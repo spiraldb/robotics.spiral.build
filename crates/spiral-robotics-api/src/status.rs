@@ -16,18 +16,18 @@ pub struct StudioSnapshot {
     /// Whether backend-owned services are still starting, usable, or running
     /// with a non-fatal bootstrap problem.
     #[serde(default)]
-    pub readiness: BackendReadiness,
+    readiness: BackendReadiness,
     /// Human-readable name of the active persistent store.
-    pub storage: String,
+    storage: String,
     /// Every robot configuration found in SpiralDB, by ID.
-    pub robots: Vec<RobotSummary>,
+    robots: Vec<RobotSummary>,
     /// Cameras the server has discovered.
-    pub cameras: Vec<CameraStatus>,
+    cameras: Vec<CameraStatus>,
     /// The currently selected operating mode.
-    pub mode: ModeStatus,
+    mode: ModeStatus,
     /// Problems worth showing the operator: invalid robot configurations, cameras
     /// that failed to probe, and similar non-fatal trouble.
-    pub issues: Vec<String>,
+    issues: Vec<String>,
 }
 
 /// Lifecycle of the backend services needed by the browser application.
@@ -43,11 +43,11 @@ pub enum BackendReadinessState {
 /// Browser-visible readiness of the backend and its Spiral catalog boundary.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct BackendReadiness {
-    pub state: BackendReadinessState,
+    state: BackendReadinessState,
     /// True only when catalog-dependent requests may safely be admitted.
-    pub catalog_available: bool,
+    catalog_available: bool,
     /// Short operator-facing description of the current phase or problem.
-    pub detail: String,
+    detail: String,
 }
 
 impl Default for BackendReadiness {
@@ -60,7 +60,70 @@ impl Default for BackendReadiness {
     }
 }
 
+impl BackendReadiness {
+    pub fn new(
+        state: BackendReadinessState,
+        catalog_available: bool,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            state,
+            catalog_available,
+            detail: detail.into(),
+        }
+    }
+    pub const fn state(&self) -> BackendReadinessState {
+        self.state
+    }
+    pub const fn catalog_available(&self) -> bool {
+        self.catalog_available
+    }
+    pub fn detail(&self) -> &str {
+        &self.detail
+    }
+}
+
 impl StudioSnapshot {
+    pub fn new(readiness: BackendReadiness, storage: impl Into<String>, mode: ModeStatus) -> Self {
+        Self {
+            readiness,
+            storage: storage.into(),
+            robots: Vec::new(),
+            cameras: Vec::new(),
+            mode,
+            issues: Vec::new(),
+        }
+    }
+    pub fn with_robots(mut self, robots: Vec<RobotSummary>) -> Self {
+        self.robots = robots;
+        self
+    }
+    pub fn with_cameras(mut self, cameras: Vec<CameraStatus>) -> Self {
+        self.cameras = cameras;
+        self
+    }
+    pub fn with_issues(mut self, issues: Vec<String>) -> Self {
+        self.issues = issues;
+        self
+    }
+    pub const fn readiness(&self) -> &BackendReadiness {
+        &self.readiness
+    }
+    pub fn storage(&self) -> &str {
+        &self.storage
+    }
+    pub fn robots(&self) -> &[RobotSummary] {
+        &self.robots
+    }
+    pub fn cameras(&self) -> &[CameraStatus] {
+        &self.cameras
+    }
+    pub const fn mode(&self) -> &ModeStatus {
+        &self.mode
+    }
+    pub fn issues(&self) -> &[String] {
+        &self.issues
+    }
     /// Pick the best connected pair for a recording-led teleoperation session.
     ///
     /// Robot type is a preference rather than a requirement: a configured leader
@@ -73,19 +136,19 @@ impl StudioSnapshot {
             .iter()
             .map(|robot| {
                 TeleoperationCandidate::new(
-                    robot.id.clone(),
+                    robot.id().to_owned(),
                     RobotReadiness::new(
-                        robot.connection.connected,
-                        robot.calibrated,
-                        robot.problem.is_none(),
+                        robot.connection().connected(),
+                        robot.calibrated(),
+                        robot.problem().is_none(),
                     ),
                     robot
-                        .motors
+                        .motors()
                         .iter()
-                        .map(|motor| motor.name.clone())
+                        .map(|motor| motor.name().to_owned())
                         .collect(),
                 )
-                .with_robot_type(robot.robot_type.clone())
+                .with_robot_type(robot.robot_type().map(str::to_owned))
             })
             .collect::<Vec<_>>();
         TeleoperationCandidates::from(candidates.as_slice()).best_pair()
@@ -95,7 +158,7 @@ impl StudioSnapshot {
 /// A failed request.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ApiError {
-    pub error: String,
+    error: String,
 }
 
 impl ApiError {
@@ -103,6 +166,13 @@ impl ApiError {
         Self {
             error: error.into(),
         }
+    }
+
+    pub fn error(&self) -> &str {
+        &self.error
+    }
+    pub fn into_error(self) -> String {
+        self.error
     }
 }
 
@@ -119,17 +189,17 @@ mod tests {
     #[test]
     fn act_defaults_match_current_lerobot_architecture() {
         let config = ActTrainingConfig::default();
-        assert_eq!(config.hidden_dim, 512);
-        assert_eq!(config.feedforward_dim, 3_200);
-        assert_eq!(config.vae_encoder_layers, 4);
-        assert_eq!(config.decoder_layers, 1);
-        assert!(config.camera_streams.is_empty());
+        assert_eq!(config.hidden_dim(), 512);
+        assert_eq!(config.feedforward_dim(), 3_200);
+        assert_eq!(config.vae_encoder_layers(), 4);
+        assert_eq!(config.decoder_layers(), 1);
+        assert!(config.camera_streams().is_empty());
         let request = StartTrainingRequest::default();
-        assert_eq!(request.batch_size, 8);
-        assert_eq!(request.steps, 100_000);
-        assert_eq!(request.checkpoint_every, 20_000);
-        assert_eq!(request.seed, 1_000);
-        assert_eq!(request.validation_split, 0.1);
+        assert_eq!(request.batch_size(), 8);
+        assert_eq!(request.steps(), 100_000);
+        assert_eq!(request.checkpoint_every(), 20_000);
+        assert_eq!(request.seed(), 1_000);
+        assert_eq!(request.validation_split(), 0.1);
     }
 
     #[test]
@@ -140,7 +210,7 @@ mod tests {
             .unwrap()
             .remove("validation_split");
         let request: StartTrainingRequest = serde_json::from_value(serialized_request).unwrap();
-        assert_eq!(request.validation_split, 0.0);
+        assert_eq!(request.validation_split(), 0.0);
     }
 
     #[test]
@@ -152,26 +222,21 @@ mod tests {
         }))
         .expect("duration defaults for an older client");
 
-        assert_eq!(request.duration_seconds, DEFAULT_ROLLOUT_DURATION_SECONDS);
+        assert_eq!(request.duration_seconds(), DEFAULT_ROLLOUT_DURATION_SECONDS);
     }
 
     #[test]
     fn motor_summary_adapts_domain_calibration_at_the_contract_edge() {
-        let summary = MotorSummary {
-            name: "joint".to_owned(),
-            id: 7,
-            direction: MotorDirection::Reversed,
-            model: Some("sts3215".to_owned()),
-            calibration: Some(
+        let summary = MotorSummary::new("joint", 7, MotorDirection::Reversed)
+            .with_model(Some("sts3215".to_owned()))
+            .with_calibration(Some(
                 MotorCalibration::new(
                     7,
                     MotorDirection::Reversed,
                     MotorReading::new(200, 100, 300),
                 )
                 .unwrap(),
-            ),
-            limits: MotorLimits::default(),
-        };
+            ));
 
         let json = serde_json::to_value(&summary).unwrap();
         assert_eq!(json["direction"], "reversed");
@@ -183,26 +248,16 @@ mod tests {
     }
 
     fn robot(id: &str, robot_type: Option<&str>) -> RobotSummary {
-        RobotSummary {
-            id: id.to_owned(),
-            robot_type: robot_type.map(str::to_owned),
-            port: None,
-            motors: vec![MotorSummary {
-                name: "shoulder".to_owned(),
-                id: 1,
-                direction: MotorDirection::Normal,
-                model: None,
-                calibration: None,
-                limits: MotorLimits::default(),
-            }],
-            cameras: Vec::new(),
-            calibrated: true,
-            problem: None,
-            connection: ConnectionStatus {
-                connected: true,
-                error: None,
-            },
-        }
+        RobotSummary::new(
+            id,
+            robot_type.map(str::to_owned),
+            RobotAvailability::new(true, None, ConnectionStatus::new(true, None)),
+        )
+        .with_motors(vec![MotorSummary::new(
+            "shoulder",
+            1,
+            MotorDirection::Normal,
+        )])
     }
 
     #[test]
@@ -237,10 +292,18 @@ mod tests {
 
     #[test]
     fn teleoperation_pair_ignores_unready_and_incompatible_arms() {
-        let mut disconnected = robot("disconnected-leader", Some("leader"));
-        disconnected.connection.connected = false;
-        let mut incompatible = robot("incompatible-leader", Some("leader"));
-        incompatible.motors[0].name = "elbow".to_owned();
+        let disconnected = RobotSummary::new(
+            "disconnected-leader",
+            Some("leader".to_owned()),
+            RobotAvailability::new(true, None, ConnectionStatus::new(false, None)),
+        )
+        .with_motors(vec![MotorSummary::new(
+            "shoulder",
+            1,
+            MotorDirection::Normal,
+        )]);
+        let incompatible = robot("incompatible-leader", Some("leader"))
+            .with_motors(vec![MotorSummary::new("elbow", 1, MotorDirection::Normal)]);
         let follower = robot("follower", Some("follower"));
         let fallback = robot("fallback", None);
         let studio = StudioSnapshot {
@@ -250,7 +313,7 @@ mod tests {
 
         assert_eq!(
             studio.default_teleoperation_pair(),
-            Some((fallback.id, "follower".to_owned()))
+            Some((fallback.id().to_owned(), "follower".to_owned()))
         );
     }
 
@@ -300,8 +363,8 @@ mod tests {
     #[test]
     fn optional_request_fields_may_be_omitted() {
         let created: CreateRobotRequest = serde_json::from_str(r#"{"id":"arm"}"#).unwrap();
-        assert_eq!(created.id, "arm");
-        assert_eq!(created.robot_type, None);
+        assert_eq!(created.id(), "arm");
+        assert_eq!(created.robot_type(), None);
 
         let update: UpdateRobotRequest = serde_json::from_str("{}").unwrap();
         assert_eq!(update, UpdateRobotRequest::default());
@@ -312,9 +375,12 @@ mod tests {
             }"#,
         )
         .unwrap();
-        assert_eq!(settings.spiral_endpoint, DEFAULT_SPIRAL_ENDPOINT);
-        assert_eq!(settings.spiral_spfs_endpoint, DEFAULT_SPIRAL_SPFS_ENDPOINT);
-        assert_eq!(settings.training, TrainingRuntimeSettings::default());
+        assert_eq!(settings.spiral_endpoint(), DEFAULT_SPIRAL_ENDPOINT);
+        assert_eq!(
+            settings.spiral_spfs_endpoint(),
+            DEFAULT_SPIRAL_SPFS_ENDPOINT
+        );
+        assert_eq!(settings.training(), &TrainingRuntimeSettings::default());
     }
 
     #[test]
@@ -331,84 +397,80 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(replay.purpose, ReplayPurpose::Timeline);
-        assert_eq!(replay.phase, ReplayPhase::Playing);
-        assert!(!replay.paused);
+        assert_eq!(replay.purpose(), ReplayPurpose::Timeline);
+        assert_eq!(replay.phase(), ReplayPhase::Playing);
+        assert!(!replay.paused());
     }
 
     #[test]
     fn an_unfinished_take_is_listed_but_not_offered() {
-        let mut episode = EpisodeSummary {
-            id: "episode_000001".to_owned(),
-            dataset_id: "default".to_owned(),
-            arms: vec![EpisodeArm {
-                id: "follower".to_owned(),
-                robot_type: Some("so101_follower".to_owned()),
-                joints: vec!["shoulder_pan".to_owned()],
-            }],
-            frames: 120,
-            duration_seconds: 2.0,
-            recording_gaps: Vec::new(),
-            sample_hz: 60.0,
-            started_ms: 1_770_000_000_000,
-            source: "Teleoperation".to_owned(),
-            max_follow_error_degrees: Some(3.5),
-            discarded: false,
-            problem: None,
+        let episode_with = |frames, problem| {
+            EpisodeSummary::new(
+                EpisodeIdentity::new(
+                    "episode_000001",
+                    "default",
+                    vec![EpisodeArm::new(
+                        "follower",
+                        Some("so101_follower".to_owned()),
+                        vec!["shoulder_pan".to_owned()],
+                    )],
+                )
+                .with_source("Teleoperation"),
+                EpisodeTimeline::new(frames, 2.0, 60.0).with_started_ms(1_770_000_000_000),
+                EpisodeAssessment::new(false, Some(3.5), problem),
+            )
         };
+        let episode = episode_with(120, None);
         assert!(episode.usable());
-        assert_eq!(episode.arm("follower").map(|arm| arm.joints.len()), Some(1));
+        assert_eq!(
+            episode.arm("follower").map(|arm| arm.joints().len()),
+            Some(1)
+        );
         assert_eq!(episode.arm("leader"), None);
 
-        episode.problem = Some("recording did not finish".to_owned());
+        let episode = episode_with(120, Some("recording did not finish".to_owned()));
         assert!(!episode.usable(), "a truncated take must not be offered");
 
         // An empty take is unusable even without a recorded reason: there is
         // nothing in it to replay.
-        episode.problem = None;
-        episode.frames = 0;
+        let episode = episode_with(0, None);
         assert!(!episode.usable());
     }
 
     #[test]
     fn calibration_span_saturates_instead_of_overflowing() {
-        let progress = CalibrationJointProgress {
-            name: "gripper".to_owned(),
-            min: i64::MIN,
-            position: 0,
-            max: i64::MAX,
-        };
+        let progress = CalibrationJointProgress::new("gripper", i64::MIN, 0).with_max(i64::MAX);
         assert_eq!(progress.span(), i64::MAX);
     }
 
     fn joint() -> JointTelemetry {
-        JointTelemetry {
-            name: "shoulder_pan".to_owned(),
-            id: 1,
-            raw: 2048,
-            degrees: None,
-            normalized: None,
-            goal_raw: None,
-            target_raw: None,
-            target_degrees: None,
-            range: None,
-            temperature_celsius: Some(30.0),
-            voltage_volts: Some(7.4),
-            current_amps: Some(0.2),
-            load: Some(0.1),
-            speed_degrees_per_second: Some(0.0),
-            temperature_rise_per_minute: Some(0.0),
-            faults: Vec::new(),
-        }
+        joint_with_diagnostics(
+            MotorElectricalReadings::new(Some(30.0), Some(7.4), Some(0.2)),
+            Some(0.1),
+            Vec::new(),
+        )
+    }
+
+    fn joint_with_diagnostics(
+        electrical: MotorElectricalReadings,
+        load: Option<f64>,
+        faults: Vec<MotorFault>,
+    ) -> JointTelemetry {
+        JointTelemetry::new(
+            JointIdentity::new("shoulder_pan", 1),
+            JointKinematics::new(2048, None, None),
+            JointDiagnostics::new(electrical, load, Some(0.0))
+                .with_temperature_rise(Some(0.0))
+                .with_faults(faults),
+        )
     }
 
     fn limits() -> MotorLimits {
-        MotorLimits {
-            max_temperature_celsius: Some(70.0),
-            min_voltage_volts: Some(4.5),
-            max_voltage_volts: Some(9.0),
-            max_load: Some(1.0),
-        }
+        MotorLimits::from_hardware_limits(
+            Some(70.0),
+            MotorVoltageRange::new(Some(4.5), Some(9.0)),
+            Some(1.0),
+        )
     }
 
     #[test]
@@ -418,42 +480,51 @@ mod tests {
 
     #[test]
     fn nearing_a_limit_is_caution_and_the_motors_own_verdict_is_fault() {
-        let hot = JointTelemetry {
-            temperature_celsius: Some(70.0 * CAUTION_LIMIT_FRACTION),
-            ..joint()
-        };
+        let hot = joint_with_diagnostics(
+            MotorElectricalReadings::new(Some(70.0 * CAUTION_LIMIT_FRACTION), Some(7.4), Some(0.2)),
+            Some(0.1),
+            Vec::new(),
+        );
         assert_eq!(hot.condition(&limits()), MotorCondition::Caution);
 
-        let strained = JointTelemetry {
-            load: Some(-0.9),
-            ..joint()
-        };
+        let strained = joint_with_diagnostics(
+            MotorElectricalReadings::new(Some(30.0), Some(7.4), Some(0.2)),
+            Some(-0.9),
+            Vec::new(),
+        );
         assert_eq!(
             strained.condition(&limits()),
             MotorCondition::Caution,
             "load is judged by how hard it is pushing, not which way"
         );
 
-        let sagging = JointTelemetry {
-            voltage_volts: Some(4.5 + CAUTION_VOLTAGE_MARGIN_VOLTS - 0.1),
-            ..joint()
-        };
+        let sagging = joint_with_diagnostics(
+            MotorElectricalReadings::new(
+                Some(30.0),
+                Some(4.5 + CAUTION_VOLTAGE_MARGIN_VOLTS - 0.1),
+                Some(0.2),
+            ),
+            Some(0.1),
+            Vec::new(),
+        );
         assert_eq!(sagging.condition(&limits()), MotorCondition::Caution);
 
         // The motor's own fault byte outranks every margin applied here.
-        let faulted = JointTelemetry {
-            faults: vec![MotorFault::Overheat],
-            ..joint()
-        };
+        let faulted = joint_with_diagnostics(
+            MotorElectricalReadings::new(Some(30.0), Some(7.4), Some(0.2)),
+            Some(0.1),
+            vec![MotorFault::Overheat],
+        );
         assert_eq!(faulted.condition(&limits()), MotorCondition::Fault);
     }
 
     #[test]
     fn without_limits_only_the_motors_own_faults_can_speak() {
-        let scorching = JointTelemetry {
-            temperature_celsius: Some(200.0),
-            ..joint()
-        };
+        let scorching = joint_with_diagnostics(
+            MotorElectricalReadings::new(Some(200.0), Some(7.4), Some(0.2)),
+            Some(0.1),
+            Vec::new(),
+        );
 
         assert_eq!(
             scorching.condition(&MotorLimits::default()),
@@ -461,10 +532,11 @@ mod tests {
             "there is nothing to be near, and a threshold invented here would be a guess"
         );
         assert_eq!(
-            JointTelemetry {
-                faults: vec![MotorFault::Unrecognized],
-                ..scorching
-            }
+            joint_with_diagnostics(
+                MotorElectricalReadings::new(Some(200.0), Some(7.4), Some(0.2)),
+                Some(0.1),
+                vec![MotorFault::Unrecognized],
+            )
             .condition(&MotorLimits::default()),
             MotorCondition::Fault
         );
@@ -484,25 +556,43 @@ mod tests {
         );
     }
 
+    fn training_run(id: &str) -> TrainingRun {
+        TrainingRun::new(
+            TrainingRunIdentity::new(
+                id,
+                StartTrainingRequest::default(),
+                TrainingSource::default(),
+            ),
+            TrainingRunLifecycle::default(),
+            TrainingRunHistory::default(),
+        )
+    }
+
+    fn training_metric(step: u64, train_loss: f64) -> TrainingMetricPoint {
+        TrainingMetricPoint::new(
+            TrainingMetricProgress::new(step, train_loss, 0.0),
+            TrainingResourceMetrics::default(),
+            TrainingStageTimings::default(),
+        )
+    }
+
     #[test]
     fn incremental_training_updates_stay_bounded_without_dropping_early_history() {
-        let mut snapshot = TrainingSnapshot {
-            runs: vec![TrainingRun {
-                id: "run-a".to_owned(),
-                ..TrainingRun::default()
-            }],
-            ..TrainingSnapshot::default()
-        };
+        let mut snapshot =
+            TrainingSnapshot::new(TrainingReadiness::default(), vec![training_run("run-a")]);
         for step in 0..=12_000 {
+            let progress =
+                TrainingMetricProgress::new(step, if step == 123 { 10_000.0 } else { 1.0 }, 0.0)
+                    .with_validation_loss((step == 6_000).then_some(4.0));
+            let resources = TrainingResourceMetrics::default()
+                .with_utilization((step == 777).then_some(9_000.0), None);
             snapshot.apply(TrainingUpdate::Metric {
                 run_id: "run-a".to_owned(),
-                point: Box::new(TrainingMetricPoint {
-                    step,
-                    train_loss: if step == 123 { 10_000.0 } else { 1.0 },
-                    validation_loss: (step == 6_000).then_some(4.0),
-                    cpu_percent: (step == 777).then_some(9_000.0),
-                    ..TrainingMetricPoint::default()
-                }),
+                point: Box::new(TrainingMetricPoint::new(
+                    progress,
+                    resources,
+                    TrainingStageTimings::default(),
+                )),
             });
         }
         for line in 0..=MAX_TRAINING_LOG_LINES {
@@ -512,104 +602,96 @@ mod tests {
             });
         }
 
-        let run = &snapshot.runs[0];
-        assert!(run.metrics.len() <= MAX_TRAINING_METRIC_POINTS);
-        assert_eq!(run.metrics.first().map(|point| point.step), Some(0));
-        assert_eq!(run.metrics.last().map(|point| point.step), Some(12_000));
-        assert!(run.metrics.iter().any(|point| point.step == 123));
-        assert!(run.metrics.iter().any(|point| point.step == 777));
-        assert!(run.metrics.iter().any(|point| point.step == 6_000));
-        assert_eq!(run.logs.len(), MAX_TRAINING_LOG_LINES);
-        assert_eq!(run.logs[0], "line 1");
-        assert_eq!(run.current_step, 12_000);
+        let run = &snapshot.runs()[0];
+        assert!(run.metrics().len() <= MAX_TRAINING_METRIC_POINTS);
+        assert_eq!(
+            run.metrics().first().map(TrainingMetricPoint::step),
+            Some(0)
+        );
+        assert_eq!(
+            run.metrics().last().map(TrainingMetricPoint::step),
+            Some(12_000)
+        );
+        assert!(run.metrics().iter().any(|point| point.step() == 123));
+        assert!(run.metrics().iter().any(|point| point.step() == 777));
+        assert!(run.metrics().iter().any(|point| point.step() == 6_000));
+        assert_eq!(run.logs().len(), MAX_TRAINING_LOG_LINES);
+        assert_eq!(run.logs()[0], "line 1");
+        assert_eq!(run.current_step(), 12_000);
     }
 
     #[test]
     fn repeated_or_late_metric_updates_replace_the_step_without_regressing_progress() {
-        let mut snapshot = TrainingSnapshot {
-            runs: vec![TrainingRun {
-                id: "run-a".to_owned(),
-                ..TrainingRun::default()
-            }],
-            ..TrainingSnapshot::default()
-        };
+        let mut snapshot =
+            TrainingSnapshot::new(TrainingReadiness::default(), vec![training_run("run-a")]);
         for (step, loss) in [(2, 2.0), (1, 1.0), (2, 0.5)] {
             snapshot.apply(TrainingUpdate::Metric {
                 run_id: "run-a".to_owned(),
-                point: Box::new(TrainingMetricPoint {
-                    step,
-                    train_loss: loss,
-                    ..TrainingMetricPoint::default()
-                }),
+                point: Box::new(training_metric(step, loss)),
             });
         }
 
-        let run = &snapshot.runs[0];
-        assert_eq!(run.current_step, 2);
-        assert_eq!(run.metrics.len(), 2);
-        assert_eq!(run.metrics[0].step, 1);
-        assert_eq!(run.metrics[1].step, 2);
-        assert_eq!(run.metrics[1].train_loss, 0.5);
+        let run = &snapshot.runs()[0];
+        assert_eq!(run.current_step(), 2);
+        assert_eq!(run.metrics().len(), 2);
+        assert_eq!(run.metrics()[0].step(), 1);
+        assert_eq!(run.metrics()[1].step(), 2);
+        assert_eq!(run.metrics()[1].train_loss(), 0.5);
     }
 
     #[test]
     fn resolved_training_configuration_updates_the_run_snapshot() {
-        let mut snapshot = TrainingSnapshot {
-            runs: vec![TrainingRun {
-                id: "run-a".to_owned(),
-                ..TrainingRun::default()
-            }],
-            ..TrainingSnapshot::default()
-        };
+        let mut snapshot =
+            TrainingSnapshot::new(TrainingReadiness::default(), vec![training_run("run-a")]);
         let mut config = StartTrainingRequest::default();
-        config.act.camera_streams = vec![
+        *config.act_mut() = ActTrainingConfig::default().with_camera_streams(vec![
             "follower.camera.gripper".to_owned(),
             "follower.camera.top".to_owned(),
-        ];
+        ]);
         snapshot.apply(TrainingUpdate::RunConfigured {
             run_id: "run-a".to_owned(),
             config: Box::new(config.clone()),
         });
-        assert_eq!(snapshot.runs[0].config, config);
+        assert_eq!(snapshot.runs()[0].config(), &config);
     }
 
     #[test]
     fn removing_a_training_run_removes_its_complete_snapshot_record() {
-        let mut snapshot = TrainingSnapshot {
-            runs: vec![
-                TrainingRun {
-                    id: "run-a".to_owned(),
-                    metrics: vec![TrainingMetricPoint::default()],
-                    checkpoints: vec![TrainingCheckpoint::default()],
-                    logs: vec!["retained only inside the run".to_owned()],
-                    ..TrainingRun::default()
-                },
-                TrainingRun {
-                    id: "run-b".to_owned(),
-                    ..TrainingRun::default()
-                },
+        let mut snapshot = TrainingSnapshot::new(
+            TrainingReadiness::default(),
+            vec![
+                TrainingRun::new(
+                    TrainingRunIdentity::new(
+                        "run-a",
+                        StartTrainingRequest::default(),
+                        TrainingSource::default(),
+                    ),
+                    TrainingRunLifecycle::default(),
+                    TrainingRunHistory::new(
+                        vec![TrainingMetricPoint::default()],
+                        vec![TrainingCheckpoint::default()],
+                        vec!["retained only inside the run".to_owned()],
+                    ),
+                ),
+                training_run("run-b"),
             ],
-            ..TrainingSnapshot::default()
-        };
+        );
 
         snapshot.apply(TrainingUpdate::RunRemoved {
             run_id: "run-a".to_owned(),
         });
 
-        assert_eq!(snapshot.runs.len(), 1);
-        assert_eq!(snapshot.runs[0].id, "run-b");
+        assert_eq!(snapshot.runs().len(), 1);
+        assert_eq!(snapshot.runs()[0].id(), "run-b");
     }
 
     #[test]
     fn bootstrap_training_snapshot_replaces_the_placeholder_atomically() {
         let mut snapshot = TrainingSnapshot::default();
-        let restored = TrainingSnapshot {
-            runs: vec![TrainingRun {
-                id: "restored-run".to_owned(),
-                ..TrainingRun::default()
-            }],
-            ..TrainingSnapshot::default()
-        };
+        let restored = TrainingSnapshot::new(
+            TrainingReadiness::default(),
+            vec![training_run("restored-run")],
+        );
 
         snapshot.apply(TrainingUpdate::Snapshot {
             snapshot: Box::new(restored.clone()),

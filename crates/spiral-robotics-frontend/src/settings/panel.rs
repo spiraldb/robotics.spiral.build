@@ -1,14 +1,15 @@
 //! Settings screen for robots, SpiralDB, training, and video.
 
 use crate::components::interaction::{
-    Action, ActionLink, ActionPurpose, ActionVariant, BlockingConfirmation, CloseIcon, FileAction,
-    Toggle, focus_after_render,
+    Action, ActionLink, ActionPurpose, ActionVariant, BlockingConfirmation, CloseIcon,
+    ConfirmationCopy, ConfirmationDismissal, ConfirmationResponse, FileAction, FileInput, Toggle,
+    focus_after_render,
 };
 use dioxus::prelude::*;
 use gloo_net::http::Method;
 use spiral_robotics_api::datasets::ProjectImportSummary;
 use spiral_robotics_api::settings::{
-    ConnectionTestResponse, DataSettings, UpdateDataSettingsRequest,
+    ConnectionTestResponse, DataSettings, SpiralConnectionUpdate, UpdateDataSettingsRequest,
 };
 
 use crate::client::http as api;
@@ -25,17 +26,56 @@ enum SettingsSection {
     Video,
 }
 
-#[component]
-pub(crate) fn SettingsPanel(
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SettingsLoadState {
     initial: Option<DataSettings>,
     load_error: Option<String>,
+}
+
+impl SettingsLoadState {
+    pub(crate) const fn new(initial: Option<DataSettings>, load_error: Option<String>) -> Self {
+        Self {
+            initial,
+            load_error,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) struct SettingsPanelHandlers {
     on_close: EventHandler<()>,
     on_saved: EventHandler<()>,
     on_busy_change: EventHandler<bool>,
-) -> Element {
+}
+
+impl SettingsPanelHandlers {
+    pub(crate) fn new(
+        on_close: impl FnMut(()) + 'static,
+        on_saved: impl FnMut(()) + 'static,
+        on_busy_change: impl FnMut(bool) + 'static,
+    ) -> Self {
+        Self {
+            on_close: EventHandler::new(on_close),
+            on_saved: EventHandler::new(on_saved),
+            on_busy_change: EventHandler::new(on_busy_change),
+        }
+    }
+}
+
+#[component]
+pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHandlers) -> Element {
+    let SettingsLoadState {
+        initial,
+        load_error,
+    } = state;
+    let SettingsPanelHandlers {
+        on_close,
+        on_saved,
+        on_busy_change,
+    } = handlers;
     let initial_value = initial.clone().unwrap_or_default();
     let settings_loaded = initial.is_some();
-    let initial_section = if initial_value.spiral.project_id.trim().is_empty() {
+    let initial_section = if initial_value.spiral().project_id().trim().is_empty() {
         SettingsSection::Spiral
     } else {
         SettingsSection::Robots
@@ -51,7 +91,7 @@ pub(crate) fn SettingsPanel(
     let mut pending_project_file = use_signal(|| None::<dioxus::html::FileData>);
     let mut project_transfer_error = use_signal(|| None::<String>);
     let mut initial_focus_set = use_signal(|| false);
-    let mut studio = studio();
+    let studio = studio();
 
     use_effect(move || {
         if !initial_focus_set() {
@@ -76,17 +116,21 @@ pub(crate) fn SettingsPanel(
         save_error.set(None);
         saving.set(true);
         on_busy_change.call(true);
-        let request = UpdateDataSettingsRequest {
-            spiral_endpoint: current().spiral.endpoint,
-            spiral_spfs_endpoint: current().spiral.spfs_endpoint,
-            project_id: current().spiral.project_id,
-            client_id: current().spiral.client_id,
-            client_secret: client_secret(),
-            clear_client_secret: current().spiral.client_id.trim().is_empty()
-                && current().spiral.client_secret_configured,
-            training: current().training,
-            video: current().video,
-        };
+        let connection = SpiralConnectionUpdate::new(
+            current().spiral().endpoint(),
+            current().spiral().spfs_endpoint(),
+            current().spiral().project_id(),
+        )
+        .with_client_credentials(current().spiral().client_id(), client_secret())
+        .with_clear_client_secret(
+            current().spiral().client_id().trim().is_empty()
+                && current().spiral().client_secret_configured(),
+        );
+        let request = UpdateDataSettingsRequest::new(
+            connection,
+            current().training().to_owned(),
+            current().video().to_owned(),
+        );
         spawn(async move {
             match api::send_json::<_, DataSettings>(
                 Method::PATCH,
@@ -106,10 +150,9 @@ pub(crate) fn SettingsPanel(
                             .await
                         {
                             Ok(response) => test_result.set(Some(response)),
-                            Err(error) => test_result.set(Some(ConnectionTestResponse {
-                                ok: false,
-                                message: error,
-                            })),
+                            Err(error) => {
+                                test_result.set(Some(ConnectionTestResponse::new(false, error)))
+                            }
                         }
                         testing.set(false);
                     } else {
@@ -127,10 +170,14 @@ pub(crate) fn SettingsPanel(
     };
     let configured_destination = current();
     let project_transfer_ready = initial.as_ref().is_some_and(|active| {
-        !configured_destination.spiral.project_id.trim().is_empty()
-            && active.spiral.endpoint == configured_destination.spiral.endpoint
-            && active.spiral.spfs_endpoint == configured_destination.spiral.spfs_endpoint
-            && active.spiral.project_id == configured_destination.spiral.project_id
+        !configured_destination
+            .spiral()
+            .project_id()
+            .trim()
+            .is_empty()
+            && active.spiral().endpoint() == configured_destination.spiral().endpoint()
+            && active.spiral().spfs_endpoint() == configured_destination.spiral().spfs_endpoint()
+            && active.spiral().project_id() == configured_destination.spiral().project_id()
     });
 
     rsx! {
@@ -179,39 +226,49 @@ pub(crate) fn SettingsPanel(
                                 div { class: "settings-field-row",
                                     SettingsField {
                                         label: "API endpoint",
-                                        value: current().spiral.endpoint,
-                                        placeholder: "https://api.spiraldb.dev",
-                                        oninput: move |value| current.write().spiral.endpoint = value,
+                                        value: current().spiral().endpoint(),
+                                        behavior: SettingsInputBehavior::new(
+                                            "https://api.spiraldb.dev",
+                                            move |value| current.write().spiral_mut().set_endpoint(value),
+                                        ),
                                     }
                                     SettingsField {
                                         label: "SpFS endpoint",
-                                        value: current().spiral.spfs_endpoint,
-                                        placeholder: "https://spfs.spiraldb.dev",
-                                        oninput: move |value| current.write().spiral.spfs_endpoint = value,
+                                        value: current().spiral().spfs_endpoint(),
+                                        behavior: SettingsInputBehavior::new(
+                                            "https://spfs.spiraldb.dev",
+                                            move |value| current.write().spiral_mut().set_spfs_endpoint(value),
+                                        ),
                                     }
                                 }
                                 div { class: "settings-field-row",
                                     SettingsField {
                                         label: "Project ID",
-                                        value: current().spiral.project_id,
-                                        placeholder: "your-project-id",
-                                        oninput: move |value| current.write().spiral.project_id = value,
+                                        value: current().spiral().project_id(),
+                                        behavior: SettingsInputBehavior::new(
+                                            "your-project-id",
+                                            move |value| current.write().spiral_mut().set_project_id(value),
+                                        ),
                                     }
-                                    SettingsField { label: "Namespace", value: current().spiral.namespace, placeholder: "spiral_robotics", disabled: true, oninput: move |_| {} }
+                                    SettingsField { label: "Namespace", value: current().spiral().namespace(), behavior: SettingsInputBehavior::new("spiral_robotics", move |_| {}).with_disabled() }
                                 }
                                 div { class: "settings-field-row",
                                     SettingsField {
                                         label: "Client ID",
-                                        value: current().spiral.client_id,
-                                        placeholder: "your-client-id",
-                                        oninput: move |value| current.write().spiral.client_id = value,
+                                        value: current().spiral().client_id(),
+                                        behavior: SettingsInputBehavior::new(
+                                            "your-client-id",
+                                            move |value| current.write().spiral_mut().set_client_id(value),
+                                        ),
                                     }
                                     SettingsField {
                                         label: "Client secret",
                                         value: client_secret(),
-                                        placeholder: if current().spiral.client_secret_configured { "Saved — leave blank to keep" } else { "your-client-secret" },
-                                        secret: true,
-                                        oninput: move |value| client_secret.set(value),
+                                        behavior: SettingsInputBehavior::new(
+                                            if current().spiral().client_secret_configured() { "Saved — leave blank to keep" } else { "your-client-secret" },
+                                            move |value| client_secret.set(value),
+                                        )
+                                        .with_secret(),
                                     }
                                 }
                                 p { class: "settings-help",
@@ -220,7 +277,7 @@ pub(crate) fn SettingsPanel(
                                 Action {
                                     purpose: ActionPurpose::Apply,
                                     variant: ActionVariant::Outline,
-                                    disabled: saving() || testing() || transferring_project() || current().spiral.project_id.trim().is_empty(),
+                                    disabled: saving() || testing() || transferring_project() || current().spiral().project_id().trim().is_empty(),
                                     aria_busy: testing(),
                                     onclick: move |_| save(Some("/api/settings/data/test/spiral")),
                                     if testing() { "Testing…" } else { "Save and test connection" }
@@ -235,18 +292,19 @@ pub(crate) fn SettingsPanel(
                                     }
                                     div { class: "settings-transfer-actions",
                                         FileAction {
-                                            input_id: "project-import-input",
                                             purpose: ActionPurpose::Import,
                                             variant: ActionVariant::Outline,
                                             title: if project_transfer_ready { "Replace all Studio-managed relations in the active SpiralDB project" } else { "Save the Spiral destination before transferring a project" },
-                                            accept: ".spiral-project,application/vnd.spiral-robotics.project",
                                             disabled: saving() || transferring_project() || !project_transfer_ready,
                                             aria_busy: transferring_project(),
-                                            onchange: move |event: Event<FormData>| {
-                                                let Some(file) = event.files().first().cloned() else { return };
-                                                project_transfer_error.set(None);
-                                                pending_project_file.set(Some(file));
-                                            },
+                                            input: FileInput::new(
+                                                ".spiral-project,application/vnd.spiral-robotics.project",
+                                                move |event: Event<FormData>| {
+                                                    let Some(file) = event.files().first().cloned() else { return };
+                                                    project_transfer_error.set(None);
+                                                    pending_project_file.set(Some(file));
+                                                },
+                                            ).with_id("project-import-input"),
                                             "Import project"
                                         }
                                         if transferring_project() || !project_transfer_ready {
@@ -275,9 +333,11 @@ pub(crate) fn SettingsPanel(
                                 ProviderHeading { title: "Policy compute runtime", description: "Run training and rollout inference in a remote PyTorch process." }
                                 SettingsField {
                                     label: "Runtime endpoint",
-                                    value: current().training.endpoint,
-                                    placeholder: "http://127.0.0.1:50051",
-                                    oninput: move |value| current.write().training.endpoint = value,
+                                    value: current().training().endpoint(),
+                                    behavior: SettingsInputBehavior::new(
+                                        "http://127.0.0.1:50051",
+                                        move |value| current.write().training_mut().set_endpoint(value),
+                                    ),
                                 }
                                 p { class: "settings-help",
                                     "Studio uses Arrow IPC over HTTP. The selected endpoint applies to new training and rollout sessions; an active session keeps its current connection."
@@ -286,14 +346,14 @@ pub(crate) fn SettingsPanel(
                             },
                             SettingsSection::Video => rsx! {
                                 ProviderHeading { title: "Video", description: "Include assigned cameras in new episodes." }
-                                Toggle { label: "Record video", checked: current().video.enabled, onchange: move |value| current.write().video.enabled = value }
+                                Toggle { label: "Record video", checked: current().video().enabled(), onchange: move |value| current.write().video_mut().set_enabled(value) }
                             },
                         }
                         if let Some(response) = test_result() {
                             p {
-                                class: if response.ok { "connection-test connection-test-ok" } else { "connection-test connection-test-failed" },
+                                class: if response.ok() { "connection-test connection-test-ok" } else { "connection-test connection-test-failed" },
                                 role: "status",
-                                "{response.message}"
+                                "{response.message()}"
                             }
                         }
                     }
@@ -326,7 +386,7 @@ pub(crate) fn SettingsPanel(
                     }
                     div {
                         Action { purpose: ActionPurpose::Cancel, disabled: saving() || transferring_project(), onclick: move |_| if !saving() && !transferring_project() { on_close.call(()) }, "Cancel" }
-                        Action { purpose: ActionPurpose::Apply, variant: ActionVariant::Solid, disabled: saving() || transferring_project() || current().spiral.project_id.trim().is_empty(), aria_busy: saving(), onclick: move |_| save(None), if saving() { "Saving…" } else { "Save settings" } }
+                        Action { purpose: ActionPurpose::Apply, variant: ActionVariant::Solid, disabled: saving() || transferring_project() || current().spiral().project_id().trim().is_empty(), aria_busy: saving(), onclick: move |_| save(None), if saving() { "Saving…" } else { "Save settings" } }
                     }
                 }
             }
@@ -334,18 +394,14 @@ pub(crate) fn SettingsPanel(
         if let Some(file) = pending_project_file() {
             BlockingConfirmation {
                 id: "project-import-confirmation",
-                title: format!("Replace project {}?", current().spiral.project_id),
-                message: format!(
-                    "Import {} into the active SpiralDB project.",
-                    file.name(),
-                ),
+                title: format!("Replace project {}?", current().spiral().project_id()),
                 consequence: "Every Studio-managed relation in this project will be replaced, including robots, episodes, media, settings, training history, checkpoints, and rollouts. Connected robots will disconnect first; imported robots will then connect automatically.".to_owned(),
-                confirm_label: if transferring_project() { "Restoring…" } else { "Import and replace project" },
-                cancel_label: "Keep current project",
-                purpose: ActionPurpose::Replace,
-                pending: transferring_project(),
-                return_focus_id: "project-import-input",
-                on_confirm: move |_| {
+                copy: ConfirmationCopy::new(
+                    format!("Import {} into the active SpiralDB project.", file.name()),
+                    if transferring_project() { "Restoring…" } else { "Import and replace project" },
+                    "Keep current project",
+                ),
+                response: ConfirmationResponse::new(ActionPurpose::Replace, move |_| {
                     if transferring_project() {
                         return;
                     }
@@ -360,7 +416,7 @@ pub(crate) fn SettingsPanel(
                                     "application/vnd.spiral-robotics.project",
                                 )
                                 .await?;
-                                studio.selected_episode.set(None);
+                                studio.selected_episode().set(None);
                                 studio.refresh_episode_catalog().await?;
                                 let settings = api::send_json::<(), DataSettings>(
                                     Method::GET,
@@ -385,9 +441,9 @@ pub(crate) fn SettingsPanel(
                                     MessageSource::Settings,
                                     format!(
                                         "Project restored from {} relations ({} rows).{}",
-                                        result.relations,
-                                        result.rows,
-                                        import_warning_suffix(&result.warnings),
+                                        result.relations(),
+                                        result.rows(),
+                                        import_warning_suffix(result.warnings()),
                                     ),
                                 );
                             }
@@ -400,8 +456,9 @@ pub(crate) fn SettingsPanel(
                         }
                         on_busy_change.call(false);
                     });
-                },
-                on_cancel: move |_| pending_project_file.set(None),
+                }, move |_| pending_project_file.set(None)),
+                dismissal: ConfirmationDismissal::new("project-import-input")
+                    .with_pending(transferring_project()),
             }
         }
     }
@@ -433,15 +490,43 @@ fn ProviderHeading(title: &'static str, description: &'static str) -> Element {
     rsx! { div { class: "provider-heading", h3 { "{title}" } p { "{description}" } } }
 }
 
-#[component]
-fn SettingsField(
-    label: &'static str,
-    value: String,
+#[derive(Clone, PartialEq)]
+struct SettingsInputBehavior {
     placeholder: String,
-    #[props(default)] disabled: bool,
-    #[props(default)] secret: bool,
+    disabled: bool,
+    secret: bool,
     oninput: EventHandler<String>,
-) -> Element {
+}
+
+impl SettingsInputBehavior {
+    fn new(placeholder: impl Into<String>, oninput: impl FnMut(String) + 'static) -> Self {
+        Self {
+            placeholder: placeholder.into(),
+            disabled: false,
+            secret: false,
+            oninput: EventHandler::new(oninput),
+        }
+    }
+
+    const fn with_disabled(mut self) -> Self {
+        self.disabled = true;
+        self
+    }
+
+    const fn with_secret(mut self) -> Self {
+        self.secret = true;
+        self
+    }
+}
+
+#[component]
+fn SettingsField(label: &'static str, value: String, behavior: SettingsInputBehavior) -> Element {
+    let SettingsInputBehavior {
+        placeholder,
+        disabled,
+        secret,
+        oninput,
+    } = behavior;
     rsx! {
         label { class: "settings-field",
             span { class: "label", "{label}" }

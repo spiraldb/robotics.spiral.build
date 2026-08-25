@@ -2,8 +2,8 @@
 //!
 //! The injected worker owns data preparation, model, and optimizer execution.
 
-pub mod execution;
+pub(crate) mod execution;
 pub(crate) mod manager;
 pub(crate) mod remote;
-pub mod runs;
-pub mod service;
+pub(crate) mod runs;
+pub(crate) mod service;

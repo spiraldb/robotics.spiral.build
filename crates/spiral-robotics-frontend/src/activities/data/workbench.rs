@@ -7,8 +7,9 @@
 use std::collections::BTreeSet;
 
 use crate::components::interaction::{
-    Action, ActionLink, ActionPurpose, ActionVariant, CloseIcon, FileAction, InlineConfirmation,
-    RefreshIcon, focus_after_render,
+    Action, ActionAuxiliaryHandlers, ActionLink, ActionPurpose, ActionVariant, CloseIcon,
+    ConfirmationCopy, ConfirmationDismissal, ConfirmationResponse, FileAction, FileInput,
+    InlineConfirmation, RefreshIcon, focus_after_render,
 };
 use dioxus::prelude::*;
 use gloo_net::http::Method;
@@ -105,7 +106,7 @@ pub(crate) enum QueryState {
 /// Dataset navigation, transfer, and per-episode actions.
 #[component]
 pub(crate) fn EpisodesPanel(namespace: String) -> Element {
-    let mut studio = studio();
+    let studio = studio();
     let importing = use_signal(|| false);
     let mut adding_data = use_signal(|| false);
     let mut confirming_delete = use_signal(|| None::<String>);
@@ -117,33 +118,38 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
     // to reads, so writing `None` into an already-empty signal would schedule
     // this effect forever when a dataset has no episodes.
     use_effect(move || {
-        let dataset_id = studio.selected_dataset.read().trim().to_owned();
+        let dataset_id = studio.selected_dataset().read().trim().to_owned();
         let episodes = studio
             .episodes()
             .into_iter()
-            .filter(|episode| episode.dataset_id == dataset_id)
+            .filter(|episode| episode.dataset_id() == dataset_id)
             .collect::<Vec<_>>();
-        let current = studio.selected_episode.read().clone();
+        let current = studio.selected_episode().read().to_owned();
         let next = reconciled_episode_selection(current.as_deref(), &episodes);
         if current != next {
-            studio.selected_episode.set(next);
+            studio.selected_episode().set(next);
         }
     });
 
-    let dataset_id = studio.selected_dataset.read().trim().to_owned();
+    let dataset_id = studio.selected_dataset().read().trim().to_owned();
     let dataset_valid = spiral_robotics_api::catalog::is_dataset_id(&dataset_id);
     let all_episodes = studio.episodes();
     let dataset_ids = all_episodes
         .iter()
-        .map(|episode| episode.dataset_id.clone())
-        .chain(studio.datasets().into_iter().map(|dataset| dataset.id))
+        .map(|episode| episode.dataset_id().to_owned())
+        .chain(
+            studio
+                .datasets()
+                .into_iter()
+                .map(|dataset| dataset.id().to_owned()),
+        )
         .chain(std::iter::once(dataset_id.clone()))
         .collect::<BTreeSet<_>>();
     let episodes = all_episodes
         .into_iter()
-        .filter(|episode| episode.dataset_id == dataset_id)
+        .filter(|episode| episode.dataset_id() == dataset_id)
         .collect::<Vec<_>>();
-    let selected = studio.selected_episode.read().clone();
+    let selected = studio.selected_episode().read().to_owned();
     let replaying = studio.replay();
     let catalog_loading = studio.episodes_loading();
     let catalog_loaded = studio.episodes_loaded();
@@ -168,7 +174,7 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
                             maxlength: "96",
                             pattern: "[A-Za-z0-9_.-]+",
                             placeholder: "pick-place-v1",
-                            oninput: move |event| studio.selected_dataset.set(event.value()),
+                            oninput: move |event| studio.selected_dataset().set(event.value()),
                         }
                     }
                     datalist { id: "data-dataset-options",
@@ -221,10 +227,11 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
                         purpose: ActionPurpose::Import,
                         variant: ActionVariant::Outline,
                         title: "Import episodes into the selected dataset; existing episode IDs are never replaced",
-                        accept: ".spiral-episodes,application/vnd.spiral-robotics.episodes",
                         disabled: importing() || !dataset_valid,
                         aria_busy: importing(),
-                        onchange: move |event: Event<FormData>| {
+                        input: FileInput::new(
+                            ".spiral-episodes,application/vnd.spiral-robotics.episodes",
+                            move |event: Event<FormData>| {
                             let Some(file) = event.files().first().cloned() else { return };
                             let target_dataset = import_dataset_id.clone();
                             studio.run_utility("", async move {
@@ -244,22 +251,23 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
                                 };
                                 match outcome {
                                     Ok(result) => {
-                                        if let Some(episode) = result.first_episode {
-                                            studio.selected_episode.set(Some(episode));
+                                        if let Some(episode) = result.first_episode() {
+                                            studio.selected_episode().set(Some(episode.to_owned()));
                                         }
                                         studio.report_success(format!(
                                             "Imported {} episodes into {} ({} rows).{}",
-                                            result.episodes,
-                                            result.dataset_id,
-                                            result.rows,
-                                            import_warning_suffix(&result.warnings),
+                                            result.episodes(),
+                                            result.dataset_id(),
+                                            result.rows(),
+                                            import_warning_suffix(result.warnings()),
                                         ));
                                         Ok(())
                                     }
                                     Err(error) => Err(error),
                                 }
                             });
-                        },
+                            },
+                        ),
                         if importing() { "Importing…" } else { "Import bundle" }
                     }
                     if dataset_valid && !episodes.is_empty() {
@@ -331,37 +339,44 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
                     ul { class: "divide-y divide-line", "aria-label": "Dataset episodes",
                         for episode in episodes.iter().rev().cloned() {
                             EpisodeRow {
-                                key: "{episode.id}",
+                                key: "{episode.id()}",
                                 episode: episode.clone(),
-                                selected: selected.as_deref() == Some(episode.id.as_str()),
-                                playing: replaying.as_ref().is_some_and(|progress| progress.episode == episode.id),
-                                confirming_delete: confirming_delete.read().as_deref() == Some(episode.id.as_str()),
-                                deleting: deleting_episode.read().as_deref() == Some(episode.id.as_str()),
-                                delete_disabled: deleting_episode.read().is_some(),
-                                on_select: move |chosen: EpisodeSummary| {
-                                    if deleting_episode.peek().is_none() {
-                                        confirming_delete.set(None);
-                                    }
-                                    if studio.selected_episode.peek().as_deref() != Some(chosen.id.as_str()) {
-                                        studio.selected_episode.set(Some(chosen.id));
-                                    }
+                                state: EpisodeRowState {
+                                    selected: selected.as_deref() == Some(episode.id()),
+                                    playing: replaying.as_ref().is_some_and(|progress| progress.episode() == episode.id()),
+                                    confirming_delete: confirming_delete.read().as_deref() == Some(episode.id()),
+                                    deleting: deleting_episode.read().as_deref() == Some(episode.id()),
+                                    delete_disabled: deleting_episode.read().is_some(),
                                 },
-                                on_delete: move |id: String| {
-                                    if confirming_delete.read().as_deref() == Some(id.as_str()) {
+                                actions: EpisodeRowActions {
+                                    on_select: EventHandler::new(move |chosen: EpisodeSummary| {
                                         if deleting_episode.peek().is_none() {
-                                            deleting_episode.set(Some(id.clone()));
-                                            delete_episode(
-                                                studio,
-                                                id,
-                                                deleting_episode,
-                                                confirming_delete,
-                                            );
+                                            confirming_delete.set(None);
                                         }
-                                    } else {
-                                        confirming_delete.set(Some(id));
-                                    }
+                                        if studio.selected_episode().peek().as_deref() != Some(chosen.id()) {
+                                            studio.selected_episode().set(Some(chosen.id().to_owned()));
+                                        }
+                                    }),
+                                    on_delete: EventHandler::new(move |id: String| {
+                                        if confirming_delete.read().as_deref() == Some(id.as_str()) {
+                                            if deleting_episode.peek().is_none() {
+                                                deleting_episode.set(Some(id.clone()));
+                                                EpisodeDeletion {
+                                                    studio,
+                                                    id,
+                                                    signals: EpisodeDeletionSignals {
+                                                        deleting: deleting_episode,
+                                                        confirming: confirming_delete,
+                                                    },
+                                                }
+                                                .delete();
+                                            }
+                                        } else {
+                                            confirming_delete.set(Some(id));
+                                        }
+                                    }),
+                                    on_cancel_delete: EventHandler::new(move |_| confirming_delete.set(None)),
                                 },
-                                on_cancel_delete: move |_| confirming_delete.set(None),
                             }
                         }
                     }
@@ -395,14 +410,10 @@ fn HuggingFaceImport(dataset_id: String, on_close: EventHandler<()>) -> Element 
     let mut imported = use_signal(|| None::<HuggingFaceDatasetImportSummary>);
     let mut error = use_signal(|| None::<String>);
 
-    let request = HuggingFaceDatasetRequest {
-        dataset_id: dataset_id.clone(),
-        repository: repository().trim().to_owned(),
-        revision: revision().trim().to_owned(),
-        format: format(),
-    };
-    let can_inspect = !request.repository.is_empty()
-        && !request.revision.is_empty()
+    let request = HuggingFaceDatasetRequest::new(dataset_id.clone(), repository().trim(), format())
+        .with_revision(revision().trim());
+    let can_inspect = !request.repository().is_empty()
+        && !request.revision().is_empty()
         && !inspecting()
         && !importing();
     let panel_pending = inspecting() || importing();
@@ -530,8 +541,8 @@ fn HuggingFaceImport(dataset_id: String, on_close: EventHandler<()>) -> Element 
                     div {
                         strong { "Dataset ready in Query" }
                         p {
-                            "Imported {summary.files} files into {summary.relations.len()} Spiral relations at "
-                            code { "{short_revision(&summary.resolved_revision)}" }
+                            "Imported {summary.files()} files into {summary.relations().len()} Spiral relations at "
+                            code { "{short_revision(summary.resolved_revision())}" }
                             "."
                         }
                     }
@@ -546,24 +557,24 @@ fn HuggingFaceImport(dataset_id: String, on_close: EventHandler<()>) -> Element 
                 div { class: "data-import-inspection",
                     div { class: "data-import-inspection-scroll",
                         dl { class: "data-import-facts",
-                            div { dt { "Snapshot" } dd { code { "{short_revision(&source.resolved_revision)}" } } }
-                            div { dt { "Files" } dd { "{source.files.len()}" } }
-                            div { dt { "Size" } dd { "{format_bytes(source.total_bytes)}" } }
-                            div { dt { "Target" } dd { code { "{source.dataset_id}" } } }
+                            div { dt { "Snapshot" } dd { code { "{short_revision(source.resolved_revision())}" } } }
+                            div { dt { "Files" } dd { "{source.files().len()}" } }
+                            div { dt { "Size" } dd { "{format_bytes(source.total_bytes())}" } }
+                            div { dt { "Target" } dd { code { "{source.dataset_id()}" } } }
                         }
                         div { class: "data-import-plan",
                             strong { "Spiral relations" }
                             ul {
-                                for relation in source.planned_relations.iter() {
+                                for relation in source.planned_relations().iter() {
                                     li { code { "{relation}" } }
                                 }
                             }
                         }
-                        if !source.warnings.is_empty() {
+                        if !source.warnings().is_empty() {
                             div { class: "data-import-warnings", role: "note",
                                 strong { "Before importing" }
                                 ul {
-                                    for warning in source.warnings.iter() { li { "{warning}" } }
+                                    for warning in source.warnings().iter() { li { "{warning}" } }
                                 }
                             }
                         }
@@ -578,12 +589,12 @@ fn HuggingFaceImport(dataset_id: String, on_close: EventHandler<()>) -> Element 
                             onclick: {
                                 let source = source.clone();
                                 move |_| {
-                                    let import_request = HuggingFaceDatasetRequest {
-                                        dataset_id: source.dataset_id.clone(),
-                                        repository: source.repository.clone(),
-                                        revision: source.resolved_revision.clone(),
-                                        format: source.format,
-                                    };
+                                    let import_request = HuggingFaceDatasetRequest::new(
+                                        source.dataset_id(),
+                                        source.repository(),
+                                        source.format(),
+                                    )
+                                    .with_revision(source.resolved_revision());
                                     error.set(None);
                                     studio.run_utility("", async move {
                                         let Some(outcome) = single_flight(
@@ -600,16 +611,16 @@ fn HuggingFaceImport(dataset_id: String, on_close: EventHandler<()>) -> Element 
                                         match outcome {
                                             Ok(summary) => {
                                                 controller.refresh_relations();
-                                                controller.set_sql(summary.suggested_sql.clone());
+                                                controller.set_sql(summary.suggested_sql().to_owned());
                                                 studio.report_success_from(
                                                     crate::shell::notifications::MessageSource::Data,
                                                     format!(
                                                         "Imported {} {} files from {} at {} into {} Spiral relations.",
-                                                        summary.files,
-                                                        summary.format.label(),
-                                                        summary.repository,
-                                                        short_revision(&summary.resolved_revision),
-                                                        summary.relations.len(),
+                                                        summary.files(),
+                                                        summary.format().label(),
+                                                        summary.repository(),
+                                                        short_revision(summary.resolved_revision()),
+                                                        summary.relations().len(),
                                                     ),
                                                 );
                                                 imported.set(Some(summary.clone()));
@@ -677,7 +688,7 @@ pub(crate) fn QueryPanel(namespace: String, dataset_id: String, query_available:
             }
         }
     });
-    let relation_result = relation_catalog.read_unchecked().clone();
+    let relation_result = relation_catalog.read_unchecked().to_owned();
     let relation_error = relation_result
         .as_ref()
         .and_then(|result| result.as_ref().err())
@@ -810,23 +821,33 @@ pub(crate) fn QueryPanel(namespace: String, dataset_id: String, query_available:
     }
 }
 
-#[component]
-fn EpisodeRow(
-    episode: EpisodeSummary,
+#[derive(Clone, Copy, PartialEq)]
+struct EpisodeRowState {
     selected: bool,
     playing: bool,
     confirming_delete: bool,
     deleting: bool,
     delete_disabled: bool,
+}
+
+#[derive(Clone, PartialEq)]
+struct EpisodeRowActions {
     on_select: EventHandler<EpisodeSummary>,
     on_delete: EventHandler<String>,
     on_cancel_delete: EventHandler<()>,
+}
+
+#[component]
+fn EpisodeRow(
+    episode: EpisodeSummary,
+    state: EpisodeRowState,
+    actions: EpisodeRowActions,
 ) -> Element {
-    let state = if playing {
+    let episode_state = if state.playing {
         "Replaying"
-    } else if episode.problem.is_some() {
+    } else if episode.problem().is_some() {
         "Incomplete"
-    } else if episode.discarded {
+    } else if episode.discarded() {
         "Discarded"
     } else {
         "Recorded"
@@ -841,57 +862,62 @@ fn EpisodeRow(
                     purpose: ActionPurpose::Select,
                     variant: ActionVariant::Row,
                     class: "data-episode-select ui-action--bare min-w-0 flex-1 rounded px-1 py-0.5 text-left focus-visible:outline-offset-0",
-                    aria_pressed: selected,
+                    aria_pressed: state.selected,
                     onclick: {
                         let episode = episode.clone();
-                        move |_| on_select.call(episode.clone())
+                        move |_| actions.on_select.call(episode.clone())
                     },
                     span { class: "flex items-baseline gap-1.5",
-                        strong { class: "truncate font-mono text-[11px] font-medium text-ink", "{short_id(&episode.id)}" }
-                        span { class: if playing { "text-[10px] text-accent" } else { "text-[10px] text-ink-faint" }, "{state}" }
+                        strong { class: "truncate font-mono text-[11px] font-medium text-ink", "{short_id(&episode.id())}" }
+                        span { class: if state.playing { "text-[10px] text-accent" } else { "text-[10px] text-ink-faint" }, "{episode_state}" }
                         // No storage badge. SpiralDB is the only persistent path
                         // this product has, so the chip was green on every row of
                         // every catalog and could never have read otherwise; the
                         // panel header already names the store once. A tag that
                         // cannot report an exception is not reporting anything.
-                        span { class: "ml-auto shrink-0 font-mono text-[10px] text-ink-soft", "{format_clock(episode.duration_seconds)}" }
+                        span { class: "ml-auto shrink-0 font-mono text-[10px] text-ink-soft", "{format_clock(episode.duration_seconds())}" }
                     }
                     span { class: "mt-0.5 flex min-w-0 items-center gap-1.5 text-[10px] text-ink-faint",
-                        span { class: "truncate", title: "{episode.source}", "{episode.source}" }
-                        span { class: "ml-auto shrink-0 font-mono", "{episode.frames}f · {episode.sample_hz:.0}Hz" }
+                        span { class: "truncate", title: "{episode.source()}", "{episode.source()}" }
+                        span { class: "ml-auto shrink-0 font-mono", "{episode.frames()}f · {episode.sample_hz():.0}Hz" }
                     }
                 }
-                if confirming_delete {
+                if state.confirming_delete {
                     InlineConfirmation {
-                        id: "delete-episode-confirmation-{episode.id}",
+                        id: "delete-episode-confirmation-{episode.id()}",
                         class: "data-delete-confirmation",
-                        message: format!(
-                            "Delete episode {}? Its streams and video will be permanently removed from SpiralDB.",
-                            short_id(&episode.id),
+                        copy: ConfirmationCopy::new(
+                            format!(
+                                "Delete episode {}? Its streams and video will be permanently removed from SpiralDB.",
+                                short_id(episode.id()),
+                            ),
+                            if state.deleting { "Deleting…" } else { "Delete episode" },
+                            "Keep episode",
                         ),
-                        confirm_label: if deleting { "Deleting…" } else { "Delete episode" },
-                        cancel_label: "Keep episode",
-                        purpose: ActionPurpose::Delete,
-                        pending: deleting,
-                        return_focus_id: "delete-episode-{episode.id}",
-                        on_confirm: {
-                            let id = episode.id.clone();
-                            move |_| on_delete.call(id.clone())
-                        },
-                        on_cancel: move |_| on_cancel_delete.call(()),
+                        response: ConfirmationResponse::new(
+                            ActionPurpose::Delete,
+                            {
+                                let id = episode.id().to_owned();
+                                move |_| actions.on_delete.call(id.clone())
+                            },
+                            move |_| actions.on_cancel_delete.call(()),
+                        ),
+                        dismissal: ConfirmationDismissal::new(
+                            format!("delete-episode-{}", episode.id()),
+                        ).with_pending(state.deleting),
                     }
                 } else {
                     div { class: "data-episode-actions",
                         Action {
-                            id: "delete-episode-{episode.id}",
+                            id: "delete-episode-{episode.id()}",
                             purpose: ActionPurpose::Delete,
                             variant: ActionVariant::Link,
                             class: "data-delete-action ui-hover-action",
-                            disabled: delete_disabled,
+                            disabled: state.delete_disabled,
                             title: delete_title,
                             onclick: {
-                                let id = episode.id.clone();
-                                move |_| on_delete.call(id.clone())
+                                let id = episode.id().to_owned();
+                                move |_| actions.on_delete.call(id.clone())
                             },
                             "Delete"
                         }
@@ -933,7 +959,7 @@ pub(crate) fn QueryResultView() -> Element {
                                     let id = tab.id;
                                     move |_| controller.select_query(id)
                                 },
-                                onkeydown: {
+                                auxiliary_handlers: ActionAuxiliaryHandlers::keydown({
                                     let ids = tab_ids.clone();
                                     let id = tab.id;
                                     move |event: KeyboardEvent| {
@@ -955,7 +981,7 @@ pub(crate) fn QueryResultView() -> Element {
                                             focus_query_tab(target);
                                         }
                                     }
-                                },
+                                }),
                                 span { class: query_tab_state_class(tab.presentation().state()), "aria-hidden": "true" }
                                 span { class: "query-result-tab-label", "{tab.title}" }
                             }
@@ -993,10 +1019,10 @@ pub(crate) fn QueryResultView() -> Element {
                     header { class: "query-result-meta",
                         if let QueryState::Ready(result) = tab.presentation().state() {
                             span { class: "query-result-count", role: "status",
-                                strong { "{result.rows.len()} rows" }
-                                span { "{result.elapsed_ms} ms" }
+                                strong { "{result.rows().len()} rows" }
+                                span { "{result.elapsed_ms()} ms" }
                             }
-                            if result.truncated { span { class: "chip chip-caution", "Truncated" } }
+                            if result.truncated() { span { class: "chip chip-caution", "Truncated" } }
                         }
                         span { class: "query-result-limit", "Limit · {tab.presentation().max_rows()} rows" }
                         details {
@@ -1063,7 +1089,7 @@ fn QueryResultContent(model: QueryExecutionPresentation) -> Element {
                         p { class: "mt-0.5", "{error}" }
                     }
                 },
-                QueryState::Ready(result) if result.rows.is_empty() => rsx! {
+                QueryState::Ready(result) if result.rows().is_empty() => rsx! {
                     div { class: "flex flex-1 items-center justify-center p-6 text-center",
                         div {
                             strong { class: "block text-[12px] font-medium text-ink", "No rows" }
@@ -1073,7 +1099,7 @@ fn QueryResultContent(model: QueryExecutionPresentation) -> Element {
                 },
                 QueryState::Ready(result) => {
                     let has_video_previews = query_needs_video_preview_column(result);
-                    let result_row_count = result.rows.len();
+                    let result_row_count = result.rows().len();
                     rsx! {
                         div { class: "query-result-ready",
                             div { class: "query-result-table-scroll",
@@ -1085,22 +1111,22 @@ fn QueryResultContent(model: QueryExecutionPresentation) -> Element {
                                             span { class: "query-column-type", "Video" }
                                         }
                                     }
-                                    for column in &result.columns {
-                                        th { key: "{column.name}", scope: "col",
+                                    for column in &result.columns() {
+                                        th { key: "{column.name()}", scope: "col",
                                             title: query_column_title(column),
-                                            span { class: "query-column-name", "{column.name}" }
+                                            span { class: "query-column-name", "{column.name()}" }
                                             span { class: "query-column-type", "{query_column_kind(column)}" }
                                         }
                                     }
                                 } }
                                 tbody {
-                                    for (index, row) in result.rows.iter().enumerate() {
+                                    for (index, row) in result.rows().iter().enumerate() {
                                         tr { key: "{index}",
                                             if has_video_previews {
                                                 {render_query_video_cell(row, index)}
                                             }
-                                            for column in &result.columns {
-                                                {render_query_cell(column, row, index, result_row_count)}
+                                            for column in &result.columns() {
+                                                {QueryCellContext::new(column, row, QueryRowPosition::new(index, result_row_count)).render()}
                                             }
                                         }
                                     }
@@ -1149,37 +1175,37 @@ fn schema_relation_views(
             .collect();
     };
     response
-        .relations
+        .relations()
         .iter()
         .map(|relation| {
             let managed = Table::ALL
                 .into_iter()
-                .find(|table| relation.name == table.qualified_name(namespace));
+                .find(|table| relation.name() == table.qualified_name(namespace));
             let label = managed
                 .map(|table| table.name().to_owned())
                 .unwrap_or_else(|| {
                     relation
-                        .name
+                        .name()
                         .strip_prefix(&format!("{namespace}."))
-                        .unwrap_or(&relation.name)
+                        .unwrap_or(relation.name())
                         .to_owned()
                 });
             SchemaRelationSummary {
-                name: relation.name.clone(),
+                name: relation.name().to_owned(),
                 label,
                 description: managed
                     .map(table_description)
-                    .unwrap_or(&relation.relation_type)
+                    .unwrap_or(relation.relation_type())
                     .to_owned(),
                 columns: relation
-                    .columns
+                    .columns()
                     .iter()
-                    .map(|column| column.name.as_str())
+                    .map(|column| column.name())
                     .collect::<Vec<_>>()
                     .join(", "),
                 sql: managed
                     .map(|table| preset_sql(namespace, dataset_id, table_preset(table)))
-                    .unwrap_or_else(|| format!("SELECT * FROM {} LIMIT 100", relation.name)),
+                    .unwrap_or_else(|| format!("SELECT * FROM {} LIMIT 100", relation.name())),
             }
         })
         .collect()
@@ -1252,7 +1278,7 @@ fn preferred_episode(episodes: &[EpisodeSummary]) -> Option<&EpisodeSummary> {
     episodes
         .iter()
         .rev()
-        .find(|episode| episode.usable() && !episode.discarded)
+        .find(|episode| episode.usable() && !episode.discarded())
         .or_else(|| episodes.last())
 }
 
@@ -1261,43 +1287,54 @@ fn reconciled_episode_selection(
     episodes: &[EpisodeSummary],
 ) -> Option<String> {
     current
-        .filter(|id| episodes.iter().any(|episode| episode.id == *id))
+        .filter(|id| episodes.iter().any(|episode| episode.id() == *id))
         .map(str::to_owned)
-        .or_else(|| preferred_episode(episodes).map(|episode| episode.id.clone()))
+        .or_else(|| preferred_episode(episodes).map(|episode| episode.id().to_owned()))
 }
 
-fn delete_episode(
+struct EpisodeDeletionSignals {
+    deleting: Signal<Option<String>>,
+    confirming: Signal<Option<String>>,
+}
+
+struct EpisodeDeletion {
     studio: crate::shell::state::Studio,
     id: String,
-    mut deleting_episode: Signal<Option<String>>,
-    mut confirming_delete: Signal<Option<String>>,
-) {
-    let mut selected = studio.selected_episode;
-    let path = format!("/api/episodes/{id}");
-    let deleted_id = id.clone();
-    studio.run_utility(format!("Deleted {id}."), async move {
-        let result = api::send::<()>(Method::DELETE, &path, None).await;
-        deleting_episode.set(None);
-        if result.is_ok() {
-            confirming_delete.set(None);
-            studio.remove_episode(&deleted_id);
-            // A slower deletion must not clear a newer choice made while the
-            // request was in flight.
-            if selected.peek().as_deref() == Some(deleted_id.as_str()) {
-                selected.set(None);
-            }
-        }
-        result
-    });
+    signals: EpisodeDeletionSignals,
+}
+
+impl EpisodeDeletion {
+    fn delete(self) {
+        let mut selected = self.studio.selected_episode();
+        let path = format!("/api/episodes/{}", self.id);
+        let deleted_id = self.id.clone();
+        let mut deleting = self.signals.deleting;
+        let mut confirming = self.signals.confirming;
+        self.studio
+            .run_utility(format!("Deleted {}.", self.id), async move {
+                let result = api::send::<()>(Method::DELETE, &path, None).await;
+                deleting.set(None);
+                if result.is_ok() {
+                    confirming.set(None);
+                    self.studio.remove_episode(&deleted_id);
+                    // A slower deletion must not clear a newer choice made while the
+                    // request was in flight.
+                    if selected.peek().as_deref() == Some(deleted_id.as_str()) {
+                        selected.set(None);
+                    }
+                }
+                result
+            });
+    }
 }
 
 fn query_column_title(column: &QueryColumn) -> String {
-    let mut title = column.data_type.clone();
-    if let Some(semantic_type) = &column.semantic_type {
+    let mut title = column.data_type().to_owned();
+    if let Some(semantic_type) = &column.semantic_type() {
         title.push_str(" · ");
         title.push_str(semantic_type);
     }
-    if column.nullable {
+    if column.nullable() {
         title.push_str(" · nullable");
     }
     title
@@ -1321,45 +1358,115 @@ fn humanize_query_column(name: &str) -> String {
     }
 }
 
-fn query_image_alt(
-    column: &QueryColumn,
-    row: &serde_json::Map<String, serde_json::Value>,
+struct QueryCellContext<'a> {
+    column: &'a QueryColumn,
+    row: &'a serde_json::Map<String, serde_json::Value>,
     row_index: usize,
     row_count: usize,
-) -> String {
-    let prefix = column
-        .name
-        .strip_suffix("_preview")
-        .or_else(|| column.name.strip_suffix("_image"));
-    let mut context = Vec::new();
-    for (label, field) in [
-        ("episode", "episode_id"),
-        ("stream", "stream_id"),
-        ("frame", "frame_index"),
-    ] {
-        let specific = prefix.map(|prefix| format!("{prefix}_{field}"));
-        let value = specific
-            .as_deref()
-            .and_then(|field| row.get(field))
-            .or_else(|| row.get(field))
-            .map(query_cell_value)
-            .filter(|value| value != "null");
-        if let Some(value) = value {
-            context.push(format!("{label} {value}"));
+}
+
+#[derive(Clone, Copy)]
+struct QueryRowPosition {
+    index: usize,
+    count: usize,
+}
+
+impl QueryRowPosition {
+    const fn new(index: usize, count: usize) -> Self {
+        Self { index, count }
+    }
+}
+
+impl<'a> QueryCellContext<'a> {
+    const fn new(
+        column: &'a QueryColumn,
+        row: &'a serde_json::Map<String, serde_json::Value>,
+        position: QueryRowPosition,
+    ) -> Self {
+        Self {
+            column,
+            row,
+            row_index: position.index,
+            row_count: position.count,
         }
     }
-    let context = if context.is_empty() {
-        String::new()
-    } else {
-        format!(" for {}", context.join(", "))
-    };
-    format!(
-        "{}{}; result {} of {}",
-        humanize_query_column(&column.name),
-        context,
-        row_index + 1,
-        row_count
-    )
+
+    fn image_alt(&self) -> String {
+        let prefix = self
+            .column
+            .name()
+            .strip_suffix("_preview")
+            .or_else(|| self.column.name().strip_suffix("_image"));
+        let mut context = Vec::new();
+        for (label, field) in [
+            ("episode", "episode_id"),
+            ("stream", "stream_id"),
+            ("frame", "frame_index"),
+        ] {
+            let specific = prefix.map(|prefix| format!("{prefix}_{field}"));
+            let value = specific
+                .as_deref()
+                .and_then(|field| self.row.get(field))
+                .or_else(|| self.row.get(field))
+                .map(query_cell_value)
+                .filter(|value| value != "null");
+            if let Some(value) = value {
+                context.push(format!("{label} {value}"));
+            }
+        }
+        let context = if context.is_empty() {
+            String::new()
+        } else {
+            format!(" for {}", context.join(", "))
+        };
+        format!(
+            "{}{}; result {} of {}",
+            humanize_query_column(self.column.name()),
+            context,
+            self.row_index + 1,
+            self.row_count
+        )
+    }
+
+    fn render(&self) -> Element {
+        let column = self.column;
+        let value = self.row.get(column.name());
+        if query_is_image_column(column) {
+            return rsx! {
+                td { key: "{column.name()}", class: "query-media-cell",
+                    if let Some(src) = query_image_src(column, value) {
+                        img {
+                            class: "query-image-preview",
+                            src,
+                            alt: self.image_alt(),
+                            loading: "lazy",
+                            decoding: "async",
+                            draggable: "false",
+                        }
+                    } else {
+                        span { class: "query-image-unavailable", "No image" }
+                    }
+                }
+            };
+        }
+        if column.semantic_type() == Some(ENCODED_MEDIA_EXTENSION_NAME) {
+            return render_query_video_cell(self.row, self.row_index);
+        }
+        let rendered = query_cell(value);
+        let display = if value.is_none_or(serde_json::Value::is_null) {
+            "—"
+        } else {
+            rendered.as_str()
+        };
+        rsx! {
+            td {
+                key: "{column.name()}",
+                class: query_value_class(value),
+                title: "{rendered}",
+                "{display}"
+            }
+        }
+    }
 }
 
 fn query_cell_value(value: &serde_json::Value) -> String {
@@ -1369,53 +1476,9 @@ fn query_cell_value(value: &serde_json::Value) -> String {
     }
 }
 
-fn render_query_cell(
-    column: &QueryColumn,
-    row: &serde_json::Map<String, serde_json::Value>,
-    row_index: usize,
-    row_count: usize,
-) -> Element {
-    let value = row.get(&column.name);
-    if query_is_image_column(column) {
-        return rsx! {
-            td { key: "{column.name}", class: "query-media-cell",
-                if let Some(src) = query_image_src(column, value) {
-                    img {
-                        class: "query-image-preview",
-                        src,
-                        alt: query_image_alt(column, row, row_index, row_count),
-                        loading: "lazy",
-                        decoding: "async",
-                        draggable: "false",
-                    }
-                } else {
-                    span { class: "query-image-unavailable", "No image" }
-                }
-            }
-        };
-    }
-    if column.semantic_type.as_deref() == Some(ENCODED_MEDIA_EXTENSION_NAME) {
-        return render_query_video_cell(row, row_index);
-    }
-    let rendered = query_cell(value);
-    let display = if value.is_none_or(serde_json::Value::is_null) {
-        "—"
-    } else {
-        rendered.as_str()
-    };
-    rsx! {
-        td {
-            key: "{column.name}",
-            class: query_value_class(value),
-            title: "{rendered}",
-            "{display}"
-        }
-    }
-}
-
 fn query_is_image_column(column: &QueryColumn) -> bool {
     matches!(
-        column.semantic_type.as_deref(),
+        column.semantic_type(),
         Some(IMAGE_EXTENSION_NAME | VARIABLE_TENSOR_EXTENSION_NAME)
     )
 }
@@ -1425,7 +1488,7 @@ fn query_image_src<'a>(
     value: Option<&'a serde_json::Value>,
 ) -> Option<&'a str> {
     matches!(
-        column.semantic_type.as_deref(),
+        column.semantic_type(),
         Some(IMAGE_EXTENSION_NAME | VARIABLE_TENSOR_EXTENSION_NAME)
     )
     .then(|| value?.as_str())?
@@ -1434,28 +1497,29 @@ fn query_image_src<'a>(
 
 fn query_needs_video_preview_column(result: &SpiralQueryResponse) -> bool {
     if result
-        .columns
+        .columns()
         .iter()
-        .any(|column| column.semantic_type.as_deref() == Some(ENCODED_MEDIA_EXTENSION_NAME))
+        .any(|column| column.semantic_type() == Some(ENCODED_MEDIA_EXTENSION_NAME))
     {
         return false;
     }
-    let has = |name: &str| result.columns.iter().any(|column| column.name == name);
+    let has = |name: &str| result.columns().iter().any(|column| column.name() == name);
     has("episode_id")
         && has("stream_id")
         && has("segment_index")
         && (has("camera_id")
             || has("byte_size")
-            || result.columns.iter().any(|column| {
-                column.semantic_type.as_deref() == Some(ENCODED_MEDIA_EXTENSION_NAME)
-            }))
+            || result
+                .columns()
+                .iter()
+                .any(|column| column.semantic_type() == Some(ENCODED_MEDIA_EXTENSION_NAME)))
 }
 
 fn query_column_kind(column: &QueryColumn) -> &str {
-    match column.semantic_type.as_deref() {
+    match column.semantic_type() {
         Some(IMAGE_EXTENSION_NAME | VARIABLE_TENSOR_EXTENSION_NAME) => "Image",
         Some(ENCODED_MEDIA_EXTENSION_NAME) => "Video",
-        _ => &column.data_type,
+        _ => column.data_type(),
     }
 }
 
@@ -1531,31 +1595,18 @@ fn query_cell(value: Option<&serde_json::Value>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use spiral_robotics_api::recording::{EpisodeAssessment, EpisodeIdentity, EpisodeTimeline};
 
     fn query_column(name: &str, semantic_type: Option<&str>) -> QueryColumn {
-        QueryColumn {
-            name: name.to_owned(),
-            data_type: "Utf8".to_owned(),
-            nullable: false,
-            semantic_type: semantic_type.map(str::to_owned),
-        }
+        QueryColumn::new(name, "Utf8", false).with_semantic_type(semantic_type.map(str::to_owned))
     }
 
     fn episode(id: &str, usable: bool, discarded: bool) -> EpisodeSummary {
-        EpisodeSummary {
-            dataset_id: "default".to_owned(),
-            id: id.to_owned(),
-            arms: Vec::new(),
-            frames: 1,
-            duration_seconds: 1.0,
-            recording_gaps: Vec::new(),
-            sample_hz: 60.0,
-            started_ms: 0,
-            source: "test".to_owned(),
-            max_follow_error_degrees: None,
-            discarded,
-            problem: (!usable).then(|| "unavailable".to_owned()),
-        }
+        EpisodeSummary::new(
+            EpisodeIdentity::new(id, "default", Vec::new()).with_source("test"),
+            EpisodeTimeline::new(1, 1.0, 60.0),
+            EpisodeAssessment::new(discarded, None, (!usable).then(|| "unavailable".to_owned())),
+        )
     }
 
     #[test]
@@ -1639,7 +1690,7 @@ mod tests {
             ("wrist_frame_index".to_owned(), serde_json::json!(42)),
         ]);
         assert_eq!(
-            query_image_alt(&column, &row, 2, 18),
+            QueryCellContext::new(&column, &row, QueryRowPosition::new(2, 18)).image_alt(),
             "Wrist for episode take-12, stream follower/wrist, frame 42; result 3 of 18"
         );
     }
@@ -1675,12 +1726,7 @@ mod tests {
             ("segment_index".to_owned(), serde_json::json!(2)),
             ("camera_id".to_owned(), serde_json::json!("wrist")),
         ]);
-        let result = SpiralQueryResponse {
-            columns,
-            rows: vec![row.clone()],
-            truncated: false,
-            elapsed_ms: 1,
-        };
+        let result = SpiralQueryResponse::new(columns, vec![row.clone()], false).with_elapsed_ms(1);
         assert!(query_needs_video_preview_column(&result));
         assert_eq!(
             query_video_preview(&row),
@@ -1690,15 +1736,17 @@ mod tests {
             ))
         );
 
-        let encoded = SpiralQueryResponse {
-            columns: vec![
+        let encoded = SpiralQueryResponse::new(
+            vec![
                 query_column("episode_id", None),
                 query_column("stream_id", None),
                 query_column("segment_index", None),
                 query_column("media", Some(ENCODED_MEDIA_EXTENSION_NAME)),
             ],
-            ..result
-        };
+            vec![row],
+            false,
+        )
+        .with_elapsed_ms(result.elapsed_ms());
         assert!(!query_needs_video_preview_column(&encoded));
     }
 

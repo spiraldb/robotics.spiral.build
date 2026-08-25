@@ -9,7 +9,8 @@
 use std::sync::Arc;
 
 use crate::components::interaction::{
-    Action, ActionPurpose, ActionSize, ActionVariant, InlineConfirmation, Toggle,
+    Action, ActionPurpose, ActionSize, ActionVariant, ConfirmationCopy, ConfirmationDismissal,
+    ConfirmationResponse, InlineConfirmation, Toggle,
 };
 use charming::Chart;
 use charming::component::{Axis, Grid};
@@ -46,64 +47,135 @@ pub(crate) enum TimelinePlayback {
 /// Controlled interaction state shared by every Timeline subject.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct StudioTimelineState {
-    pub(crate) subject: TimelineSubject,
-    pub(crate) playhead_seconds: f64,
-    pub(crate) playback: TimelinePlayback,
-    pub(crate) follow_live: bool,
-    pub(crate) sync_robot: bool,
+    subject: TimelineSubject,
+    playhead_seconds: f64,
+    playback: TimelinePlayback,
+    follow_live: bool,
+    sync_robot: bool,
+}
+
+impl StudioTimelineState {
+    pub(crate) fn new(
+        subject: TimelineSubject,
+        playhead_seconds: f64,
+        playback: TimelinePlayback,
+    ) -> Self {
+        Self {
+            subject,
+            playhead_seconds,
+            playback,
+            follow_live: false,
+            sync_robot: false,
+        }
+    }
+
+    pub(crate) const fn with_controls(mut self, follow_live: bool, sync_robot: bool) -> Self {
+        self.follow_live = follow_live;
+        self.sync_robot = sync_robot;
+        self
+    }
 }
 
 /// One measured point. `None` creates a visible gap rather than bridging a
 /// missing sample with a line the hardware never reported.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct TimelineSignalPoint {
-    pub(crate) seconds: f64,
-    pub(crate) value: Option<f64>,
+    seconds: f64,
+    value: Option<f64>,
+}
+
+impl TimelineSignalPoint {
+    pub(crate) const fn new(seconds: f64, value: Option<f64>) -> Self {
+        Self { seconds, value }
+    }
+
+    pub(crate) const fn seconds(&self) -> f64 {
+        self.seconds
+    }
 }
 
 /// One arm's trace within a joint lane.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct TimelineSignalSeries {
-    pub(crate) arm: String,
-    pub(crate) points: Vec<TimelineSignalPoint>,
+    arm: String,
+    points: Vec<TimelineSignalPoint>,
+}
+
+impl TimelineSignalSeries {
+    pub(crate) fn new(arm: impl Into<String>, points: Vec<TimelineSignalPoint>) -> Self {
+        Self {
+            arm: arm.into(),
+            points,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn points(&self) -> &[TimelineSignalPoint] {
+        &self.points
+    }
 }
 
 /// One of the six fixed SO-101 joint lanes.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct TimelineSignalLane {
-    pub(crate) joint: String,
-    pub(crate) label: String,
-    pub(crate) color: String,
-    pub(crate) series: Vec<TimelineSignalSeries>,
+    joint: String,
+    label: String,
+    color: String,
+    series: Vec<TimelineSignalSeries>,
+}
+
+impl TimelineSignalLane {
+    pub(crate) fn new(
+        joint: impl Into<String>,
+        label: impl Into<String>,
+        color: impl Into<String>,
+    ) -> Self {
+        Self {
+            joint: joint.into(),
+            label: label.into(),
+            color: color.into(),
+            series: Vec::new(),
+        }
+    }
+
+    pub(crate) fn with_series(mut self, series: Vec<TimelineSignalSeries>) -> Self {
+        self.series = series;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn series(&self) -> &[TimelineSignalSeries] {
+        &self.series
+    }
 }
 
 /// Wire response from the bounded historical trace endpoint.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub(crate) struct RecordedTimelineTraces {
-    pub(crate) episode: String,
-    pub(crate) samples: u64,
-    pub(crate) buckets: usize,
-    pub(crate) start_seconds: Option<f64>,
-    pub(crate) end_seconds: Option<f64>,
-    pub(crate) lanes: Vec<RecordedTimelineTraceLane>,
+    episode: String,
+    samples: u64,
+    buckets: usize,
+    start_seconds: Option<f64>,
+    end_seconds: Option<f64>,
+    lanes: Vec<RecordedTimelineTraceLane>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub(crate) struct RecordedTimelineTraceLane {
-    pub(crate) joint: String,
-    pub(crate) series: Vec<RecordedTimelineTraceSeries>,
+    joint: String,
+    series: Vec<RecordedTimelineTraceSeries>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub(crate) struct RecordedTimelineTraceSeries {
-    pub(crate) arm: String,
-    pub(crate) points: Vec<RecordedTimelineTracePoint>,
+    arm: String,
+    points: Vec<RecordedTimelineTracePoint>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq)]
 pub(crate) struct RecordedTimelineTracePoint {
-    pub(crate) seconds: f64,
-    pub(crate) value: Option<f64>,
+    seconds: f64,
+    value: Option<f64>,
 }
 
 impl RecordedTimelineTraces {
@@ -154,20 +226,20 @@ pub(crate) fn signal_lanes_from_store(store: &SignalStore) -> [TimelineSignalLan
             .iter()
             .filter_map(|arm| {
                 let joint = arm
-                    .joints
+                    .joints()
                     .iter()
-                    .find(|joint| joint.name == definition.name())?;
+                    .find(|joint| joint.name() == definition.name())?;
                 let points = store
                     .times()
                     .iter()
-                    .zip(&joint.values)
+                    .zip(joint.values())
                     .map(|(seconds, value)| TimelineSignalPoint {
                         seconds: f64::from(*seconds),
                         value: value.map(f64::from),
                     })
                     .collect();
                 Some(TimelineSignalSeries {
-                    arm: arm.id.clone(),
+                    arm: arm.id().to_owned(),
                     points,
                 })
             })
@@ -186,8 +258,8 @@ pub(crate) fn signal_lanes_from_store(store: &SignalStore) -> [TimelineSignalLan
 /// path when it is not.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct TimelineGate {
-    pub(crate) allowed: bool,
-    pub(crate) reason: Option<String>,
+    allowed: bool,
+    reason: Option<String>,
 }
 
 impl TimelineGate {
@@ -204,17 +276,57 @@ impl TimelineGate {
             reason: Some(reason.into()),
         }
     }
+
+    pub(crate) const fn is_allowed(&self) -> bool {
+        self.allowed
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct TimelineCapabilities {
-    pub(crate) record: TimelineGate,
-    pub(crate) preview: TimelineGate,
-    pub(crate) seek: TimelineGate,
+    record: TimelineGate,
+    preview: TimelineGate,
+    seek: TimelineGate,
     /// Whether full-episode playback may drive the compatible robot.
-    pub(crate) synced_playback: TimelineGate,
+    synced_playback: TimelineGate,
     /// Whether this Timeline subject may be armed to drive the robot.
-    pub(crate) robot_sync: TimelineGate,
+    robot_sync: TimelineGate,
+}
+
+impl TimelineCapabilities {
+    pub(crate) const fn new(
+        record: TimelineGate,
+        preview: TimelineGate,
+        seek: TimelineGate,
+    ) -> Self {
+        Self {
+            record,
+            preview,
+            seek,
+            synced_playback: TimelineGate {
+                allowed: false,
+                reason: None,
+            },
+            robot_sync: TimelineGate {
+                allowed: false,
+                reason: None,
+            },
+        }
+    }
+
+    pub(crate) fn with_robot_controls(
+        mut self,
+        synced_playback: TimelineGate,
+        robot_sync: TimelineGate,
+    ) -> Self {
+        self.synced_playback = synced_playback;
+        self.robot_sync = robot_sync;
+        self
+    }
+
+    pub(crate) const fn robot_sync(&self) -> &TimelineGate {
+        &self.robot_sync
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -243,10 +355,28 @@ pub(crate) enum TimelineRobotSyncAction {
 /// after the robot-sync gate and operator option have both passed.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct TimelineSeekRequest {
-    pub(crate) target: TimelineTarget,
-    pub(crate) seconds: f64,
-    pub(crate) move_robot: bool,
-    pub(crate) committed: bool,
+    target: TimelineTarget,
+    seconds: f64,
+    move_robot: bool,
+    committed: bool,
+}
+
+impl TimelineSeekRequest {
+    pub(crate) const fn target(&self) -> &TimelineTarget {
+        &self.target
+    }
+
+    pub(crate) const fn seconds(&self) -> f64 {
+        self.seconds
+    }
+
+    pub(crate) const fn moves_robot(&self) -> bool {
+        self.move_robot
+    }
+
+    pub(crate) const fn committed(&self) -> bool {
+        self.committed
+    }
 }
 
 /// The Timeline's one user-operation vocabulary in every activity and state.
@@ -344,14 +474,38 @@ fn transport_intent(playback: TimelinePlayback, sync_robot: bool) -> TimelineTra
 /// feeds requested actions back through [`StudioTimelineState`]. Scrubbing is
 /// held locally until the range control commits, so physical motion is never
 /// requested for every pointer move.
-#[component]
-pub(crate) fn StudioTimeline(
-    state: StudioTimelineState,
+#[derive(Clone, PartialEq)]
+pub(crate) struct TimelineVisualization {
     signal_lanes: Arc<[TimelineSignalLane; 6]>,
     signal_source: SignalSource,
     capabilities: TimelineCapabilities,
+}
+
+impl TimelineVisualization {
+    pub(crate) const fn new(
+        signal_lanes: Arc<[TimelineSignalLane; 6]>,
+        signal_source: SignalSource,
+        capabilities: TimelineCapabilities,
+    ) -> Self {
+        Self {
+            signal_lanes,
+            signal_source,
+            capabilities,
+        }
+    }
+}
+
+#[component]
+pub(crate) fn StudioTimeline(
+    state: StudioTimelineState,
+    visualization: TimelineVisualization,
     on_action: EventHandler<TimelineAction>,
 ) -> Element {
+    let TimelineVisualization {
+        signal_lanes,
+        signal_source,
+        capabilities,
+    } = visualization;
     let recording = state.subject.recording().cloned();
     let duration = state.subject.duration_seconds();
     let external_playhead = if recording.is_some() && state.follow_live {
@@ -372,7 +526,9 @@ pub(crate) fn StudioTimeline(
     // A pending confirmation belongs to the take that raised it. If that take
     // ends by any other route — Stop, a server-side fault, an activity switch —
     // the armed Discard must not survive to greet the next one.
-    let capture_identity = recording.as_ref().map(|progress| progress.episode.clone());
+    let capture_identity = recording
+        .as_ref()
+        .map(|progress| progress.episode().to_owned());
     use_effect(use_reactive((&capture_identity,), move |(identity,)| {
         if identity.is_none() {
             confirm_discard.set(false);
@@ -477,8 +633,10 @@ pub(crate) fn StudioTimeline(
     let sync_target = target.clone();
     let scrub_sync_episode = preview_episode.clone();
     let next_transport = transport_intent(playback, sync_robot);
-    let capture_episode = recording.as_ref().map(|progress| progress.episode.clone());
-    let capture_paused = recording.as_ref().is_some_and(|progress| progress.paused);
+    let capture_episode = recording
+        .as_ref()
+        .map(|progress| progress.episode().to_owned());
+    let capture_paused = recording.as_ref().is_some_and(|progress| progress.paused());
     let timeline_label = match state.subject.activity() {
         Activity::Live => "Live Timeline",
         Activity::Data => "Data Timeline",
@@ -529,22 +687,26 @@ pub(crate) fn StudioTimeline(
                         InlineConfirmation {
                             id: "discard-take-confirmation",
                             class: "timeline-discard-confirmation",
-                            message: "Discard this take? The current recording will not be saved.".to_owned(),
-                            confirm_label: "Discard take",
-                            cancel_label: "Keep recording",
-                            purpose: ActionPurpose::Discard,
-                            return_focus_id: "discard-take",
-                            on_confirm: {
-                                let episode = capture_episode.clone();
-                                move |_| {
-                                    confirm_discard.set(false);
-                                    on_action.call(TimelineAction::Capture {
-                                        episode: episode.clone(),
-                                        action: TimelineCaptureAction::Discard,
-                                    });
-                                }
-                            },
-                            on_cancel: move |_| confirm_discard.set(false),
+                            copy: ConfirmationCopy::new(
+                                "Discard this take? The current recording will not be saved.",
+                                "Discard take",
+                                "Keep recording",
+                            ),
+                            response: ConfirmationResponse::new(
+                                ActionPurpose::Discard,
+                                {
+                                    let episode = capture_episode.clone();
+                                    move |_| {
+                                        confirm_discard.set(false);
+                                        on_action.call(TimelineAction::Capture {
+                                            episode: episode.clone(),
+                                            action: TimelineCaptureAction::Discard,
+                                        });
+                                    }
+                                },
+                                move |_| confirm_discard.set(false),
+                            ),
+                            dismissal: ConfirmationDismissal::new("discard-take"),
                         }
                     } else {
                         div { class: "ml-1 flex items-center gap-1 border-l border-line pl-2",
@@ -773,8 +935,10 @@ pub(crate) fn StudioTimeline(
                             CharmingChart {
                                 id: TIMELINE_CHART_ID.to_owned(),
                                 chart: signal_chart,
-                                class: "timeline-signal-chart".to_owned(),
-                                aria_label: signal_chart_label,
+                                presentation: crate::components::charts::ChartPresentation::new(
+                                    "timeline-signal-chart",
+                                    signal_chart_label,
+                                ),
                             }
                             div { class: "timeline-signal-lane-overlays",
                                 for lane in signal_lanes.iter() {

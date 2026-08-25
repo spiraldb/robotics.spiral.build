@@ -1,3 +1,3 @@
 pub(crate) mod manager;
-pub mod policy;
-pub mod service;
+pub(crate) mod policy;
+pub(crate) mod service;

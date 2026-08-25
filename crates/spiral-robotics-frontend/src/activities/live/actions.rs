@@ -17,10 +17,10 @@ pub(crate) enum LiveAction {
 }
 
 impl Studio {
-    pub(crate) fn dispatch_live_action(mut self, action: LiveAction) {
+    pub(crate) fn dispatch_live_action(self, action: LiveAction) {
         match action {
-            LiveAction::Select(selection) => self.selected.set(selection),
-            LiveAction::Point(selection) => self.pointed.set(selection),
+            LiveAction::Select(selection) => self.selection().set(selection),
+            LiveAction::Point(selection) => self.pointed_selection().set(selection),
             LiveAction::Hold(robot) => self.hold_robot(robot),
             LiveAction::Release(robot) => self.release_robot(robot),
             LiveAction::Teleoperate { leader, follower } => {

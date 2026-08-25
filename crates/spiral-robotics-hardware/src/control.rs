@@ -36,12 +36,14 @@ use crate::control_policy::{
     ReplayState as ReplayPolicyState, RobotAdmission,
 };
 use spiral_robotics_api::recording::{
-    EpisodeArm, EpisodeSummary, RecordingGap, RecordingProgress, ReplayPhase, ReplayProgress,
-    ReplayPurpose,
+    EpisodeArm, EpisodeSummary, RecordingClock as RecordingProgressClock, RecordingGap,
+    RecordingIdentity, RecordingProgress, RecordingState, ReplayIdentity, ReplayPhase,
+    ReplayProgress, ReplayPurpose, ReplayTimeline, ReplayTransport,
 };
 use spiral_robotics_api::robots::{
     CAUTION_FOLLOW_ERROR_DEGREES, CalibrationJointProgress, CalibrationProgress, ConnectionStatus,
-    JointRange, JointTelemetry, ModeSelection, ModeStatus, MotorFault, MotorLimits, PortSettings,
+    JointDiagnostics, JointIdentity, JointKinematics, JointRange, JointTelemetry, ModeSelection,
+    ModeStatus, MotorElectricalReadings, MotorFault, MotorLimits, MotorVoltageRange, PortSettings,
     RobotTelemetry, TelemetryFrame,
 };
 use spiral_robotics_core::arm;
@@ -53,39 +55,145 @@ use tokio::sync::{oneshot, watch};
 
 #[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
 pub struct ArmConditionSummary {
-    pub arm: String,
-    pub peak_temperature_celsius: Vec<Option<f64>>,
-    pub min_voltage_volts: Vec<Option<f64>>,
-    pub peak_load: Vec<Option<f64>>,
-    pub peak_current_amps: Vec<Option<f64>>,
+    arm: String,
+    peak_temperature_celsius: Vec<Option<f64>>,
+    min_voltage_volts: Vec<Option<f64>>,
+    peak_load: Vec<Option<f64>>,
+    peak_current_amps: Vec<Option<f64>>,
 }
 
 impl ArmConditionSummary {
+    fn new(arm: String, joint_count: usize) -> Self {
+        Self {
+            arm,
+            peak_temperature_celsius: vec![None; joint_count],
+            min_voltage_volts: vec![None; joint_count],
+            peak_load: vec![None; joint_count],
+            peak_current_amps: vec![None; joint_count],
+        }
+    }
+
+    pub fn arm(&self) -> &str {
+        &self.arm
+    }
+
+    pub fn min_voltage_volts(&self) -> &[Option<f64>] {
+        &self.min_voltage_volts
+    }
+
     fn observe_motor(&mut self, slot: usize, track: &MotorTrack) {
-        retain_maximum(
+        Self::retain_maximum(
             &mut self.peak_temperature_celsius,
             slot,
-            track.sample.electrical.temperature_celsius,
+            track.sample.electrical().temperature_celsius(),
         );
-        retain_minimum(
+        Self::retain_minimum(
             &mut self.min_voltage_volts,
             slot,
-            track.sample.electrical.voltage_volts,
+            track.sample.electrical().voltage_volts(),
         );
-        retain_maximum(&mut self.peak_load, slot, track.load.map(f64::abs));
-        retain_maximum(&mut self.peak_current_amps, slot, track.current);
+        Self::retain_maximum(&mut self.peak_load, slot, track.load.map(f64::abs));
+        Self::retain_maximum(&mut self.peak_current_amps, slot, track.current);
+    }
+
+    /// Keep the more extreme of a slot's running value and a new reading.
+    fn retain_maximum(slots: &mut [Option<f64>], slot: usize, reading: Option<f64>) {
+        let Some(reading) = reading else { return };
+        let Some(held) = slots.get_mut(slot) else {
+            return;
+        };
+        *held = Some(held.map_or(reading, |held| held.max(reading)));
+    }
+
+    fn retain_minimum(slots: &mut [Option<f64>], slot: usize, reading: Option<f64>) {
+        let Some(reading) = reading else { return };
+        let Some(held) = slots.get_mut(slot) else {
+            return;
+        };
+        *held = Some(held.map_or(reading, |held| held.min(reading)));
     }
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct Sample {
-    pub seconds: f64,
-    pub normalized: Vec<Vec<Option<f64>>>,
-    pub raw: Vec<Vec<i64>>,
-    pub follow_error_degrees: Option<f64>,
-    pub velocity: Option<Vec<Vec<Option<f64>>>>,
-    pub effort: Option<Vec<Vec<Option<f64>>>>,
-    pub action: Vec<Option<Vec<Option<f64>>>>,
+    seconds: f64,
+    normalized: Vec<Vec<Option<f64>>>,
+    raw: Vec<Vec<i64>>,
+    follow_error_degrees: Option<f64>,
+    velocity: Option<Vec<Vec<Option<f64>>>>,
+    effort: Option<Vec<Vec<Option<f64>>>>,
+    action: Vec<Option<Vec<Option<f64>>>>,
+}
+
+impl Sample {
+    pub fn new(seconds: f64, normalized: Vec<Vec<Option<f64>>>, raw: Vec<Vec<i64>>) -> Self {
+        Self {
+            seconds,
+            normalized,
+            raw,
+            ..Self::default()
+        }
+    }
+
+    pub fn with_follow_error_degrees(mut self, follow_error_degrees: Option<f64>) -> Self {
+        self.follow_error_degrees = follow_error_degrees;
+        self
+    }
+
+    pub fn with_velocity(mut self, velocity: Option<Vec<Vec<Option<f64>>>>) -> Self {
+        self.velocity = velocity;
+        self
+    }
+
+    pub fn with_effort(mut self, effort: Option<Vec<Vec<Option<f64>>>>) -> Self {
+        self.effort = effort;
+        self
+    }
+
+    pub fn with_action(mut self, action: Vec<Option<Vec<Option<f64>>>>) -> Self {
+        self.action = action;
+        self
+    }
+
+    pub const fn seconds(&self) -> f64 {
+        self.seconds
+    }
+
+    pub fn normalized(&self) -> &[Vec<Option<f64>>] {
+        &self.normalized
+    }
+
+    pub fn raw(&self) -> &[Vec<i64>] {
+        &self.raw
+    }
+
+    pub const fn follow_error_degrees(&self) -> Option<f64> {
+        self.follow_error_degrees
+    }
+
+    pub fn velocity(&self) -> Option<&[Vec<Option<f64>>]> {
+        self.velocity.as_deref()
+    }
+
+    pub fn effort(&self) -> Option<&[Vec<Option<f64>>]> {
+        self.effort.as_deref()
+    }
+
+    pub fn action(&self) -> &[Option<Vec<Option<f64>>>] {
+        &self.action
+    }
+
+    pub fn replace_normalized_arm(
+        &mut self,
+        arm_index: usize,
+        values: Vec<Option<f64>>,
+    ) -> Result<(), Vec<Option<f64>>> {
+        let Some(arm) = self.normalized.get_mut(arm_index) else {
+            return Err(values);
+        };
+        *arm = values;
+        Ok(())
+    }
 }
 
 pub type EpisodeCheckpoint = oneshot::Receiver<Result<(), String>>;
@@ -161,7 +269,7 @@ pub trait RecordingWriter: Send {
 
 /// How often the control loop runs.
 pub const CONTROL_HZ: u64 = 60;
-pub const CONTROL_PERIOD: Duration = Duration::from_nanos(1_000_000_000 / CONTROL_HZ);
+const CONTROL_PERIOD: Duration = Duration::from_nanos(1_000_000_000 / CONTROL_HZ);
 
 /// Default ceiling on how far one joint may be commanded to move per cycle.
 ///
@@ -230,11 +338,6 @@ pub struct ControlSettings {
 }
 
 impl ControlSettings {
-    pub fn with_period(mut self, period: Duration) -> Self {
-        self.period = period;
-        self
-    }
-
     /// Override the ordinary and teleoperation motion limits while preserving
     /// the requirement that every control-cycle step is positive.
     pub fn try_with_motion_limits(
@@ -264,24 +367,46 @@ impl Default for ControlSettings {
 /// A published sample of everything the control thread knows.
 #[derive(Clone, Debug, Default)]
 pub struct HardwareState {
-    pub telemetry: TelemetryFrame,
+    telemetry: TelemetryFrame,
     /// Every robot the thread has been asked to connect, including ones whose
     /// bus has since been lost, so the reason stays visible.
-    pub connections: BTreeMap<String, ConnectionStatus>,
-    pub mode: ModeStatus,
+    connections: BTreeMap<String, ConnectionStatus>,
+    mode: ModeStatus,
     /// What each connected robot's motors said they will fault at.
     ///
     /// Keyed robot then motor. These ride the snapshot rather than the
     /// telemetry frame because they are read once at connect and do not change
     /// while an arm runs; publishing them twenty times a second would be
     /// publishing a constant.
-    pub limits: BTreeMap<String, BTreeMap<String, MotorLimits>>,
+    limits: BTreeMap<String, BTreeMap<String, MotorLimits>>,
     /// Why the last take stopped on its own, kept until another one starts.
     ///
     /// A take cut short by an arm going away has to survive the moment it
     /// happens: the recording counters vanish with the recording, and an
     /// operator looking up a second later would otherwise see nothing at all.
-    pub recording_issue: Option<String>,
+    recording_issue: Option<String>,
+}
+
+impl HardwareState {
+    pub const fn telemetry(&self) -> &TelemetryFrame {
+        &self.telemetry
+    }
+
+    pub const fn connections(&self) -> &BTreeMap<String, ConnectionStatus> {
+        &self.connections
+    }
+
+    pub const fn mode(&self) -> &ModeStatus {
+        &self.mode
+    }
+
+    pub const fn limits(&self) -> &BTreeMap<String, BTreeMap<String, MotorLimits>> {
+        &self.limits
+    }
+
+    pub fn recording_issue(&self) -> Option<&str> {
+        self.recording_issue.as_deref()
+    }
 }
 
 pub struct ReplayTrajectory {
@@ -523,10 +648,8 @@ impl RecordingClock {
             .saturating_sub(duration)
             .as_secs_f64();
         self.paused_duration += duration;
-        self.gaps.push(RecordingGap {
-            after_seconds,
-            duration_seconds: duration.as_secs_f64(),
-        });
+        self.gaps
+            .push(RecordingGap::new(after_seconds, duration.as_secs_f64()));
     }
 
     fn pause(&mut self, now: Instant) {
@@ -922,14 +1045,20 @@ struct MotorTrack {
 
 impl MotorTrack {
     fn observe(&mut self, sample: MotorSample, now: Instant) {
-        self.speed = smooth(self.speed, sample.speed_degrees_per_second);
-        self.load = hold_peak(self.load, smooth(self.load, sample.load), f64::abs);
-        self.current = hold_peak(
+        let mechanical = sample.mechanical();
+        let electrical = sample.electrical();
+        self.speed = Self::smoothed_reading(self.speed, mechanical.speed_degrees_per_second());
+        self.load = Self::held_peak(
+            self.load,
+            Self::smoothed_reading(self.load, mechanical.load()),
+            f64::abs,
+        );
+        self.current = Self::held_peak(
             self.current,
-            smooth(self.current, sample.electrical.current_amps),
+            Self::smoothed_reading(self.current, electrical.current_amps()),
             |amps| amps,
         );
-        if let Some(celsius) = sample.electrical.temperature_celsius {
+        if let Some(celsius) = electrical.temperature_celsius() {
             self.record_temperature(celsius, now);
         }
         self.sample = sample;
@@ -965,82 +1094,31 @@ impl MotorTrack {
         }
         Some((newest - oldest) / (elapsed.as_secs_f64() / 60.0))
     }
-}
 
-/// Keep the more extreme of a slot's running value and a new reading.
-///
-/// A slot that has never had a reading stays `None` rather than becoming zero:
-/// a take whose bus reports no temperature must not be readable a week later as
-/// a take that ran at nought degrees.
-fn retain_maximum(slots: &mut [Option<f64>], slot: usize, reading: Option<f64>) {
-    let Some(reading) = reading else { return };
-    let Some(held) = slots.get_mut(slot) else {
-        return;
-    };
-    *held = Some(held.map_or(reading, |held| held.max(reading)));
-}
-
-fn retain_minimum(slots: &mut [Option<f64>], slot: usize, reading: Option<f64>) {
-    let Some(reading) = reading else { return };
-    let Some(held) = slots.get_mut(slot) else {
-        return;
-    };
-    *held = Some(held.map_or(reading, |held| held.min(reading)));
-}
-
-/// Restate a bus-level limit on the wire.
-///
-/// The driver and the wire describe the same quantities and deliberately do not
-/// share a type: the wire contract is the product boundary, and it must not
-/// change shape because a motor SDK did.
-fn convert_limits(limits: BusMotorLimits) -> MotorLimits {
-    MotorLimits {
-        max_temperature_celsius: limits.max_temperature_celsius,
-        min_voltage_volts: limits.min_voltage_volts,
-        max_voltage_volts: limits.max_voltage_volts,
-        max_load: limits.max_load,
-    }
-}
-
-/// Restate the servo's fault byte as the faults the wire names.
-fn convert_faults(faults: BusMotorFaults) -> Vec<MotorFault> {
-    let mut named = faults
-        .known_faults()
-        .into_iter()
-        .map(|fault| match fault {
-            BusMotorFault::Overheat => MotorFault::Overheat,
-            BusMotorFault::Overload => MotorFault::Overload,
-            BusMotorFault::Voltage => MotorFault::Voltage,
+    /// Fold a reading into its smoothed predecessor, starting from the reading.
+    fn smoothed_reading(previous: Option<f64>, next: Option<f64>) -> Option<f64> {
+        let next = next?;
+        Some(match previous {
+            Some(previous) if previous.is_finite() => {
+                previous + (next - previous) * READING_SMOOTHING
+            }
+            _ => next,
         })
-        .collect::<Vec<_>>();
-    // A bit this build cannot name is still a motor saying something is wrong,
-    // and dropping it would report a faulted arm as healthy.
-    if faults.unknown_bits() != 0 {
-        named.push(MotorFault::Unrecognized);
     }
-    named
-}
 
-/// Fold `next` into a smoothed reading, starting from it when there is none.
-fn smooth(previous: Option<f64>, next: Option<f64>) -> Option<f64> {
-    let next = next?;
-    Some(match previous {
-        Some(previous) if previous.is_finite() => previous + (next - previous) * READING_SMOOTHING,
-        _ => next,
-    })
-}
-
-/// Keep the larger of a decaying held peak and the current reading.
-///
-/// `magnitude` says what "larger" means, so a signed reading holds the peak of
-/// its size while keeping the direction it was pushing in.
-fn hold_peak(held: Option<f64>, next: Option<f64>, magnitude: impl Fn(f64) -> f64) -> Option<f64> {
-    let next = next?;
-    match held {
-        Some(held) if magnitude(held * PEAK_HOLD_DECAY) > magnitude(next) => {
-            Some(held * PEAK_HOLD_DECAY)
+    /// Keep the larger of a decaying held peak and the current reading.
+    fn held_peak(
+        held: Option<f64>,
+        next: Option<f64>,
+        magnitude: impl Fn(f64) -> f64,
+    ) -> Option<f64> {
+        let next = next?;
+        match held {
+            Some(held) if magnitude(held * PEAK_HOLD_DECAY) > magnitude(next) => {
+                Some(held * PEAK_HOLD_DECAY)
+            }
+            _ => Some(next),
         }
-        _ => Some(next),
     }
 }
 
@@ -1054,6 +1132,35 @@ struct ConnectedRobot {
     limits: BTreeMap<String, MotorLimits>,
     health: BusHealth,
     sweep: Option<MotorRangeTracker>,
+}
+
+/// Restate a bus-level limit on the published wire boundary.
+impl From<BusMotorLimits> for MotorLimits {
+    fn from(limits: BusMotorLimits) -> Self {
+        Self::from_hardware_limits(
+            limits.max_temperature_celsius(),
+            MotorVoltageRange::new(limits.min_voltage_volts(), limits.max_voltage_volts()),
+            limits.max_load(),
+        )
+    }
+}
+
+impl From<BusMotorFaults> for Vec<MotorFault> {
+    fn from(faults: BusMotorFaults) -> Self {
+        let mut named = faults
+            .known_faults()
+            .into_iter()
+            .map(|fault| match fault {
+                BusMotorFault::Overheat => MotorFault::Overheat,
+                BusMotorFault::Overload => MotorFault::Overload,
+                BusMotorFault::Voltage => MotorFault::Voltage,
+            })
+            .collect::<Vec<_>>();
+        if faults.unknown_bits() != 0 {
+            named.push(MotorFault::Unrecognized);
+        }
+        named
+    }
 }
 
 /// Measured and commanded motor state that must move through the loop together.
@@ -1247,65 +1354,73 @@ impl ConnectedRobot {
                     .is_engaged()
                     .then(|| self.motion.target.get(name).copied())
                     .flatten();
-                JointTelemetry {
-                    name: name.clone(),
-                    id: spec.id(),
+                let goal_raw = self
+                    .motion
+                    .torque
+                    .is_engaged()
+                    .then(|| self.motion.commanded.get(name).copied())
+                    .flatten();
+                let kinematics = JointKinematics::new(
                     raw,
-                    degrees: motor.map(|motor| joint_degrees(motor, raw)),
-                    normalized: motor.and_then(|motor| motor.normalize_raw(raw).ok()),
-                    goal_raw: self
-                        .motion
-                        .torque
-                        .is_engaged()
-                        .then(|| self.motion.commanded.get(name).copied())
-                        .flatten(),
-                    target_raw,
-                    target_degrees: target_raw
+                    motor.map(|motor| joint_degrees(motor, raw)),
+                    motor.and_then(|motor| motor.normalize_raw(raw).ok()),
+                )
+                .with_raw_targets(goal_raw, target_raw)
+                .with_calibrated_target(
+                    target_raw
                         .zip(motor)
                         .map(|(target, motor)| joint_degrees(motor, target)),
-                    range: motor.map(|motor| JointRange {
-                        min: motor.reading().range_min(),
-                        center: motor.reading().center(),
-                        max: motor.reading().range_max(),
+                    motor.map(|motor| {
+                        JointRange::new(
+                            motor.reading().range_min(),
+                            motor.reading().center(),
+                            motor.reading().range_max(),
+                        )
                     }),
-                    // Everything below is what the motor says about itself, and
-                    // none of it depends on calibration: these are the only
-                    // readings an arm that has never been calibrated can give.
-                    temperature_celsius: track
-                        .and_then(|track| track.sample.electrical.temperature_celsius),
-                    voltage_volts: track.and_then(|track| track.sample.electrical.voltage_volts),
-                    current_amps: track.and_then(|track| track.current),
-                    load: track.and_then(|track| track.load),
-                    speed_degrees_per_second: track.and_then(|track| track.speed),
-                    temperature_rise_per_minute: track
-                        .and_then(MotorTrack::temperature_rise_per_minute),
-                    faults: track
-                        .map(|track| convert_faults(track.sample.faults))
+                );
+                let electrical = MotorElectricalReadings::new(
+                    track.and_then(|track| track.sample.electrical().temperature_celsius()),
+                    track.and_then(|track| track.sample.electrical().voltage_volts()),
+                    track.and_then(|track| track.current),
+                );
+                let diagnostics = JointDiagnostics::new(
+                    electrical,
+                    track.and_then(|track| track.load),
+                    track.and_then(|track| track.speed),
+                )
+                .with_temperature_rise(track.and_then(MotorTrack::temperature_rise_per_minute))
+                .with_faults(
+                    track
+                        .map(|track| Vec::from(track.sample.faults()))
                         .unwrap_or_default(),
-                }
+                );
+                JointTelemetry::new(
+                    JointIdentity::new(name.clone(), spec.id()),
+                    kinematics,
+                    diagnostics,
+                )
             })
             .collect();
 
-        RobotTelemetry {
-            id: self.spec.id.clone(),
-            torque: self.motion.torque.is_engaged(),
+        let calibration = self.sweep.as_ref().map(|sweep| {
+            let joints = self
+                .ordered_motors()
+                .into_iter()
+                .filter_map(|(name, _)| Some((name, sweep.ranges().get(name)?)))
+                .map(|(name, range)| {
+                    CalibrationJointProgress::new(name.clone(), range.minimum(), range.position())
+                        .with_max(range.maximum())
+                })
+                .collect();
+            CalibrationProgress::new(joints, sweep.is_ready())
+        });
+        RobotTelemetry::new(
+            self.spec.id.clone(),
+            self.motion.torque.is_engaged(),
             joints,
-            error: self.health.error.clone(),
-            calibration: self.sweep.as_ref().map(|sweep| CalibrationProgress {
-                joints: self
-                    .ordered_motors()
-                    .into_iter()
-                    .filter_map(|(name, _)| Some((name, sweep.ranges().get(name)?)))
-                    .map(|(name, range)| CalibrationJointProgress {
-                        name: name.clone(),
-                        min: range.minimum(),
-                        position: range.position(),
-                        max: range.maximum(),
-                    })
-                    .collect(),
-                ready: sweep.is_ready(),
-            }),
-        }
+        )
+        .with_error(self.health.error.clone())
+        .with_calibration(calibration)
     }
 }
 
@@ -1319,37 +1434,41 @@ fn joint_degrees(motor: &MotorCalibration, raw: i64) -> f64 {
 }
 
 /// Translate the delivery contract into the framework-neutral ownership model.
-fn control_mode(selection: &ModeSelection) -> ControlMode {
-    match selection {
-        ModeSelection::Idle => ControlMode::Idle,
-        ModeSelection::Manual { robot } => ControlMode::Manual {
-            robot: robot.clone(),
-        },
-        ModeSelection::Teleoperate { leader, follower } => ControlMode::Teleoperate {
-            leader: leader.clone(),
-            follower: follower.clone(),
-        },
-        ModeSelection::Replay { robot, episode } => ControlMode::Replay {
-            robot: robot.clone(),
-            episode: episode.clone(),
-        },
-        ModeSelection::Policy { robot, session } => ControlMode::Policy {
-            robot: robot.clone(),
-            session: session.clone(),
-        },
+impl From<&ModeSelection> for ControlMode {
+    fn from(selection: &ModeSelection) -> Self {
+        match selection {
+            ModeSelection::Idle => ControlMode::Idle,
+            ModeSelection::Manual { robot } => ControlMode::Manual {
+                robot: robot.clone(),
+            },
+            ModeSelection::Teleoperate { leader, follower } => ControlMode::Teleoperate {
+                leader: leader.clone(),
+                follower: follower.clone(),
+            },
+            ModeSelection::Replay { robot, episode } => ControlMode::Replay {
+                robot: robot.clone(),
+                episode: episode.clone(),
+            },
+            ModeSelection::Policy { robot, session } => ControlMode::Policy {
+                robot: robot.clone(),
+                session: session.clone(),
+            },
+        }
     }
 }
 
 /// Translate committed application state back onto the published API contract.
-fn mode_selection(mode: ControlMode) -> ModeSelection {
-    match mode {
-        ControlMode::Idle => ModeSelection::Idle,
-        ControlMode::Manual { robot } => ModeSelection::Manual { robot },
-        ControlMode::Teleoperate { leader, follower } => {
-            ModeSelection::Teleoperate { leader, follower }
+impl From<ControlMode> for ModeSelection {
+    fn from(mode: ControlMode) -> Self {
+        match mode {
+            ControlMode::Idle => ModeSelection::Idle,
+            ControlMode::Manual { robot } => ModeSelection::Manual { robot },
+            ControlMode::Teleoperate { leader, follower } => {
+                ModeSelection::Teleoperate { leader, follower }
+            }
+            ControlMode::Replay { robot, episode } => ModeSelection::Replay { robot, episode },
+            ControlMode::Policy { robot, session } => ModeSelection::Policy { robot, session },
         }
-        ControlMode::Replay { robot, episode } => ModeSelection::Replay { robot, episode },
-        ControlMode::Policy { robot, session } => ModeSelection::Policy { robot, session },
     }
 }
 
@@ -1365,6 +1484,13 @@ struct Controller {
     robots: BTreeMap<String, ConnectedRobot>,
     published: PublishedControllerState,
     state: watch::Sender<HardwareState>,
+    operations: ActiveOperations,
+    #[cfg(test)]
+    use_test_bus: bool,
+}
+
+#[derive(Default)]
+struct ActiveOperations {
     /// The take being captured, if any. Recording is deliberately not a mode:
     /// an operator records *while* teleoperating, and a take of an idle arm
     /// being moved by hand is a legitimate take too.
@@ -1372,8 +1498,6 @@ struct Controller {
     /// The episode being played back, if any. This one *is* a mode, because it
     /// drives motors and only one thing may do that at a time.
     replay: Option<Replay>,
-    #[cfg(test)]
-    use_test_bus: bool,
 }
 
 /// Controller-owned values copied into each published hardware snapshot.
@@ -1395,8 +1519,7 @@ impl Controller {
             robots: BTreeMap::new(),
             published: PublishedControllerState::default(),
             state,
-            recording: None,
-            replay: None,
+            operations: ActiveOperations::default(),
             #[cfg(test)]
             use_test_bus: false,
         }
@@ -1457,7 +1580,8 @@ impl Controller {
             // write. Reading every other arm between those two adds visible
             // latency for no control benefit, so service that path first and
             // collect the remaining telemetry immediately afterwards.
-            if let ModeSelection::Teleoperate { leader, .. } = self.published.mode.selection.clone()
+            if let ModeSelection::Teleoperate { leader, .. } =
+                self.published.mode.selection().clone()
             {
                 self.poll_robot(&leader);
                 self.apply_mode();
@@ -1519,7 +1643,7 @@ impl Controller {
             }
             Command::StopPolicySession { session, reply } => {
                 let result = if matches!(
-                    &self.published.mode.selection,
+                    self.published.mode.selection(),
                     ModeSelection::Policy { session: active, .. } if active == &session
                 ) {
                     self.set_mode(ModeSelection::Idle)
@@ -1598,7 +1722,7 @@ impl Controller {
         writer: Box<dyn RecordingWriter>,
         arms: Vec<EpisodeArm>,
     ) -> Result<(), String> {
-        if let Some(existing) = &self.recording {
+        if let Some(existing) = &self.operations.recording {
             return Err(format!(
                 "take {} is already recording; stop it first",
                 existing.writer.id()
@@ -1607,8 +1731,8 @@ impl Controller {
         // Every named arm has to be open right now, or the take would begin
         // with a hole in it.
         for arm in &arms {
-            if !self.robots.contains_key(&arm.id) {
-                return Err(format!("robot {:?} is not connected", arm.id));
+            if !self.robots.contains_key(arm.id()) {
+                return Err(format!("robot {:?} is not connected", arm.id()));
             }
         }
 
@@ -1616,20 +1740,14 @@ impl Controller {
         // list that already has the right shape.
         let condition = arms
             .iter()
-            .map(|arm| ArmConditionSummary {
-                arm: arm.id.clone(),
-                peak_temperature_celsius: vec![None; arm.joints.len()],
-                min_voltage_volts: vec![None; arm.joints.len()],
-                peak_load: vec![None; arm.joints.len()],
-                peak_current_amps: vec![None; arm.joints.len()],
-            })
+            .map(|arm| ArmConditionSummary::new(arm.id().to_owned(), arm.joints().len()))
             .collect();
 
         self.published.recording_issue = None;
-        self.recording = Some(Recording {
+        self.operations.recording = Some(Recording {
             writer,
             arms,
-            resume_mode: self.published.mode.selection.clone(),
+            resume_mode: self.published.mode.selection().clone(),
             clock: RecordingClock::started_now(),
             frames: 0,
             tracking: RecordingTrackingSummary::default(),
@@ -1640,6 +1758,7 @@ impl Controller {
 
     fn stop_recording(&mut self, keep: bool) -> Result<EpisodeSummary, String> {
         let mut recording = self
+            .operations
             .recording
             .take()
             .ok_or_else(|| "no take is being recorded".to_owned())?;
@@ -1669,6 +1788,7 @@ impl Controller {
         if paused {
             let (checkpoint, elapsed_seconds) = {
                 let recording = self
+                    .operations
                     .recording
                     .as_mut()
                     .ok_or_else(|| "no take is being recorded".to_owned())?;
@@ -1688,6 +1808,7 @@ impl Controller {
             return Ok((Some(checkpoint), elapsed_seconds));
         }
         let resume_mode = self
+            .operations
             .recording
             .as_ref()
             .ok_or_else(|| "no take is being recorded".to_owned())?
@@ -1695,11 +1816,12 @@ impl Controller {
             .clone();
         self.set_mode(resume_mode)?;
         let elapsed_seconds = self
+            .operations
             .recording
             .as_ref()
             .map(|recording| recording.active_elapsed(Instant::now()).as_secs_f64())
             .unwrap_or_default();
-        if let Some(recording) = self.recording.as_mut()
+        if let Some(recording) = self.operations.recording.as_mut()
             && recording.clock.is_paused()
         {
             recording.close_pause(Instant::now());
@@ -1709,7 +1831,7 @@ impl Controller {
 
     /// Append this cycle's positions to the take in progress.
     fn capture_sample(&mut self) {
-        let Some(recording) = self.recording.as_mut() else {
+        let Some(recording) = self.operations.recording.as_mut() else {
             return;
         };
 
@@ -1719,7 +1841,7 @@ impl Controller {
         let missing = recording
             .arms
             .iter()
-            .map(|arm| arm.id.clone())
+            .map(|arm| arm.id().to_owned())
             .find(|id| !self.robots.contains_key(id));
         if let Some(missing) = missing {
             let reason = format!("stopped recording: robot {missing:?} is no longer connected");
@@ -1727,7 +1849,8 @@ impl Controller {
                 Ok(summary) => {
                     self.published.recording_issue = Some(format!(
                         "{reason}. The {} frames captured before that are stored as {}",
-                        summary.frames, summary.id
+                        summary.frames(),
+                        summary.id()
                     ));
                 }
                 Err(error) => {
@@ -1757,14 +1880,14 @@ impl Controller {
         // distrust partway down.
         let mut proprioception = true;
         for (index, arm) in arms.iter().enumerate() {
-            let Some(robot) = self.robots.get(&arm.id) else {
+            let Some(robot) = self.robots.get(arm.id()) else {
                 return;
             };
-            let (arm_normalized, arm_raw) = robot.sample(&arm.joints);
+            let (arm_normalized, arm_raw) = robot.sample(arm.joints());
             normalized.push(arm_normalized);
             raw.push(arm_raw);
-            let (arm_velocity, arm_effort) = robot.sample_proprioception(&arm.joints);
-            action.push(robot.sample_action(&arm.joints));
+            let (arm_velocity, arm_effort) = robot.sample_proprioception(arm.joints());
+            action.push(robot.sample_action(arm.joints()));
             proprioception &= arm_velocity.iter().chain(&arm_effort).all(Option::is_some);
             velocity.push(arm_velocity);
             effort.push(arm_effort);
@@ -1772,7 +1895,7 @@ impl Controller {
                 instant_error = Some(instant_error.map_or(error, |worst: f64| worst.max(error)));
             }
             if let Some(summary) = recording.condition.get_mut(index) {
-                for (slot, joint) in arm.joints.iter().enumerate() {
+                for (slot, joint) in arm.joints().iter().enumerate() {
                     if let Some(track) = robot.tracks.get(joint) {
                         summary.observe_motor(slot, track);
                     }
@@ -1783,15 +1906,13 @@ impl Controller {
             recording.tracking.observe_follow_error(error);
         }
 
-        if recording.writer.push(Sample {
-            seconds,
-            normalized,
-            raw,
-            follow_error_degrees: instant_error,
-            velocity: proprioception.then_some(velocity),
-            effort: proprioception.then_some(effort),
-            action,
-        }) {
+        if recording.writer.push(
+            Sample::new(seconds, normalized, raw)
+                .with_follow_error_degrees(instant_error)
+                .with_velocity(proprioception.then_some(velocity))
+                .with_effort(proprioception.then_some(effort))
+                .with_action(action),
+        ) {
             recording.frames += 1;
             return;
         }
@@ -1805,7 +1926,7 @@ impl Controller {
         match self.stop_recording(true) {
             Ok(summary) => {
                 self.published.recording_issue =
-                    Some(format!("stopped recording {}: {reason}", summary.id));
+                    Some(format!("stopped recording {}: {reason}", summary.id()));
             }
             Err(error) => {
                 self.published.recording_issue =
@@ -1880,7 +2001,7 @@ impl Controller {
         })?;
 
         let start_position = start_frame as f64;
-        self.replay = Some(Replay {
+        self.operations.replay = Some(Replay {
             episode: episode.to_owned(),
             robot: robot.to_owned(),
             frames,
@@ -1903,6 +2024,7 @@ impl Controller {
         // transport. A late pause from the replay that preceded a scrub must
         // not freeze the replacement seek before the arm can move.
         if self
+            .operations
             .replay
             .as_ref()
             .is_some_and(|replay| replay.purpose == ReplayPurpose::PhysicalSeek)
@@ -1910,11 +2032,13 @@ impl Controller {
             return Ok(());
         }
         let robot = self
+            .operations
             .replay
             .as_ref()
             .map(|replay| replay.robot.clone())
             .ok_or_else(|| "no episode is being replayed".to_owned())?;
         if self
+            .operations
             .replay
             .as_ref()
             .is_some_and(|replay| replay.timing.paused == paused)
@@ -1931,7 +2055,7 @@ impl Controller {
             // continuing to pull the arm after Pause was acknowledged.
             arm.follow_measured_positions();
         }
-        if let Some(replay) = self.replay.as_mut() {
+        if let Some(replay) = self.operations.replay.as_mut() {
             replay.timing.paused = paused;
             if !paused && replay.phase == ReplayPhase::Seeking {
                 replay.timing.seeking_since = Instant::now();
@@ -1960,11 +2084,12 @@ impl Controller {
         let holder = self
             .robots
             .values()
-            .find(|robot| robot.spec.port.path == spec.port.path);
+            .find(|robot| robot.spec.port.path() == spec.port.path());
         if let Some(holder) = holder {
             return Err(format!(
                 "port {:?} is already open for robot {:?}",
-                spec.port.path, holder.spec.id
+                spec.port.path(),
+                holder.spec.id
             ));
         }
 
@@ -1973,13 +2098,13 @@ impl Controller {
             if self.use_test_bus {
                 Ok(Box::new(SimulatedBus::new(&spec.motors, true)))
             } else {
-                FeetechBus::connect(&spec.port.path, spec.port.baud_rate, &spec.motors)
+                FeetechBus::connect(spec.port.path(), spec.port.baud_rate(), &spec.motors)
                     .map(|bus| Box::new(bus) as Box<dyn MotorBus>)
                     .map_err(|error| error.to_string())
             }
             #[cfg(not(test))]
             {
-                FeetechBus::connect(&spec.port.path, spec.port.baud_rate, &spec.motors)
+                FeetechBus::connect(spec.port.path(), spec.port.baud_rate(), &spec.motors)
                     .map(|bus| Box::new(bus) as Box<dyn MotorBus>)
                     .map_err(|error| error.to_string())
             }
@@ -1988,23 +2113,20 @@ impl Controller {
         let mut bus = open(&spec).inspect_err(|error| {
             self.published.connections.insert(
                 spec.id.clone(),
-                ConnectionStatus {
-                    connected: false,
-                    error: Some(error.clone()),
-                },
+                ConnectionStatus::new(false, Some(error.clone())),
             );
         })?;
 
         // Reading once proves every configured motor is really on the bus
         // before the robot is presented as connected.
         let positions = bus.read_positions().map_err(|error| {
-            let message = format!("could not reach all motors on {}: {error}", spec.port.path);
+            let message = format!(
+                "could not reach all motors on {}: {error}",
+                spec.port.path()
+            );
             self.published.connections.insert(
                 spec.id.clone(),
-                ConnectionStatus {
-                    connected: false,
-                    error: Some(message.clone()),
-                },
+                ConnectionStatus::new(false, Some(message.clone())),
             );
             message
         })?;
@@ -2012,10 +2134,7 @@ impl Controller {
             |message| {
                 self.published.connections.insert(
                     spec.id.clone(),
-                    ConnectionStatus {
-                        connected: false,
-                        error: Some(message.clone()),
-                    },
+                    ConnectionStatus::new(false, Some(message.clone())),
                 );
             },
         )?;
@@ -2026,14 +2145,11 @@ impl Controller {
         bus.set_torque(false).map_err(|error| {
             let message = format!(
                 "could not establish released torque state on {}: {error}",
-                spec.port.path
+                spec.port.path()
             );
             self.published.connections.insert(
                 spec.id.clone(),
-                ConnectionStatus {
-                    connected: false,
-                    error: Some(message.clone()),
-                },
+                ConnectionStatus::new(false, Some(message.clone())),
             );
             message
         })?;
@@ -2044,7 +2160,7 @@ impl Controller {
         let limits = bus
             .read_limits()
             .into_iter()
-            .map(|(name, limits)| (name, convert_limits(limits)))
+            .map(|(name, limits)| (name, limits.into()))
             .collect();
 
         let id = spec.id.clone();
@@ -2065,13 +2181,9 @@ impl Controller {
                 sweep: None,
             },
         );
-        self.published.connections.insert(
-            id,
-            ConnectionStatus {
-                connected: true,
-                error: None,
-            },
-        );
+        self.published
+            .connections
+            .insert(id, ConnectionStatus::new(true, None));
         Ok(())
     }
 
@@ -2208,7 +2320,7 @@ impl Controller {
     }
 
     fn set_mode(&mut self, selection: ModeSelection) -> Result<(), String> {
-        self.decide_and_execute(ControlIntent::Select(control_mode(&selection)))
+        self.decide_and_execute(ControlIntent::Select((&selection).into()))
     }
 
     fn decide_and_execute(&mut self, intent: ControlIntent) -> Result<(), String> {
@@ -2224,7 +2336,7 @@ impl Controller {
             .control_state()
             .decide(intent)
             .map_err(|error| error.to_string())?;
-        debug_assert!(decision.effects.is_empty(), "authorization is state-free");
+        debug_assert!(decision.is_empty(), "authorization is state-free");
         Ok(())
     }
 
@@ -2248,23 +2360,17 @@ impl Controller {
                 };
                 (
                     id.clone(),
-                    RobotAdmission {
-                        calibration,
-                        calibration_in_progress: robot.sweep.is_some(),
-                    },
+                    RobotAdmission::new(calibration, robot.sweep.is_some()),
                 )
             })
             .collect();
-        ControlState {
-            mode: control_mode(&self.published.mode.selection),
-            robots,
-        }
+        ControlState::new(self.published.mode.selection().into(), robots)
     }
 
     fn execute_control_decision(&mut self, decision: ControlDecision) -> Result<(), String> {
-        for effect in decision.effects {
+        for effect in decision.into_effects() {
             match effect {
-                ControlEffect::ClearReplay => self.replay = None,
+                ControlEffect::ClearReplay => self.operations.replay = None,
                 ControlEffect::ResetAllTargets => {
                     for robot in self.robots.values_mut() {
                         robot.follow_measured_positions();
@@ -2281,14 +2387,15 @@ impl Controller {
                     on_failure,
                 } => {
                     if let Err(error) = self.set_torque(&robot, engaged) {
-                        let recovery = on_failure.failure_decision(error);
+                        let (recovery_effects, recovery_error) =
+                            on_failure.failure_decision(error).into_parts();
                         // Recovery is deliberately limited to state-only
                         // effects, so a second driver fault cannot prevent the
                         // policy from surrendering ownership to Idle.
-                        for recovery_effect in recovery.effects {
+                        for recovery_effect in recovery_effects {
                             self.apply_state_effect(recovery_effect);
                         }
-                        return Err(recovery.error);
+                        return Err(recovery_error);
                     }
                 }
                 ControlEffect::CommitMode(mode) => {
@@ -2298,8 +2405,7 @@ impl Controller {
                     self.commit_control_mode_with_error(mode, error);
                 }
                 ControlEffect::SetActivity { active, error } => {
-                    self.published.mode.active = active;
-                    self.published.mode.error = error;
+                    self.published.mode.update_activity(active, error);
                 }
             }
         }
@@ -2308,7 +2414,7 @@ impl Controller {
 
     fn apply_state_effect(&mut self, effect: ControlEffect) {
         match effect {
-            ControlEffect::ClearReplay => self.replay = None,
+            ControlEffect::ClearReplay => self.operations.replay = None,
             ControlEffect::ResetAllTargets => {
                 for robot in self.robots.values_mut() {
                     robot.follow_measured_positions();
@@ -2324,8 +2430,7 @@ impl Controller {
                 self.commit_control_mode_with_error(mode, error);
             }
             ControlEffect::SetActivity { active, error } => {
-                self.published.mode.active = active;
-                self.published.mode.error = error;
+                self.published.mode.update_activity(active, error);
             }
             ControlEffect::SetTorque { .. } => {
                 unreachable!("recovery policy must not contain physical effects")
@@ -2334,21 +2439,21 @@ impl Controller {
     }
 
     fn commit_control_mode(&mut self, mode: ControlMode) {
-        let selection = mode_selection(mode);
-        self.published.mode = ModeStatus {
-            active: !matches!(selection, ModeSelection::Idle),
-            selection,
-            error: None,
-        };
+        let selection = ModeSelection::from(mode);
+        self.published.mode = ModeStatus::new(
+            selection.clone(),
+            !matches!(selection, ModeSelection::Idle),
+            None,
+        );
     }
 
     fn commit_control_mode_with_error(&mut self, mode: ControlMode, error: String) {
-        let selection = mode_selection(mode);
-        self.published.mode = ModeStatus {
-            active: !matches!(selection, ModeSelection::Idle),
-            selection,
-            error: Some(error),
-        };
+        let selection = ModeSelection::from(mode);
+        self.published.mode = ModeStatus::new(
+            selection.clone(),
+            !matches!(selection, ModeSelection::Idle),
+            Some(error),
+        );
     }
 
     fn require_calibrated(&self, id: &str) -> Result<&Calibration, String> {
@@ -2472,7 +2577,7 @@ impl Controller {
                 }
                 let positions = samples
                     .iter()
-                    .map(|(name, sample)| (name.clone(), sample.position))
+                    .map(|(name, sample)| (name.clone(), sample.position()))
                     .collect::<BTreeMap<_, _>>();
                 if let Some(sweep) = robot.sweep.as_mut()
                     && let Err(error) = sweep.observe(&positions)
@@ -2503,9 +2608,10 @@ impl Controller {
         // replay is still walking to the take's first frame it stays on the
         // gentle manual ramp, because that move is not in the recording and the
         // operator has no way to anticipate it.
-        let quick = match &self.published.mode.selection {
+        let quick = match self.published.mode.selection() {
             ModeSelection::Teleoperate { follower, .. } => Some(follower.as_str()),
             ModeSelection::Replay { robot, .. } => self
+                .operations
                 .replay
                 .as_ref()
                 .filter(|replay| replay.phase == ReplayPhase::Playing)
@@ -2524,11 +2630,15 @@ impl Controller {
     }
 
     fn apply_mode(&mut self) {
-        if matches!(self.published.mode.selection, ModeSelection::Replay { .. }) {
+        if matches!(
+            self.published.mode.selection(),
+            ModeSelection::Replay { .. }
+        ) {
             self.apply_replay();
             return;
         }
-        let ModeSelection::Teleoperate { leader, follower } = self.published.mode.selection.clone()
+        let ModeSelection::Teleoperate { leader, follower } =
+            self.published.mode.selection().clone()
         else {
             return;
         };
@@ -2571,8 +2681,7 @@ impl Controller {
         if let Some(follower_robot) = self.robots.get_mut(&follower) {
             follower_robot.motion.target.extend(targets);
         }
-        self.published.mode.active = true;
-        self.published.mode.error = None;
+        self.published.mode.update_activity(true, None);
     }
 
     /// Walk the replay forward one control cycle.
@@ -2584,7 +2693,7 @@ impl Controller {
     /// elapsed time so a take captured at sixty hertz plays at sixty hertz
     /// whatever rate this loop is managing today.
     fn apply_replay(&mut self) {
-        let Some(replay) = self.replay.as_mut() else {
+        let Some(replay) = self.operations.replay.as_mut() else {
             let decision = self.control_state().decide_event(ControlEvent::ReplayLost);
             self.execute_control_decision(decision)
                 .expect("replay-loss policy contains no physical effects");
@@ -2672,7 +2781,7 @@ impl Controller {
             }
         }
 
-        let Some(replay) = self.replay.as_mut() else {
+        let Some(replay) = self.operations.replay.as_mut() else {
             return;
         };
         if replay.phase == ReplayPhase::Playing {
@@ -2685,13 +2794,14 @@ impl Controller {
                 return;
             }
             let replay = self
+                .operations
                 .replay
                 .as_mut()
                 .expect("keeping playback preserves the replay");
             replay.timing.position += self.settings.period.as_secs_f64() / replay.frame_period;
         }
 
-        let Some(replay) = self.replay.as_ref() else {
+        let Some(replay) = self.operations.replay.as_ref() else {
             return;
         };
         let Some(pose) = replay.pose().cloned() else {
@@ -2713,6 +2823,7 @@ impl Controller {
             Ok(targets) => targets,
             Err(error) => {
                 let state = self
+                    .operations
                     .replay
                     .as_ref()
                     .map(|replay| replay_policy_state(replay.phase))
@@ -2729,8 +2840,7 @@ impl Controller {
         if let Some(robot) = self.robots.get_mut(&robot_id) {
             robot.motion.target.extend(targets);
         }
-        self.published.mode.active = true;
-        self.published.mode.error = None;
+        self.published.mode.update_activity(true, None);
     }
 
     /// Apply the lifecycle consequence chosen by the application policy.
@@ -2739,7 +2849,7 @@ impl Controller {
         match decision {
             ReplayPolicyDecision::Keep => false,
             ReplayPolicyDecision::EnterPlaying => {
-                if let Some(replay) = self.replay.as_mut() {
+                if let Some(replay) = self.operations.replay.as_mut() {
                     replay.phase = ReplayPhase::Playing;
                 }
                 false
@@ -2805,13 +2915,9 @@ impl Controller {
                 Ok(()) => error,
                 Err(detach) => format!("{error}; {detach}"),
             };
-            self.published.connections.insert(
-                id,
-                ConnectionStatus {
-                    connected: false,
-                    error: Some(reported),
-                },
-            );
+            self.published
+                .connections
+                .insert(id, ConnectionStatus::new(false, Some(reported)));
         }
     }
 
@@ -2825,9 +2931,10 @@ impl Controller {
         }
 
         let recording_error = self
+            .operations
             .recording
             .as_ref()
-            .is_some_and(|recording| recording.arms.iter().any(|arm| arm.id == id))
+            .is_some_and(|recording| recording.arms.iter().any(|arm| arm.id() == id))
             .then(|| self.stop_recording(true).err())
             .flatten();
         if let Some(error) = &recording_error {
@@ -2855,7 +2962,7 @@ impl Controller {
     /// release attempts run even when an earlier cleanup step failed.
     fn shutdown_all(&mut self) -> Result<(), String> {
         let mut failures = Vec::new();
-        if self.recording.is_some()
+        if self.operations.recording.is_some()
             && let Err(error) = self.stop_recording(true)
         {
             self.published.recording_issue = Some(format!(
@@ -2879,45 +2986,59 @@ impl Controller {
     fn publish(&mut self) {
         self.published.sequence += 1;
         let state = HardwareState {
-            telemetry: TelemetryFrame {
-                sequence: self.published.sequence,
-                loop_hz: self.published.loop_hz,
-                target_hz: 1.0 / self.settings.period.as_secs_f64(),
-                robots: self
-                    .robots
+            telemetry: TelemetryFrame::new(
+                self.published.sequence,
+                self.published.loop_hz,
+                1.0 / self.settings.period.as_secs_f64(),
+            )
+            .with_robots(
+                self.robots
                     .values()
                     .map(ConnectedRobot::telemetry)
                     .collect(),
-                recording: self.recording.as_ref().map(|recording| {
+            )
+            .with_operations(
+                self.operations.recording.as_ref().map(|recording| {
                     let now = Instant::now();
-                    RecordingProgress {
-                        episode: recording.writer.id().to_owned(),
-                        dataset_id: recording.writer.dataset_id().to_owned(),
-                        frames: recording.frames,
-                        elapsed_seconds: recording.active_elapsed(now).as_secs_f64(),
-                        wall_elapsed_seconds: recording.clock.wall_elapsed(now).as_secs_f64(),
-                        paused_seconds: recording.paused_elapsed(now).as_secs_f64(),
-                        paused: recording.clock.is_paused(),
-                        arms: recording.arms.iter().map(|arm| arm.id.clone()).collect(),
-                        max_follow_error_degrees: recording.follow_error(),
-                        error: recording.writer.failure(),
-                    }
+                    let identity = RecordingIdentity::new(
+                        recording.writer.id().to_owned(),
+                        recording.writer.dataset_id().to_owned(),
+                        recording
+                            .arms
+                            .iter()
+                            .map(|arm| arm.id().to_owned())
+                            .collect(),
+                    );
+                    let clock = RecordingProgressClock::new(
+                        recording.frames,
+                        recording.active_elapsed(now).as_secs_f64(),
+                        recording.clock.wall_elapsed(now).as_secs_f64(),
+                    )
+                    .with_paused_seconds(recording.paused_elapsed(now).as_secs_f64());
+                    let state = RecordingState::new(
+                        recording.clock.is_paused(),
+                        recording.follow_error(),
+                        recording.writer.failure(),
+                    );
+                    RecordingProgress::new(identity, clock, state)
                 }),
-                replay: self.replay.as_ref().map(|replay| ReplayProgress {
-                    episode: replay.episode.clone(),
-                    robot: replay.robot.clone(),
+                self.operations.replay.as_ref().map(|replay| {
+                    let identity =
+                        ReplayIdentity::new(replay.episode.clone(), replay.robot.clone());
                     // Seeking preserves the requested episode position while
                     // the arm ramps there, so visualizations never jump back
                     // to frame zero after a committed scrub.
-                    frame: replay.cursor().min(replay.frames.len()) as u64,
-                    frames: replay.frames.len() as u64,
-                    elapsed_seconds: replay.elapsed_seconds(),
-                    duration_seconds: replay.duration_seconds(),
-                    purpose: replay.purpose,
-                    phase: replay.phase,
-                    paused: replay.timing.paused,
+                    let timeline = ReplayTimeline::new(
+                        replay.cursor().min(replay.frames.len()) as u64,
+                        replay.frames.len() as u64,
+                        replay.elapsed_seconds(),
+                    )
+                    .with_duration_seconds(replay.duration_seconds());
+                    let transport =
+                        ReplayTransport::new(replay.purpose, replay.phase, replay.timing.paused);
+                    ReplayProgress::new(identity, timeline, transport)
                 }),
-            },
+            ),
             connections: self.published.connections.clone(),
             mode: self.published.mode.clone(),
             limits: self
@@ -2954,7 +3075,7 @@ fn validate_motor_read_keys<T>(
 mod tests {
     use std::sync::Arc;
 
-    use crate::bus::{BusError, MotorElectricalSample};
+    use crate::bus::{BusError, MotorElectricalSample, MotorMechanicalSample};
     use spiral_robotics_core::calibration::MotorReading;
 
     use super::*;
@@ -2988,15 +3109,12 @@ mod tests {
     }
 
     fn spec(id: &str, calibration: Option<Calibration>) -> RobotSpec {
-        RobotSpec {
-            id: id.to_owned(),
-            port: PortSettings {
-                path: format!("/dev/{id}"),
-                baud_rate: 1_000_000,
-            },
-            motors: motors(),
-            calibration,
-        }
+        RobotSpec::new(
+            id.to_owned(),
+            PortSettings::new(format!("/dev/{id}"), 1_000_000),
+            motors(),
+        )
+        .with_calibration(calibration)
     }
 
     fn timeline_replay(
@@ -3031,15 +3149,7 @@ mod tests {
             Ok(self
                 .positions
                 .iter()
-                .map(|(name, position)| {
-                    (
-                        name.clone(),
-                        MotorSample {
-                            position: *position,
-                            ..MotorSample::default()
-                        },
-                    )
-                })
+                .map(|(name, position)| (name.clone(), MotorSample::at(*position)))
                 .collect())
         }
 
@@ -3118,7 +3228,11 @@ mod tests {
             .expect("start replay");
 
         assert_eq!(
-            controller.replay.as_ref().map(|replay| replay.phase),
+            controller
+                .operations
+                .replay
+                .as_ref()
+                .map(|replay| replay.phase),
             Some(ReplayPhase::Seeking)
         );
         // Entering replay energizes the arm, the same way entering teleoperation
@@ -3129,6 +3243,7 @@ mod tests {
         // start pose the operator never saw coming.
         let mut cycles = 0;
         while controller
+            .operations
             .replay
             .as_ref()
             .is_some_and(|replay| replay.phase == ReplayPhase::Seeking)
@@ -3141,7 +3256,11 @@ mod tests {
         }
         assert!(cycles > 1, "the arm had to travel to reach the start");
         assert_eq!(
-            controller.replay.as_ref().map(|replay| replay.phase),
+            controller
+                .operations
+                .replay
+                .as_ref()
+                .map(|replay| replay.phase),
             Some(ReplayPhase::Playing),
             "the replay starts playing once the arm arrives"
         );
@@ -3151,14 +3270,21 @@ mod tests {
             controller.poll_robots();
             controller.apply_mode();
             controller.drive_robots();
-            if controller.replay.is_none() {
+            if controller.operations.replay.is_none() {
                 break;
             }
         }
-        assert!(controller.replay.is_none(), "the replay finished");
-        assert_eq!(controller.published.mode.selection, ModeSelection::Idle);
+        assert!(
+            controller.operations.replay.is_none(),
+            "the replay finished"
+        );
         assert_eq!(
-            controller.published.mode.error, None,
+            controller.published.mode.selection().clone(),
+            ModeSelection::Idle
+        );
+        assert_eq!(
+            controller.published.mode.error(),
+            None,
             "reaching the end of a take is not a fault"
         );
     }
@@ -3186,6 +3312,7 @@ mod tests {
             controller.apply_mode();
             controller.drive_robots();
             if controller
+                .operations
                 .replay
                 .as_ref()
                 .is_some_and(|replay| replay.phase == ReplayPhase::Playing)
@@ -3199,6 +3326,7 @@ mod tests {
             controller.drive_robots();
         }
         let paused_at = controller
+            .operations
             .replay
             .as_ref()
             .expect("replay is active")
@@ -3214,6 +3342,7 @@ mod tests {
         }
         assert_eq!(
             controller
+                .operations
                 .replay
                 .as_ref()
                 .expect("paused replay remains loaded")
@@ -3229,6 +3358,7 @@ mod tests {
         controller.drive_robots();
         assert!(
             controller
+                .operations
                 .replay
                 .as_ref()
                 .expect("replay continues")
@@ -3254,7 +3384,11 @@ mod tests {
             .start_replay(timeline_replay("arm", frames, 60.0).starting_at(60, 1.25))
             .expect("start replay at playhead");
 
-        let replay = controller.replay.as_ref().expect("replay is active");
+        let replay = controller
+            .operations
+            .replay
+            .as_ref()
+            .expect("replay is active");
         assert_eq!(replay.timing.position, 60.0);
         assert_eq!(replay.cursor(), 60);
         assert_eq!(replay.elapsed_seconds(), 1.25);
@@ -3285,6 +3419,7 @@ mod tests {
 
         assert!(
             !controller
+                .operations
                 .replay
                 .as_ref()
                 .expect("seek remains active")
@@ -3311,7 +3446,11 @@ mod tests {
 
         controller.set_replay_paused(true).expect("pause replay");
 
-        let replay = controller.replay.as_ref().expect("replay remains loaded");
+        let replay = controller
+            .operations
+            .replay
+            .as_ref()
+            .expect("replay remains loaded");
         assert_eq!(replay.purpose, ReplayPurpose::Timeline);
         assert!(replay.timing.paused);
     }
@@ -3353,8 +3492,11 @@ mod tests {
                 .expect_err("unknown joint")
                 .contains("sixth_axis")
         );
-        assert!(controller.replay.is_none());
-        assert_eq!(controller.published.mode.selection, ModeSelection::Idle);
+        assert!(controller.operations.replay.is_none());
+        assert_eq!(
+            controller.published.mode.selection().clone(),
+            ModeSelection::Idle
+        );
     }
 
     #[test]
@@ -3394,8 +3536,11 @@ mod tests {
                 error.contains("frame 1"),
                 "{label} should identify its later frame: {error}"
             );
-            assert!(controller.replay.is_none());
-            assert_eq!(controller.published.mode.selection, ModeSelection::Idle);
+            assert!(controller.operations.replay.is_none());
+            assert_eq!(
+                controller.published.mode.selection().clone(),
+                ModeSelection::Idle
+            );
         }
     }
 
@@ -3423,15 +3568,17 @@ mod tests {
 
         controller.apply_replay();
 
-        assert!(controller.replay.is_none());
-        assert_eq!(controller.published.mode.selection, ModeSelection::Idle);
-        assert!(!controller.published.mode.active);
+        assert!(controller.operations.replay.is_none());
+        assert_eq!(
+            controller.published.mode.selection().clone(),
+            ModeSelection::Idle
+        );
+        assert!(!controller.published.mode.active());
         assert!(
             controller
                 .published
                 .mode
-                .error
-                .as_deref()
+                .error()
                 .is_some_and(|error| error.contains("stopped reporting"))
         );
         assert!(
@@ -3461,10 +3608,13 @@ mod tests {
 
         controller.apply_replay();
 
-        assert!(controller.replay.is_none());
-        assert_eq!(controller.published.mode.selection, ModeSelection::Idle);
-        assert!(!controller.published.mode.active);
-        assert!(controller.published.mode.error.is_some());
+        assert!(controller.operations.replay.is_none());
+        assert_eq!(
+            controller.published.mode.selection().clone(),
+            ModeSelection::Idle
+        );
+        assert!(!controller.published.mode.active());
+        assert!(controller.published.mode.error().is_some());
         let robot = &controller.robots["arm"];
         assert_eq!(robot.motion.target, robot.motion.positions);
     }
@@ -3483,11 +3633,11 @@ mod tests {
                 60.0,
             ))
             .expect("start replay");
-        assert!(controller.replay.is_some());
+        assert!(controller.operations.replay.is_some());
 
         controller.set_mode(ModeSelection::Idle).expect("stop");
         assert!(
-            controller.replay.is_none(),
+            controller.operations.replay.is_none(),
             "an idle studio must not keep samples queued to drive an arm"
         );
 
@@ -3501,13 +3651,12 @@ mod tests {
             ))
             .expect("start replay again");
         controller.leave_mode_involving("arm", "its motor bus stopped responding");
-        assert!(controller.replay.is_none());
+        assert!(controller.operations.replay.is_none());
         assert!(
             controller
                 .published
                 .mode
-                .error
-                .as_deref()
+                .error()
                 .is_some_and(|error| error.contains("Replay"))
         );
     }
@@ -3524,7 +3673,7 @@ mod tests {
                 .contains("already connected")
         );
         assert_eq!(controller.robots.len(), 1);
-        assert!(controller.published.connections["arm"].connected);
+        assert!(controller.published.connections["arm"].connected());
     }
 
     #[test]
@@ -3590,7 +3739,7 @@ mod tests {
 
         controller.hold("arm").expect("hold");
         assert_eq!(
-            controller.published.mode.selection,
+            controller.published.mode.selection().clone(),
             ModeSelection::Manual {
                 robot: "arm".to_owned()
             }
@@ -3598,7 +3747,10 @@ mod tests {
         assert_eq!(controller.robots["arm"].motion.torque, TorqueState::Engaged);
 
         controller.release("arm").expect("release");
-        assert_eq!(controller.published.mode.selection, ModeSelection::Idle);
+        assert_eq!(
+            controller.published.mode.selection().clone(),
+            ModeSelection::Idle
+        );
         assert_eq!(
             controller.robots["arm"].motion.torque,
             TorqueState::Released
@@ -3621,7 +3773,10 @@ mod tests {
             error.contains("compensating torque-off was verified"),
             "{error}"
         );
-        assert_eq!(controller.published.mode.selection, ModeSelection::Idle);
+        assert_eq!(
+            controller.published.mode.selection().clone(),
+            ModeSelection::Idle
+        );
         assert_eq!(
             controller.robots["arm"].motion.torque,
             TorqueState::Released
@@ -3636,9 +3791,12 @@ mod tests {
             error.contains("physical torque state is unknown"),
             "{error}"
         );
-        assert_eq!(controller.published.mode.selection, ModeSelection::Idle);
+        assert_eq!(
+            controller.published.mode.selection().clone(),
+            ModeSelection::Idle
+        );
         assert_eq!(controller.robots["arm"].motion.torque, TorqueState::Unknown);
-        assert!(!controller.robots["arm"].telemetry().torque);
+        assert!(!controller.robots["arm"].telemetry().torque());
         controller
             .set_mode(ModeSelection::Manual {
                 robot: "arm".to_owned(),
@@ -3925,7 +4083,7 @@ mod tests {
         leader.motion.positions.insert("gripper".to_owned(), 2448);
         controller.apply_mode();
 
-        assert!(controller.published.mode.active);
+        assert!(controller.published.mode.active());
         assert_eq!(
             controller.robots["follower"].motion.target["gripper"], 2300,
             "the follower's own range, not the leader's counts"
@@ -3998,7 +4156,10 @@ mod tests {
                 .expect_err("uncalibrated follower")
                 .contains("calibrated")
         );
-        assert_eq!(controller.published.mode.selection, ModeSelection::Idle);
+        assert_eq!(
+            controller.published.mode.selection().clone(),
+            ModeSelection::Idle
+        );
     }
 
     #[test]
@@ -4023,12 +4184,22 @@ mod tests {
         controller.drop_failed_robots();
 
         assert!(!controller.robots.contains_key("leader"));
-        assert_eq!(controller.published.mode.selection, ModeSelection::Idle);
-        assert!(!controller.published.mode.active);
-        assert!(controller.published.mode.error.unwrap().contains("stopped"));
+        assert_eq!(
+            controller.published.mode.selection().clone(),
+            ModeSelection::Idle
+        );
+        assert!(!controller.published.mode.active());
+        assert!(
+            controller
+                .published
+                .mode
+                .error()
+                .unwrap()
+                .contains("stopped")
+        );
         let connection = &controller.published.connections["leader"];
-        assert!(!connection.connected);
-        assert_eq!(connection.error.as_deref(), Some("bus went away"));
+        assert!(!connection.connected());
+        assert_eq!(connection.error(), Some("bus went away"));
     }
 
     #[test]
@@ -4050,7 +4221,10 @@ mod tests {
             controller.robots["arm"].motion.torque,
             TorqueState::Released
         );
-        assert_eq!(controller.published.mode.selection, ModeSelection::Idle);
+        assert_eq!(
+            controller.published.mode.selection().clone(),
+            ModeSelection::Idle
+        );
         assert!(
             controller
                 .set_torque("arm", true)
@@ -4133,35 +4307,35 @@ mod tests {
         let state = controller.state.borrow().clone();
         let calibrated = state
             .telemetry
-            .robots
+            .robots()
             .iter()
-            .find(|robot| robot.id == "calibrated")
+            .find(|robot| robot.id() == "calibrated")
             .expect("calibrated telemetry");
         let raw = state
             .telemetry
-            .robots
+            .robots()
             .iter()
-            .find(|robot| robot.id == "raw")
+            .find(|robot| robot.id() == "raw")
             .expect("raw telemetry");
 
-        assert_eq!(calibrated.joints.len(), 6);
-        assert_eq!(calibrated.joints[0].degrees, Some(0.0));
-        assert_eq!(calibrated.joints[0].normalized, Some(0.0));
+        assert_eq!(calibrated.joints().len(), 6);
+        assert_eq!(calibrated.joints()[0].degrees(), Some(0.0));
+        assert_eq!(calibrated.joints()[0].normalized(), Some(0.0));
         assert_eq!(
-            calibrated.joints[0].range,
-            Some(JointRange {
-                min: 1024,
-                center: 2048,
-                max: 3072
-            })
+            calibrated.joints()[0].range(),
+            Some(JointRange::new(1024, 2048, 3072))
         );
-        assert!(raw.joints.iter().all(|joint| joint.degrees.is_none()));
-        assert!(raw.joints.iter().all(|joint| joint.goal_raw.is_none()));
-        assert!(raw.joints.iter().all(|joint| joint.target_raw.is_none()));
+        assert!(raw.joints().iter().all(|joint| joint.degrees().is_none()));
+        assert!(raw.joints().iter().all(|joint| joint.goal_raw().is_none()));
         assert!(
-            raw.joints
+            raw.joints()
                 .iter()
-                .all(|joint| joint.target_degrees.is_none())
+                .all(|joint| joint.target_raw().is_none())
+        );
+        assert!(
+            raw.joints()
+                .iter()
+                .all(|joint| joint.target_degrees().is_none())
         );
     }
 
@@ -4173,27 +4347,31 @@ mod tests {
         controller.publish();
 
         let state = controller.state.borrow().clone();
-        let raw = &state.telemetry.robots[0];
+        let raw = &state.telemetry.robots()[0];
 
         // Calibration is what turns counts into degrees; it has nothing to do
         // with the motor's own condition, and an arm nobody has calibrated yet
         // is exactly the arm whose wiring you want to check.
-        assert!(raw.joints.iter().all(|joint| joint.degrees.is_none()));
+        assert!(raw.joints().iter().all(|joint| joint.degrees().is_none()));
         assert!(
-            raw.joints
+            raw.joints()
                 .iter()
-                .all(|joint| joint.temperature_celsius.is_some()),
+                .all(|joint| joint.temperature_celsius().is_some()),
             "temperature does not wait for a calibration"
         );
-        assert!(raw.joints.iter().all(|joint| joint.voltage_volts.is_some()));
-        assert!(raw.joints.iter().all(|joint| joint.faults.is_empty()));
+        assert!(
+            raw.joints()
+                .iter()
+                .all(|joint| joint.voltage_volts().is_some())
+        );
+        assert!(raw.joints().iter().all(|joint| joint.faults().is_empty()));
 
         let limits = &state.limits["raw"];
         assert_eq!(limits.len(), 6);
         assert!(
             limits
                 .values()
-                .all(|limits| limits.max_temperature_celsius.is_some()),
+                .all(|limits| limits.max_temperature_celsius().is_some()),
             "limits are read from the motors when the robot connects"
         );
     }
@@ -4202,28 +4380,22 @@ mod tests {
     fn a_transient_load_spike_survives_to_the_next_published_frame() {
         let mut track = MotorTrack::default();
         let now = Instant::now();
-        let idle = MotorSample {
-            load: Some(0.05),
-            electrical: MotorElectricalSample {
-                current_amps: Some(0.1),
-                ..MotorElectricalSample::default()
-            },
-            ..MotorSample::default()
-        };
+        let idle = MotorSample::new(
+            0,
+            MotorMechanicalSample::new(None, Some(0.05), None),
+            MotorElectricalSample::new(None, None, Some(0.1)),
+        );
         for _ in 0..40 {
             track.observe(idle, now);
         }
         let settled = track.load.expect("a settled load");
 
         track.observe(
-            MotorSample {
-                load: Some(0.9),
-                electrical: MotorElectricalSample {
-                    current_amps: Some(1.3),
-                    ..MotorElectricalSample::default()
-                },
-                ..MotorSample::default()
-            },
+            MotorSample::new(
+                0,
+                MotorMechanicalSample::new(None, Some(0.9), None),
+                MotorElectricalSample::new(None, None, Some(1.3)),
+            ),
             now,
         );
         let spiked = track.load.expect("the spike");

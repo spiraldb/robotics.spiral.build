@@ -13,8 +13,10 @@ use arrow_array::{
     UInt64Array,
 };
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
+use spiral_robotics_api::recording::EpisodeArm;
 
 use crate::episodes::{EpisodeCompletion, EpisodeError, EpisodeStart, Sample};
+use crate::video::VideoSize;
 
 /// Schema for [`crate::schema::Table::Datasets`].
 pub(crate) fn datasets_schema() -> SchemaRef {
@@ -30,9 +32,9 @@ pub(crate) fn datasets_schema() -> SchemaRef {
 /// name until richer dataset metadata is edited in a future workflow.
 pub(crate) fn dataset_batch(start: &EpisodeStart) -> Result<RecordBatch, EpisodeError> {
     let columns: Vec<ArrayRef> = vec![
-        Arc::new(StringArray::from(vec![start.dataset_id.as_str()])),
-        Arc::new(StringArray::from(vec![start.dataset_id.as_str()])),
-        Arc::new(Int64Array::from(vec![start.started_ms])),
+        Arc::new(StringArray::from(vec![start.dataset_id()])),
+        Arc::new(StringArray::from(vec![start.dataset_id()])),
+        Arc::new(Int64Array::from(vec![start.started_ms()])),
         Arc::new(StringArray::from(vec![None::<&str>])),
     ];
     RecordBatch::try_new(datasets_schema(), columns)
@@ -74,12 +76,40 @@ struct JointStateValues {
 /// Camera stream metadata stored beside joint stream descriptions.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct VideoStreamRow {
-    pub(crate) episode_id: String,
-    pub(crate) stream_id: String,
-    pub(crate) camera_id: String,
-    pub(crate) width: u32,
-    pub(crate) height: u32,
-    pub(crate) fps: u32,
+    episode_id: String,
+    stream_id: String,
+    properties: VideoStreamProperties,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct VideoStreamProperties {
+    camera_id: String,
+    size: VideoSize,
+    fps: u32,
+}
+
+impl VideoStreamProperties {
+    pub(crate) fn new(camera_id: String, size: VideoSize, fps: u32) -> Self {
+        Self {
+            camera_id,
+            size,
+            fps,
+        }
+    }
+}
+
+impl VideoStreamRow {
+    pub(crate) fn new(
+        episode_id: String,
+        stream_id: String,
+        properties: VideoStreamProperties,
+    ) -> Self {
+        Self {
+            episode_id,
+            stream_id,
+            properties,
+        }
+    }
 }
 
 /// Stateful conversion from control-loop frames to relational stream rows.
@@ -94,7 +124,7 @@ pub(crate) struct SpiralEpisodeEncoder {
 
 impl SpiralEpisodeEncoder {
     pub(crate) fn new(start: EpisodeStart) -> Result<Self, EpisodeError> {
-        if start.arms.is_empty() {
+        if start.arms().is_empty() {
             return Err(invalid("a Spiral episode needs at least one arm stream"));
         }
         Ok(Self {
@@ -110,27 +140,27 @@ impl SpiralEpisodeEncoder {
     /// Convert one control frame without performing I/O.
     pub(crate) fn encode(&mut self, sample: &Sample) -> Result<Vec<JointSampleRow>, EpisodeError> {
         validate_sample(&self.start, sample)?;
-        let episode_time_ns = seconds_to_ns(sample.seconds, "sample time")?;
+        let episode_time_ns = seconds_to_ns(sample.seconds(), "sample time")?;
         let sample_index = self.next_sample_index;
 
         let rows = self
             .start
-            .arms
+            .arms()
             .iter()
             .enumerate()
             .map(|(arm_index, arm)| JointSampleRow {
                 key: JointSampleKey {
-                    episode_id: self.start.id.clone(),
-                    stream_id: arm.id.clone(),
+                    episode_id: self.start.id().to_owned(),
+                    stream_id: arm.id().to_owned(),
                     sample_index,
                     episode_time_ns,
                 },
                 validity: SampleValidity {
-                    state: sample.normalized[arm_index]
+                    state: sample.normalized()[arm_index]
                         .iter()
                         .all(|value| value.is_some_and(f64::is_finite)),
                     action: sample
-                        .action
+                        .action()
                         .get(arm_index)
                         .and_then(Option::as_ref)
                         .is_some_and(|values| {
@@ -138,19 +168,13 @@ impl SpiralEpisodeEncoder {
                         }),
                 },
                 state: JointStateValues {
-                    position: sample.normalized[arm_index].clone(),
-                    raw_position: sample.raw[arm_index].clone(),
-                    velocity: sample
-                        .velocity
-                        .as_ref()
-                        .map(|values| values[arm_index].clone()),
-                    effort: sample
-                        .effort
-                        .as_ref()
-                        .map(|values| values[arm_index].clone()),
+                    position: sample.normalized()[arm_index].clone(),
+                    raw_position: sample.raw()[arm_index].clone(),
+                    velocity: sample.velocity().map(|values| values[arm_index].clone()),
+                    effort: sample.effort().map(|values| values[arm_index].clone()),
                 },
-                action_position: sample.action.get(arm_index).cloned().flatten(),
-                follow_error_degrees: sample.follow_error_degrees,
+                action_position: sample.action().get(arm_index).cloned().flatten(),
+                follow_error_degrees: sample.follow_error_degrees(),
             })
             .collect();
 
@@ -187,23 +211,23 @@ pub(crate) fn episode_completion_batch(
     completion: &EpisodeCompletion,
     frames: u64,
 ) -> Result<RecordBatch, EpisodeError> {
-    let duration_ns = seconds_to_ns(completion.duration_seconds, "episode duration")?;
+    let duration_ns = seconds_to_ns(completion.duration_seconds(), "episode duration")?;
     let metadata = serde_json::to_string(&(start, completion))
         .map_err(|error| invalid(format!("encoding episode metadata: {error}")))?;
     let columns: Vec<ArrayRef> = vec![
-        Arc::new(StringArray::from(vec![start.id.as_str()])),
-        Arc::new(StringArray::from(vec![start.dataset_id.as_str()])),
+        Arc::new(StringArray::from(vec![start.id()])),
+        Arc::new(StringArray::from(vec![start.dataset_id()])),
         Arc::new(UInt32Array::from(vec![SCHEMA_VERSION])),
-        Arc::new(Int64Array::from(vec![start.started_ms])),
-        Arc::new(Float64Array::from(vec![start.sample_hz])),
-        Arc::new(StringArray::from(vec![start.source.as_str()])),
-        Arc::new(StringArray::from(vec![start.note.as_deref()])),
+        Arc::new(Int64Array::from(vec![start.started_ms()])),
+        Arc::new(Float64Array::from(vec![start.sample_hz()])),
+        Arc::new(StringArray::from(vec![start.source()])),
+        Arc::new(StringArray::from(vec![start.note()])),
         Arc::new(UInt64Array::from(vec![frames])),
         Arc::new(UInt64Array::from(vec![duration_ns])),
         Arc::new(Float64Array::from(vec![
-            completion.max_follow_error_degrees,
+            completion.max_follow_error_degrees(),
         ])),
-        Arc::new(BooleanArray::from(vec![completion.discarded])),
+        Arc::new(BooleanArray::from(vec![completion.discarded()])),
         Arc::new(StringArray::from(vec![metadata])),
     ];
     RecordBatch::try_new(episodes_schema(), columns)
@@ -236,30 +260,30 @@ pub(crate) fn episode_streams_batch(start: &EpisodeStart) -> Result<RecordBatch,
         DataType::Utf8,
         false,
     )));
-    for arm in &start.arms {
-        for joint in &arm.joints {
+    for arm in start.arms() {
+        for joint in arm.joints() {
             joint_names.values().append_value(joint);
         }
         joint_names.append(true);
     }
     let columns: Vec<ArrayRef> = vec![
         Arc::new(StringArray::from_iter_values(
-            start.arms.iter().map(|_| start.id.as_str()),
+            start.arms().iter().map(|_| start.id()),
         )),
         Arc::new(StringArray::from_iter_values(
-            start.arms.iter().map(|arm| arm.id.as_str()),
+            start.arms().iter().map(EpisodeArm::id),
         )),
         Arc::new(StringArray::from_iter_values(
-            start.arms.iter().map(|_| "joint"),
+            start.arms().iter().map(|_| "joint"),
         )),
         Arc::new(StringArray::from_iter(
-            start.arms.iter().map(|arm| arm.robot_type.as_deref()),
+            start.arms().iter().map(EpisodeArm::robot_type),
         )),
         Arc::new(joint_names.finish()),
-        Arc::new(StringArray::from(vec![None::<&str>; start.arms.len()])),
-        Arc::new(UInt32Array::from(vec![None; start.arms.len()])),
-        Arc::new(UInt32Array::from(vec![None; start.arms.len()])),
-        Arc::new(UInt32Array::from(vec![None; start.arms.len()])),
+        Arc::new(StringArray::from(vec![None::<&str>; start.arms().len()])),
+        Arc::new(UInt32Array::from(vec![None; start.arms().len()])),
+        Arc::new(UInt32Array::from(vec![None; start.arms().len()])),
+        Arc::new(UInt32Array::from(vec![None; start.arms().len()])),
     ];
     RecordBatch::try_new(episode_streams_schema(), columns)
         .map_err(|error| invalid(format!("building Spiral stream batch: {error}")))
@@ -286,16 +310,16 @@ pub(crate) fn video_streams_batch(rows: &[VideoStreamRow]) -> Result<RecordBatch
         Arc::new(StringArray::from(vec![None::<&str>; rows.len()])),
         Arc::new(joint_names.finish()),
         Arc::new(StringArray::from_iter_values(
-            rows.iter().map(|row| row.camera_id.as_str()),
+            rows.iter().map(|row| row.properties.camera_id.as_str()),
         )),
         Arc::new(UInt32Array::from_iter_values(
-            rows.iter().map(|row| row.width),
+            rows.iter().map(|row| row.properties.size.width()),
         )),
         Arc::new(UInt32Array::from_iter_values(
-            rows.iter().map(|row| row.height),
+            rows.iter().map(|row| row.properties.size.height()),
         )),
         Arc::new(UInt32Array::from_iter_values(
-            rows.iter().map(|row| row.fps),
+            rows.iter().map(|row| row.properties.fps),
         )),
     ];
     RecordBatch::try_new(episode_streams_schema(), columns)
@@ -403,77 +427,77 @@ fn append_nullable_values(
 }
 
 fn validate_sample(start: &EpisodeStart, sample: &Sample) -> Result<(), EpisodeError> {
-    if !sample.seconds.is_finite() || sample.seconds < 0.0 {
+    if !sample.seconds().is_finite() || sample.seconds() < 0.0 {
         return Err(invalid("sample time must be finite and non-negative"));
     }
     if sample
-        .follow_error_degrees
+        .follow_error_degrees()
         .is_some_and(|value| !value.is_finite())
     {
         return Err(invalid("follow error must be finite when present"));
     }
     validate_outer_shape(
         "normalized position",
-        start.arms.len(),
-        sample.normalized.len(),
+        start.arms().len(),
+        sample.normalized().len(),
     )?;
-    validate_outer_shape("raw position", start.arms.len(), sample.raw.len())?;
-    if let Some(velocity) = &sample.velocity {
-        validate_outer_shape("velocity", start.arms.len(), velocity.len())?;
+    validate_outer_shape("raw position", start.arms().len(), sample.raw().len())?;
+    if let Some(velocity) = &sample.velocity() {
+        validate_outer_shape("velocity", start.arms().len(), velocity.len())?;
     }
-    if let Some(effort) = &sample.effort {
-        validate_outer_shape("effort", start.arms.len(), effort.len())?;
+    if let Some(effort) = &sample.effort() {
+        validate_outer_shape("effort", start.arms().len(), effort.len())?;
     }
-    if !sample.action.is_empty() {
-        validate_outer_shape("action", start.arms.len(), sample.action.len())?;
+    if !sample.action().is_empty() {
+        validate_outer_shape("action", start.arms().len(), sample.action().len())?;
     }
 
-    for (arm_index, arm) in start.arms.iter().enumerate() {
+    for (arm_index, arm) in start.arms().iter().enumerate() {
         validate_joint_shape(
             "normalized position",
-            &arm.id,
+            arm.id(),
             Shape {
-                expected: arm.joints.len(),
-                actual: sample.normalized[arm_index].len(),
+                expected: arm.joints().len(),
+                actual: sample.normalized()[arm_index].len(),
             },
         )?;
         validate_joint_shape(
             "raw position",
-            &arm.id,
+            arm.id(),
             Shape {
-                expected: arm.joints.len(),
-                actual: sample.raw[arm_index].len(),
+                expected: arm.joints().len(),
+                actual: sample.raw()[arm_index].len(),
             },
         )?;
-        validate_finite_values("normalized position", &sample.normalized[arm_index])?;
-        if let Some(action) = sample.action.get(arm_index).and_then(Option::as_ref) {
+        validate_finite_values("normalized position", &sample.normalized()[arm_index])?;
+        if let Some(action) = sample.action().get(arm_index).and_then(Option::as_ref) {
             validate_joint_shape(
                 "action",
-                &arm.id,
+                arm.id(),
                 Shape {
-                    expected: arm.joints.len(),
+                    expected: arm.joints().len(),
                     actual: action.len(),
                 },
             )?;
             validate_finite_values("action", action)?;
         }
-        if let Some(velocity) = &sample.velocity {
+        if let Some(velocity) = &sample.velocity() {
             validate_joint_shape(
                 "velocity",
-                &arm.id,
+                arm.id(),
                 Shape {
-                    expected: arm.joints.len(),
+                    expected: arm.joints().len(),
                     actual: velocity[arm_index].len(),
                 },
             )?;
             validate_finite_values("velocity", &velocity[arm_index])?;
         }
-        if let Some(effort) = &sample.effort {
+        if let Some(effort) = &sample.effort() {
             validate_joint_shape(
                 "effort",
-                &arm.id,
+                arm.id(),
                 Shape {
-                    expected: arm.joints.len(),
+                    expected: arm.joints().len(),
                     actual: effort[arm_index].len(),
                 },
             )?;
@@ -557,39 +581,38 @@ mod tests {
     }
 
     fn start() -> EpisodeStart {
-        EpisodeStart {
-            dataset_id: "default".to_owned(),
-            id: "episode_000042".to_owned(),
-            started_ms: 1_700_000_000_000,
-            sample_hz: 60.0,
-            source: "teleoperation".to_owned(),
-            note: Some("pick cube".to_owned()),
-            arms: vec![
-                EpisodeArm {
-                    id: "leader".to_owned(),
-                    robot_type: Some("so101_leader".to_owned()),
-                    joints: vec!["shoulder".to_owned(), "elbow".to_owned()],
-                },
-                EpisodeArm {
-                    id: "follower".to_owned(),
-                    robot_type: Some("so101_follower".to_owned()),
-                    joints: vec!["shoulder".to_owned(), "elbow".to_owned()],
-                },
-            ],
-            condition: Vec::new(),
-        }
+        EpisodeStart::new("episode_000042".to_owned(), "default".to_owned())
+            .with_timing(1_700_000_000_000, 60.0)
+            .with_source("teleoperation".to_owned(), Some("pick cube".to_owned()))
+            .with_arms(
+                vec![
+                    EpisodeArm::new(
+                        "leader",
+                        Some("so101_leader".to_owned()),
+                        vec!["shoulder".to_owned(), "elbow".to_owned()],
+                    ),
+                    EpisodeArm::new(
+                        "follower",
+                        Some("so101_follower".to_owned()),
+                        vec!["shoulder".to_owned(), "elbow".to_owned()],
+                    ),
+                ],
+                Vec::new(),
+            )
     }
 
     fn sample(seconds: f64) -> Sample {
-        Sample {
+        Sample::new(
             seconds,
-            normalized: vec![vec![Some(0.1), None], vec![Some(0.2), Some(0.3)]],
-            raw: vec![vec![10, 20], vec![30, 40]],
-            follow_error_degrees: Some(1.25),
-            velocity: Some(vec![vec![Some(2.0), Some(3.0)], vec![Some(4.0), Some(5.0)]]),
-            effort: None,
-            action: vec![None, Some(vec![Some(0.25), Some(0.5)])],
-        }
+            vec![vec![Some(0.1), None], vec![Some(0.2), Some(0.3)]],
+            vec![vec![10, 20], vec![30, 40]],
+        )
+        .with_follow_error_degrees(Some(1.25))
+        .with_velocity(Some(vec![
+            vec![Some(2.0), Some(3.0)],
+            vec![Some(4.0), Some(5.0)],
+        ]))
+        .with_action(vec![None, Some(vec![Some(0.25), Some(0.5)])])
     }
 
     #[test]
@@ -613,8 +636,12 @@ mod tests {
     #[test]
     fn malformed_frames_do_not_advance_the_stable_sample_index() {
         let mut encoder = SpiralEpisodeEncoder::new(start()).unwrap();
-        let mut malformed = sample(0.0);
-        malformed.raw.pop();
+        let complete = sample(0.0);
+        let malformed = Sample::new(
+            complete.seconds(),
+            complete.normalized().to_vec(),
+            vec![complete.raw()[0].clone()],
+        );
 
         let error = encoder.encode(&malformed).unwrap_err().to_string();
         assert!(error.contains("raw position has 1 arm streams, expected 2"));
@@ -662,13 +689,8 @@ mod tests {
     #[test]
     fn completion_row_is_the_episode_visibility_marker() {
         let start = start();
-        let completion = EpisodeCompletion {
-            duration_seconds: 2.5,
-            recording_gaps: Vec::new(),
-            max_follow_error_degrees: Some(1.25),
-            discarded: false,
-            condition: Vec::new(),
-        };
+        let completion = EpisodeCompletion::new(2.5, Vec::new(), Vec::new())
+            .with_max_follow_error_degrees(Some(1.25));
         let batch = episode_completion_batch(&start, &completion, 150).unwrap();
 
         assert_eq!(batch.num_rows(), 1);
@@ -725,14 +747,11 @@ mod tests {
 
     #[test]
     fn camera_rows_share_the_stream_catalog_without_fake_joints() {
-        let batch = video_streams_batch(&[VideoStreamRow {
-            episode_id: "episode_000042".to_owned(),
-            stream_id: "follower.camera.wrist".to_owned(),
-            camera_id: "camera-1".to_owned(),
-            width: 640,
-            height: 480,
-            fps: 30,
-        }])
+        let batch = video_streams_batch(&[VideoStreamRow::new(
+            "episode_000042".to_owned(),
+            "follower.camera.wrist".to_owned(),
+            VideoStreamProperties::new("camera-1".to_owned(), VideoSize::new(640, 480), 30),
+        )])
         .unwrap();
         assert_eq!(batch.num_rows(), 1);
         assert!(batch.column_by_name("joint_names").unwrap().is_null(0));

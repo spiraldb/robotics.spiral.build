@@ -13,13 +13,13 @@ use spiral_robotics_core::workflow::{QualifiedRelation, WorkflowNodeId, Workflow
 use crate::relations::{QueryColumn, SpiralQueryResponse};
 
 pub const DEFAULT_WORKFLOW_ID: &str = "default";
-pub const MAX_WORKFLOW_QUERY_ROWS: usize = 1_000;
+const MAX_WORKFLOW_QUERY_ROWS: usize = 1_000;
 pub const SIGLIP_BASE_MODEL_ID: &str = "siglip-base";
 pub const SIGLIP_BASE_REPOSITORY: &str = "google/siglip-base-patch16-224";
 pub const SIGLIP_BASE_REVISION: &str = "7fd15f0689c79d79e38b1c2e2e2370a7bf2761ed";
-pub const MAX_SIGLIP_FEATURES: usize = 32;
+const MAX_SIGLIP_FEATURES: usize = 32;
 pub const MAX_SIGLIP_CONCEPT_LENGTH: usize = 80;
-pub const MAX_WORKFLOW_FEATURE_NAME_LENGTH: usize = 96;
+const MAX_WORKFLOW_FEATURE_NAME_LENGTH: usize = 96;
 pub const MAX_WORKFLOW_FEATURE_DESCRIPTION_LENGTH: usize = 240;
 pub const MAX_WORKFLOW_FEATURE_STREAMS: usize = 8;
 pub const WORKFLOW_FEATURE_REGISTRY_RELATION: &str = "workflow.feature_registry";
@@ -38,13 +38,13 @@ pub fn derived_feature_cache_relation(source_relation: &str) -> String {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkflowSpec {
-    pub id: String,
-    pub name: String,
-    pub revision: u64,
+    id: String,
+    name: String,
+    revision: u64,
     #[serde(default)]
-    pub nodes: Vec<WorkflowNodeSpec>,
+    nodes: Vec<WorkflowNodeSpec>,
     #[serde(default)]
-    pub edges: Vec<WorkflowEdgeSpec>,
+    edges: Vec<WorkflowEdgeSpec>,
 }
 
 impl Default for WorkflowSpec {
@@ -91,10 +91,10 @@ impl Default for WorkflowSpec {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkflowNodeSpec {
-    pub id: String,
-    pub name: String,
+    id: String,
+    name: String,
     #[serde(flatten)]
-    pub config: WorkflowNodeConfig,
+    config: WorkflowNodeConfig,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -121,13 +121,65 @@ pub enum WorkflowNodeConfig {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkflowFeatureDefinition {
-    pub name: String,
-    pub description: String,
-    pub concept: String,
-    pub applicability: WorkflowFeatureApplicability,
+    name: String,
+    description: String,
+    concept: String,
+    applicability: WorkflowFeatureApplicability,
 }
 
 impl WorkflowFeatureDefinition {
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        concept: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            concept: concept.into(),
+            applicability: WorkflowFeatureApplicability {
+                source_relation: String::new(),
+                media_field: String::new(),
+                stream_ids: Vec::new(),
+            },
+        }
+    }
+
+    pub fn with_applicability(mut self, applicability: WorkflowFeatureApplicability) -> Self {
+        self.applicability = applicability;
+        self
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub fn description(&self) -> &str {
+        &self.description
+    }
+    pub fn concept(&self) -> &str {
+        &self.concept
+    }
+    pub const fn applicability(&self) -> &WorkflowFeatureApplicability {
+        &self.applicability
+    }
+    pub fn set_name(&mut self, name: impl Into<String>) {
+        self.name = name.into();
+    }
+    pub fn set_description(&mut self, description: impl Into<String>) {
+        self.description = description.into();
+    }
+    pub fn set_concept(&mut self, concept: impl Into<String>) {
+        self.concept = concept.into();
+    }
+    pub fn set_source_relation(&mut self, relation: impl Into<String>) {
+        self.applicability.source_relation = relation.into();
+    }
+    pub fn set_media_field(&mut self, field: impl Into<String>) {
+        self.applicability.media_field = field.into();
+    }
+    pub fn set_stream_ids(&mut self, stream_ids: Vec<String>) {
+        self.applicability.stream_ids = stream_ids;
+    }
     /// Whether this feature's output column has a safe, descriptive name.
     pub fn has_valid_name(&self) -> bool {
         UnquotedSqlIdentifier::try_from(self.name.as_str()).is_ok()
@@ -136,12 +188,35 @@ impl WorkflowFeatureDefinition {
     }
 }
 
+impl WorkflowFeatureApplicability {
+    pub fn new(source_relation: impl Into<String>, media_field: impl Into<String>) -> Self {
+        Self {
+            source_relation: source_relation.into(),
+            media_field: media_field.into(),
+            stream_ids: Vec::new(),
+        }
+    }
+    pub fn with_stream_ids(mut self, stream_ids: Vec<String>) -> Self {
+        self.stream_ids = stream_ids;
+        self
+    }
+    pub fn source_relation(&self) -> &str {
+        &self.source_relation
+    }
+    pub fn media_field(&self) -> &str {
+        &self.media_field
+    }
+    pub fn stream_ids(&self) -> &[String] {
+        &self.stream_ids
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkflowFeatureApplicability {
-    pub source_relation: String,
-    pub media_field: String,
+    source_relation: String,
+    media_field: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub stream_ids: Vec<String>,
+    stream_ids: Vec<String>,
 }
 
 fn default_workflow_query_rows() -> usize {
@@ -192,16 +267,16 @@ impl WorkflowNodeKind {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkflowEdgeSpec {
-    pub source: String,
-    pub target: String,
+    source: String,
+    target: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkflowValidationReport {
     #[serde(default)]
-    pub errors: Vec<WorkflowValidationIssue>,
+    errors: Vec<WorkflowValidationIssue>,
     #[serde(default)]
-    pub warnings: Vec<WorkflowValidationIssue>,
+    warnings: Vec<WorkflowValidationIssue>,
 }
 
 impl WorkflowValidationReport {
@@ -209,14 +284,28 @@ impl WorkflowValidationReport {
         self.errors.is_empty()
     }
 }
+impl WorkflowValidationIssue {
+    pub fn code(&self) -> &str {
+        &self.code
+    }
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+    pub fn recovery(&self) -> &str {
+        &self.recovery
+    }
+    pub fn node_id(&self) -> Option<&str> {
+        self.node_id.as_deref()
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkflowValidationIssue {
-    pub code: String,
+    code: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub node_id: Option<String>,
-    pub message: String,
-    pub recovery: String,
+    node_id: Option<String>,
+    message: String,
+    recovery: String,
 }
 
 impl WorkflowValidationIssue {
@@ -237,20 +326,69 @@ impl WorkflowValidationIssue {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SaveWorkflowRequest {
-    pub scope_id: String,
-    pub expected_revision: u64,
-    pub workflow: WorkflowSpec,
+    scope_id: String,
+    expected_revision: u64,
+    workflow: WorkflowSpec,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RunWorkflowRequest {
-    pub scope_id: String,
-    pub revision: u64,
+    scope_id: String,
+    revision: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CancelWorkflowRequest {
-    pub scope_id: String,
+    scope_id: String,
+}
+
+impl SaveWorkflowRequest {
+    pub fn new(
+        scope_id: impl Into<String>,
+        expected_revision: u64,
+        workflow: WorkflowSpec,
+    ) -> Self {
+        Self {
+            scope_id: scope_id.into(),
+            expected_revision,
+            workflow,
+        }
+    }
+    pub fn scope_id(&self) -> &str {
+        &self.scope_id
+    }
+    pub const fn expected_revision(&self) -> u64 {
+        self.expected_revision
+    }
+    pub const fn workflow(&self) -> &WorkflowSpec {
+        &self.workflow
+    }
+}
+
+impl RunWorkflowRequest {
+    pub fn new(scope_id: impl Into<String>, revision: u64) -> Self {
+        Self {
+            scope_id: scope_id.into(),
+            revision,
+        }
+    }
+    pub fn scope_id(&self) -> &str {
+        &self.scope_id
+    }
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+}
+
+impl CancelWorkflowRequest {
+    pub fn new(scope_id: impl Into<String>) -> Self {
+        Self {
+            scope_id: scope_id.into(),
+        }
+    }
+    pub fn scope_id(&self) -> &str {
+        &self.scope_id
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -258,10 +396,10 @@ pub struct WorkflowStateResponse {
     /// Ephemeral server identity for the active Spiral destination/project.
     /// Revisions are monotonic only within one scope.
     #[serde(default)]
-    pub scope_id: String,
-    pub workflow: WorkflowSpec,
-    pub validation: WorkflowValidationReport,
-    pub snapshot: WorkflowRunSnapshot,
+    scope_id: String,
+    workflow: WorkflowSpec,
+    validation: WorkflowValidationReport,
+    snapshot: WorkflowRunSnapshot,
 }
 
 impl Default for WorkflowStateResponse {
@@ -278,45 +416,181 @@ impl Default for WorkflowStateResponse {
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct WorkflowRunSnapshot {
-    pub workflow_id: String,
-    pub workflow_revision: u64,
+    #[serde(flatten)]
+    identity: WorkflowRunIdentity,
+    #[serde(flatten)]
+    execution: WorkflowRunExecution,
+    #[serde(flatten)]
+    timing: WorkflowRunTiming,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct WorkflowRunIdentity {
+    workflow_id: String,
+    workflow_revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_id: Option<String>,
-    pub phase: WorkflowRunPhase,
+    run_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct WorkflowRunExecution {
+    phase: WorkflowRunPhase,
     #[serde(default)]
-    pub nodes: Vec<WorkflowNodeSnapshot>,
+    nodes: Vec<WorkflowNodeSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result: Option<SpiralQueryResponse>,
+    result: Option<SpiralQueryResponse>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+    error: Option<String>,
     #[serde(default)]
-    pub result_stale: bool,
+    result_stale: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct WorkflowRunTiming {
     #[serde(default)]
-    pub started_ms: u64,
+    started_ms: u64,
     #[serde(default)]
-    pub finished_ms: u64,
+    finished_ms: u64,
     #[serde(default)]
-    pub updated_ms: u64,
+    updated_ms: u64,
 }
 
 impl WorkflowRunSnapshot {
     pub fn idle_for(workflow: &WorkflowSpec) -> Self {
         Self {
-            workflow_id: workflow.id.clone(),
-            workflow_revision: workflow.revision,
-            phase: WorkflowRunPhase::Idle,
-            nodes: workflow
-                .nodes
-                .iter()
-                .map(|node| WorkflowNodeSnapshot {
-                    node_id: node.id.clone(),
-                    phase: WorkflowNodePhase::Pending,
-                    detail: "Not run".to_owned(),
-                    ..WorkflowNodeSnapshot::default()
-                })
-                .collect(),
+            identity: WorkflowRunIdentity::new(workflow.id.clone(), workflow.revision),
+            execution: WorkflowRunExecution::new(
+                WorkflowRunPhase::Idle,
+                workflow
+                    .nodes
+                    .iter()
+                    .map(|node| WorkflowNodeSnapshot::pending(node.id.clone(), "Not run"))
+                    .collect(),
+            ),
             ..Self::default()
         }
+    }
+}
+
+impl WorkflowRunIdentity {
+    pub fn new(workflow_id: impl Into<String>, workflow_revision: u64) -> Self {
+        Self {
+            workflow_id: workflow_id.into(),
+            workflow_revision,
+            run_id: None,
+        }
+    }
+    pub fn with_run_id(mut self, run_id: Option<String>) -> Self {
+        self.run_id = run_id;
+        self
+    }
+}
+
+impl WorkflowRunExecution {
+    pub fn new(phase: WorkflowRunPhase, nodes: Vec<WorkflowNodeSnapshot>) -> Self {
+        Self {
+            phase,
+            nodes,
+            result: None,
+            error: None,
+            result_stale: false,
+        }
+    }
+    pub fn with_result(mut self, result: Option<SpiralQueryResponse>, result_stale: bool) -> Self {
+        self.result = result;
+        self.result_stale = result_stale;
+        self
+    }
+    pub fn with_error(mut self, error: Option<String>) -> Self {
+        self.error = error;
+        self
+    }
+}
+
+impl WorkflowRunTiming {
+    pub const fn new(started_ms: u64, finished_ms: u64, updated_ms: u64) -> Self {
+        Self {
+            started_ms,
+            finished_ms,
+            updated_ms,
+        }
+    }
+}
+
+impl WorkflowRunSnapshot {
+    pub fn new(
+        identity: WorkflowRunIdentity,
+        execution: WorkflowRunExecution,
+        timing: WorkflowRunTiming,
+    ) -> Self {
+        Self {
+            identity,
+            execution,
+            timing,
+        }
+    }
+    pub fn workflow_id(&self) -> &str {
+        &self.identity.workflow_id
+    }
+    pub const fn workflow_revision(&self) -> u64 {
+        self.identity.workflow_revision
+    }
+    pub fn run_id(&self) -> Option<&str> {
+        self.identity.run_id.as_deref()
+    }
+    pub const fn phase(&self) -> WorkflowRunPhase {
+        self.execution.phase
+    }
+    pub fn nodes(&self) -> &[WorkflowNodeSnapshot] {
+        &self.execution.nodes
+    }
+    pub const fn result(&self) -> Option<&SpiralQueryResponse> {
+        self.execution.result.as_ref()
+    }
+    pub fn error(&self) -> Option<&str> {
+        self.execution.error.as_deref()
+    }
+    pub const fn result_stale(&self) -> bool {
+        self.execution.result_stale
+    }
+    pub const fn started_ms(&self) -> u64 {
+        self.timing.started_ms
+    }
+    pub const fn finished_ms(&self) -> u64 {
+        self.timing.finished_ms
+    }
+    pub const fn updated_ms(&self) -> u64 {
+        self.timing.updated_ms
+    }
+    pub fn set_run_id(&mut self, run_id: Option<String>) {
+        self.identity.run_id = run_id;
+    }
+    pub const fn set_workflow_revision(&mut self, revision: u64) {
+        self.identity.workflow_revision = revision;
+    }
+    pub const fn set_phase(&mut self, phase: WorkflowRunPhase) {
+        self.execution.phase = phase;
+    }
+    pub fn nodes_mut(&mut self) -> &mut Vec<WorkflowNodeSnapshot> {
+        &mut self.execution.nodes
+    }
+    pub fn set_result(&mut self, result: Option<SpiralQueryResponse>) {
+        self.execution.result = result;
+    }
+    pub fn set_error(&mut self, error: Option<String>) {
+        self.execution.error = error;
+    }
+    pub const fn set_result_stale(&mut self, result_stale: bool) {
+        self.execution.result_stale = result_stale;
+    }
+    pub const fn set_started_ms(&mut self, started_ms: u64) {
+        self.timing.started_ms = started_ms;
+    }
+    pub const fn set_finished_ms(&mut self, finished_ms: u64) {
+        self.timing.finished_ms = finished_ms;
+    }
+    pub const fn set_updated_ms(&mut self, updated_ms: u64) {
+        self.timing.updated_ms = updated_ms;
     }
 }
 
@@ -349,50 +623,302 @@ impl WorkflowRunPhase {
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkflowNodeSnapshot {
-    pub node_id: String,
-    pub phase: WorkflowNodePhase,
-    pub detail: String,
+    #[serde(flatten)]
+    status: WorkflowNodeStatus,
+    #[serde(flatten)]
+    outcome: WorkflowNodeOutcome,
+    #[serde(flatten)]
+    artifacts: WorkflowNodeArtifacts,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorkflowNodeStatus {
+    node_id: String,
+    phase: WorkflowNodePhase,
+    detail: String,
     #[serde(default)]
-    pub elapsed_ms: u64,
+    elapsed_ms: u64,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorkflowNodeOutcome {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rows: Option<usize>,
+    rows: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+    error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub progress: Option<WorkflowNodeProgress>,
+    progress: Option<WorkflowNodeProgress>,
     #[serde(default)]
-    pub quarantine: WorkflowQuarantineSummary,
+    quarantine: WorkflowQuarantineSummary,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorkflowNodeArtifacts {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<WorkflowModelRunMetadata>,
+    model: Option<WorkflowModelRunMetadata>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub warnings: Vec<String>,
+    warnings: Vec<String>,
+}
+
+impl WorkflowNodeStatus {
+    pub fn new(
+        node_id: impl Into<String>,
+        phase: WorkflowNodePhase,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            node_id: node_id.into(),
+            phase,
+            detail: detail.into(),
+            elapsed_ms: 0,
+        }
+    }
+    pub const fn with_elapsed_ms(mut self, elapsed_ms: u64) -> Self {
+        self.elapsed_ms = elapsed_ms;
+        self
+    }
+}
+impl WorkflowNodeOutcome {
+    pub fn new(
+        rows: Option<usize>,
+        error: Option<String>,
+        progress: Option<WorkflowNodeProgress>,
+    ) -> Self {
+        Self {
+            rows,
+            error,
+            progress,
+            quarantine: WorkflowQuarantineSummary::default(),
+        }
+    }
+    pub fn with_quarantine(mut self, quarantine: WorkflowQuarantineSummary) -> Self {
+        self.quarantine = quarantine;
+        self
+    }
+}
+impl WorkflowNodeArtifacts {
+    pub fn new(model: Option<WorkflowModelRunMetadata>, warnings: Vec<String>) -> Self {
+        Self { model, warnings }
+    }
+}
+impl WorkflowNodeSnapshot {
+    pub fn new(
+        status: WorkflowNodeStatus,
+        outcome: WorkflowNodeOutcome,
+        artifacts: WorkflowNodeArtifacts,
+    ) -> Self {
+        Self {
+            status,
+            outcome,
+            artifacts,
+        }
+    }
+    pub fn pending(node_id: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self::new(
+            WorkflowNodeStatus::new(node_id, WorkflowNodePhase::Pending, detail),
+            WorkflowNodeOutcome::default(),
+            WorkflowNodeArtifacts::default(),
+        )
+    }
+    pub fn node_id(&self) -> &str {
+        &self.status.node_id
+    }
+    pub const fn phase(&self) -> WorkflowNodePhase {
+        self.status.phase
+    }
+    pub fn detail(&self) -> &str {
+        &self.status.detail
+    }
+    pub const fn elapsed_ms(&self) -> u64 {
+        self.status.elapsed_ms
+    }
+    pub const fn rows(&self) -> Option<usize> {
+        self.outcome.rows
+    }
+    pub fn error(&self) -> Option<&str> {
+        self.outcome.error.as_deref()
+    }
+    pub const fn progress(&self) -> Option<&WorkflowNodeProgress> {
+        self.outcome.progress.as_ref()
+    }
+    pub const fn quarantine(&self) -> &WorkflowQuarantineSummary {
+        &self.outcome.quarantine
+    }
+    pub const fn model(&self) -> Option<&WorkflowModelRunMetadata> {
+        self.artifacts.model.as_ref()
+    }
+    pub fn warnings(&self) -> &[String] {
+        &self.artifacts.warnings
+    }
+    pub const fn set_phase(&mut self, phase: WorkflowNodePhase) {
+        self.status.phase = phase;
+    }
+    pub fn set_detail(&mut self, detail: impl Into<String>) {
+        self.status.detail = detail.into();
+    }
+    pub const fn set_elapsed_ms(&mut self, elapsed_ms: u64) {
+        self.status.elapsed_ms = elapsed_ms;
+    }
+    pub const fn set_rows(&mut self, rows: Option<usize>) {
+        self.outcome.rows = rows;
+    }
+    pub fn set_error(&mut self, error: Option<String>) {
+        self.outcome.error = error;
+    }
+    pub fn set_progress(&mut self, progress: Option<WorkflowNodeProgress>) {
+        self.outcome.progress = progress;
+    }
+    pub fn set_quarantine(&mut self, quarantine: WorkflowQuarantineSummary) {
+        self.outcome.quarantine = quarantine;
+    }
+    pub fn set_model(&mut self, model: Option<WorkflowModelRunMetadata>) {
+        self.artifacts.model = model;
+    }
+    pub fn warnings_mut(&mut self) -> &mut Vec<String> {
+        &mut self.artifacts.warnings
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkflowNodeProgress {
-    pub completed: u64,
-    pub total: u64,
-    pub unit: String,
+    completed: u64,
+    total: u64,
+    unit: String,
+}
+
+impl WorkflowNodeProgress {
+    pub fn new(completed: u64, total: u64, unit: impl Into<String>) -> Self {
+        Self {
+            completed,
+            total,
+            unit: unit.into(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkflowModelRunMetadata {
-    pub model_id: String,
-    pub artifact_revision: String,
-    pub feature_cache_relation: String,
+    #[serde(flatten)]
+    identity: WorkflowModelIdentity,
+    #[serde(flatten)]
+    execution: WorkflowModelExecution,
+    #[serde(flatten)]
+    metrics: WorkflowModelMetrics,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorkflowModelIdentity {
+    model_id: String,
+    artifact_revision: String,
+    feature_cache_relation: String,
+    fingerprint: String,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorkflowModelExecution {
     #[serde(default)]
-    pub features: Vec<WorkflowFeatureDefinition>,
-    pub fingerprint: String,
-    pub reused: bool,
-    pub device: String,
+    features: Vec<WorkflowFeatureDefinition>,
+    reused: bool,
+    device: String,
+}
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorkflowModelMetrics {
     #[serde(default)]
-    pub input_rows: u64,
+    input_rows: u64,
     #[serde(default)]
-    pub output_rows: u64,
+    output_rows: u64,
     #[serde(default)]
-    pub decode_ms: u64,
+    decode_ms: u64,
     #[serde(default)]
-    pub inference_ms: u64,
+    inference_ms: u64,
+}
+
+impl WorkflowModelIdentity {
+    pub fn new(
+        model_id: impl Into<String>,
+        artifact_revision: impl Into<String>,
+        feature_cache_relation: impl Into<String>,
+    ) -> Self {
+        Self {
+            model_id: model_id.into(),
+            artifact_revision: artifact_revision.into(),
+            feature_cache_relation: feature_cache_relation.into(),
+            fingerprint: String::new(),
+        }
+    }
+    pub fn with_fingerprint(mut self, fingerprint: impl Into<String>) -> Self {
+        self.fingerprint = fingerprint.into();
+        self
+    }
+}
+impl WorkflowModelExecution {
+    pub fn new(
+        features: Vec<WorkflowFeatureDefinition>,
+        reused: bool,
+        device: impl Into<String>,
+    ) -> Self {
+        Self {
+            features,
+            reused,
+            device: device.into(),
+        }
+    }
+}
+impl WorkflowModelMetrics {
+    pub const fn new(input_rows: u64, output_rows: u64, decode_ms: u64) -> Self {
+        Self {
+            input_rows,
+            output_rows,
+            decode_ms,
+            inference_ms: 0,
+        }
+    }
+    pub const fn with_inference_ms(mut self, inference_ms: u64) -> Self {
+        self.inference_ms = inference_ms;
+        self
+    }
+}
+impl WorkflowModelRunMetadata {
+    pub const fn new(
+        identity: WorkflowModelIdentity,
+        execution: WorkflowModelExecution,
+        metrics: WorkflowModelMetrics,
+    ) -> Self {
+        Self {
+            identity,
+            execution,
+            metrics,
+        }
+    }
+    pub fn model_id(&self) -> &str {
+        &self.identity.model_id
+    }
+    pub fn feature_cache_relation(&self) -> &str {
+        &self.identity.feature_cache_relation
+    }
+    pub fn features(&self) -> &[WorkflowFeatureDefinition] {
+        &self.execution.features
+    }
+    pub fn fingerprint(&self) -> &str {
+        &self.identity.fingerprint
+    }
+    pub const fn reused(&self) -> bool {
+        self.execution.reused
+    }
+    pub fn device(&self) -> &str {
+        &self.execution.device
+    }
+    pub const fn input_rows(&self) -> u64 {
+        self.metrics.input_rows
+    }
+    pub const fn output_rows(&self) -> u64 {
+        self.metrics.output_rows
+    }
+    pub const fn decode_ms(&self) -> u64 {
+        self.metrics.decode_ms
+    }
+    pub const fn inference_ms(&self) -> u64 {
+        self.metrics.inference_ms
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -414,19 +940,19 @@ pub enum WorkflowNodePhase {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct WorkflowUpdate {
-    pub state: WorkflowStateResponse,
+    state: WorkflowStateResponse,
 }
 
 /// Public, secret-free readiness for the backend-owned Workflow agent.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkflowAgentReadiness {
-    pub configured: bool,
-    pub status: WorkflowAgentReadinessStatus,
+    configured: bool,
+    status: WorkflowAgentReadinessStatus,
     #[serde(default)]
-    pub provider: String,
+    provider: String,
     #[serde(default)]
-    pub model: String,
-    pub detail: String,
+    model: String,
+    detail: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -474,44 +1000,135 @@ pub enum WorkflowAgentArtifactKind {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowAgentArtifactReceipt {
-    pub kind: WorkflowAgentArtifactKind,
-    pub label: String,
+    kind: WorkflowAgentArtifactKind,
+    label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub revision: Option<u64>,
+    revision: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_id: Option<String>,
+    run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub row_count: Option<usize>,
+    row_count: Option<usize>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowAgentToolSummary {
-    pub call_id: String,
-    pub name: String,
-    pub phase: WorkflowAgentToolPhase,
-    pub summary: String,
+    call_id: String,
+    name: String,
+    phase: WorkflowAgentToolPhase,
+    summary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+    error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub receipt: Option<WorkflowAgentArtifactReceipt>,
+    receipt: Option<WorkflowAgentArtifactReceipt>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowAgentMessage {
-    pub id: String,
-    pub sequence: u64,
-    pub role: WorkflowAgentRole,
-    pub phase: WorkflowAgentMessagePhase,
+    #[serde(flatten)]
+    identity: WorkflowAgentMessageIdentity,
+    #[serde(flatten)]
+    content: WorkflowAgentMessageContent,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowAgentMessageIdentity {
+    id: String,
+    sequence: u64,
+    role: WorkflowAgentRole,
     #[serde(default)]
-    pub text: String,
+    created_ms: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowAgentMessageContent {
+    phase: WorkflowAgentMessagePhase,
     #[serde(default)]
-    pub tools: Vec<WorkflowAgentToolSummary>,
+    text: String,
+    #[serde(default)]
+    tools: Vec<WorkflowAgentToolSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_id: Option<String>,
-    #[serde(default)]
-    pub created_ms: u64,
+    run_id: Option<String>,
+}
+
+impl WorkflowAgentMessageIdentity {
+    pub fn new(id: impl Into<String>, sequence: u64, role: WorkflowAgentRole) -> Self {
+        Self {
+            id: id.into(),
+            sequence,
+            role,
+            created_ms: 0,
+        }
+    }
+    pub const fn with_created_ms(mut self, created_ms: u64) -> Self {
+        self.created_ms = created_ms;
+        self
+    }
+}
+impl WorkflowAgentMessageContent {
+    pub fn new(
+        phase: WorkflowAgentMessagePhase,
+        text: impl Into<String>,
+        tools: Vec<WorkflowAgentToolSummary>,
+    ) -> Self {
+        Self {
+            phase,
+            text: text.into(),
+            tools,
+            run_id: None,
+        }
+    }
+    pub fn with_run_id(mut self, run_id: Option<String>) -> Self {
+        self.run_id = run_id;
+        self
+    }
+}
+impl WorkflowAgentMessage {
+    pub const fn new(
+        identity: WorkflowAgentMessageIdentity,
+        content: WorkflowAgentMessageContent,
+    ) -> Self {
+        Self { identity, content }
+    }
+    pub fn id(&self) -> &str {
+        &self.identity.id
+    }
+    pub const fn sequence(&self) -> u64 {
+        self.identity.sequence
+    }
+    pub const fn role(&self) -> WorkflowAgentRole {
+        self.identity.role
+    }
+    pub const fn phase(&self) -> WorkflowAgentMessagePhase {
+        self.content.phase
+    }
+    pub fn text(&self) -> &str {
+        &self.content.text
+    }
+    pub fn tools(&self) -> &[WorkflowAgentToolSummary] {
+        &self.content.tools
+    }
+    pub fn run_id(&self) -> Option<&str> {
+        self.content.run_id.as_deref()
+    }
+    pub const fn created_ms(&self) -> u64 {
+        self.identity.created_ms
+    }
+    pub const fn set_phase(&mut self, phase: WorkflowAgentMessagePhase) {
+        self.content.phase = phase;
+    }
+    pub fn set_text(&mut self, text: impl Into<String>) {
+        self.content.text = text.into();
+    }
+    pub fn tools_mut(&mut self) -> &mut Vec<WorkflowAgentToolSummary> {
+        &mut self.content.tools
+    }
+    pub fn set_run_id(&mut self, run_id: Option<String>) {
+        self.content.run_id = run_id;
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -539,110 +1156,307 @@ impl WorkflowAgentPhase {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowAgentSession {
-    pub workflow_id: String,
+    #[serde(flatten)]
+    identity: WorkflowAgentSessionIdentity,
+    #[serde(flatten)]
+    activity: WorkflowAgentActivity,
+    #[serde(default)]
+    updated_ms: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowAgentSessionIdentity {
+    workflow_id: String,
     #[serde(default, alias = "session_id")]
-    pub conversation_id: String,
-    pub revision: u64,
-    pub phase: WorkflowAgentPhase,
+    conversation_id: String,
+    revision: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowAgentActivity {
+    phase: WorkflowAgentPhase,
     #[serde(default)]
-    pub messages: Vec<WorkflowAgentMessage>,
+    messages: Vec<WorkflowAgentMessage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_turn_id: Option<String>,
+    active_turn_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub deferred_run_id: Option<String>,
+    deferred_run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    #[serde(default)]
-    pub updated_ms: u64,
+    error: Option<String>,
 }
 
 impl Default for WorkflowAgentSession {
     fn default() -> Self {
         Self {
-            workflow_id: DEFAULT_WORKFLOW_ID.to_owned(),
-            conversation_id: String::new(),
-            revision: 0,
-            phase: WorkflowAgentPhase::Idle,
-            messages: Vec::new(),
-            active_turn_id: None,
-            deferred_run_id: None,
-            error: None,
+            identity: WorkflowAgentSessionIdentity::new(DEFAULT_WORKFLOW_ID, String::new(), 0),
+            activity: WorkflowAgentActivity::new(WorkflowAgentPhase::Idle, Vec::new()),
             updated_ms: 0,
         }
     }
 }
 
+impl WorkflowAgentSessionIdentity {
+    pub fn new(
+        workflow_id: impl Into<String>,
+        conversation_id: impl Into<String>,
+        revision: u64,
+    ) -> Self {
+        Self {
+            workflow_id: workflow_id.into(),
+            conversation_id: conversation_id.into(),
+            revision,
+        }
+    }
+}
+impl WorkflowAgentActivity {
+    pub fn new(phase: WorkflowAgentPhase, messages: Vec<WorkflowAgentMessage>) -> Self {
+        Self {
+            phase,
+            messages,
+            active_turn_id: None,
+            deferred_run_id: None,
+            error: None,
+        }
+    }
+    pub fn with_turns(
+        mut self,
+        active_turn_id: Option<String>,
+        deferred_run_id: Option<String>,
+    ) -> Self {
+        self.active_turn_id = active_turn_id;
+        self.deferred_run_id = deferred_run_id;
+        self
+    }
+    pub fn with_error(mut self, error: Option<String>) -> Self {
+        self.error = error;
+        self
+    }
+}
+impl WorkflowAgentSession {
+    pub const fn new(
+        identity: WorkflowAgentSessionIdentity,
+        activity: WorkflowAgentActivity,
+        updated_ms: u64,
+    ) -> Self {
+        Self {
+            identity,
+            activity,
+            updated_ms,
+        }
+    }
+    pub fn workflow_id(&self) -> &str {
+        &self.identity.workflow_id
+    }
+    pub fn conversation_id(&self) -> &str {
+        &self.identity.conversation_id
+    }
+    pub const fn revision(&self) -> u64 {
+        self.identity.revision
+    }
+    pub const fn phase(&self) -> WorkflowAgentPhase {
+        self.activity.phase
+    }
+    pub fn messages(&self) -> &[WorkflowAgentMessage] {
+        &self.activity.messages
+    }
+    pub fn active_turn_id(&self) -> Option<&str> {
+        self.activity.active_turn_id.as_deref()
+    }
+    pub fn deferred_run_id(&self) -> Option<&str> {
+        self.activity.deferred_run_id.as_deref()
+    }
+    pub fn error(&self) -> Option<&str> {
+        self.activity.error.as_deref()
+    }
+    pub const fn updated_ms(&self) -> u64 {
+        self.updated_ms
+    }
+    pub const fn set_revision(&mut self, revision: u64) {
+        self.identity.revision = revision;
+    }
+    pub fn set_workflow_id(&mut self, workflow_id: impl Into<String>) {
+        self.identity.workflow_id = workflow_id.into();
+    }
+    pub const fn set_phase(&mut self, phase: WorkflowAgentPhase) {
+        self.activity.phase = phase;
+    }
+    pub fn messages_mut(&mut self) -> &mut Vec<WorkflowAgentMessage> {
+        &mut self.activity.messages
+    }
+    pub fn set_active_turn_id(&mut self, turn_id: Option<String>) {
+        self.activity.active_turn_id = turn_id;
+    }
+    pub fn set_deferred_run_id(&mut self, run_id: Option<String>) {
+        self.activity.deferred_run_id = run_id;
+    }
+    pub fn set_error(&mut self, error: Option<String>) {
+        self.activity.error = error;
+    }
+    pub const fn set_updated_ms(&mut self, updated_ms: u64) {
+        self.updated_ms = updated_ms;
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkflowAgentConversationSummary {
-    pub conversation_id: String,
-    pub title: String,
-    pub created_ms: u64,
-    pub updated_ms: u64,
-    pub message_count: usize,
+    conversation_id: String,
+    title: String,
+    created_ms: u64,
+    updated_ms: u64,
+    message_count: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owned_run_id: Option<String>,
+    owned_run_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkflowAgentStateResponse {
-    pub readiness: WorkflowAgentReadiness,
-    pub history_available: bool,
-    pub scope_id: String,
-    pub revision: u64,
-    pub active_conversation_id: String,
+    readiness: WorkflowAgentReadiness,
+    #[serde(flatten)]
+    identity: WorkflowAgentStateIdentity,
     #[serde(default)]
-    pub conversations: Vec<WorkflowAgentConversationSummary>,
-    pub conversation_limit: usize,
-    pub session: WorkflowAgentSession,
+    conversations: Vec<WorkflowAgentConversationSummary>,
+    session: WorkflowAgentSession,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorkflowAgentStateIdentity {
+    history_available: bool,
+    scope_id: String,
+    revision: u64,
+    active_conversation_id: String,
+    conversation_limit: usize,
+}
+
+impl WorkflowAgentStateIdentity {
+    pub fn new(history_available: bool, scope_id: impl Into<String>, revision: u64) -> Self {
+        Self {
+            history_available,
+            scope_id: scope_id.into(),
+            revision,
+            active_conversation_id: String::new(),
+            conversation_limit: 0,
+        }
+    }
+    pub fn with_conversation(
+        mut self,
+        active_conversation_id: impl Into<String>,
+        conversation_limit: usize,
+    ) -> Self {
+        self.active_conversation_id = active_conversation_id.into();
+        self.conversation_limit = conversation_limit;
+        self
+    }
+}
+impl WorkflowAgentStateResponse {
+    pub fn new(
+        readiness: WorkflowAgentReadiness,
+        identity: WorkflowAgentStateIdentity,
+        session: WorkflowAgentSession,
+    ) -> Self {
+        Self {
+            readiness,
+            identity,
+            conversations: Vec::new(),
+            session,
+        }
+    }
+    pub fn with_conversations(
+        mut self,
+        conversations: Vec<WorkflowAgentConversationSummary>,
+    ) -> Self {
+        self.conversations = conversations;
+        self
+    }
+    pub const fn readiness(&self) -> &WorkflowAgentReadiness {
+        &self.readiness
+    }
+    pub const fn history_available(&self) -> bool {
+        self.identity.history_available
+    }
+    pub fn scope_id(&self) -> &str {
+        &self.identity.scope_id
+    }
+    pub const fn revision(&self) -> u64 {
+        self.identity.revision
+    }
+    pub fn active_conversation_id(&self) -> &str {
+        &self.identity.active_conversation_id
+    }
+    pub fn conversations(&self) -> &[WorkflowAgentConversationSummary] {
+        &self.conversations
+    }
+    pub const fn conversation_limit(&self) -> usize {
+        self.identity.conversation_limit
+    }
+    pub const fn session(&self) -> &WorkflowAgentSession {
+        &self.session
+    }
+    pub fn set_scope_id(&mut self, scope_id: impl Into<String>) {
+        self.identity.scope_id = scope_id.into();
+    }
+    pub const fn set_revision(&mut self, revision: u64) {
+        self.identity.revision = revision;
+    }
+    pub const fn set_history_available(&mut self, history_available: bool) {
+        self.identity.history_available = history_available;
+    }
+    pub fn conversations_mut(&mut self) -> &mut Vec<WorkflowAgentConversationSummary> {
+        &mut self.conversations
+    }
+    pub const fn session_mut(&mut self) -> &mut WorkflowAgentSession {
+        &mut self.session
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkflowAgentTurnRequest {
-    pub scope_id: String,
-    pub conversation_id: String,
-    pub text: String,
-    pub expected_revision: u64,
+    scope_id: String,
+    conversation_id: String,
+    text: String,
+    expected_revision: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkflowAgentCreateConversationRequest {
-    pub scope_id: String,
-    pub expected_revision: u64,
+    scope_id: String,
+    expected_revision: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkflowAgentActivateConversationRequest {
-    pub scope_id: String,
-    pub conversation_id: String,
-    pub expected_revision: u64,
+    scope_id: String,
+    conversation_id: String,
+    expected_revision: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkflowAgentCancelRequest {
-    pub scope_id: String,
-    pub conversation_id: String,
-    pub turn_id: String,
+    scope_id: String,
+    conversation_id: String,
+    turn_id: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkflowAgentTurnAccepted {
-    pub turn_id: String,
-    pub state: WorkflowAgentStateResponse,
+    turn_id: String,
+    state: WorkflowAgentStateResponse,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkflowAgentUpdate {
-    pub state: WorkflowAgentStateResponse,
+    state: WorkflowAgentStateResponse,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkflowCapabilities {
-    pub schema_version: u32,
-    pub node_kinds: Vec<WorkflowNodeCapability>,
-    pub max_query_rows: usize,
-    pub relation_discovery: String,
+    schema_version: u32,
+    node_kinds: Vec<WorkflowNodeCapability>,
+    max_query_rows: usize,
+    relation_discovery: String,
     #[serde(default)]
-    pub models: Vec<WorkflowModelCapability>,
+    models: Vec<WorkflowModelCapability>,
 }
 
 impl Default for WorkflowCapabilities {
@@ -681,24 +1495,24 @@ impl Default for WorkflowCapabilities {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkflowNodeCapability {
-    pub kind: WorkflowNodeKind,
-    pub executable: bool,
-    pub detail: String,
+    kind: WorkflowNodeKind,
+    executable: bool,
+    detail: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkflowModelCapability {
-    pub id: String,
-    pub label: String,
-    pub repository: String,
-    pub artifact_revision: String,
-    pub input_contract: String,
-    pub max_features: usize,
-    pub device_policy: String,
+    id: String,
+    label: String,
+    repository: String,
+    artifact_revision: String,
+    input_contract: String,
+    max_features: usize,
+    device_policy: String,
 }
 
 impl WorkflowModelCapability {
-    pub fn siglip_base() -> Self {
+    fn siglip_base() -> Self {
         Self {
             id: SIGLIP_BASE_MODEL_ID.to_owned(),
             label: "SigLIP base".to_owned(),
@@ -717,35 +1531,35 @@ pub struct WorkflowRelationsResponse {
     /// Must match [`WorkflowStateResponse::scope_id`] before the catalog may
     /// be projected into the editor.
     #[serde(default)]
-    pub scope_id: String,
-    pub relations: Vec<WorkflowRelation>,
-    pub complete: bool,
+    scope_id: String,
+    relations: Vec<WorkflowRelation>,
+    complete: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub limitation: Option<String>,
+    limitation: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkflowRelation {
-    pub name: String,
-    pub relation_type: String,
-    pub columns: Vec<QueryColumn>,
+    name: String,
+    relation_type: String,
+    columns: Vec<QueryColumn>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub row_count: Option<u64>,
+    row_count: Option<u64>,
 }
 
 /// Reserved bounded diagnostic shape for later decode/model phases.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkflowQuarantineSummary {
-    pub count: u64,
+    count: u64,
     #[serde(default)]
-    pub examples: Vec<String>,
+    examples: Vec<String>,
 }
 
 /// One document persisted atomically under the workflow identity.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct WorkflowDocument {
-    pub workflow: WorkflowSpec,
-    pub snapshot: WorkflowRunSnapshot,
+    workflow: WorkflowSpec,
+    snapshot: WorkflowRunSnapshot,
 }
 
 impl Default for WorkflowDocument {
@@ -757,6 +1571,21 @@ impl Default for WorkflowDocument {
 }
 
 impl WorkflowSpec {
+    pub fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            revision: 0,
+            nodes: Vec::new(),
+            edges: Vec::new(),
+        }
+    }
+
+    pub const fn with_revision(mut self, revision: u64) -> Self {
+        self.revision = revision;
+        self
+    }
+
     pub fn validate(&self) -> WorkflowValidationReport {
         let spec = self;
         let mut report = WorkflowValidationReport::default();
@@ -1219,6 +2048,539 @@ impl WorkflowSpec {
     }
 }
 
+impl WorkflowSpec {
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+    pub fn nodes(&self) -> &[WorkflowNodeSpec] {
+        &self.nodes
+    }
+    pub fn edges(&self) -> &[WorkflowEdgeSpec] {
+        &self.edges
+    }
+    pub fn nodes_mut(&mut self) -> &mut Vec<WorkflowNodeSpec> {
+        &mut self.nodes
+    }
+    pub fn edges_mut(&mut self) -> &mut Vec<WorkflowEdgeSpec> {
+        &mut self.edges
+    }
+    pub const fn set_revision(&mut self, revision: u64) {
+        self.revision = revision;
+    }
+    pub fn set_name(&mut self, name: impl Into<String>) {
+        self.name = name.into();
+    }
+}
+impl WorkflowNodeSpec {
+    pub fn new(id: impl Into<String>, name: impl Into<String>, config: WorkflowNodeConfig) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            config,
+        }
+    }
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub const fn config(&self) -> &WorkflowNodeConfig {
+        &self.config
+    }
+    pub fn config_mut(&mut self) -> &mut WorkflowNodeConfig {
+        &mut self.config
+    }
+    pub fn set_id(&mut self, id: impl Into<String>) {
+        self.id = id.into();
+    }
+    pub fn set_name(&mut self, name: impl Into<String>) {
+        self.name = name.into();
+    }
+    pub fn set_config(&mut self, config: WorkflowNodeConfig) {
+        self.config = config;
+    }
+}
+impl WorkflowEdgeSpec {
+    pub fn new(source: impl Into<String>, target: impl Into<String>) -> Self {
+        Self {
+            source: source.into(),
+            target: target.into(),
+        }
+    }
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+    pub fn target(&self) -> &str {
+        &self.target
+    }
+}
+impl WorkflowValidationReport {
+    pub fn errors(&self) -> &[WorkflowValidationIssue] {
+        &self.errors
+    }
+    pub fn warnings(&self) -> &[WorkflowValidationIssue] {
+        &self.warnings
+    }
+}
+impl WorkflowStateResponse {
+    pub fn from_workflow(scope_id: impl Into<String>, workflow: WorkflowSpec) -> Self {
+        let validation = workflow.validate();
+        let snapshot = WorkflowRunSnapshot::idle_for(&workflow);
+        Self {
+            scope_id: scope_id.into(),
+            workflow,
+            validation,
+            snapshot,
+        }
+    }
+
+    pub fn scope_id(&self) -> &str {
+        &self.scope_id
+    }
+    pub const fn workflow(&self) -> &WorkflowSpec {
+        &self.workflow
+    }
+    pub const fn validation(&self) -> &WorkflowValidationReport {
+        &self.validation
+    }
+    pub const fn snapshot(&self) -> &WorkflowRunSnapshot {
+        &self.snapshot
+    }
+    pub fn workflow_mut(&mut self) -> &mut WorkflowSpec {
+        &mut self.workflow
+    }
+    pub fn set_snapshot(&mut self, snapshot: WorkflowRunSnapshot) {
+        self.snapshot = snapshot;
+    }
+    pub const fn snapshot_mut(&mut self) -> &mut WorkflowRunSnapshot {
+        &mut self.snapshot
+    }
+    pub fn set_scope_id(&mut self, scope_id: impl Into<String>) {
+        self.scope_id = scope_id.into();
+    }
+}
+
+impl WorkflowUpdate {
+    pub const fn new(state: WorkflowStateResponse) -> Self {
+        Self { state }
+    }
+
+    pub const fn state(&self) -> &WorkflowStateResponse {
+        &self.state
+    }
+}
+impl WorkflowNodeProgress {
+    pub const fn completed(&self) -> u64 {
+        self.completed
+    }
+    pub const fn total(&self) -> u64 {
+        self.total
+    }
+    pub fn unit(&self) -> &str {
+        &self.unit
+    }
+}
+impl WorkflowAgentReadiness {
+    pub fn new(
+        configured: bool,
+        status: WorkflowAgentReadinessStatus,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            configured,
+            status,
+            provider: String::new(),
+            model: String::new(),
+            detail: detail.into(),
+        }
+    }
+    pub fn with_provider(mut self, provider: impl Into<String>, model: impl Into<String>) -> Self {
+        self.provider = provider.into();
+        self.model = model.into();
+        self
+    }
+    pub const fn configured(&self) -> bool {
+        self.configured
+    }
+    pub const fn status(&self) -> WorkflowAgentReadinessStatus {
+        self.status
+    }
+    pub fn provider(&self) -> &str {
+        &self.provider
+    }
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+    pub fn detail(&self) -> &str {
+        &self.detail
+    }
+}
+impl WorkflowAgentArtifactReceipt {
+    pub fn new(kind: WorkflowAgentArtifactKind, label: impl Into<String>) -> Self {
+        Self {
+            kind,
+            label: label.into(),
+            revision: None,
+            run_id: None,
+            row_count: None,
+        }
+    }
+    pub const fn with_revision(mut self, revision: Option<u64>) -> Self {
+        self.revision = revision;
+        self
+    }
+    pub fn with_run_id(mut self, run_id: Option<String>) -> Self {
+        self.run_id = run_id;
+        self
+    }
+    pub const fn with_row_count(mut self, row_count: Option<usize>) -> Self {
+        self.row_count = row_count;
+        self
+    }
+    pub const fn kind(&self) -> WorkflowAgentArtifactKind {
+        self.kind
+    }
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+    pub const fn revision(&self) -> Option<u64> {
+        self.revision
+    }
+    pub fn run_id(&self) -> Option<&str> {
+        self.run_id.as_deref()
+    }
+    pub const fn row_count(&self) -> Option<usize> {
+        self.row_count
+    }
+    pub const fn set_revision(&mut self, revision: Option<u64>) {
+        self.revision = revision;
+    }
+    pub fn set_run_id(&mut self, run_id: Option<String>) {
+        self.run_id = run_id;
+    }
+}
+impl WorkflowAgentToolSummary {
+    pub fn new(
+        call_id: impl Into<String>,
+        name: impl Into<String>,
+        summary: impl Into<String>,
+    ) -> Self {
+        Self {
+            call_id: call_id.into(),
+            name: name.into(),
+            phase: WorkflowAgentToolPhase::Running,
+            summary: summary.into(),
+            error: None,
+            receipt: None,
+        }
+    }
+    pub const fn set_phase(&mut self, phase: WorkflowAgentToolPhase) {
+        self.phase = phase;
+    }
+    pub fn set_summary(&mut self, summary: impl Into<String>) {
+        self.summary = summary.into();
+    }
+    pub fn set_error(&mut self, error: Option<String>) {
+        self.error = error;
+    }
+    pub fn set_receipt(&mut self, receipt: Option<WorkflowAgentArtifactReceipt>) {
+        self.receipt = receipt;
+    }
+    pub fn call_id(&self) -> &str {
+        &self.call_id
+    }
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub const fn phase(&self) -> WorkflowAgentToolPhase {
+        self.phase
+    }
+    pub fn summary(&self) -> &str {
+        &self.summary
+    }
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+    pub const fn receipt(&self) -> Option<&WorkflowAgentArtifactReceipt> {
+        self.receipt.as_ref()
+    }
+}
+impl WorkflowAgentConversationSummary {
+    pub fn new(
+        conversation_id: impl Into<String>,
+        title: impl Into<String>,
+        created_ms: u64,
+    ) -> Self {
+        Self {
+            conversation_id: conversation_id.into(),
+            title: title.into(),
+            created_ms,
+            updated_ms: created_ms,
+            message_count: 0,
+            owned_run_id: None,
+        }
+    }
+    pub const fn with_activity(mut self, updated_ms: u64, message_count: usize) -> Self {
+        self.updated_ms = updated_ms;
+        self.message_count = message_count;
+        self
+    }
+    pub fn with_owned_run_id(mut self, owned_run_id: Option<String>) -> Self {
+        self.owned_run_id = owned_run_id;
+        self
+    }
+    pub fn conversation_id(&self) -> &str {
+        &self.conversation_id
+    }
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+    pub const fn created_ms(&self) -> u64 {
+        self.created_ms
+    }
+    pub const fn updated_ms(&self) -> u64 {
+        self.updated_ms
+    }
+    pub const fn message_count(&self) -> usize {
+        self.message_count
+    }
+    pub fn owned_run_id(&self) -> Option<&str> {
+        self.owned_run_id.as_deref()
+    }
+    pub fn set_owned_run_id(&mut self, owned_run_id: Option<String>) {
+        self.owned_run_id = owned_run_id;
+    }
+}
+impl WorkflowAgentTurnRequest {
+    pub fn new(
+        scope_id: impl Into<String>,
+        conversation_id: impl Into<String>,
+        text: impl Into<String>,
+    ) -> Self {
+        Self {
+            scope_id: scope_id.into(),
+            conversation_id: conversation_id.into(),
+            text: text.into(),
+            expected_revision: 0,
+        }
+    }
+    pub const fn expecting_revision(mut self, expected_revision: u64) -> Self {
+        self.expected_revision = expected_revision;
+        self
+    }
+    pub fn scope_id(&self) -> &str {
+        &self.scope_id
+    }
+    pub fn conversation_id(&self) -> &str {
+        &self.conversation_id
+    }
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+    pub const fn expected_revision(&self) -> u64 {
+        self.expected_revision
+    }
+}
+impl WorkflowAgentCreateConversationRequest {
+    pub fn new(scope_id: impl Into<String>, expected_revision: u64) -> Self {
+        Self {
+            scope_id: scope_id.into(),
+            expected_revision,
+        }
+    }
+    pub fn scope_id(&self) -> &str {
+        &self.scope_id
+    }
+    pub const fn expected_revision(&self) -> u64 {
+        self.expected_revision
+    }
+}
+impl WorkflowAgentActivateConversationRequest {
+    pub fn new(
+        scope_id: impl Into<String>,
+        conversation_id: impl Into<String>,
+        expected_revision: u64,
+    ) -> Self {
+        Self {
+            scope_id: scope_id.into(),
+            conversation_id: conversation_id.into(),
+            expected_revision,
+        }
+    }
+    pub fn scope_id(&self) -> &str {
+        &self.scope_id
+    }
+    pub fn conversation_id(&self) -> &str {
+        &self.conversation_id
+    }
+    pub const fn expected_revision(&self) -> u64 {
+        self.expected_revision
+    }
+}
+impl WorkflowAgentCancelRequest {
+    pub fn new(
+        scope_id: impl Into<String>,
+        conversation_id: impl Into<String>,
+        turn_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            scope_id: scope_id.into(),
+            conversation_id: conversation_id.into(),
+            turn_id: turn_id.into(),
+        }
+    }
+
+    pub fn scope_id(&self) -> &str {
+        &self.scope_id
+    }
+    pub fn conversation_id(&self) -> &str {
+        &self.conversation_id
+    }
+    pub fn turn_id(&self) -> &str {
+        &self.turn_id
+    }
+}
+impl WorkflowAgentTurnAccepted {
+    pub fn new(turn_id: impl Into<String>, state: WorkflowAgentStateResponse) -> Self {
+        Self {
+            turn_id: turn_id.into(),
+            state,
+        }
+    }
+    pub const fn state(&self) -> &WorkflowAgentStateResponse {
+        &self.state
+    }
+    pub fn into_state(self) -> WorkflowAgentStateResponse {
+        self.state
+    }
+}
+impl WorkflowAgentUpdate {
+    pub const fn new(state: WorkflowAgentStateResponse) -> Self {
+        Self { state }
+    }
+    pub const fn state(&self) -> &WorkflowAgentStateResponse {
+        &self.state
+    }
+}
+impl WorkflowCapabilities {
+    pub fn models(&self) -> &[WorkflowModelCapability] {
+        &self.models
+    }
+}
+impl WorkflowModelCapability {
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+}
+impl WorkflowRelationsResponse {
+    pub fn new(
+        scope_id: impl Into<String>,
+        relations: Vec<WorkflowRelation>,
+        complete: bool,
+    ) -> Self {
+        Self {
+            scope_id: scope_id.into(),
+            relations,
+            complete,
+            limitation: None,
+        }
+    }
+    pub fn with_limitation(mut self, limitation: Option<String>) -> Self {
+        self.limitation = limitation;
+        self
+    }
+    pub fn scope_id(&self) -> &str {
+        &self.scope_id
+    }
+    pub fn relations(&self) -> &[WorkflowRelation] {
+        &self.relations
+    }
+    pub const fn complete(&self) -> bool {
+        self.complete
+    }
+    pub fn limitation(&self) -> Option<&str> {
+        self.limitation.as_deref()
+    }
+    pub fn set_scope_id(&mut self, scope_id: impl Into<String>) {
+        self.scope_id = scope_id.into();
+    }
+}
+impl WorkflowRelation {
+    pub fn new(
+        name: impl Into<String>,
+        relation_type: impl Into<String>,
+        columns: Vec<crate::relations::QueryColumn>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            relation_type: relation_type.into(),
+            columns,
+            row_count: None,
+        }
+    }
+    pub const fn with_row_count(mut self, row_count: Option<u64>) -> Self {
+        self.row_count = row_count;
+        self
+    }
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub fn relation_type(&self) -> &str {
+        &self.relation_type
+    }
+    pub fn columns(&self) -> &[crate::relations::QueryColumn] {
+        &self.columns
+    }
+    pub const fn row_count(&self) -> Option<u64> {
+        self.row_count
+    }
+}
+impl WorkflowQuarantineSummary {
+    pub fn new(count: u64, examples: Vec<String>) -> Self {
+        Self { count, examples }
+    }
+    pub const fn count(&self) -> u64 {
+        self.count
+    }
+    pub fn examples(&self) -> &[String] {
+        &self.examples
+    }
+    pub const fn set_count(&mut self, count: u64) {
+        self.count = count;
+    }
+    pub fn examples_mut(&mut self) -> &mut Vec<String> {
+        &mut self.examples
+    }
+}
+
+impl WorkflowDocument {
+    pub fn new(workflow: WorkflowSpec, snapshot: WorkflowRunSnapshot) -> Self {
+        Self { workflow, snapshot }
+    }
+    pub const fn workflow(&self) -> &WorkflowSpec {
+        &self.workflow
+    }
+    pub fn workflow_mut(&mut self) -> &mut WorkflowSpec {
+        &mut self.workflow
+    }
+    pub const fn snapshot(&self) -> &WorkflowRunSnapshot {
+        &self.snapshot
+    }
+    pub fn snapshot_mut(&mut self) -> &mut WorkflowRunSnapshot {
+        &mut self.snapshot
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1312,48 +2674,49 @@ mod tests {
 
     #[test]
     fn agent_state_and_named_update_are_serde_stable_and_secret_free() {
-        let mut state = WorkflowAgentStateResponse {
-            readiness: WorkflowAgentReadiness {
-                configured: true,
-                status: WorkflowAgentReadinessStatus::Ready,
-                provider: "provider.example".to_owned(),
-                model: "model-a".to_owned(),
-                detail: "Ready".to_owned(),
-            },
-            scope_id: "agent-scope-1".to_owned(),
-            history_available: true,
-            revision: 3,
-            active_conversation_id: "conversation-1".to_owned(),
-            conversation_limit: MAX_WORKFLOW_AGENT_CONVERSATIONS,
-            ..WorkflowAgentStateResponse::default()
+        let readiness = WorkflowAgentReadiness {
+            configured: true,
+            status: WorkflowAgentReadinessStatus::Ready,
+            provider: "provider.example".to_owned(),
+            model: "model-a".to_owned(),
+            detail: "Ready".to_owned(),
         };
-        state.conversations.push(WorkflowAgentConversationSummary {
+        let conversation = WorkflowAgentConversationSummary {
             conversation_id: "conversation-1".to_owned(),
             title: "Inspect the catalog".to_owned(),
             created_ms: 9,
             updated_ms: 10,
             message_count: 1,
             owned_run_id: None,
-        });
-        state.session.conversation_id = "conversation-1".to_owned();
-        state.session.messages.push(WorkflowAgentMessage {
-            id: "message-1".to_owned(),
-            sequence: 1,
-            role: WorkflowAgentRole::Assistant,
-            phase: WorkflowAgentMessagePhase::Complete,
-            text: "I inspected the catalog.".to_owned(),
-            tools: vec![WorkflowAgentToolSummary {
-                call_id: "call-1".to_owned(),
-                name: "list_relations".to_owned(),
-                phase: WorkflowAgentToolPhase::Complete,
-                summary: "Relation catalog complete".to_owned(),
-                error: None,
-                receipt: None,
-            }],
-            run_id: None,
-            created_ms: 10,
-        });
-        state.session.revision = 2;
+        };
+        let message = WorkflowAgentMessage::new(
+            WorkflowAgentMessageIdentity::new("message-1", 1, WorkflowAgentRole::Assistant)
+                .with_created_ms(10),
+            WorkflowAgentMessageContent::new(
+                WorkflowAgentMessagePhase::Complete,
+                "I inspected the catalog.",
+                vec![WorkflowAgentToolSummary {
+                    call_id: "call-1".to_owned(),
+                    name: "list_relations".to_owned(),
+                    phase: WorkflowAgentToolPhase::Complete,
+                    summary: "Relation catalog complete".to_owned(),
+                    error: None,
+                    receipt: None,
+                }],
+            ),
+        );
+        let session = WorkflowAgentSession::new(
+            WorkflowAgentSessionIdentity::new(DEFAULT_WORKFLOW_ID, "conversation-1", 2),
+            WorkflowAgentActivity::new(WorkflowAgentPhase::Idle, vec![message]),
+            0,
+        );
+        let state = WorkflowAgentStateResponse::new(
+            readiness,
+            WorkflowAgentStateIdentity::new(true, "agent-scope-1", 3)
+                .with_conversation("conversation-1", MAX_WORKFLOW_AGENT_CONVERSATIONS),
+            session,
+        )
+        .with_conversations(vec![conversation]);
         let json = serde_json::to_value(WorkflowAgentUpdate {
             state: state.clone(),
         })

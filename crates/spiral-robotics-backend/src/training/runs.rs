@@ -8,7 +8,7 @@
 use std::collections::BTreeSet;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RunPhase {
+pub(crate) enum RunPhase {
     Starting,
     Running,
     Stopping,
@@ -18,7 +18,7 @@ pub enum RunPhase {
 }
 
 impl RunPhase {
-    pub const fn active(self) -> bool {
+    pub(crate) const fn active(self) -> bool {
         matches!(self, Self::Starting | Self::Running | Self::Stopping)
     }
 
@@ -42,26 +42,35 @@ impl RunPhase {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RunRecord {
-    pub id: String,
-    pub phase: RunPhase,
+pub(crate) struct RunRecord {
+    id: String,
+    phase: RunPhase,
+}
+
+impl RunRecord {
+    pub(crate) fn new(id: impl Into<String>, phase: RunPhase) -> Self {
+        Self {
+            id: id.into(),
+            phase,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RunTransition {
-    pub id: String,
-    pub from: RunPhase,
-    pub to: RunPhase,
+pub(crate) struct RunTransition {
+    id: String,
+    from: RunPhase,
+    to: RunPhase,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TrainingRunRegistry {
+pub(crate) struct TrainingRunRegistry {
     runs: Vec<RunRecord>,
     history_limit: usize,
 }
 
 impl TrainingRunRegistry {
-    pub fn new(
+    pub(crate) fn new(
         history_limit: usize,
         runs: impl IntoIterator<Item = RunRecord>,
     ) -> Result<Self, String> {
@@ -89,7 +98,7 @@ impl TrainingRunRegistry {
         })
     }
 
-    pub fn admit(&mut self, run: RunRecord) -> Result<(), String> {
+    pub(crate) fn admit(&mut self, run: RunRecord) -> Result<(), String> {
         if run.id.trim().is_empty() {
             return Err("training run id must not be empty".to_owned());
         }
@@ -114,7 +123,7 @@ impl TrainingRunRegistry {
     }
 
     #[cfg(test)]
-    pub fn recover_after_restart(&mut self) -> Vec<RunTransition> {
+    fn recover_after_restart(&mut self) -> Vec<RunTransition> {
         self.runs
             .iter_mut()
             .filter_map(|run| {
@@ -131,7 +140,11 @@ impl TrainingRunRegistry {
             .collect()
     }
 
-    pub fn transition(&mut self, run_id: &str, next: RunPhase) -> Result<RunTransition, String> {
+    pub(crate) fn transition(
+        &mut self,
+        run_id: &str,
+        next: RunPhase,
+    ) -> Result<RunTransition, String> {
         let run = self
             .runs
             .iter_mut()
@@ -151,7 +164,7 @@ impl TrainingRunRegistry {
         })
     }
 
-    pub fn retained_ids(&self) -> impl Iterator<Item = &str> {
+    pub(crate) fn retained_ids(&self) -> impl Iterator<Item = &str> {
         self.runs.iter().map(|run| run.id.as_str())
     }
 }

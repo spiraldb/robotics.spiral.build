@@ -1,5 +1,6 @@
 //! Persisted video values shared by camera capture and episode storage.
 
+use arrow_array::RecordBatch;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -93,6 +94,14 @@ impl VideoAsset {
             timing: VideoTiming::new(0, 0),
             segment: VideoSegment::new(0, None),
         }
+    }
+
+    pub fn publication_batch(
+        episode_id: &str,
+        assets: &[Self],
+        media_relation: &str,
+    ) -> Result<RecordBatch, String> {
+        crate::manager::video_assets_batch(episode_id, assets, media_relation)
     }
 
     pub fn with_size(mut self, size: VideoSize) -> Self {

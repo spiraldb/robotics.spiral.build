@@ -5,27 +5,59 @@ use std::pin::Pin;
 
 /// Keep one model cell below Spiral's 256 MiB operation limit, with headroom
 /// for the row's metadata and Arrow buffers.
-pub const MAX_CHECKPOINT_ARTIFACT_BYTES: usize = 240 * 1024 * 1024;
+pub(crate) const MAX_CHECKPOINT_ARTIFACT_BYTES: usize = 240 * 1024 * 1024;
 /// Configuration is small JSON policy metadata, never a second weight blob.
-pub const MAX_CHECKPOINT_CONFIG_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_CHECKPOINT_CONFIG_BYTES: usize = 1024 * 1024;
 
 /// Identity selected by the rollout use case.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CheckpointKey {
-    pub run_id: String,
-    pub step: u64,
+    run_id: String,
+    step: u64,
+}
+
+impl CheckpointKey {
+    pub fn new(run_id: String, step: u64) -> Self {
+        Self { run_id, step }
+    }
+    pub fn run_id(&self) -> &str {
+        &self.run_id
+    }
+    pub const fn step(&self) -> u64 {
+        self.step
+    }
 }
 
 /// Opaque model material loaded for native rollout.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CheckpointArtifact {
-    pub config_json: Vec<u8>,
-    pub payload: Vec<u8>,
+    config_json: Vec<u8>,
+    payload: Vec<u8>,
+}
+
+impl CheckpointArtifact {
+    pub fn new(config_json: Vec<u8>, payload: Vec<u8>) -> Result<Self, String> {
+        validate_checkpoint_artifact_size(config_json.len(), payload.len())?;
+        Ok(Self {
+            config_json,
+            payload,
+        })
+    }
+
+    pub fn into_parts(self) -> (Vec<u8>, Vec<u8>) {
+        (self.config_json, self.payload)
+    }
+    pub fn config_json(&self) -> &[u8] {
+        &self.config_json
+    }
+    pub fn payload(&self) -> &[u8] {
+        &self.payload
+    }
 }
 
 /// Validate opaque artifact sizes before adapters copy or materialize them a
 /// second time. Overflow and oversized external rows fail closed.
-pub fn validate_checkpoint_artifact_size(
+pub(crate) fn validate_checkpoint_artifact_size(
     config_bytes: usize,
     payload_bytes: usize,
 ) -> Result<(), String> {

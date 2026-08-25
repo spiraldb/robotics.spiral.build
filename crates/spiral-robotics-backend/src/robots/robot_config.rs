@@ -1,24 +1,28 @@
 //! Safe, schema-aware storage for a robot's unified JSON configuration.
 //!
 //! [`RobotConfig`] keeps the complete JSON object in memory, so fields that a
-//! particular command does not understand survive an update.  Call
-//! [`RobotConfig::merged`] to create an updated document and
-//! [`RobotConfig::save_atomic`] to atomically replace the destination.
+//! particular command does not understand survive an update.
 
 use std::error::Error;
 use std::fmt;
+#[cfg(test)]
 use std::fs::{self, File, OpenOptions};
+#[cfg(test)]
 use std::io::{self, BufReader, Write};
+#[cfg(test)]
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
-use serde::de::{self, DeserializeOwned, MapAccess, SeqAccess, Visitor};
+#[cfg(test)]
+use serde::de::DeserializeOwned;
+use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Number, Value};
 use spiral_robotics_core::calibration::{MotorDirection, MotorSpec};
+#[cfg(test)]
 use tempfile::NamedTempFile;
 
 /// The newest robot-configuration schema understood by this crate.
-pub const SCHEMA_VERSION: u64 = 1;
+pub(crate) const SCHEMA_VERSION: u64 = 1;
 
 /// A validated robot configuration document.
 ///
@@ -26,7 +30,7 @@ pub const SCHEMA_VERSION: u64 = 1;
 /// `schema_version`.  Loading a legacy object without a version treats it as
 /// schema version 1 and adds the version to the in-memory document.
 #[derive(Clone, Debug, PartialEq)]
-pub struct RobotConfig {
+pub(crate) struct RobotConfig {
     root: Map<String, Value>,
 }
 
@@ -65,8 +69,9 @@ impl RobotConfigUpdate {
 
 /// An error encountered while loading, updating, or saving a robot config.
 #[derive(Debug)]
-pub enum ConfigError {
+pub(crate) enum ConfigError {
     /// A filesystem operation failed.
+    #[cfg(test)]
     Io {
         operation: &'static str,
         path: PathBuf,
@@ -82,10 +87,13 @@ pub enum ConfigError {
     /// `schema_version` was not a supported positive integer.
     InvalidSchemaVersion(Value),
     /// A config path existed but was a symlink or another non-regular file.
+    #[cfg(test)]
     UnsafeTarget { path: PathBuf, kind: &'static str },
     /// The config changed after the caller loaded the expected document.
+    #[cfg(test)]
     ConcurrentModification { path: PathBuf },
     /// The replacement committed, but synchronizing its directory failed.
+    #[cfg(test)]
     CommittedButNotDurable {
         path: PathBuf,
         directory: PathBuf,
@@ -100,6 +108,7 @@ pub enum ConfigError {
 impl fmt::Display for ConfigError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            #[cfg(test)]
             Self::Io {
                 operation,
                 path,
@@ -119,16 +128,19 @@ impl fmt::Display for ConfigError {
                 formatter,
                 "unsupported schema_version {version}; expected integer {SCHEMA_VERSION}"
             ),
+            #[cfg(test)]
             Self::UnsafeTarget { path, kind } => write!(
                 formatter,
                 "refusing robot configuration target '{}': target is {kind}",
                 path.display()
             ),
+            #[cfg(test)]
             Self::ConcurrentModification { path } => write!(
                 formatter,
                 "robot configuration '{}' changed while calibration was in progress; reload it and try again",
                 path.display()
             ),
+            #[cfg(test)]
             Self::CommittedButNotDurable {
                 path,
                 directory,
@@ -152,15 +164,17 @@ impl fmt::Display for ConfigError {
 impl Error for ConfigError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            #[cfg(test)]
             Self::Io { source, .. } => Some(source),
             Self::Json { source, .. } => Some(source),
+            #[cfg(test)]
             Self::CommittedButNotDurable { source, .. } => Some(source),
             Self::RootMustBeObject
             | Self::InvalidSchemaVersion(_)
-            | Self::UnsafeTarget { .. }
-            | Self::ConcurrentModification { .. }
             | Self::PortMustBeObject
             | Self::MotorsMustBeObject => None,
+            #[cfg(test)]
+            Self::UnsafeTarget { .. } | Self::ConcurrentModification { .. } => None,
         }
     }
 }
@@ -183,7 +197,8 @@ impl RobotConfig {
     /// Existing symlinks, directories, sockets, and other non-regular targets
     /// are refused.  A missing `schema_version` is accepted as version 1;
     /// malformed, zero, negative, fractional, and newer versions are rejected.
-    pub fn load(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
+    #[cfg(test)]
+    fn load(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
         let path = path.as_ref();
         let Some(file) = open_regular_config(path)? else {
             return Ok(Self::default());
@@ -199,7 +214,7 @@ impl RobotConfig {
 
     /// Parse an in-memory document while rejecting duplicate object keys at any
     /// depth before a generic JSON value could silently overwrite one.
-    pub fn from_slice(bytes: &[u8]) -> Result<Self, ConfigError> {
+    pub(crate) fn from_slice(bytes: &[u8]) -> Result<Self, ConfigError> {
         let StrictValue(value) =
             serde_json::from_slice(bytes).map_err(|source| ConfigError::Json {
                 context: "in imported robot configuration".to_owned(),
@@ -209,7 +224,7 @@ impl RobotConfig {
     }
 
     /// Construct a document from an in-memory JSON value.
-    pub fn from_value(value: Value) -> Result<Self, ConfigError> {
+    pub(crate) fn from_value(value: Value) -> Result<Self, ConfigError> {
         let Value::Object(mut root) = value else {
             return Err(ConfigError::RootMustBeObject);
         };
@@ -223,27 +238,23 @@ impl RobotConfig {
     }
 
     /// Borrow the complete root object, including fields unknown to this crate.
-    pub fn root(&self) -> &Map<String, Value> {
+    pub(crate) fn root(&self) -> &Map<String, Value> {
         &self.root
     }
 
-    /// Consume the document and return its complete JSON value.
-    pub fn into_value(self) -> Value {
-        Value::Object(self.root)
-    }
-
     /// Borrow the existing top-level `calibration` value, if present.
-    pub fn calibration(&self) -> Option<&Value> {
+    pub(crate) fn calibration(&self) -> Option<&Value> {
         self.root.get("calibration")
     }
 
     /// Borrow the existing top-level `motors` value, if present.
-    pub fn motors(&self) -> Option<&Value> {
+    pub(crate) fn motors(&self) -> Option<&Value> {
         self.root.get("motors")
     }
 
     /// Deserialize the existing calibration into a caller-selected type.
-    pub fn deserialize_calibration<T>(&self) -> Result<Option<T>, ConfigError>
+    #[cfg(test)]
+    fn deserialize_calibration<T>(&self) -> Result<Option<T>, ConfigError>
     where
         T: DeserializeOwned,
     {
@@ -252,7 +263,8 @@ impl RobotConfig {
 
     /// Deserialize the existing motor specifications into an
     /// caller-selected type.
-    pub fn deserialize_motors<T>(&self) -> Result<Option<T>, ConfigError>
+    #[cfg(test)]
+    fn deserialize_motors<T>(&self) -> Result<Option<T>, ConfigError>
     where
         T: DeserializeOwned,
     {
@@ -261,7 +273,7 @@ impl RobotConfig {
 
     /// Decode domain motor specifications while keeping raw unknown fields in
     /// this document for the next read-modify-write.
-    pub fn motor_specs(
+    pub(crate) fn motor_specs(
         &self,
     ) -> Result<Option<std::collections::BTreeMap<String, MotorSpec>>, ConfigError> {
         let Some(value) = self.motors().filter(|value| !value.is_null()) else {
@@ -323,7 +335,7 @@ impl RobotConfig {
     ///
     /// Fields unknown to this build survive for existing motors. Removed motors
     /// are removed, and new motors receive only the explicit domain fields.
-    pub fn encode_motor_specs(
+    pub(crate) fn encode_motor_specs(
         &self,
         specs: &std::collections::BTreeMap<String, MotorSpec>,
     ) -> Result<Value, ConfigError> {
@@ -398,7 +410,7 @@ impl RobotConfig {
 
     /// Serialize the complete document as deterministic pretty JSON ending in
     /// exactly one newline.
-    pub fn to_pretty_json(&self) -> Result<String, ConfigError> {
+    pub(crate) fn to_pretty_json(&self) -> Result<String, ConfigError> {
         let canonical = canonicalize(Value::Object(self.root.clone()));
         let mut json =
             serde_json::to_string_pretty(&canonical).map_err(|source| ConfigError::Json {
@@ -417,7 +429,8 @@ impl RobotConfig {
     /// and the containing directory is synchronized after the rename. Other
     /// platforms receive the strongest replacement and flush guarantees
     /// exposed by the standard library and `tempfile`.
-    pub fn save_atomic(&self, path: impl AsRef<Path>) -> Result<(), ConfigError> {
+    #[cfg(test)]
+    fn save_atomic(&self, path: impl AsRef<Path>) -> Result<(), ConfigError> {
         let path = path.as_ref();
         let _lock_guard = acquire_config_lock(path)?;
         self.save_atomic_unlocked(path)
@@ -431,7 +444,8 @@ impl RobotConfig {
     /// silently overwrite intervening updates. The lock file is intentionally
     /// retained: deleting it would allow different processes to lock different
     /// inodes for the same configuration path.
-    pub fn save_atomic_if_unchanged(
+    #[cfg(test)]
+    fn save_atomic_if_unchanged(
         &self,
         path: impl AsRef<Path>,
         expected: &Self,
@@ -448,10 +462,12 @@ impl RobotConfig {
         self.save_atomic_unlocked(path)
     }
 
+    #[cfg(test)]
     fn save_atomic_unlocked(&self, path: &Path) -> Result<(), ConfigError> {
         self.save_atomic_unlocked_with_sync(path, sync_parent_directory)
     }
 
+    #[cfg(test)]
     fn save_atomic_unlocked_with_sync<F>(
         &self,
         path: &Path,
@@ -521,6 +537,7 @@ fn validate_schema(root: &Map<String, Value>) -> Result<(), ConfigError> {
     }
 }
 
+#[cfg(test)]
 fn validate_regular_target(path: &Path, metadata: &fs::Metadata) -> Result<(), ConfigError> {
     let file_type = metadata.file_type();
     if file_type.is_symlink() {
@@ -538,7 +555,7 @@ fn validate_regular_target(path: &Path, metadata: &fs::Metadata) -> Result<(), C
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 fn open_regular_config(path: &Path) -> Result<Option<File>, ConfigError> {
     use std::os::unix::fs::OpenOptionsExt;
 
@@ -571,7 +588,7 @@ fn open_regular_config(path: &Path) -> Result<Option<File>, ConfigError> {
     Ok(Some(file))
 }
 
-#[cfg(not(unix))]
+#[cfg(all(test, not(unix)))]
 fn open_regular_config(path: &Path) -> Result<Option<File>, ConfigError> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -588,6 +605,7 @@ fn open_regular_config(path: &Path) -> Result<Option<File>, ConfigError> {
     Ok(Some(file))
 }
 
+#[cfg(test)]
 fn companion_lock_path(path: &Path) -> Result<PathBuf, ConfigError> {
     let Some(file_name) = path.file_name().filter(|name| !name.is_empty()) else {
         return Err(ConfigError::UnsafeTarget {
@@ -601,6 +619,7 @@ fn companion_lock_path(path: &Path) -> Result<PathBuf, ConfigError> {
     Ok(path.with_file_name(lock_name))
 }
 
+#[cfg(test)]
 fn acquire_config_lock(path: &Path) -> Result<File, ConfigError> {
     let lock_path = companion_lock_path(path)?;
     match fs::symlink_metadata(&lock_path) {
@@ -640,6 +659,7 @@ fn acquire_config_lock(path: &Path) -> Result<File, ConfigError> {
     Ok(lock)
 }
 
+#[cfg(test)]
 fn deserialize_optional<T>(value: Option<&Value>, context: &str) -> Result<Option<T>, ConfigError>
 where
     T: DeserializeOwned,
@@ -773,6 +793,7 @@ fn canonicalize(value: Value) -> Value {
     }
 }
 
+#[cfg(test)]
 fn io_error(operation: &'static str, path: &Path, source: io::Error) -> ConfigError {
     ConfigError::Io {
         operation,
@@ -781,7 +802,7 @@ fn io_error(operation: &'static str, path: &Path, source: io::Error) -> ConfigEr
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 fn set_temporary_permissions(
     file: &File,
     path: &Path,
@@ -794,7 +815,7 @@ fn set_temporary_permissions(
         .map_err(|source| io_error("set permissions on", path, source))
 }
 
-#[cfg(not(unix))]
+#[cfg(all(test, not(unix)))]
 fn set_temporary_permissions(
     _file: &File,
     _path: &Path,
@@ -803,12 +824,12 @@ fn set_temporary_permissions(
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 fn sync_parent_directory(parent: &Path) -> io::Result<()> {
     File::open(parent).and_then(|directory| directory.sync_all())
 }
 
-#[cfg(not(unix))]
+#[cfg(all(test, not(unix)))]
 fn sync_parent_directory(_parent: &Path) -> io::Result<()> {
     Ok(())
 }

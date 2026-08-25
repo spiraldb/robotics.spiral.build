@@ -9,7 +9,7 @@
 //!
 //! It is deliberately two layers.
 //!
-//! [`scene`], [`camera`], [`render`], [`pick`], and [`gesture`] know nothing
+//! `scene`, `camera`, `render`, `pick`, and `gesture` know nothing
 //! about robots. They deal in an [`EntityKey`] — an opaque number the caller
 //! assigns — plus geometry, transforms, colour, and state. Picking returns a
 //! key; it has no opinion about what the key means. [`Viewport::anchor`] turns
@@ -17,7 +17,7 @@
 //! application draw its own labels over the scene without this crate ever
 //! learning what a label says.
 //!
-//! [`robot`] is the layer that does know what an arm is. Together with [`urdf`],
+//! `robot` is the layer that does know what an arm is. Together with `urdf`,
 //! it owns the renderer-facing description, parser, and pose construction. It
 //! accepts neutral measured joint angles from `spiral-robotics-core`, turns
 //! them and any mounted cameras into a [`Scene`], and hands back the table that

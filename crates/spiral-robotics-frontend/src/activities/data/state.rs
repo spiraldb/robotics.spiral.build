@@ -35,9 +35,19 @@ impl ActiveQuery {
 
 #[derive(Clone, Copy)]
 pub(crate) struct DataController {
+    draft: QueryDraftSignals,
+    execution: QueryExecutionSignals,
+}
+
+#[derive(Clone, Copy)]
+struct QueryDraftSignals {
     sql: Signal<String>,
     generated_sql: Signal<String>,
     max_rows: Signal<usize>,
+}
+
+#[derive(Clone, Copy)]
+struct QueryExecutionSignals {
     query_tabs: Signal<Vec<QueryTab>>,
     active_query: Signal<Option<u64>>,
     active_request: Signal<Option<ActiveQuery>>,
@@ -51,14 +61,18 @@ pub(crate) fn use_data_controller(namespace: &str, dataset_id: &str) -> DataCont
     let initial_sql = default_query_sql(namespace, dataset_id);
     let sql_value = initial_sql.clone();
     let controller = DataController {
-        sql: use_signal(move || sql_value),
-        generated_sql: use_signal(move || initial_sql),
-        max_rows: use_signal(|| DEFAULT_QUERY_ROWS),
-        query_tabs: use_signal(Vec::new),
-        active_query: use_signal(|| None),
-        active_request: use_signal(|| None),
-        next_query_id: use_signal(|| 1),
-        relation_generation: use_signal(|| 0),
+        draft: QueryDraftSignals {
+            sql: use_signal(move || sql_value),
+            generated_sql: use_signal(move || initial_sql),
+            max_rows: use_signal(|| DEFAULT_QUERY_ROWS),
+        },
+        execution: QueryExecutionSignals {
+            query_tabs: use_signal(Vec::new),
+            active_query: use_signal(|| None),
+            active_request: use_signal(|| None),
+            next_query_id: use_signal(|| 1),
+            relation_generation: use_signal(|| 0),
+        },
     };
     let namespace_dependency = namespace.to_owned();
     let dataset_dependency = dataset_id.to_owned();
@@ -75,78 +89,85 @@ pub(crate) fn data_controller() -> DataController {
 
 impl DataController {
     fn sync_dataset(mut self, namespace: &str, dataset_id: &str) {
-        let previous = self.generated_sql.peek().clone();
+        let previous = self.draft.generated_sql.peek().to_owned();
         let next = default_query_sql(namespace, dataset_id);
         if previous == next {
             return;
         }
-        let mut current = self.sql.peek().clone();
+        let mut current = self.draft.sql.peek().to_owned();
         if rebase_generated_sql(&mut current, &previous, &next) {
-            self.sql.set(current);
+            self.draft.sql.set(current);
         }
-        self.generated_sql.set(next);
+        self.draft.generated_sql.set(next);
     }
 
     pub(crate) fn sql(&self) -> String {
-        self.sql.read().clone()
+        self.draft.sql.read().to_owned()
     }
 
     pub(crate) fn max_rows(&self) -> usize {
-        self.max_rows.read().to_owned()
+        self.draft.max_rows.read().to_owned()
     }
 
     pub(crate) fn query_tabs(&self) -> Vec<QueryTab> {
-        self.query_tabs.read().clone()
+        self.execution.query_tabs.read().to_owned()
     }
 
     pub(crate) fn active_query(&self) -> Option<u64> {
-        self.active_query.read().to_owned()
+        self.execution.active_query.read().to_owned()
     }
 
     pub(crate) fn query_running(&self) -> bool {
-        self.active_request.read().is_some()
+        self.execution.active_request.read().is_some()
     }
 
     pub(crate) fn relation_generation(&self) -> u64 {
-        *self.relation_generation.read()
+        *self.execution.relation_generation.read()
     }
 
     pub(crate) fn refresh_relations(mut self) {
-        let next = self.relation_generation.peek().wrapping_add(1);
-        self.relation_generation.set(next);
+        let next = self.execution.relation_generation.peek().wrapping_add(1);
+        self.execution.relation_generation.set(next);
     }
 
     pub(crate) fn select_query(mut self, id: u64) {
-        if self.query_tabs.peek().iter().any(|tab| tab.id() == id) {
-            self.active_query.set(Some(id));
+        if self
+            .execution
+            .query_tabs
+            .peek()
+            .iter()
+            .any(|tab| tab.id() == id)
+        {
+            self.execution.active_query.set(Some(id));
         }
     }
 
     pub(crate) fn close_query(mut self, id: u64) {
         if self
+            .execution
             .active_request
             .peek()
             .as_ref()
             .is_some_and(|request| request.id == id)
-            && let Some(request) = self.active_request.replace(None)
+            && let Some(request) = self.execution.active_request.replace(None)
         {
             request.abort();
         }
-        let mut tabs = self.query_tabs.peek().clone();
-        let mut active = self.active_query.peek().to_owned();
+        let mut tabs = self.execution.query_tabs.peek().to_owned();
+        let mut active = self.execution.active_query.peek().to_owned();
         if !close_query_tab(&mut tabs, &mut active, id) {
             return;
         }
-        self.query_tabs.set(tabs);
-        self.active_query.set(active);
+        self.execution.query_tabs.set(tabs);
+        self.execution.active_query.set(active);
     }
 
     pub(crate) fn set_sql(mut self, sql: String) {
-        self.sql.set(sql);
+        self.draft.sql.set(sql);
     }
 
     pub(crate) fn set_max_rows(mut self, rows: usize) {
-        self.max_rows.set(rows);
+        self.draft.max_rows.set(rows);
     }
 
     pub(crate) fn run_query(mut self, studio: Studio, query_available: bool) {
@@ -157,11 +178,11 @@ impl DataController {
             );
             return;
         }
-        let statement = self.sql.read().trim().to_owned();
+        let statement = self.draft.sql.read().trim().to_owned();
         if statement.is_empty() {
             return;
         }
-        if self.active_request.peek().is_some() {
+        if self.execution.active_request.peek().is_some() {
             studio.report_warning_from(
                 MessageSource::Data,
                 "A query is already running. Cancel it before starting another.",
@@ -169,19 +190,19 @@ impl DataController {
             return;
         }
 
-        let rows = (self.max_rows)();
-        let id = self.next_query_id.peek().to_owned();
-        self.next_query_id.set(id.wrapping_add(1));
+        let rows = (self.draft.max_rows)();
+        let id = self.execution.next_query_id.peek().to_owned();
+        self.execution.next_query_id.set(id.wrapping_add(1));
         let title = query_title(&statement, id);
         let running = QueryTab::new(
             id,
             title,
             QueryExecutionPresentation::new(statement.clone(), rows, QueryState::Running),
         );
-        let mut tabs = self.query_tabs.peek().clone();
+        let mut tabs = self.execution.query_tabs.peek().to_owned();
         push_bounded_query_tab(&mut tabs, running);
-        self.query_tabs.set(tabs);
-        self.active_query.set(Some(id));
+        self.execution.query_tabs.set(tabs);
+        self.execution.active_query.set(Some(id));
 
         #[cfg(target_arch = "wasm32")]
         let abort = web_sys::AbortController::new().ok();
@@ -189,28 +210,24 @@ impl DataController {
         let signal = abort.as_ref().map(web_sys::AbortController::signal);
         #[cfg(not(target_arch = "wasm32"))]
         let signal = None::<web_sys::AbortSignal>;
-        self.active_request.set(Some(ActiveQuery {
+        self.execution.active_request.set(Some(ActiveQuery {
             id,
             #[cfg(target_arch = "wasm32")]
             abort,
         }));
 
-        let request = SpiralQueryRequest {
-            sql: statement.clone(),
-            max_rows: rows,
-        };
+        let request = SpiralQueryRequest::new(statement.clone(), rows);
         // The Data view may be unmounted while the request is in flight. The
         // controller and its generation guard are shell-owned, so completion
         // must outlive the button that launched it.
         dioxus::dioxus_core::spawn_forever(async move {
-            let outcome = api::send_json_abortable(
-                Method::POST,
-                "/api/spiral/query",
-                Some(&request),
-                signal.as_ref(),
-            )
-            .await;
+            let outcome =
+                api::AbortableJsonRequest::new(Method::POST, "/api/spiral/query", Some(&request))
+                    .with_signal(signal.as_ref())
+                    .send()
+                    .await;
             if self
+                .execution
                 .active_request
                 .peek()
                 .as_ref()
@@ -225,24 +242,24 @@ impl DataController {
                     QueryState::Failed(error)
                 }
             };
-            let mut tabs = self.query_tabs.peek().clone();
+            let mut tabs = self.execution.query_tabs.peek().to_owned();
             if let Some(tab) = tabs.iter_mut().find(|tab| tab.id() == id) {
                 tab.replace_presentation(QueryExecutionPresentation::new(statement, rows, state));
-                self.query_tabs.set(tabs);
+                self.execution.query_tabs.set(tabs);
             }
-            self.active_request.set(None);
+            self.execution.active_request.set(None);
         });
     }
 
     pub(crate) fn cancel_query(mut self) {
-        let Some(request) = self.active_request.replace(None) else {
+        let Some(request) = self.execution.active_request.replace(None) else {
             return;
         };
         request.abort();
-        let mut tabs = self.query_tabs.peek().clone();
+        let mut tabs = self.execution.query_tabs.peek().to_owned();
         if let Some(tab) = tabs.iter_mut().find(|tab| tab.id() == request.id) {
             tab.mark_cancelled();
-            self.query_tabs.set(tabs);
+            self.execution.query_tabs.set(tabs);
         }
     }
 }

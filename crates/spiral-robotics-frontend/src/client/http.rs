@@ -57,17 +57,44 @@ pub(crate) async fn send_json<B: Serialize, T: DeserializeOwned>(
     decode(&request(method, path, body).await?, path)
 }
 
-/// Send JSON with a browser-owned cancellation signal. Aborting releases the
-/// UI immediately; hosted ADBC work is isolated on its own checked-out
-/// connection, so a slow abandoned query cannot block persistence or replay.
-pub(crate) async fn send_json_abortable<B: Serialize, T: DeserializeOwned>(
+/// One JSON request with an optional browser-owned cancellation signal.
+pub(crate) struct AbortableJsonRequest<'a, B> {
     method: Method,
-    path: &str,
-    body: Option<&B>,
-    signal: Option<&web_sys::AbortSignal>,
-) -> Result<T, String> {
-    let body = body.map(to_value).transpose()?;
-    decode(&request_with_abort(method, path, body, signal).await?, path)
+    path: &'a str,
+    body: Option<&'a B>,
+    signal: Option<&'a web_sys::AbortSignal>,
+}
+
+impl<'a, B: Serialize> AbortableJsonRequest<'a, B> {
+    pub(crate) fn new(method: Method, path: &'a str, body: Option<&'a B>) -> Self {
+        Self {
+            method,
+            path,
+            body,
+            signal: None,
+        }
+    }
+
+    pub(crate) fn with_signal(mut self, signal: Option<&'a web_sys::AbortSignal>) -> Self {
+        self.signal = signal;
+        self
+    }
+
+    /// Aborting releases the UI immediately; hosted ADBC work is isolated on
+    /// its own checked-out connection, so an abandoned query cannot block
+    /// persistence or replay.
+    pub(crate) async fn send<T: DeserializeOwned>(self) -> Result<T, String> {
+        let body = self.body.map(to_value).transpose()?;
+        let response = RawRequest {
+            method: self.method,
+            path: self.path,
+            body,
+            signal: self.signal,
+        }
+        .send()
+        .await?;
+        decode(&response, self.path)
+    }
 }
 
 /// POST with no request body.
@@ -77,36 +104,164 @@ pub(crate) async fn post(path: &str) -> Result<(), String> {
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub(crate) struct TimelineMetadata {
-    pub(crate) samples: u64,
-    pub(crate) first_seconds: Option<f64>,
-    pub(crate) last_seconds: Option<f64>,
+    samples: u64,
+    first_seconds: Option<f64>,
+    last_seconds: Option<f64>,
+}
+
+impl TimelineMetadata {
+    pub(crate) const fn new(
+        samples: u64,
+        first_seconds: Option<f64>,
+        last_seconds: Option<f64>,
+    ) -> Self {
+        Self {
+            samples,
+            first_seconds,
+            last_seconds,
+        }
+    }
 }
 
 /// Episode detail used to align timeline samples and recorded media.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub(crate) struct EpisodeTimelineResponse {
-    pub(crate) episode: EpisodeSummary,
-    pub(crate) samples: TimelineMetadata,
-    pub(crate) videos: Vec<VideoAssetMetadata>,
+    episode: EpisodeSummary,
+    samples: TimelineMetadata,
+    videos: Vec<VideoAssetMetadata>,
+}
+
+impl EpisodeTimelineResponse {
+    pub(crate) const fn new(
+        episode: EpisodeSummary,
+        samples: TimelineMetadata,
+        videos: Vec<VideoAssetMetadata>,
+    ) -> Self {
+        Self {
+            episode,
+            samples,
+            videos,
+        }
+    }
+
+    pub(crate) const fn episode(&self) -> &EpisodeSummary {
+        &self.episode
+    }
+
+    pub(crate) fn videos(&self) -> &[VideoAssetMetadata] {
+        &self.videos
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub(crate) struct TimelineArmSample {
-    pub(crate) arm: String,
-    pub(crate) normalized: BTreeMap<String, Option<f64>>,
-    pub(crate) raw: BTreeMap<String, i64>,
-    pub(crate) velocity: Option<BTreeMap<String, Option<f64>>>,
-    pub(crate) effort: Option<BTreeMap<String, Option<f64>>>,
-    pub(crate) action: Option<BTreeMap<String, Option<f64>>>,
+    arm: String,
+    normalized: BTreeMap<String, Option<f64>>,
+    raw: BTreeMap<String, i64>,
+    velocity: Option<BTreeMap<String, Option<f64>>>,
+    effort: Option<BTreeMap<String, Option<f64>>>,
+    action: Option<BTreeMap<String, Option<f64>>>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct TimelineOptionalArmChannels {
+    velocity: Option<BTreeMap<String, Option<f64>>>,
+    effort: Option<BTreeMap<String, Option<f64>>>,
+    action: Option<BTreeMap<String, Option<f64>>>,
+}
+
+impl TimelineOptionalArmChannels {
+    pub(crate) const fn new(
+        velocity: Option<BTreeMap<String, Option<f64>>>,
+        effort: Option<BTreeMap<String, Option<f64>>>,
+        action: Option<BTreeMap<String, Option<f64>>>,
+    ) -> Self {
+        Self {
+            velocity,
+            effort,
+            action,
+        }
+    }
+}
+
+impl TimelineArmSample {
+    pub(crate) fn new(
+        arm: impl Into<String>,
+        normalized: BTreeMap<String, Option<f64>>,
+        raw: BTreeMap<String, i64>,
+    ) -> Self {
+        Self {
+            arm: arm.into(),
+            normalized,
+            raw,
+            velocity: None,
+            effort: None,
+            action: None,
+        }
+    }
+
+    pub(crate) fn with_optional_channels(mut self, channels: TimelineOptionalArmChannels) -> Self {
+        self.velocity = channels.velocity;
+        self.effort = channels.effort;
+        self.action = channels.action;
+        self
+    }
+
+    pub(crate) fn arm(&self) -> &str {
+        &self.arm
+    }
+
+    pub(crate) const fn normalized(&self) -> &BTreeMap<String, Option<f64>> {
+        &self.normalized
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn raw(&self) -> &BTreeMap<String, i64> {
+        &self.raw
+    }
 }
 
 /// The nearest stored sample to a committed historical playhead position.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub(crate) struct TimelineSample {
-    pub(crate) frame: u64,
-    pub(crate) seconds: f64,
-    pub(crate) follow_error_degrees: Option<f64>,
-    pub(crate) arms: Vec<TimelineArmSample>,
+    frame: u64,
+    seconds: f64,
+    follow_error_degrees: Option<f64>,
+    arms: Vec<TimelineArmSample>,
+}
+
+impl TimelineSample {
+    pub(crate) const fn new(frame: u64, seconds: f64) -> Self {
+        Self {
+            frame,
+            seconds,
+            follow_error_degrees: None,
+            arms: Vec::new(),
+        }
+    }
+
+    pub(crate) fn with_measurements(
+        mut self,
+        follow_error_degrees: Option<f64>,
+        arms: Vec<TimelineArmSample>,
+    ) -> Self {
+        self.follow_error_degrees = follow_error_degrees;
+        self.arms = arms;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn frame(&self) -> u64 {
+        self.frame
+    }
+
+    pub(crate) const fn seconds(&self) -> f64 {
+        self.seconds
+    }
+
+    pub(crate) fn arms(&self) -> &[TimelineArmSample] {
+        &self.arms
+    }
 }
 
 /// Upload one file and decode the server's JSON response.
@@ -130,7 +285,7 @@ pub(crate) async fn upload_json<T: DeserializeOwned>(
         return decode(&text, path);
     }
     Err(serde_json::from_str::<ApiError>(&text)
-        .map(|failure| failure.error)
+        .map(ApiError::into_error)
         .unwrap_or_else(|_| format!("upload to {path} failed with status {status}")))
 }
 
@@ -177,7 +332,7 @@ pub(crate) async fn upload_file_json<T: DeserializeOwned>(
         return decode(&text, path);
     }
     Err(serde_json::from_str::<ApiError>(&text)
-        .map(|failure| failure.error)
+        .map(ApiError::into_error)
         .unwrap_or_else(|_| format!("upload to {path} failed with status {status}")))
 }
 
@@ -191,39 +346,50 @@ fn decode<T: DeserializeOwned>(body: &str, path: &str) -> Result<T, String> {
 }
 
 async fn request(method: Method, path: &str, body: Option<Value>) -> Result<String, String> {
-    request_with_abort(method, path, body, None).await
+    RawRequest {
+        method,
+        path,
+        body,
+        signal: None,
+    }
+    .send()
+    .await
 }
 
-async fn request_with_abort(
+struct RawRequest<'a> {
     method: Method,
-    path: &str,
+    path: &'a str,
     body: Option<Value>,
-    signal: Option<&web_sys::AbortSignal>,
-) -> Result<String, String> {
-    let builder = RequestBuilder::new(path)
-        .method(method)
-        .abort_signal(signal);
-    let request = match body {
-        Some(value) => builder.json(&value),
-        None => builder.build(),
-    }
-    .map_err(|error| format!("could not build the request: {error}"))?;
+    signal: Option<&'a web_sys::AbortSignal>,
+}
 
-    let response = request
-        .send()
-        .await
-        .map_err(|error| format!("the studio server is unreachable: {error}"))?;
-    let status = response.status();
-    let text = response.text().await.unwrap_or_default();
+impl RawRequest<'_> {
+    async fn send(self) -> Result<String, String> {
+        let builder = RequestBuilder::new(self.path)
+            .method(self.method)
+            .abort_signal(self.signal);
+        let request = match self.body {
+            Some(value) => builder.json(&value),
+            None => builder.build(),
+        }
+        .map_err(|error| format!("could not build the request: {error}"))?;
 
-    if (200..300).contains(&status) {
-        return Ok(text);
+        let response = request
+            .send()
+            .await
+            .map_err(|error| format!("the studio server is unreachable: {error}"))?;
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+
+        if (200..300).contains(&status) {
+            return Ok(text);
+        }
+        // The server always describes a failure in the body; fall back to the
+        // status only when something else answered.
+        Err(serde_json::from_str::<ApiError>(&text)
+            .map(ApiError::into_error)
+            .unwrap_or_else(|_| format!("request to {} failed with status {status}", self.path)))
     }
-    // The server always describes a failure in the body; fall back to the
-    // status only when something else answered.
-    Err(serde_json::from_str::<ApiError>(&text)
-        .map(|failure| failure.error)
-        .unwrap_or_else(|_| format!("request to {path} failed with status {status}")))
 }
 
 /// One message from the studio's event stream.

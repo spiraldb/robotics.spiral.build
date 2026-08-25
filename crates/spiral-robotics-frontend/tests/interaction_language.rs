@@ -349,7 +349,7 @@ fn workflow_assistant_receipts_results_and_run_states_are_explicit() {
     for expectation in [
         "query-media-cell",
         "query-image-preview",
-        "query_image_alt",
+        "fn image_alt",
         "query-result-count",
         "Query results",
     ] {

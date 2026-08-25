@@ -22,11 +22,11 @@ use std::time::{Duration, Instant};
 
 use serialport::{ClearBuffer, SerialPort};
 
-use crate::bus::{BusError, MotorBus, MotorElectricalSample};
-use spiral_robotics_core::calibration::MotorSpec;
-// Keep the original paths available to callers while making the types
-// themselves owned by the protocol-neutral bus boundary.
+use crate::bus::{
+    BusError, MotorBus, MotorElectricalSample, MotorMechanicalSample, MotorVoltageLimits,
+};
 use crate::bus::{MotorFaults, MotorLimits, MotorSample};
+use spiral_robotics_core::calibration::MotorSpec;
 
 const BROADCAST_ID: u8 = 0xfe;
 const INSTRUCTION_READ: u8 = 0x02;
@@ -850,32 +850,33 @@ fn word_at(bytes: &[u8], offset: usize) -> Option<u16> {
 /// A response that stops short simply reports fewer measurements. Nothing here
 /// substitutes a zero for a byte that never arrived.
 fn decode_status_block(bytes: &[u8]) -> MotorSample {
-    MotorSample {
-        position: decode_position(bytes),
-        speed_degrees_per_second: word_at(bytes, OFFSET_SPEED).map(|speed| {
+    let mechanical = MotorMechanicalSample::new(
+        word_at(bytes, OFFSET_SPEED).map(|speed| {
             spiral_robotics_core::arm::counts_to_degrees(i64::from(decode_sign_magnitude(speed)))
         }),
-        load: word_at(bytes, OFFSET_LOAD)
+        word_at(bytes, OFFSET_LOAD)
             .map(|load| f64::from(decode_sign_magnitude_at(load, LOAD_SIGN_BIT)) / LOAD_FULL_SCALE),
+        bytes.get(OFFSET_MOVING).map(|moving| *moving != 0),
+    );
+    let electrical = MotorElectricalSample::new(
         // A servo answering at all is a servo with supply voltage, so a zero
         // here is a register this firmware does not fill rather than a reading.
-        electrical: MotorElectricalSample {
-            voltage_volts: bytes
-                .get(OFFSET_VOLTAGE)
-                .copied()
-                .filter(|volts| *volts != 0)
-                .map(|volts| f64::from(volts) * VOLTS_PER_COUNT),
-            temperature_celsius: bytes
-                .get(OFFSET_TEMPERATURE)
-                .map(|celsius| f64::from(*celsius)),
-            // Direction of current draw says nothing an operator acts on, and the
-            // magnitude is what a stall shows up in.
-            current_amps: word_at(bytes, OFFSET_CURRENT)
-                .map(|current| f64::from(decode_sign_magnitude(current).abs()) * AMPS_PER_COUNT),
-        },
-        moving: bytes.get(OFFSET_MOVING).map(|moving| *moving != 0),
-        faults: MotorFaults::from_raw(bytes.get(OFFSET_STATUS).copied().unwrap_or_default()),
-    }
+        bytes
+            .get(OFFSET_VOLTAGE)
+            .copied()
+            .filter(|volts| *volts != 0)
+            .map(|volts| f64::from(volts) * VOLTS_PER_COUNT),
+        bytes
+            .get(OFFSET_TEMPERATURE)
+            .map(|celsius| f64::from(*celsius)),
+        // Direction of current draw says nothing an operator acts on, and the
+        // magnitude is what a stall shows up in.
+        word_at(bytes, OFFSET_CURRENT)
+            .map(|current| f64::from(decode_sign_magnitude(current).abs()) * AMPS_PER_COUNT),
+    );
+    MotorSample::new(decode_position(bytes), mechanical, electrical).with_faults(
+        MotorFaults::from_raw(bytes.get(OFFSET_STATUS).copied().unwrap_or_default()),
+    )
 }
 
 /// Decode the EEPROM limit run beginning at [`LIMITS_ADDRESS`].
@@ -883,24 +884,16 @@ fn decode_limits(bytes: &[u8]) -> MotorLimits {
     // A limit register left at zero is a limit the servo is not enforcing, and
     // a zero-degree ceiling would put every motor permanently in caution.
     let byte_at = |offset: usize| bytes.get(offset).copied().filter(|value| *value != 0);
-    MotorLimits {
-        max_temperature_celsius: byte_at(0).map(f64::from),
-        max_voltage_volts: byte_at(1).map(|volts| f64::from(volts) * VOLTS_PER_COUNT),
-        min_voltage_volts: byte_at(2).map(|volts| f64::from(volts) * VOLTS_PER_COUNT),
-        max_load: word_at(bytes, 3)
+    MotorLimits::new(
+        byte_at(0).map(f64::from),
+        MotorVoltageLimits::new(
+            byte_at(2).map(|volts| f64::from(volts) * VOLTS_PER_COUNT),
+            byte_at(1).map(|volts| f64::from(volts) * VOLTS_PER_COUNT),
+        ),
+        word_at(bytes, 3)
             .filter(|torque| *torque != 0)
             .map(|torque| f64::from(torque) / LOAD_FULL_SCALE),
-    }
-}
-
-impl MotorSample {
-    /// A reading carrying only a position, from a bus that answers nothing else.
-    fn at(position: i64) -> Self {
-        Self {
-            position,
-            ..Self::default()
-        }
-    }
+    )
 }
 
 enum PacketParse {
@@ -1215,26 +1208,26 @@ mod tests {
     fn a_status_block_decodes_into_physical_units() {
         let reading = decode_status_block(&status_block());
 
-        assert_eq!(reading.position, 2048);
-        assert_eq!(reading.speed_degrees_per_second, Some(-45.0));
-        assert_eq!(reading.load, Some(0.25));
-        assert_eq!(reading.electrical.voltage_volts, Some(7.4));
-        assert_eq!(reading.electrical.temperature_celsius, Some(43.0));
-        assert!((reading.electrical.current_amps.unwrap() - 0.78).abs() < 1e-9);
-        assert_eq!(reading.moving, Some(true));
-        assert!(!reading.faults.has_faults());
+        assert_eq!(reading.position(), 2048);
+        assert_eq!(reading.mechanical().speed_degrees_per_second(), Some(-45.0));
+        assert_eq!(reading.mechanical().load(), Some(0.25));
+        assert_eq!(reading.electrical().voltage_volts(), Some(7.4));
+        assert_eq!(reading.electrical().temperature_celsius(), Some(43.0));
+        assert!((reading.electrical().current_amps().unwrap() - 0.78).abs() < 1e-9);
+        assert_eq!(reading.mechanical().moving(), Some(true));
+        assert!(!reading.faults().has_faults());
     }
 
     #[test]
     fn a_truncated_block_reports_fewer_readings_rather_than_zeroes() {
         let reading = decode_status_block(&status_block()[..OFFSET_TEMPERATURE]);
 
-        assert_eq!(reading.position, 2048);
-        assert_eq!(reading.electrical.temperature_celsius, None);
-        assert_eq!(reading.electrical.current_amps, None);
-        assert_eq!(reading.moving, None);
+        assert_eq!(reading.position(), 2048);
+        assert_eq!(reading.electrical().temperature_celsius(), None);
+        assert_eq!(reading.electrical().current_amps(), None);
+        assert_eq!(reading.mechanical().moving(), None);
         // Voltage is the last field that did arrive, so it is still reported.
-        assert_eq!(reading.electrical.voltage_volts, Some(7.4));
+        assert_eq!(reading.electrical().voltage_volts(), Some(7.4));
     }
 
     #[test]
@@ -1244,7 +1237,10 @@ mod tests {
         // a magnitude of 44 with the direction bit set, at bit 10.
         bytes[OFFSET_LOAD..OFFSET_LOAD + 2].copy_from_slice(&1068_u16.to_le_bytes());
 
-        let load = decode_status_block(&bytes).load.expect("a load reading");
+        let load = decode_status_block(&bytes)
+            .mechanical()
+            .load()
+            .expect("a load reading");
         assert!(
             (load + 0.044).abs() < 1e-9,
             "reading the sign at bit 15 would call this 106.8% of rated torque, got {load}"
@@ -1256,14 +1252,17 @@ mod tests {
         let mut bytes = status_block();
         bytes[OFFSET_VOLTAGE] = 0;
 
-        assert_eq!(decode_status_block(&bytes).electrical.voltage_volts, None);
+        assert_eq!(
+            decode_status_block(&bytes).electrical().voltage_volts(),
+            None
+        );
     }
 
     #[test]
     fn the_servo_reports_its_own_faults_and_keeps_the_bits_it_cannot_name() {
         let mut bytes = status_block();
         bytes[OFFSET_STATUS] = MotorFaults::OVERHEAT | MotorFaults::OVERLOAD | 0x40;
-        let faults = decode_status_block(&bytes).faults;
+        let faults = decode_status_block(&bytes).faults();
 
         assert!(faults.has_faults());
         assert_eq!(
@@ -1279,19 +1278,19 @@ mod tests {
         bytes.extend_from_slice(&1000_u16.to_le_bytes());
         let limits = decode_limits(&bytes);
 
-        assert_eq!(limits.max_temperature_celsius, Some(70.0));
-        assert_eq!(limits.max_voltage_volts, Some(9.0));
-        assert_eq!(limits.min_voltage_volts, Some(4.5));
-        assert_eq!(limits.max_load, Some(1.0));
+        assert_eq!(limits.max_temperature_celsius(), Some(70.0));
+        assert_eq!(limits.max_voltage_volts(), Some(9.0));
+        assert_eq!(limits.min_voltage_volts(), Some(4.5));
+        assert_eq!(limits.max_load(), Some(1.0));
     }
 
     #[test]
     fn an_unset_limit_register_is_not_a_limit_of_zero() {
         let limits = decode_limits(&[0, 0, 0, 0, 0]);
 
-        assert_eq!(limits.max_temperature_celsius, None);
-        assert_eq!(limits.max_voltage_volts, None);
-        assert_eq!(limits.min_voltage_volts, None);
-        assert_eq!(limits.max_load, None);
+        assert_eq!(limits.max_temperature_celsius(), None);
+        assert_eq!(limits.max_voltage_volts(), None);
+        assert_eq!(limits.min_voltage_volts(), None);
+        assert_eq!(limits.max_load(), None);
     }
 }

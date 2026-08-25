@@ -1,6 +1,5 @@
 use super::data::{
-    capability_data_settings, capability_query_result, contract_data_settings,
-    contract_query_result,
+    DataSettingsOverrides, capability_query_result, contract_data_settings, contract_query_result,
 };
 use super::devices::{build_camera_object, multipart_part};
 use super::recordings::{ByteRange, parse_byte_range};
@@ -13,15 +12,18 @@ use super::*;
 #[test]
 fn bootstrap_lifecycle_controls_catalog_admission() {
     let state = BootstrapState::new();
-    assert_eq!(state.current().state, BackendReadinessState::Bootstrapping);
+    assert_eq!(
+        state.current().state(),
+        BackendReadinessState::Bootstrapping
+    );
     assert!(state.catalog_unavailable().is_some());
 
     state.ready();
-    assert_eq!(state.current().state, BackendReadinessState::Ready);
+    assert_eq!(state.current().state(), BackendReadinessState::Ready);
     assert!(state.catalog_unavailable().is_none());
 
     state.degraded(false, "authentication expired");
-    assert_eq!(state.current().state, BackendReadinessState::Degraded);
+    assert_eq!(state.current().state(), BackendReadinessState::Degraded);
     assert_eq!(
         state.catalog_unavailable().as_deref(),
         Some("authentication expired")
@@ -129,7 +131,7 @@ fn workflow_uses_named_events_on_the_single_reconnecting_stream() {
     assert!(source.contains("event(\"workflow_update\")"));
     assert!(source.contains("event(\"workflow_agent\")"));
     assert!(
-        source.contains("let snapshot = state.workflow.state();"),
+        source.contains("let snapshot = state.workflow().state();"),
         "Workflow broadcasts are wakeups so an old queued scope cannot regress SSE"
     );
     assert_eq!(source.matches("route(\"/events\"").count(), 1);
@@ -165,23 +167,15 @@ fn imports_distinguish_unavailable_storage_from_invalid_files() {
 }
 
 fn status(id: &str) -> CameraStatus {
-    CameraStatus {
-        id: id.to_owned(),
-        name: "Test camera".to_owned(),
-        width: 1280,
-        height: 720,
-        fps: 30,
-        streaming: false,
-        frames: 0,
-        error: None,
-    }
+    CameraStatus::new(
+        id,
+        "Test camera",
+        spiral_robotics_api::robots::CameraStreamFormat::new(1280, 720, 30),
+    )
 }
 
 fn binding(name: &str, id: &str) -> CameraAssignment {
-    CameraAssignment {
-        role: name.to_owned(),
-        device_id: id.to_owned(),
-    }
+    CameraAssignment::new(name, id)
 }
 
 #[test]
@@ -253,11 +247,11 @@ fn removing_a_camera_drops_it_from_the_stored_object() {
 
 #[test]
 fn multipart_parts_carry_an_accurate_length() {
-    let frame = Frame {
-        bytes: Bytes::from_static(&[0xff, 0xd8, 0x00, 0xff, 0xd9]),
-        sequence: 1,
-        captured_at: std::time::Instant::now(),
-    };
+    let frame = Frame::new(
+        Bytes::from_static(&[0xff, 0xd8, 0x00, 0xff, 0xd9]),
+        1,
+        std::time::Instant::now(),
+    );
 
     let part = multipart_part(&frame);
     let text = String::from_utf8_lossy(&part);
@@ -272,19 +266,19 @@ fn multipart_parts_carry_an_accurate_length() {
 fn spiral_video_ranges_cover_browser_seek_forms() {
     assert_eq!(
         parse_byte_range("bytes=10-19", 100),
-        Some(ByteRange { start: 10, end: 19 })
+        Some(ByteRange::new(10, 19))
     );
     assert_eq!(
         parse_byte_range("bytes=90-", 100),
-        Some(ByteRange { start: 90, end: 99 })
+        Some(ByteRange::new(90, 99))
     );
     assert_eq!(
         parse_byte_range("bytes=-10", 100),
-        Some(ByteRange { start: 90, end: 99 })
+        Some(ByteRange::new(90, 99))
     );
     assert_eq!(
         parse_byte_range("bytes=90-200", 100),
-        Some(ByteRange { start: 90, end: 99 })
+        Some(ByteRange::new(90, 99))
     );
     assert_eq!(parse_byte_range("bytes=100-", 100), None);
     assert_eq!(parse_byte_range("bytes=20-10", 100), None);
@@ -339,60 +333,45 @@ fn workspace_errors_map_to_the_right_status_codes() {
 
 #[test]
 fn data_presenters_round_trip_transport_values_without_leaking_them_to_policy() {
-    let settings = DataSettings {
-        spiral: ContractSpiralSettings {
-            endpoint: "https://api.spiraldb.dev".to_owned(),
-            spfs_endpoint: "https://spfs.spiraldb.dev".to_owned(),
-            project_id: "project".to_owned(),
-            client_id: String::new(),
-            client_secret_configured: false,
-            namespace: "dataset".to_owned(),
-            endpoint_restart_required: false,
-        },
-        training: spiral_robotics_api::settings::TrainingRuntimeSettings::default(),
-        video: VideoSettings { enabled: true },
-    };
+    let settings = DataSettings::new(
+        ContractSpiralSettings::new(
+            "https://api.spiraldb.dev",
+            "https://spfs.spiraldb.dev",
+            "project",
+        )
+        .with_namespace("dataset"),
+        spiral_robotics_api::settings::TrainingRuntimeSettings::default(),
+        VideoSettings::new(true),
+    );
     assert_eq!(
-        contract_data_settings(capability_data_settings(
-            settings.clone(),
-            None,
-            None,
-            None,
-            None,
-            false,
-        )),
+        contract_data_settings(DataSettingsOverrides::new(None, None).apply(settings.clone())),
         settings
     );
 
-    let pending = capability_data_settings(
-        settings,
-        Some("http://127.0.0.1:4279"),
-        Some("http://127.0.0.1:4295"),
-        Some("local-project"),
-        Some("client-id"),
-        true,
-    );
-    assert_eq!(pending.spiral.endpoint, "http://127.0.0.1:4279");
-    assert_eq!(pending.spiral.spfs_endpoint, "http://127.0.0.1:4295");
-    assert_eq!(pending.spiral.project_id, "local-project");
-    assert!(!pending.spiral.endpoint_restart_required);
-    assert_eq!(pending.spiral.client_id, "client-id");
-    assert!(pending.spiral.client_secret_configured);
+    let pending =
+        DataSettingsOverrides::new(Some("http://127.0.0.1:4279"), Some("http://127.0.0.1:4295"))
+            .with_identity(Some("local-project"), Some("client-id"))
+            .with_credentials(true)
+            .apply(settings);
+    assert_eq!(pending.spiral().endpoint(), "http://127.0.0.1:4279");
+    assert_eq!(pending.spiral().spfs_endpoint(), "http://127.0.0.1:4295");
+    assert_eq!(pending.spiral().project_id(), "local-project");
+    assert!(!pending.spiral().endpoint_restart_required());
+    assert_eq!(pending.spiral().client_id(), "client-id");
+    assert!(pending.spiral().client_secret_configured());
 
-    let query = SpiralQueryResponse {
-        columns: vec![spiral_robotics_api::relations::QueryColumn {
-            name: "payload".to_owned(),
-            data_type: "json".to_owned(),
-            nullable: true,
-            semantic_type: Some("spql.test.Payload".to_owned()),
-        }],
-        rows: vec![serde_json::Map::from_iter([(
+    let query = SpiralQueryResponse::new(
+        vec![
+            spiral_robotics_api::relations::QueryColumn::new("payload", "json", true)
+                .with_semantic_type(Some("spql.test.Payload".to_owned())),
+        ],
+        vec![serde_json::Map::from_iter([(
             "payload".to_owned(),
             serde_json::json!({"signed": -2, "unsigned": u64::MAX, "nested": [true, null]}),
         )])],
-        truncated: true,
-        elapsed_ms: 9,
-    };
+        true,
+    )
+    .with_elapsed_ms(9);
     assert_eq!(
         contract_query_result(capability_query_result(query.clone())),
         query
@@ -401,51 +380,54 @@ fn data_presenters_round_trip_transport_values_without_leaking_them_to_policy() 
 
 #[test]
 fn training_and_rollout_presenters_round_trip_semantic_state() {
-    let run = TrainingRun {
-        id: "run-1".to_owned(),
-        config: StartTrainingRequest::default(),
-        source: spiral_robotics_api::training::TrainingSource {
-            dataset_id: "default".to_owned(),
-        },
-        phase: spiral_robotics_api::training::TrainingRunPhase::Running,
-        current_step: 4,
-        started_ms: 1,
-        finished_ms: None,
-        message: Some("running".to_owned()),
-        metrics: vec![spiral_robotics_api::training::TrainingMetricPoint {
-            step: 4,
-            loader_ms: Some(790.0),
-            arrow_encode_ms: Some(24.0),
-            upload_ms: Some(2_960.0),
-            device_copy_ms: Some(6.0),
-            model_ms: Some(149.0),
-            ..Default::default()
-        }],
-        checkpoints: Vec::new(),
-        logs: vec!["ready".to_owned()],
-    };
+    let metric = spiral_robotics_api::training::TrainingMetricPoint::new(
+        spiral_robotics_api::training::TrainingMetricProgress::new(4, 0.0, 0.0),
+        spiral_robotics_api::training::TrainingResourceMetrics::default(),
+        spiral_robotics_api::training::TrainingStageTimings::new(
+            Some(790.0),
+            Some(24.0),
+            Some(2_960.0),
+        )
+        .with_runtime(Some(6.0), Some(149.0)),
+    );
+    let run = TrainingRun::new(
+        spiral_robotics_api::training::TrainingRunIdentity::new(
+            "run-1",
+            StartTrainingRequest::default(),
+            spiral_robotics_api::training::TrainingSource::new("default"),
+        ),
+        spiral_robotics_api::training::TrainingRunLifecycle::new(
+            spiral_robotics_api::training::TrainingRunPhase::Running,
+            4,
+            1,
+        )
+        .with_completion(None, Some("running".to_owned())),
+        spiral_robotics_api::training::TrainingRunHistory::new(
+            vec![metric],
+            Vec::new(),
+            vec!["ready".to_owned()],
+        ),
+    );
     assert_eq!(
         contract_training_run(capability_training_run(run.clone())),
         run
     );
 
-    let rollout = RolloutSnapshot {
-        phase: spiral_robotics_api::rollout::RolloutPhase::Running,
-        session_id: Some("session-1".to_owned()),
-        run_id: Some("run-1".to_owned()),
-        checkpoint_step: Some(4),
-        robot: Some("arm".to_owned()),
-        duration_seconds: Some(30),
-        started_ms: Some(1),
-        finished_ms: None,
-        message: None,
-        warning: Some("clamped wrist".to_owned()),
-        metrics: spiral_robotics_api::rollout::RolloutMetrics {
-            inference_count: 2,
-            command_count: 1,
-            ..Default::default()
-        },
-    };
+    let rollout = RolloutSnapshot::new(
+        spiral_robotics_api::rollout::RolloutIdentity::new(
+            Some("session-1".to_owned()),
+            Some("run-1".to_owned()),
+            Some("arm".to_owned()),
+        )
+        .with_checkpoint(Some(4))
+        .with_duration(Some(30)),
+        spiral_robotics_api::rollout::RolloutLifecycle::new(
+            spiral_robotics_api::rollout::RolloutPhase::Running,
+            Some(1),
+        )
+        .with_messages(None, Some("clamped wrist".to_owned())),
+        spiral_robotics_api::rollout::RolloutMetrics::new(2, 1, 0),
+    );
     assert_eq!(
         contract_rollout_snapshot(capability_rollout_snapshot(rollout.clone())),
         rollout

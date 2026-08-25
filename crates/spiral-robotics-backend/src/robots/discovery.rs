@@ -1,37 +1,73 @@
 //! Framework-neutral discovery actions for serial ports and cameras.
 
-use spiral_robotics_core::error::OperationError;
+use spiral_robotics_core::OperationError;
 
-pub trait SerialPortInventory: Send + Sync {
+pub(crate) trait SerialPortInventory: Send + Sync {
     async fn available_port_paths(&self) -> Result<Vec<String>, OperationError>;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SerialPortDescriptor {
-    pub path: String,
-    pub kind: String,
-    pub description: Option<String>,
-    pub used_by: Option<String>,
+pub(crate) struct SerialPortDescriptor {
+    path: String,
+    kind: String,
+    description: Option<String>,
+    used_by: Option<String>,
 }
 
-pub trait SerialPortQueryPort: Send + Sync {
+impl SerialPortDescriptor {
+    pub(crate) fn new(
+        path: impl Into<String>,
+        kind: impl Into<String>,
+        description: Option<String>,
+    ) -> Self {
+        Self {
+            path: path.into(),
+            kind: kind.into(),
+            description,
+            used_by: None,
+        }
+    }
+
+    pub(crate) fn with_owner(mut self, used_by: Option<String>) -> Self {
+        self.used_by = used_by;
+        self
+    }
+
+    pub(crate) fn into_parts(self) -> (String, String, Option<String>, Option<String>) {
+        (self.path, self.kind, self.description, self.used_by)
+    }
+}
+
+pub(crate) trait SerialPortQueryPort: Send + Sync {
     async fn serial_ports(&self) -> Result<Vec<SerialPortDescriptor>, OperationError>;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct IdentifySerialPortCommand {
-    pub before: Vec<String>,
+pub(crate) struct IdentifySerialPortCommand {
+    before: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SerialPortIdentification {
-    pub port: Option<String>,
-    pub removed: Vec<String>,
-    pub guidance: String,
+pub(crate) struct SerialPortIdentification {
+    port: Option<String>,
+    removed: Vec<String>,
+    guidance: String,
 }
 
 impl IdentifySerialPortCommand {
-    pub async fn execute<P: SerialPortInventory + ?Sized>(
+    pub(crate) fn new(before: Vec<String>) -> Self {
+        Self { before }
+    }
+}
+
+impl SerialPortIdentification {
+    pub(crate) fn into_parts(self) -> (Option<String>, Vec<String>, String) {
+        (self.port, self.removed, self.guidance)
+    }
+}
+
+impl IdentifySerialPortCommand {
+    pub(crate) async fn execute<P: SerialPortInventory + ?Sized>(
         self,
         inventory: &P,
     ) -> Result<SerialPortIdentification, OperationError> {
@@ -71,18 +107,89 @@ impl IdentifySerialPortCommand {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DiscoveredCamera {
-    pub id: String,
-    pub name: String,
-    pub width: u32,
-    pub height: u32,
-    pub fps: u32,
-    pub streaming: bool,
-    pub frames: u64,
-    pub error: Option<String>,
+pub(crate) struct DiscoveredCamera {
+    id: String,
+    name: String,
+    format: CameraDiscoveryFormat,
+    status: CameraDiscoveryStatus,
 }
 
-pub trait CameraDiscoveryPort: Send + Sync {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct CameraDiscoveryFormat {
+    width: u32,
+    height: u32,
+    fps: u32,
+}
+
+impl CameraDiscoveryFormat {
+    pub(crate) fn new(width: u32, height: u32, fps: u32) -> Self {
+        Self { width, height, fps }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CameraDiscoveryStatus {
+    streaming: bool,
+    frames: u64,
+    error: Option<String>,
+}
+
+impl CameraDiscoveryStatus {
+    pub(crate) fn new(streaming: bool, frames: u64, error: Option<String>) -> Self {
+        Self {
+            streaming,
+            frames,
+            error,
+        }
+    }
+}
+
+impl DiscoveredCamera {
+    pub(crate) fn new(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        format: CameraDiscoveryFormat,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            format,
+            status: CameraDiscoveryStatus::new(false, 0, None),
+        }
+    }
+
+    pub(crate) fn with_status(mut self, status: CameraDiscoveryStatus) -> Self {
+        self.status = status;
+        self
+    }
+
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+    pub(crate) fn width(&self) -> u32 {
+        self.format.width
+    }
+    pub(crate) fn height(&self) -> u32 {
+        self.format.height
+    }
+    pub(crate) fn fps(&self) -> u32 {
+        self.format.fps
+    }
+    pub(crate) fn streaming(&self) -> bool {
+        self.status.streaming
+    }
+    pub(crate) fn frames(&self) -> u64 {
+        self.status.frames
+    }
+    pub(crate) fn error(&self) -> Option<&str> {
+        self.status.error.as_deref()
+    }
+}
+
+pub(crate) trait CameraDiscoveryPort: Send + Sync {
     fn cameras(&self) -> Vec<DiscoveredCamera>;
     async fn refresh_cameras(&self) -> Result<Vec<DiscoveredCamera>, OperationError>;
 }
@@ -219,18 +326,13 @@ mod tests {
     async fn camera_refresh_delegates_once_and_preserves_success_or_failure() {
         let cameras = Cameras {
             calls: Mutex::new(0),
-            result: Ok(vec![DiscoveredCamera {
-                id: "wrist".to_owned(),
-                name: "Wrist".to_owned(),
-                width: 640,
-                height: 480,
-                fps: 30,
-                streaming: false,
-                frames: 0,
-                error: None,
-            }]),
+            result: Ok(vec![DiscoveredCamera::new(
+                "wrist",
+                "Wrist",
+                CameraDiscoveryFormat::new(640, 480, 30),
+            )]),
         };
-        assert_eq!(cameras.refresh_cameras().await.unwrap()[0].id, "wrist");
+        assert_eq!(cameras.refresh_cameras().await.unwrap()[0].id(), "wrist");
         assert_eq!(*cameras.calls.lock().unwrap(), 1);
 
         let cameras = Cameras {

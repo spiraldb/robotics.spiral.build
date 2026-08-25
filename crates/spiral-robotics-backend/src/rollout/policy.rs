@@ -8,77 +8,261 @@ use std::time::Duration;
 
 use spiral_robotics_core::operation::MAX_ROLLOUT_ACTION_STEPS;
 
-use spiral_robotics_core::error::OperationError;
+use spiral_robotics_core::OperationError;
 
-pub const ACT_ARTIFACT_FORMAT: &str = "spiral_robotics.act.safetensors.v2";
-pub const ACT_TENSOR_NAMESPACE: &str = "lerobot_act_state_dict_v1";
+pub(crate) const ACT_ARTIFACT_FORMAT: &str = "spiral_robotics.act.safetensors.v2";
+pub(crate) const ACT_TENSOR_NAMESPACE: &str = "lerobot_act_state_dict_v1";
 const LEGACY_BURN_ACT_TENSOR_NAMESPACE: &str = "burn_act_state_dict_v1";
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct ArtifactIdentity {
-    pub format: String,
-    pub purpose: String,
-    pub run_id: String,
-    pub step: u64,
-    pub tensor_namespace: String,
+pub(crate) struct ArtifactIdentity {
+    format: String,
+    purpose: String,
+    run_id: String,
+    step: u64,
+    tensor_namespace: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct PolicyDataContract {
-    pub value_space: String,
-    pub robot_type: String,
-    pub joint_names: Vec<String>,
-    pub camera_streams: Vec<String>,
-    pub sample_hz: f64,
-    pub image_layout: String,
-    pub image_normalization: String,
-    pub frame_alignment: String,
-    pub schema_version: u32,
-    pub supported_schema_version: u32,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PolicyModelContract {
-    pub state_dimensions: usize,
-    pub action_dimensions: usize,
-    pub action_chunk_size: usize,
-    pub recommended_action_steps: usize,
-    pub image_streams: Vec<String>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TargetRobotContract {
-    pub id: String,
-    pub robot_type: Option<String>,
-    pub joint_names: Vec<String>,
-    pub camera_bindings: Vec<CameraBindingContract>,
-    pub connected: bool,
-    pub calibrated: bool,
-    pub problem: Option<String>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CameraBindingContract {
-    pub role: String,
-    pub camera_id: String,
+pub(crate) struct PolicyDataContract {
+    observations: PolicyObservationContract,
+    images: PolicyImageContract,
+    schemas: PolicySchemaContract,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct ValidatedRolloutContract {
-    pub joint_names: Vec<String>,
-    pub camera_bindings: Vec<ResolvedCameraBinding>,
-    pub sample_hz: f64,
-    pub sample_period: Duration,
-    pub action_steps: usize,
+pub(crate) struct PolicyObservationContract {
+    value_space: String,
+    robot_type: String,
+    joint_names: Vec<String>,
+    camera_streams: Vec<String>,
+    sample_hz: f64,
+}
+
+impl PolicyObservationContract {
+    pub(crate) fn new(
+        value_space: impl Into<String>,
+        robot_type: impl Into<String>,
+        joint_names: Vec<String>,
+    ) -> Self {
+        Self {
+            value_space: value_space.into(),
+            robot_type: robot_type.into(),
+            joint_names,
+            camera_streams: Vec::new(),
+            sample_hz: 0.0,
+        }
+    }
+
+    pub(crate) fn with_capture(mut self, camera_streams: Vec<String>, sample_hz: f64) -> Self {
+        self.camera_streams = camera_streams;
+        self.sample_hz = sample_hz;
+        self
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct PolicyImageContract {
+    layout: String,
+    normalization: String,
+    frame_alignment: String,
+}
+
+impl PolicyImageContract {
+    pub(crate) fn new(
+        layout: impl Into<String>,
+        normalization: impl Into<String>,
+        frame_alignment: impl Into<String>,
+    ) -> Self {
+        Self {
+            layout: layout.into(),
+            normalization: normalization.into(),
+            frame_alignment: frame_alignment.into(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct PolicySchemaContract {
+    artifact: u32,
+    supported: u32,
+}
+
+impl PolicySchemaContract {
+    pub(crate) fn new(artifact: u32, supported: u32) -> Self {
+        Self {
+            artifact,
+            supported,
+        }
+    }
+}
+
+impl PolicyDataContract {
+    pub(crate) fn new(
+        observations: PolicyObservationContract,
+        images: PolicyImageContract,
+        schemas: PolicySchemaContract,
+    ) -> Self {
+        Self {
+            observations,
+            images,
+            schemas,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ResolvedCameraBinding {
-    pub stream: String,
-    pub camera_id: String,
+pub(crate) struct PolicyModelContract {
+    state_dimensions: usize,
+    action_dimensions: usize,
+    action_chunk_size: usize,
+    recommended_action_steps: usize,
+    image_streams: Vec<String>,
 }
 
-pub fn validate_artifact_identity(
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TargetRobotContract {
+    id: String,
+    robot_type: Option<String>,
+    joint_names: Vec<String>,
+    camera_bindings: Vec<CameraBindingContract>,
+    connected: bool,
+    calibrated: bool,
+    problem: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CameraBindingContract {
+    role: String,
+    camera_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ValidatedRolloutContract {
+    joint_names: Vec<String>,
+    camera_bindings: Vec<ResolvedCameraBinding>,
+    sample_hz: f64,
+    sample_period: Duration,
+    action_steps: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ResolvedCameraBinding {
+    stream: String,
+    camera_id: String,
+}
+
+impl ArtifactIdentity {
+    pub(crate) fn new(
+        format: impl Into<String>,
+        purpose: impl Into<String>,
+        run_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            format: format.into(),
+            purpose: purpose.into(),
+            run_id: run_id.into(),
+            step: 0,
+            tensor_namespace: String::new(),
+        }
+    }
+    pub(crate) fn with_artifact(mut self, step: u64, tensor_namespace: impl Into<String>) -> Self {
+        self.step = step;
+        self.tensor_namespace = tensor_namespace.into();
+        self
+    }
+}
+
+impl PolicyModelContract {
+    pub(crate) fn new(
+        state_dimensions: usize,
+        action_dimensions: usize,
+        image_streams: Vec<String>,
+    ) -> Self {
+        Self {
+            state_dimensions,
+            action_dimensions,
+            action_chunk_size: 0,
+            recommended_action_steps: 0,
+            image_streams,
+        }
+    }
+    pub(crate) fn with_action_shape(
+        mut self,
+        action_chunk_size: usize,
+        recommended_action_steps: usize,
+    ) -> Self {
+        self.action_chunk_size = action_chunk_size;
+        self.recommended_action_steps = recommended_action_steps;
+        self
+    }
+}
+
+impl TargetRobotContract {
+    pub(crate) fn new(
+        id: impl Into<String>,
+        robot_type: Option<String>,
+        joint_names: Vec<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            robot_type,
+            joint_names,
+            camera_bindings: Vec::new(),
+            connected: false,
+            calibrated: false,
+            problem: None,
+        }
+    }
+    pub(crate) fn with_cameras(mut self, camera_bindings: Vec<CameraBindingContract>) -> Self {
+        self.camera_bindings = camera_bindings;
+        self
+    }
+    pub(crate) fn with_availability(mut self, connected: bool, calibrated: bool) -> Self {
+        self.connected = connected;
+        self.calibrated = calibrated;
+        self
+    }
+    pub(crate) fn with_problem(mut self, problem: Option<String>) -> Self {
+        self.problem = problem;
+        self
+    }
+}
+
+impl CameraBindingContract {
+    pub(crate) fn new(role: impl Into<String>, camera_id: impl Into<String>) -> Self {
+        Self {
+            role: role.into(),
+            camera_id: camera_id.into(),
+        }
+    }
+}
+
+impl ValidatedRolloutContract {
+    pub(crate) fn joint_names(&self) -> &[String] {
+        &self.joint_names
+    }
+    pub(crate) fn camera_bindings(&self) -> &[ResolvedCameraBinding] {
+        &self.camera_bindings
+    }
+    pub(crate) const fn sample_hz(&self) -> f64 {
+        self.sample_hz
+    }
+    pub(crate) const fn sample_period(&self) -> Duration {
+        self.sample_period
+    }
+}
+
+impl ResolvedCameraBinding {
+    pub(crate) fn stream(&self) -> &str {
+        &self.stream
+    }
+    pub(crate) fn camera_id(&self) -> &str {
+        &self.camera_id
+    }
+}
+
+pub(crate) fn validate_artifact_identity(
     actual: &ArtifactIdentity,
     expected_run: &str,
     expected_step: u64,
@@ -98,41 +282,43 @@ pub fn validate_artifact_identity(
 }
 
 /// Bind persisted artifact policy, loaded-model shape, and live robot setup.
-pub fn validate_rollout_contract(
+pub(crate) fn validate_rollout_contract(
     data: PolicyDataContract,
     model: &PolicyModelContract,
     target: &TargetRobotContract,
 ) -> Result<ValidatedRolloutContract, OperationError> {
-    if data.robot_type.trim().is_empty()
-        || data.joint_names.is_empty()
-        || data.camera_streams.is_empty()
+    if data.observations.robot_type.trim().is_empty()
+        || data.observations.joint_names.is_empty()
+        || data.observations.camera_streams.is_empty()
     {
         return invalid("checkpoint has an empty robot, joint, or camera contract");
     }
-    if data.value_space != "centered_normalized"
-        || data.image_layout != "chw"
-        || data.image_normalization != "imagenet"
-        || data.frame_alignment != "fixed_fps"
+    if data.observations.value_space != "centered_normalized"
+        || data.images.layout != "chw"
+        || data.images.normalization != "imagenet"
+        || data.images.frame_alignment != "fixed_fps"
     {
         return invalid("checkpoint uses an unsupported observation or image contract");
     }
-    if data.schema_version != data.supported_schema_version {
+    if data.schemas.artifact != data.schemas.supported {
         return invalid(format!(
             "checkpoint schema version {} is not supported by runtime version {}",
-            data.schema_version, data.supported_schema_version
+            data.schemas.artifact, data.schemas.supported
         ));
     }
-    require_unique_nonempty("checkpoint joint", &data.joint_names)?;
-    require_unique_nonempty("checkpoint camera", &data.camera_streams)?;
-    if !data.sample_hz.is_finite() || !(1.0..=100.0).contains(&data.sample_hz) {
+    require_unique_nonempty("checkpoint joint", &data.observations.joint_names)?;
+    require_unique_nonempty("checkpoint camera", &data.observations.camera_streams)?;
+    if !data.observations.sample_hz.is_finite()
+        || !(1.0..=100.0).contains(&data.observations.sample_hz)
+    {
         return invalid("checkpoint sample_hz must be between 1 and 100");
     }
-    if model.state_dimensions != data.joint_names.len()
-        || model.action_dimensions != data.joint_names.len()
+    if model.state_dimensions != data.observations.joint_names.len()
+        || model.action_dimensions != data.observations.joint_names.len()
     {
         return invalid(format!(
             "checkpoint joint contract has {} names but the model expects {} state and {} action values",
-            data.joint_names.len(),
+            data.observations.joint_names.len(),
             model.state_dimensions,
             model.action_dimensions
         ));
@@ -145,7 +331,7 @@ pub fn validate_rollout_contract(
             model.recommended_action_steps, model.action_chunk_size
         ));
     }
-    if model.image_streams != data.camera_streams {
+    if model.image_streams != data.observations.camera_streams {
         return invalid("checkpoint camera order does not match its configuration");
     }
     if target.problem.is_some() || !target.connected || !target.calibrated {
@@ -154,15 +340,19 @@ pub fn validate_rollout_contract(
             target.id
         ));
     }
-    if target.robot_type.as_deref() != Some(data.robot_type.as_str()) {
+    if target.robot_type.as_deref() != Some(data.observations.robot_type.as_str()) {
         return invalid(format!(
             "checkpoint was trained for {:?}, but robot {:?} is {:?}",
-            data.robot_type, target.id, target.robot_type
+            data.observations.robot_type, target.id, target.robot_type
         ));
     }
     let configured = target.joint_names.iter().collect::<BTreeSet<_>>();
-    let expected = data.joint_names.iter().collect::<BTreeSet<_>>();
-    if configured != expected || target.joint_names.len() != data.joint_names.len() {
+    let expected = data
+        .observations
+        .joint_names
+        .iter()
+        .collect::<BTreeSet<_>>();
+    if configured != expected || target.joint_names.len() != data.observations.joint_names.len() {
         return invalid("checkpoint joint names do not exactly match the target robot");
     }
 
@@ -178,8 +368,8 @@ pub fn validate_rollout_contract(
             return invalid("robot camera roles must be non-empty and unique");
         }
     }
-    let mut resolved = Vec::with_capacity(data.camera_streams.len());
-    for stream in &data.camera_streams {
+    let mut resolved = Vec::with_capacity(data.observations.camera_streams.len());
+    for stream in &data.observations.camera_streams {
         let role = stream.rsplit('.').next().unwrap_or(stream);
         let camera_id = bindings.get(role).ok_or_else(|| {
             OperationError::InvalidInput(format!(
@@ -194,21 +384,30 @@ pub fn validate_rollout_contract(
     }
 
     Ok(ValidatedRolloutContract {
-        joint_names: data.joint_names,
+        joint_names: data.observations.joint_names,
         camera_bindings: resolved,
-        sample_hz: data.sample_hz,
-        sample_period: Duration::from_secs_f64(1.0 / data.sample_hz),
+        sample_hz: data.observations.sample_hz,
+        sample_period: Duration::from_secs_f64(1.0 / data.observations.sample_hz),
         action_steps: model.recommended_action_steps.min(MAX_ROLLOUT_ACTION_STEPS),
     })
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ObservationFreshness {
-    pub source: String,
-    pub age: Option<Duration>,
+pub(crate) struct ObservationFreshness {
+    source: String,
+    age: Option<Duration>,
 }
 
-pub fn require_fresh_observations(
+impl ObservationFreshness {
+    pub(crate) fn new(source: impl Into<String>, age: Option<Duration>) -> Self {
+        Self {
+            source: source.into(),
+            age,
+        }
+    }
+}
+
+pub(crate) fn require_fresh_observations(
     observations: &[ObservationFreshness],
     maximum_age: Duration,
 ) -> Result<(), OperationError> {
@@ -227,24 +426,48 @@ pub fn require_fresh_observations(
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct PreparedActionGoals {
-    pub goals: BTreeMap<String, f64>,
-    pub clamps: Vec<ActionClamp>,
+pub(crate) struct PreparedActionGoals {
+    goals: BTreeMap<String, f64>,
+    clamps: Vec<ActionClamp>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct ActionClamp {
-    pub index: usize,
-    pub joint: String,
-    pub requested: f32,
-    pub applied: f32,
+pub(crate) struct ActionClamp {
+    index: usize,
+    joint: String,
+    requested: f32,
+    applied: f32,
+}
+
+impl PreparedActionGoals {
+    pub(crate) fn goals(&self) -> &BTreeMap<String, f64> {
+        &self.goals
+    }
+    pub(crate) fn clamps(&self) -> &[ActionClamp] {
+        &self.clamps
+    }
+}
+
+impl ActionClamp {
+    pub(crate) const fn index(&self) -> usize {
+        self.index
+    }
+    pub(crate) fn joint(&self) -> &str {
+        &self.joint
+    }
+    pub(crate) const fn requested(&self) -> f32 {
+        self.requested
+    }
+    pub(crate) const fn applied(&self) -> f32 {
+        self.applied
+    }
 }
 
 /// Bind one model action to the exact ordered joint contract before hardware.
 ///
 /// Finite values outside the normalized range are safe to saturate at the
 /// calibrated endpoint. Shape mismatches and non-finite values remain fatal.
-pub fn prepare_action_goals(
+pub(crate) fn prepare_action_goals(
     joint_names: &[String],
     action: &[f32],
 ) -> Result<PreparedActionGoals, OperationError> {
@@ -278,13 +501,22 @@ pub fn prepare_action_goals(
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct JointObservation {
-    pub joint: String,
-    pub normalized: Option<f64>,
+pub(crate) struct JointObservation {
+    joint: String,
+    normalized: Option<f64>,
+}
+
+impl JointObservation {
+    pub(crate) fn new(joint: impl Into<String>, normalized: Option<f64>) -> Self {
+        Self {
+            joint: joint.into(),
+            normalized,
+        }
+    }
 }
 
 /// Order live telemetry exactly as the model contract declares it.
-pub fn prepare_observation_state(
+pub(crate) fn prepare_observation_state(
     joint_names: &[String],
     observations: &[JointObservation],
 ) -> Result<Vec<f32>, OperationError> {
@@ -319,42 +551,62 @@ pub fn prepare_observation_state(
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ControlOwner {
+pub(crate) enum ControlOwner {
     Policy { robot: String, session: String },
     Other(String),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum PolicyOwnership {
+pub(crate) enum PolicyOwnership {
     Retained,
     Replaced(String),
 }
 
-pub fn assess_policy_ownership(
-    owner: &ControlOwner,
-    hardware_error: Option<&str>,
-    expected_robot: &str,
-    expected_session: &str,
-) -> Result<PolicyOwnership, OperationError> {
-    if matches!(owner, ControlOwner::Policy { robot, session }
-        if robot == expected_robot && session == expected_session)
-    {
-        return Ok(PolicyOwnership::Retained);
+pub(crate) struct ExpectedPolicyOwner<'a> {
+    robot: &'a str,
+    session: &'a str,
+}
+
+impl<'a> ExpectedPolicyOwner<'a> {
+    pub(crate) fn new(robot: &'a str, session: &'a str) -> Self {
+        Self { robot, session }
     }
-    let replacement = match owner {
-        ControlOwner::Policy { robot, session } => {
-            format!("Policy session {session} on {robot}")
+
+    pub(crate) fn robot(&self) -> &str {
+        self.robot
+    }
+
+    pub(crate) fn session(&self) -> &str {
+        self.session
+    }
+}
+
+impl ControlOwner {
+    pub(crate) fn assess(
+        &self,
+        hardware_error: Option<&str>,
+        expected: ExpectedPolicyOwner<'_>,
+    ) -> Result<PolicyOwnership, OperationError> {
+        if matches!(self, ControlOwner::Policy { robot, session }
+            if robot == expected.robot && session == expected.session)
+        {
+            return Ok(PolicyOwnership::Retained);
         }
-        ControlOwner::Other(description) => description.clone(),
-    };
-    if let Some(error) = hardware_error {
-        return Err(OperationError::Conflict(format!(
-            "stopped policy: hardware control transitioned to {replacement}: {error}"
-        )));
+        let replacement = match self {
+            ControlOwner::Policy { robot, session } => {
+                format!("Policy session {session} on {robot}")
+            }
+            ControlOwner::Other(description) => description.clone(),
+        };
+        if let Some(error) = hardware_error {
+            return Err(OperationError::Conflict(format!(
+                "stopped policy: hardware control transitioned to {replacement}: {error}"
+            )));
+        }
+        Ok(PolicyOwnership::Replaced(format!(
+            "Policy stopped; hardware control transitioned to {replacement}."
+        )))
     }
-    Ok(PolicyOwnership::Replaced(format!(
-        "Policy stopped; hardware control transitioned to {replacement}."
-    )))
 }
 
 fn require_unique_nonempty(label: &str, values: &[String]) -> Result<(), OperationError> {

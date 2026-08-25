@@ -9,7 +9,7 @@
 use std::sync::{Mutex, MutexGuard};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CatalogLeaseOwner {
+pub(crate) enum CatalogLeaseOwner {
     Recording,
     CalibrationReapply,
     EpisodeImport,
@@ -23,15 +23,29 @@ pub enum CatalogLeaseOwner {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CatalogLeaseToken {
+pub(crate) struct CatalogLeaseToken {
     owner: CatalogLeaseOwner,
     generation: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ClaimedRecordingLease {
-    pub token: CatalogLeaseToken,
-    pub episode: String,
+pub(crate) struct ClaimedRecordingLease {
+    token: CatalogLeaseToken,
+    episode: String,
+}
+
+impl ClaimedRecordingLease {
+    fn new(token: CatalogLeaseToken, episode: String) -> Self {
+        Self { token, episode }
+    }
+
+    pub(crate) fn token(&self) -> CatalogLeaseToken {
+        self.token
+    }
+
+    pub(crate) fn episode(&self) -> &str {
+        &self.episode
+    }
 }
 
 struct LeaseHolder {
@@ -47,12 +61,12 @@ struct LeaseState {
 }
 
 #[derive(Default)]
-pub struct CatalogMutationLease {
+pub(crate) struct CatalogMutationLease {
     state: Mutex<LeaseState>,
 }
 
 impl CatalogMutationLease {
-    pub fn try_acquire(&self, owner: CatalogLeaseOwner) -> Option<CatalogLeaseToken> {
+    pub(crate) fn try_acquire(&self, owner: CatalogLeaseOwner) -> Option<CatalogLeaseToken> {
         let mut state = lock(&self.state);
         if state.holder.is_some() {
             return None;
@@ -72,7 +86,7 @@ impl CatalogMutationLease {
 
     /// Associate the identity allocated by a successful recording start with
     /// its still-held catalog lease.
-    pub fn bind_recording(&self, token: CatalogLeaseToken, episode: String) -> bool {
+    pub(crate) fn bind_recording(&self, token: CatalogLeaseToken, episode: String) -> bool {
         let mut state = lock(&self.state);
         let Some(holder) = state.holder.as_mut() else {
             return false;
@@ -90,7 +104,7 @@ impl CatalogMutationLease {
 
     /// Claim finalization exactly once while keeping the exclusion held until
     /// durable commit calls [`release`](Self::release).
-    pub fn claim_recording(&self) -> Option<ClaimedRecordingLease> {
+    pub(crate) fn claim_recording(&self) -> Option<ClaimedRecordingLease> {
         let mut state = lock(&self.state);
         let holder = state.holder.as_mut()?;
         if holder.token.owner != CatalogLeaseOwner::Recording || holder.claimed {
@@ -98,13 +112,10 @@ impl CatalogMutationLease {
         }
         let episode = holder.recording_episode.clone()?;
         holder.claimed = true;
-        Some(ClaimedRecordingLease {
-            token: holder.token,
-            episode,
-        })
+        Some(ClaimedRecordingLease::new(holder.token, episode))
     }
 
-    pub fn recording_episode(&self) -> Option<String> {
+    pub(crate) fn recording_episode(&self) -> Option<String> {
         let state = lock(&self.state);
         let holder = state.holder.as_ref()?;
         (holder.token.owner == CatalogLeaseOwner::Recording && !holder.claimed)
@@ -112,7 +123,7 @@ impl CatalogMutationLease {
             .flatten()
     }
 
-    pub fn recording_is_opening(&self) -> bool {
+    pub(crate) fn recording_is_opening(&self) -> bool {
         let state = lock(&self.state);
         state.holder.as_ref().is_some_and(|holder| {
             holder.token.owner == CatalogLeaseOwner::Recording
@@ -122,13 +133,13 @@ impl CatalogMutationLease {
     }
 
     #[cfg(test)]
-    pub fn is_held(&self) -> bool {
+    pub(crate) fn is_held(&self) -> bool {
         lock(&self.state).holder.is_some()
     }
 
     /// Release only the acquisition identified by `token`. A stale token or a
     /// token belonging to another owner is a no-op.
-    pub fn release(&self, token: CatalogLeaseToken) -> bool {
+    pub(crate) fn release(&self, token: CatalogLeaseToken) -> bool {
         let mut state = lock(&self.state);
         if state
             .holder

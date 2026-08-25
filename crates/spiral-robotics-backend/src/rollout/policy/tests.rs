@@ -1,43 +1,31 @@
 use super::*;
 
 fn data() -> PolicyDataContract {
-    PolicyDataContract {
-        value_space: "centered_normalized".to_owned(),
-        robot_type: "so101_follower".to_owned(),
-        joint_names: vec!["shoulder".to_owned(), "elbow".to_owned()],
-        camera_streams: vec!["follower.camera.wrist".to_owned()],
-        sample_hz: 60.0,
-        image_layout: "chw".to_owned(),
-        image_normalization: "imagenet".to_owned(),
-        frame_alignment: "fixed_fps".to_owned(),
-        schema_version: 6,
-        supported_schema_version: 6,
-    }
+    PolicyDataContract::new(
+        PolicyObservationContract::new(
+            "centered_normalized",
+            "so101_follower",
+            vec!["shoulder".to_owned(), "elbow".to_owned()],
+        )
+        .with_capture(vec!["follower.camera.wrist".to_owned()], 60.0),
+        PolicyImageContract::new("chw", "imagenet", "fixed_fps"),
+        PolicySchemaContract::new(6, 6),
+    )
 }
 
 fn model() -> PolicyModelContract {
-    PolicyModelContract {
-        state_dimensions: 2,
-        action_dimensions: 2,
-        action_chunk_size: 100,
-        recommended_action_steps: 25,
-        image_streams: vec!["follower.camera.wrist".to_owned()],
-    }
+    PolicyModelContract::new(2, 2, vec!["follower.camera.wrist".to_owned()])
+        .with_action_shape(100, 25)
 }
 
 fn target() -> TargetRobotContract {
-    TargetRobotContract {
-        id: "follower".to_owned(),
-        robot_type: Some("so101_follower".to_owned()),
-        joint_names: vec!["elbow".to_owned(), "shoulder".to_owned()],
-        camera_bindings: vec![CameraBindingContract {
-            role: "wrist".to_owned(),
-            camera_id: "camera-1".to_owned(),
-        }],
-        connected: true,
-        calibrated: true,
-        problem: None,
-    }
+    TargetRobotContract::new(
+        "follower",
+        Some("so101_follower".to_owned()),
+        vec!["elbow".to_owned(), "shoulder".to_owned()],
+    )
+    .with_cameras(vec![CameraBindingContract::new("wrist", "camera-1")])
+    .with_availability(true, true)
 }
 
 #[test]
@@ -95,11 +83,8 @@ fn valid_contract_resolves_camera_roles_and_preserves_checkpoint_joint_order() {
 
 #[test]
 fn rollout_preserves_a_checkpoint_prefix_shorter_than_the_replanning_cap() {
-    let short_model = PolicyModelContract {
-        action_chunk_size: 10,
-        recommended_action_steps: 10,
-        ..model()
-    };
+    let short_model = PolicyModelContract::new(2, 2, vec!["follower.camera.wrist".to_owned()])
+        .with_action_shape(10, 10);
 
     let result = validate_rollout_contract(data(), &short_model, &target()).unwrap();
 
@@ -108,39 +93,31 @@ fn rollout_preserves_a_checkpoint_prefix_shorter_than_the_replanning_cap() {
 
 #[test]
 fn artifact_data_must_have_unique_names_and_a_safe_rate() {
+    let mut empty_joints = data();
+    empty_joints.observations.joint_names.clear();
+    let mut duplicate_joints = data();
+    duplicate_joints.observations.joint_names = vec!["shoulder".to_owned(), "shoulder".to_owned()];
+    let mut duplicate_cameras = data();
+    duplicate_cameras.observations.camera_streams = vec!["wrist".to_owned(), "wrist".to_owned()];
+    let mut nan_rate = data();
+    nan_rate.observations.sample_hz = f64::NAN;
+    let mut excessive_rate = data();
+    excessive_rate.observations.sample_hz = 101.0;
+    let mut raw_ticks = data();
+    raw_ticks.observations.value_space = "raw_ticks".to_owned();
+    let mut wrong_layout = data();
+    wrong_layout.images.layout = "hwc".to_owned();
+    let mut old_schema = data();
+    old_schema.schemas.artifact = 5;
     for contract in [
-        PolicyDataContract {
-            joint_names: vec![],
-            ..data()
-        },
-        PolicyDataContract {
-            joint_names: vec!["shoulder".to_owned(), "shoulder".to_owned()],
-            ..data()
-        },
-        PolicyDataContract {
-            camera_streams: vec!["wrist".to_owned(), "wrist".to_owned()],
-            ..data()
-        },
-        PolicyDataContract {
-            sample_hz: f64::NAN,
-            ..data()
-        },
-        PolicyDataContract {
-            sample_hz: 101.0,
-            ..data()
-        },
-        PolicyDataContract {
-            value_space: "raw_ticks".to_owned(),
-            ..data()
-        },
-        PolicyDataContract {
-            image_layout: "hwc".to_owned(),
-            ..data()
-        },
-        PolicyDataContract {
-            schema_version: 5,
-            ..data()
-        },
+        empty_joints,
+        duplicate_joints,
+        duplicate_cameras,
+        nan_rate,
+        excessive_rate,
+        raw_ticks,
+        wrong_layout,
+        old_schema,
     ] {
         assert!(validate_rollout_contract(contract, &model(), &target()).is_err());
     }
@@ -182,14 +159,8 @@ fn finite_action_overshoots_are_clamped_and_reported() {
 fn live_joint_state_is_complete_finite_unique_and_checkpoint_ordered() {
     let joints = vec!["shoulder".to_owned(), "elbow".to_owned()];
     let observations = vec![
-        JointObservation {
-            joint: "elbow".to_owned(),
-            normalized: Some(-0.5),
-        },
-        JointObservation {
-            joint: "shoulder".to_owned(),
-            normalized: Some(0.25),
-        },
+        JointObservation::new("elbow", Some(-0.5)),
+        JointObservation::new("shoulder", Some(0.25)),
     ];
     assert_eq!(
         prepare_observation_state(&joints, &observations).unwrap(),
@@ -200,17 +171,11 @@ fn live_joint_state_is_complete_finite_unique_and_checkpoint_ordered() {
         vec![observations[0].clone()],
         vec![
             observations[0].clone(),
-            JointObservation {
-                joint: "shoulder".to_owned(),
-                normalized: None,
-            },
+            JointObservation::new("shoulder", None),
         ],
         vec![
             observations[0].clone(),
-            JointObservation {
-                joint: "shoulder".to_owned(),
-                normalized: Some(f64::NAN),
-            },
+            JointObservation::new("shoulder", Some(f64::NAN)),
         ],
         vec![observations[0].clone(), observations[0].clone()],
     ] {
@@ -276,14 +241,8 @@ fn target_must_be_healthy_exactly_typed_and_joint_compatible() {
     });
     variants.push(TargetRobotContract {
         camera_bindings: vec![
-            CameraBindingContract {
-                role: "wrist".to_owned(),
-                camera_id: "camera-1".to_owned(),
-            },
-            CameraBindingContract {
-                role: "wrist".to_owned(),
-                camera_id: "camera-2".to_owned(),
-            },
+            CameraBindingContract::new("wrist", "camera-1"),
+            CameraBindingContract::new("wrist", "camera-2"),
         ],
         ..target()
     });
@@ -335,25 +294,21 @@ fn exact_policy_session_owns_control_and_replacements_are_classified() {
         session: "session-1".to_owned(),
     };
     assert_eq!(
-        assess_policy_ownership(&owner, None, "follower", "session-1").unwrap(),
+        owner
+            .assess(None, ExpectedPolicyOwner::new("follower", "session-1"))
+            .unwrap(),
         PolicyOwnership::Retained
     );
     assert!(matches!(
-        assess_policy_ownership(
-            &ControlOwner::Other("Idle".to_owned()),
-            None,
-            "follower",
-            "session-1"
-        )
-        .unwrap(),
+        ControlOwner::Other("Idle".to_owned())
+            .assess(None, ExpectedPolicyOwner::new("follower", "session-1"))
+            .unwrap(),
         PolicyOwnership::Replaced(_)
     ));
     assert!(matches!(
-        assess_policy_ownership(
-            &ControlOwner::Other("Idle".to_owned()),
+        ControlOwner::Other("Idle".to_owned()).assess(
             Some("motor bus stopped responding"),
-            "follower",
-            "session-1"
+            ExpectedPolicyOwner::new("follower", "session-1"),
         ),
         Err(OperationError::Conflict(_))
     ));

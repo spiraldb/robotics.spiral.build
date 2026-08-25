@@ -15,21 +15,69 @@ use spiral_robotics_api::robots::{
 };
 use spiral_robotics_core::arm;
 use spiral_robotics_core::calibration::{Calibration, MotorSpec, MotorSpecifications};
-use spiral_robotics_storage::schema::{Table, column as db};
+use spiral_robotics_storage::{
+    ProjectStore, ROBOT_CONFIGURATION_COLUMN, ROBOT_IDENTIFIER_COLUMN, ROBOT_UPDATED_MILLIS_COLUMN,
+    robot_configuration_relation,
+};
 
 use super::calibration::CalibrationUpdate;
 use super::calibration_codec;
 use super::robot_config::{ConfigError, RobotConfig, RobotConfigUpdate};
-use spiral_robotics_storage::adbc::ProjectStore;
-use spiral_robotics_storage::manager::{
-    ensure_dataset_namespace, execute_delete_sql, execute_update_sql, ingest_batch, table_exists,
-};
-use spiral_robotics_storage::sql;
+use spiral_robotics_storage::string_literal;
 
 pub(crate) const DEFAULT_ROBOT_TYPE: &str = "so101_follower";
 pub(crate) const DEFAULT_BAUD_RATE: u32 = 1_000_000;
 const MAX_ROBOT_ID_LENGTH: usize = 64;
 const MAX_LABEL_LENGTH: usize = 64;
+
+pub(crate) struct RobotWorkspaceCreate {
+    id: String,
+    robot_type: Option<String>,
+    port: Option<PortSettings>,
+}
+
+impl RobotWorkspaceCreate {
+    pub(crate) fn new(id: String, robot_type: Option<String>) -> Self {
+        Self {
+            id,
+            robot_type,
+            port: None,
+        }
+    }
+
+    pub(crate) fn with_port(mut self, port: Option<PortSettings>) -> Self {
+        self.port = port;
+        self
+    }
+}
+
+pub(crate) struct RobotWorkspaceUpdate {
+    id: String,
+    robot_type: Option<String>,
+    port: Option<PortSettings>,
+    cameras: Option<Map<String, Value>>,
+}
+
+impl RobotWorkspaceUpdate {
+    pub(crate) fn new(id: String, robot_type: Option<String>) -> Self {
+        Self {
+            id,
+            robot_type,
+            port: None,
+            cameras: None,
+        }
+    }
+
+    pub(crate) fn with_port(mut self, port: Option<PortSettings>) -> Self {
+        self.port = port;
+        self
+    }
+
+    pub(crate) fn with_cameras(mut self, cameras: Option<Map<String, Value>>) -> Self {
+        self.cameras = cameras;
+        self
+    }
+}
 
 #[derive(Debug)]
 pub(crate) enum WorkspaceError {
@@ -65,8 +113,18 @@ impl From<ConfigError> for WorkspaceError {
 
 #[derive(Clone, Debug)]
 pub(crate) struct RobotRecord {
-    pub(crate) id: String,
-    pub(crate) config: RobotConfig,
+    id: String,
+    config: RobotConfig,
+}
+
+impl RobotRecord {
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub(crate) const fn config(&self) -> &RobotConfig {
+        &self.config
+    }
 }
 
 impl RobotRecord {
@@ -84,15 +142,14 @@ impl RobotRecord {
         if path.trim().is_empty() {
             return None;
         }
-        Some(PortSettings {
-            path: path.to_owned(),
-            baud_rate: port
-                .get("baud_rate")
+        Some(PortSettings::new(
+            path,
+            port.get("baud_rate")
                 .and_then(Value::as_u64)
                 .and_then(|rate| u32::try_from(rate).ok())
                 .filter(|rate| *rate > 0)
                 .unwrap_or(DEFAULT_BAUD_RATE),
-        })
+        ))
     }
 
     pub(crate) fn camera_object(&self) -> Map<String, Value> {
@@ -114,7 +171,7 @@ impl RobotRecord {
                     .get("mount")
                     .cloned()
                     .and_then(|mount| serde_json::from_value(mount).ok());
-                Some(CameraBinding { name, id, mount })
+                Some(CameraBinding::new(name, id, mount))
             })
             .collect()
     }
@@ -170,32 +227,30 @@ impl RobotRecord {
         let calibrated = calibration.is_some() && problem.is_none();
         let mut motors = motors
             .into_iter()
-            .map(|(name, spec)| MotorSummary {
-                id: spec.id(),
-                direction: spec.direction(),
-                model: spec.model().map(str::to_owned),
-                calibration: calibration
-                    .as_ref()
-                    .and_then(|calibration| calibration.motors().get(&name).copied()),
-                limits: MotorLimits::default(),
-                name,
+            .map(|(name, spec)| {
+                MotorSummary::new(name.clone(), spec.id(), spec.direction())
+                    .with_model(spec.model().map(str::to_owned))
+                    .with_calibration(
+                        calibration
+                            .as_ref()
+                            .and_then(|calibration| calibration.motors().get(&name).copied()),
+                    )
+                    .with_limits(MotorLimits::default())
             })
             .collect::<Vec<_>>();
         motors.sort_by(|left, right| {
-            left.id
-                .cmp(&right.id)
-                .then_with(|| left.name.cmp(&right.name))
+            left.id()
+                .cmp(&right.id())
+                .then_with(|| left.name().cmp(right.name()))
         });
-        RobotSummary {
-            id: self.id.clone(),
-            robot_type: self.robot_type(),
-            port: self.port(),
-            motors,
-            cameras: self.cameras(),
-            calibrated,
-            problem,
-            connection,
-        }
+        RobotSummary::new(
+            self.id.clone(),
+            self.robot_type(),
+            spiral_robotics_api::robots::RobotAvailability::new(calibrated, problem, connection),
+        )
+        .with_port(self.port())
+        .with_motors(motors)
+        .with_cameras(self.cameras())
     }
 }
 
@@ -239,23 +294,32 @@ impl RobotWorkspace {
 
     pub(crate) fn create(
         &self,
-        id: &str,
-        robot_type: Option<&str>,
-        port: Option<&str>,
-        baud_rate: Option<u32>,
+        request: RobotWorkspaceCreate,
     ) -> Result<RobotRecord, WorkspaceError> {
+        let RobotWorkspaceCreate {
+            id,
+            robot_type,
+            port,
+        } = request;
+        let id = id.as_str();
         validate_robot_id(id)?;
         match self.get(id) {
             Ok(_) => return Err(WorkspaceError::AlreadyExists(id.to_owned())),
             Err(WorkspaceError::NotFound(_)) => {}
             Err(error) => return Err(error),
         }
-        let robot_type = clean_label("robot_type", robot_type.unwrap_or(DEFAULT_ROBOT_TYPE))?;
+        let robot_type = clean_label(
+            "robot_type",
+            robot_type.as_deref().unwrap_or(DEFAULT_ROBOT_TYPE),
+        )?;
         let mut root = Map::new();
         root.insert("robot_id".to_owned(), Value::String(id.to_owned()));
         root.insert("robot_type".to_owned(), Value::String(robot_type));
-        if let Some(port) = port.map(str::trim).filter(|port| !port.is_empty()) {
-            root.insert("port".to_owned(), port_value(port, baud_rate));
+        if let Some(port) = port.filter(|port| !port.path().trim().is_empty()) {
+            root.insert(
+                "port".to_owned(),
+                port_value(port.path().trim(), Some(port.baud_rate())),
+            );
         }
         root.insert(
             "motors".to_owned(),
@@ -291,14 +355,18 @@ impl RobotWorkspace {
 
     pub(crate) fn update(
         &self,
-        id: &str,
-        robot_type: Option<&str>,
-        port: Option<&PortSettings>,
-        cameras: Option<Map<String, Value>>,
+        request: RobotWorkspaceUpdate,
     ) -> Result<RobotRecord, WorkspaceError> {
+        let RobotWorkspaceUpdate {
+            id,
+            robot_type,
+            port,
+            cameras,
+        } = request;
+        let id = id.as_str();
         let record = self.get(id)?;
         let mut root = record.config.root().clone();
-        if let Some(robot_type) = robot_type {
+        if let Some(robot_type) = robot_type.as_deref() {
             root.insert(
                 "robot_type".to_owned(),
                 Value::String(clean_label("robot_type", robot_type)?),
@@ -310,8 +378,8 @@ impl RobotWorkspace {
                 .and_then(Value::as_object)
                 .cloned()
                 .unwrap_or_default();
-            fields.insert("path".to_owned(), Value::String(port.path.clone()));
-            fields.insert("baud_rate".to_owned(), Value::from(port.baud_rate));
+            fields.insert("path".to_owned(), Value::String(port.path().to_owned()));
+            fields.insert("baud_rate".to_owned(), Value::from(port.baud_rate()));
             root.insert("port".to_owned(), Value::Object(fields));
         }
         if let Some(cameras) = cameras {
@@ -344,15 +412,14 @@ impl RobotWorkspace {
 
     pub(crate) fn delete(&self, id: &str) -> Result<(), WorkspaceError> {
         self.get(id)?;
-        let relation = Table::Robots.qualified_name(self.project_store.namespace());
-        let id = sql::string_literal(id);
+        let relation = robot_configuration_relation(self.project_store.namespace());
+        let id = string_literal(id);
         self.project_store
             .run_invalidating_blocking(move |connection| {
-                if table_exists(connection, &relation)? {
-                    execute_update_sql(
-                        connection,
-                        &format!("DELETE FROM {relation} WHERE {} = {id}", db::ROBOT_ID),
-                    )?;
+                if connection.table_exists(&relation)? {
+                    connection.execute_update_sql(&format!(
+                        "DELETE FROM {relation} WHERE {ROBOT_IDENTIFIER_COLUMN} = {id}"
+                    ))?;
                 }
                 Ok(())
             })
@@ -360,32 +427,28 @@ impl RobotWorkspace {
     }
 
     pub(crate) fn try_list(&self) -> Result<Vec<RobotRecord>, WorkspaceError> {
-        let relation = Table::Robots.qualified_name(self.project_store.namespace());
+        let relation = robot_configuration_relation(self.project_store.namespace());
         self.project_store
             .run_blocking(move |connection| {
-                if !table_exists(connection, &relation)? {
+                if !connection.table_exists(&relation)? {
                     return Ok(Vec::new());
                 }
-                let mut statement = connection
-                    .new_statement()
-                    .map_err(|error| error.to_string())?;
-                statement
-                    .set_sql_query(format!(
+                let reader = connection
+                    .execute_query(format!(
                         "SELECT {}, {} FROM {relation} ORDER BY {}",
-                        db::ROBOT_ID,
-                        db::CONFIG_JSON,
-                        db::ROBOT_ID
+                        ROBOT_IDENTIFIER_COLUMN,
+                        ROBOT_CONFIGURATION_COLUMN,
+                        ROBOT_IDENTIFIER_COLUMN
                     ))
                     .map_err(|error| error.to_string())?;
-                let reader = statement.execute().map_err(|error| error.to_string())?;
                 let mut records = Vec::new();
                 for batch in reader {
                     let batch = batch.map_err(|error| error.to_string())?;
                     let ids = batch
-                        .column_by_name(db::ROBOT_ID)
+                        .column_by_name(ROBOT_IDENTIFIER_COLUMN)
                         .ok_or_else(|| "robots result has no robot_id".to_owned())?;
                     let configs = batch
-                        .column_by_name(db::CONFIG_JSON)
+                        .column_by_name(ROBOT_CONFIGURATION_COLUMN)
                         .ok_or_else(|| "robots result has no config_json".to_owned())?;
                     for row in 0..batch.num_rows() {
                         let id = text_value(ids.as_ref(), row)?;
@@ -402,23 +465,22 @@ impl RobotWorkspace {
 
     fn persist(&self, id: &str, config: RobotConfig) -> Result<RobotRecord, WorkspaceError> {
         let namespace = self.project_store.namespace().to_owned();
-        let relation = Table::Robots.qualified_name(&namespace);
+        let relation = robot_configuration_relation(&namespace);
         let config_json = config.to_pretty_json()?;
         let id_owned = id.to_owned();
-        let id_sql = sql::string_literal(id);
+        let id_sql = string_literal(id);
         self.project_store
             .run_invalidating_blocking(move |connection| {
-                ensure_dataset_namespace(connection, &namespace)?;
-                if table_exists(connection, &relation)? {
-                    execute_delete_sql(
-                        connection,
-                        &format!("DELETE FROM {relation} WHERE {} = {id_sql}", db::ROBOT_ID),
-                    )?;
+                connection.ensure_dataset_namespace(&namespace)?;
+                if connection.table_exists(&relation)? {
+                    connection.execute_delete_sql(&format!(
+                        "DELETE FROM {relation} WHERE {ROBOT_IDENTIFIER_COLUMN} = {id_sql}"
+                    ))?;
                 }
                 let schema = Arc::new(Schema::new(vec![
-                    Field::new(db::ROBOT_ID, DataType::Utf8, false),
-                    Field::new(db::CONFIG_JSON, DataType::Utf8, false),
-                    Field::new(db::UPDATED_MS, DataType::Int64, false),
+                    Field::new(ROBOT_IDENTIFIER_COLUMN, DataType::Utf8, false),
+                    Field::new(ROBOT_CONFIGURATION_COLUMN, DataType::Utf8, false),
+                    Field::new(ROBOT_UPDATED_MILLIS_COLUMN, DataType::Int64, false),
                 ]));
                 let batch = RecordBatch::try_new(
                     schema,
@@ -429,7 +491,7 @@ impl RobotWorkspace {
                     ],
                 )
                 .map_err(|error| error.to_string())?;
-                ingest_batch(connection, &relation, batch)
+                connection.ingest_batch(&relation, batch)
             })
             .map_err(WorkspaceError::Invalid)?;
         Ok(RobotRecord {

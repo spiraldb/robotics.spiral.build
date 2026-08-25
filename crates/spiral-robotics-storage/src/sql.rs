@@ -7,13 +7,13 @@
 
 use crate::schema::{self as spiral, Table, column};
 use crate::video::{VideoAssetKey, VideoByteRange};
-pub use spiral_robotics_core::query::ReadOnlyQueryMode;
+pub(crate) use spiral_robotics_core::query::ReadOnlyQueryMode;
 
-pub fn count_rows(relation: &str) -> String {
+pub(crate) fn count_rows(relation: &str) -> String {
     format!("SELECT COUNT(*) AS rows FROM {relation}")
 }
 
-pub fn dataset_exists(relation: &str, dataset_id: &str) -> String {
+pub(crate) fn dataset_exists(relation: &str, dataset_id: &str) -> String {
     format!(
         "SELECT {dataset_id_column} FROM {relation} WHERE {dataset_id_column} = {dataset_id} LIMIT 1",
         dataset_id_column = column::DATASET_ID,
@@ -21,7 +21,7 @@ pub fn dataset_exists(relation: &str, dataset_id: &str) -> String {
     )
 }
 
-pub fn delete_episode(relation: &str, episode_id: &str) -> String {
+pub(crate) fn delete_episode(relation: &str, episode_id: &str) -> String {
     format!(
         "DELETE FROM {relation} WHERE {} = {}",
         column::EPISODE_ID,
@@ -29,7 +29,7 @@ pub fn delete_episode(relation: &str, episode_id: &str) -> String {
     )
 }
 
-pub fn delete_training_run(relation: &str, run_id: &str) -> String {
+pub(crate) fn delete_training_run(relation: &str, run_id: &str) -> String {
     format!(
         "DELETE FROM {relation} WHERE {} = {}",
         column::RUN_ID,
@@ -37,7 +37,7 @@ pub fn delete_training_run(relation: &str, run_id: &str) -> String {
     )
 }
 
-pub fn trajectory(dataset: &str, episode_id: &str, stream_id: &str) -> String {
+pub(crate) fn trajectory(dataset: &str, episode_id: &str, stream_id: &str) -> String {
     let episodes = Table::Episodes.qualified_name(dataset);
     let streams = Table::EpisodeStreams.qualified_name(dataset);
     let samples = Table::JointSamples.qualified_name(dataset);
@@ -61,7 +61,7 @@ pub fn trajectory(dataset: &str, episode_id: &str, stream_id: &str) -> String {
     )
 }
 
-pub fn episode_samples(dataset: &str, episode_id: &str) -> String {
+pub(crate) fn episode_samples(dataset: &str, episode_id: &str) -> String {
     format!(
         "SELECT * FROM {} WHERE {} = {} ORDER BY {}, {}",
         Table::JointSamples.qualified_name(dataset),
@@ -119,7 +119,7 @@ pub(crate) fn video_asset_range(
     )
 }
 
-pub fn training_checkpoint(dataset: &str, run_id: &str, step: u64) -> String {
+pub(crate) fn training_checkpoint(dataset: &str, run_id: &str, step: u64) -> String {
     let checkpoints = Table::TrainingCheckpoints.qualified_name(dataset);
     format!(
         "SELECT {config}, {checkpoint} FROM {checkpoints} \
@@ -134,7 +134,7 @@ pub fn training_checkpoint(dataset: &str, run_id: &str, step: u64) -> String {
     )
 }
 
-pub fn create_dataset_namespace(dataset: &str) -> String {
+pub(crate) fn create_dataset_namespace(dataset: &str) -> String {
     format!(
         "CREATE TABLE {dataset} AS SELECT {} AS {}",
         string_literal(dataset),
@@ -142,19 +142,19 @@ pub fn create_dataset_namespace(dataset: &str) -> String {
     )
 }
 
-pub fn video_sources_relation(dataset: &str) -> String {
+pub(crate) fn video_sources_relation(dataset: &str) -> String {
     format!("{dataset}_video_sources")
 }
 
-pub fn video_dataset_relation(dataset: &str) -> String {
+pub(crate) fn video_dataset_relation(dataset: &str) -> String {
     format!("{dataset}.video")
 }
 
-pub fn video_dataset_output(dataset: &str) -> String {
+pub(crate) fn video_dataset_output(dataset: &str) -> String {
     format!("{}.assets", video_dataset_relation(dataset))
 }
 
-pub fn create_video_sources(sources: &str, assets: &str) -> String {
+pub(crate) fn create_video_sources(sources: &str, assets: &str) -> String {
     format!(
         "CREATE OR REPLACE VIEW {sources} AS SELECT assets.{episode_id}, assets.{stream_id}, \
          assets.{segment_index}, assets.{timeline_offset}, \
@@ -169,7 +169,7 @@ pub fn create_video_sources(sources: &str, assets: &str) -> String {
     )
 }
 
-pub fn migrate_video_assets_to_blob(assets: &str) -> String {
+pub(crate) fn migrate_video_assets_to_blob(assets: &str) -> String {
     format!(
         "CREATE OR REPLACE TABLE {assets} ENGINE 'arbor' AS SELECT \
          {episode_id}, {stream_id}, {segment_index}, {timeline_offset}, {camera_id}, \
@@ -190,7 +190,7 @@ pub fn migrate_video_assets_to_blob(assets: &str) -> String {
     )
 }
 
-pub fn create_video_dataset(dataset: &str, sources: &str) -> String {
+pub(crate) fn create_video_dataset(dataset: &str, sources: &str) -> String {
     format!(
         "CREATE DATASET {dataset} USING spql.mp4.dataset FROM {sources} \
          WITH (blob = '{}', index_tier = 'dependency')",
@@ -198,7 +198,7 @@ pub fn create_video_dataset(dataset: &str, sources: &str) -> String {
     )
 }
 
-pub fn refresh_dataset(dataset: &str) -> String {
+pub(crate) fn refresh_dataset(dataset: &str) -> String {
     format!("REFRESH DATASET {dataset}")
 }
 
@@ -206,11 +206,11 @@ pub fn drop_video_dataset(dataset: &str) -> String {
     format!("DROP DATASET IF EXISTS {dataset} CASCADE")
 }
 
-pub fn drop_video_sources(sources: &str) -> String {
+pub(crate) fn drop_video_sources(sources: &str) -> String {
     format!("DROP VIEW IF EXISTS {sources}")
 }
 
-pub fn ensure_read_only(sql: &str, mode: ReadOnlyQueryMode) -> Result<(), String> {
+pub(crate) fn ensure_read_only(sql: &str, mode: ReadOnlyQueryMode) -> Result<(), String> {
     spiral_robotics_core::query::ReadOnlyQuery::new(sql, mode)
         .authorize()
         .map_err(|error| error.to_string())

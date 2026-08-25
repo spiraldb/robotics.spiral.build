@@ -32,8 +32,9 @@ use spiral_robotics_api::workflow::{
     MAX_SIGLIP_CONCEPT_LENGTH, MAX_WORKFLOW_FEATURE_DESCRIPTION_LENGTH,
     MAX_WORKFLOW_FEATURE_STREAMS, SIGLIP_BASE_MODEL_ID, SIGLIP_BASE_REPOSITORY,
     SIGLIP_BASE_REVISION, WORKFLOW_FEATURE_REGISTRY_RELATION as FEATURE_REGISTRY_RELATION,
-    WorkflowFeatureDefinition, WorkflowModelRunMetadata, WorkflowNodeProgress,
-    WorkflowQuarantineSummary, derived_feature_cache_relation,
+    WorkflowFeatureDefinition, WorkflowModelExecution, WorkflowModelIdentity, WorkflowModelMetrics,
+    WorkflowModelRunMetadata, WorkflowNodeProgress, WorkflowQuarantineSummary,
+    derived_feature_cache_relation,
 };
 use spiral_robotics_core::query::{ReadOnlyQuery, ReadOnlyQueryMode, UnquotedSqlIdentifier};
 use spiral_robotics_core::workflow::QualifiedRelation;
@@ -41,8 +42,7 @@ use tokenizers::Tokenizer;
 use tokenizers::utils::padding::{PaddingDirection, PaddingParams, PaddingStrategy};
 use tokenizers::utils::truncation::TruncationParams;
 
-use spiral_robotics_storage::adbc::ProjectStore;
-use spiral_robotics_storage::manager::{ensure_dataset_namespace, replace_batches};
+use spiral_robotics_storage::ProjectStore;
 
 const IMAGE_EXTENSION_NAME: &str = "spql.image.Image";
 const INPUT_PREFETCH_CHUNKS: usize = 2;
@@ -68,19 +68,57 @@ fn cache_key_declaration_may_be_nullable(name: &str) -> bool {
 }
 
 pub(crate) struct ModelRunRequest {
-    pub(crate) candidate_sql: String,
-    pub(crate) feature_cache_relation: String,
-    pub(crate) features: Vec<WorkflowFeatureDefinition>,
+    candidate_sql: String,
+    feature_cache_relation: String,
+    features: Vec<WorkflowFeatureDefinition>,
 }
 
 pub(crate) struct ModelRunResult {
-    pub(crate) rows: usize,
-    pub(crate) requested_feature_cells: u64,
-    pub(crate) computed_feature_cells: u64,
-    pub(crate) reused_feature_cells: u64,
-    pub(crate) quarantine: WorkflowQuarantineSummary,
-    pub(crate) metadata: WorkflowModelRunMetadata,
-    pub(crate) warnings: Vec<String>,
+    rows: usize,
+    requested_feature_cells: u64,
+    computed_feature_cells: u64,
+    reused_feature_cells: u64,
+    quarantine: WorkflowQuarantineSummary,
+    metadata: WorkflowModelRunMetadata,
+    warnings: Vec<String>,
+}
+
+impl ModelRunRequest {
+    pub(crate) fn new(
+        candidate_sql: impl Into<String>,
+        feature_cache_relation: impl Into<String>,
+        features: Vec<WorkflowFeatureDefinition>,
+    ) -> Self {
+        Self {
+            candidate_sql: candidate_sql.into(),
+            feature_cache_relation: feature_cache_relation.into(),
+            features,
+        }
+    }
+}
+
+impl ModelRunResult {
+    pub(crate) const fn rows(&self) -> usize {
+        self.rows
+    }
+    pub(crate) const fn requested_feature_cells(&self) -> u64 {
+        self.requested_feature_cells
+    }
+    pub(crate) const fn computed_feature_cells(&self) -> u64 {
+        self.computed_feature_cells
+    }
+    pub(crate) const fn reused_feature_cells(&self) -> u64 {
+        self.reused_feature_cells
+    }
+    pub(crate) const fn quarantine(&self) -> &WorkflowQuarantineSummary {
+        &self.quarantine
+    }
+    pub(crate) const fn metadata(&self) -> &WorkflowModelRunMetadata {
+        &self.metadata
+    }
+    pub(crate) fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -109,13 +147,43 @@ pub(crate) enum ModelRunEvent {
     },
 }
 
-pub(crate) fn run_model(
+pub(crate) struct ModelRunContext {
     project_store: Arc<ProjectStore>,
     request: ModelRunRequest,
     cancel: Arc<AtomicBool>,
     publication_gate: Arc<Mutex<()>>,
+}
+
+impl ModelRunContext {
+    pub(crate) fn new(
+        project_store: Arc<ProjectStore>,
+        request: ModelRunRequest,
+        cancel: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            project_store,
+            request,
+            cancel,
+            publication_gate: Arc::new(Mutex::new(())),
+        }
+    }
+
+    pub(crate) fn with_publication_gate(mut self, gate: Arc<Mutex<()>>) -> Self {
+        self.publication_gate = gate;
+        self
+    }
+}
+
+pub(crate) fn run_model(
+    context: ModelRunContext,
     mut publish: impl FnMut(ModelRunEvent),
 ) -> Result<ModelRunResult, ModelRunFailure> {
+    let ModelRunContext {
+        project_store,
+        request,
+        cancel,
+        publication_gate,
+    } = context;
     ReadOnlyQuery::new(&request.candidate_sql, ReadOnlyQueryMode::Training)
         .authorize()
         .map_err(|error| {
@@ -126,18 +194,14 @@ pub(crate) fn run_model(
     publish(ModelRunEvent::Validating(
         "Inspecting candidate keys and feature cache".to_owned(),
     ));
-    let scan = scan_candidates(
-        &project_store,
-        &request.candidate_sql,
-        &request.features,
-        &cancel,
-    )?;
+    let scan = CandidateScanRequest::new(&request.candidate_sql, &request.features, &cancel)
+        .scan(&project_store)?;
     let mut registry = load_feature_registry(&project_store)?;
-    let registry_changed = registry.register(
+    let registry_changed = registry.register(FeatureRegistration::new(
         &request.feature_cache_relation,
         &request.features,
         current_time_millis(),
-    )?;
+    ))?;
     let mut cache = load_feature_cache(&project_store, &request.feature_cache_relation, &registry)?;
     let (requested_indices, cache_schema_changed) = cache.merge_requested(&request.features)?;
     ensure_merged_cache_row_bound(&cache, &scan.keys, MAX_FEATURE_CACHE_ROWS)?;
@@ -147,7 +211,12 @@ pub(crate) fn run_model(
     let missing_cells = scan
         .keys
         .iter()
-        .map(|key| cache.missing_count(key, &requested_indices, &request.features))
+        .map(|key| {
+            cache.missing_count(
+                key,
+                RequestedFeatures::new(&requested_indices, &request.features),
+            )
+        })
         .sum::<usize>();
     let requested_cells = scan
         .keys
@@ -163,25 +232,18 @@ pub(crate) fn run_model(
     ensure_not_cancelled(&cancel)?;
 
     if missing_cells == 0 && !registry_changed && !cache_schema_changed {
-        return Ok(feature_cache_hit_result(
-            request,
-            scan,
-            cache.rows.len(),
-            requested_cells,
-        ));
+        return Ok(FeatureCacheHit::new(request, scan)
+            .with_counts(cache.rows.len(), requested_cells)
+            .into_result());
     }
 
     if missing_cells == 0 {
         publish(ModelRunEvent::Materializing(
             "Publishing feature definitions and cache schema".to_owned(),
         ));
-        publish_feature_cache_and_registry(
+        FeaturePublication::new(&request.feature_cache_relation, &cache, &registry).publish(
             &project_store,
-            &request.feature_cache_relation,
-            &cache,
-            &registry,
-            &cancel,
-            &publication_gate,
+            PublicationGuard::new(&cancel, &publication_gate),
         )?;
         return Ok(ModelRunResult {
             rows: cache.rows.len(),
@@ -189,19 +251,20 @@ pub(crate) fn run_model(
             computed_feature_cells: 0,
             reused_feature_cells: requested_cells as u64,
             quarantine: WorkflowQuarantineSummary::default(),
-            metadata: WorkflowModelRunMetadata {
-                model_id: SIGLIP_BASE_MODEL_ID.to_owned(),
-                artifact_revision: SIGLIP_BASE_REVISION.to_owned(),
-                feature_cache_relation: request.feature_cache_relation,
-                features: request.features,
-                fingerprint: scan.fingerprint,
-                reused: false,
-                device: "not loaded (empty applicable cohort)".to_owned(),
-                input_rows: scan.keys.len() as u64,
-                output_rows: cache.rows.len() as u64,
-                decode_ms: 0,
-                inference_ms: 0,
-            },
+            metadata: WorkflowModelRunMetadata::new(
+                WorkflowModelIdentity::new(
+                    SIGLIP_BASE_MODEL_ID,
+                    SIGLIP_BASE_REVISION,
+                    request.feature_cache_relation,
+                )
+                .with_fingerprint(scan.fingerprint),
+                WorkflowModelExecution::new(
+                    request.features,
+                    false,
+                    "not loaded (empty applicable cohort)",
+                ),
+                WorkflowModelMetrics::new(scan.keys.len() as u64, cache.rows.len() as u64, 0),
+            ),
             warnings: Vec::new(),
         });
     }
@@ -215,7 +278,7 @@ pub(crate) fn run_model(
     let concepts = request
         .features
         .iter()
-        .map(|definition| definition.concept.as_str())
+        .map(WorkflowFeatureDefinition::concept)
         .collect::<Vec<_>>();
     let (engine, fallback_warning) = SiglipEngine::load_preferred(&artifacts, &concepts)?;
     ensure_not_cancelled(&cancel)?;
@@ -223,11 +286,7 @@ pub(crate) fn run_model(
     let chunk_rows = model_chunk_rows(engine.processor.image_size);
     publish(ModelRunEvent::Running {
         detail: format!("Backfilling {missing_cells} feature cells on {device_name}"),
-        progress: WorkflowNodeProgress {
-            completed: 0,
-            total: missing_cells as u64,
-            unit: "feature cells".to_owned(),
-        },
+        progress: WorkflowNodeProgress::new(0, missing_cells as u64, "feature cells"),
     });
 
     let (sender, receiver) = mpsc::sync_channel(INPUT_PREFETCH_CHUNKS);
@@ -237,13 +296,9 @@ pub(crate) fn run_model(
     let producer = thread::Builder::new()
         .name("workflow-model-candidates".to_owned())
         .spawn(move || {
-            produce_candidate_batches(
-                &producer_store,
-                &producer_sql,
-                chunk_rows,
-                &producer_cancel,
-                sender,
-            )
+            CandidateBatchProducer::new(&producer_sql, chunk_rows, &producer_cancel)
+                .with_sender(sender)
+                .produce(&producer_store)
         })
         .map_err(|error| format!("starting the Workflow candidate prefetch worker: {error}"))?;
 
@@ -267,31 +322,26 @@ pub(crate) fn run_model(
                 break;
             }
         };
-        if let Err(error) = backfill_candidate_batch(
-            &engine,
-            &batch,
-            &requested_indices,
-            &request.features,
-            &mut cache,
-            &scan.keys,
-            &mut seen,
-            &mut completed_cells,
-            &mut rows_needing_features,
-            &mut decode_ms,
-            &mut inference_ms,
-            &mut quarantine,
-            &mut quarantined_keys,
-        ) {
+        let model = BackfillModel::new(&engine, &requested_indices, &request.features);
+        let cache_state = BackfillCache::new(&mut cache, &scan.keys, &mut seen);
+        let progress = BackfillProgress::new(&mut completed_cells, &mut rows_needing_features)
+            .with_timings(&mut decode_ms, &mut inference_ms);
+        let quarantine_state = BackfillQuarantine::new(&mut quarantine, &mut quarantined_keys);
+        if let Err(error) = CandidateBackfill::new(model, &batch, cache_state)
+            .with_progress(progress)
+            .with_quarantine(quarantine_state)
+            .run()
+        {
             pipeline_error = Some(error);
             break;
         }
         publish(ModelRunEvent::Running {
             detail: format!("Backfilled {completed_cells} of {missing_cells} feature cells"),
-            progress: WorkflowNodeProgress {
-                completed: completed_cells.min(missing_cells as u64),
-                total: missing_cells as u64,
-                unit: "feature cells".to_owned(),
-            },
+            progress: WorkflowNodeProgress::new(
+                completed_cells.min(missing_cells as u64),
+                missing_cells as u64,
+                "feature cells",
+            ),
         });
     }
     drop(receiver);
@@ -310,10 +360,10 @@ pub(crate) fn run_model(
                 .to_owned(),
         );
     }
-    if quarantine.count.saturating_mul(2) > rows_needing_features {
+    if quarantine.count().saturating_mul(2) > rows_needing_features {
         pipeline_error = Some(format!(
             "{} of {rows_needing_features} candidate rows needing features could not be decoded; more than half were quarantined.",
-            quarantine.count
+            quarantine.count()
         ));
     }
     if let Some(error) = pipeline_error {
@@ -323,13 +373,9 @@ pub(crate) fn run_model(
     publish(ModelRunEvent::Materializing(
         "Atomically replacing the complete feature cache".to_owned(),
     ));
-    publish_feature_cache_and_registry(
+    FeaturePublication::new(&request.feature_cache_relation, &cache, &registry).publish(
         &project_store,
-        &request.feature_cache_relation,
-        &cache,
-        &registry,
-        &cancel,
-        &publication_gate,
+        PublicationGuard::new(&cancel, &publication_gate),
     )?;
     project_store.invalidate_idle_connections();
 
@@ -337,16 +383,21 @@ pub(crate) fn run_model(
     if let Some(warning) = fallback_warning {
         warnings.push(warning);
     }
-    if quarantine.count > 0 {
+    if quarantine.count() > 0 {
         warnings.push(format!(
             "{} candidate rows were quarantined; their requested feature cells remain null.",
-            quarantine.count
+            quarantine.count()
         ));
     }
     let remaining_cells = scan
         .keys
         .iter()
-        .map(|key| cache.missing_count(key, &requested_indices, &request.features))
+        .map(|key| {
+            cache.missing_count(
+                key,
+                RequestedFeatures::new(&requested_indices, &request.features),
+            )
+        })
         .sum::<usize>();
     Ok(ModelRunResult {
         rows: cache.rows.len(),
@@ -354,49 +405,67 @@ pub(crate) fn run_model(
         computed_feature_cells: missing_cells.saturating_sub(remaining_cells) as u64,
         reused_feature_cells: requested_cells.saturating_sub(missing_cells) as u64,
         quarantine,
-        metadata: WorkflowModelRunMetadata {
-            model_id: SIGLIP_BASE_MODEL_ID.to_owned(),
-            artifact_revision: SIGLIP_BASE_REVISION.to_owned(),
-            feature_cache_relation: request.feature_cache_relation,
-            features: request.features,
-            fingerprint: scan.fingerprint,
-            reused: false,
-            device: device_name,
-            input_rows: scan.keys.len() as u64,
-            output_rows: cache.rows.len() as u64,
-            decode_ms,
-            inference_ms,
-        },
+        metadata: WorkflowModelRunMetadata::new(
+            WorkflowModelIdentity::new(
+                SIGLIP_BASE_MODEL_ID,
+                SIGLIP_BASE_REVISION,
+                request.feature_cache_relation,
+            )
+            .with_fingerprint(scan.fingerprint),
+            WorkflowModelExecution::new(request.features, false, device_name),
+            WorkflowModelMetrics::new(scan.keys.len() as u64, cache.rows.len() as u64, decode_ms)
+                .with_inference_ms(inference_ms),
+        ),
         warnings,
     })
 }
 
-fn feature_cache_hit_result(
+struct FeatureCacheHit {
     request: ModelRunRequest,
     scan: CandidateScan,
     cache_rows: usize,
     requested_cells: usize,
-) -> ModelRunResult {
-    ModelRunResult {
-        rows: cache_rows,
-        requested_feature_cells: requested_cells as u64,
-        computed_feature_cells: 0,
-        reused_feature_cells: requested_cells as u64,
-        quarantine: WorkflowQuarantineSummary::default(),
-        metadata: WorkflowModelRunMetadata {
-            model_id: SIGLIP_BASE_MODEL_ID.to_owned(),
-            artifact_revision: SIGLIP_BASE_REVISION.to_owned(),
-            feature_cache_relation: request.feature_cache_relation,
-            features: request.features,
-            fingerprint: scan.fingerprint,
-            reused: true,
-            device: "not loaded (feature cache hit)".to_owned(),
-            input_rows: scan.keys.len() as u64,
-            output_rows: cache_rows as u64,
-            decode_ms: 0,
-            inference_ms: 0,
-        },
-        warnings: Vec::new(),
+}
+
+impl FeatureCacheHit {
+    fn new(request: ModelRunRequest, scan: CandidateScan) -> Self {
+        Self {
+            request,
+            scan,
+            cache_rows: 0,
+            requested_cells: 0,
+        }
+    }
+
+    fn with_counts(mut self, cache_rows: usize, requested_cells: usize) -> Self {
+        self.cache_rows = cache_rows;
+        self.requested_cells = requested_cells;
+        self
+    }
+
+    fn into_result(self) -> ModelRunResult {
+        ModelRunResult {
+            rows: self.cache_rows,
+            requested_feature_cells: self.requested_cells as u64,
+            computed_feature_cells: 0,
+            reused_feature_cells: self.requested_cells as u64,
+            quarantine: WorkflowQuarantineSummary::default(),
+            metadata: WorkflowModelRunMetadata::new(
+                WorkflowModelIdentity::new(
+                    SIGLIP_BASE_MODEL_ID,
+                    SIGLIP_BASE_REVISION,
+                    self.request.feature_cache_relation,
+                )
+                .with_fingerprint(self.scan.fingerprint),
+                WorkflowModelExecution::new(
+                    self.request.features,
+                    true,
+                    "not loaded (feature cache hit)",
+                ),
+                WorkflowModelMetrics::new(self.scan.keys.len() as u64, self.cache_rows as u64, 0),
+            ),
+            warnings: Vec::new(),
+        }
     }
 }
 
@@ -419,13 +488,59 @@ struct CacheFeature {
 struct FeatureRegistryEntry {
     definition: WorkflowFeatureDefinition,
     cache_relation: String,
+    producer: FeatureProducer,
+    timestamps: FeatureRegistryTimestamps,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FeatureProducer {
     model_id: String,
     repository: String,
     artifact_revision: String,
     value_semantics: String,
     definition_version: u32,
+}
+
+impl FeatureProducer {
+    fn siglip() -> Self {
+        Self {
+            model_id: SIGLIP_BASE_MODEL_ID.to_owned(),
+            repository: SIGLIP_BASE_REPOSITORY.to_owned(),
+            artifact_revision: SIGLIP_BASE_REVISION.to_owned(),
+            value_semantics: FEATURE_VALUE_SEMANTICS.to_owned(),
+            definition_version: 1,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FeatureRegistryTimestamps {
     created_at_ms: u64,
     updated_at_ms: u64,
+}
+
+impl FeatureRegistryTimestamps {
+    fn new(created_at_ms: u64, updated_at_ms: u64) -> Self {
+        Self {
+            created_at_ms,
+            updated_at_ms,
+        }
+    }
+}
+
+impl FeatureRegistryEntry {
+    fn new(
+        definition: WorkflowFeatureDefinition,
+        cache_relation: impl Into<String>,
+        now_ms: u64,
+    ) -> Self {
+        Self {
+            definition,
+            cache_relation: cache_relation.into(),
+            producer: FeatureProducer::siglip(),
+            timestamps: FeatureRegistryTimestamps::new(now_ms, now_ms),
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -434,29 +549,30 @@ struct FeatureRegistry {
 }
 
 impl FeatureRegistry {
-    fn register(
-        &mut self,
-        cache_relation: &str,
-        requested: &[WorkflowFeatureDefinition],
-        now_ms: u64,
-    ) -> Result<bool, String> {
+    fn register(&mut self, registration: FeatureRegistration<'_>) -> Result<bool, String> {
+        let FeatureRegistration {
+            cache_relation,
+            requested,
+            now_ms,
+        } = registration;
         let mut changed = false;
         for definition in requested {
             let key = (
-                definition.applicability.source_relation.clone(),
-                definition.name.clone(),
+                definition.applicability().source_relation().to_owned(),
+                definition.name().to_owned(),
             );
             if let Some(existing) = self.entries.get(&key) {
                 if existing.definition != *definition
                     || existing.cache_relation != cache_relation
-                    || existing.model_id != SIGLIP_BASE_MODEL_ID
-                    || existing.repository != SIGLIP_BASE_REPOSITORY
-                    || existing.artifact_revision != SIGLIP_BASE_REVISION
-                    || existing.value_semantics != FEATURE_VALUE_SEMANTICS
+                    || existing.producer.model_id != SIGLIP_BASE_MODEL_ID
+                    || existing.producer.repository != SIGLIP_BASE_REPOSITORY
+                    || existing.producer.artifact_revision != SIGLIP_BASE_REVISION
+                    || existing.producer.value_semantics != FEATURE_VALUE_SEMANTICS
                 {
                     return Err(format!(
                         "Feature {:?} already exists for source {:?} with an incompatible definition. Reuse its exact registry definition or choose a new descriptive feature name.",
-                        definition.name, definition.applicability.source_relation
+                        definition.name(),
+                        definition.applicability().source_relation()
                     ));
                 }
                 continue;
@@ -466,17 +582,7 @@ impl FeatureRegistry {
                     "Workflow feature registry exceeds the bounded limit of {MAX_FEATURE_REGISTRY_ROWS} definitions."
                 ));
             }
-            let entry = FeatureRegistryEntry {
-                definition: definition.clone(),
-                cache_relation: cache_relation.to_owned(),
-                model_id: SIGLIP_BASE_MODEL_ID.to_owned(),
-                repository: SIGLIP_BASE_REPOSITORY.to_owned(),
-                artifact_revision: SIGLIP_BASE_REVISION.to_owned(),
-                value_semantics: FEATURE_VALUE_SEMANTICS.to_owned(),
-                definition_version: 1,
-                created_at_ms: now_ms,
-                updated_at_ms: now_ms,
-            };
+            let entry = FeatureRegistryEntry::new(definition.clone(), cache_relation, now_ms);
             validate_feature_registry_entry(&entry)?;
             self.entries.insert(key, entry);
             changed = true;
@@ -489,10 +595,30 @@ impl FeatureRegistry {
             .values()
             .filter(|entry| entry.cache_relation == cache_relation)
             .map(|entry| CacheFeature {
-                name: entry.definition.name.clone(),
+                name: entry.definition.name().to_owned(),
                 definition: entry.definition.clone(),
             })
             .collect()
+    }
+}
+
+struct FeatureRegistration<'a> {
+    cache_relation: &'a str,
+    requested: &'a [WorkflowFeatureDefinition],
+    now_ms: u64,
+}
+
+impl<'a> FeatureRegistration<'a> {
+    fn new(
+        cache_relation: &'a str,
+        requested: &'a [WorkflowFeatureDefinition],
+        now_ms: u64,
+    ) -> Self {
+        Self {
+            cache_relation,
+            requested,
+            now_ms,
+        }
     }
 }
 
@@ -513,7 +639,7 @@ impl FeatureCache {
                 !self
                     .features
                     .iter()
-                    .any(|feature| feature.name == definition.name)
+                    .any(|feature| feature.name == definition.name())
             })
             .count();
         if self.features.len().saturating_add(additional) > MAX_FEATURE_CACHE_COLUMNS {
@@ -528,12 +654,12 @@ impl FeatureCache {
                 .features
                 .iter()
                 .enumerate()
-                .find(|(_, feature)| feature.name == mapping.name)
+                .find(|(_, feature)| feature.name == mapping.name())
             {
                 if existing.definition != *mapping {
                     return Err(format!(
                         "Feature cache field {:?} has an incompatible registered definition.",
-                        mapping.name
+                        mapping.name()
                     ));
                 }
                 indices.push(index);
@@ -541,7 +667,7 @@ impl FeatureCache {
             }
             let index = self.features.len();
             self.features.push(CacheFeature {
-                name: mapping.name.clone(),
+                name: mapping.name().to_owned(),
                 definition: mapping.clone(),
             });
             for values in self.rows.values_mut() {
@@ -563,27 +689,38 @@ impl FeatureCache {
     fn missing_indices(
         &self,
         key: &FrameKey,
-        requested: &[usize],
-        definitions: &[WorkflowFeatureDefinition],
+        requested: RequestedFeatures<'_>,
     ) -> Vec<(usize, usize)> {
         let values = self.rows.get(key).expect("candidate key was inserted");
         requested
+            .indices
             .iter()
             .copied()
             .enumerate()
             .filter(|(request_index, cache_index)| {
-                feature_applies(&definitions[*request_index], key) && values[*cache_index].is_none()
+                feature_applies(&requested.definitions[*request_index], key)
+                    && values[*cache_index].is_none()
             })
             .collect()
     }
 
-    fn missing_count(
-        &self,
-        key: &FrameKey,
-        requested: &[usize],
-        definitions: &[WorkflowFeatureDefinition],
-    ) -> usize {
-        self.missing_indices(key, requested, definitions).len()
+    fn missing_count(&self, key: &FrameKey, requested: RequestedFeatures<'_>) -> usize {
+        self.missing_indices(key, requested).len()
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RequestedFeatures<'a> {
+    indices: &'a [usize],
+    definitions: &'a [WorkflowFeatureDefinition],
+}
+
+impl<'a> RequestedFeatures<'a> {
+    fn new(indices: &'a [usize], definitions: &'a [WorkflowFeatureDefinition]) -> Self {
+        Self {
+            indices,
+            definitions,
+        }
     }
 }
 
@@ -605,10 +742,10 @@ fn ensure_merged_cache_row_bound(
 }
 
 fn feature_applies(definition: &WorkflowFeatureDefinition, key: &FrameKey) -> bool {
-    definition.applicability.stream_ids.is_empty()
+    definition.applicability().stream_ids().is_empty()
         || definition
-            .applicability
-            .stream_ids
+            .applicability()
+            .stream_ids()
             .iter()
             .any(|stream| stream == &key.stream_id)
 }
@@ -618,25 +755,38 @@ struct CandidateScan {
     fingerprint: String,
 }
 
-fn scan_candidates(
-    project_store: &ProjectStore,
-    sql: &str,
-    features: &[WorkflowFeatureDefinition],
-    cancel: &AtomicBool,
-) -> Result<CandidateScan, String> {
-    let sql = sql.to_owned();
-    let media_fields = features
-        .iter()
-        .map(|feature| feature.applicability.media_field.clone())
-        .collect::<BTreeSet<_>>();
-    let mut keys = project_store.run_blocking(|connection| {
-        let mut statement = connection.new_statement()?;
-        statement.set_sql_query(&sql)?;
-        let mut reader = statement.execute()?;
+struct CandidateScanRequest<'a> {
+    sql: &'a str,
+    features: &'a [WorkflowFeatureDefinition],
+    cancel: &'a AtomicBool,
+}
+
+impl<'a> CandidateScanRequest<'a> {
+    fn new(
+        sql: &'a str,
+        features: &'a [WorkflowFeatureDefinition],
+        cancel: &'a AtomicBool,
+    ) -> Self {
+        Self {
+            sql,
+            features,
+            cancel,
+        }
+    }
+
+    fn scan(self, project_store: &ProjectStore) -> Result<CandidateScan, String> {
+        let sql = self.sql.to_owned();
+        let media_fields = self
+            .features
+            .iter()
+            .map(|feature| feature.applicability().media_field().to_owned())
+            .collect::<BTreeSet<_>>();
+        let mut keys = project_store.run_blocking(|connection| {
+        let mut reader = connection.execute_query(&sql)?;
         validate_candidate_schema(reader.schema().as_ref(), &media_fields)?;
         let mut keys = BTreeSet::new();
         for batch in &mut reader {
-            ensure_not_cancelled(cancel)?;
+            ensure_not_cancelled(self.cancel)?;
             let batch = batch.map_err(|error| format!("reading Workflow candidates: {error}"))?;
             for row in 0..batch.num_rows() {
                 let key = frame_key(&batch, row)?;
@@ -655,24 +805,25 @@ fn scan_candidates(
         }
         Ok(keys)
     })?;
-    let mut digest = Sha256::new();
-    digest.update(b"spiral-workflow-feature-cache\0v1");
-    for definition in features {
-        fingerprint_field(&mut digest, b"feature_name", definition.name.as_bytes());
-        fingerprint_field(&mut digest, b"concept", definition.concept.as_bytes());
-        fingerprint_field(
-            &mut digest,
-            b"definition",
-            feature_definition_fingerprint(definition).as_bytes(),
-        );
+        let mut digest = Sha256::new();
+        digest.update(b"spiral-workflow-feature-cache\0v1");
+        for definition in self.features {
+            fingerprint_field(&mut digest, b"feature_name", definition.name().as_bytes());
+            fingerprint_field(&mut digest, b"concept", definition.concept().as_bytes());
+            fingerprint_field(
+                &mut digest,
+                b"definition",
+                feature_definition_fingerprint(definition).as_bytes(),
+            );
+        }
+        for key in &keys {
+            fingerprint_frame_key(&mut digest, key);
+        }
+        Ok(CandidateScan {
+            keys: std::mem::take(&mut keys),
+            fingerprint: digest_hex(digest.finalize().as_slice()),
+        })
     }
-    for key in &keys {
-        fingerprint_frame_key(&mut digest, key);
-    }
-    Ok(CandidateScan {
-        keys: std::mem::take(&mut keys),
-        fingerprint: digest_hex(digest.finalize().as_slice()),
-    })
 }
 
 fn validate_candidate_schema(
@@ -752,24 +903,24 @@ fn fingerprint_frame_key(digest: &mut Sha256, key: &FrameKey) {
 fn feature_definition_fingerprint(definition: &WorkflowFeatureDefinition) -> String {
     let mut digest = Sha256::new();
     digest.update(b"spiral-workflow-feature-definition\0v1");
-    fingerprint_field(&mut digest, b"name", definition.name.as_bytes());
+    fingerprint_field(&mut digest, b"name", definition.name().as_bytes());
     fingerprint_field(
         &mut digest,
         b"description",
-        definition.description.as_bytes(),
+        definition.description().as_bytes(),
     );
-    fingerprint_field(&mut digest, b"concept", definition.concept.as_bytes());
+    fingerprint_field(&mut digest, b"concept", definition.concept().as_bytes());
     fingerprint_field(
         &mut digest,
         b"source_relation",
-        definition.applicability.source_relation.as_bytes(),
+        definition.applicability().source_relation().as_bytes(),
     );
     fingerprint_field(
         &mut digest,
         b"media_field",
-        definition.applicability.media_field.as_bytes(),
+        definition.applicability().media_field().as_bytes(),
     );
-    for stream in &definition.applicability.stream_ids {
+    for stream in definition.applicability().stream_ids() {
         fingerprint_field(&mut digest, b"stream_id", stream.as_bytes());
     }
     digest_hex(digest.finalize().as_slice())
@@ -781,9 +932,8 @@ fn load_feature_registry(project_store: &ProjectStore) -> Result<FeatureRegistry
             return Ok(FeatureRegistry::default());
         };
         validate_feature_registry_schema(&schema)?;
-        let mut statement = connection.new_statement()?;
-        statement.set_sql_query(format!("SELECT * FROM {FEATURE_REGISTRY_RELATION}"))?;
-        let mut reader = statement.execute()?;
+        let mut reader =
+            connection.execute_query(format!("SELECT * FROM {FEATURE_REGISTRY_RELATION}"))?;
         let mut registry = FeatureRegistry::default();
         for batch in &mut reader {
             let batch =
@@ -801,87 +951,105 @@ fn load_feature_registry(project_store: &ProjectStore) -> Result<FeatureRegistry
                 let source_relation = required_text("source_relation")?;
                 let feature_name = required_text("feature_name")?;
                 let entry = FeatureRegistryEntry {
-                    definition: WorkflowFeatureDefinition {
-                        name: feature_name.clone(),
-                        description: required_text("description")?,
-                        concept: required_text("concept")?,
-                        applicability:
-                            spiral_robotics_api::workflow::WorkflowFeatureApplicability {
-                                source_relation: source_relation.clone(),
-                                media_field: required_text("media_field")?,
-                                stream_ids: registry_stream_ids(&batch, row)?,
-                            },
-                    },
+                    definition: WorkflowFeatureDefinition::new(
+                        feature_name.clone(),
+                        required_text("description")?,
+                        required_text("concept")?,
+                    )
+                    .with_applicability(
+                        spiral_robotics_api::workflow::WorkflowFeatureApplicability::new(
+                            source_relation.clone(),
+                            required_text("media_field")?,
+                        )
+                        .with_stream_ids(registry_stream_ids(&batch, row)?),
+                    ),
                     cache_relation: required_text("cache_relation")?,
-                    model_id: required_text("producer_model_id")?,
-                    repository: required_text("producer_repository")?,
-                    artifact_revision: required_text("artifact_revision")?,
-                    value_semantics: required_text("value_semantics")?,
-                    definition_version: u32::try_from(
+                    producer: FeatureProducer {
+                        model_id: required_text("producer_model_id")?,
+                        repository: required_text("producer_repository")?,
+                        artifact_revision: required_text("artifact_revision")?,
+                        value_semantics: required_text("value_semantics")?,
+                        definition_version: u32::try_from(
+                            batch
+                                .column_by_name("definition_version")
+                                .and_then(|column| u64_value(column.as_ref(), row))
+                                .ok_or_else(|| {
+                                    "Workflow feature registry definition_version is invalid."
+                                        .to_owned()
+                                })?,
+                        )
+                        .map_err(|_| {
+                            "Workflow feature registry definition_version overflowed UInt32."
+                                .to_owned()
+                        })?,
+                    },
+                    timestamps: FeatureRegistryTimestamps::new(
                         batch
-                            .column_by_name("definition_version")
+                            .column_by_name("created_at_ms")
                             .and_then(|column| u64_value(column.as_ref(), row))
                             .ok_or_else(|| {
-                                "Workflow feature registry definition_version is invalid."
-                                    .to_owned()
+                                "Workflow feature registry created_at_ms is invalid.".to_owned()
                             })?,
-                    )
-                    .map_err(|_| {
-                        "Workflow feature registry definition_version overflowed UInt32.".to_owned()
-                    })?,
-                    created_at_ms: batch
-                        .column_by_name("created_at_ms")
-                        .and_then(|column| u64_value(column.as_ref(), row))
-                        .ok_or_else(|| {
-                            "Workflow feature registry created_at_ms is invalid.".to_owned()
-                        })?,
-                    updated_at_ms: batch
-                        .column_by_name("updated_at_ms")
-                        .and_then(|column| u64_value(column.as_ref(), row))
-                        .ok_or_else(|| {
-                            "Workflow feature registry updated_at_ms is invalid.".to_owned()
-                        })?,
+                        batch
+                            .column_by_name("updated_at_ms")
+                            .and_then(|column| u64_value(column.as_ref(), row))
+                            .ok_or_else(|| {
+                                "Workflow feature registry updated_at_ms is invalid.".to_owned()
+                            })?,
+                    ),
                 };
-                insert_loaded_registry_entry(&mut registry, source_relation, feature_name, entry)?;
+                LoadedFeatureRegistryEntry::new(source_relation, feature_name, entry)
+                    .insert_into(&mut registry)?;
             }
         }
         Ok(registry)
     })
 }
 
-fn insert_loaded_registry_entry(
-    registry: &mut FeatureRegistry,
+struct LoadedFeatureRegistryEntry {
     source_relation: String,
     feature_name: String,
     entry: FeatureRegistryEntry,
-) -> Result<(), String> {
-    validate_feature_registry_entry(&entry)?;
-    if registry
-        .entries
-        .contains_key(&(source_relation.clone(), feature_name.clone()))
-    {
-        return Err(
-            "Workflow feature registry contains a duplicate source/name definition.".to_owned(),
-        );
+}
+
+impl LoadedFeatureRegistryEntry {
+    fn new(source_relation: String, feature_name: String, entry: FeatureRegistryEntry) -> Self {
+        Self {
+            source_relation,
+            feature_name,
+            entry,
+        }
     }
-    if registry.entries.len() >= MAX_FEATURE_REGISTRY_ROWS {
-        return Err(format!(
-            "Workflow feature registry exceeds the bounded limit of {MAX_FEATURE_REGISTRY_ROWS} definitions."
-        ));
+
+    fn insert_into(self, registry: &mut FeatureRegistry) -> Result<(), String> {
+        validate_feature_registry_entry(&self.entry)?;
+        if registry
+            .entries
+            .contains_key(&(self.source_relation.clone(), self.feature_name.clone()))
+        {
+            return Err(
+                "Workflow feature registry contains a duplicate source/name definition.".to_owned(),
+            );
+        }
+        if registry.entries.len() >= MAX_FEATURE_REGISTRY_ROWS {
+            return Err(format!(
+                "Workflow feature registry exceeds the bounded limit of {MAX_FEATURE_REGISTRY_ROWS} definitions."
+            ));
+        }
+        registry
+            .entries
+            .insert((self.source_relation, self.feature_name), self.entry);
+        Ok(())
     }
-    registry
-        .entries
-        .insert((source_relation, feature_name), entry);
-    Ok(())
 }
 
 fn validate_feature_registry_entry(entry: &FeatureRegistryEntry) -> Result<(), String> {
-    QualifiedRelation::try_from(entry.definition.applicability.source_relation.as_str())
+    QualifiedRelation::try_from(entry.definition.applicability().source_relation())
         .map_err(|error| format!("Workflow feature registry source relation is unsafe: {error}"))?;
     QualifiedRelation::try_from(entry.cache_relation.as_str())
         .map_err(|error| format!("Workflow feature registry cache relation is unsafe: {error}"))?;
     if entry.cache_relation
-        != derived_feature_cache_relation(&entry.definition.applicability.source_relation)
+        != derived_feature_cache_relation(entry.definition.applicability().source_relation())
     {
         return Err(
             "Workflow feature registry cache relation does not match its server-derived source identity."
@@ -889,23 +1057,22 @@ fn validate_feature_registry_entry(entry: &FeatureRegistryEntry) -> Result<(), S
         );
     }
     if !entry.definition.has_valid_name()
-        || entry.definition.description.trim().is_empty()
-        || entry.definition.description.chars().count() > MAX_WORKFLOW_FEATURE_DESCRIPTION_LENGTH
-        || entry.definition.concept.trim().is_empty()
-        || entry.definition.concept.chars().count() > MAX_SIGLIP_CONCEPT_LENGTH
-        || entry.definition.applicability.stream_ids.len() > MAX_WORKFLOW_FEATURE_STREAMS
-        || UnquotedSqlIdentifier::try_from(entry.definition.applicability.media_field.as_str())
-            .is_err()
+        || entry.definition.description().trim().is_empty()
+        || entry.definition.description().chars().count() > MAX_WORKFLOW_FEATURE_DESCRIPTION_LENGTH
+        || entry.definition.concept().trim().is_empty()
+        || entry.definition.concept().chars().count() > MAX_SIGLIP_CONCEPT_LENGTH
+        || entry.definition.applicability().stream_ids().len() > MAX_WORKFLOW_FEATURE_STREAMS
+        || UnquotedSqlIdentifier::try_from(entry.definition.applicability().media_field()).is_err()
     {
         return Err("Workflow feature registry contains an invalid feature definition.".to_owned());
     }
     let streams = entry
         .definition
-        .applicability
-        .stream_ids
+        .applicability()
+        .stream_ids()
         .iter()
         .collect::<BTreeSet<_>>();
-    if streams.len() != entry.definition.applicability.stream_ids.len()
+    if streams.len() != entry.definition.applicability().stream_ids().len()
         || streams
             .iter()
             .any(|stream| stream.trim().is_empty() || stream.len() > 128)
@@ -914,12 +1081,12 @@ fn validate_feature_registry_entry(entry: &FeatureRegistryEntry) -> Result<(), S
             "Workflow feature registry contains invalid applicability stream IDs.".to_owned(),
         );
     }
-    if entry.model_id != SIGLIP_BASE_MODEL_ID
-        || entry.repository != SIGLIP_BASE_REPOSITORY
-        || entry.artifact_revision != SIGLIP_BASE_REVISION
-        || entry.value_semantics != FEATURE_VALUE_SEMANTICS
-        || entry.definition_version != 1
-        || entry.updated_at_ms < entry.created_at_ms
+    if entry.producer.model_id != SIGLIP_BASE_MODEL_ID
+        || entry.producer.repository != SIGLIP_BASE_REPOSITORY
+        || entry.producer.artifact_revision != SIGLIP_BASE_REVISION
+        || entry.producer.value_semantics != FEATURE_VALUE_SEMANTICS
+        || entry.producer.definition_version != 1
+        || entry.timestamps.updated_at_ms < entry.timestamps.created_at_ms
     {
         return Err(
             "Workflow feature registry contains incompatible producer provenance.".to_owned(),
@@ -1004,7 +1171,7 @@ fn feature_registry_batch(registry: &FeatureRegistry) -> Result<RecordBatch, Str
         false,
     )));
     for entry in &entries {
-        for stream in &entry.definition.applicability.stream_ids {
+        for stream in entry.definition.applicability().stream_ids() {
             streams.values().append_value(stream);
         }
         streams.append(true);
@@ -1012,25 +1179,27 @@ fn feature_registry_batch(registry: &FeatureRegistry) -> Result<RecordBatch, Str
     RecordBatch::try_new(
         feature_registry_schema(),
         vec![
-            text(|entry| &entry.definition.applicability.source_relation),
+            text(|entry| entry.definition.applicability().source_relation()),
             text(|entry| &entry.cache_relation),
-            text(|entry| &entry.definition.name),
-            text(|entry| &entry.definition.description),
-            text(|entry| &entry.definition.concept),
-            text(|entry| &entry.definition.applicability.media_field),
+            text(|entry| entry.definition.name()),
+            text(|entry| entry.definition.description()),
+            text(|entry| entry.definition.concept()),
+            text(|entry| entry.definition.applicability().media_field()),
             Arc::new(streams.finish()) as ArrayRef,
-            text(|entry| &entry.model_id),
-            text(|entry| &entry.repository),
-            text(|entry| &entry.artifact_revision),
-            text(|entry| &entry.value_semantics),
+            text(|entry| &entry.producer.model_id),
+            text(|entry| &entry.producer.repository),
+            text(|entry| &entry.producer.artifact_revision),
+            text(|entry| &entry.producer.value_semantics),
             Arc::new(UInt32Array::from_iter_values(
-                entries.iter().map(|entry| entry.definition_version),
+                entries
+                    .iter()
+                    .map(|entry| entry.producer.definition_version),
             )) as ArrayRef,
             Arc::new(UInt64Array::from_iter_values(
-                entries.iter().map(|entry| entry.created_at_ms),
+                entries.iter().map(|entry| entry.timestamps.created_at_ms),
             )) as ArrayRef,
             Arc::new(UInt64Array::from_iter_values(
-                entries.iter().map(|entry| entry.updated_at_ms),
+                entries.iter().map(|entry| entry.timestamps.updated_at_ms),
             )) as ArrayRef,
         ],
     )
@@ -1049,9 +1218,7 @@ fn load_feature_cache(
             return Ok(FeatureCache::default());
         };
         let features = validate_cache_schema(&schema, &registered)?;
-        let mut statement = connection.new_statement()?;
-        statement.set_sql_query(format!("SELECT * FROM {relation}"))?;
-        let mut reader = statement.execute()?;
+        let mut reader = connection.execute_query(format!("SELECT * FROM {relation}"))?;
         let mut rows = BTreeMap::new();
         for batch in &mut reader {
             let batch = batch.map_err(|error| format!("reading Workflow feature cache: {error}"))?;
@@ -1147,182 +1314,352 @@ fn validate_cache_schema(
         .collect()
 }
 
-fn produce_candidate_batches(
-    project_store: &ProjectStore,
-    sql: &str,
+struct CandidateBatchProducer<'a> {
+    sql: &'a str,
     chunk_rows: usize,
-    cancel: &AtomicBool,
-    sender: SyncSender<Result<RecordBatch, String>>,
-) -> Result<(), String> {
-    let sql = sql.to_owned();
-    project_store.run_blocking(move |connection| {
-        let mut statement = connection.new_statement()?;
-        statement.set_sql_query(sql)?;
-        let mut reader = statement.execute()?;
-        for batch in &mut reader {
-            if cancelled(cancel) {
-                return Ok(());
-            }
-            let batch = batch.map_err(|error| format!("reading Workflow candidates: {error}"))?;
-            let mut offset = 0;
-            while offset < batch.num_rows() {
-                let rows = chunk_rows.min(batch.num_rows() - offset);
-                let compact = compact_batch_rows(&batch, offset, rows)?;
-                if sender.send(Ok(compact)).is_err() {
-                    return Ok(());
-                }
-                offset += rows;
-            }
-        }
-        Ok(())
-    })
+    cancel: &'a AtomicBool,
+    sender: Option<SyncSender<Result<RecordBatch, String>>>,
 }
 
-#[allow(clippy::too_many_arguments)]
-fn backfill_candidate_batch(
-    engine: &SiglipEngine,
-    batch: &RecordBatch,
-    requested_indices: &[usize],
-    definitions: &[WorkflowFeatureDefinition],
-    cache: &mut FeatureCache,
-    expected: &BTreeSet<FrameKey>,
-    seen: &mut BTreeSet<FrameKey>,
-    completed_cells: &mut u64,
-    rows_needing_features: &mut u64,
-    decode_ms: &mut u64,
-    inference_ms: &mut u64,
-    quarantine: &mut WorkflowQuarantineSummary,
-    quarantined_keys: &mut BTreeSet<FrameKey>,
-) -> Result<(), String> {
-    let media_fields = definitions
-        .iter()
-        .map(|definition| definition.applicability.media_field.clone())
-        .collect::<BTreeSet<_>>();
-    validate_candidate_schema(batch.schema().as_ref(), &media_fields)?;
-    type MissingFeatureGroups = BTreeMap<(String, Vec<(usize, usize)>), Vec<(usize, FrameKey)>>;
-    let mut groups = MissingFeatureGroups::new();
-    for row in 0..batch.num_rows() {
-        let key = frame_key(batch, row)?;
-        if !expected.contains(&key) || !seen.insert(key.clone()) {
-            return Err(
+impl<'a> CandidateBatchProducer<'a> {
+    fn new(sql: &'a str, chunk_rows: usize, cancel: &'a AtomicBool) -> Self {
+        Self {
+            sql,
+            chunk_rows,
+            cancel,
+            sender: None,
+        }
+    }
+
+    fn with_sender(mut self, sender: SyncSender<Result<RecordBatch, String>>) -> Self {
+        self.sender = Some(sender);
+        self
+    }
+
+    fn produce(self, project_store: &ProjectStore) -> Result<(), String> {
+        let sql = self.sql.to_owned();
+        let sender = self.sender.expect("candidate batch sender is configured");
+        project_store.run_blocking(move |connection| {
+            let mut reader = connection.execute_query(sql)?;
+            for batch in &mut reader {
+                if cancelled(self.cancel) {
+                    return Ok(());
+                }
+                let batch =
+                    batch.map_err(|error| format!("reading Workflow candidates: {error}"))?;
+                let mut offset = 0;
+                while offset < batch.num_rows() {
+                    let rows = self.chunk_rows.min(batch.num_rows() - offset);
+                    let compact = compact_batch_rows(&batch, offset, rows)?;
+                    if sender.send(Ok(compact)).is_err() {
+                        return Ok(());
+                    }
+                    offset += rows;
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+struct BackfillModel<'a> {
+    engine: &'a SiglipEngine,
+    requested: RequestedFeatures<'a>,
+}
+
+impl<'a> BackfillModel<'a> {
+    fn new(
+        engine: &'a SiglipEngine,
+        requested_indices: &'a [usize],
+        definitions: &'a [WorkflowFeatureDefinition],
+    ) -> Self {
+        Self {
+            engine,
+            requested: RequestedFeatures::new(requested_indices, definitions),
+        }
+    }
+}
+
+struct BackfillCache<'a> {
+    cache: &'a mut FeatureCache,
+    expected: &'a BTreeSet<FrameKey>,
+    seen: &'a mut BTreeSet<FrameKey>,
+}
+
+impl<'a> BackfillCache<'a> {
+    fn new(
+        cache: &'a mut FeatureCache,
+        expected: &'a BTreeSet<FrameKey>,
+        seen: &'a mut BTreeSet<FrameKey>,
+    ) -> Self {
+        Self {
+            cache,
+            expected,
+            seen,
+        }
+    }
+}
+
+struct BackfillProgress<'a> {
+    completed_cells: &'a mut u64,
+    rows_needing_features: &'a mut u64,
+    decode_ms: Option<&'a mut u64>,
+    inference_ms: Option<&'a mut u64>,
+}
+
+impl<'a> BackfillProgress<'a> {
+    fn new(completed_cells: &'a mut u64, rows_needing_features: &'a mut u64) -> Self {
+        Self {
+            completed_cells,
+            rows_needing_features,
+            decode_ms: None,
+            inference_ms: None,
+        }
+    }
+
+    fn with_timings(mut self, decode_ms: &'a mut u64, inference_ms: &'a mut u64) -> Self {
+        self.decode_ms = Some(decode_ms);
+        self.inference_ms = Some(inference_ms);
+        self
+    }
+}
+
+struct BackfillQuarantine<'a> {
+    summary: &'a mut WorkflowQuarantineSummary,
+    keys: &'a mut BTreeSet<FrameKey>,
+}
+
+impl<'a> BackfillQuarantine<'a> {
+    fn new(summary: &'a mut WorkflowQuarantineSummary, keys: &'a mut BTreeSet<FrameKey>) -> Self {
+        Self { summary, keys }
+    }
+}
+
+struct CandidateBackfill<'a> {
+    model: BackfillModel<'a>,
+    batch: &'a RecordBatch,
+    cache: BackfillCache<'a>,
+    progress: Option<BackfillProgress<'a>>,
+    quarantine: Option<BackfillQuarantine<'a>>,
+}
+
+impl<'a> CandidateBackfill<'a> {
+    fn new(model: BackfillModel<'a>, batch: &'a RecordBatch, cache: BackfillCache<'a>) -> Self {
+        Self {
+            model,
+            batch,
+            cache,
+            progress: None,
+            quarantine: None,
+        }
+    }
+
+    fn with_progress(mut self, progress: BackfillProgress<'a>) -> Self {
+        self.progress = Some(progress);
+        self
+    }
+
+    fn with_quarantine(mut self, quarantine: BackfillQuarantine<'a>) -> Self {
+        self.quarantine = Some(quarantine);
+        self
+    }
+
+    fn run(self) -> Result<(), String> {
+        let Self {
+            model: BackfillModel { engine, requested },
+            batch,
+            cache:
+                BackfillCache {
+                    cache,
+                    expected,
+                    seen,
+                },
+            progress,
+            quarantine,
+        } = self;
+        let RequestedFeatures {
+            indices: requested_indices,
+            definitions,
+        } = requested;
+        let BackfillProgress {
+            completed_cells,
+            rows_needing_features,
+            decode_ms,
+            inference_ms,
+        } = progress.expect("backfill progress is configured");
+        let decode_ms = decode_ms.expect("backfill decode timing is configured");
+        let inference_ms = inference_ms.expect("backfill inference timing is configured");
+        let BackfillQuarantine {
+            summary: quarantine,
+            keys: quarantined_keys,
+        } = quarantine.expect("backfill quarantine is configured");
+        let media_fields = definitions
+            .iter()
+            .map(|definition| definition.applicability().media_field().to_owned())
+            .collect::<BTreeSet<_>>();
+        validate_candidate_schema(batch.schema().as_ref(), &media_fields)?;
+        type MissingFeatureGroups = BTreeMap<(String, Vec<(usize, usize)>), Vec<(usize, FrameKey)>>;
+        let mut groups = MissingFeatureGroups::new();
+        for row in 0..batch.num_rows() {
+            let key = frame_key(batch, row)?;
+            if !expected.contains(&key) || !seen.insert(key.clone()) {
+                return Err(
                 "Workflow candidate cohort changed between validation and feature backfill. Run again."
                     .to_owned(),
             );
-        }
-        let missing = cache.missing_indices(&key, requested_indices, definitions);
-        if !missing.is_empty() {
-            *rows_needing_features = rows_needing_features.saturating_add(1);
-            let mut by_media = BTreeMap::<String, Vec<(usize, usize)>>::new();
-            for pair @ (request_index, _) in missing {
-                by_media
-                    .entry(definitions[request_index].applicability.media_field.clone())
-                    .or_default()
-                    .push(pair);
             }
-            for (media_field, pairs) in by_media {
-                groups
-                    .entry((media_field, pairs))
-                    .or_default()
-                    .push((row, key.clone()));
-            }
-        }
-    }
-    for ((media_field, feature_indices), rows) in groups {
-        let media = batch
-            .column_by_name(&media_field)
-            .and_then(|column| column.as_any().downcast_ref::<StructArray>())
-            .ok_or_else(|| {
-                format!(
-                    "Workflow candidate image field {media_field:?} did not use struct storage."
-                )
-            })?;
-        let decode_started = Instant::now();
-        let mut pixels = Vec::new();
-        let mut valid_keys = Vec::new();
-        for (row, key) in rows {
-            match decode_image_row(media, row, &engine.processor) {
-                Ok(image) => {
-                    pixels.extend(image);
-                    valid_keys.push(key);
+            let missing =
+                cache.missing_indices(&key, RequestedFeatures::new(requested_indices, definitions));
+            if !missing.is_empty() {
+                *rows_needing_features = rows_needing_features.saturating_add(1);
+                let mut by_media = BTreeMap::<String, Vec<(usize, usize)>>::new();
+                for pair @ (request_index, _) in missing {
+                    by_media
+                        .entry(
+                            definitions[request_index]
+                                .applicability()
+                                .media_field()
+                                .to_owned(),
+                        )
+                        .or_default()
+                        .push(pair);
                 }
-                Err(error) => {
-                    if quarantined_keys.insert(key.clone()) {
-                        quarantine.count = quarantine.count.saturating_add(1);
-                        if quarantine.examples.len() < MAX_QUARANTINE_EXAMPLES {
-                            quarantine.examples.push(format!(
-                                "{}/{}/{}: {error}",
-                                key.episode_id, key.stream_id, key.frame_index
-                            ));
-                        }
+                for (media_field, pairs) in by_media {
+                    groups
+                        .entry((media_field, pairs))
+                        .or_default()
+                        .push((row, key.clone()));
+                }
+            }
+        }
+        for ((media_field, feature_indices), rows) in groups {
+            let media = batch
+                .column_by_name(&media_field)
+                .and_then(|column| column.as_any().downcast_ref::<StructArray>())
+                .ok_or_else(|| {
+                    format!(
+                        "Workflow candidate image field {media_field:?} did not use struct storage."
+                    )
+                })?;
+            let decode_started = Instant::now();
+            let mut pixels = Vec::new();
+            let mut valid_keys = Vec::new();
+            for (row, key) in rows {
+                match decode_image_row(media, row, &engine.processor) {
+                    Ok(image) => {
+                        pixels.extend(image);
+                        valid_keys.push(key);
                     }
-                    *completed_cells = completed_cells.saturating_add(feature_indices.len() as u64);
+                    Err(error) => {
+                        if quarantined_keys.insert(key.clone()) {
+                            quarantine.set_count(quarantine.count().saturating_add(1));
+                            if quarantine.examples().len() < MAX_QUARANTINE_EXAMPLES {
+                                quarantine.examples_mut().push(format!(
+                                    "{}/{}/{}: {error}",
+                                    key.episode_id, key.stream_id, key.frame_index
+                                ));
+                            }
+                        }
+                        *completed_cells =
+                            completed_cells.saturating_add(feature_indices.len() as u64);
+                    }
                 }
             }
-        }
-        *decode_ms = decode_ms.saturating_add(elapsed_millis(decode_started));
-        if valid_keys.is_empty() {
-            continue;
-        }
-        let inference_started = Instant::now();
-        let engine_indices = feature_indices
-            .iter()
-            .map(|(request_index, _)| *request_index)
-            .collect::<Vec<_>>();
-        let scores = engine.score_selected(&pixels, valid_keys.len(), &engine_indices)?;
-        *inference_ms = inference_ms.saturating_add(elapsed_millis(inference_started));
-        for (key, values) in valid_keys.into_iter().zip(scores) {
-            let row = cache
-                .rows
-                .get_mut(&key)
-                .expect("candidate key was inserted");
-            for (value, (_, cache_index)) in values.into_iter().zip(&feature_indices) {
-                row[*cache_index] = Some(value);
+            *decode_ms = decode_ms.saturating_add(elapsed_millis(decode_started));
+            if valid_keys.is_empty() {
+                continue;
             }
-            *completed_cells = completed_cells.saturating_add(feature_indices.len() as u64);
+            let inference_started = Instant::now();
+            let engine_indices = feature_indices
+                .iter()
+                .map(|(request_index, _)| *request_index)
+                .collect::<Vec<_>>();
+            let scores = engine.score_selected(SelectedImageBatch::new(
+                &pixels,
+                valid_keys.len(),
+                &engine_indices,
+            ))?;
+            *inference_ms = inference_ms.saturating_add(elapsed_millis(inference_started));
+            for (key, values) in valid_keys.into_iter().zip(scores) {
+                let row = cache
+                    .rows
+                    .get_mut(&key)
+                    .expect("candidate key was inserted");
+                for (value, (_, cache_index)) in values.into_iter().zip(&feature_indices) {
+                    row[*cache_index] = Some(value);
+                }
+                *completed_cells = completed_cells.saturating_add(feature_indices.len() as u64);
+            }
+        }
+        Ok(())
+    }
+}
+
+struct FeaturePublication<'a> {
+    relation: &'a str,
+    cache: &'a FeatureCache,
+    registry: &'a FeatureRegistry,
+}
+
+impl<'a> FeaturePublication<'a> {
+    fn new(relation: &'a str, cache: &'a FeatureCache, registry: &'a FeatureRegistry) -> Self {
+        Self {
+            relation,
+            cache,
+            registry,
         }
     }
-    Ok(())
-}
 
-fn replace_feature_cache_and_registry(
-    project_store: &ProjectStore,
-    relation: &str,
-    cache: &FeatureCache,
-    registry: &FeatureRegistry,
-) -> Result<(), String> {
-    let relation = relation.to_owned();
-    let batches = feature_cache_batches(cache)?;
-    let registry_batch = feature_registry_batch(registry)?;
-    project_store.run_exclusive_blocking(move |connection| {
-        let namespace = relation
-            .split_once('.')
-            .map(|(namespace, _)| namespace)
-            .ok_or_else(|| "Workflow feature cache relation was not qualified.".to_owned())?;
-        ensure_dataset_namespace(connection, namespace)?;
-        run_feature_publication_transaction(connection, |connection| {
-            replace_batches(connection, &relation, batches)?;
-            replace_batches(connection, FEATURE_REGISTRY_RELATION, vec![registry_batch])
+    fn replace(self, project_store: &ProjectStore) -> Result<(), String> {
+        let relation = self.relation.to_owned();
+        let batches = feature_cache_batches(self.cache)?;
+        let registry_batch = feature_registry_batch(self.registry)?;
+        project_store.run_exclusive_blocking(move |connection| {
+            let namespace = relation
+                .split_once('.')
+                .map(|(namespace, _)| namespace)
+                .ok_or_else(|| "Workflow feature cache relation was not qualified.".to_owned())?;
+            connection.ensure_dataset_namespace(namespace)?;
+            run_feature_publication_transaction(connection, |connection| {
+                connection.replace_batches(&relation, batches)?;
+                connection.replace_batches(FEATURE_REGISTRY_RELATION, vec![registry_batch])
+            })
         })
-    })
+    }
+
+    fn publish(
+        self,
+        project_store: &ProjectStore,
+        guard: PublicationGuard<'_>,
+    ) -> Result<(), String> {
+        let PublicationGuard {
+            cancel,
+            publication_gate,
+        } = guard;
+        // Cancellation takes this same gate before setting the token. Whichever
+        // side acquires it first owns the publication boundary: cancellation that
+        // wins prevents the transaction, while a completed transaction remains a
+        // truthful predecessor of any later cancellation request.
+        let _publication = publication_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        ensure_not_cancelled(cancel)?;
+        self.replace(project_store)
+    }
 }
 
-fn publish_feature_cache_and_registry(
-    project_store: &ProjectStore,
-    relation: &str,
-    cache: &FeatureCache,
-    registry: &FeatureRegistry,
-    cancel: &AtomicBool,
-    publication_gate: &Mutex<()>,
-) -> Result<(), String> {
-    // Cancellation takes this same gate before setting the token. Whichever
-    // side acquires it first owns the publication boundary: cancellation that
-    // wins prevents the transaction, while a completed transaction remains a
-    // truthful predecessor of any later cancellation request.
-    let _publication = publication_gate
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    ensure_not_cancelled(cancel)?;
-    replace_feature_cache_and_registry(project_store, relation, cache, registry)
+struct PublicationGuard<'a> {
+    cancel: &'a AtomicBool,
+    publication_gate: &'a Mutex<()>,
+}
+
+impl<'a> PublicationGuard<'a> {
+    fn new(cancel: &'a AtomicBool, publication_gate: &'a Mutex<()>) -> Self {
+        Self {
+            cancel,
+            publication_gate,
+        }
+    }
 }
 
 trait FeaturePublicationTransaction {
@@ -1333,7 +1670,7 @@ trait FeaturePublicationTransaction {
     fn discard_publication_connection(&mut self);
 }
 
-impl FeaturePublicationTransaction for spiral_robotics_storage::adbc::StorageConnection {
+impl FeaturePublicationTransaction for spiral_robotics_storage::StorageConnection {
     fn begin(&mut self) -> Result<(), String> {
         self.set_autocommit(false)
     }
@@ -1655,13 +1992,31 @@ impl SiglipArtifacts {
 
 #[derive(Deserialize)]
 struct SiglipPreprocessorFile {
+    #[serde(flatten)]
+    operations: SiglipPreprocessorOperations,
+    #[serde(flatten)]
+    normalization: SiglipPreprocessorNormalization,
+    #[serde(flatten)]
+    resizing: SiglipPreprocessorResizing,
+}
+
+#[derive(Deserialize)]
+struct SiglipPreprocessorOperations {
     do_normalize: bool,
     do_rescale: bool,
     do_resize: bool,
+}
+
+#[derive(Deserialize)]
+struct SiglipPreprocessorNormalization {
     image_mean: Vec<f32>,
     image_std: Vec<f32>,
-    resample: u8,
     rescale_factor: f32,
+}
+
+#[derive(Deserialize)]
+struct SiglipPreprocessorResizing {
+    resample: u8,
     size: SiglipPreprocessorSize,
 }
 
@@ -1692,37 +2047,52 @@ impl SiglipImageProcessor {
         source: SiglipPreprocessorFile,
         model_image_size: usize,
     ) -> Result<Self, String> {
-        if !source.do_resize || !source.do_rescale || !source.do_normalize {
+        if !source.operations.do_resize
+            || !source.operations.do_rescale
+            || !source.operations.do_normalize
+        {
             return Err(
                 "Pinned SigLIP preprocessor must resize, rescale, and normalize images.".to_owned(),
             );
         }
-        if source.resample != 3 {
+        if source.resizing.resample != 3 {
             return Err(format!(
                 "Pinned SigLIP preprocessor uses unsupported resample mode {}; expected PIL bicubic mode 3.",
-                source.resample
+                source.resizing.resample
             ));
         }
-        if source.size.width != model_image_size || source.size.height != model_image_size {
+        if source.resizing.size.width != model_image_size
+            || source.resizing.size.height != model_image_size
+        {
             return Err(format!(
                 "Pinned SigLIP processor dimensions {}x{} do not match model input {model_image_size}x{model_image_size}.",
-                source.size.width, source.size.height
+                source.resizing.size.width, source.resizing.size.height
             ));
         }
-        let image_mean: [f32; 3] = source.image_mean.try_into().map_err(|values: Vec<f32>| {
-            format!(
-                "Pinned SigLIP preprocessor has {} mean values; expected 3.",
-                values.len()
-            )
-        })?;
-        let image_std: [f32; 3] = source.image_std.try_into().map_err(|values: Vec<f32>| {
-            format!(
-                "Pinned SigLIP preprocessor has {} standard-deviation values; expected 3.",
-                values.len()
-            )
-        })?;
-        if !source.rescale_factor.is_finite()
-            || source.rescale_factor <= 0.0
+        let image_mean: [f32; 3] =
+            source
+                .normalization
+                .image_mean
+                .try_into()
+                .map_err(|values: Vec<f32>| {
+                    format!(
+                        "Pinned SigLIP preprocessor has {} mean values; expected 3.",
+                        values.len()
+                    )
+                })?;
+        let image_std: [f32; 3] =
+            source
+                .normalization
+                .image_std
+                .try_into()
+                .map_err(|values: Vec<f32>| {
+                    format!(
+                        "Pinned SigLIP preprocessor has {} standard-deviation values; expected 3.",
+                        values.len()
+                    )
+                })?;
+        if !source.normalization.rescale_factor.is_finite()
+            || source.normalization.rescale_factor <= 0.0
             || image_mean.iter().any(|value| !value.is_finite())
             || image_std
                 .iter()
@@ -1734,7 +2104,7 @@ impl SiglipImageProcessor {
             image_size: model_image_size,
             image_mean,
             image_std,
-            rescale_factor: source.rescale_factor,
+            rescale_factor: source.normalization.rescale_factor,
         })
     }
 }
@@ -1749,6 +2119,33 @@ struct SiglipEngine {
     processor: SiglipImageProcessor,
 }
 
+struct SiglipDevice {
+    device: Device,
+    name: &'static str,
+}
+
+impl SiglipDevice {
+    fn new(device: Device, name: &'static str) -> Self {
+        Self { device, name }
+    }
+}
+
+struct SelectedImageBatch<'a> {
+    pixels: &'a [f32],
+    images: usize,
+    concept_indices: &'a [usize],
+}
+
+impl<'a> SelectedImageBatch<'a> {
+    fn new(pixels: &'a [f32], images: usize, concept_indices: &'a [usize]) -> Self {
+        Self {
+            pixels,
+            images,
+            concept_indices,
+        }
+    }
+}
+
 impl SiglipEngine {
     fn load_preferred(
         artifacts: &SiglipArtifacts,
@@ -1757,27 +2154,29 @@ impl SiglipEngine {
         #[cfg(target_os = "macos")]
         {
             match Device::new_metal(0) {
-                Ok(device) => match Self::load(artifacts, concepts, device, "Metal") {
-                    Ok(engine) => Ok((engine, None)),
-                    Err(error) => {
-                        let warning = format!(
-                            "Metal SigLIP initialization failed; this run used CPU instead: {error}"
-                        );
-                        Self::load(artifacts, concepts, Device::Cpu, "CPU")
-                            .map(|engine| (engine, Some(warning)))
+                Ok(device) => {
+                    match Self::load(artifacts, concepts, SiglipDevice::new(device, "Metal")) {
+                        Ok(engine) => Ok((engine, None)),
+                        Err(error) => {
+                            let warning = format!(
+                                "Metal SigLIP initialization failed; this run used CPU instead: {error}"
+                            );
+                            Self::load(artifacts, concepts, SiglipDevice::new(Device::Cpu, "CPU"))
+                                .map(|engine| (engine, Some(warning)))
+                        }
                     }
-                },
+                }
                 Err(error) => {
                     let warning =
                         format!("Metal is unavailable; this run used CPU instead: {error}");
-                    Self::load(artifacts, concepts, Device::Cpu, "CPU")
+                    Self::load(artifacts, concepts, SiglipDevice::new(Device::Cpu, "CPU"))
                         .map(|engine| (engine, Some(warning)))
                 }
             }
         }
         #[cfg(not(target_os = "macos"))]
         {
-            Self::load(artifacts, concepts, Device::Cpu, "CPU").map(|engine| {
+            Self::load(artifacts, concepts, SiglipDevice::new(Device::Cpu, "CPU")).map(|engine| {
                 (
                     engine,
                     Some("Metal is unavailable on this platform; this run used CPU.".to_owned()),
@@ -1789,9 +2188,12 @@ impl SiglipEngine {
     fn load(
         artifacts: &SiglipArtifacts,
         concepts: &[&str],
-        device: Device,
-        device_name: &str,
+        target: SiglipDevice,
     ) -> Result<Self, String> {
+        let SiglipDevice {
+            device,
+            name: device_name,
+        } = target;
         let config: siglip::Config = serde_json::from_slice(
             &std::fs::read(&artifacts.config)
                 .map_err(|error| format!("reading SigLIP config: {error}"))?,
@@ -1861,12 +2263,12 @@ impl SiglipEngine {
         })
     }
 
-    fn score_selected(
-        &self,
-        pixels: &[f32],
-        images: usize,
-        concept_indices: &[usize],
-    ) -> Result<Vec<Vec<f32>>, String> {
+    fn score_selected(&self, batch: SelectedImageBatch<'_>) -> Result<Vec<Vec<f32>>, String> {
+        let SelectedImageBatch {
+            pixels,
+            images,
+            concept_indices,
+        } = batch;
         let pixel_values = Tensor::from_vec(
             pixels.to_vec(),
             (
@@ -1983,10 +2385,7 @@ mod tests {
     use arrow_array::{ListArray, StructArray};
     use arrow_schema::Fields;
 
-    use spiral_robotics_storage::manager::{
-        execute_update_sql, ingest_batch, run_query, table_exists,
-    };
-    use spiral_robotics_storage::settings::{
+    use spiral_robotics_storage::{
         BackendStateStore, SpiralConnectionSettings, environment_spiral_endpoint,
         environment_spiral_spfs_endpoint,
     };
@@ -2034,16 +2433,17 @@ mod tests {
     }
 
     fn feature(name: &str, concept: &str, source_relation: &str) -> WorkflowFeatureDefinition {
-        WorkflowFeatureDefinition {
-            name: name.to_owned(),
-            description: format!("Probability that the frame shows {concept}"),
-            concept: concept.to_owned(),
-            applicability: spiral_robotics_api::workflow::WorkflowFeatureApplicability {
-                source_relation: source_relation.to_owned(),
-                media_field: "image".to_owned(),
-                stream_ids: Vec::new(),
-            },
-        }
+        WorkflowFeatureDefinition::new(
+            name,
+            format!("Probability that the frame shows {concept}"),
+            concept,
+        )
+        .with_applicability(
+            spiral_robotics_api::workflow::WorkflowFeatureApplicability::new(
+                source_relation,
+                "image",
+            ),
+        )
     }
 
     #[test]
@@ -2166,11 +2566,11 @@ mod tests {
         assert_eq!(requested, vec![0, 1]);
         assert_eq!(cache.rows[&key(1)], vec![Some(0.8), None]);
         assert_eq!(
-            cache.missing_indices(&key(1), &requested, &definitions),
+            cache.missing_indices(&key(1), RequestedFeatures::new(&requested, &definitions)),
             vec![(1, 1)]
         );
         assert_eq!(
-            cache.missing_indices(&key(2), &requested, &definitions),
+            cache.missing_indices(&key(2), RequestedFeatures::new(&requested, &definitions)),
             vec![(0, 0), (1, 1)]
         );
         assert_eq!(cache.rows[&key(99)], vec![Some(0.3), None]);
@@ -2231,23 +2631,23 @@ mod tests {
     #[test]
     fn cache_hit_metadata_describes_the_current_cohort_without_prior_run_warnings() {
         let definition = feature("is_raining_feature", "raining", "dataset.frames");
-        let result = feature_cache_hit_result(
-            ModelRunRequest {
-                candidate_sql: "SELECT * FROM candidates".to_owned(),
-                feature_cache_relation: "workflow.features_dataset".to_owned(),
-                features: vec![definition],
-            },
+        let result = FeatureCacheHit::new(
+            ModelRunRequest::new(
+                "SELECT * FROM candidates",
+                "workflow.features_dataset",
+                vec![definition],
+            ),
             CandidateScan {
                 keys: BTreeSet::from([key(2), key(6)]),
                 fingerprint: "current-cohort".to_owned(),
             },
-            9,
-            2,
-        );
-        assert_eq!(result.metadata.device, "not loaded (feature cache hit)");
-        assert_eq!(result.metadata.input_rows, 2);
-        assert_eq!(result.metadata.output_rows, 9);
-        assert_eq!(result.metadata.fingerprint, "current-cohort");
+        )
+        .with_counts(9, 2)
+        .into_result();
+        assert_eq!(result.metadata.device(), "not loaded (feature cache hit)");
+        assert_eq!(result.metadata.input_rows(), 2);
+        assert_eq!(result.metadata.output_rows(), 9);
+        assert_eq!(result.metadata.fingerprint(), "current-cohort");
         assert_eq!(result.quarantine, WorkflowQuarantineSummary::default());
         assert!(result.warnings.is_empty());
     }
@@ -2281,7 +2681,7 @@ mod tests {
     fn feature_cache_uses_the_registry_when_spiral_drops_arrow_field_metadata() {
         let definition = feature("is_raining_feature", "raining", "dataset.frames");
         let registered = vec![CacheFeature {
-            name: definition.name.clone(),
+            name: definition.name().to_owned(),
             definition: definition.clone(),
         }];
         let schema = feature_cache_schema(&registered);
@@ -2299,23 +2699,18 @@ mod tests {
             .expect("a metadata-free Spiral cache must use its atomic registry definition");
         assert_eq!(loaded[0].definition, definition);
 
-        let mut incompatible_registry = FeatureRegistryEntry {
-            definition: loaded[0].definition.clone(),
-            cache_relation: derived_feature_cache_relation("dataset.frames"),
-            model_id: SIGLIP_BASE_MODEL_ID.to_owned(),
-            repository: SIGLIP_BASE_REPOSITORY.to_owned(),
-            artifact_revision: "different-artifact-revision".to_owned(),
-            value_semantics: FEATURE_VALUE_SEMANTICS.to_owned(),
-            definition_version: 1,
-            created_at_ms: 1,
-            updated_at_ms: 1,
-        };
+        let mut incompatible_registry = FeatureRegistryEntry::new(
+            loaded[0].definition.clone(),
+            derived_feature_cache_relation("dataset.frames"),
+            1,
+        );
+        incompatible_registry.producer.artifact_revision = "different-artifact-revision".to_owned();
         assert!(
             validate_feature_registry_entry(&incompatible_registry)
                 .unwrap_err()
                 .contains("incompatible producer provenance")
         );
-        incompatible_registry.artifact_revision = SIGLIP_BASE_REVISION.to_owned();
+        incompatible_registry.producer.artifact_revision = SIGLIP_BASE_REVISION.to_owned();
         validate_feature_registry_entry(&incompatible_registry)
             .expect("the registry retains exact producer provenance without field metadata");
     }
@@ -2336,7 +2731,12 @@ mod tests {
         }
         let missing = [0, 2, 4, 6]
             .into_iter()
-            .filter(|frame| cache.missing_count(&key(*frame), &requested, &definitions) == 1)
+            .filter(|frame| {
+                cache.missing_count(
+                    &key(*frame),
+                    RequestedFeatures::new(&requested, &definitions),
+                ) == 1
+            })
             .collect::<Vec<_>>();
         assert_eq!(missing, vec![2, 6]);
         assert_eq!(cache.rows[&key(0)][0], Some(0.75));
@@ -2355,19 +2755,27 @@ mod tests {
         let mut registry = FeatureRegistry::default();
         assert!(
             registry
-                .register(&cache_relation, std::slice::from_ref(&definition), 10)
+                .register(FeatureRegistration::new(
+                    &cache_relation,
+                    std::slice::from_ref(&definition),
+                    10,
+                ))
                 .unwrap()
         );
         assert!(
             !registry
-                .register(&cache_relation, std::slice::from_ref(&definition), 20)
+                .register(FeatureRegistration::new(
+                    &cache_relation,
+                    std::slice::from_ref(&definition),
+                    20,
+                ))
                 .unwrap()
         );
         let mut conflict = definition.clone();
-        conflict.description = "A different public meaning".to_owned();
+        conflict.set_description("A different public meaning");
         assert!(
             registry
-                .register(&cache_relation, &[conflict], 30)
+                .register(FeatureRegistration::new(&cache_relation, &[conflict], 30))
                 .unwrap_err()
                 .contains("incompatible definition")
         );
@@ -2376,7 +2784,7 @@ mod tests {
             spiral_robotics_api::workflow::derived_feature_cache_relation("dataset_b.frames");
         assert!(
             registry
-                .register(&other_cache, &[other_source], 40)
+                .register(FeatureRegistration::new(&other_cache, &[other_source], 40))
                 .unwrap()
         );
 
@@ -2446,38 +2854,18 @@ mod tests {
                 source,
             );
             registry.entries.insert(
-                (source.to_owned(), definition.name.clone()),
-                FeatureRegistryEntry {
-                    definition,
-                    cache_relation: cache_relation.clone(),
-                    model_id: SIGLIP_BASE_MODEL_ID.to_owned(),
-                    repository: SIGLIP_BASE_REPOSITORY.to_owned(),
-                    artifact_revision: SIGLIP_BASE_REVISION.to_owned(),
-                    value_semantics: FEATURE_VALUE_SEMANTICS.to_owned(),
-                    definition_version: 1,
-                    created_at_ms: 1,
-                    updated_at_ms: 1,
-                },
+                (source.to_owned(), definition.name().to_owned()),
+                FeatureRegistryEntry::new(definition, cache_relation.clone(), 1),
             );
         }
         let definition = feature("is_one_too_many_feature", "overflow", source);
-        let feature_name = definition.name.clone();
-        let error = insert_loaded_registry_entry(
-            &mut registry,
+        let feature_name = definition.name().to_owned();
+        let error = LoadedFeatureRegistryEntry::new(
             source.to_owned(),
             feature_name,
-            FeatureRegistryEntry {
-                definition,
-                cache_relation,
-                model_id: SIGLIP_BASE_MODEL_ID.to_owned(),
-                repository: SIGLIP_BASE_REPOSITORY.to_owned(),
-                artifact_revision: SIGLIP_BASE_REVISION.to_owned(),
-                value_semantics: FEATURE_VALUE_SEMANTICS.to_owned(),
-                definition_version: 1,
-                created_at_ms: 2,
-                updated_at_ms: 2,
-            },
+            FeatureRegistryEntry::new(definition, cache_relation, 2),
         )
+        .insert_into(&mut registry)
         .expect_err("a persisted registry above the durable bound must be rejected while loading");
         assert!(error.contains("4096 definitions"));
     }
@@ -2487,19 +2875,23 @@ mod tests {
         let source = "dataset.frames";
         let cache_relation = derived_feature_cache_relation(source);
         let mut definition = feature("is_unicode_feature", "visual", source);
-        definition.description = "é".repeat(MAX_WORKFLOW_FEATURE_DESCRIPTION_LENGTH);
-        definition.concept = "雨".repeat(MAX_SIGLIP_CONCEPT_LENGTH);
+        definition.set_description("é".repeat(MAX_WORKFLOW_FEATURE_DESCRIPTION_LENGTH));
+        definition.set_concept("雨".repeat(MAX_SIGLIP_CONCEPT_LENGTH));
         let mut registry = FeatureRegistry::default();
         registry
-            .register(&cache_relation, std::slice::from_ref(&definition), 1)
+            .register(FeatureRegistration::new(
+                &cache_relation,
+                std::slice::from_ref(&definition),
+                1,
+            ))
             .expect("the registry must share the contract's character-count limits");
 
         let mut too_long = definition;
-        too_long.name = "is_unicode_too_long_feature".to_owned();
-        too_long.description.push('é');
+        too_long.set_name("is_unicode_too_long_feature");
+        too_long.set_description(format!("{}é", too_long.description()));
         assert!(
             registry
-                .register(&cache_relation, &[too_long], 2)
+                .register(FeatureRegistration::new(&cache_relation, &[too_long], 2))
                 .unwrap_err()
                 .contains("invalid feature definition")
         );
@@ -2627,7 +3019,7 @@ mod tests {
     #[test]
     fn nonapplicable_stream_cells_remain_null_without_being_missing_work() {
         let mut definition = feature("is_gripper_open_feature", "gripper open", "dataset.frames");
-        definition.applicability.stream_ids = vec!["camera.top".to_owned()];
+        definition.set_stream_ids(vec!["camera.top".to_owned()]);
         let definitions = vec![definition];
         let mut cache = FeatureCache::default();
         let (requested, _) = cache.merge_requested(&definitions).unwrap();
@@ -2642,11 +3034,17 @@ mod tests {
         cache.ensure_key(applicable.clone());
         cache.ensure_key(nonapplicable.clone());
         assert_eq!(
-            cache.missing_count(&applicable, &requested, &definitions),
+            cache.missing_count(
+                &applicable,
+                RequestedFeatures::new(&requested, &definitions),
+            ),
             1
         );
         assert_eq!(
-            cache.missing_count(&nonapplicable, &requested, &definitions),
+            cache.missing_count(
+                &nonapplicable,
+                RequestedFeatures::new(&requested, &definitions),
+            ),
             0
         );
         assert_eq!(cache.rows[&nonapplicable][0], None);
@@ -2679,7 +3077,7 @@ mod tests {
                 .expect("the Workflow registry project store must be valid"),
         );
         let registry_existed = project_store
-            .run_blocking(|connection| table_exists(connection, FEATURE_REGISTRY_RELATION))
+            .run_blocking(|connection| connection.table_exists(FEATURE_REGISTRY_RELATION))
             .expect("the Workflow registry catalog check must succeed");
         let previous_registry = load_feature_registry(&project_store)
             .expect("the existing Workflow registry must be readable");
@@ -2704,7 +3102,11 @@ mod tests {
         let expected_registry_after_cleanup = previous_registry.clone();
         let mut registry = previous_registry;
         registry
-            .register(&cache_relation, std::slice::from_ref(&definition), 42)
+            .register(FeatureRegistration::new(
+                &cache_relation,
+                std::slice::from_ref(&definition),
+                42,
+            ))
             .expect("the test feature must register");
         let mut cache = FeatureCache::default();
         let (indices, _) = cache
@@ -2713,7 +3115,8 @@ mod tests {
         cache.ensure_key(key(7));
         cache.rows.get_mut(&key(7)).unwrap()[indices[0]] = Some(0.625);
 
-        replace_feature_cache_and_registry(&project_store, &cache_relation, &cache, &registry)
+        FeaturePublication::new(&cache_relation, &cache, &registry)
+            .replace(&project_store)
             .expect("cache and registry must commit together");
         project_store.invalidate_idle_connections();
         let reloaded_registry =
@@ -2725,8 +3128,9 @@ mod tests {
         assert_eq!(
             reloaded_registry
                 .entries
-                .get(&(source_relation, definition.name))
+                .get(&(source_relation, definition.name().to_owned()))
                 .unwrap()
+                .producer
                 .value_semantics,
             FEATURE_VALUE_SEMANTICS
         );
@@ -2735,7 +3139,7 @@ mod tests {
             .expect("the registry round trip must restore the prior project state");
         assert!(
             !project_store
-                .run_blocking(|connection| table_exists(connection, &cache_relation))
+                .run_blocking(|connection| connection.table_exists(&cache_relation))
                 .expect("the cleaned cache catalog check must succeed"),
             "the registry round trip must remove its exact derived cache"
         );
@@ -2952,8 +3356,8 @@ mod tests {
         let seed_namespace = namespace.clone();
         project_store
             .run_exclusive_blocking(move |connection| {
-                ensure_dataset_namespace(connection, &seed_namespace)?;
-                ingest_batch(connection, &seed_relation, batch)
+                connection.ensure_dataset_namespace(&seed_namespace)?;
+                connection.ingest_batch(&seed_relation, batch)
             })
             .expect("seeding the golden image relation must succeed");
         project_store.invalidate_idle_connections();
@@ -2964,21 +3368,23 @@ mod tests {
         ];
         let mut events = Vec::new();
         let result = run_model(
-            project_store.clone(),
-            ModelRunRequest {
-                candidate_sql: format!("SELECT * FROM {input_relation}"),
-                feature_cache_relation: output_relation.clone(),
-                features,
-            },
-            Arc::new(AtomicBool::new(false)),
-            Arc::new(Mutex::new(())),
+            ModelRunContext::new(
+                project_store.clone(),
+                ModelRunRequest::new(
+                    format!("SELECT * FROM {input_relation}"),
+                    output_relation.clone(),
+                    features,
+                ),
+                Arc::new(AtomicBool::new(false)),
+            )
+            .with_publication_gate(Arc::new(Mutex::new(()))),
             |event| events.push(event),
         )
         .expect("the golden SigLIP run must complete with a warning");
-        assert_eq!(result.metadata.input_rows, 2);
-        assert_eq!(result.metadata.output_rows, 2);
-        assert_eq!(result.quarantine.count, 1);
-        assert_eq!(result.quarantine.examples.len(), 1);
+        assert_eq!(result.metadata.input_rows(), 2);
+        assert_eq!(result.metadata.output_rows(), 2);
+        assert_eq!(result.quarantine.count(), 1);
+        assert_eq!(result.quarantine.examples().len(), 1);
         assert!(
             result
                 .warnings
@@ -2988,16 +3394,15 @@ mod tests {
         assert!(events.iter().any(|event| matches!(
             event,
             ModelRunEvent::Running { progress, .. }
-                if progress.completed == 2
-                    && progress.total == 4
-                    && progress.unit == "feature cells"
+                if progress.completed() == 2
+                    && progress.total() == 4
+                    && progress.unit() == "feature cells"
         )));
 
         let scored_relation = output_relation.clone();
         let scored = project_store
             .run_blocking(move |connection| {
-                run_query(
-                    connection,
+                connection.run_query(
                     &format!(
                         "SELECT is_black_square_feature, is_white_square_feature FROM {scored_relation} WHERE frame_index = 0"
                     ),
@@ -3005,12 +3410,12 @@ mod tests {
                 )
             })
             .expect("the golden score relation must be queryable");
-        assert_eq!(scored.rows.len(), 1);
-        let black = scored.rows[0]
+        assert_eq!(scored.rows().len(), 1);
+        let black = scored.rows()[0]
             .get("is_black_square_feature")
             .and_then(serde_json::Value::as_f64)
             .expect("black score must be numeric");
-        let white = scored.rows[0]
+        let white = scored.rows()[0]
             .get("is_white_square_feature")
             .and_then(serde_json::Value::as_f64)
             .expect("white score must be numeric");
@@ -3026,7 +3431,9 @@ mod tests {
         );
         eprintln!(
             "SigLIP image golden: device={}, black={black:.8}, white={white:.8}, decode_ms={}, inference_ms={}",
-            result.metadata.device, result.metadata.decode_ms, result.metadata.inference_ms,
+            result.metadata.device(),
+            result.metadata.decode_ms(),
+            result.metadata.inference_ms(),
         );
     }
 
@@ -3049,19 +3456,16 @@ mod tests {
             self.project_store.run_exclusive_blocking(move |connection| {
                 connection.set_autocommit(false)?;
                 let mutation = (|| {
-                    execute_update_sql(
-                        connection,
+                    connection.execute_update_sql(
                         &format!("DROP TABLE IF EXISTS {cache_relation}"),
                     )?;
                     if registry_existed {
-                        replace_batches(
-                            connection,
+                        connection.replace_batches(
                             FEATURE_REGISTRY_RELATION,
                             vec![registry_batch],
                         )?;
                     } else {
-                        execute_update_sql(
-                            connection,
+                        connection.execute_update_sql(
                             &format!("DROP TABLE IF EXISTS {FEATURE_REGISTRY_RELATION}"),
                         )?;
                     }
@@ -3111,12 +3515,12 @@ mod tests {
                 .project_store
                 .run_exclusive_blocking(move |connection| {
                     for relation in relations {
-                        if table_exists(connection, &relation)? {
-                            execute_update_sql(connection, &format!("DROP TABLE {relation}"))?;
+                        if connection.table_exists(&relation)? {
+                            connection.execute_update_sql(&format!("DROP TABLE {relation}"))?;
                         }
                     }
-                    if table_exists(connection, &namespace)? {
-                        execute_update_sql(connection, &format!("DROP TABLE {namespace}"))?;
+                    if connection.table_exists(&namespace)? {
+                        connection.execute_update_sql(&format!("DROP TABLE {namespace}"))?;
                     }
                     Ok(())
                 });

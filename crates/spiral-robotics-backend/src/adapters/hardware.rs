@@ -3,8 +3,8 @@
 use std::collections::BTreeMap;
 
 use spiral_robotics_api::robots::ModeSelection;
+use spiral_robotics_core::OperationError;
 use spiral_robotics_core::calibration::{Calibration, CalibrationInput, NormalizedPosition};
-use spiral_robotics_core::error::OperationError;
 use spiral_robotics_hardware::{
     HardwareHandle, ReplayRequest, ReplayTrajectory as HardwareReplayTrajectory,
 };
@@ -20,12 +20,14 @@ impl SpiralReplayPort for HardwareHandle {
         command: StartSpiralReplayCommand,
         trajectory: ReplayTrajectory,
     ) -> Result<(), OperationError> {
+        let (_sample_hz, frames) = trajectory.into_parts();
+        let (episode, robot, _stream) = command.into_parts();
         HardwareHandle::start_replay(
             self,
             ReplayRequest::timeline(
-                command.robot,
-                command.episode,
-                HardwareReplayTrajectory::new(trajectory.frames, trajectory.sample_hz),
+                robot,
+                episode,
+                HardwareReplayTrajectory::new(frames, _sample_hz),
             ),
         )
         .await

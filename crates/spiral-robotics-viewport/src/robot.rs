@@ -219,7 +219,7 @@ impl BenchPosition {
         }
     }
 
-    pub fn translation(self) -> Vec3 {
+    fn translation(self) -> Vec3 {
         Vec3::new(
             0.0,
             (self.index as f32 - self.count.saturating_sub(1) as f32 / 2.0) * BENCH_SPACING,

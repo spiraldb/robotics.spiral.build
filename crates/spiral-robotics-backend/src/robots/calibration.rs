@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use spiral_robotics_core::calibration::{Calibration, CalibrationInput, MotorSpec};
 
 use crate::data::catalog_lease::CatalogLeaseToken;
-use spiral_robotics_core::error::OperationError;
+use spiral_robotics_core::OperationError;
 
 pub(crate) struct CalibrationUpdate<'a> {
     motors: &'a BTreeMap<String, MotorSpec>,
@@ -44,7 +44,7 @@ pub(crate) trait RobotCalibrationStore {
 }
 
 /// Live sweep operations required by the calibration action.
-pub trait CalibrationControlPort {
+pub(crate) trait CalibrationControlPort {
     async fn start_calibration(&self, robot: &str) -> Result<(), OperationError>;
 
     async fn calibration_input(&self, robot: &str) -> Result<CalibrationInput, OperationError>;
@@ -60,34 +60,87 @@ pub trait CalibrationControlPort {
 
 /// Work that would make rewriting completed episode state inconsistent.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct CalibrationHistoryActivity {
-    pub recording: Option<String>,
-    pub replaying: Option<String>,
-    pub training_active: bool,
+pub(crate) struct CalibrationHistoryActivity {
+    recording: Option<String>,
+    replaying: Option<String>,
+    training_active: bool,
 }
 
 /// Changes committed directly to the historical rows in SpiralDB.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct ReappliedPositions {
-    pub updated_episode_ids: Vec<String>,
-    pub frames_updated: u64,
-    pub episodes_unchanged: u64,
-    pub episodes_skipped: u64,
-    pub warnings: Vec<String>,
+pub(crate) struct ReappliedPositions {
+    updated_episode_ids: Vec<String>,
+    frames_updated: u64,
+    episodes_unchanged: u64,
+    episodes_skipped: u64,
+    warnings: Vec<String>,
 }
 
 /// Result presented to the delivery layer after SpiralDB is durable.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct ReapplyCalibrationOutput {
-    pub episodes_updated: u64,
-    pub frames_updated: u64,
-    pub episodes_unchanged: u64,
-    pub episodes_skipped: u64,
-    pub warnings: Vec<String>,
+pub(crate) struct ReapplyCalibrationOutput {
+    episodes_updated: u64,
+    frames_updated: u64,
+    episodes_unchanged: u64,
+    episodes_skipped: u64,
+    warnings: Vec<String>,
+}
+
+impl CalibrationHistoryActivity {
+    pub(crate) fn new(
+        recording: Option<String>,
+        replaying: Option<String>,
+        training_active: bool,
+    ) -> Self {
+        Self {
+            recording,
+            replaying,
+            training_active,
+        }
+    }
+}
+
+impl ReappliedPositions {
+    pub(crate) fn new(
+        updated_episode_ids: Vec<String>,
+        frames_updated: u64,
+        episodes_unchanged: u64,
+    ) -> Self {
+        Self {
+            updated_episode_ids,
+            frames_updated,
+            episodes_unchanged,
+            episodes_skipped: 0,
+            warnings: Vec::new(),
+        }
+    }
+    pub(crate) fn with_skipped(mut self, episodes_skipped: u64, warnings: Vec<String>) -> Self {
+        self.episodes_skipped = episodes_skipped;
+        self.warnings = warnings;
+        self
+    }
+}
+
+impl ReapplyCalibrationOutput {
+    pub(crate) const fn episodes_updated(&self) -> u64 {
+        self.episodes_updated
+    }
+    pub(crate) const fn frames_updated(&self) -> u64 {
+        self.frames_updated
+    }
+    pub(crate) const fn episodes_unchanged(&self) -> u64 {
+        self.episodes_unchanged
+    }
+    pub(crate) const fn episodes_skipped(&self) -> u64 {
+        self.episodes_skipped
+    }
+    pub(crate) fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
 }
 
 /// Historical episode boundary for applying a robot's current calibration.
-pub trait CalibrationHistoryPort {
+pub(crate) trait CalibrationHistoryPort {
     fn reserve_catalog_mutation(&self) -> Result<Option<CatalogLeaseToken>, OperationError>;
     fn release_catalog_mutation(&self, token: CatalogLeaseToken);
     fn activity(&self) -> CalibrationHistoryActivity;
@@ -112,7 +165,7 @@ impl<P: CalibrationHistoryPort + ?Sized> Drop for CalibrationHistoryReservation<
 }
 
 /// Begin a hand-guided calibration sweep.
-pub async fn start<C>(control: &C, robot: &str) -> Result<(), OperationError>
+pub(crate) async fn start<C>(control: &C, robot: &str) -> Result<(), OperationError>
 where
     C: CalibrationControlPort + ?Sized,
 {
@@ -120,7 +173,7 @@ where
 }
 
 /// Abandon a calibration sweep and return the robot to normal operation.
-pub async fn cancel<C>(control: &C, robot: &str) -> Result<(), OperationError>
+pub(crate) async fn cancel<C>(control: &C, robot: &str) -> Result<(), OperationError>
 where
     C: CalibrationControlPort + ?Sized,
 {
@@ -129,9 +182,15 @@ where
 
 /// A calibration was durably saved. Any warning concerns only its live refresh.
 #[derive(Clone, Debug, PartialEq)]
-pub struct FinishCalibrationOutput {
-    pub calibration: Calibration,
-    pub live_warning: Option<String>,
+pub(crate) struct FinishCalibrationOutput {
+    calibration: Calibration,
+    live_warning: Option<String>,
+}
+
+impl FinishCalibrationOutput {
+    pub(crate) fn live_warning(&self) -> Option<&str> {
+        self.live_warning.as_deref()
+    }
 }
 
 /// Finish a sweep, validate its domain result, persist it, then refresh live control.
@@ -184,7 +243,7 @@ where
 /// are replaced atomically, and only then are changed takes queued for remote
 /// synchronization. Actions remain untouched because old takes do not retain
 /// the raw commanded goal needed to transform them faithfully.
-pub async fn reapply_history<P>(
+pub(crate) async fn reapply_history<P>(
     port: &P,
     robot: &str,
 ) -> Result<ReapplyCalibrationOutput, OperationError>

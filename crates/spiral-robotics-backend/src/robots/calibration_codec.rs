@@ -1,6 +1,6 @@
 //! JSON codec for calibration values imported and exported by Studio.
 //!
-//! Calibration policy accepts plain [`CalibrationInput`] values. Strict JSON
+//! Calibration policy accepts plain calibration input values. Strict JSON
 //! shape, unknown-field rejection, and duplicate-object-key detection are
 //! delivery concerns kept here at the backend edge.
 
@@ -10,13 +10,17 @@ use std::marker::PhantomData;
 
 use serde::de::{self, DeserializeOwned, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use spiral_robotics_core::calibration::CalibrationInput;
 use spiral_robotics_core::calibration::{
-    Calibration, CalibrationFormat, CalibrationInput, MotorCalibration, MotorDirection,
-    MotorReading,
+    Calibration, CalibrationFormat, MotorCalibration, MotorDirection, MotorReading,
 };
 
 /// Serialize a domain direction at a delivery or persistence edge.
-pub fn serialize_direction<S>(direction: &MotorDirection, serializer: S) -> Result<S::Ok, S::Error>
+pub(crate) fn serialize_direction<S>(
+    direction: &MotorDirection,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
 {
@@ -27,7 +31,7 @@ where
 }
 
 /// Deserialize a persisted or delivered direction into the domain value.
-pub fn deserialize_direction<'de, D>(deserializer: D) -> Result<MotorDirection, D::Error>
+pub(crate) fn deserialize_direction<'de, D>(deserializer: D) -> Result<MotorDirection, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -41,16 +45,16 @@ where
 /// Edge-owned wire shape for a per-motor calibration.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct MotorCalibrationWire {
-    pub id: u32,
+struct MotorCalibrationWire {
+    id: u32,
     #[serde(
         deserialize_with = "deserialize_direction",
         serialize_with = "serialize_direction"
     )]
-    pub direction: MotorDirection,
-    pub range_min: i64,
-    pub center: i64,
-    pub range_max: i64,
+    direction: MotorDirection,
+    range_min: i64,
+    center: i64,
+    range_max: i64,
 }
 
 impl From<MotorCalibration> for MotorCalibrationWire {
@@ -88,12 +92,13 @@ struct CalibrationWire {
 }
 
 /// Decode a strict calibration document and apply all domain invariants.
-pub fn decode_calibration(value: serde_json::Value) -> serde_json::Result<Calibration> {
+pub(crate) fn decode_calibration(value: serde_json::Value) -> serde_json::Result<Calibration> {
     calibration_from_wire(serde_json::from_value::<CalibrationWire>(value)?)
 }
 
 /// Decode calibration JSON before generic values can erase duplicate keys.
-pub fn decode_calibration_json(json: &str) -> serde_json::Result<Calibration> {
+#[cfg(test)]
+fn decode_calibration_json(json: &str) -> serde_json::Result<Calibration> {
     let wire = serde_json::from_str::<CalibrationWire>(json)?;
     calibration_from_wire(wire)
 }
@@ -114,7 +119,9 @@ fn calibration_from_wire(wire: CalibrationWire) -> serde_json::Result<Calibratio
 }
 
 /// Encode a validated calibration document for a robot file.
-pub fn encode_calibration(calibration: &Calibration) -> serde_json::Result<serde_json::Value> {
+pub(crate) fn encode_calibration(
+    calibration: &Calibration,
+) -> serde_json::Result<serde_json::Value> {
     calibration.validate().map_err(json_error)?;
     let format = calibration.format();
     serde_json::to_value(CalibrationWire {
@@ -135,6 +142,7 @@ fn json_error(error: impl fmt::Display) -> serde_json::Error {
     <serde_json::Error as de::Error>::custom(error.to_string())
 }
 
+#[cfg(test)]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MotorReadingWire {
@@ -143,18 +151,21 @@ struct MotorReadingWire {
     range_max: i64,
 }
 
+#[cfg(test)]
 impl From<MotorReadingWire> for MotorReading {
     fn from(reading: MotorReadingWire) -> Self {
         Self::new(reading.center, reading.range_min, reading.range_max)
     }
 }
 
+#[cfg(test)]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DirectInput {
     motors: UniqueMap<MotorReadingWire>,
 }
 
+#[cfg(test)]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SweepInput {
@@ -162,6 +173,7 @@ struct SweepInput {
     samples: Vec<UniqueMap<i64>>,
 }
 
+#[cfg(test)]
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum CalibrationInputWire {
@@ -170,7 +182,8 @@ enum CalibrationInputWire {
 }
 
 /// Decode strict calibration JSON into a framework-neutral domain input.
-pub fn decode_input(json: &str) -> serde_json::Result<CalibrationInput> {
+#[cfg(test)]
+fn decode_input(json: &str) -> serde_json::Result<CalibrationInput> {
     let wire = serde_json::from_str::<CalibrationInputWire>(json)?;
     Ok(match wire {
         CalibrationInputWire::Direct(input) => CalibrationInput::Direct {

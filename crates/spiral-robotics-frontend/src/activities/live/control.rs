@@ -4,7 +4,9 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use crate::components::interaction::{Action, ActionPurpose, ActionVariant};
+use crate::components::interaction::{
+    Action, ActionAuxiliaryHandlers, ActionPurpose, ActionVariant,
+};
 use dioxus::prelude::*;
 use gloo_net::http::Method;
 use spiral_robotics_api::robots::{
@@ -45,13 +47,13 @@ pub(crate) fn JointPanel(
         };
     };
 
-    let telemetry = studio.robot_telemetry(&robot.id);
-    let torque = telemetry.as_ref().is_some_and(|robot| robot.torque);
-    let drivable = studio.is_manual_target(&robot.id) && torque && robot.calibrated;
+    let telemetry = studio.robot_telemetry(robot.id());
+    let torque = telemetry.as_ref().is_some_and(|robot| robot.torque());
+    let drivable = studio.is_manual_target(robot.id()) && torque && robot.calibrated();
 
     rsx! {
         div { class: "live-joint-panel flex flex-col",
-            if let Some(error) = telemetry.as_ref().and_then(|robot| robot.error.clone()) {
+            if let Some(error) = telemetry.as_ref().and_then(|robot| robot.error().to_owned()) {
                 p { class: "mx-2 mt-1 rounded bg-danger-soft px-1.5 py-1 text-[11px] text-danger",
                     "{error}"
                 }
@@ -59,7 +61,7 @@ pub(crate) fn JointPanel(
 
             ToolReadout {
                 telemetry: telemetry.clone(),
-                calibrated: robot.calibrated,
+                calibrated: robot.calibrated(),
             }
 
             ConditionReadout {
@@ -70,9 +72,7 @@ pub(crate) fn JointPanel(
             JointControls {
                 robot: robot.clone(),
                 telemetry: telemetry.clone(),
-                drivable,
-                on_select,
-                on_point,
+                behavior: JointControlBehavior::new(drivable, on_select, on_point),
             }
 
             MotorDetail {
@@ -94,15 +94,15 @@ fn ToolReadout(telemetry: Option<RobotTelemetry>, calibrated: bool) -> Element {
     let angles = telemetry
         .as_ref()
         .filter(|_| calibrated)
-        .map(|robot| measured_angles(&robot.joints));
+        .map(|robot| measured_angles(robot.joints()));
     let tip = angles
         .as_ref()
         .and_then(|angles| tool_position(urdf, angles));
     let tracking_error = telemetry.as_ref().and_then(|robot| {
         robot
-            .joints
+            .joints()
             .iter()
-            .filter_map(|joint| Some((joint.degrees? - joint.target_degrees?).abs()))
+            .filter_map(|joint| Some((joint.degrees()? - joint.target_degrees()?).abs()))
             .filter(|error| error.is_finite())
             .reduce(f64::max)
     });
@@ -114,12 +114,12 @@ fn ToolReadout(telemetry: Option<RobotTelemetry>, calibrated: bool) -> Element {
             Readout {
                 label: "Reach",
                 value: tip.map(|tip| format!("{:.0}", tip.truncate().length())),
-                unit: "mm",
+                details: ReadoutDetails::new("mm"),
             }
             Readout {
                 label: "Height",
                 value: tip.map(|tip| format!("{:.0}", tip.z)),
-                unit: "mm",
+                details: ReadoutDetails::new("mm"),
             }
             // A bare percentage does not say which end is which, and reading it
             // backwards is exactly the mistake this readout used to invite — so
@@ -129,7 +129,7 @@ fn ToolReadout(telemetry: Option<RobotTelemetry>, calibrated: bool) -> Element {
             Readout {
                 label: "Gripper open",
                 value: angles.map(|angles| format!("{:.0}", angles.gripper_opening() * 100.0)),
-                unit: "%",
+                details: ReadoutDetails::new("%"),
             }
             // One name for one number, in every mode. This is the same quantity
             // the session timeline records for a whole take; calling it
@@ -145,9 +145,9 @@ fn ToolReadout(telemetry: Option<RobotTelemetry>, calibrated: bool) -> Element {
                 // One decimal, matching the session timeline: the same number
                 // rounded two different ways reads as two measurements.
                 value: tracking_error.map(|error| format!("{error:.1}")),
-                unit: "°",
-                caution: lagging,
-                hint: "The largest gap between where a joint is and where it was told to be",
+                details: ReadoutDetails::new("°")
+                    .with_hint("The largest gap between where a joint is and where it was told to be")
+                    .with_caution(lagging),
             }
         }
     }
@@ -156,10 +156,10 @@ fn ToolReadout(telemetry: Option<RobotTelemetry>, calibrated: bool) -> Element {
 /// The limits the named motor reported for itself when it connected.
 fn motor_limits(robot: &RobotSummary, joint: &str) -> MotorLimits {
     robot
-        .motors
+        .motors()
         .iter()
-        .find(|motor| motor.name == joint)
-        .map(|motor| motor.limits)
+        .find(|motor| motor.name() == joint)
+        .map(|motor| motor.limits())
         .unwrap_or_default()
 }
 
@@ -173,45 +173,47 @@ fn motor_limits(robot: &RobotSummary, joint: &str) -> MotorLimits {
 /// readout, and the joint row a few pixels below tints itself instead.
 #[component]
 fn ConditionReadout(robot: RobotSummary, telemetry: Option<RobotTelemetry>) -> Element {
-    let joints = telemetry.map(|robot| robot.joints).unwrap_or_default();
+    let joints = telemetry
+        .map(|robot| robot.joints().to_owned())
+        .unwrap_or_default();
 
     // The hottest motor decides both thermal cells, so they always describe the
     // same motor as each other.
     let hottest = joints
         .iter()
-        .filter(|joint| joint.temperature_celsius.is_some())
+        .filter(|joint| joint.temperature_celsius().is_some())
         .max_by(|left, right| {
-            left.temperature_celsius
+            left.temperature_celsius()
                 .unwrap_or_default()
-                .total_cmp(&right.temperature_celsius.unwrap_or_default())
+                .total_cmp(&right.temperature_celsius().unwrap_or_default())
         });
     let hot = hottest.is_some_and(|joint| {
-        joint.condition(&motor_limits(&robot, &joint.name)) != MotorCondition::Nominal
+        joint.condition(&motor_limits(&robot, joint.name())) != MotorCondition::Nominal
     });
 
     // Every motor shares one supply, so the interesting number is the worst of
     // them: the motor seeing the deepest sag is the one about to complain.
     let supply = joints
         .iter()
-        .filter_map(|joint| joint.voltage_volts)
+        .filter_map(|joint| joint.voltage_volts())
         .reduce(f64::min);
     let sagging = joints.iter().any(|joint| {
-        joint.voltage_volts.is_some()
-            && joint.voltage_volts == supply
-            && joint.condition(&motor_limits(&robot, &joint.name)) != MotorCondition::Nominal
+        joint.voltage_volts().is_some()
+            && joint.voltage_volts() == supply
+            && joint.condition(&motor_limits(&robot, joint.name())) != MotorCondition::Nominal
     });
 
     let hardest = joints
         .iter()
-        .filter(|joint| joint.load.is_some())
+        .filter(|joint| joint.load().is_some())
         .max_by(|left, right| {
-            left.load
+            left.load()
                 .unwrap_or_default()
                 .abs()
-                .total_cmp(&right.load.unwrap_or_default().abs())
+                .total_cmp(&right.load().unwrap_or_default().abs())
         });
     let strained = hardest.is_some_and(|joint| {
-        joint.condition(&motor_limits(&robot, &joint.name)) != MotorCondition::Nominal
+        joint.condition(&motor_limits(&robot, joint.name())) != MotorCondition::Nominal
     });
 
     rsx! {
@@ -219,37 +221,37 @@ fn ConditionReadout(robot: RobotSummary, telemetry: Option<RobotTelemetry>) -> E
             Readout {
                 label: "Hottest",
                 value: hottest
-                    .and_then(|joint| joint.temperature_celsius)
+                    .and_then(|joint| joint.temperature_celsius())
                     .map(|celsius| format!("{celsius:.0}")),
-                unit: "°C",
-                caution: hot,
-                hint: "The warmest motor on this arm",
+                details: ReadoutDetails::new("°C")
+                    .with_hint("The warmest motor on this arm")
+                    .with_caution(hot),
             }
             // No caution tint: a rise has no limit to be near, and this studio
             // does not invent thresholds the hardware did not state.
             Readout {
                 label: "Rise",
                 value: hottest
-                    .and_then(|joint| joint.temperature_rise_per_minute)
+                    .and_then(|joint| joint.temperature_rise_per_minute())
                     .map(|rate| format!("{rate:+.0}")),
-                unit: "°C/m",
-                hint: "How fast the warmest motor is heating, measured over the last minute",
+                details: ReadoutDetails::new("°C/m")
+                    .with_hint("How fast the warmest motor is heating, measured over the last minute"),
             }
             Readout {
                 label: "Supply",
                 value: supply.map(|volts| format!("{volts:.1}")),
-                unit: "V",
-                caution: sagging,
-                hint: "The lowest supply voltage any motor on this bus reports",
+                details: ReadoutDetails::new("V")
+                    .with_hint("The lowest supply voltage any motor on this bus reports")
+                    .with_caution(sagging),
             }
             Readout {
                 label: "Load",
                 value: hardest
-                    .and_then(|joint| joint.load)
+                    .and_then(|joint| joint.load())
                     .map(|load| format!("{:.0}", load.abs() * 100.0)),
-                unit: "%",
-                caution: strained,
-                hint: "The hardest any motor is working, as a share of its rated torque",
+                details: ReadoutDetails::new("%")
+                    .with_hint("The hardest any motor is working, as a share of its rated torque")
+                    .with_caution(strained),
             }
         }
     }
@@ -265,32 +267,34 @@ fn ConditionReadout(robot: RobotSummary, telemetry: Option<RobotTelemetry>) -> E
 #[component]
 fn MotorDetail(robot: RobotSummary, telemetry: Option<RobotTelemetry>) -> Element {
     let studio = studio();
-    let selected = studio.selected.read().clone();
+    let selected = studio.selection().read().to_owned();
     let Some(name) = selected.and_then(|selection| match selection {
         Selection::Joint {
             robot: selected,
             joint,
-        } if selected == robot.id => Some(joint),
+        } if selected == robot.id() => Some(joint),
         _ => None,
     }) else {
         return rsx! {};
     };
     let Some(joint) = telemetry.and_then(|telemetry| {
         telemetry
-            .joints
-            .into_iter()
-            .find(|joint| joint.name == name)
+            .joints()
+            .iter()
+            .find(|joint| joint.name() == name)
+            .cloned()
     }) else {
         return rsx! {};
     };
 
-    let label = arm::so101_joint(&joint.name).map_or(joint.name.clone(), |j| j.label().to_owned());
+    let label =
+        arm::so101_joint(joint.name()).map_or(joint.name().to_owned(), |j| j.label().to_owned());
     let model = robot
-        .motors
+        .motors()
         .iter()
-        .find(|motor| motor.name == joint.name)
-        .and_then(|motor| motor.model.clone());
-    let limits = motor_limits(&robot, &joint.name);
+        .find(|motor| motor.name() == joint.name())
+        .and_then(|motor| motor.model().to_owned());
+    let limits = motor_limits(&robot, joint.name());
     let condition = joint.condition(&limits);
 
     rsx! {
@@ -301,61 +305,60 @@ fn MotorDetail(robot: RobotSummary, telemetry: Option<RobotTelemetry>) -> Elemen
                 // its own complaint when it is not. A line that appears only on
                 // a fault would push the readouts below it down a row at the
                 // exact moment they matter most.
-                if joint.faults.is_empty() {
+                if joint.faults().is_empty() {
                     span { class: "motor-detail-id",
-                        "id {joint.id}"
+                        "id {joint.id()}"
                         if let Some(model) = model {
                             " · {model}"
                         }
                     }
                 } else {
                     span { class: "motor-detail-fault",
-                        {joint.faults.iter().map(|fault| fault.label()).collect::<Vec<_>>().join(" · ")}
+                        {joint.faults().iter().map(|fault| fault.label()).collect::<Vec<_>>().join(" · ")}
                     }
                 }
             }
             dl { class: "grid grid-cols-3 gap-1.5",
                 Readout {
                     label: "Temp",
-                    value: joint.temperature_celsius.map(|celsius| format!("{celsius:.0}")),
-                    unit: "°C",
-                    caution: condition != MotorCondition::Nominal,
-                    hint: match limits.max_temperature_celsius {
-                        Some(limit) => format!("This motor faults at {limit:.0} °C"),
-                        None => "This motor did not report a temperature limit".to_owned(),
-                    },
+                    value: joint.temperature_celsius().map(|celsius| format!("{celsius:.0}")),
+                    details: ReadoutDetails::new("°C")
+                        .with_hint(match limits.max_temperature_celsius() {
+                            Some(limit) => format!("This motor faults at {limit:.0} °C"),
+                            None => "This motor did not report a temperature limit".to_owned(),
+                        })
+                        .with_caution(condition != MotorCondition::Nominal),
                 }
                 Readout {
                     label: "Rise",
-                    value: joint.temperature_rise_per_minute.map(|rate| format!("{rate:+.0}")),
-                    unit: "°C/m",
-                    hint: "Measured over the last minute",
+                    value: joint.temperature_rise_per_minute().map(|rate| format!("{rate:+.0}")),
+                    details: ReadoutDetails::new("°C/m")
+                        .with_hint("Measured over the last minute"),
                 }
                 Readout {
                     label: "Supply",
-                    value: joint.voltage_volts.map(|volts| format!("{volts:.1}")),
-                    unit: "V",
-                    hint: "Supply voltage at this motor",
+                    value: joint.voltage_volts().map(|volts| format!("{volts:.1}")),
+                    details: ReadoutDetails::new("V").with_hint("Supply voltage at this motor"),
                 }
                 Readout {
                     label: "Load",
-                    value: joint.load.map(|load| format!("{:.0}", load.abs() * 100.0)),
-                    unit: "%",
-                    hint: "Share of this motor's rated torque",
+                    value: joint.load().map(|load| format!("{:.0}", load.abs() * 100.0)),
+                    details: ReadoutDetails::new("%")
+                        .with_hint("Share of this motor's rated torque"),
                 }
                 Readout {
                     label: "Current",
-                    value: joint.current_amps.map(|amps| format!("{amps:.2}")),
-                    unit: "A",
-                    hint: "Peak draw since the last reading",
+                    value: joint.current_amps().map(|amps| format!("{amps:.2}")),
+                    details: ReadoutDetails::new("A")
+                        .with_hint("Peak draw since the last reading"),
                 }
                 Readout {
                     label: "Speed",
                     value: joint
-                        .speed_degrees_per_second
+                        .speed_degrees_per_second()
                         .map(|speed| format!("{speed:+.0}")),
-                    unit: "°/s",
-                    hint: "Shaft speed the motor is reporting",
+                    details: ReadoutDetails::new("°/s")
+                        .with_hint("Shaft speed the motor is reporting"),
                 }
             }
         }
@@ -369,14 +372,40 @@ fn MotorDetail(robot: RobotSummary, telemetry: Option<RobotTelemetry>) -> Elemen
 /// its own label happened to end. The digits also hold a fixed width: these
 /// numbers change twenty times a second, and a unit that slides left every time
 /// a hundreds digit drops is the whole strip shimmering.
-#[component]
-fn Readout(
-    label: String,
-    value: Option<String>,
+#[derive(Clone, PartialEq)]
+struct ReadoutDetails {
     unit: &'static str,
-    #[props(default)] caution: bool,
-    #[props(default)] hint: String,
-) -> Element {
+    caution: bool,
+    hint: String,
+}
+
+impl ReadoutDetails {
+    const fn new(unit: &'static str) -> Self {
+        Self {
+            unit,
+            caution: false,
+            hint: String::new(),
+        }
+    }
+
+    fn with_caution(mut self, caution: bool) -> Self {
+        self.caution = caution;
+        self
+    }
+
+    fn with_hint(mut self, hint: impl Into<String>) -> Self {
+        self.hint = hint.into();
+        self
+    }
+}
+
+#[component]
+fn Readout(label: String, value: Option<String>, details: ReadoutDetails) -> Element {
+    let ReadoutDetails {
+        unit,
+        caution,
+        hint,
+    } = details;
     let known = value.is_some();
     rsx! {
         div {
@@ -395,12 +424,12 @@ fn Readout(
 pub(crate) fn measured_angles(joints: &[JointTelemetry]) -> JointAngles {
     let degrees = joints
         .iter()
-        .filter_map(|joint| Some((joint.name.clone(), joint.degrees?)))
+        .filter_map(|joint| Some((joint.name().to_owned(), joint.degrees()?)))
         .collect::<BTreeMap<_, _>>();
     let gripper = joints
         .iter()
-        .find(|joint| joint.name == "gripper")
-        .and_then(|joint| joint.normalized)
+        .find(|joint| joint.name() == "gripper")
+        .and_then(|joint| joint.normalized())
         .unwrap_or(0.0);
     JointAngles::from(&degrees).with_gripper_normalized(gripper)
 }
@@ -409,10 +438,13 @@ pub(crate) fn measured_angles(joints: &[JointTelemetry]) -> JointAngles {
 fn JointControls(
     robot: RobotSummary,
     telemetry: Option<RobotTelemetry>,
-    drivable: bool,
-    on_select: EventHandler<Option<Selection>>,
-    on_point: EventHandler<Option<Selection>>,
+    behavior: JointControlBehavior,
 ) -> Element {
+    let JointControlBehavior {
+        drivable,
+        on_select,
+        on_point,
+    } = behavior;
     let studio = studio();
     // While a slider is being dragged the arm is still catching up, so the
     // commanded value is shown until the measurement agrees with it. That echo
@@ -426,7 +458,7 @@ fn JointControls(
     // overtake one another, and the final value is always sent after an
     // in-flight request completes.
     let pending = use_hook(|| Rc::new(RefCell::new(PendingGoals::default())));
-    let command_robot = robot.id.clone();
+    let command_robot = robot.id().to_owned();
     use_future({
         let pending = pending.clone();
         move || {
@@ -439,7 +471,7 @@ fn JointControls(
                         && studio.is_manual_target(&command_robot)
                         && studio
                             .robot_telemetry(&command_robot)
-                            .is_some_and(|robot| robot.torque);
+                            .is_some_and(|robot| robot.torque());
                     if !may_drive {
                         pending.borrow_mut().clear();
                         continue;
@@ -448,7 +480,7 @@ fn JointControls(
                     if normalized.is_empty() {
                         continue;
                     }
-                    let request = GoalRequest { normalized };
+                    let request = GoalRequest::new(normalized);
                     if let Err(error) = api::send(
                         Method::POST,
                         &format!("/api/robots/{command_robot}/goal"),
@@ -462,15 +494,15 @@ fn JointControls(
             }
         }
     });
-    let watched = robot.id.clone();
+    let watched = robot.id().to_owned();
     let clear_pending = pending.clone();
     use_effect(move || {
         let driving = studio
-            .telemetry
+            .telemetry()
             .read()
-            .robots
+            .robots()
             .iter()
-            .any(|robot| robot.id == watched && robot.torque)
+            .any(|robot| robot.id() == watched && robot.torque())
             && studio.is_manual_target(&watched);
         // `peek` deliberately: an effect that subscribes to the signal it
         // writes retriggers itself, and this one only needs to observe
@@ -489,7 +521,7 @@ fn JointControls(
         };
     };
 
-    let id = robot.id.clone();
+    let id = robot.id().to_owned();
 
     rsx! {
         div {
@@ -498,48 +530,73 @@ fn JointControls(
             // uncalibrated arm refuses every command, and the control that fixes
             // it lives in the robot explorer. Mode and torque transitions belong
             // to the workbench Control section rather than this detail panel.
-            if !robot.calibrated {
+            if !robot.calibrated() {
                 p { class: "joint-blocked joint-list-wide",
                     "Calibrate this arm in the robot explorer to command its joints."
                 }
             }
-            for joint in telemetry.joints.clone() {
+            for joint in telemetry.joints().to_owned() {
                 JointRow {
-                    key: "{joint.name}",
+                    key: "{joint.name()}",
                     joint: joint.clone(),
-                    drivable,
-                    selected: studio
-                        .selected
-                        .read()
-                        .as_ref()
-                        .is_some_and(|selection| selection.matches_joint(&robot.id, &joint.name)),
-                    condition: joint.condition(&motor_limits(&robot, &joint.name)),
-                    value: drivable
-                        .then(|| commanded.read().get(&joint.name).copied())
-                        .flatten(),
-                    on_change: {
-                        let name = joint.name.clone();
-                        let pending = pending.clone();
-                        move |value| command_joint(commanded, pending.clone(), name.clone(), value)
+                    state: JointRowState {
+                        drivable,
+                        selected: studio
+                            .selection()
+                            .read()
+                            .as_ref()
+                            .is_some_and(|selection| selection.matches_joint(robot.id(), joint.name())),
+                        condition: joint.condition(&motor_limits(&robot, joint.name())),
+                        value: drivable
+                            .then(|| commanded.read().get(joint.name()).copied())
+                            .flatten(),
                     },
-                    on_select: {
-                        let (robot_id, joint_name) = (id.clone(), joint.name.clone());
-                        move |_| on_select.call(Some(Selection::Joint {
-                            robot: robot_id.clone(),
-                            joint: joint_name.clone(),
-                        }))
-                    },
-                    on_point: {
-                        let (robot_id, joint_name) = (id.clone(), joint.name.clone());
-                        move |pointing: bool| {
-                            on_point.call(pointing.then(|| Selection::Joint {
+                    actions: JointRowActions {
+                        on_change: EventHandler::new({
+                            let name = joint.name().to_owned();
+                            let commander = JointCommander::new(commanded, pending.clone());
+                            move |value| commander.clone().set(name.clone(), value)
+                        }),
+                        on_select: EventHandler::new({
+                            let (robot_id, joint_name) = (id.clone(), joint.name().to_owned());
+                            move |_| on_select.call(Some(Selection::Joint {
                                 robot: robot_id.clone(),
                                 joint: joint_name.clone(),
                             }))
-                        }
+                        }),
+                        on_point: EventHandler::new({
+                            let (robot_id, joint_name) = (id.clone(), joint.name().to_owned());
+                            move |pointing: bool| {
+                                on_point.call(pointing.then(|| Selection::Joint {
+                                    robot: robot_id.clone(),
+                                    joint: joint_name.clone(),
+                                }))
+                            }
+                        }),
                     }
                 }
             }
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct JointControlBehavior {
+    drivable: bool,
+    on_select: EventHandler<Option<Selection>>,
+    on_point: EventHandler<Option<Selection>>,
+}
+
+impl JointControlBehavior {
+    const fn new(
+        drivable: bool,
+        on_select: EventHandler<Option<Selection>>,
+        on_point: EventHandler<Option<Selection>>,
+    ) -> Self {
+        Self {
+            drivable,
+            on_select,
+            on_point,
         }
     }
 }
@@ -548,14 +605,21 @@ fn JointControls(
 ///
 /// The commanded value is kept locally so the slider stays where the operator
 /// put it while the arm ramps toward it.
-fn command_joint(
-    mut commanded: Signal<BTreeMap<String, f64>>,
+#[derive(Clone)]
+struct JointCommander {
+    commanded: Signal<BTreeMap<String, f64>>,
     pending: Rc<RefCell<PendingGoals>>,
-    joint: String,
-    value: f64,
-) {
-    commanded.write().insert(joint.clone(), value);
-    pending.borrow_mut().replace(joint, value);
+}
+
+impl JointCommander {
+    fn new(commanded: Signal<BTreeMap<String, f64>>, pending: Rc<RefCell<PendingGoals>>) -> Self {
+        Self { commanded, pending }
+    }
+
+    fn set(mut self, joint: String, value: f64) {
+        self.commanded.write().insert(joint.clone(), value);
+        self.pending.borrow_mut().replace(joint, value);
+    }
 }
 
 #[cfg(test)]
@@ -577,27 +641,34 @@ mod tests {
     }
 }
 
-#[component]
-fn JointRow(
-    joint: JointTelemetry,
+#[derive(Clone, Copy, PartialEq)]
+struct JointRowState {
     drivable: bool,
     selected: bool,
     condition: MotorCondition,
     value: Option<f64>,
+}
+
+#[derive(Clone, PartialEq)]
+struct JointRowActions {
     on_change: EventHandler<f64>,
     on_select: EventHandler<()>,
     on_point: EventHandler<bool>,
-) -> Element {
-    let label = arm::so101_joint(&joint.name).map_or(joint.name.clone(), |j| j.label().to_owned());
-    let measured = joint.normalized.unwrap_or(0.0);
-    let shown = value.unwrap_or(measured);
-    let interactive = drivable && joint.range.is_some();
+}
+
+#[component]
+fn JointRow(joint: JointTelemetry, state: JointRowState, actions: JointRowActions) -> Element {
+    let label =
+        arm::so101_joint(joint.name()).map_or(joint.name().to_owned(), |j| j.label().to_owned());
+    let measured = joint.normalized().unwrap_or(0.0);
+    let shown = state.value.unwrap_or(measured);
+    let interactive = state.drivable && joint.range().is_some();
     let position_percent = ((measured + 1.0) * 50.0).clamp(0.0, 100.0);
-    let displayed = match joint.degrees {
+    let displayed = match joint.degrees() {
         Some(degrees) => format!("{degrees:+.0}°"),
-        None => format!("{}", joint.raw),
+        None => format!("{}", joint.raw()),
     };
-    let position_title = match joint.target_degrees {
+    let position_title = match joint.target_degrees() {
         Some(target) => format!("Measured joint angle; current target {target:+.0}°"),
         None => "Measured joint angle".to_owned(),
     };
@@ -605,10 +676,10 @@ fn JointRow(
     // cell, so the row answers it. The tint is the whole treatment: nothing is
     // added to the row, so a joint crossing its limit does not move the stack.
     let mut classes = String::from("joint-row");
-    if selected {
+    if state.selected {
         classes.push_str(" joint-row-selected");
     }
-    match condition {
+    match state.condition {
         MotorCondition::Nominal => {}
         MotorCondition::Caution => classes.push_str(" joint-row-caution"),
         MotorCondition::Fault => classes.push_str(" joint-row-fault"),
@@ -621,16 +692,18 @@ fn JointRow(
             // pointing at the motor lights the row. Neither disturbs what is
             // selected: one object, seen twice, and looking at it is not
             // choosing it.
-            onpointerenter: move |_| on_point.call(true),
-            onpointerleave: move |_| on_point.call(false),
+            onpointerenter: move |_| actions.on_point.call(true),
+            onpointerleave: move |_| actions.on_point.call(false),
             Action {
                 purpose: ActionPurpose::Select,
                 variant: ActionVariant::Row,
                 class: "joint-label",
                 title: "Select {label}",
-                onfocus: move |_| on_point.call(true),
-                onblur: move |_| on_point.call(false),
-                onclick: move |_| on_select.call(()),
+                auxiliary_handlers: ActionAuxiliaryHandlers::default().with_focus(
+                    move |_| actions.on_point.call(true),
+                    move |_| actions.on_point.call(false),
+                ),
+                onclick: move |_| actions.on_select.call(()),
                 "{label}"
             }
             if interactive {
@@ -645,11 +718,11 @@ fn JointRow(
                     title: "{position_title}",
                     oninput: move |event| {
                         if let Ok(value) = event.value().parse::<f64>() {
-                            on_change.call(value);
+                            actions.on_change.call(value);
                         }
                     },
                 }
-            } else if joint.normalized.is_some() {
+            } else if joint.normalized().is_some() {
                 span {
                     class: "joint-position-meter",
                     role: "meter",

@@ -13,7 +13,6 @@ use std::fmt;
 use crate::query::UnquotedSqlIdentifier;
 
 const PLACEHOLDER_PREFIX: &str = "{{node:";
-pub const SIGLIP_SCORE_COLUMN_PREFIX: &str = "score_";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkflowSyntaxError(String);
@@ -57,42 +56,6 @@ impl<'a> TryFrom<&'a str> for WorkflowNodeId<'a> {
 impl WorkflowNodeId<'_> {
     pub const fn as_str(&self) -> &str {
         self.0
-    }
-}
-
-/// One user-facing concept used to name a SigLIP score column.
-#[derive(Clone, Copy, Debug)]
-pub struct SiglipConcept<'a>(&'a str);
-
-impl<'a> From<&'a str> for SiglipConcept<'a> {
-    fn from(concept: &'a str) -> Self {
-        Self(concept)
-    }
-}
-
-/// Turn a user-facing SigLIP concept into the safe, deterministic stem used by
-/// the server-owned output schema. Collisions are resolved by the contract
-/// layer, which has visibility into the full ordered concept list.
-impl SiglipConcept<'_> {
-    pub fn score_column_stem(self) -> String {
-        let mut stem = String::new();
-        let mut separator_pending = false;
-        for character in self.0.trim().chars() {
-            if character.is_ascii_alphanumeric() {
-                if separator_pending && !stem.is_empty() {
-                    stem.push('_');
-                }
-                stem.push(character.to_ascii_lowercase());
-                separator_pending = false;
-            } else if !stem.is_empty() {
-                separator_pending = true;
-            }
-        }
-        if stem.is_empty() {
-            "concept".to_owned()
-        } else {
-            stem
-        }
     }
 }
 
@@ -281,23 +244,6 @@ mod tests {
             WorkflowSql::from("SELECT * FROM {{node:frames}}")
                 .substitute(&injected)
                 .is_err()
-        );
-    }
-
-    #[test]
-    fn siglip_score_stems_are_identifier_safe_and_stable() {
-        assert_eq!(
-            SiglipConcept::from(" Red cube ").score_column_stem(),
-            "red_cube"
-        );
-        assert_eq!(
-            SiglipConcept::from("red-cube!").score_column_stem(),
-            "red_cube"
-        );
-        assert_eq!(SiglipConcept::from("  🤖  ").score_column_stem(), "concept");
-        assert_eq!(
-            SiglipConcept::from("Café / CUP").score_column_stem(),
-            "caf_cup"
         );
     }
 }

@@ -16,7 +16,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use spiral_robotics_api::robots::CameraStatus;
+use spiral_robotics_api::robots::{CameraStatus, CameraStreamFormat, CameraStreamState};
 use spiral_robotics_hardware::cameras::{self, DEFAULT_JPEG_QUALITY, DetectedCamera};
 use tokio::sync::watch;
 
@@ -29,9 +29,32 @@ const STREAM_SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
 /// One encoded frame, ready to be written to an HTTP response.
 #[derive(Clone, Debug)]
 pub(crate) struct Frame {
-    pub(crate) bytes: Bytes,
-    pub(crate) sequence: u64,
-    pub(crate) captured_at: Instant,
+    bytes: Bytes,
+    sequence: u64,
+    captured_at: Instant,
+}
+
+impl Frame {
+    #[cfg(test)]
+    pub(crate) fn new(bytes: Bytes, sequence: u64, captured_at: Instant) -> Self {
+        Self {
+            bytes,
+            sequence,
+            captured_at,
+        }
+    }
+
+    pub(crate) fn bytes(&self) -> &Bytes {
+        &self.bytes
+    }
+
+    pub(crate) const fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    pub(crate) const fn captured_at(&self) -> Instant {
+        self.captured_at
+    }
 }
 
 #[derive(Debug, Default)]
@@ -91,7 +114,7 @@ pub(crate) struct CameraManager {
 }
 
 impl CameraManager {
-    /// Create an empty manager; call [`CameraManager::refresh`] to populate it.
+    /// Create an empty manager; call [`CameraManager::refresh_blocking`] to populate it.
     pub(crate) fn new() -> Self {
         Self::default()
     }
@@ -103,16 +126,16 @@ impl CameraManager {
     pub(crate) fn refresh_blocking(&self) {
         let (discovered, issues) = match cameras::discover() {
             Ok(outcome) => {
+                let (cameras, skipped, failures) = outcome.into_parts();
                 let mut issues = Vec::new();
-                for node in outcome.skipped {
+                for node in skipped {
                     issues.push(format!("skipped unsupported video node {node}"));
                 }
-                for failure in outcome.failures {
+                for failure in failures {
                     issues.push(format!("camera unavailable: {failure}"));
                 }
                 (
-                    outcome
-                        .cameras
+                    cameras
                         .into_iter()
                         .map(|camera| (camera.identifier(), camera))
                         .collect::<BTreeMap<_, _>>(),
@@ -163,16 +186,12 @@ impl CameraManager {
                     }
                     None => (false, 0, None),
                 };
-                CameraStatus {
+                CameraStatus::new(
                     id,
-                    name: camera.name(),
-                    width: camera.width(),
-                    height: camera.height(),
-                    fps: camera.fps(),
-                    streaming,
-                    frames,
-                    error,
-                }
+                    camera.name(),
+                    CameraStreamFormat::new(camera.width(), camera.height(), camera.fps()),
+                )
+                .with_state(CameraStreamState::new(streaming, frames, error))
             })
             .collect()
     }
@@ -264,9 +283,9 @@ fn spawn_stream(camera: DetectedCamera) -> Stream {
                 let result = camera.stream_jpeg_frames(
                     cameras::JpegStreamConfig::new(&stop, DEFAULT_JPEG_QUALITY),
                     |frame| {
-                        let sequence = frame.sequence;
+                        let sequence = frame.sequence();
                         frames.send_replace(Some(Arc::new(Frame {
-                            bytes: Bytes::from(frame.bytes),
+                            bytes: Bytes::from(frame.into_bytes()),
                             sequence,
                             captured_at: Instant::now(),
                         })));

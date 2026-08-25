@@ -4,79 +4,213 @@ use std::collections::BTreeMap;
 
 use spiral_robotics_core::calibration::{Calibration, MotorSpec};
 
-use spiral_robotics_core::error::OperationError;
+use spiral_robotics_core::OperationError;
 
 const DEFAULT_ROBOT_BAUD_RATE: u32 = 1_000_000;
 const MAX_ROBOT_ID_LENGTH: usize = 64;
 const MAX_CAMERA_ROLE_LENGTH: usize = 64;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SerialPortConfiguration {
-    pub path: String,
-    pub baud_rate: u32,
+pub(crate) struct SerialPortConfiguration {
+    path: String,
+    baud_rate: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CreateRobotCommand {
-    pub id: String,
-    pub robot_type: Option<String>,
-    pub port: Option<String>,
-    pub baud_rate: Option<u32>,
+pub(crate) struct CreateRobotCommand {
+    id: String,
+    robot_type: Option<String>,
+    port: Option<String>,
+    baud_rate: Option<u32>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct NewRobot {
-    pub id: String,
-    pub robot_type: Option<String>,
-    pub port: Option<SerialPortConfiguration>,
+pub(crate) struct NewRobot {
+    id: String,
+    robot_type: Option<String>,
+    port: Option<SerialPortConfiguration>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CameraAssignment {
-    pub role: String,
-    pub device_id: String,
+pub(crate) struct CameraAssignment {
+    role: String,
+    device_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct UpdateRobotCommand {
-    pub id: String,
-    pub robot_type: Option<String>,
-    pub port: Option<SerialPortConfiguration>,
-    pub cameras: Option<Vec<CameraAssignment>>,
+pub(crate) struct UpdateRobotCommand {
+    id: String,
+    robot_type: Option<String>,
+    port: Option<SerialPortConfiguration>,
+    cameras: Option<Vec<CameraAssignment>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct RobotUpdate<C> {
-    pub id: String,
-    pub robot_type: Option<String>,
-    pub port: Option<SerialPortConfiguration>,
-    pub cameras: Option<C>,
+pub(crate) struct RobotUpdate<C> {
+    id: String,
+    robot_type: Option<String>,
+    port: Option<SerialPortConfiguration>,
+    cameras: Option<C>,
 }
 
 /// Plain information required to connect a saved robot.
 #[derive(Clone, Debug, PartialEq)]
-pub struct RobotConnectionSpec {
-    pub id: String,
-    pub port: SerialPortConfiguration,
-    pub motors: BTreeMap<String, MotorSpec>,
-    pub calibration: Option<Calibration>,
+pub(crate) struct RobotConnectionSpec {
+    id: String,
+    port: SerialPortConfiguration,
+    motors: BTreeMap<String, MotorSpec>,
+    calibration: Option<Calibration>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SavedRobot {
-    pub id: String,
+pub(crate) struct SavedRobot {
+    id: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ExportedRobotDocument {
-    pub bytes: Vec<u8>,
+pub(crate) struct ExportedRobotDocument {
+    bytes: Vec<u8>,
+}
+
+impl SerialPortConfiguration {
+    pub(crate) fn new(path: impl Into<String>, baud_rate: u32) -> Self {
+        Self {
+            path: path.into(),
+            baud_rate,
+        }
+    }
+    pub(crate) fn path(&self) -> &str {
+        &self.path
+    }
+    pub(crate) const fn baud_rate(&self) -> u32 {
+        self.baud_rate
+    }
+}
+
+impl CreateRobotCommand {
+    pub(crate) fn new(
+        id: impl Into<String>,
+        robot_type: Option<String>,
+        port: Option<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            robot_type,
+            port,
+            baud_rate: None,
+        }
+    }
+    pub(crate) fn with_baud_rate(mut self, baud_rate: Option<u32>) -> Self {
+        self.baud_rate = baud_rate;
+        self
+    }
+}
+
+impl NewRobot {
+    pub(crate) fn into_parts(self) -> (String, Option<String>, Option<SerialPortConfiguration>) {
+        (self.id, self.robot_type, self.port)
+    }
+}
+
+impl CameraAssignment {
+    pub(crate) fn new(role: impl Into<String>, device_id: impl Into<String>) -> Self {
+        Self {
+            role: role.into(),
+            device_id: device_id.into(),
+        }
+    }
+    pub(crate) fn role(&self) -> &str {
+        &self.role
+    }
+    pub(crate) fn device_id(&self) -> &str {
+        &self.device_id
+    }
+}
+
+impl UpdateRobotCommand {
+    pub(crate) fn new(
+        id: impl Into<String>,
+        robot_type: Option<String>,
+        port: Option<SerialPortConfiguration>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            robot_type,
+            port,
+            cameras: None,
+        }
+    }
+    pub(crate) fn with_cameras(mut self, cameras: Option<Vec<CameraAssignment>>) -> Self {
+        self.cameras = cameras;
+        self
+    }
+}
+
+impl<C> RobotUpdate<C> {
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        String,
+        Option<String>,
+        Option<SerialPortConfiguration>,
+        Option<C>,
+    ) {
+        (self.id, self.robot_type, self.port, self.cameras)
+    }
+}
+
+impl RobotConnectionSpec {
+    pub(crate) fn new(
+        id: impl Into<String>,
+        port: SerialPortConfiguration,
+        motors: BTreeMap<String, MotorSpec>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            port,
+            motors,
+            calibration: None,
+        }
+    }
+    pub(crate) fn with_calibration(mut self, calibration: Option<Calibration>) -> Self {
+        self.calibration = calibration;
+        self
+    }
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        String,
+        SerialPortConfiguration,
+        BTreeMap<String, MotorSpec>,
+        Option<Calibration>,
+    ) {
+        (self.id, self.port, self.motors, self.calibration)
+    }
+}
+
+impl SavedRobot {
+    pub(crate) fn new(id: impl Into<String>) -> Self {
+        Self { id: id.into() }
+    }
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+impl ExportedRobotDocument {
+    pub(crate) fn new(bytes: Vec<u8>) -> Self {
+        Self { bytes }
+    }
+    pub(crate) fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
 }
 
 /// Persistence operations needed by robot-configuration actions.
 ///
 /// Camera patches are adapter-minted capabilities consumed by the same
 /// store after capability validation.
-pub trait RobotStore {
+pub(crate) trait RobotStore {
     type CameraConfiguration;
 
     fn create(&self, robot: NewRobot) -> Result<SavedRobot, OperationError>;
@@ -106,7 +240,7 @@ pub trait RobotStore {
 }
 
 /// Live hardware operations needed by robot-configuration actions.
-pub trait RobotConnectionPort {
+pub(crate) trait RobotConnectionPort {
     fn is_connected(&self, robot: &str) -> bool;
 
     async fn connect(&self, specification: RobotConnectionSpec) -> Result<(), OperationError>;
@@ -117,7 +251,7 @@ pub trait RobotConnectionPort {
     async fn forget(&self, robot: &str) -> Result<(), OperationError>;
 }
 
-pub fn create<R: RobotStore + ?Sized>(
+pub(crate) fn create<R: RobotStore + ?Sized>(
     store: &R,
     mut command: CreateRobotCommand,
 ) -> Result<SavedRobot, OperationError> {
@@ -142,14 +276,14 @@ pub fn create<R: RobotStore + ?Sized>(
     })
 }
 
-pub fn import_configuration<R: RobotStore + ?Sized>(
+pub(crate) fn import_configuration<R: RobotStore + ?Sized>(
     store: &R,
 ) -> Result<SavedRobot, OperationError> {
     store.import_configuration()
 }
 
 /// Select saved robot identities for a read presenter.
-pub fn list<R: RobotStore + ?Sized>(store: &R) -> Vec<SavedRobot> {
+pub(crate) fn list<R: RobotStore + ?Sized>(store: &R) -> Vec<SavedRobot> {
     store
         .saved_robot_ids()
         .into_iter()
@@ -158,20 +292,23 @@ pub fn list<R: RobotStore + ?Sized>(store: &R) -> Vec<SavedRobot> {
 }
 
 /// Admit one saved identity before an outer presenter hydrates its view.
-pub fn get<R: RobotStore + ?Sized>(store: &R, robot: String) -> Result<SavedRobot, OperationError> {
+pub(crate) fn get<R: RobotStore + ?Sized>(
+    store: &R,
+    robot: String,
+) -> Result<SavedRobot, OperationError> {
     validate_plain_name("robot id", &robot, MAX_ROBOT_ID_LENGTH)?;
     store.ensure_exists(&robot)?;
     Ok(SavedRobot { id: robot })
 }
 
-pub fn export_configuration<R: RobotStore + ?Sized>(
+pub(crate) fn export_configuration<R: RobotStore + ?Sized>(
     store: &R,
     robot: &str,
 ) -> Result<ExportedRobotDocument, OperationError> {
     store.export_configuration(robot)
 }
 
-pub fn update<R, C>(
+pub(crate) fn update<R, C>(
     store: &R,
     control: &C,
     mut command: UpdateRobotCommand,
@@ -251,7 +388,7 @@ fn validate_plain_name(label: &str, value: &str, maximum: usize) -> Result<(), O
 /// tear down a bus. Once it passes, failure is deliberately biased toward a
 /// saved-but-disconnected robot: deleting the SpiralDB row first could leave a
 /// live bus that no configuration or UI card can identify and stop.
-pub async fn delete<R, C>(store: &R, control: &C, robot: &str) -> Result<(), OperationError>
+pub(crate) async fn delete<R, C>(store: &R, control: &C, robot: &str) -> Result<(), OperationError>
 where
     R: RobotStore + ?Sized,
     C: RobotConnectionPort + ?Sized,
@@ -261,7 +398,7 @@ where
     store.delete(robot)
 }
 
-pub async fn connect<R, C>(store: &R, control: &C, robot: &str) -> Result<(), OperationError>
+pub(crate) async fn connect<R, C>(store: &R, control: &C, robot: &str) -> Result<(), OperationError>
 where
     R: RobotStore + ?Sized,
     C: RobotConnectionPort + ?Sized,
@@ -270,7 +407,7 @@ where
     control.connect(specification).await
 }
 
-pub async fn disconnect<C: RobotConnectionPort + ?Sized>(
+pub(crate) async fn disconnect<C: RobotConnectionPort + ?Sized>(
     control: &C,
     robot: &str,
 ) -> Result<(), OperationError> {
@@ -278,21 +415,31 @@ pub async fn disconnect<C: RobotConnectionPort + ?Sized>(
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum AutoConnectStatus {
+pub(crate) enum AutoConnectStatus {
     Connected,
     Skipped(String),
     Failed(String),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AutoConnectOutcome {
-    pub robot: String,
-    pub status: AutoConnectStatus,
+pub(crate) struct AutoConnectOutcome {
+    robot: String,
+    status: AutoConnectStatus,
+}
+
+impl AutoConnectOutcome {
+    pub(crate) fn into_parts(self) -> (String, AutoConnectStatus) {
+        (self.robot, self.status)
+    }
 }
 
 /// Try one saved robot without turning an unavailable or incomplete arm into
 /// a failure for the persistence action that introduced it.
-pub async fn auto_connect_robot<R, C>(store: &R, control: &C, robot: String) -> AutoConnectOutcome
+pub(crate) async fn auto_connect_robot<R, C>(
+    store: &R,
+    control: &C,
+    robot: String,
+) -> AutoConnectOutcome
 where
     R: RobotStore + ?Sized,
     C: RobotConnectionPort + ?Sized,
@@ -315,7 +462,7 @@ where
 
 /// Try every saved robot independently; one invalid or absent arm must not
 /// prevent other usable arms or the Studio itself from starting.
-pub async fn auto_connect<R, C>(store: &R, control: &C) -> Vec<AutoConnectOutcome>
+pub(crate) async fn auto_connect<R, C>(store: &R, control: &C) -> Vec<AutoConnectOutcome>
 where
     R: RobotStore + ?Sized,
     C: RobotConnectionPort + ?Sized,

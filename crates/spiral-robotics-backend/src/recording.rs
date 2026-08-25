@@ -11,37 +11,37 @@ use spiral_robotics_core::identity::DatasetId;
 
 use crate::data::catalog_lease::CatalogLeaseToken;
 use crate::data::episode_arms::RecordedArms;
-use spiral_robotics_core::error::OperationError;
+use spiral_robotics_core::OperationError;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StartRecordingCommand {
-    pub dataset_id: String,
-    pub arms: Vec<String>,
-    pub note: Option<String>,
+pub(crate) struct StartRecordingCommand {
+    dataset_id: String,
+    arms: Vec<String>,
+    note: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TeleoperationPair {
-    pub leader: String,
-    pub follower: String,
+pub(crate) struct TeleoperationPair {
+    leader: String,
+    follower: String,
 }
 
 /// Live facts needed to admit one new take.
 #[derive(Clone, Debug, PartialEq)]
-pub struct RecordingContext {
-    pub connected_arms: Vec<String>,
-    pub sample_hz: f64,
-    pub media_finalizing: bool,
+pub(crate) struct RecordingContext {
+    connected_arms: Vec<String>,
+    sample_hz: f64,
+    media_finalizing: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct StopRecordingCommand {
-    pub keep: bool,
+pub(crate) struct StopRecordingCommand {
+    keep: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct SetRecordingPausedCommand {
-    pub paused: bool,
+pub(crate) struct SetRecordingPausedCommand {
+    paused: bool,
 }
 
 /// Consequences needed by the recording-session use cases.
@@ -49,11 +49,107 @@ pub struct SetRecordingPausedCommand {
 /// `MediaCapture` and `MediaOutput` remain opaque so video libraries and media
 /// formats cannot leak into capability policy.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RecordingResult {
-    pub episode: String,
+pub(crate) struct RecordingResult {
+    episode: String,
 }
 
-pub trait RecordingPort {
+impl StartRecordingCommand {
+    pub(crate) fn new(
+        dataset_id: impl Into<String>,
+        arms: Vec<String>,
+        note: Option<String>,
+    ) -> Self {
+        Self {
+            dataset_id: dataset_id.into(),
+            arms,
+            note,
+        }
+    }
+    pub(crate) fn into_parts(self) -> (String, Vec<String>, Option<String>) {
+        (self.dataset_id, self.arms, self.note)
+    }
+}
+
+impl TeleoperationPair {
+    pub(crate) fn new(leader: impl Into<String>, follower: impl Into<String>) -> Self {
+        Self {
+            leader: leader.into(),
+            follower: follower.into(),
+        }
+    }
+    pub(crate) fn leader(&self) -> &str {
+        &self.leader
+    }
+    pub(crate) fn follower(&self) -> &str {
+        &self.follower
+    }
+}
+
+impl RecordingContext {
+    pub(crate) fn new(connected_arms: Vec<String>, sample_hz: f64, media_finalizing: bool) -> Self {
+        Self {
+            connected_arms,
+            sample_hz,
+            media_finalizing,
+        }
+    }
+}
+
+impl StopRecordingCommand {
+    pub(crate) const fn new(keep: bool) -> Self {
+        Self { keep }
+    }
+    pub(crate) const fn keep(self) -> bool {
+        self.keep
+    }
+}
+
+impl SetRecordingPausedCommand {
+    pub(crate) const fn new(paused: bool) -> Self {
+        Self { paused }
+    }
+}
+
+impl RecordingResult {
+    pub(crate) fn new(episode: impl Into<String>) -> Self {
+        Self {
+            episode: episode.into(),
+        }
+    }
+    pub(crate) fn episode(&self) -> &str {
+        &self.episode
+    }
+}
+
+pub(crate) struct RecordingDraftRequest {
+    command: StartRecordingCommand,
+    source: String,
+    arms: Vec<String>,
+    sample_hz: f64,
+}
+
+impl RecordingDraftRequest {
+    fn new(command: StartRecordingCommand, source: String) -> Self {
+        Self {
+            command,
+            source,
+            arms: Vec::new(),
+            sample_hz: 0.0,
+        }
+    }
+
+    fn with_capture(mut self, arms: Vec<String>, sample_hz: f64) -> Self {
+        self.arms = arms;
+        self.sample_hz = sample_hz;
+        self
+    }
+
+    pub(crate) fn into_parts(self) -> (StartRecordingCommand, String, Vec<String>, f64) {
+        (self.command, self.source, self.arms, self.sample_hz)
+    }
+}
+
+pub(crate) trait RecordingPort {
     type RecordingDraft;
     type MediaCapture;
     type MediaOutput;
@@ -71,10 +167,7 @@ pub trait RecordingPort {
     async fn enter_idle(&self) -> Result<(), OperationError>;
     fn create_recording_draft(
         &self,
-        command: StartRecordingCommand,
-        source: String,
-        arms: Vec<String>,
-        sample_hz: f64,
+        request: RecordingDraftRequest,
     ) -> Result<Self::RecordingDraft, OperationError>;
     fn draft_episode(&self, draft: &Self::RecordingDraft) -> String;
     async fn start_recording_media(
@@ -156,7 +249,7 @@ impl<P: RecordingPort + ?Sized> Drop for RecordingStopReservation<'_, P> {
 /// If any edge assembly fails after the mode transition, returning to idle is
 /// mandatory compensation. A failed rollback is retained in the operator
 /// error because an unnoticed live teleoperation session is safety-relevant.
-pub async fn start_recording<P: RecordingPort + ?Sized>(
+pub(crate) async fn start_recording<P: RecordingPort + ?Sized>(
     port: &P,
     command: StartRecordingCommand,
 ) -> Result<RecordingResult, OperationError> {
@@ -232,8 +325,9 @@ async fn start_reserved<P: RecordingPort + ?Sized>(
 
     port.enter_teleoperation(&pair).await?;
     let open = async {
-        let draft =
-            port.create_recording_draft(command, source, arms.clone(), context.sample_hz)?;
+        let request = RecordingDraftRequest::new(command, source)
+            .with_capture(arms.clone(), context.sample_hz);
+        let draft = port.create_recording_draft(request)?;
         let episode = port.draft_episode(&draft);
         let media = port.start_recording_media(&episode, &arms).await?;
         match port.begin_recording(draft).await {
@@ -266,7 +360,7 @@ async fn start_reserved<P: RecordingPort + ?Sized>(
 /// Media is claimed before the hardware stop so an automatic-stop observer
 /// cannot race this explicit action. The idle transition is attempted even if
 /// finalizing the recording fails.
-pub async fn stop_recording<P: RecordingPort + ?Sized>(
+pub(crate) async fn stop_recording<P: RecordingPort + ?Sized>(
     port: &P,
     command: StopRecordingCommand,
 ) -> Result<RecordingResult, OperationError> {
@@ -315,7 +409,7 @@ pub async fn stop_recording<P: RecordingPort + ?Sized>(
 }
 
 /// Pause/resume joint and media capture in a fail-safe order.
-pub async fn set_recording_paused<P: RecordingPort + ?Sized>(
+pub(crate) async fn set_recording_paused<P: RecordingPort + ?Sized>(
     port: &P,
     command: SetRecordingPausedCommand,
 ) -> Result<(), OperationError> {
@@ -332,56 +426,146 @@ pub async fn set_recording_paused<P: RecordingPort + ?Sized>(
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct StartReplayCommand {
-    pub episode: String,
-    pub robot: String,
-    pub source_arm: Option<String>,
-    pub start_seconds: f64,
+pub(crate) struct StartReplayCommand {
+    episode: String,
+    robot: String,
+    source_arm: Option<String>,
+    start_seconds: f64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct SetReplayPausedCommand {
-    pub paused: bool,
+pub(crate) struct SetReplayPausedCommand {
+    paused: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct ReplayEpisode {
-    pub id: String,
-    pub arms: Vec<String>,
-    pub sample_hz: f64,
+pub(crate) struct ReplayEpisode {
+    id: String,
+    arms: Vec<String>,
+    sample_hz: f64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct ReplayTrajectory {
-    pub frames: Vec<BTreeMap<String, f64>>,
-    pub start_frame: usize,
-    pub resolved_start_seconds: f64,
+pub(crate) struct ReplayTrajectory {
+    frames: Vec<BTreeMap<String, f64>>,
+    start_frame: usize,
+    resolved_start_seconds: f64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct ReplayPlan {
-    pub robot: String,
-    pub episode: String,
-    pub frames: Vec<BTreeMap<String, f64>>,
-    pub sample_hz: f64,
-    pub start_frame: usize,
-    pub resolved_start_seconds: f64,
+pub(crate) struct ReplayPlan {
+    robot: String,
+    episode: String,
+    frames: Vec<BTreeMap<String, f64>>,
+    sample_hz: f64,
+    start_frame: usize,
+    resolved_start_seconds: f64,
 }
 
-pub trait ReplayPort {
+impl StartReplayCommand {
+    pub(crate) fn new(
+        episode: impl Into<String>,
+        robot: impl Into<String>,
+        source_arm: Option<String>,
+    ) -> Self {
+        Self {
+            episode: episode.into(),
+            robot: robot.into(),
+            source_arm,
+            start_seconds: 0.0,
+        }
+    }
+    pub(crate) fn starting_at(mut self, start_seconds: f64) -> Self {
+        self.start_seconds = start_seconds;
+        self
+    }
+}
+
+impl SetReplayPausedCommand {
+    pub(crate) const fn new(paused: bool) -> Self {
+        Self { paused }
+    }
+}
+
+impl ReplayEpisode {
+    pub(crate) fn new(id: impl Into<String>, arms: Vec<String>, sample_hz: f64) -> Self {
+        Self {
+            id: id.into(),
+            arms,
+            sample_hz,
+        }
+    }
+}
+
+impl ReplayTrajectory {
+    pub(crate) fn new(frames: Vec<BTreeMap<String, f64>>, start_frame: usize) -> Self {
+        Self {
+            frames,
+            start_frame,
+            resolved_start_seconds: 0.0,
+        }
+    }
+    pub(crate) fn starting_at(mut self, resolved_start_seconds: f64) -> Self {
+        self.resolved_start_seconds = resolved_start_seconds;
+        self
+    }
+}
+
+impl ReplayPlan {
+    pub(crate) fn into_parts(
+        self,
+    ) -> (String, String, Vec<BTreeMap<String, f64>>, f64, usize, f64) {
+        (
+            self.robot,
+            self.episode,
+            self.frames,
+            self.sample_hz,
+            self.start_frame,
+            self.resolved_start_seconds,
+        )
+    }
+}
+
+pub(crate) trait ReplayPort {
     fn replay_episode(&self, episode: &str) -> Result<ReplayEpisode, OperationError>;
     async fn load_trajectory(
         &self,
-        episode: &str,
-        source_arm: &str,
-        start_seconds: f64,
+        request: ReplayTrajectoryRequest<'_>,
     ) -> Result<ReplayTrajectory, OperationError>;
     async fn start_replay(&self, plan: ReplayPlan) -> Result<(), OperationError>;
     async fn set_replay_paused(&self, paused: bool) -> Result<(), OperationError>;
 }
 
+pub(crate) struct ReplayTrajectoryRequest<'a> {
+    episode: &'a str,
+    source_arm: &'a str,
+    start_seconds: f64,
+}
+
+impl<'a> ReplayTrajectoryRequest<'a> {
+    fn new(episode: &'a str, source_arm: &'a str, start_seconds: f64) -> Self {
+        Self {
+            episode,
+            source_arm,
+            start_seconds,
+        }
+    }
+
+    pub(crate) fn episode(&self) -> &str {
+        self.episode
+    }
+
+    pub(crate) fn source_arm(&self) -> &str {
+        self.source_arm
+    }
+
+    pub(crate) fn start_seconds(&self) -> f64 {
+        self.start_seconds
+    }
+}
+
 /// Resolve the recorded arm, load the validated trajectory, then admit replay.
-pub async fn start_replay<P: ReplayPort + ?Sized>(
+pub(crate) async fn start_replay<P: ReplayPort + ?Sized>(
     port: &P,
     command: StartReplayCommand,
 ) -> Result<(), OperationError> {
@@ -399,7 +583,11 @@ pub async fn start_replay<P: ReplayPort + ?Sized>(
     let source = RecordedArms::new(&summary.id, &summary.arms, &command.robot)
         .select(command.source_arm.as_deref())?;
     let trajectory = port
-        .load_trajectory(&command.episode, &source, command.start_seconds)
+        .load_trajectory(ReplayTrajectoryRequest::new(
+            &command.episode,
+            &source,
+            command.start_seconds,
+        ))
         .await?;
     if !summary.sample_hz.is_finite() || summary.sample_hz <= 0.0 {
         return Err(OperationError::InvalidInput(format!(
@@ -436,7 +624,7 @@ pub async fn start_replay<P: ReplayPort + ?Sized>(
     .await
 }
 
-pub async fn set_replay_paused<P: ReplayPort + ?Sized>(
+pub(crate) async fn set_replay_paused<P: ReplayPort + ?Sized>(
     port: &P,
     command: SetReplayPausedCommand,
 ) -> Result<(), OperationError> {
@@ -532,7 +720,7 @@ mod tests {
         }
 
         fn claim_recording_lease(&self) -> Result<Option<CatalogLeaseToken>, OperationError> {
-            Ok(self.catalog.claim_recording().map(|claim| claim.token))
+            Ok(self.catalog.claim_recording().map(|claim| claim.token()))
         }
 
         fn release_recording_lease(&self, token: CatalogLeaseToken) {
@@ -550,11 +738,11 @@ mod tests {
         }
 
         fn recording_context(&self) -> RecordingContext {
-            RecordingContext {
-                connected_arms: vec!["leader".to_owned(), "follower".to_owned()],
-                sample_hz: 60.0,
-                media_finalizing: false,
-            }
+            RecordingContext::new(
+                vec!["leader".to_owned(), "follower".to_owned()],
+                60.0,
+                false,
+            )
         }
 
         async fn enter_teleoperation(
@@ -572,11 +760,9 @@ mod tests {
 
         fn create_recording_draft(
             &self,
-            command: StartRecordingCommand,
-            _source: String,
-            arms: Vec<String>,
-            sample_hz: f64,
+            request: RecordingDraftRequest,
         ) -> Result<Self::RecordingDraft, OperationError> {
+            let (command, _source, arms, sample_hz) = request.into_parts();
             self.events.lock().unwrap().push(format!(
                 "draft:{}:{}:{sample_hz}",
                 command.arms.join("+"),
@@ -695,23 +881,21 @@ mod tests {
 
         async fn load_trajectory(
             &self,
-            _episode: &str,
-            source_arm: &str,
-            _start_seconds: f64,
+            request: ReplayTrajectoryRequest<'_>,
         ) -> Result<ReplayTrajectory, OperationError> {
             self.events
                 .lock()
                 .unwrap()
-                .push(format!("load:{source_arm}"));
-            Ok(ReplayTrajectory {
-                frames: vec![
+                .push(format!("load:{}", request.source_arm()));
+            Ok(ReplayTrajectory::new(
+                vec![
                     BTreeMap::from([("joint".to_owned(), 0.25)]),
                     BTreeMap::from([("joint".to_owned(), 0.4)]),
                     BTreeMap::from([("joint".to_owned(), 0.5)]),
                 ],
-                start_frame: 2,
-                resolved_start_seconds: 0.2,
-            })
+                2,
+            )
+            .starting_at(0.2))
         }
 
         async fn start_replay(&self, plan: ReplayPlan) -> Result<(), OperationError> {

@@ -3,34 +3,72 @@
 //! This module owns which catalog mutations are allowed. Storage formats and
 //! delivery response types remain opaque behind [`EpisodeCatalogPort`].
 
-use spiral_robotics_core::error::OperationError;
+use spiral_robotics_core::OperationError;
 
 /// Current episode use that makes deletion unsafe.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct EpisodeActivity {
-    pub recording: Option<String>,
-    pub replaying: Option<String>,
+pub(crate) struct EpisodeActivity {
+    recording: Option<String>,
+    replaying: Option<String>,
+}
+
+impl EpisodeActivity {
+    pub(crate) fn new(recording: Option<String>, replaying: Option<String>) -> Self {
+        Self {
+            recording,
+            replaying,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct JudgeEpisodeCommand {
-    pub episode: String,
-    pub discarded: bool,
+pub(crate) struct JudgeEpisodeCommand {
+    episode: String,
+    discarded: bool,
+}
+
+impl JudgeEpisodeCommand {
+    pub(crate) fn new(episode: impl Into<String>, discarded: bool) -> Self {
+        Self {
+            episode: episode.into(),
+            discarded,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DeleteEpisodeCommand {
-    pub episode: String,
+pub(crate) struct DeleteEpisodeCommand {
+    episode: String,
+}
+
+impl DeleteEpisodeCommand {
+    pub(crate) fn new(episode: impl Into<String>) -> Self {
+        Self {
+            episode: episode.into(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct EpisodeMutationResult {
-    pub episode: String,
+pub(crate) struct EpisodeMutationResult {
+    episode: String,
+}
+
+impl EpisodeMutationResult {
+    pub(crate) fn new(episode: impl Into<String>) -> Self {
+        Self {
+            episode: episode.into(),
+        }
+    }
+
+    pub(crate) fn episode(&self) -> &str {
+        &self.episode
+    }
 }
 
 /// Consequences required by episode catalog actions.
 ///
-pub trait EpisodeCatalogPort {
+pub(crate) trait EpisodeCatalogPort {
     fn activity(&self) -> EpisodeActivity;
     async fn judge_episode(
         &self,
@@ -41,7 +79,7 @@ pub trait EpisodeCatalogPort {
     async fn delete_episode(&self, episode: String) -> Result<(), OperationError>;
 }
 
-pub async fn judge<P: EpisodeCatalogPort + ?Sized>(
+pub(crate) async fn judge<P: EpisodeCatalogPort + ?Sized>(
     port: &P,
     command: JudgeEpisodeCommand,
 ) -> Result<EpisodeMutationResult, OperationError> {
@@ -55,7 +93,7 @@ pub async fn judge<P: EpisodeCatalogPort + ?Sized>(
 /// storage adapter therefore cannot remove a recording or a trajectory that is
 /// currently driving an arm. Related-row cleanup belongs inside the store
 /// transaction.
-pub async fn delete<P: EpisodeCatalogPort + ?Sized>(
+pub(crate) async fn delete<P: EpisodeCatalogPort + ?Sized>(
     port: &P,
     command: DeleteEpisodeCommand,
 ) -> Result<(), OperationError> {

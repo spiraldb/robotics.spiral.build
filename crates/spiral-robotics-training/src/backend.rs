@@ -32,8 +32,8 @@ impl TrainingBackendProtocol {
 
     fn is_revision_compatible(&self) -> bool {
         self.api_revision
-            .checked_sub(TRAINING_BACKEND_API_REVISION)
-            .is_some()
+            .cmp(&TRAINING_BACKEND_API_REVISION)
+            .is_ge()
     }
 
     #[cfg(test)]
@@ -106,23 +106,23 @@ impl TrainingBackendInfo {
         }
     }
 
-    pub fn api_id(&self) -> &str {
+    pub(crate) fn api_id(&self) -> &str {
         &self.protocol.api_id
     }
 
-    pub const fn api_version(&self) -> u32 {
+    pub(crate) const fn api_version(&self) -> u32 {
         self.protocol.api_version
     }
 
-    pub const fn api_revision(&self) -> u32 {
+    pub(crate) const fn api_revision(&self) -> u32 {
         self.protocol.api_revision
     }
 
-    pub const fn spiral_schema_minimum(&self) -> u32 {
+    pub(crate) const fn spiral_schema_minimum(&self) -> u32 {
         self.protocol.spiral_schema_minimum
     }
 
-    pub const fn spiral_schema_maximum(&self) -> u32 {
+    pub(crate) const fn spiral_schema_maximum(&self) -> u32 {
         self.protocol.spiral_schema_maximum
     }
 

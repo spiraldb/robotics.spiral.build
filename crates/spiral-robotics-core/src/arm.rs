@@ -13,7 +13,7 @@ pub const ENCODER_COUNTS_PER_TURN: i64 = 4096;
 
 /// The role a motor plays in the arm's kinematic chain.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum JointRole {
+enum JointRole {
     /// Rotates the whole arm about the vertical base axis.
     Pan,
     /// Raises and lowers the upper arm.
@@ -46,21 +46,13 @@ impl JointDefinition {
         self.name
     }
 
-    pub const fn bus_id(self) -> u32 {
-        self.bus_id
-    }
-
-    pub const fn role(self) -> JointRole {
-        self.role
-    }
-
     pub const fn label(self) -> &'static str {
         self.label
     }
 }
 
 /// The Feetech servo model used throughout a stock SO-101 arm.
-pub const SO101_MOTOR_MODEL: &str = "sts3215";
+const SO101_MOTOR_MODEL: &str = "sts3215";
 
 /// The motors of a stock SO-ARM101, in bus-ID order.
 pub const SO101_JOINTS: [JointDefinition; 6] = [
@@ -129,7 +121,8 @@ pub fn counts_to_degrees(counts: i64) -> f64 {
 ///
 /// Motion code must not turn an invalid angle into a plausible zero command,
 /// so non-finite and out-of-range inputs are rejected explicitly.
-pub fn degrees_to_counts(degrees: f64) -> Option<i64> {
+#[cfg(test)]
+fn degrees_to_counts(degrees: f64) -> Option<i64> {
     let counts = (degrees * ENCODER_COUNTS_PER_TURN as f64 / 360.0).round();
     // `i64::MAX as f64` rounds up to 2^63, so the positive bound must be
     // exclusive. The negative bound -2^63 is exactly representable.

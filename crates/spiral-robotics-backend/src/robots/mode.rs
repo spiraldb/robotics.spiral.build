@@ -1,23 +1,23 @@
 //! Operator-requested control-mode changes.
 
-use spiral_robotics_core::error::OperationError;
+use spiral_robotics_core::OperationError;
 
 /// Modes an operator may enter directly.
 ///
 /// Replay and policy sessions are deliberately absent: their use cases must
 /// load and validate an episode or checkpoint before control can change.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum OperatorMode {
+pub(crate) enum OperatorMode {
     Idle,
     Manual { robot: String },
     Teleoperate { leader: String, follower: String },
 }
 
-pub trait ModeControlPort {
+pub(crate) trait ModeControlPort {
     async fn set_operator_mode(&self, mode: OperatorMode) -> Result<(), OperationError>;
 }
 
-pub async fn set_mode<P: ModeControlPort + ?Sized>(
+pub(crate) async fn set_mode<P: ModeControlPort + ?Sized>(
     control: &P,
     mode: OperatorMode,
 ) -> Result<(), OperationError> {

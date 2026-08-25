@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::Result;
+use crate::InferenceResult;
 
 /// Policy family implemented by an engine.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -51,10 +51,23 @@ pub struct ImageFrame<'a> {
 }
 
 impl<'a> ImageFrame<'a> {
-    pub fn packed_rgb8(name: &'a str, dimensions: ImageDimensions, data: &'a [u8]) -> Result<Self> {
+    pub fn packed_rgb8(
+        name: &'a str,
+        dimensions: ImageDimensions,
+        data: &'a [u8],
+    ) -> InferenceResult<Self> {
         let row_stride = dimensions.width.checked_mul(3).ok_or_else(|| {
-            crate::Error::Input("packed RGB row stride overflows usize".to_owned())
+            crate::InferenceError::Input("packed RGB row stride overflows usize".to_owned())
         })?;
+        let expected_byte_count = row_stride.checked_mul(dimensions.height).ok_or_else(|| {
+            crate::InferenceError::Input("packed RGB image size overflows usize".to_owned())
+        })?;
+        if data.len() != expected_byte_count {
+            return Err(crate::InferenceError::Input(format!(
+                "packed RGB image contains {} bytes, expected {expected_byte_count}",
+                data.len()
+            )));
+        }
         Ok(Self {
             name,
             dimensions,
@@ -133,10 +146,6 @@ impl PolicySpecification {
             action_chunk_size: actions.chunk_size,
             recommended_action_steps: actions.recommended_steps,
         }
-    }
-
-    pub fn kind(&self) -> PolicyKind {
-        self.kind
     }
 
     pub fn state_dimensions(&self) -> usize {
@@ -264,16 +273,8 @@ impl InferenceStats {
         self
     }
 
-    pub fn preprocessing(self) -> Duration {
-        self.preprocessing
-    }
-
     pub fn model(self) -> Duration {
         self.model
-    }
-
-    pub fn postprocessing(self) -> Duration {
-        self.postprocessing
     }
 
     pub fn total(self) -> Duration {
@@ -290,23 +291,15 @@ pub struct ActionChunkShape {
 }
 
 impl ActionChunkShape {
-    pub fn try_new(steps: usize, action_dimensions: usize) -> Result<Self> {
+    pub fn try_new(steps: usize, action_dimensions: usize) -> InferenceResult<Self> {
         let value_count = steps.checked_mul(action_dimensions).ok_or_else(|| {
-            crate::Error::Inference("action chunk dimensions overflow usize".to_owned())
+            crate::InferenceError::Inference("action chunk dimensions overflow usize".to_owned())
         })?;
         Ok(Self {
             steps,
             action_dimensions,
             value_count,
         })
-    }
-
-    pub fn steps(self) -> usize {
-        self.steps
-    }
-
-    pub fn action_dimensions(self) -> usize {
-        self.action_dimensions
     }
 }
 
@@ -328,9 +321,9 @@ impl ActionChunk {
         values: Vec<f32>,
         shape: ActionChunkShape,
         stats: InferenceStats,
-    ) -> Result<Self> {
+    ) -> InferenceResult<Self> {
         if values.len() != shape.value_count {
-            return Err(crate::Error::Inference(format!(
+            return Err(crate::InferenceError::Inference(format!(
                 "model returned {} action values, expected {} × {} = {}",
                 values.len(),
                 shape.steps,
@@ -362,32 +355,19 @@ impl ActionChunk {
     pub fn stats(&self) -> InferenceStats {
         self.stats
     }
-
-    pub fn as_slice(&self) -> &[f32] {
-        &self.values
-    }
-
-    pub fn into_values(self) -> Vec<f32> {
-        self.values
-    }
 }
 
 /// Framework-neutral interface implemented by every policy family.
 pub trait Policy: Send {
-    fn identity(&self) -> &crate::ModelIdentity;
     fn specification(&self) -> &PolicySpecification;
 
     /// Materialize backend kernels and validate one representative forward
     /// pass before the policy is admitted to a deadline-sensitive control path.
-    fn warm_up(&mut self) -> Result<InferenceStats>;
+    fn warm_up(&mut self) -> InferenceResult<InferenceStats>;
 
     /// Produce a full action chunk. Scheduling, chunk consumption, temporal
     /// ensembling, and safety validation remain responsibilities of the caller.
-    fn infer(&mut self, input: InferenceInput<'_>) -> Result<ActionChunk>;
-
-    /// Clear policy-local episode state. Stateless chunk predictors need no
-    /// work here, while future ensemble/streaming policies can override it.
-    fn reset(&mut self) {}
+    fn infer(&mut self, input: InferenceInput<'_>) -> InferenceResult<ActionChunk>;
 }
 
 /// Materializes one policy inside the process that owns the tensor framework.
@@ -395,7 +375,7 @@ pub trait Policy: Send {
 /// HTTP transports depend only on this framework-neutral boundary. Studio can
 /// therefore use a remote policy without linking the loader implementation.
 pub trait PolicyLoader: Send + Sync {
-    fn load(&self, artifact: crate::ModelArtifact) -> Result<Box<dyn Policy>>;
+    fn load(&self, artifact: crate::ModelArtifact) -> InferenceResult<Box<dyn Policy>>;
 }
 
 #[cfg(test)]
@@ -414,5 +394,12 @@ mod tests {
         assert!(
             ImageFrame::packed_rgb8("camera", ImageDimensions::new(usize::MAX, 1), &[]).is_err()
         );
+    }
+
+    #[test]
+    fn packed_images_require_exact_storage() {
+        let dimensions = ImageDimensions::new(2, 2);
+        assert!(ImageFrame::packed_rgb8("camera", dimensions, &[0; 11]).is_err());
+        assert!(ImageFrame::packed_rgb8("camera", dimensions, &[0; 12]).is_ok());
     }
 }

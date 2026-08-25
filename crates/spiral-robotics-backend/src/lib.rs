@@ -8,13 +8,13 @@
 
 mod adapters;
 mod clock;
-pub mod data;
+mod data;
 mod http;
-pub mod recording;
+mod recording;
 mod robotics;
-pub mod robots;
-pub mod rollout;
-pub mod training;
-pub mod workflow;
+mod robots;
+mod rollout;
+mod training;
+mod workflow;
 
 pub use http::server::run;

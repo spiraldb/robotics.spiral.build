@@ -153,23 +153,28 @@ These rules apply to every feature:
 - Behavior with a natural owner must be implemented as a member method. Use
   `From` or `TryFrom` for type-owned conversions; reserve free functions for
   genuinely stateless operations without a meaningful receiver.
-- Every item must use the narrowest useful visibility. Fields are private and
-  exposed through methods unless they are intentionally part of a public data
-  contract; the workspace lint policy denies unreachable public items for every
-  first-party package.
+- Every item must use the narrowest useful visibility. Named struct fields are
+  private and exposed through narrow constructors, builders, getters, and
+  domain operations. Serialized contracts preserve their flat wire shape with
+  private grouped values rather than public fields. The workspace lint policy
+  denies unreachable public items for every first-party package.
+- Backend and frontend libraries export only their process/UI launchers.
+  Storage keeps ADBC, schema, SQL, settings, and manager modules private and
+  exposes reviewed feature types plus a flat connection facade.
 - Source must be organized around product capabilities and features rather than
   technical buckets such as generic API, data, or view modules.
 - Runtime state must have an explicit owner; first-party Rust code must not use
   process-wide `static` variables.
 - Public construction must be narrow and invariant-preserving. Prefer focused
   constructors and builders over broad field-by-field struct literals.
-- An ordinary function or method has at most three parameters, including
-  `self`; group cohesive inputs into a named value when more context is needed.
-  Framework component signatures and externally imposed trait or wire
-  signatures may stay flat when grouping would break their contract.
-- An ordinary struct has at most seven fields; group related internal state into
-  private capability values. Stable serialized and wire contracts may remain
-  flat when their shape is itself the public contract.
+- A function or method has at most three parameters, including `self`; group
+  cohesive inputs into a named value when more context is needed. Framework
+  component inputs must follow the same bound through private props values.
+- A struct or enum variant has at most seven fields; group related internal
+  state into private capability values. Stable serialized and wire contracts
+  use `serde` flattening when their external shape must remain flat.
+- A recursive syntax-level architecture test enforces the field, parameter,
+  visibility, and no-static bounds across every first-party production crate.
 - Critical invariants must be enforced by core, backend capability policy, or
   hardware control policy, not only by UI controls.
 - Pure feature tests must run without hardware, HTTP, SpiralDB, or a compute

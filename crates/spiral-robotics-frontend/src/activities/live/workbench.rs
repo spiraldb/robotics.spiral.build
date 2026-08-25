@@ -3,7 +3,8 @@
 use std::collections::BTreeSet;
 
 use crate::components::interaction::{
-    Action, ActionPurpose, ActionVariant, BlockingConfirmation, ModeAction, ModeGroup,
+    Action, ActionPurpose, ActionVariant, BlockingConfirmation, ConfirmationCopy,
+    ConfirmationDismissal, ConfirmationResponse, ModeAction, ModeGroup,
 };
 use dioxus::prelude::*;
 use spiral_robotics_api::robots::ModeSelection;
@@ -16,7 +17,7 @@ use crate::shell::state::{Selection, studio};
 #[component]
 pub(crate) fn LiveWorkbench(on_action: EventHandler<LiveAction>) -> Element {
     let studio = studio();
-    let robots = studio.snapshot.read().robots.clone();
+    let robots = studio.snapshot().read().robots().to_owned();
 
     rsx! {
         div { class: "studio-workbench-scroll live-workbench",
@@ -43,13 +44,13 @@ pub(crate) fn LiveWorkbench(on_action: EventHandler<LiveAction>) -> Element {
 #[component]
 fn CaptureSection() -> Element {
     let studio = studio();
-    let mut selected_dataset = studio.selected_dataset;
+    let mut selected_dataset = studio.selected_dataset();
     let recording = studio.recording();
     let dataset_ids = studio
         .episodes()
         .into_iter()
-        .map(|episode| episode.dataset_id)
-        .chain(std::iter::once(selected_dataset.read().clone()))
+        .map(|episode| episode.dataset_id().to_owned())
+        .chain(std::iter::once(selected_dataset.read().to_owned()))
         .collect::<BTreeSet<_>>();
 
     rsx! {
@@ -57,7 +58,7 @@ fn CaptureSection() -> Element {
             header { class: "workbench-section-heading",
                 h3 { "Capture destination" }
                 if let Some(recording) = recording.as_ref() {
-                    span { "Recording {recording.episode}" }
+                    span { "Recording {recording.episode()}" }
                 }
             }
             label { class: "capture-dataset-field",
@@ -65,7 +66,7 @@ fn CaptureSection() -> Element {
                 input {
                     class: "field",
                     list: "live-dataset-options",
-                    value: selected_dataset.read().clone(),
+                    value: selected_dataset.read().to_owned(),
                     disabled: recording.is_some(),
                     maxlength: "96",
                     pattern: "[A-Za-z0-9_.-]+",
@@ -93,39 +94,39 @@ fn RobotRoster(
     on_select: EventHandler<Option<Selection>>,
 ) -> Element {
     let studio = studio();
-    let focused = studio.focused().map(|robot| robot.id);
+    let focused = studio.focused().map(|robot| robot.id().to_owned());
     let empty = robots.is_empty();
 
     rsx! {
         section { class: "live-robot-roster", role: "tablist", "aria-label": "Robot arms",
             for robot in robots {
                 {
-                    let id = robot.id.clone();
-                    let selected = focused.as_deref() == Some(robot.id.as_str());
-                    let ready = robot.connection.connected && robot.calibrated && robot.problem.is_none();
-                    let role = robot.robot_type.as_deref().map(role_label).unwrap_or("arm");
-                    let show_role = !robot.id.eq_ignore_ascii_case(role);
-                    let state = if robot.problem.is_some() {
+                    let id = robot.id().to_owned();
+                    let selected = focused.as_deref() == Some(robot.id());
+                    let ready = robot.connection().connected() && robot.calibrated() && robot.problem().is_none();
+                    let role = robot.robot_type().map(role_label).unwrap_or("arm");
+                    let show_role = !robot.id().eq_ignore_ascii_case(role);
+                    let state = if robot.problem().is_some() {
                         "Needs attention"
-                    } else if !robot.connection.connected {
+                    } else if !robot.connection().connected() {
                         "Disconnected"
-                    } else if !robot.calibrated {
+                    } else if !robot.calibrated() {
                         "Calibration needed"
                     } else {
                         "Connected and calibrated"
                     };
                     let accessible_label = if show_role {
-                        format!("{}, {role}, {state}", robot.id)
+                        format!("{}, {role}, {state}", robot.id())
                     } else {
-                        format!("{}, {state}", robot.id)
+                        format!("{}, {state}", robot.id())
                     };
                     let accent =
                         crate::panels::scene::accent_css(
-                            studio.position_of(&robot.id),
+                            studio.position_of(robot.id()),
                         );
                     rsx! {
                         Action {
-                            key: "{robot.id}",
+                            key: "{robot.id()}",
                             purpose: ActionPurpose::Select,
                             variant: ActionVariant::Row,
                             class: "live-robot-row",
@@ -140,7 +141,7 @@ fn RobotRoster(
                                 style: "background: {accent}",
                             }
                             span { class: "live-robot-copy",
-                                strong { "{robot.id}" }
+                                strong { "{robot.id()}" }
                                 if show_role { small { "{role}" } }
                             }
                             span {
@@ -164,10 +165,10 @@ fn ControlSection(on_action: EventHandler<LiveAction>) -> Element {
     let focused = studio.focused();
     let telemetry = focused
         .as_ref()
-        .and_then(|robot| studio.robot_telemetry(&robot.id));
-    let holding = telemetry.as_ref().is_some_and(|robot| robot.torque);
+        .and_then(|robot| studio.robot_telemetry(robot.id()));
+    let holding = telemetry.as_ref().is_some_and(|robot| robot.torque());
     let teleop = matches!(studio.mode(), ModeSelection::Teleoperate { .. }) && studio.mode_active();
-    let pair = studio.snapshot.read().default_teleoperation_pair();
+    let pair = studio.snapshot().read().default_teleoperation_pair();
     let mut confirm_release = use_signal(|| false);
 
     rsx! {
@@ -183,7 +184,7 @@ fn ControlSection(on_action: EventHandler<LiveAction>) -> Element {
                     class: "control-segment",
                     disabled: focused.is_none() || telemetry.is_none(),
                     onclick: {
-                        let id = focused.as_ref().map(|robot| robot.id.clone());
+                        let id = focused.as_ref().map(|robot| robot.id().to_owned());
                         move |_| if (!holding || teleop)
                             && let Some(id) = id.clone()
                         {
@@ -218,21 +219,25 @@ fn ControlSection(on_action: EventHandler<LiveAction>) -> Element {
             if confirm_release() {
                 BlockingConfirmation {
                     id: "release-arm-confirmation",
-                    title: focused.as_ref().map(|robot| format!("Release {}?", robot.id)).unwrap_or_else(|| "Release arm?".to_owned()),
-                    message: "Support the arm before continuing.".to_owned(),
+                    title: focused.as_ref().map(|robot| format!("Release {}?", robot.id())).unwrap_or_else(|| "Release arm?".to_owned()),
                     consequence: "Motor torque will turn off immediately and the arm can fall under its own weight.".to_owned(),
-                    confirm_label: "Release arm",
-                    cancel_label: "Keep holding",
-                    purpose: ActionPurpose::Release,
-                    return_focus_id: "motor-mode-release",
-                    on_confirm: {
-                        let id = focused.as_ref().map(|robot| robot.id.clone());
-                        move |_| {
-                            confirm_release.set(false);
-                            if let Some(id) = id.clone() { on_action.call(LiveAction::Release(id)); }
-                        }
-                    },
-                    on_cancel: move |_| confirm_release.set(false),
+                    copy: ConfirmationCopy::new(
+                        "Support the arm before continuing.",
+                        "Release arm",
+                        "Keep holding",
+                    ),
+                    response: ConfirmationResponse::new(
+                        ActionPurpose::Release,
+                        {
+                            let id = focused.as_ref().map(|robot| robot.id().to_owned());
+                            move |_| {
+                                confirm_release.set(false);
+                                if let Some(id) = id.clone() { on_action.call(LiveAction::Release(id)); }
+                            }
+                        },
+                        move |_| confirm_release.set(false),
+                    ),
+                    dismissal: ConfirmationDismissal::new("motor-mode-release"),
                 }
             }
         }

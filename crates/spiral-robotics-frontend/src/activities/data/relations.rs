@@ -38,7 +38,7 @@ pub(crate) fn RelationsPanel(namespace: String, query_available: bool) -> Elemen
             }
         }
     });
-    let catalog_result = catalog.read_unchecked().clone();
+    let catalog_result = catalog.read_unchecked().to_owned();
     let response = catalog_result
         .as_ref()
         .and_then(|result| result.as_ref().ok())
@@ -49,14 +49,14 @@ pub(crate) fn RelationsPanel(namespace: String, query_available: bool) -> Elemen
         .and_then(|result| result.as_ref().err())
         .cloned();
     let selection_candidates = response
-        .relations
+        .relations()
         .iter()
-        .map(|relation| relation.name.clone())
+        .map(|relation| relation.name().to_owned())
         .collect::<Vec<_>>();
     use_effect(use_reactive(
         (&selection_candidates,),
         move |(candidates,)| {
-            let current = selected.peek().clone();
+            let current = selected.peek().to_owned();
             if current
                 .as_ref()
                 .is_some_and(|name| candidates.contains(name))
@@ -76,10 +76,7 @@ pub(crate) fn RelationsPanel(namespace: String, query_available: bool) -> Elemen
             if !query_available {
                 return Ok(None);
             }
-            let request = SpiralQueryRequest {
-                sql: preview_sql(&relation),
-                max_rows: PREVIEW_ROWS,
-            };
+            let request = SpiralQueryRequest::new(preview_sql(&relation), PREVIEW_ROWS);
             api::send_json::<_, SpiralQueryResponse>(
                 Method::POST,
                 "/api/spiral/query",
@@ -89,37 +86,37 @@ pub(crate) fn RelationsPanel(namespace: String, query_available: bool) -> Elemen
             .map(Some)
         }
     });
-    let preview_result = preview.read_unchecked().clone();
+    let preview_result = preview.read_unchecked().to_owned();
     let selected_name = selected();
     let selected_relation = selected_name.as_ref().and_then(|name| {
         response
-            .relations
+            .relations()
             .iter()
-            .find(|relation| &relation.name == name)
+            .find(|relation| relation.name() == name)
     });
-    let links = relation_links(&response.relations);
+    let links = relation_links(response.relations());
     let counted_rows = response
-        .relations
+        .relations()
         .iter()
-        .filter_map(|relation| relation.row_count)
+        .filter_map(|relation| relation.row_count())
         .sum::<u64>();
-    let count_complete = response.complete
+    let count_complete = response.complete()
         && response
-            .relations
+            .relations()
             .iter()
-            .all(|relation| relation.row_count.is_some());
+            .all(|relation| relation.row_count().is_some());
     let catalog_metrics = match catalog_result.as_ref() {
         None if query_available => "Reading tables and counting rows…".to_owned(),
         Some(Err(_)) => "Metrics unavailable".to_owned(),
         _ if count_complete => format!(
             "{} tables · {} rows · {} shared-key links",
-            response.relations.len(),
+            response.relations().len(),
             format_count(counted_rows),
             links.len()
         ),
         _ => format!(
             "{} tables · {} counted rows · {} shared-key links",
-            response.relations.len(),
+            response.relations().len(),
             format_count(counted_rows),
             links.len()
         ),
@@ -169,7 +166,7 @@ pub(crate) fn RelationsPanel(namespace: String, query_available: bool) -> Elemen
                     div { class: "data-relations-loading-line data-relations-loading-line-short" }
                     span { "Reading schemas and exact row counts…" }
                 }
-            } else if response.relations.is_empty() {
+            } else if response.relations().is_empty() {
                 div { class: "data-relations-message", role: "status",
                     strong { "No project tables yet" }
                     p { "Record an episode or add data to make the project’s tables visible here." }
@@ -182,24 +179,24 @@ pub(crate) fn RelationsPanel(namespace: String, query_available: bool) -> Elemen
                             small { "{namespace}" }
                         }
                         nav {
-                            for relation in response.relations.iter().cloned() {
+                            for relation in response.relations().iter().cloned() {
                                 {
-                                    let relation_name = relation.name.clone();
-                                    let active = selected_name.as_deref() == Some(relation.name.as_str());
+                                    let relation_name = relation.name().to_owned();
+                                    let active = selected_name.as_deref() == Some(relation.name());
                                     rsx! {
                                         Action {
-                                            key: "{relation.name}",
+                                            key: "{relation.name()}",
                                             purpose: ActionPurpose::Select,
                                             variant: ActionVariant::Row,
                                             class: if active { "data-relation-index-row data-relation-index-row-active" } else { "data-relation-index-row" },
                                             aria_pressed: active,
-                                            title: "Inspect {relation.name}",
+                                            title: "Inspect {relation.name()}",
                                             onclick: move |_| selected.set(Some(relation_name.clone())),
                                             span {
-                                                strong { "{relation_label(&relation.name)}" }
-                                                small { "{relation.columns.len()} columns" }
+                                                strong { "{relation_label(relation.name())}" }
+                                                small { "{relation.columns().len()} columns" }
                                             }
-                                            code { "{format_optional_count(relation.row_count)}" }
+                                            code { "{format_optional_count(relation.row_count())}" }
                                         }
                                     }
                                 }
@@ -260,29 +257,29 @@ pub(crate) fn RelationsPanel(namespace: String, query_available: bool) -> Elemen
                             if let Some(relation) = selected_relation {
                                 header { class: "data-relation-preview-heading",
                                     div {
-                                        strong { "{relation_label(&relation.name)}" }
-                                        p { title: "{relation.name}", "{relation.name}" }
+                                        strong { "{relation_label(relation.name())}" }
+                                        p { title: "{relation.name()}", "{relation.name()}" }
                                     }
-                                    span { "{format_optional_count(relation.row_count)} rows · {relation.columns.len()} columns" }
+                                    span { "{format_optional_count(relation.row_count())} rows · {relation.columns().len()} columns" }
                                     Action {
                                         purpose: ActionPurpose::Apply,
                                         variant: ActionVariant::Outline,
                                         title: "Put this table’s preview SQL in the Query panel",
                                         onclick: {
-                                            let relation_name = relation.name.clone();
+                                            let relation_name = relation.name().to_owned();
                                             move |_| controller.set_sql(format!("SELECT * FROM {relation_name} LIMIT 100"))
                                         },
                                         "Load in Query"
                                     }
                                 }
                                 details { class: "data-relation-columns",
-                                    summary { "Schema · {relation.columns.len()} columns" }
+                                    summary { "Schema · {relation.columns().len()} columns" }
                                     ul {
-                                        for column in relation.columns.iter() {
+                                        for column in relation.columns().iter() {
                                             li {
-                                                code { "{column.name}" }
-                                                span { "{column.semantic_type.as_deref().unwrap_or(&column.data_type)}" }
-                                                small { if column.nullable { "nullable" } else { "required" } }
+                                                code { "{column.name()}" }
+                                                span { "{column.semantic_type().unwrap_or(column.data_type())}" }
+                                                small { if column.nullable() { "nullable" } else { "required" } }
                                             }
                                         }
                                     }
@@ -295,7 +292,7 @@ pub(crate) fn RelationsPanel(namespace: String, query_available: bool) -> Elemen
                     }
                 }
             }
-            if let Some(limitation) = response.limitation {
+            if let Some(limitation) = response.limitation() {
                 footer { class: "data-relations-limitation", role: "status", "{limitation}" }
             }
         }
@@ -359,24 +356,24 @@ fn relation_links(relations: &[ProjectDataRelation]) -> Vec<RelationLink> {
     let mut links = Vec::new();
     for (index, left) in relations.iter().enumerate() {
         let left_keys = left
-            .columns
+            .columns()
             .iter()
-            .map(|column| column.name.as_str())
+            .map(|column| column.name())
             .filter(relationship_key)
             .collect::<BTreeSet<_>>();
         for right in relations.iter().skip(index + 1) {
             let mut keys = right
-                .columns
+                .columns()
                 .iter()
-                .map(|column| column.name.as_str())
+                .map(|column| column.name())
                 .filter(|name| left_keys.contains(name))
                 .map(ToOwned::to_owned)
                 .collect::<Vec<_>>();
             keys.sort();
             if !keys.is_empty() {
                 links.push(RelationLink {
-                    left: left.name.clone(),
-                    right: right.name.clone(),
+                    left: left.name().to_owned(),
+                    right: right.name().to_owned(),
                     keys,
                 });
             }
@@ -424,20 +421,15 @@ mod tests {
     use super::*;
 
     fn relation(name: &str, columns: &[&str]) -> ProjectDataRelation {
-        ProjectDataRelation {
-            name: name.to_owned(),
-            relation_type: "TABLE".to_owned(),
-            columns: columns
+        ProjectDataRelation::new(
+            name,
+            "TABLE",
+            columns
                 .iter()
-                .map(|name| QueryColumn {
-                    name: (*name).to_owned(),
-                    data_type: "Utf8".to_owned(),
-                    nullable: false,
-                    semantic_type: None,
-                })
+                .map(|name| QueryColumn::new(*name, "Utf8", false))
                 .collect(),
-            row_count: Some(1),
-        }
+        )
+        .with_row_count(Some(1))
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use spiral_robotics_storage::settings::StudioPreferencesStore;
+use spiral_robotics_storage::StudioPreferencesStore;
 use spiral_robotics_training::{
     TrainingBackend, TrainingBackendError, TrainingBackendInfo, TrainingJobCursor,
     TrainingJobRequest, TrainingJobSnapshot,
@@ -22,7 +22,7 @@ impl ConfiguredHttpTrainingBackend {
     }
 
     fn selected(&self) -> HttpTrainingBackend {
-        HttpTrainingBackend::new(self.preferences.get().training.endpoint)
+        HttpTrainingBackend::new(self.preferences.get().training().endpoint())
     }
 }
 

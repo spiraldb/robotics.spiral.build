@@ -50,8 +50,6 @@ fn core_exposes_only_domain_modules_and_has_no_outward_dependencies() {
         [
             "arm",
             "calibration",
-            "episode",
-            "error",
             "identity",
             "operation",
             "query",

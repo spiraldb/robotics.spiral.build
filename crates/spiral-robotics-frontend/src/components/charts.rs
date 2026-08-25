@@ -187,14 +187,37 @@ pub(crate) fn downsample_extrema(points: &[(f64, f64)], budget: usize) -> Vec<(f
     reduced
 }
 
-#[component]
-pub(crate) fn CharmingChart(
-    id: String,
-    chart: Chart,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ChartPresentation {
     class: String,
     aria_label: String,
-    #[props(default)] group: Option<String>,
-) -> Element {
+    group: Option<String>,
+}
+
+impl ChartPresentation {
+    pub(crate) fn new(class: impl Into<String>, aria_label: impl Into<String>) -> Self {
+        Self {
+            class: class.into(),
+            aria_label: aria_label.into(),
+            group: None,
+        }
+    }
+
+    pub(crate) fn with_group(mut self, group: String) -> Self {
+        self.group = Some(group);
+        self
+    }
+}
+
+#[component]
+pub(crate) fn CharmingChart(id: String, chart: Chart, presentation: ChartPresentation) -> Element {
+    let ChartPresentation {
+        class,
+        aria_label,
+        group,
+    } = presentation;
+    #[cfg(not(feature = "web"))]
+    let _ = &group;
     let runtime_failed = use_signal(|| false);
 
     #[cfg(feature = "web")]
@@ -218,13 +241,15 @@ pub(crate) fn CharmingChart(
                 spawn(async move {
                     for _ in 0..100 {
                         if runtime_ready() {
-                            match render_or_update(
-                                &id,
-                                &chart,
-                                group.as_deref(),
-                                &instance,
-                                &observer,
-                            ) {
+                            match (ChartRenderRequest {
+                                id: &id,
+                                chart: &chart,
+                                group: group.as_deref(),
+                                instance: &instance,
+                                observer: &observer,
+                            })
+                            .render()
+                            {
                                 Ok(()) => runtime_status.set(false),
                                 Err(()) => runtime_status.set(true),
                             }
@@ -275,29 +300,35 @@ fn runtime_ready() -> bool {
 }
 
 #[cfg(feature = "web")]
-fn render_or_update(
-    id: &str,
-    chart: &Chart,
-    group: Option<&str>,
-    instance: &std::rc::Rc<std::cell::RefCell<Option<charming::Echarts>>>,
-    observer: &std::rc::Rc<std::cell::RefCell<Option<ChartResizeObserver>>>,
-) -> Result<(), ()> {
-    if let Some(existing) = instance.borrow().as_ref() {
-        update_chart(existing, chart);
-        connect_chart(existing, group)?;
-        return Ok(());
-    }
+struct ChartRenderRequest<'a> {
+    id: &'a str,
+    chart: &'a Chart,
+    group: Option<&'a str>,
+    instance: &'a std::rc::Rc<std::cell::RefCell<Option<charming::Echarts>>>,
+    observer: &'a std::rc::Rc<std::cell::RefCell<Option<ChartResizeObserver>>>,
+}
 
-    let rendered = charming::WasmRenderer::new_opt(None, None)
-        .render(id, chart)
-        .map_err(|_| ())?;
-    apply_studio_tooltip_theme(&rendered);
-    connect_chart(&rendered, group)?;
-    observer
-        .borrow_mut()
-        .replace(ChartResizeObserver::new(id, std::rc::Rc::clone(instance))?);
-    instance.borrow_mut().replace(rendered);
-    Ok(())
+#[cfg(feature = "web")]
+impl ChartRenderRequest<'_> {
+    fn render(self) -> Result<(), ()> {
+        if let Some(existing) = self.instance.borrow().as_ref() {
+            update_chart(existing, self.chart);
+            connect_chart(existing, self.group)?;
+            return Ok(());
+        }
+
+        let rendered = charming::WasmRenderer::new_opt(None, None)
+            .render(self.id, self.chart)
+            .map_err(|_| ())?;
+        apply_studio_tooltip_theme(&rendered);
+        connect_chart(&rendered, self.group)?;
+        self.observer.borrow_mut().replace(ChartResizeObserver::new(
+            self.id,
+            std::rc::Rc::clone(self.instance),
+        )?);
+        self.instance.borrow_mut().replace(rendered);
+        Ok(())
+    }
 }
 
 #[cfg(feature = "web")]

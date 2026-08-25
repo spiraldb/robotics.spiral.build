@@ -92,25 +92,31 @@ fn default_joint_selection(
     selected: Option<&Selection>,
 ) -> Option<Selection> {
     let robot = selected
-        .and_then(|selection| robots.iter().find(|robot| robot.id == selection.robot_id()))
+        .and_then(|selection| {
+            robots
+                .iter()
+                .find(|robot| robot.id() == selection.robot_id())
+        })
         .or_else(|| robots.first())?;
 
     match selected {
         Some(Selection::Camera {
             robot: selected, ..
-        }) if selected == &robot.id => return None,
+        }) if selected == robot.id() => return None,
         Some(Selection::Joint {
             robot: selected,
             joint,
-        }) if selected == &robot.id && robot.motors.iter().any(|motor| &motor.name == joint) => {
+        }) if selected == robot.id()
+            && robot.motors().iter().any(|motor| motor.name() == joint) =>
+        {
             return None;
         }
         _ => {}
     }
 
-    robot.motors.first().map(|motor| Selection::Joint {
-        robot: robot.id.clone(),
-        joint: motor.name.clone(),
+    robot.motors().first().map(|motor| Selection::Joint {
+        robot: robot.id().to_owned(),
+        joint: motor.name().to_owned(),
     })
 }
 
@@ -128,42 +134,43 @@ struct EpisodeCatalogState {
 /// episode catalog is an explicit HTTP resource owned by the browser session.
 #[derive(Clone, Copy)]
 pub(crate) struct Studio {
-    pub(crate) snapshot: Signal<StudioSnapshot>,
-    pub(crate) telemetry: Signal<TelemetryFrame>,
+    snapshot: Signal<StudioSnapshot>,
+    telemetry: Signal<TelemetryFrame>,
+    backend: BackendSignals,
+    data: StudioDataSignals,
+    notifications: Signal<NotificationCenterState>,
+    selected: Signal<Option<Selection>>,
+    pointed: Signal<Option<Selection>>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct BackendSignals {
     /// Backend-owned lifecycle and metric history for remote policy training.
-    pub(crate) training: Signal<TrainingSnapshot>,
+    training: Signal<TrainingSnapshot>,
     /// Backend-owned remote inference and motor-control lifecycle.
-    pub(crate) rollout: Signal<RolloutSnapshot>,
+    rollout: Signal<RolloutSnapshot>,
     /// Backend-owned lifecycle and terminal payload for relation Workflows.
-    pub(crate) workflow_state: Signal<Option<WorkflowStateResponse>>,
+    workflow_state: Signal<Option<WorkflowStateResponse>>,
     /// Backend-owned Workflow Assistant readiness and durable conversation.
-    pub(crate) workflow_agent_state: Signal<Option<WorkflowAgentStateResponse>>,
+    workflow_agent_state: Signal<Option<WorkflowAgentStateResponse>>,
     /// True while the event stream is connected.
-    pub(crate) live: Signal<bool>,
+    live: Signal<bool>,
     /// Wall-clock time of the last valid event and a periodically updated clock.
-    pub(crate) last_event_ms: Signal<f64>,
-    pub(crate) clock_ms: Signal<f64>,
-    /// Session-level command outcomes and recoverable failures. Panels keep
-    /// durable domain state; this queue owns cross-route operator messages.
-    pub(crate) notifications: Signal<NotificationCenterState>,
-    /// The entity every view is currently showing and editing.
-    pub(crate) selected: Signal<Option<Selection>>,
-    /// What the pointer is over, wherever it is.
-    ///
-    /// Separate from `selected` because pointing is not choosing: hovering a
-    /// joint row lights that motor on the bench and hovering the motor lights
-    /// the row, without either disturbing what the operator actually picked.
-    /// One object, seen twice.
-    pub(crate) pointed: Signal<Option<Selection>>,
+    last_event_ms: Signal<f64>,
+    clock_ms: Signal<f64>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct StudioDataSignals {
     /// The take the timeline is showing in detail.
     ///
     /// Deliberately not part of [`Selection`]: choosing a take must not point
     /// the joint inspector somewhere else, because judging a take and watching
     /// the arm that produced it are the same gesture.
-    pub(crate) selected_episode: Signal<Option<String>>,
+    selected_episode: Signal<Option<String>>,
     /// Dataset row used by capture, import, Data filtering, and new Training
     /// runs. This is distinct from the configured Spiral namespace.
-    pub(crate) selected_dataset: Signal<String>,
+    selected_dataset: Signal<String>,
     episode_catalog: Signal<EpisodeCatalogState>,
     /// Joint angles for the take being recorded, or the last one recorded.
     ///
@@ -171,10 +178,66 @@ pub(crate) struct Studio {
     /// a take captured with the Signals region collapsed is still a take, and
     /// arriving to find it empty would be the interface deciding what was
     /// measured. See [`crate::panels::timeline::signals`].
-    pub(crate) recording_signals: Signal<SignalStore>,
+    recording_signals: Signal<SignalStore>,
 }
 
 impl Studio {
+    pub(crate) const fn snapshot(self) -> Signal<StudioSnapshot> {
+        self.snapshot
+    }
+
+    pub(crate) const fn telemetry(self) -> Signal<TelemetryFrame> {
+        self.telemetry
+    }
+
+    pub(crate) const fn training(self) -> Signal<TrainingSnapshot> {
+        self.backend.training
+    }
+
+    pub(crate) const fn rollout(self) -> Signal<RolloutSnapshot> {
+        self.backend.rollout
+    }
+
+    pub(crate) const fn workflow_state(self) -> Signal<Option<WorkflowStateResponse>> {
+        self.backend.workflow_state
+    }
+
+    pub(crate) const fn workflow_agent_state(self) -> Signal<Option<WorkflowAgentStateResponse>> {
+        self.backend.workflow_agent_state
+    }
+
+    pub(crate) const fn live(self) -> Signal<bool> {
+        self.backend.live
+    }
+
+    pub(crate) const fn clock_ms(self) -> Signal<f64> {
+        self.backend.clock_ms
+    }
+
+    pub(crate) const fn notifications(self) -> Signal<NotificationCenterState> {
+        self.notifications
+    }
+
+    pub(crate) const fn selection(self) -> Signal<Option<Selection>> {
+        self.selected
+    }
+
+    pub(crate) const fn pointed_selection(self) -> Signal<Option<Selection>> {
+        self.pointed
+    }
+
+    pub(crate) const fn selected_episode(self) -> Signal<Option<String>> {
+        self.data.selected_episode
+    }
+
+    pub(crate) const fn selected_dataset(self) -> Signal<String> {
+        self.data.selected_dataset
+    }
+
+    pub(crate) const fn recording_signals(self) -> Signal<SignalStore> {
+        self.data.recording_signals
+    }
+
     /// Create the shared state, load the episode catalog, and follow live state.
     pub(crate) fn use_studio() -> Self {
         // Hooks own the lifetime of every signal. The context publishes only
@@ -199,29 +262,34 @@ impl Studio {
         let studio = use_context_provider(|| Self {
             snapshot,
             telemetry,
-            training,
-            rollout,
-            workflow_state,
-            workflow_agent_state,
-            live,
-            last_event_ms,
-            // Keep the server's first render identical to the browser's first
-            // render; the browser clock starts with the client tasks below.
-            clock_ms,
+            backend: BackendSignals {
+                training,
+                rollout,
+                workflow_state,
+                workflow_agent_state,
+                live,
+                last_event_ms,
+                // Keep the server's first render identical to the browser's first
+                // render; the browser clock starts with the client tasks below.
+                clock_ms,
+            },
+            data: StudioDataSignals {
+                selected_episode,
+                selected_dataset,
+                episode_catalog,
+                recording_signals,
+            },
             notifications,
             selected,
             pointed,
-            selected_episode,
-            selected_dataset,
-            episode_catalog,
-            recording_signals,
         });
-        let mut default_selection = studio.selected;
+        let mut default_selection = studio.selection();
         use_effect(move || {
             let next = {
-                let snapshot = studio.snapshot.read();
+                let snapshot_signal = studio.snapshot();
+                let snapshot = snapshot_signal.read();
                 let selected = default_selection.read();
-                default_joint_selection(&snapshot.robots, selected.as_ref())
+                default_joint_selection(snapshot.robots(), selected.as_ref())
             };
             if let Some(next) = next {
                 default_selection.set(Some(next));
@@ -237,7 +305,8 @@ impl Studio {
         let mut catalog_bootstrap_started = use_signal(|| false);
         #[cfg(all(feature = "web", target_arch = "wasm32"))]
         use_effect(move || {
-            if studio.snapshot.read().readiness.catalog_available && !catalog_bootstrap_started() {
+            if studio.snapshot().read().readiness.catalog_available && !catalog_bootstrap_started()
+            {
                 catalog_bootstrap_started.set(true);
                 spawn(async move {
                     let _ = studio.refresh_episode_catalog().await;
@@ -312,7 +381,7 @@ impl Studio {
             loop {
                 gloo_timers::future::TimeoutFuture::new(250).await;
                 let now = js_sys::Date::now();
-                studio.clock_ms.set(now);
+                studio.clock_ms().set(now);
             }
         });
 
@@ -326,27 +395,27 @@ impl Studio {
         }
         self.telemetry
             .read()
-            .robots
+            .robots()
             .iter()
-            .find(|robot| robot.id == id)
+            .find(|robot| robot.id() == id)
             .cloned()
     }
 
     /// Normal controls require both an open stream and a recent event.
     pub(crate) fn controls_available(&self) -> bool {
         let age = self.telemetry_age_seconds();
-        (self.live)()
-            && self.snapshot.read().readiness.catalog_available
+        (self.backend.live)()
+            && self.snapshot.read().readiness().catalog_available()
             && age.is_finite()
             && age < 2.5
     }
 
     pub(crate) fn telemetry_age_seconds(&self) -> f64 {
-        let last = (self.last_event_ms)();
+        let last = (self.backend.last_event_ms)();
         if last <= 0.0 {
             return f64::INFINITY;
         }
-        (((self.clock_ms)() - last) / 1000.0).max(0.0)
+        (((self.backend.clock_ms)() - last) / 1000.0).max(0.0)
     }
 
     /// The arm the side panels are showing.
@@ -362,11 +431,11 @@ impl Studio {
             .as_ref()
             .and_then(|selection| {
                 robots
-                    .robots
+                    .robots()
                     .iter()
-                    .find(|robot| robot.id == selection.robot_id())
+                    .find(|robot| robot.id() == selection.robot_id())
             })
-            .or_else(|| robots.robots.first())
+            .or_else(|| robots.robots().first())
             .cloned()
     }
 
@@ -379,13 +448,12 @@ impl Studio {
     /// follower" is a thing an operator learns in the first minute and relies on
     /// while looking at the bench rather than the screen.
     pub(crate) fn position_of(&self, id: &str) -> usize {
-        let kind = self
-            .snapshot
-            .read()
-            .robots
+        let snapshot = self.snapshot.read();
+        let kind = snapshot
+            .robots()
             .iter()
-            .find(|robot| robot.id == id)
-            .and_then(|robot| robot.robot_type.clone());
+            .find(|robot| robot.id() == id)
+            .and_then(|robot| robot.robot_type().map(str::to_owned));
         // Blue for the follower and violet for the leader, which is what the
         // alphabetical accident used to produce on a two-arm bench; the arms
         // keep the colours their operator already knows.
@@ -405,48 +473,49 @@ impl Studio {
 
     /// Every recorded take, oldest first.
     pub(crate) fn episodes(&self) -> Vec<EpisodeSummary> {
-        self.episode_catalog.read().episodes.clone()
+        self.data.episode_catalog.read().episodes.clone()
     }
 
     pub(crate) fn datasets(&self) -> Vec<DatasetSummary> {
-        self.episode_catalog.read().datasets.clone()
+        self.data.episode_catalog.read().datasets.clone()
     }
 
     pub(crate) fn episodes_loading(&self) -> bool {
-        self.episode_catalog.read().loading
+        self.data.episode_catalog.read().loading
     }
 
     pub(crate) fn episodes_loaded(&self) -> bool {
-        self.episode_catalog.read().loaded
+        self.data.episode_catalog.read().loaded
     }
 
     pub(crate) fn episode_catalog_error(&self) -> Option<String> {
-        self.episode_catalog.read().error.clone()
+        self.data.episode_catalog.read().error.clone()
     }
 
     pub(crate) fn episode_catalog_issues(&self) -> Vec<String> {
-        self.episode_catalog.read().issues.clone()
+        self.data.episode_catalog.read().issues.clone()
     }
 
     /// Replace the browser's episode catalog in one request.
     pub(crate) async fn refresh_episode_catalog(mut self) -> Result<(), String> {
         {
-            let mut catalog = self.episode_catalog.write();
+            let mut catalog = self.data.episode_catalog.write();
             catalog.loading = true;
             catalog.error = None;
         }
         match api::get::<EpisodeCatalogResponse>("/api/episodes").await {
             Ok(response) => {
-                let mut catalog = self.episode_catalog.write();
-                catalog.datasets = response.datasets;
-                catalog.episodes = response.episodes;
-                catalog.issues = response.issues;
+                let mut catalog = self.data.episode_catalog.write();
+                let (datasets, episodes, issues) = response.into_parts();
+                catalog.datasets = datasets;
+                catalog.episodes = episodes;
+                catalog.issues = issues;
                 catalog.loading = false;
                 catalog.loaded = true;
                 Ok(())
             }
             Err(error) => {
-                let mut catalog = self.episode_catalog.write();
+                let mut catalog = self.data.episode_catalog.write();
                 catalog.loading = false;
                 catalog.error = Some(error.clone());
                 Err(format!("Could not refresh the episode catalog: {error}"))
@@ -456,26 +525,26 @@ impl Studio {
 
     /// Apply the authoritative response from a known episode mutation.
     pub(crate) fn upsert_episode(mut self, episode: EpisodeSummary) {
-        let mut catalog = self.episode_catalog.write();
+        let mut catalog = self.data.episode_catalog.write();
         if let Some(existing) = catalog
             .episodes
             .iter_mut()
-            .find(|existing| existing.id == episode.id)
+            .find(|existing| existing.id() == episode.id())
         {
             *existing = episode;
         } else {
             catalog.episodes.push(episode);
         }
         catalog.episodes.sort_by(|left, right| {
-            left.started_ms
-                .cmp(&right.started_ms)
-                .then_with(|| left.id.cmp(&right.id))
+            left.started_ms()
+                .cmp(&right.started_ms())
+                .then_with(|| left.id().cmp(right.id()))
         });
     }
 
     pub(crate) fn remove_episode(mut self, episode: &str) {
-        let mut catalog = self.episode_catalog.write();
-        catalog.episodes.retain(|existing| existing.id != episode);
+        let mut catalog = self.data.episode_catalog.write();
+        catalog.episodes.retain(|existing| existing.id() != episode);
     }
 
     /// The take being captured right now.
@@ -484,21 +553,21 @@ impl Studio {
     /// recording that is still running is exactly what an operator needs to know
     /// about while the link is unreliable.
     pub(crate) fn recording(&self) -> Option<RecordingProgress> {
-        self.telemetry.read().recording.clone()
+        self.telemetry.read().recording().cloned()
     }
 
     /// The episode being played back right now.
     pub(crate) fn replay(&self) -> Option<ReplayProgress> {
-        self.telemetry.read().replay.clone()
+        self.telemetry.read().replay().cloned()
     }
 
     /// The take the timeline is showing, when it still exists.
     pub(crate) fn focused_episode(&self) -> Option<EpisodeSummary> {
-        let episodes = self.episode_catalog.read();
-        let chosen = self.selected_episode.read();
+        let episodes = self.data.episode_catalog.read();
+        let chosen = self.data.selected_episode.read();
         chosen
             .as_ref()
-            .and_then(|id| episodes.episodes.iter().find(|episode| &episode.id == id))
+            .and_then(|id| episodes.episodes.iter().find(|episode| episode.id() == id))
             .cloned()
     }
 
@@ -506,21 +575,21 @@ impl Studio {
     pub(crate) fn connected_robots(&self) -> Vec<RobotSummary> {
         self.snapshot
             .read()
-            .robots
+            .robots()
             .iter()
-            .filter(|robot| robot.connection.connected)
+            .filter(|robot| robot.connection().connected())
             .cloned()
             .collect()
     }
 
     /// The mode the studio is in.
     pub(crate) fn mode(&self) -> ModeSelection {
-        self.snapshot.read().mode.selection.clone()
+        self.snapshot.read().mode().selection().to_owned()
     }
 
     /// Whether the configured mode is actually running.
     pub(crate) fn mode_active(&self) -> bool {
-        self.snapshot.read().mode.active
+        self.snapshot.read().mode().active()
     }
 
     /// True when `id` is the robot the operator is driving by hand.
@@ -639,33 +708,28 @@ pub(crate) fn studio() -> Studio {
 
 #[cfg(test)]
 mod tests {
-    use spiral_robotics_api::robots::{ConnectionStatus, MotorLimits, MotorSummary, RobotSummary};
+    use spiral_robotics_api::robots::{
+        ConnectionStatus, MotorSummary, RobotAvailability, RobotSummary,
+    };
     use spiral_robotics_core::calibration::MotorDirection;
 
     use super::{Selection, default_joint_selection};
 
     fn robot(id: &str, motors: &[&str]) -> RobotSummary {
-        RobotSummary {
-            id: id.to_owned(),
-            robot_type: None,
-            port: None,
-            motors: motors
+        RobotSummary::new(
+            id,
+            None,
+            RobotAvailability::new(false, None, ConnectionStatus::default()),
+        )
+        .with_motors(
+            motors
                 .iter()
                 .enumerate()
-                .map(|(index, name)| MotorSummary {
-                    name: (*name).to_owned(),
-                    id: index as u32 + 1,
-                    direction: MotorDirection::Normal,
-                    model: None,
-                    calibration: None,
-                    limits: MotorLimits::default(),
+                .map(|(index, name)| {
+                    MotorSummary::new(*name, index as u32 + 1, MotorDirection::Normal)
                 })
                 .collect(),
-            cameras: Vec::new(),
-            calibrated: false,
-            problem: None,
-            connection: ConnectionStatus::default(),
-        }
+        )
     }
 
     #[test]

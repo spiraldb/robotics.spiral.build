@@ -15,7 +15,7 @@ use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, de::DeserializeOwned};
 use spiral_robotics_inference::{
     ActionChunk, ActionChunkShape, ImageFormat, InferenceInput, InferenceStats, ModelArtifact,
-    ModelIdentity, Policy, PolicyLoader, PolicySpecification,
+    Policy, PolicyLoader, PolicySpecification,
 };
 use spiral_robotics_training::{
     TrainingBackend, TrainingBackendError, TrainingBackendInfo, TrainingJobCursor,
@@ -135,7 +135,7 @@ impl HttpPolicyLoader {
         }
     }
 
-    fn url(&self, path: &str) -> spiral_robotics_inference::Result<String> {
+    fn url(&self, path: &str) -> spiral_robotics_inference::InferenceResult<String> {
         let endpoint = self.endpoint.trim().trim_end_matches('/');
         if endpoint.is_empty() {
             return Err(inference_error("policy runtime endpoint is empty"));
@@ -145,8 +145,10 @@ impl HttpPolicyLoader {
 }
 
 impl PolicyLoader for HttpPolicyLoader {
-    fn load(&self, artifact: ModelArtifact) -> spiral_robotics_inference::Result<Box<dyn Policy>> {
-        let identity = artifact.identity().clone();
+    fn load(
+        &self,
+        artifact: ModelArtifact,
+    ) -> spiral_robotics_inference::InferenceResult<Box<dyn Policy>> {
         let body = encode_policy_artifact(&artifact)?;
         let response = self
             .client
@@ -160,7 +162,6 @@ impl PolicyLoader for HttpPolicyLoader {
         Ok(Box::new(HttpPolicy {
             backend: self.clone(),
             session_id: response.session_id,
-            identity,
             specification: response.specification,
         }))
     }
@@ -169,7 +170,6 @@ impl PolicyLoader for HttpPolicyLoader {
 struct HttpPolicy {
     backend: HttpPolicyLoader,
     session_id: String,
-    identity: ModelIdentity,
     specification: PolicySpecification,
 }
 
@@ -180,15 +180,11 @@ impl HttpPolicy {
 }
 
 impl Policy for HttpPolicy {
-    fn identity(&self) -> &ModelIdentity {
-        &self.identity
-    }
-
     fn specification(&self) -> &PolicySpecification {
         &self.specification
     }
 
-    fn warm_up(&mut self) -> spiral_robotics_inference::Result<InferenceStats> {
+    fn warm_up(&mut self) -> spiral_robotics_inference::InferenceResult<InferenceStats> {
         let path = self.path("/warm-up");
         let response = self
             .backend
@@ -204,7 +200,7 @@ impl Policy for HttpPolicy {
     fn infer(
         &mut self,
         input: InferenceInput<'_>,
-    ) -> spiral_robotics_inference::Result<ActionChunk> {
+    ) -> spiral_robotics_inference::InferenceResult<ActionChunk> {
         let body = encode_inference_input(input, &self.specification)?;
         let path = self.path("/infer");
         let response = self
@@ -252,7 +248,7 @@ struct InferenceStatsResponse {
 }
 
 impl InferenceStatsResponse {
-    fn into_stats(self) -> spiral_robotics_inference::Result<InferenceStats> {
+    fn into_stats(self) -> spiral_robotics_inference::InferenceResult<InferenceStats> {
         Ok(InferenceStats::default()
             .with_preprocessing(duration_from_millis(self.preprocessing_ms)?)
             .with_model(duration_from_millis(self.model_ms)?)
@@ -270,7 +266,7 @@ struct InferenceResponse {
 }
 
 impl InferenceResponse {
-    fn into_chunk(self) -> spiral_robotics_inference::Result<ActionChunk> {
+    fn into_chunk(self) -> spiral_robotics_inference::InferenceResult<ActionChunk> {
         ActionChunk::try_new(
             self.values,
             ActionChunkShape::try_new(self.steps, self.action_dimensions)?,
@@ -279,7 +275,9 @@ impl InferenceResponse {
     }
 }
 
-fn encode_policy_artifact(artifact: &ModelArtifact) -> spiral_robotics_inference::Result<Vec<u8>> {
+fn encode_policy_artifact(
+    artifact: &ModelArtifact,
+) -> spiral_robotics_inference::InferenceResult<Vec<u8>> {
     let config_len = u64::try_from(artifact.config().len())
         .map_err(|_| inference_error("model config is too large for the HTTP envelope"))?;
     let capacity = 8_usize
@@ -296,16 +294,16 @@ fn encode_policy_artifact(artifact: &ModelArtifact) -> spiral_robotics_inference
 fn encode_inference_input(
     input: InferenceInput<'_>,
     specification: &PolicySpecification,
-) -> spiral_robotics_inference::Result<Vec<u8>> {
+) -> spiral_robotics_inference::InferenceResult<Vec<u8>> {
     if input.state().len() != specification.state_dimensions() {
-        return Err(spiral_robotics_inference::Error::Input(format!(
+        return Err(spiral_robotics_inference::InferenceError::Input(format!(
             "policy state has {} values, expected {}",
             input.state().len(),
             specification.state_dimensions()
         )));
     }
     if input.images().len() != specification.image_inputs().len() {
-        return Err(spiral_robotics_inference::Error::Input(format!(
+        return Err(spiral_robotics_inference::InferenceError::Input(format!(
             "policy input has {} images, expected {}",
             input.images().len(),
             specification.image_inputs().len()
@@ -338,7 +336,7 @@ fn encode_inference_input(
             || image.row_stride() != packed_stride
             || image.data().len() != expected_len
         {
-            return Err(spiral_robotics_inference::Error::Input(format!(
+            return Err(spiral_robotics_inference::InferenceError::Input(format!(
                 "image {:?} does not match policy input {:?} ({}x{} RGB8)",
                 image.name(),
                 expected.name(),
@@ -438,7 +436,7 @@ fn decode_json_response<T: DeserializeOwned>(
 fn decode_inference_json_response<T: DeserializeOwned>(
     response: reqwest::blocking::Response,
     context: &str,
-) -> spiral_robotics_inference::Result<T> {
+) -> spiral_robotics_inference::InferenceResult<T> {
     require_inference_success(response, context)?
         .json()
         .map_err(|error| inference_error(format!("decoding {context} response: {error}")))
@@ -447,7 +445,7 @@ fn decode_inference_json_response<T: DeserializeOwned>(
 fn require_inference_success(
     response: reqwest::blocking::Response,
     context: &str,
-) -> spiral_robotics_inference::Result<reqwest::blocking::Response> {
+) -> spiral_robotics_inference::InferenceResult<reqwest::blocking::Response> {
     if response.status().is_success() {
         return Ok(response);
     }
@@ -476,11 +474,11 @@ fn backend_error(message: impl Into<String>) -> TrainingBackendError {
     TrainingBackendError::new(message)
 }
 
-fn inference_error(message: impl Into<String>) -> spiral_robotics_inference::Error {
-    spiral_robotics_inference::Error::Inference(message.into())
+fn inference_error(message: impl Into<String>) -> spiral_robotics_inference::InferenceError {
+    spiral_robotics_inference::InferenceError::Inference(message.into())
 }
 
-fn duration_from_millis(milliseconds: f64) -> spiral_robotics_inference::Result<Duration> {
+fn duration_from_millis(milliseconds: f64) -> spiral_robotics_inference::InferenceResult<Duration> {
     Duration::try_from_secs_f64(milliseconds / 1_000.0)
         .map_err(|error| inference_error(format!("invalid inference duration: {error}")))
 }

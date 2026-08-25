@@ -20,19 +20,22 @@ impl TrainingPort for TrainingManager {
     fn training_run_status(&self, run_id: &str) -> Option<TrainingRunStatus> {
         let snapshot = TrainingManager::snapshot(self);
         snapshot
-            .runs
+            .runs()
             .iter()
-            .find(|run| run.id == run_id)
-            .map(|run| TrainingRunStatus {
-                active: run.phase.active(),
-                checkpoints: run
-                    .checkpoints
-                    .iter()
-                    .map(|checkpoint| TrainingCheckpointStatus {
-                        step: checkpoint.step,
-                        inference_ready: checkpoint.inference_ready,
-                    })
-                    .collect(),
+            .find(|run| run.id() == run_id)
+            .map(|run| {
+                TrainingRunStatus::new(
+                    run.phase().active(),
+                    run.checkpoints()
+                        .iter()
+                        .map(|checkpoint| {
+                            TrainingCheckpointStatus::new(
+                                checkpoint.step(),
+                                checkpoint.inference_ready(),
+                            )
+                        })
+                        .collect(),
+                )
             })
     }
 
@@ -57,7 +60,13 @@ impl TrainingPort for TrainingManager {
     }
 }
 
-pub(super) struct RolloutHttpAdapter(pub(super) Arc<RolloutManager>);
+pub(super) struct RolloutHttpAdapter(Arc<RolloutManager>);
+
+impl RolloutHttpAdapter {
+    pub(super) fn new(rollout_manager: Arc<RolloutManager>) -> Self {
+        Self(rollout_manager)
+    }
+}
 
 impl RolloutSessionPort for RolloutHttpAdapter {
     fn snapshot(&self) -> CapabilityRolloutSnapshot {
@@ -82,96 +91,116 @@ impl RolloutSessionPort for RolloutHttpAdapter {
 }
 
 fn training_command(request: StartTrainingRequest) -> StartTrainingCommand {
-    let policy = match request.policy {
+    let policy = match request.policy() {
         ContractTrainingPolicy::Act => CapabilityTrainingPolicy::Act,
     };
-    let act = ActTrainingSettings {
-        camera_streams: request.act.camera_streams,
-        image_width: request.act.image_width,
-        image_height: request.act.image_height,
-        video_decoder: request.act.video_decoder,
-        pretrained_backbone: request.act.pretrained_backbone,
-        hidden_dim: request.act.hidden_dim,
-        latent_dim: request.act.latent_dim,
-        encoder_layers: request.act.encoder_layers,
-        vae_encoder_layers: request.act.vae_encoder_layers,
-        decoder_layers: request.act.decoder_layers,
-        attention_heads: request.act.attention_heads,
-        feedforward_dim: request.act.feedforward_dim,
-        kl_weight: request.act.kl_weight,
-    };
-    StartTrainingCommand {
-        run_name: request.run_name,
-        dataset_id: request.dataset_id,
-        policy,
-        query: request.sql,
-        state_column: request.state_column,
-        action_column: request.action_column,
-        device: request.device,
-        steps: request.steps,
-        batch_size: request.batch_size,
-        validation_split: request.validation_split,
-        learning_rate: request.learning_rate,
-        checkpoint_every: request.checkpoint_every,
-        chunk_size: request.chunk_size,
-        seed: request.seed,
-        act,
-    }
+    let request_act = request.act();
+    let input = ActTrainingInputSettings::new(
+        request_act.camera_streams().to_vec(),
+        (request_act.image_width(), request_act.image_height()),
+        request_act.video_decoder(),
+    )
+    .with_pretrained_backbone(request_act.pretrained_backbone());
+    let model = ActTrainingModelSettings::new(
+        request_act.hidden_dim(),
+        request_act.latent_dim(),
+        request_act.attention_heads(),
+    )
+    .with_feedforward(request_act.feedforward_dim(), request_act.kl_weight());
+    let layers = ActTrainingLayerSettings::new(
+        request_act.encoder_layers(),
+        request_act.vae_encoder_layers(),
+        request_act.decoder_layers(),
+    );
+    let execution = TrainingExecutionSettings::new(
+        request.device(),
+        TrainingProgressSettings::new(
+            request.steps(),
+            request.batch_size(),
+            request.validation_split(),
+        ),
+        ActTrainingSettings::new(input, model, layers),
+    )
+    .with_schedule(
+        TrainingOptimizerSettings::new(request.learning_rate(), request.seed()),
+        TrainingCheckpointSettings::new(request.checkpoint_every(), request.chunk_size()),
+    );
+    StartTrainingCommand::new(
+        TrainingCommandIdentity::new(request.run_name(), request.dataset_id(), policy),
+        TrainingDataSettings::new(
+            request.sql(),
+            request.state_column(),
+            request.action_column(),
+        ),
+        execution,
+    )
 }
 
 fn training_request(command: StartTrainingCommand) -> StartTrainingRequest {
-    let policy = match command.policy {
+    let policy = match command.policy() {
         CapabilityTrainingPolicy::Act => ContractTrainingPolicy::Act,
     };
-    StartTrainingRequest {
-        run_name: command.run_name,
-        dataset_id: command.dataset_id,
-        policy,
-        sql: command.query,
-        state_column: command.state_column,
-        action_column: command.action_column,
-        device: command.device,
-        steps: command.steps,
-        batch_size: command.batch_size,
-        validation_split: command.validation_split,
-        learning_rate: command.learning_rate,
-        checkpoint_every: command.checkpoint_every,
-        chunk_size: command.chunk_size,
-        seed: command.seed,
-        act: spiral_robotics_api::training::ActTrainingConfig {
-            camera_streams: command.act.camera_streams,
-            image_width: command.act.image_width,
-            image_height: command.act.image_height,
-            video_decoder: command.act.video_decoder,
-            pretrained_backbone: command.act.pretrained_backbone,
-            hidden_dim: command.act.hidden_dim,
-            latent_dim: command.act.latent_dim,
-            encoder_layers: command.act.encoder_layers,
-            vae_encoder_layers: command.act.vae_encoder_layers,
-            decoder_layers: command.act.decoder_layers,
-            attention_heads: command.act.attention_heads,
-            feedforward_dim: command.act.feedforward_dim,
-            kl_weight: command.act.kl_weight,
-        },
-    }
+    let selection = spiral_robotics_api::training::TrainingDataSelection::new(
+        command.run_name(),
+        command.dataset_id(),
+        command.query(),
+    )
+    .with_policy(policy)
+    .with_columns(command.state_column(), command.action_column())
+    .with_device(command.device());
+    let optimization = spiral_robotics_api::training::TrainingOptimizationConfig::new(
+        command.steps(),
+        command.batch_size(),
+        command.learning_rate(),
+    )
+    .with_validation_split(command.validation_split())
+    .with_checkpoint_schedule(command.checkpoint_every(), command.chunk_size())
+    .with_seed(command.seed());
+    let act = command.act();
+    let act_input = spiral_robotics_api::training::ActInputConfig::new(
+        act.camera_streams().to_vec(),
+        (act.image_width(), act.image_height()),
+        act.video_decoder(),
+    )
+    .with_pretrained_backbone(act.pretrained_backbone());
+    let layer_counts = spiral_robotics_api::training::ActLayerCounts::new(
+        act.encoder_layers(),
+        act.vae_encoder_layers(),
+        act.decoder_layers(),
+    );
+    let architecture = spiral_robotics_api::training::ActArchitectureConfig::new(
+        act.hidden_dim(),
+        act.latent_dim(),
+        layer_counts,
+    );
+    let attention = spiral_robotics_api::training::ActAttentionConfig::new(
+        act.attention_heads(),
+        act.feedforward_dim(),
+        act.kl_weight(),
+    );
+    StartTrainingRequest::new(
+        selection,
+        optimization,
+        spiral_robotics_api::training::ActTrainingConfig::new(act_input, architecture, attention),
+    )
 }
 
 fn rollout_command(request: StartRolloutRequest) -> RolloutRequest {
-    RolloutRequest {
-        run_id: request.run_id,
-        checkpoint_step: request.checkpoint_step,
-        robot: request.robot,
-        duration_seconds: request.duration_seconds,
-    }
+    RolloutRequest::new(
+        request.run_id().to_owned(),
+        request.checkpoint_step(),
+        request.robot().to_owned(),
+    )
+    .with_duration(request.duration_seconds())
 }
 
 fn rollout_request(command: RolloutRequest) -> StartRolloutRequest {
-    StartRolloutRequest {
-        run_id: command.run_id,
-        checkpoint_step: command.checkpoint_step,
-        robot: command.robot,
-        duration_seconds: command.duration_seconds,
-    }
+    StartRolloutRequest::new(
+        command.run_id().to_owned(),
+        command.checkpoint_step(),
+        command.robot().to_owned(),
+    )
+    .with_duration(command.duration_seconds())
 }
 
 fn capability_training_phase(
@@ -225,232 +254,265 @@ fn contract_training_phase(
 }
 
 pub(super) fn capability_training_run(run: TrainingRun) -> CapabilityTrainingRun {
-    CapabilityTrainingRun {
-        id: run.id,
-        config: training_command(run.config),
-        source: CapabilityTrainingSource {
-            dataset_id: run.source.dataset_id,
-        },
-        phase: capability_training_phase(run.phase),
-        current_step: run.current_step,
-        started_ms: run.started_ms,
-        finished_ms: run.finished_ms,
-        message: run.message,
-        metrics: run
-            .metrics
-            .into_iter()
-            .map(|metric| CapabilityTrainingMetric {
-                step: metric.step,
-                train_loss: metric.train_loss,
-                validation_loss: metric.validation_loss,
-                learning_rate: metric.learning_rate,
-                transfer_bytes_per_second: metric.transfer_bytes_per_second,
-                examples_per_second: metric.examples_per_second,
-                cpu_percent: metric.cpu_percent,
-                gpu_percent: metric.gpu_percent,
-                memory_bytes: metric.memory_bytes,
-                loader_ms: metric.loader_ms,
-                batch_encode_ms: metric.arrow_encode_ms,
-                upload_ms: metric.upload_ms,
-                device_copy_ms: metric.device_copy_ms,
-                model_ms: metric.model_ms,
-                elapsed_seconds: metric.elapsed_seconds,
-                event: metric.event,
-            })
-            .collect(),
-        checkpoints: run
-            .checkpoints
-            .into_iter()
-            .map(|checkpoint| CapabilityTrainingCheckpoint {
-                step: checkpoint.step,
-                created_ms: checkpoint.created_ms,
-                validation_loss: checkpoint.validation_loss,
-                byte_size: checkpoint.byte_size,
-                inference_ready: checkpoint.inference_ready,
-                recommended_action_steps: checkpoint.recommended_action_steps,
-                sample_hz: checkpoint.sample_hz,
-            })
-            .collect(),
-        logs: run.logs,
-    }
+    let metrics = run
+        .metrics()
+        .iter()
+        .map(|metric| {
+            let progress = TrainingMetricProgress::new(
+                metric.step(),
+                metric.train_loss(),
+                metric.validation_loss(),
+            )
+            .with_event(metric.learning_rate(), metric.event().map(str::to_owned));
+            let throughput = TrainingMetricThroughput::new(
+                metric.transfer_bytes_per_second(),
+                metric.examples_per_second(),
+            );
+            let resources = TrainingMetricResources::new(
+                metric.cpu_percent(),
+                metric.gpu_percent(),
+                metric.memory_bytes(),
+            );
+            let timings = TrainingMetricTimings::new(
+                metric.loader_ms(),
+                metric.arrow_encode_ms(),
+                metric.upload_ms(),
+            )
+            .with_execution(metric.device_copy_ms(), metric.model_ms())
+            .elapsed(metric.elapsed_seconds());
+            CapabilityTrainingMetric::new(progress, throughput, resources).with_timings(timings)
+        })
+        .collect();
+    let checkpoints = run
+        .checkpoints()
+        .iter()
+        .map(|checkpoint| {
+            CapabilityTrainingCheckpoint::new(checkpoint.step(), checkpoint.created_ms())
+                .with_validation_loss(checkpoint.validation_loss())
+                .with_artifact(checkpoint.byte_size(), checkpoint.inference_ready())
+                .with_rollout(
+                    checkpoint.recommended_action_steps(),
+                    checkpoint.sample_hz(),
+                )
+        })
+        .collect();
+    CapabilityTrainingRun::new(
+        TrainingRunIdentity::new(
+            run.id(),
+            training_command(run.config().clone()),
+            CapabilityTrainingSource::new(run.source().dataset_id()),
+        ),
+        TrainingRunState::new(
+            capability_training_phase(run.phase()),
+            run.current_step(),
+            run.started_ms(),
+        )
+        .finished(run.finished_ms(), run.message().map(str::to_owned)),
+        TrainingRunHistory::new(metrics, checkpoints, run.logs().to_vec()),
+    )
 }
 
 pub(super) fn contract_training_run(run: CapabilityTrainingRun) -> TrainingRun {
-    TrainingRun {
-        id: run.id,
-        config: training_request(run.config),
-        source: spiral_robotics_api::training::TrainingSource {
-            dataset_id: run.source.dataset_id,
-        },
-        phase: contract_training_phase(run.phase),
-        current_step: run.current_step,
-        started_ms: run.started_ms,
-        finished_ms: run.finished_ms,
-        message: run.message,
-        metrics: run
-            .metrics
-            .into_iter()
-            .map(
-                |metric| spiral_robotics_api::training::TrainingMetricPoint {
-                    step: metric.step,
-                    train_loss: metric.train_loss,
-                    validation_loss: metric.validation_loss,
-                    learning_rate: metric.learning_rate,
-                    transfer_bytes_per_second: metric.transfer_bytes_per_second,
-                    examples_per_second: metric.examples_per_second,
-                    cpu_percent: metric.cpu_percent,
-                    gpu_percent: metric.gpu_percent,
-                    memory_bytes: metric.memory_bytes,
-                    loader_ms: metric.loader_ms,
-                    arrow_encode_ms: metric.batch_encode_ms,
-                    upload_ms: metric.upload_ms,
-                    device_copy_ms: metric.device_copy_ms,
-                    model_ms: metric.model_ms,
-                    elapsed_seconds: metric.elapsed_seconds,
-                    event: metric.event,
-                },
+    let metrics = run
+        .metrics()
+        .iter()
+        .map(|metric| {
+            let progress = spiral_robotics_api::training::TrainingMetricProgress::new(
+                metric.step(),
+                metric.train_loss(),
+                metric.learning_rate(),
             )
-            .collect(),
-        checkpoints: run
-            .checkpoints
-            .into_iter()
-            .map(
-                |checkpoint| spiral_robotics_api::training::TrainingCheckpoint {
-                    step: checkpoint.step,
-                    created_ms: checkpoint.created_ms,
-                    validation_loss: checkpoint.validation_loss,
-                    byte_size: checkpoint.byte_size,
-                    inference_ready: checkpoint.inference_ready,
-                    recommended_action_steps: checkpoint.recommended_action_steps,
-                    sample_hz: checkpoint.sample_hz,
-                },
+            .with_validation_loss(metric.validation_loss())
+            .with_timeline(metric.elapsed_seconds(), metric.event().map(str::to_owned));
+            let resources = spiral_robotics_api::training::TrainingResourceMetrics::new(
+                metric.transfer_bytes_per_second(),
+                metric.examples_per_second(),
             )
-            .collect(),
-        logs: run.logs,
-    }
+            .with_utilization(metric.cpu_percent(), metric.gpu_percent())
+            .with_memory_bytes(metric.memory_bytes());
+            let timings = spiral_robotics_api::training::TrainingStageTimings::new(
+                metric.loader_ms(),
+                metric.batch_encode_ms(),
+                metric.upload_ms(),
+            )
+            .with_runtime(metric.device_copy_ms(), metric.model_ms());
+            spiral_robotics_api::training::TrainingMetricPoint::new(progress, resources, timings)
+        })
+        .collect();
+    let checkpoints = run
+        .checkpoints()
+        .iter()
+        .map(|checkpoint| {
+            spiral_robotics_api::training::TrainingCheckpoint::new(
+                checkpoint.step(),
+                checkpoint.created_ms(),
+            )
+            .with_validation_loss(checkpoint.validation_loss())
+            .with_artifact(checkpoint.byte_size(), checkpoint.inference_ready())
+            .with_rollout(
+                checkpoint.recommended_action_steps(),
+                checkpoint.sample_hz(),
+            )
+        })
+        .collect();
+    TrainingRun::new(
+        spiral_robotics_api::training::TrainingRunIdentity::new(
+            run.id(),
+            training_request(run.config().clone()),
+            spiral_robotics_api::training::TrainingSource::new(run.source().dataset_id()),
+        ),
+        spiral_robotics_api::training::TrainingRunLifecycle::new(
+            contract_training_phase(run.phase()),
+            run.current_step(),
+            run.started_ms(),
+        )
+        .with_completion(run.finished_ms(), run.message().map(str::to_owned)),
+        spiral_robotics_api::training::TrainingRunHistory::new(
+            metrics,
+            checkpoints,
+            run.logs().to_vec(),
+        ),
+    )
 }
 
 pub(super) fn capability_training_snapshot(
     snapshot: TrainingSnapshot,
 ) -> CapabilityTrainingSnapshot {
-    CapabilityTrainingSnapshot {
-        readiness: CapabilityTrainingReadiness {
-            ready: snapshot.readiness.ready,
-            spiral_ready: snapshot.readiness.spiral_ready,
-            runtime: snapshot.readiness.runtime.map(|runtime| {
-                crate::training::service::TrainingRuntimeInfo {
-                    id: runtime.id,
-                    display_name: runtime.display_name,
-                    runtime: runtime.runtime,
-                    devices: runtime.devices,
-                }
-            }),
-            summary: snapshot.readiness.summary,
-        },
-        runs: snapshot
-            .runs
-            .into_iter()
+    CapabilityTrainingSnapshot::new(
+        CapabilityTrainingReadiness::new(
+            snapshot.readiness().ready(),
+            snapshot.readiness().spiral_ready(),
+            snapshot.readiness().summary(),
+        )
+        .with_runtime(snapshot.readiness().runtime().map(|runtime| {
+            crate::training::service::TrainingRuntimeInfo::new(
+                runtime.id(),
+                runtime.display_name(),
+                runtime.runtime(),
+            )
+            .with_devices(runtime.devices().to_vec())
+        })),
+        snapshot
+            .runs()
+            .iter()
+            .cloned()
             .map(capability_training_run)
             .collect(),
-    }
+    )
 }
 
 pub(super) fn contract_training_snapshot(snapshot: CapabilityTrainingSnapshot) -> TrainingSnapshot {
-    TrainingSnapshot {
-        readiness: spiral_robotics_api::training::TrainingReadiness {
-            ready: snapshot.readiness.ready,
-            spiral_ready: snapshot.readiness.spiral_ready,
-            runtime: snapshot.readiness.runtime.map(|runtime| {
-                spiral_robotics_api::training::TrainingRuntimeInfo {
-                    id: runtime.id,
-                    display_name: runtime.display_name,
-                    runtime: runtime.runtime,
-                    devices: runtime.devices,
-                }
-            }),
-            summary: snapshot.readiness.summary,
-        },
-        runs: snapshot
-            .runs
-            .into_iter()
+    let runtime = snapshot.readiness().runtime().map(|runtime| {
+        spiral_robotics_api::training::TrainingRuntimeInfo::new(
+            runtime.id().to_owned(),
+            runtime.display_name().to_owned(),
+            runtime.runtime().to_owned(),
+        )
+        .with_devices(runtime.devices().to_vec())
+    });
+    let readiness = spiral_robotics_api::training::TrainingReadiness::new(
+        snapshot.readiness().ready(),
+        snapshot.readiness().spiral_ready(),
+        snapshot.readiness().summary(),
+    )
+    .with_runtime(runtime);
+    TrainingSnapshot::new(
+        readiness,
+        snapshot
+            .runs()
+            .iter()
+            .cloned()
             .map(contract_training_run)
             .collect(),
-    }
+    )
 }
 
 pub(super) fn capability_rollout_snapshot(snapshot: RolloutSnapshot) -> CapabilityRolloutSnapshot {
-    CapabilityRolloutSnapshot {
-        phase: match snapshot.phase {
-            spiral_robotics_api::rollout::RolloutPhase::Idle => CapabilityRolloutPhase::Idle,
-            spiral_robotics_api::rollout::RolloutPhase::Loading => CapabilityRolloutPhase::Loading,
-            spiral_robotics_api::rollout::RolloutPhase::WarmingUp => {
-                CapabilityRolloutPhase::WarmingUp
-            }
-            spiral_robotics_api::rollout::RolloutPhase::Running => CapabilityRolloutPhase::Running,
-            spiral_robotics_api::rollout::RolloutPhase::Stopping => {
-                CapabilityRolloutPhase::Stopping
-            }
-            spiral_robotics_api::rollout::RolloutPhase::Failed => CapabilityRolloutPhase::Failed,
-        },
-        session_id: snapshot.session_id,
-        run_id: snapshot.run_id,
-        checkpoint_step: snapshot.checkpoint_step,
-        robot: snapshot.robot,
-        duration_seconds: snapshot.duration_seconds,
-        started_ms: snapshot.started_ms,
-        finished_ms: snapshot.finished_ms,
-        message: snapshot.message,
-        warning: snapshot.warning,
-        metrics: CapabilityRolloutMetrics {
-            inference_count: snapshot.metrics.inference_count,
-            command_count: snapshot.metrics.command_count,
-            missed_deadlines: snapshot.metrics.missed_deadlines,
-            last_latency_ms: snapshot.metrics.last_latency_ms,
-            last_model_ms: snapshot.metrics.last_model_ms,
-            mean_latency_ms: snapshot.metrics.mean_latency_ms,
-            max_latency_ms: snapshot.metrics.max_latency_ms,
-        },
-    }
+    let phase = match snapshot.phase() {
+        spiral_robotics_api::rollout::RolloutPhase::Idle => CapabilityRolloutPhase::Idle,
+        spiral_robotics_api::rollout::RolloutPhase::Loading => CapabilityRolloutPhase::Loading,
+        spiral_robotics_api::rollout::RolloutPhase::WarmingUp => CapabilityRolloutPhase::WarmingUp,
+        spiral_robotics_api::rollout::RolloutPhase::Running => CapabilityRolloutPhase::Running,
+        spiral_robotics_api::rollout::RolloutPhase::Stopping => CapabilityRolloutPhase::Stopping,
+        spiral_robotics_api::rollout::RolloutPhase::Failed => CapabilityRolloutPhase::Failed,
+    };
+    CapabilityRolloutSnapshot::new(
+        crate::rollout::service::RolloutIdentity::new(
+            snapshot.session_id().map(str::to_owned),
+            snapshot.run_id().map(str::to_owned),
+            snapshot.checkpoint_step(),
+        )
+        .with_target(
+            snapshot.robot().map(str::to_owned),
+            snapshot.duration_seconds(),
+        ),
+        crate::rollout::service::RolloutLifecycle::new(
+            phase,
+            snapshot.started_ms(),
+            snapshot.finished_ms(),
+        )
+        .with_messages(
+            snapshot.message().map(str::to_owned),
+            snapshot.warning().map(str::to_owned),
+        ),
+        CapabilityRolloutMetrics::new(
+            snapshot.metrics().inference_count(),
+            snapshot.metrics().command_count(),
+            snapshot.metrics().missed_deadlines(),
+        )
+        .with_latest_timings(
+            snapshot.metrics().last_latency_ms(),
+            snapshot.metrics().last_model_ms(),
+        )
+        .with_latency_summary(
+            snapshot.metrics().mean_latency_ms(),
+            snapshot.metrics().max_latency_ms(),
+        ),
+    )
 }
 
 pub(super) fn contract_rollout_snapshot(snapshot: CapabilityRolloutSnapshot) -> RolloutSnapshot {
-    RolloutSnapshot {
-        phase: match snapshot.phase {
-            CapabilityRolloutPhase::Idle => spiral_robotics_api::rollout::RolloutPhase::Idle,
-            CapabilityRolloutPhase::Loading => spiral_robotics_api::rollout::RolloutPhase::Loading,
-            CapabilityRolloutPhase::WarmingUp => {
-                spiral_robotics_api::rollout::RolloutPhase::WarmingUp
-            }
-            CapabilityRolloutPhase::Running => spiral_robotics_api::rollout::RolloutPhase::Running,
-            CapabilityRolloutPhase::Stopping => {
-                spiral_robotics_api::rollout::RolloutPhase::Stopping
-            }
-            CapabilityRolloutPhase::Failed => spiral_robotics_api::rollout::RolloutPhase::Failed,
-        },
-        session_id: snapshot.session_id,
-        run_id: snapshot.run_id,
-        checkpoint_step: snapshot.checkpoint_step,
-        robot: snapshot.robot,
-        duration_seconds: snapshot.duration_seconds,
-        started_ms: snapshot.started_ms,
-        finished_ms: snapshot.finished_ms,
-        message: snapshot.message,
-        warning: snapshot.warning,
-        metrics: spiral_robotics_api::rollout::RolloutMetrics {
-            inference_count: snapshot.metrics.inference_count,
-            command_count: snapshot.metrics.command_count,
-            missed_deadlines: snapshot.metrics.missed_deadlines,
-            last_latency_ms: snapshot.metrics.last_latency_ms,
-            last_model_ms: snapshot.metrics.last_model_ms,
-            mean_latency_ms: snapshot.metrics.mean_latency_ms,
-            max_latency_ms: snapshot.metrics.max_latency_ms,
-        },
-    }
+    let phase = match snapshot.phase() {
+        CapabilityRolloutPhase::Idle => spiral_robotics_api::rollout::RolloutPhase::Idle,
+        CapabilityRolloutPhase::Loading => spiral_robotics_api::rollout::RolloutPhase::Loading,
+        CapabilityRolloutPhase::WarmingUp => spiral_robotics_api::rollout::RolloutPhase::WarmingUp,
+        CapabilityRolloutPhase::Running => spiral_robotics_api::rollout::RolloutPhase::Running,
+        CapabilityRolloutPhase::Stopping => spiral_robotics_api::rollout::RolloutPhase::Stopping,
+        CapabilityRolloutPhase::Failed => spiral_robotics_api::rollout::RolloutPhase::Failed,
+    };
+    RolloutSnapshot::new(
+        spiral_robotics_api::rollout::RolloutIdentity::new(
+            snapshot.session_id().map(str::to_owned),
+            snapshot.run_id().map(str::to_owned),
+            snapshot.robot().map(str::to_owned),
+        )
+        .with_checkpoint(snapshot.checkpoint_step())
+        .with_duration(snapshot.duration_seconds()),
+        spiral_robotics_api::rollout::RolloutLifecycle::new(phase, snapshot.started_ms())
+            .with_finished_ms(snapshot.finished_ms())
+            .with_messages(
+                snapshot.message().map(str::to_owned),
+                snapshot.warning().map(str::to_owned),
+            ),
+        spiral_robotics_api::rollout::RolloutMetrics::new(
+            snapshot.metrics().inference_count(),
+            snapshot.metrics().command_count(),
+            snapshot.metrics().missed_deadlines(),
+        )
+        .with_latest_timings(
+            snapshot.metrics().last_latency_ms(),
+            snapshot.metrics().last_model_ms(),
+        )
+        .with_latency_summary(
+            snapshot.metrics().mean_latency_ms(),
+            snapshot.metrics().max_latency_ms(),
+        ),
+    )
 }
 
 async fn list_training_runs(State(state): State<AppState>) -> Json<TrainingSnapshot> {
     Json(contract_training_snapshot(
-        training_application::list_training(state.training.as_ref()),
+        training_application::list_training(state.training().as_ref()),
     ))
 }
 
@@ -459,7 +521,7 @@ async fn start_training(
     Json(request): Json<StartTrainingRequest>,
 ) -> Result<(StatusCode, Json<TrainingRun>), Failure> {
     let run =
-        training_application::start_training(state.training.as_ref(), training_command(request))
+        training_application::start_training(state.training().as_ref(), training_command(request))
             .await?;
     Ok((StatusCode::CREATED, Json(contract_training_run(run))))
 }
@@ -468,7 +530,7 @@ async fn stop_training(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, Failure> {
-    training_application::stop_training(state.training.as_ref(), &id)?;
+    training_application::stop_training(state.training().as_ref(), &id)?;
     Ok(StatusCode::ACCEPTED)
 }
 
@@ -476,14 +538,19 @@ async fn delete_training(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, Failure> {
-    let rollout = RolloutManager::snapshot(state.rollout.as_ref());
-    let activity = TrainingRunActivity {
-        rollout: rollout.phase.active().then_some(rollout.run_id).flatten(),
-    };
+    let rollout = RolloutManager::snapshot(state.rollout().as_ref());
+    let activity = TrainingRunActivity::new(
+        rollout
+            .phase()
+            .active()
+            .then_some(rollout.run_id())
+            .flatten()
+            .map(str::to_owned),
+    );
     training_application::delete_training(
-        state.training.as_ref(),
+        state.training().as_ref(),
         activity,
-        DeleteTrainingRunCommand { run_id: id },
+        DeleteTrainingRunCommand::new(id),
     )
     .await?;
     Ok(StatusCode::NO_CONTENT)
@@ -491,7 +558,7 @@ async fn delete_training(
 
 async fn get_rollout(State(state): State<AppState>) -> Json<RolloutSnapshot> {
     Json(contract_rollout_snapshot(rollout_application::snapshot(
-        &RolloutHttpAdapter(state.rollout.clone()),
+        &RolloutHttpAdapter::new(state.rollout().clone()),
     )))
 }
 
@@ -500,9 +567,10 @@ async fn start_rollout(
     Json(request): Json<StartRolloutRequest>,
 ) -> Result<(StatusCode, Json<RolloutSnapshot>), Failure> {
     let request =
-        training_application::admit_rollout(state.training.as_ref(), rollout_command(request))?;
+        training_application::admit_rollout(state.training().as_ref(), rollout_command(request))?;
     let snapshot =
-        rollout_application::start(&RolloutHttpAdapter(state.rollout.clone()), request).await?;
+        rollout_application::start(&RolloutHttpAdapter::new(state.rollout().clone()), request)
+            .await?;
     Ok((
         StatusCode::ACCEPTED,
         Json(contract_rollout_snapshot(snapshot)),
@@ -510,6 +578,6 @@ async fn start_rollout(
 }
 
 async fn stop_rollout(State(state): State<AppState>) -> Result<StatusCode, Failure> {
-    rollout_application::stop(&RolloutHttpAdapter(state.rollout.clone())).await?;
+    rollout_application::stop(&RolloutHttpAdapter::new(state.rollout().clone())).await?;
     Ok(StatusCode::ACCEPTED)
 }

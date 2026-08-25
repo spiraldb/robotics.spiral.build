@@ -81,32 +81,180 @@ impl MotorFaults {
 /// adapter can faithfully represent hardware that supplies fewer readings.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct MotorSample {
-    pub(crate) position: i64,
+    position: i64,
+    mechanical: MotorMechanicalSample,
+    electrical: MotorElectricalSample,
+    faults: MotorFaults,
+}
+
+/// Motion and load readings captured in one motor transaction.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct MotorMechanicalSample {
     /// Shaft speed in degrees per second, signed.
-    pub(crate) speed_degrees_per_second: Option<f64>,
+    speed_degrees_per_second: Option<f64>,
     /// Load as a signed fraction of the motor's rated torque.
-    pub(crate) load: Option<f64>,
-    pub(crate) electrical: MotorElectricalSample,
-    pub(crate) moving: Option<bool>,
-    pub(crate) faults: MotorFaults,
+    load: Option<f64>,
+    moving: Option<bool>,
 }
 
 /// Electrical and thermal readings captured in the same motor transaction.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct MotorElectricalSample {
-    pub(crate) voltage_volts: Option<f64>,
-    pub(crate) temperature_celsius: Option<f64>,
-    pub(crate) current_amps: Option<f64>,
+    voltage_volts: Option<f64>,
+    temperature_celsius: Option<f64>,
+    current_amps: Option<f64>,
 }
 
 /// Limits a motor controller enforces on itself.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct MotorLimits {
-    pub(crate) max_temperature_celsius: Option<f64>,
-    pub(crate) min_voltage_volts: Option<f64>,
-    pub(crate) max_voltage_volts: Option<f64>,
+    max_temperature_celsius: Option<f64>,
+    voltage: MotorVoltageLimits,
     /// Configured torque ceiling as a fraction of the motor's rated torque.
-    pub(crate) max_load: Option<f64>,
+    max_load: Option<f64>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct MotorVoltageLimits {
+    minimum_volts: Option<f64>,
+    maximum_volts: Option<f64>,
+}
+
+impl MotorSample {
+    pub(crate) fn new(
+        position: i64,
+        mechanical: MotorMechanicalSample,
+        electrical: MotorElectricalSample,
+    ) -> Self {
+        Self {
+            position,
+            mechanical,
+            electrical,
+            faults: MotorFaults::default(),
+        }
+    }
+
+    /// A reading carrying only a position, from a bus that answers nothing else.
+    pub(crate) fn at(position: i64) -> Self {
+        Self::new(
+            position,
+            MotorMechanicalSample::default(),
+            MotorElectricalSample::default(),
+        )
+    }
+
+    pub(crate) fn with_faults(mut self, faults: MotorFaults) -> Self {
+        self.faults = faults;
+        self
+    }
+
+    pub(crate) fn position(self) -> i64 {
+        self.position
+    }
+
+    pub(crate) fn mechanical(self) -> MotorMechanicalSample {
+        self.mechanical
+    }
+
+    pub(crate) fn electrical(self) -> MotorElectricalSample {
+        self.electrical
+    }
+
+    pub(crate) fn faults(self) -> MotorFaults {
+        self.faults
+    }
+}
+
+impl MotorMechanicalSample {
+    pub(crate) fn new(
+        speed_degrees_per_second: Option<f64>,
+        load: Option<f64>,
+        moving: Option<bool>,
+    ) -> Self {
+        Self {
+            speed_degrees_per_second,
+            load,
+            moving,
+        }
+    }
+
+    pub(crate) fn speed_degrees_per_second(self) -> Option<f64> {
+        self.speed_degrees_per_second
+    }
+
+    pub(crate) fn load(self) -> Option<f64> {
+        self.load
+    }
+
+    #[cfg(test)]
+    pub(crate) fn moving(self) -> Option<bool> {
+        self.moving
+    }
+}
+
+impl MotorElectricalSample {
+    pub(crate) fn new(
+        voltage_volts: Option<f64>,
+        temperature_celsius: Option<f64>,
+        current_amps: Option<f64>,
+    ) -> Self {
+        Self {
+            voltage_volts,
+            temperature_celsius,
+            current_amps,
+        }
+    }
+
+    pub(crate) fn voltage_volts(self) -> Option<f64> {
+        self.voltage_volts
+    }
+
+    pub(crate) fn temperature_celsius(self) -> Option<f64> {
+        self.temperature_celsius
+    }
+
+    pub(crate) fn current_amps(self) -> Option<f64> {
+        self.current_amps
+    }
+}
+
+impl MotorVoltageLimits {
+    pub(crate) fn new(minimum_volts: Option<f64>, maximum_volts: Option<f64>) -> Self {
+        Self {
+            minimum_volts,
+            maximum_volts,
+        }
+    }
+}
+
+impl MotorLimits {
+    pub(crate) fn new(
+        max_temperature_celsius: Option<f64>,
+        voltage: MotorVoltageLimits,
+        max_load: Option<f64>,
+    ) -> Self {
+        Self {
+            max_temperature_celsius,
+            voltage,
+            max_load,
+        }
+    }
+
+    pub(crate) fn max_temperature_celsius(self) -> Option<f64> {
+        self.max_temperature_celsius
+    }
+
+    pub(crate) fn min_voltage_volts(self) -> Option<f64> {
+        self.voltage.minimum_volts
+    }
+
+    pub(crate) fn max_voltage_volts(self) -> Option<f64> {
+        self.voltage.maximum_volts
+    }
+
+    pub(crate) fn max_load(self) -> Option<f64> {
+        self.max_load
+    }
 }
 
 /// Something went wrong talking to a motor bus.
@@ -252,12 +400,11 @@ const SIMULATED_FULL_LOAD_ERROR: f64 = 400.0;
 /// Limits a simulated motor claims for itself, in the shape a real one reports.
 #[cfg(test)]
 fn simulated_limits() -> MotorLimits {
-    MotorLimits {
-        max_temperature_celsius: Some(70.0),
-        min_voltage_volts: Some(4.5),
-        max_voltage_volts: Some(9.0),
-        max_load: Some(1.0),
-    }
+    MotorLimits::new(
+        Some(70.0),
+        MotorVoltageLimits::new(Some(4.5), Some(9.0)),
+        Some(1.0),
+    )
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -391,21 +538,22 @@ impl MotorBus for SimulatedBus {
                 let travelled = motor.position - motor.previous_position;
                 (
                     name.clone(),
-                    MotorSample {
-                        position: motor.position,
-                        speed_degrees_per_second: Some(
-                            spiral_robotics_core::arm::counts_to_degrees(travelled)
-                                * SIMULATED_READS_PER_SECOND,
+                    MotorSample::new(
+                        motor.position,
+                        MotorMechanicalSample::new(
+                            Some(
+                                spiral_robotics_core::arm::counts_to_degrees(travelled)
+                                    * SIMULATED_READS_PER_SECOND,
+                            ),
+                            Some(motor.load),
+                            Some(travelled != 0),
                         ),
-                        load: Some(motor.load),
-                        electrical: MotorElectricalSample {
-                            voltage_volts: Some(SIMULATED_VOLTS),
-                            temperature_celsius: Some(motor.temperature.round()),
-                            current_amps: Some(motor.load.abs() * SIMULATED_STALL_AMPS),
-                        },
-                        moving: Some(travelled != 0),
-                        faults: MotorFaults::default(),
-                    },
+                        MotorElectricalSample::new(
+                            Some(SIMULATED_VOLTS),
+                            Some(motor.temperature.round()),
+                            Some(motor.load.abs() * SIMULATED_STALL_AMPS),
+                        ),
+                    ),
                 )
             })
             .collect())
@@ -550,11 +698,11 @@ mod tests {
         let resting = bus.read_samples().unwrap();
         let cold = resting["shoulder_pan"];
 
-        assert_eq!(cold.load, Some(0.0));
-        assert_eq!(cold.electrical.current_amps, Some(0.0));
-        assert_eq!(cold.electrical.voltage_volts, Some(SIMULATED_VOLTS));
+        assert_eq!(cold.mechanical().load(), Some(0.0));
+        assert_eq!(cold.electrical().current_amps(), Some(0.0));
+        assert_eq!(cold.electrical().voltage_volts(), Some(SIMULATED_VOLTS));
         assert_eq!(
-            cold.electrical.temperature_celsius,
+            cold.electrical().temperature_celsius(),
             Some(SIMULATED_AMBIENT_CELSIUS.round())
         );
 
@@ -573,16 +721,16 @@ mod tests {
         // Load carries the direction the motor is pushing, so a joint on its
         // way back down reports a negative one. Effort is its magnitude.
         assert!(
-            hot.load.unwrap().abs() > SIMULATED_HOLDING_LOAD,
+            hot.mechanical().load().unwrap().abs() > SIMULATED_HOLDING_LOAD,
             "a motor under load reports more than its holding effort"
         );
-        assert!(hot.electrical.current_amps.unwrap() > 0.0);
+        assert!(hot.electrical().current_amps().unwrap() > 0.0);
         assert!(
-            hot.electrical.temperature_celsius.unwrap() > SIMULATED_AMBIENT_CELSIUS,
+            hot.electrical().temperature_celsius().unwrap() > SIMULATED_AMBIENT_CELSIUS,
             "a working motor warms above ambient"
         );
         assert!(
-            hot.electrical.temperature_celsius.unwrap() < SIMULATED_DRIVEN_CELSIUS,
+            hot.electrical().temperature_celsius().unwrap() < SIMULATED_DRIVEN_CELSIUS,
             "and does not arrive there instantly"
         );
     }
@@ -592,7 +740,7 @@ mod tests {
         let limits = SimulatedBus::new(&specs(), false).read_limits();
 
         assert_eq!(limits.len(), 3);
-        assert_eq!(limits["elbow_flex"].max_temperature_celsius, Some(70.0));
+        assert_eq!(limits["elbow_flex"].max_temperature_celsius(), Some(70.0));
     }
 
     #[test]

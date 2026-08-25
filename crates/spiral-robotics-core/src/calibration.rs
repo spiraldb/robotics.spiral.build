@@ -69,11 +69,6 @@ impl MotorSpec {
     pub fn model(&self) -> Option<&str> {
         self.model.as_deref()
     }
-
-    pub fn with_direction(mut self, direction: MotorDirection) -> Self {
-        self.direction = direction;
-        self
-    }
 }
 
 /// Raw readings for one motor after a completed range sweep.
@@ -360,7 +355,7 @@ impl<'a> TryFrom<&'a BTreeMap<String, MotorSpec>> for MotorSpecifications<'a> {
 }
 
 impl<'a> MotorSpecifications<'a> {
-    pub const fn as_map(self) -> &'a BTreeMap<String, MotorSpec> {
+    const fn as_map(self) -> &'a BTreeMap<String, MotorSpec> {
         self.0
     }
 }
@@ -868,7 +863,7 @@ mod tests {
     #[test]
     fn direct_input_preserves_truthful_unhomed_raw_values() {
         let mut specs = two_specs();
-        *specs.get_mut("elbow").unwrap() = motor_spec(2).with_direction(MotorDirection::Reversed);
+        specs.get_mut("elbow").unwrap().direction = MotorDirection::Reversed;
         let calibration = direct_input().build(&specs).unwrap();
 
         assert_eq!(calibration.format().coordinate_space(), "unhomed_raw");

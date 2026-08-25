@@ -1,5 +1,6 @@
 use super::*;
 use crate::data::catalog_lease::{CatalogLeaseOwner, CatalogLeaseToken, CatalogMutationLease};
+use crate::recording::{RecordingDraftRequest, ReplayTrajectoryRequest};
 
 pub(super) fn router() -> Router<AppState> {
     Router::new()
@@ -54,7 +55,7 @@ impl<'a> RecordingHttpAdapter<'a> {
             .ok_or_else(|| {
                 OperationError::Internal("recording result was not presented".to_owned())
             })?;
-        if summary.id != result.episode {
+        if summary.id() != result.episode() {
             return Err(OperationError::Internal(
                 "recording presenter returned a different episode".to_owned(),
             ));
@@ -75,26 +76,26 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
     type MediaOutput = Vec<VideoAsset>;
 
     fn reserve_recording_start(&self) -> Result<Option<CatalogLeaseToken>, OperationError> {
-        reserve_recording_catalog_mutation(&self.state.catalog_lease, || {
+        reserve_recording_catalog_mutation(self.state.catalog_lease(), || {
             (
-                self.state.workflow.is_active(),
-                self.state.workflow_agent.is_active(),
+                self.state.workflow().is_active(),
+                self.state.workflow_agent().is_active(),
             )
         })
     }
 
     fn bind_recording_lease(&self, token: CatalogLeaseToken, episode: String) {
         assert!(
-            self.state.catalog_lease.bind_recording(token, episode),
+            self.state.catalog_lease().bind_recording(token, episode),
             "the admitted recording must retain its exact catalog lease"
         );
     }
 
     fn claim_recording_lease(&self) -> Result<Option<CatalogLeaseToken>, OperationError> {
-        if let Some(recording) = self.state.catalog_lease.claim_recording() {
-            return Ok(Some(recording.token));
+        if let Some(recording) = self.state.catalog_lease().claim_recording() {
+            return Ok(Some(recording.token()));
         }
-        if self.state.catalog_lease.recording_is_opening() {
+        if self.state.catalog_lease().recording_is_opening() {
             return Err(OperationError::Conflict(
                 "the recording is still opening; wait before stopping it".to_owned(),
             ));
@@ -103,54 +104,58 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
     }
 
     fn release_recording_lease(&self, token: CatalogLeaseToken) {
-        let released = self.state.catalog_lease.release(token);
+        let released = self.state.catalog_lease().release(token);
         debug_assert!(released, "recording releases its exact catalog lease once");
     }
 
     fn recording_active(&self) -> bool {
-        self.state.hardware.state().telemetry.recording.is_some()
+        self.state
+            .hardware()
+            .state()
+            .telemetry()
+            .recording()
+            .is_some()
     }
 
     fn default_teleoperation_pair(&self) -> Option<TeleoperationPair> {
         build_snapshot(self.state)
             .default_teleoperation_pair()
-            .map(|(leader, follower)| TeleoperationPair { leader, follower })
+            .map(|(leader, follower)| TeleoperationPair::new(leader, follower))
     }
 
     fn recording_context(&self) -> RecordingContext {
-        let hardware = self.state.hardware.state();
-        RecordingContext {
-            connected_arms: hardware
-                .telemetry
-                .robots
-                .iter()
-                .filter(|robot| {
-                    hardware
-                        .connections
-                        .get(&robot.id)
-                        .is_some_and(|connection| connection.connected)
-                })
-                .map(|robot| robot.id.clone())
-                .collect(),
-            sample_hz: if hardware.telemetry.target_hz > 0.0 {
-                (hardware.telemetry.target_hz * 1_000.0).round() / 1_000.0
-            } else {
-                spiral_robotics_hardware::CONTROL_HZ as f64
-            },
-            media_finalizing: self
-                .state
-                .recording_video
-                .try_lock()
-                .map_or(true, |capture| capture.is_some()),
-        }
+        let hardware = self.state.hardware().state();
+        let connected_arms = hardware
+            .telemetry()
+            .robots()
+            .iter()
+            .filter(|robot| {
+                hardware
+                    .connections()
+                    .get(robot.id())
+                    .is_some_and(|connection| connection.connected())
+            })
+            .map(|robot| robot.id().to_owned())
+            .collect();
+        let sample_hz = if hardware.telemetry().target_hz() > 0.0 {
+            (hardware.telemetry().target_hz() * 1_000.0).round() / 1_000.0
+        } else {
+            spiral_robotics_hardware::CONTROL_HZ as f64
+        };
+        let media_finalizing = self
+            .state
+            .recording_video()
+            .try_lock()
+            .map_or(true, |capture| capture.is_some());
+        RecordingContext::new(connected_arms, sample_hz, media_finalizing)
     }
 
     async fn enter_teleoperation(&self, pair: &TeleoperationPair) -> Result<(), OperationError> {
         self.state
-            .hardware
+            .hardware()
             .set_mode(ModeSelection::Teleoperate {
-                leader: pair.leader.clone(),
-                follower: pair.follower.clone(),
+                leader: pair.leader().to_owned(),
+                follower: pair.follower().to_owned(),
             })
             .await
             .map_err(OperationError::conflict)
@@ -158,7 +163,7 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
 
     async fn enter_idle(&self) -> Result<(), OperationError> {
         self.state
-            .hardware
+            .hardware()
             .set_mode(ModeSelection::Idle)
             .await
             .map_err(OperationError::conflict)
@@ -166,16 +171,13 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
 
     fn create_recording_draft(
         &self,
-        command: StartRecordingCommand,
-        source: String,
-        wanted: Vec<String>,
-        sample_hz: f64,
+        request: RecordingDraftRequest,
     ) -> Result<RecordingDraft, OperationError> {
-        create_recording_draft(self.state, command, source, wanted, sample_hz)
+        create_recording_draft(self.state, request)
     }
 
     fn draft_episode(&self, draft: &Self::RecordingDraft) -> String {
-        draft.summary.id.clone()
+        draft.summary.id().to_owned()
     }
 
     async fn start_recording_media(
@@ -191,13 +193,11 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
         draft: Self::RecordingDraft,
     ) -> Result<RecordingResult, OperationError> {
         self.state
-            .hardware
+            .hardware()
             .start_recording(draft.writer, draft.arms)
             .await
             .map_err(OperationError::conflict)?;
-        let result = RecordingResult {
-            episode: draft.summary.id.clone(),
-        };
+        let result = RecordingResult::new(draft.summary.id());
         *self.presented_recording.lock().map_err(|_| {
             OperationError::Internal("recording presenter lock poisoned".to_owned())
         })? = Some(draft.summary);
@@ -205,7 +205,7 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
     }
 
     async fn retain_recording_media(&self, capture: Option<Self::MediaCapture>) {
-        *self.state.recording_video.lock().await = capture;
+        *self.state.recording_video().lock().await = capture;
     }
 
     async fn abandon_recording_media(&self, capture: Self::MediaCapture) {
@@ -213,7 +213,7 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
     }
 
     async fn take_recording_media(&self) -> Option<Self::MediaCapture> {
-        self.state.recording_video.lock().await.take()
+        self.state.recording_video().lock().await.take()
     }
 
     fn media_episode(&self, capture: &Self::MediaCapture) -> String {
@@ -226,13 +226,11 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
     ) -> Result<RecordingResult, OperationError> {
         let summary = self
             .state
-            .hardware
-            .stop_recording(command.keep)
+            .hardware()
+            .stop_recording(command.keep())
             .await
             .map_err(OperationError::conflict)?;
-        let result = RecordingResult {
-            episode: summary.id.clone(),
-        };
+        let result = RecordingResult::new(summary.id());
         *self.presented_recording.lock().map_err(|_| {
             OperationError::Internal("recording presenter lock poisoned".to_owned())
         })? = Some(summary);
@@ -254,34 +252,34 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
     ) -> Result<(), OperationError> {
         let completed = self
             .state
-            .episodes
+            .episodes()
             .completed(&episode)
             .map_err(episode_capability_error)?;
         self.state
-            .storage
+            .storage()
             .commit_episode_blocking(&completed, &media)
             .map_err(OperationError::Internal)
     }
 
     async fn request_media_pause(&self) {
-        if let Some(capture) = self.state.recording_video.lock().await.as_ref() {
+        if let Some(capture) = self.state.recording_video().lock().await.as_ref() {
             capture.request_pause();
         }
     }
 
     async fn set_recording_paused(&self, paused: bool) -> Result<f64, OperationError> {
         self.state
-            .hardware
+            .hardware()
             .set_recording_paused(paused)
             .await
             .map_err(OperationError::conflict)
     }
 
     async fn finish_media_pause(&self) {
-        let checkpoint = if let Some(capture) = self.state.recording_video.lock().await.as_mut() {
+        let checkpoint = if let Some(capture) = self.state.recording_video().lock().await.as_mut() {
             for failure in capture.finish_pause().await {
                 self.state
-                    .cameras
+                    .cameras()
                     .note_issue(format!("paused episode video was not saved: {failure}"));
             }
             Some((capture.episode_id().to_owned(), capture.completed_assets()))
@@ -291,8 +289,8 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
         let Some((episode, media)) = checkpoint else {
             return;
         };
-        let episodes = self.state.episodes.clone();
-        let storage = self.state.storage.clone();
+        let episodes = self.state.episodes().clone();
+        let storage = self.state.storage().clone();
         let outcome = tokio::task::spawn_blocking(move || {
             let completed = episodes
                 .completed(&episode)
@@ -302,18 +300,18 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
         .await
         .unwrap_or_else(|error| Err(format!("video checkpoint task stopped: {error}")));
         if let Err(error) = outcome {
-            self.state.cameras.note_issue(format!(
+            self.state.cameras().note_issue(format!(
                 "paused episode video was not saved to SpiralDB: {error}"
             ));
         }
     }
 
     async fn resume_media(&self, active_seconds: f64) {
-        if let Some(capture) = self.state.recording_video.lock().await.as_mut()
+        if let Some(capture) = self.state.recording_video().lock().await.as_mut()
             && let Err(error) = capture.resume(active_seconds)
         {
             self.state
-                .cameras
+                .cameras()
                 .note_issue(format!("episode video could not resume: {error}"));
         }
     }
@@ -348,48 +346,56 @@ fn reserve_recording_catalog_mutation(
 impl ReplayPort for RecordingHttpAdapter<'_> {
     fn replay_episode(&self, episode: &str) -> Result<ReplayEpisode, OperationError> {
         self.state
-            .episodes
+            .episodes()
             .get(episode)
-            .map(|summary| ReplayEpisode {
-                id: summary.id,
-                arms: summary.arms.into_iter().map(|arm| arm.id).collect(),
-                sample_hz: summary.sample_hz,
+            .map(|summary| {
+                ReplayEpisode::new(
+                    summary.id(),
+                    summary
+                        .arms()
+                        .iter()
+                        .map(|arm| arm.id().to_owned())
+                        .collect(),
+                    summary.sample_hz(),
+                )
             })
             .map_err(episode_capability_error)
     }
 
     async fn load_trajectory(
         &self,
-        episode: &str,
-        source_arm: &str,
-        start_seconds: f64,
+        request: ReplayTrajectoryRequest<'_>,
     ) -> Result<ReplayTrajectory, OperationError> {
-        let episodes = self.state.episodes.clone();
-        let episode = episode.to_owned();
-        let source_arm = source_arm.to_owned();
+        let episodes = self.state.episodes().clone();
+        let episode = request.episode().to_owned();
+        let source_arm = request.source_arm().to_owned();
+        let start_seconds = request.start_seconds();
         tokio::task::spawn_blocking(move || {
             episodes.trajectory_at(&episode, ReplayRequest::new(&source_arm, start_seconds))
         })
         .await
         .map_err(|error| OperationError::Internal(error.to_string()))?
-        .map(|trajectory| ReplayTrajectory {
-            frames: trajectory.frames,
-            start_frame: trajectory.start_frame,
-            resolved_start_seconds: trajectory.resolved_start_seconds,
+        .map(|trajectory| {
+            let start_frame = trajectory.start_frame();
+            let resolved_start_seconds = trajectory.resolved_start_seconds();
+            ReplayTrajectory::new(trajectory.into_frames(), start_frame)
+                .starting_at(resolved_start_seconds)
         })
         .map_err(episode_capability_error)
     }
 
     async fn start_replay(&self, plan: ReplayPlan) -> Result<(), OperationError> {
+        let (robot, episode, frames, sample_hz, start_frame, resolved_start_seconds) =
+            plan.into_parts();
         self.state
-            .hardware
+            .hardware()
             .start_replay(
                 spiral_robotics_hardware::ReplayRequest::timeline(
-                    plan.robot,
-                    plan.episode,
-                    spiral_robotics_hardware::ReplayTrajectory::new(plan.frames, plan.sample_hz),
+                    robot,
+                    episode,
+                    spiral_robotics_hardware::ReplayTrajectory::new(frames, sample_hz),
                 )
-                .starting_at(plan.start_frame, plan.resolved_start_seconds),
+                .starting_at(start_frame, resolved_start_seconds),
             )
             .await
             .map_err(OperationError::conflict)
@@ -397,7 +403,7 @@ impl ReplayPort for RecordingHttpAdapter<'_> {
 
     async fn set_replay_paused(&self, paused: bool) -> Result<(), OperationError> {
         self.state
-            .hardware
+            .hardware()
             .set_replay_paused(paused)
             .await
             .map_err(OperationError::conflict)
@@ -417,17 +423,18 @@ impl<'a> EpisodeHttpAdapter<'a> {
 
 impl EpisodeCatalogPort for EpisodeHttpAdapter<'_> {
     fn activity(&self) -> EpisodeActivity {
-        let hardware = self.state.hardware.state();
-        EpisodeActivity {
-            recording: hardware
-                .telemetry
-                .recording
-                .map(|recording| recording.episode),
-            replaying: match hardware.mode.selection {
-                ModeSelection::Replay { episode, .. } => Some(episode),
+        let hardware = self.state.hardware().state();
+        EpisodeActivity::new(
+            hardware
+                .telemetry()
+                .recording()
+                .as_ref()
+                .map(|recording| recording.episode().to_owned()),
+            match &hardware.mode().selection() {
+                ModeSelection::Replay { episode, .. } => Some(episode.clone()),
                 _ => None,
             },
-        }
+        )
     }
 
     async fn judge_episode(
@@ -435,18 +442,16 @@ impl EpisodeCatalogPort for EpisodeHttpAdapter<'_> {
         episode: String,
         discarded: bool,
     ) -> Result<EpisodeMutationResult, OperationError> {
-        let episodes = self.state.episodes.clone();
+        let episodes = self.state.episodes().clone();
         let summary = tokio::task::spawn_blocking(move || episodes.judge(&episode, discarded))
             .await
             .map_err(|error| OperationError::Internal(error.to_string()))?
             .map_err(episode_capability_error)?;
-        Ok(EpisodeMutationResult {
-            episode: summary.id,
-        })
+        Ok(EpisodeMutationResult::new(summary.id()))
     }
 
     async fn delete_episode(&self, episode: String) -> Result<(), OperationError> {
-        let episodes = self.state.episodes.clone();
+        let episodes = self.state.episodes().clone();
         tokio::task::spawn_blocking(move || episodes.delete(&episode))
             .await
             .map_err(|error| OperationError::Internal(error.to_string()))?
@@ -459,16 +464,17 @@ impl EpisodeCatalogPort for EpisodeHttpAdapter<'_> {
 impl EpisodeQueryPort for EpisodeHttpAdapter<'_> {
     fn episodes(&self) -> Vec<EpisodeRecord> {
         self.state
-            .episodes
+            .episodes()
             .list()
-            .into_iter()
+            .iter()
+            .cloned()
             .map(capability_episode)
             .collect()
     }
 
     fn ensure_episode_exists(&self, episode: &str) -> Result<(), OperationError> {
         self.state
-            .episodes
+            .episodes()
             .get(episode)
             .map(|_| ())
             .map_err(episode_capability_error)
@@ -478,9 +484,11 @@ impl EpisodeQueryPort for EpisodeHttpAdapter<'_> {
         &self,
         query: EpisodeTraceQuery,
     ) -> Result<Vec<Option<f64>>, OperationError> {
+        let episode = query.episode().to_owned();
+        let buckets = query.buckets();
         self.state
-            .episodes
-            .trace(&query.episode, query.buckets)
+            .episodes()
+            .trace(&episode, buckets)
             .map_err(episode_capability_error)
     }
 
@@ -488,9 +496,11 @@ impl EpisodeQueryPort for EpisodeHttpAdapter<'_> {
         &self,
         query: EpisodeTraceQuery,
     ) -> Result<TimelineTraceCollection, OperationError> {
+        let episode = query.episode().to_owned();
+        let buckets = query.buckets();
         self.state
-            .episodes
-            .timeline_traces(&query.episode, query.buckets)
+            .episodes()
+            .timeline_traces(&episode, buckets)
             .map(capability_timeline_traces)
             .map_err(episode_capability_error)
     }
@@ -498,38 +508,39 @@ impl EpisodeQueryPort for EpisodeHttpAdapter<'_> {
     fn timeline(&self, episode: String) -> Result<EpisodeTimelineRecord, OperationError> {
         let samples = self
             .state
-            .episodes
+            .episodes()
             .timeline_metadata(&episode)
             .map_err(episode_capability_error)?;
         // Metadata refreshes a stale partial entry. Read the summary after it
         // so both projections describe the same durable episode.
         let summary = self
             .state
-            .episodes
+            .episodes()
             .get(&episode)
             .map_err(episode_capability_error)?;
         let videos = self
             .state
-            .episodes
+            .episodes()
             .video_metadata(&episode)
             .map_err(episode_capability_error)?
-            .into_iter()
+            .iter()
+            .cloned()
             .map(capability_video_asset)
             .collect();
-        Ok(EpisodeTimelineRecord {
-            episode: capability_episode(summary),
-            samples: TimelineMetadataRecord {
-                samples: samples.samples,
-                first_seconds: samples.first_seconds,
-                last_seconds: samples.last_seconds,
-            },
+        Ok(EpisodeTimelineRecord::new(
+            capability_episode(summary),
+            TimelineMetadataRecord::new(
+                samples.samples(),
+                samples.first_seconds(),
+                samples.last_seconds(),
+            ),
             videos,
-        })
+        ))
     }
 
     fn inspection(&self, episode: String) -> Result<EpisodeInspectionRecord, OperationError> {
         self.state
-            .episodes
+            .episodes()
             .inspection(&episode)
             .map(capability_episode_inspection)
             .map_err(episode_capability_error)
@@ -541,7 +552,7 @@ impl EpisodeQueryPort for EpisodeHttpAdapter<'_> {
         seconds: f64,
     ) -> Result<TimelineSampleRecord, OperationError> {
         self.state
-            .episodes
+            .episodes()
             .sample_at(&episode, seconds)
             .map(capability_timeline_sample)
             .map_err(episode_capability_error)
@@ -549,350 +560,357 @@ impl EpisodeQueryPort for EpisodeHttpAdapter<'_> {
 }
 
 fn capability_episode(episode: EpisodeSummary) -> EpisodeRecord {
-    EpisodeRecord {
-        id: episode.id,
-        dataset_id: episode.dataset_id,
-        arms: episode
-            .arms
-            .into_iter()
-            .map(|arm| EpisodeArmRecord {
-                id: arm.id,
-                robot_type: arm.robot_type,
-                joints: arm.joints,
+    let identity = EpisodeRecordIdentity::new(episode.id(), episode.dataset_id(), episode.source())
+        .started_at(episode.started_ms());
+    let capture = EpisodeCaptureSummary::new(
+        episode
+            .arms()
+            .iter()
+            .map(|arm| {
+                EpisodeArmRecord::new(
+                    arm.id(),
+                    arm.robot_type().map(str::to_owned),
+                    arm.joints().to_vec(),
+                )
             })
             .collect(),
-        frames: episode.frames,
-        duration_seconds: episode.duration_seconds,
-        recording_gaps: episode
-            .recording_gaps
-            .into_iter()
-            .map(|gap| RecordingGapRecord {
-                after_seconds: gap.after_seconds,
-                duration_seconds: gap.duration_seconds,
-            })
+        episode.frames(),
+        episode.duration_seconds(),
+    )
+    .with_timing(
+        episode
+            .recording_gaps()
+            .iter()
+            .map(|gap| RecordingGapRecord::new(gap.after_seconds(), gap.duration_seconds()))
             .collect(),
-        sample_hz: episode.sample_hz,
-        started_ms: episode.started_ms,
-        source: episode.source,
-        max_follow_error_degrees: episode.max_follow_error_degrees,
-        discarded: episode.discarded,
-        problem: episode.problem,
-    }
+        episode.sample_hz(),
+    )
+    .with_maximum_follow_error(episode.max_follow_error_degrees());
+    EpisodeRecord::new(
+        identity,
+        capture,
+        EpisodeDisposition::new(episode.discarded(), episode.problem().map(str::to_owned)),
+    )
 }
 
 pub(super) fn contract_episode(episode: EpisodeRecord) -> EpisodeSummary {
-    EpisodeSummary {
-        id: episode.id,
-        dataset_id: episode.dataset_id,
-        arms: episode
-            .arms
-            .into_iter()
-            .map(|arm| spiral_robotics_api::recording::EpisodeArm {
-                id: arm.id,
-                robot_type: arm.robot_type,
-                joints: arm.joints,
+    let identity = EpisodeIdentity::new(
+        episode.id(),
+        episode.dataset_id(),
+        episode
+            .arms()
+            .iter()
+            .map(|arm| {
+                spiral_robotics_api::recording::EpisodeArm::new(
+                    arm.id(),
+                    arm.robot_type().map(str::to_owned),
+                    arm.joints().to_vec(),
+                )
             })
             .collect(),
-        frames: episode.frames,
-        duration_seconds: episode.duration_seconds,
-        recording_gaps: episode
-            .recording_gaps
-            .into_iter()
-            .map(|gap| spiral_robotics_api::recording::RecordingGap {
-                after_seconds: gap.after_seconds,
-                duration_seconds: gap.duration_seconds,
+    )
+    .with_source(episode.source());
+    let timeline = EpisodeTimeline::new(
+        episode.frames(),
+        episode.duration_seconds(),
+        episode.sample_hz(),
+    )
+    .with_recording_gaps(
+        episode
+            .recording_gaps()
+            .iter()
+            .map(|gap| {
+                spiral_robotics_api::recording::RecordingGap::new(
+                    gap.after_seconds(),
+                    gap.duration_seconds(),
+                )
             })
             .collect(),
-        sample_hz: episode.sample_hz,
-        started_ms: episode.started_ms,
-        source: episode.source,
-        max_follow_error_degrees: episode.max_follow_error_degrees,
-        discarded: episode.discarded,
-        problem: episode.problem,
-    }
+    )
+    .with_started_ms(episode.started_ms());
+    EpisodeSummary::new(
+        identity,
+        timeline,
+        EpisodeAssessment::new(
+            episode.discarded(),
+            episode.max_follow_error_degrees(),
+            episode.problem().map(str::to_owned),
+        ),
+    )
 }
 
 fn capability_video_asset(video: VideoAssetMetadata) -> VideoAssetRecord {
     let size = video.size();
     let timing = video.timing();
     let segment = video.segment();
-    VideoAssetRecord {
-        stream_id: video.stream_id().to_owned(),
-        camera_id: video.camera_id().to_owned(),
-        width: size.width(),
-        height: size.height(),
-        fps: timing.fps(),
-        frames: timing.frames(),
-        duration_seconds: video.duration_seconds(),
-        segment_index: segment.index(),
-        timeline_offset_seconds: segment.timeline_offset_seconds(),
-    }
+    VideoAssetRecord::new(
+        VideoAssetIdentity::new(video.stream_id(), video.camera_id(), segment.index()),
+        VideoAssetFormat::new(size.width(), size.height(), timing.fps()),
+        VideoAssetTimeline::new(
+            timing.frames(),
+            video.duration_seconds(),
+            segment.timeline_offset_seconds(),
+        ),
+    )
 }
 
 fn capability_episode_inspection(inspection: EpisodeInspection) -> EpisodeInspectionRecord {
-    let samples = &inspection.episode.samples;
-    let arms = inspection
-        .episode
-        .start
-        .arms
+    let (episode, summary, videos) = inspection.into_parts();
+    let samples = episode.samples();
+    let arms = episode
+        .start()
+        .arms()
         .iter()
         .enumerate()
         .map(|(arm_index, arm)| {
-            let joint_count = arm.joints.len();
-            EpisodeInspectionArmRecord {
-                arm: arm.id.clone(),
-                joints: arm.joints.clone(),
-                normalized: samples
-                    .iter()
-                    .flat_map(|sample| sample.normalized[arm_index].iter().copied())
-                    .collect(),
-                raw: samples
-                    .iter()
-                    .flat_map(|sample| sample.raw[arm_index].iter().copied())
-                    .collect(),
-                velocity: capability_optional_frame_matrix(
-                    samples,
-                    arm_index,
-                    joint_count,
-                    |sample, index| {
-                        sample
-                            .velocity
-                            .as_ref()
-                            .and_then(|arms| arms.get(index))
-                            .map(Vec::as_slice)
-                    },
-                ),
-                effort: capability_optional_frame_matrix(
-                    samples,
-                    arm_index,
-                    joint_count,
-                    |sample, index| {
-                        sample
-                            .effort
-                            .as_ref()
-                            .and_then(|arms| arms.get(index))
-                            .map(Vec::as_slice)
-                    },
-                ),
-                action: capability_optional_frame_matrix(
-                    samples,
-                    arm_index,
-                    joint_count,
-                    |sample, index| {
-                        sample
-                            .action
-                            .get(index)
-                            .and_then(Option::as_ref)
-                            .map(Vec::as_slice)
-                    },
-                ),
-            }
+            let joint_count = arm.joints().len();
+            let normalized = samples
+                .iter()
+                .flat_map(|sample| sample.normalized()[arm_index].iter().copied())
+                .collect();
+            let raw = samples
+                .iter()
+                .flat_map(|sample| sample.raw()[arm_index].iter().copied())
+                .collect();
+            let velocity = OptionalFrameMatrix::new(samples, joint_count, |sample, index| {
+                sample
+                    .velocity()
+                    .and_then(|arms| arms.get(index))
+                    .map(Vec::as_slice)
+            })
+            .for_arm(arm_index);
+            let effort = OptionalFrameMatrix::new(samples, joint_count, |sample, index| {
+                sample
+                    .effort()
+                    .and_then(|arms| arms.get(index))
+                    .map(Vec::as_slice)
+            })
+            .for_arm(arm_index);
+            let action = OptionalFrameMatrix::new(samples, joint_count, |sample, index| {
+                sample
+                    .action()
+                    .get(index)
+                    .and_then(Option::as_ref)
+                    .map(Vec::as_slice)
+            })
+            .for_arm(arm_index);
+            EpisodeInspectionArmRecord::new(arm.id(), arm.joints().to_vec(), normalized)
+                .with_raw(raw)
+                .with_dynamics(velocity, effort)
+                .with_action(action)
         })
         .collect();
-    EpisodeInspectionRecord {
-        episode: capability_episode(inspection.summary),
-        sample_times_seconds: samples.iter().map(|sample| sample.seconds).collect(),
-        follow_error_degrees: samples
-            .iter()
-            .map(|sample| sample.follow_error_degrees)
-            .collect(),
+    EpisodeInspectionRecord::new(
+        capability_episode(summary),
+        samples.iter().map(|sample| sample.seconds()).collect(),
         arms,
-        videos: inspection
-            .videos
-            .into_iter()
-            .map(capability_video_asset)
+    )
+    .with_follow_error(
+        samples
+            .iter()
+            .map(|sample| sample.follow_error_degrees())
             .collect(),
-    }
+    )
+    .with_videos(videos.into_iter().map(capability_video_asset).collect())
 }
 
-fn capability_optional_frame_matrix(
-    samples: &[spiral_robotics_storage::episodes::Sample],
-    arm_index: usize,
+struct OptionalFrameMatrix<'a, F> {
+    samples: &'a [spiral_robotics_storage::episodes::Sample],
     joint_count: usize,
-    values_at: impl for<'a> Fn(
-        &'a spiral_robotics_storage::episodes::Sample,
+    values_at: F,
+}
+
+impl<'samples, F> OptionalFrameMatrix<'samples, F>
+where
+    F: for<'sample> Fn(
+        &'sample spiral_robotics_storage::episodes::Sample,
         usize,
-    ) -> Option<&'a [Option<f64>]>,
-) -> OptionalFrameMatrixRecord {
-    let mut present = Vec::with_capacity(samples.len());
-    let mut values = Vec::with_capacity(samples.len().saturating_mul(joint_count));
-    for sample in samples {
-        match values_at(sample, arm_index) {
-            Some(frame) => {
-                debug_assert_eq!(frame.len(), joint_count);
-                present.push(true);
-                values.extend(frame.iter().copied());
-            }
-            None => {
-                present.push(false);
-                values.extend(std::iter::repeat_n(None, joint_count));
-            }
+    ) -> Option<&'sample [Option<f64>]>,
+{
+    fn new(
+        samples: &'samples [spiral_robotics_storage::episodes::Sample],
+        joint_count: usize,
+        values_at: F,
+    ) -> Self {
+        Self {
+            samples,
+            joint_count,
+            values_at,
         }
     }
-    OptionalFrameMatrixRecord { present, values }
+
+    fn for_arm(self, arm_index: usize) -> OptionalFrameMatrixRecord {
+        let mut present = Vec::with_capacity(self.samples.len());
+        let mut values = Vec::with_capacity(self.samples.len().saturating_mul(self.joint_count));
+        for sample in self.samples {
+            match (self.values_at)(sample, arm_index) {
+                Some(frame) => {
+                    debug_assert_eq!(frame.len(), self.joint_count);
+                    present.push(true);
+                    values.extend(frame.iter().copied());
+                }
+                None => {
+                    present.push(false);
+                    values.extend(std::iter::repeat_n(None, self.joint_count));
+                }
+            }
+        }
+        OptionalFrameMatrixRecord::new(present, values)
+    }
 }
 
 fn contract_video_asset(video: VideoAssetRecord) -> VideoAssetMetadata {
-    VideoAssetMetadata::new(video.stream_id, video.camera_id, video.duration_seconds)
-        .with_size(VideoSize::new(video.width, video.height))
-        .with_timing(VideoTiming::new(video.fps, video.frames))
-        .with_segment(VideoSegment::new(
-            video.segment_index,
-            video.timeline_offset_seconds,
-        ))
+    VideoAssetMetadata::new(
+        video.stream_id().to_owned(),
+        video.camera_id().to_owned(),
+        video.duration_seconds(),
+    )
+    .with_size(VideoSize::new(video.width(), video.height()))
+    .with_timing(VideoTiming::new(video.fps(), video.frames()))
+    .with_segment(VideoSegment::new(
+        video.segment_index(),
+        video.timeline_offset_seconds(),
+    ))
 }
 
 fn contract_episode_inspection(inspection: EpisodeInspectionRecord) -> EpisodeInspectionSnapshot {
-    EpisodeInspectionSnapshot {
-        episode: contract_episode(inspection.episode),
-        sample_times_seconds: inspection.sample_times_seconds,
-        follow_error_degrees: inspection.follow_error_degrees,
-        arms: inspection
-            .arms
-            .into_iter()
-            .map(|arm| EpisodeInspectionArm {
-                arm: arm.arm,
-                joints: arm.joints,
-                normalized: arm.normalized,
-                raw: arm.raw,
-                velocity: contract_optional_frame_matrix(arm.velocity),
-                effort: contract_optional_frame_matrix(arm.effort),
-                action: contract_optional_frame_matrix(arm.action),
-            })
-            .collect(),
-        videos: inspection
-            .videos
-            .into_iter()
-            .map(|video| EpisodeVideoAssetMetadata {
-                stream_id: video.stream_id,
-                camera_id: video.camera_id,
-                width: video.width,
-                height: video.height,
-                fps: video.fps,
-                frames: video.frames,
-                duration_seconds: video.duration_seconds,
-                segment_index: video.segment_index,
-                timeline_offset_seconds: video.timeline_offset_seconds,
-            })
-            .collect(),
-    }
+    let (episode, sample_times_seconds, follow_error_degrees, arm_records, video_records) =
+        inspection.into_parts();
+    let arms = arm_records
+        .into_iter()
+        .map(|arm| {
+            let (arm, joints, normalized, raw, velocity, effort, action) = arm.into_parts();
+            EpisodeInspectionArm::new(arm, joints, EpisodeArmScalarSamples::new(normalized, raw))
+                .with_optional_channels(EpisodeArmOptionalChannels::new(
+                    contract_optional_frame_matrix(velocity),
+                    contract_optional_frame_matrix(effort),
+                    contract_optional_frame_matrix(action),
+                ))
+        })
+        .collect();
+    let videos = video_records
+        .into_iter()
+        .map(|video| {
+            EpisodeVideoAssetMetadata::new(
+                EpisodeVideoIdentity::new(
+                    video.stream_id(),
+                    video.camera_id(),
+                    video.segment_index(),
+                ),
+                EpisodeVideoFormat::new(video.width(), video.height(), video.fps()),
+                EpisodeVideoTimeline::new(
+                    video.frames(),
+                    video.duration_seconds(),
+                    video.timeline_offset_seconds(),
+                ),
+            )
+        })
+        .collect();
+    EpisodeInspectionSnapshot::new(
+        contract_episode(episode),
+        sample_times_seconds,
+        follow_error_degrees,
+    )
+    .with_arms(arms)
+    .with_videos(videos)
 }
 
 fn contract_optional_frame_matrix(matrix: OptionalFrameMatrixRecord) -> EpisodeOptionalFrameMatrix {
-    EpisodeOptionalFrameMatrix {
-        present: matrix.present,
-        values: matrix.values,
-    }
+    let (present, values) = matrix.into_parts();
+    EpisodeOptionalFrameMatrix::new(present, values)
 }
 
 fn capability_timeline_sample(sample: TimelineSample) -> TimelineSampleRecord {
-    TimelineSampleRecord {
-        frame: sample.frame,
-        seconds: sample.seconds,
-        follow_error_degrees: sample.follow_error_degrees,
-        arms: sample
-            .arms
-            .into_iter()
-            .map(|arm| TimelineArmSampleRecord {
-                arm: arm.arm,
-                normalized: arm.normalized,
-                raw: arm.raw,
-                velocity: arm.velocity,
-                effort: arm.effort,
-                action: arm.action,
-            })
-            .collect(),
-    }
+    let (frame, seconds, follow_error_degrees, arms) = sample.into_parts();
+    let arms = arms
+        .into_iter()
+        .map(|arm| {
+            let (pose, signals) = arm.into_groups();
+            let (arm, normalized, raw) = pose.into_parts();
+            let (velocity, effort, action) = signals.into_parts();
+            TimelineArmSampleRecord::new(arm, normalized, raw)
+                .with_dynamics(velocity, effort)
+                .with_action(action)
+        })
+        .collect();
+    TimelineSampleRecord::new(frame, seconds, arms).with_follow_error(follow_error_degrees)
 }
 
 fn contract_timeline_sample(sample: TimelineSampleRecord) -> TimelineSample {
-    TimelineSample {
-        frame: sample.frame,
-        seconds: sample.seconds,
-        follow_error_degrees: sample.follow_error_degrees,
-        arms: sample
-            .arms
-            .into_iter()
-            .map(|arm| spiral_robotics_storage::episodes::TimelineArmSample {
-                arm: arm.arm,
-                normalized: arm.normalized,
-                raw: arm.raw,
-                velocity: arm.velocity,
-                effort: arm.effort,
-                action: arm.action,
-            })
-            .collect(),
-    }
+    let (frame, seconds, follow_error_degrees, arms) = sample.into_parts();
+    TimelineSample::new(frame, seconds)
+        .with_follow_error_degrees(follow_error_degrees)
+        .with_arms(
+            arms.into_iter()
+                .map(|arm| {
+                    let (arm, normalized, raw, velocity, effort, action) = arm.into_parts();
+                    spiral_robotics_storage::episodes::TimelineArmSample::new(arm, normalized, raw)
+                        .with_velocity(velocity)
+                        .with_effort(effort)
+                        .with_action(action)
+                })
+                .collect(),
+        )
 }
 
 fn capability_timeline_traces(traces: TimelineTraces) -> TimelineTraceCollection {
-    TimelineTraceCollection {
-        episode: traces.episode,
-        samples: traces.samples,
-        buckets: traces.buckets,
-        start_seconds: traces.start_seconds,
-        end_seconds: traces.end_seconds,
-        lanes: traces
-            .lanes
-            .into_iter()
-            .map(|lane| TimelineTraceLaneRecord {
-                joint: lane.joint,
-                series: lane
-                    .series
-                    .into_iter()
-                    .map(|series| TimelineTraceSeriesRecord {
-                        arm: series.arm,
-                        points: series
-                            .points
-                            .into_iter()
-                            .map(|point| TimelineTracePointRecord {
-                                seconds: point.seconds,
-                                value: point.value,
-                            })
-                            .collect(),
-                    })
-                    .collect(),
-            })
-            .collect(),
-    }
+    let (episode, samples, buckets, start_seconds, end_seconds, lanes) = traces.into_parts();
+    let lanes = lanes
+        .into_iter()
+        .map(|lane| {
+            let (joint, series) = lane.into_parts();
+            let series = series
+                .into_iter()
+                .map(|series| {
+                    let (arm, points) = series.into_parts();
+                    let points = points
+                        .iter()
+                        .map(|point| TimelineTracePointRecord::new(point.seconds(), point.value()))
+                        .collect();
+                    TimelineTraceSeriesRecord::new(arm, points)
+                })
+                .collect();
+            TimelineTraceLaneRecord::new(joint, series)
+        })
+        .collect();
+    TimelineTraceCollection::new(episode, samples, buckets)
+        .with_range(start_seconds, end_seconds)
+        .with_lanes(lanes)
 }
 
 fn contract_timeline_traces(traces: TimelineTraceCollection) -> TimelineTraces {
-    TimelineTraces {
-        episode: traces.episode,
-        samples: traces.samples,
-        buckets: traces.buckets,
-        start_seconds: traces.start_seconds,
-        end_seconds: traces.end_seconds,
-        lanes: traces
-            .lanes
-            .into_iter()
-            .map(
-                |lane| spiral_robotics_storage::episodes::TimelineTraceLane {
-                    joint: lane.joint,
-                    series: lane
-                        .series
-                        .into_iter()
-                        .map(
-                            |series| spiral_robotics_storage::episodes::TimelineTraceSeries {
-                                arm: series.arm,
-                                points: series
-                                    .points
+    let (episode, samples, buckets, start_seconds, end_seconds, lanes) = traces.into_parts();
+    TimelineTraces::new(episode, samples, buckets)
+        .with_range(start_seconds, end_seconds)
+        .with_lanes(
+            lanes
+                .into_iter()
+                .map(|lane| {
+                    let (joint, series) = lane.into_parts();
+                    spiral_robotics_storage::episodes::TimelineTraceLane::new(
+                        joint,
+                        series
+                            .into_iter()
+                            .map(|series| {
+                                let (arm, points) = series.into_parts();
+                                spiral_robotics_storage::episodes::TimelineTraceSeries::new(
+                                arm,
+                                points
                                     .into_iter()
                                     .map(|point| {
-                                        spiral_robotics_storage::episodes::TimelineTracePoint {
-                                            seconds: point.seconds,
-                                            value: point.value,
-                                        }
+                                        spiral_robotics_storage::episodes::TimelineTracePoint::new(
+                                            point.seconds(),
+                                            point.value(),
+                                        )
                                     })
                                     .collect(),
-                            },
-                        )
-                        .collect(),
-                },
-            )
-            .collect(),
-    }
+                            )
+                            })
+                            .collect(),
+                    )
+                })
+                .collect(),
+        )
 }
 
 /// Adapter for historical physical seeks. The current-ticket check and motor
@@ -904,53 +922,57 @@ struct SeekHttpAdapter<'a> {
 
 impl PhysicalSeekPort for SeekHttpAdapter<'_> {
     fn activity(&self) -> SeekActivity {
-        let hardware = self.state.hardware.state();
-        SeekActivity {
-            recording: hardware
-                .telemetry
-                .recording
-                .map(|recording| ActiveRecording {
-                    episode: recording.episode,
-                    paused: recording.paused,
-                }),
-            mode: match hardware.mode.selection {
+        let hardware = self.state.hardware().state();
+        SeekActivity::new(
+            hardware
+                .telemetry()
+                .recording()
+                .as_ref()
+                .map(|recording| ActiveRecording::new(recording.episode(), recording.paused())),
+            match hardware.mode().selection() {
                 ModeSelection::Idle => SeekControlMode::Idle,
                 ModeSelection::Replay { .. } => SeekControlMode::Replay,
                 _ => SeekControlMode::Other,
             },
-        }
+        )
     }
 
     fn target(&self, robot: &str) -> Result<Option<SeekTarget>, OperationError> {
         Ok(build_snapshot(self.state)
-            .robots
-            .into_iter()
-            .find(|candidate| candidate.id == robot)
-            .map(|target| SeekTarget {
-                id: target.id,
-                robot_type: target.robot_type,
-                connected: target.connection.connected,
-                calibrated: target.calibrated,
-                problem: target.problem,
+            .robots()
+            .iter()
+            .find(|candidate| candidate.id() == robot)
+            .map(|target| {
+                SeekTarget::new(
+                    target.id(),
+                    target.robot_type().map(str::to_owned),
+                    target.connection().connected(),
+                )
+                .with_readiness(target.calibrated(), target.problem().map(str::to_owned))
             }))
     }
 
     fn episode(&self, episode: &str) -> Result<SeekableEpisode, OperationError> {
         self.state
-            .episodes
+            .episodes()
             .get(episode)
-            .map(|summary| SeekableEpisode {
-                id: summary.id,
-                arms: summary.arms.into_iter().map(|arm| arm.id).collect(),
-                sample_hz: summary.sample_hz,
-                problem: summary.problem,
-                unfinished: false,
+            .map(|summary| {
+                SeekableEpisode::new(
+                    summary.id(),
+                    summary
+                        .arms()
+                        .iter()
+                        .map(|arm| arm.id().to_owned())
+                        .collect(),
+                    summary.sample_hz(),
+                )
+                .with_state(summary.problem().map(str::to_owned), false)
             })
             .map_err(episode_capability_error)
     }
 
     fn reserve_seek(&self, robot: &str) -> u64 {
-        self.state.episodes.reserve_seek(robot)
+        self.state.episodes().reserve_seek(robot)
     }
 
     async fn sample_at(
@@ -958,41 +980,40 @@ impl PhysicalSeekPort for SeekHttpAdapter<'_> {
         episode: &str,
         seconds: f64,
     ) -> Result<HistoricalSample, OperationError> {
-        let episodes = self.state.episodes.clone();
+        let episodes = self.state.episodes().clone();
         let episode = episode.to_owned();
         tokio::task::spawn_blocking(move || episodes.sample_at(&episode, seconds))
             .await
             .map_err(|error| OperationError::Internal(error.to_string()))?
-            .map(|sample| HistoricalSample {
-                seconds: sample.seconds,
-                frame: sample.frame,
-                arms: sample
-                    .arms
-                    .into_iter()
-                    .map(|arm| SampledArm {
-                        id: arm.arm,
-                        normalized: arm.normalized,
-                    })
-                    .collect(),
+            .map(|sample| {
+                let (frame, seconds, _, arms) = sample.into_parts();
+                HistoricalSample::new(
+                    seconds,
+                    frame,
+                    arms.into_iter()
+                        .map(|arm| {
+                            let (pose, _) = arm.into_groups();
+                            let (id, normalized, _) = pose.into_parts();
+                            SampledArm::new(id, normalized)
+                        })
+                        .collect(),
+                )
             })
             .map_err(episode_capability_error)
     }
 
     async fn commit_if_current(&self, plan: PhysicalSeekPlan) -> Result<bool, OperationError> {
-        let _gate = self.state.episodes.lock_seek().await;
-        if !self
-            .state
-            .episodes
-            .seek_is_current(&plan.robot, plan.ticket)
-        {
+        let (ticket, robot, episode, pose, sample_hz) = plan.into_parts();
+        let _gate = self.state.episodes().lock_seek().await;
+        if !self.state.episodes().seek_is_current(&robot, ticket) {
             return Ok(false);
         }
         self.state
-            .hardware
+            .hardware()
             .start_replay(spiral_robotics_hardware::ReplayRequest::physical_seek(
-                plan.robot,
-                plan.episode,
-                spiral_robotics_hardware::ReplayTrajectory::single_pose(plan.pose, plan.sample_hz),
+                robot,
+                episode,
+                spiral_robotics_hardware::ReplayTrajectory::single_pose(pose, sample_hz),
             ))
             .await
             .map_err(OperationError::conflict)?;
@@ -1004,30 +1025,27 @@ async fn list_episodes(State(state): State<AppState>) -> Json<EpisodeCatalogResp
     // A paused take has a readable SpiralDB checkpoint. Hide its catalog row
     // here because live recording state is delivered through telemetry.
     let recording = state
-        .hardware
+        .hardware()
         .state()
-        .telemetry
-        .recording
-        .map(|progress| progress.episode);
+        .telemetry()
+        .recording()
+        .as_ref()
+        .map(|progress| progress.episode().to_owned());
     let episodes = EpisodeQueries::new(&EpisodeHttpAdapter::catalog(&state))
         .list()
         .into_iter()
-        .filter(|episode| Some(&episode.id) != recording.as_ref())
+        .filter(|episode| Some(episode.id()) != recording.as_deref())
         .map(contract_episode)
         .collect();
-    let mut issues = state.episodes.issues();
-    let datasets = match state.storage.datasets().await {
+    let mut issues = state.episodes().issues();
+    let datasets = match state.storage().datasets().await {
         Ok(datasets) => datasets,
         Err(error) => {
             issues.push(format!("dataset catalog: {error}"));
             Vec::new()
         }
     };
-    Json(EpisodeCatalogResponse {
-        datasets,
-        episodes,
-        issues,
-    })
+    Json(EpisodeCatalogResponse::new(datasets, episodes, issues))
 }
 
 /// Begin a take.
@@ -1043,11 +1061,11 @@ async fn start_recording(
     let adapter = RecordingHttpAdapter::new(&state);
     let result = recording::start_recording(
         &adapter,
-        StartRecordingCommand {
-            dataset_id: request.dataset_id,
-            arms: request.arms,
-            note: request.note,
-        },
+        StartRecordingCommand::new(
+            request.dataset_id(),
+            request.arms().to_vec(),
+            request.note().map(str::to_owned),
+        ),
     )
     .await?;
     Ok(Json(adapter.present_recording(result)?))
@@ -1060,21 +1078,20 @@ async fn start_recording(
 /// structures into the episode writer's concrete representation.
 fn create_recording_draft(
     state: &AppState,
-    command: StartRecordingCommand,
-    source: String,
-    wanted: Vec<String>,
-    sample_hz: f64,
+    request: RecordingDraftRequest,
 ) -> Result<RecordingDraft, OperationError> {
-    let hardware = state.hardware.state();
+    let (command, source, wanted, sample_hz) = request.into_parts();
+    let (dataset_id, _requested_arms, note) = command.into_parts();
+    let hardware = state.hardware().state();
     let connected = hardware
-        .telemetry
-        .robots
+        .telemetry()
+        .robots()
         .iter()
         .filter(|robot| {
             hardware
-                .connections
-                .get(&robot.id)
-                .is_some_and(|connection| connection.connected)
+                .connections()
+                .get(robot.id())
+                .is_some_and(|connection| connection.connected())
         })
         .collect::<Vec<_>>();
 
@@ -1083,7 +1100,7 @@ fn create_recording_draft(
         .map(|id| {
             let robot = connected
                 .iter()
-                .find(|robot| &robot.id == id)
+                .find(|robot| robot.id() == id)
                 .ok_or_else(|| {
                     OperationError::Conflict(format!(
                         "robot {id:?} disconnected while the recording was opening"
@@ -1092,21 +1109,29 @@ fn create_recording_draft(
             Ok((
                 id.clone(),
                 robot
-                    .joints
+                    .joints()
                     .iter()
-                    .map(|joint| joint.name.clone())
+                    .map(|joint| joint.name().to_owned())
                     .collect::<Vec<_>>(),
             ))
         })
         .collect::<Result<Vec<_>, OperationError>>()?;
-    let mut arms = build_arms(&arms).map_err(episode_capability_error)?;
-    for arm in &mut arms {
-        arm.robot_type = state
-            .workspace
-            .get(&arm.id)
-            .ok()
-            .and_then(|robot| robot.robot_type());
-    }
+    let arms = build_arms(&arms)
+        .map_err(episode_capability_error)?
+        .into_iter()
+        .map(|arm| {
+            let robot_type = state
+                .workspace()
+                .get(arm.id())
+                .ok()
+                .and_then(|robot| robot.robot_type());
+            spiral_robotics_api::recording::EpisodeArm::new(
+                arm.id(),
+                robot_type,
+                arm.joints().to_vec(),
+            )
+        })
+        .collect::<Vec<_>>();
 
     // What the motors were like as the take opened. Recorded once here rather
     // than on every frame: these move over seconds, and the footer's extremes
@@ -1114,59 +1139,51 @@ fn create_recording_draft(
     let condition = arms
         .iter()
         .filter_map(|arm| {
-            let robot = connected.iter().find(|robot| robot.id == arm.id)?;
-            let limits = hardware.limits.get(&arm.id);
-            let joint = |name: &str| robot.joints.iter().find(|joint| joint.name == *name);
-            Some(ArmCondition {
-                arm: arm.id.clone(),
-                temperature_celsius: arm
-                    .joints
-                    .iter()
-                    .map(|name| joint(name).and_then(|joint| joint.temperature_celsius))
-                    .collect(),
-                voltage_volts: arm
-                    .joints
-                    .iter()
-                    .map(|name| joint(name).and_then(|joint| joint.voltage_volts))
-                    .collect(),
-                limits: arm
-                    .joints
-                    .iter()
-                    .map(|name| {
-                        limits
-                            .and_then(|limits| limits.get(name))
-                            .copied()
-                            .unwrap_or_default()
-                    })
-                    .collect(),
-            })
+            let robot = connected.iter().find(|robot| robot.id() == arm.id())?;
+            let limits = hardware.limits().get(arm.id());
+            let joint = |name: &str| robot.joints().iter().find(|joint| joint.name() == name);
+            Some(
+                ArmCondition::new(arm.id().to_owned())
+                    .with_measurements(
+                        arm.joints()
+                            .iter()
+                            .map(|name| joint(name).and_then(|joint| joint.temperature_celsius()))
+                            .collect(),
+                        arm.joints()
+                            .iter()
+                            .map(|name| joint(name).and_then(|joint| joint.voltage_volts()))
+                            .collect(),
+                    )
+                    .with_limits(
+                        arm.joints()
+                            .iter()
+                            .map(|name| {
+                                limits
+                                    .and_then(|limits| limits.get(name))
+                                    .copied()
+                                    .unwrap_or_default()
+                            })
+                            .collect(),
+                    ),
+            )
         })
         .collect();
 
     let writer = state
-        .episodes
+        .episodes()
         .begin_in_dataset(
-            EpisodeRecordingRequest::new(command.dataset_id.clone(), source.clone(), sample_hz)
-                .with_note(command.note)
+            EpisodeRecordingRequest::new(dataset_id.clone(), source.clone(), sample_hz)
+                .with_note(note)
                 .with_arms(arms.clone(), condition),
         )
         .map_err(episode_capability_error)?;
     let id = writer.id().to_owned();
     let started_ms = writer.started_ms();
-    let summary = EpisodeSummary {
-        id,
-        dataset_id: command.dataset_id,
-        arms: arms.clone(),
-        frames: 0,
-        duration_seconds: 0.0,
-        recording_gaps: Vec::new(),
-        sample_hz,
-        started_ms,
-        source,
-        max_follow_error_degrees: None,
-        discarded: false,
-        problem: None,
-    };
+    let summary = EpisodeSummary::new(
+        EpisodeIdentity::new(id, dataset_id, arms.clone()).with_source(source),
+        EpisodeTimeline::new(0, 0.0, sample_hz).with_started_ms(started_ms),
+        EpisodeAssessment::new(false, None, None),
+    );
     Ok(RecordingDraft {
         writer,
         arms,
@@ -1180,41 +1197,39 @@ async fn start_recording_media_at_edge(
     episode: &str,
     wanted: &[String],
 ) -> Result<Option<VideoCapture>, OperationError> {
-    let video_settings = state.preferences.get().video;
-    if video_settings.enabled {
+    let video_settings = state.preferences().get().video().clone();
+    if video_settings.enabled() {
         let snapshot = build_snapshot(state);
         let camera_status = snapshot
-            .cameras
+            .cameras()
             .iter()
-            .map(|camera| (camera.id.as_str(), camera))
+            .map(|camera| (camera.id(), camera))
             .collect::<std::collections::BTreeMap<_, _>>();
         let mut seen = BTreeSet::new();
         let mut cameras = Vec::new();
         for robot in snapshot
-            .robots
+            .robots()
             .iter()
-            .filter(|robot| wanted.contains(&robot.id))
+            .filter(|robot| wanted.iter().any(|id| id == robot.id()))
         {
-            for camera in &robot.cameras {
-                if !seen.insert(camera.id.clone()) {
+            for camera in robot.cameras() {
+                if !seen.insert(camera.id().to_owned()) {
                     continue;
                 }
-                let Some(status) = camera_status.get(camera.id.as_str()) else {
+                let Some(status) = camera_status.get(camera.id()) else {
                     continue;
                 };
-                cameras.push(CameraCaptureSpec {
-                    stream_id: format!("{}.camera.{}", robot.id, camera.name),
-                    camera_id: camera.id.clone(),
-                    width: status.width,
-                    height: status.height,
-                    fps: status.fps,
-                });
+                cameras.push(CameraCaptureSpec::new(
+                    format!("{}.camera.{}", robot.id(), camera.name()),
+                    camera.id(),
+                    (status.width(), status.height(), status.fps()),
+                ));
             }
         }
         VideoCapture::start(
-            state.cameras.clone(),
+            state.cameras().clone(),
             VideoCaptureRequest::new(episode, cameras),
-            &state.video_encoder,
+            state.video_encoder(),
         )
         .await
         .map_err(|error| OperationError::InvalidInput(error.to_string()))
@@ -1229,7 +1244,7 @@ async fn stop_recording(
 ) -> Result<Json<EpisodeSummary>, Failure> {
     let adapter = RecordingHttpAdapter::new(&state);
     let result =
-        recording::stop_recording(&adapter, StopRecordingCommand { keep: request.keep }).await?;
+        recording::stop_recording(&adapter, StopRecordingCommand::new(request.keep())).await?;
     Ok(Json(adapter.present_recording(result)?))
 }
 
@@ -1246,9 +1261,7 @@ async fn set_recording_paused(
 ) -> Result<StatusCode, Failure> {
     recording::set_recording_paused(
         &RecordingHttpAdapter::new(&state),
-        SetRecordingPausedCommand {
-            paused: request.paused,
-        },
+        SetRecordingPausedCommand::new(request.paused()),
     )
     .await?;
     Ok(StatusCode::NO_CONTENT)
@@ -1261,13 +1274,10 @@ async fn judge_episode(
 ) -> Result<Json<EpisodeSummary>, Failure> {
     let result = episode_catalog::judge(
         &EpisodeHttpAdapter::catalog(&state),
-        JudgeEpisodeCommand {
-            episode: id,
-            discarded: request.discarded,
-        },
+        JudgeEpisodeCommand::new(id, request.discarded()),
     )
     .await?;
-    Ok(Json(state.episodes.get(&result.episode)?))
+    Ok(Json(state.episodes().get(result.episode())?))
 }
 
 async fn delete_episode(
@@ -1276,7 +1286,7 @@ async fn delete_episode(
 ) -> Result<StatusCode, Failure> {
     episode_catalog::delete(
         &EpisodeHttpAdapter::catalog(&state),
-        DeleteEpisodeCommand { episode: id },
+        DeleteEpisodeCommand::new(id),
     )
     .await?;
     Ok(StatusCode::NO_CONTENT)
@@ -1299,12 +1309,8 @@ async fn episode_trace(
     Query(query): Query<TraceQuery>,
 ) -> Result<Json<Vec<Option<f64>>>, Failure> {
     let trace = tokio::task::spawn_blocking(move || {
-        EpisodeQueries::new(&EpisodeHttpAdapter::catalog(&state)).follow_error_trace(
-            EpisodeTraceQuery {
-                episode: id,
-                buckets: query.buckets,
-            },
-        )
+        EpisodeQueries::new(&EpisodeHttpAdapter::catalog(&state))
+            .follow_error_trace(EpisodeTraceQuery::new(id, query.buckets))
     })
     .await
     .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
@@ -1318,10 +1324,7 @@ async fn episode_timeline_traces(
 ) -> Result<Json<TimelineTraces>, Failure> {
     let traces = tokio::task::spawn_blocking(move || {
         EpisodeQueries::new(&EpisodeHttpAdapter::catalog(&state))
-            .timeline_traces(EpisodeTraceQuery {
-                episode: id,
-                buckets: query.buckets,
-            })
+            .timeline_traces(EpisodeTraceQuery::new(id, query.buckets))
             .map(contract_timeline_traces)
     })
     .await
@@ -1356,18 +1359,15 @@ async fn episode_timeline(
 ) -> Result<Json<EpisodeTimelineResponse>, Failure> {
     let result = tokio::task::spawn_blocking(move || {
         let timeline = EpisodeQueries::new(&EpisodeHttpAdapter::catalog(&state)).timeline(id)?;
+        let (episode, samples, videos) = timeline.into_parts();
         Ok::<_, Failure>(EpisodeTimelineResponse {
-            episode: contract_episode(timeline.episode),
-            samples: TimelineMetadata {
-                samples: timeline.samples.samples,
-                first_seconds: timeline.samples.first_seconds,
-                last_seconds: timeline.samples.last_seconds,
-            },
-            videos: timeline
-                .videos
-                .into_iter()
-                .map(contract_video_asset)
-                .collect(),
+            episode: contract_episode(episode),
+            samples: TimelineMetadata::new(
+                samples.samples(),
+                samples.first_seconds(),
+                samples.last_seconds(),
+            ),
+            videos: videos.into_iter().map(contract_video_asset).collect(),
         })
     })
     .await
@@ -1428,32 +1428,35 @@ async fn seek_episode(
 ) -> Result<Json<HistoricalSeekResponse>, Failure> {
     let result = episode_seek::seek(
         &SeekHttpAdapter { state: &state },
-        SeekEpisodeCommand {
-            episode: id,
-            robot: request.robot,
-            source_arm: request.source_arm,
-            seconds: request.seconds,
-        },
+        SeekEpisodeCommand::new(id, request.robot, request.seconds)
+            .with_source_arm(request.source_arm),
     )
     .await?;
     Ok(Json(HistoricalSeekResponse {
-        state: match result.state {
+        state: match result.state() {
             HistoricalSeekState::Seeking => "seeking",
             HistoricalSeekState::Coalesced => "coalesced",
         },
-        episode: result.episode,
-        robot: result.robot,
-        source_arm: result.source_arm,
-        requested_seconds: result.requested_seconds,
-        resolved_seconds: result.resolved_seconds,
-        frame: result.frame,
+        episode: result.episode().to_owned(),
+        robot: result.robot().to_owned(),
+        source_arm: result.source_arm().to_owned(),
+        requested_seconds: result.requested_seconds(),
+        resolved_seconds: result.resolved_seconds(),
+        frame: result.frame(),
     }))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct ByteRange {
-    pub(super) start: u64,
-    pub(super) end: u64,
+    start: u64,
+    end: u64,
+}
+
+#[cfg(test)]
+impl ByteRange {
+    pub(super) const fn new(start: u64, end: u64) -> Self {
+        Self { start, end }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
@@ -1464,16 +1467,18 @@ struct LocalVideoQuery {
 
 async fn episode_video(
     State(state): State<AppState>,
-    Path((id, stream)): Path<(String, String)>,
-    Query(query): Query<LocalVideoQuery>,
-    headers: HeaderMap,
+    (Path((id, stream)), Query(query), headers): (
+        Path<(String, String)>,
+        Query<LocalVideoQuery>,
+        HeaderMap,
+    ),
 ) -> Result<Response, Failure> {
     // Looking up the episode first prevents an orphaned media row from becoming
     // an independent serving namespace.
     EpisodeQueries::new(&EpisodeHttpAdapter::catalog(&state)).authorize_asset(id.clone())?;
     let asset = VideoAssetKey::new(id, stream, query.segment);
     let length = state
-        .storage
+        .storage()
         .video_asset_size(&asset)
         .await
         .map_err(|error| Failure(StatusCode::NOT_FOUND, error))?;
@@ -1501,7 +1506,7 @@ async fn episode_video(
         Bytes::new()
     } else {
         let payload = state
-            .storage
+            .storage()
             .video_asset_range(&asset, VideoByteRange::new(range.start, content_length))
             .await
             .map_err(|error| Failure(StatusCode::NOT_FOUND, error))?;
@@ -1585,12 +1590,12 @@ async fn start_replay(
 ) -> Result<StatusCode, Failure> {
     recording::start_replay(
         &RecordingHttpAdapter::new(&state),
-        StartReplayCommand {
-            episode: request.episode,
-            robot: request.robot,
-            source_arm: request.source_arm,
-            start_seconds: request.start_seconds,
-        },
+        StartReplayCommand::new(
+            request.episode(),
+            request.robot(),
+            request.source_arm().map(str::to_owned),
+        )
+        .starting_at(request.start_seconds()),
     )
     .await?;
     Ok(StatusCode::NO_CONTENT)
@@ -1602,9 +1607,7 @@ async fn set_replay_paused(
 ) -> Result<StatusCode, Failure> {
     recording::set_replay_paused(
         &RecordingHttpAdapter::new(&state),
-        SetReplayPausedCommand {
-            paused: request.paused,
-        },
+        SetReplayPausedCommand::new(request.paused()),
     )
     .await?;
     Ok(StatusCode::NO_CONTENT)

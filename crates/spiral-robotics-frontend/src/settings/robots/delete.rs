@@ -1,4 +1,7 @@
-use crate::components::interaction::{Action, ActionPurpose, ActionVariant, InlineConfirmation};
+use crate::components::interaction::{
+    Action, ActionPurpose, ActionVariant, ConfirmationCopy, ConfirmationDismissal,
+    ConfirmationResponse, InlineConfirmation,
+};
 use dioxus::prelude::*;
 use gloo_net::http::Method;
 use spiral_robotics_api::robots::RobotSummary;
@@ -13,7 +16,7 @@ pub(super) fn DeleteRobotAction(robot: RobotSummary) -> Element {
     let studio = studio();
     let mut confirming = use_signal(|| false);
     let deleting = use_signal(|| false);
-    let id = robot.id.clone();
+    let id = robot.id().to_owned();
 
     // Resting, this is the quietest thing in the file row: it is the rarest
     // action on the panel and the only destructive one, and it used to be the
@@ -22,10 +25,10 @@ pub(super) fn DeleteRobotAction(robot: RobotSummary) -> Element {
     if !confirming() {
         return rsx! {
             Action {
-                id: "delete-robot-{robot.id}",
+                id: "delete-robot-{robot.id()}",
                 purpose: ActionPurpose::Delete,
                 variant: ActionVariant::Link,
-                class: "device-delete", title: "Delete {robot.id}",
+                class: "device-delete", title: "Delete {robot.id()}",
                 onclick: move |_| confirming.set(true), "Delete"
             }
         };
@@ -33,38 +36,42 @@ pub(super) fn DeleteRobotAction(robot: RobotSummary) -> Element {
 
     rsx! {
         InlineConfirmation {
-            id: "delete-robot-confirmation-{robot.id}",
+            id: "delete-robot-confirmation-{robot.id()}",
             class: "device-delete-confirmation",
-            message: format!(
-                "Delete robot {}? Its setup and calibration will be permanently removed.",
-                robot.id,
+            copy: ConfirmationCopy::new(
+                format!(
+                    "Delete robot {}? Its setup and calibration will be permanently removed.",
+                    robot.id(),
+                ),
+                if deleting() { "Deleting…" } else { "Delete robot" },
+                "Keep robot",
             ),
-            confirm_label: if deleting() { "Deleting…" } else { "Delete robot" },
-            cancel_label: "Keep robot",
-            purpose: ActionPurpose::Delete,
-            pending: deleting(),
-            return_focus_id: "delete-robot-{robot.id}",
-            on_confirm: move |_| {
-                if deleting() {
-                    return;
-                }
-                let id = id.clone();
-                studio.run(format!("Deleted {id}."), async move {
-                    let Some(result) = single_flight(
-                        deleting,
-                        api::send::<()>(Method::DELETE, &format!("/api/robots/{id}"), None),
-                    )
-                    .await
-                    else {
-                        return Ok(());
-                    };
-                    if result.is_ok() {
-                        confirming.set(false);
+            response: ConfirmationResponse::new(
+                ActionPurpose::Delete,
+                move |_| {
+                    if deleting() {
+                        return;
                     }
-                    result
-                });
-            },
-            on_cancel: move |_| confirming.set(false),
+                    let id = id.clone();
+                    studio.run(format!("Deleted {id}."), async move {
+                        let Some(result) = single_flight(
+                            deleting,
+                            api::send::<()>(Method::DELETE, &format!("/api/robots/{id}"), None),
+                        )
+                        .await
+                        else {
+                            return Ok(());
+                        };
+                        if result.is_ok() {
+                            confirming.set(false);
+                        }
+                        result
+                    });
+                },
+                move |_| confirming.set(false),
+            ),
+            dismissal: ConfirmationDismissal::new(format!("delete-robot-{}", robot.id()))
+                .with_pending(deleting()),
         }
     }
 }

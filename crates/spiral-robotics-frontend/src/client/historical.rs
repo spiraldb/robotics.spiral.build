@@ -45,7 +45,7 @@ pub(crate) struct HistoricalPreview {
 impl HistoricalPreview {
     fn from_inspection(inspection: &CachedInspection, sample: api::TimelineSample) -> Self {
         Self {
-            episode: inspection.snapshot.episode.id.clone(),
+            episode: inspection.snapshot.episode().id().to_owned(),
             timeline: Arc::clone(&inspection.timeline),
             sample,
             signal_lanes: Arc::clone(&inspection.signal_lanes),
@@ -99,15 +99,15 @@ struct CachedInspection {
 impl CachedInspection {
     fn try_new(snapshot: EpisodeInspectionSnapshot) -> Result<Self, String> {
         validate_snapshot(&snapshot)?;
-        let timeline = Arc::new(api::EpisodeTimelineResponse {
-            episode: snapshot.episode.clone(),
-            samples: api::TimelineMetadata {
-                samples: snapshot.sample_times_seconds.len() as u64,
-                first_seconds: snapshot.sample_times_seconds.first().copied(),
-                last_seconds: snapshot.sample_times_seconds.last().copied(),
-            },
-            videos: snapshot.videos.clone(),
-        });
+        let timeline = Arc::new(api::EpisodeTimelineResponse::new(
+            snapshot.episode().to_owned(),
+            api::TimelineMetadata::new(
+                snapshot.sample_times_seconds().len() as u64,
+                snapshot.sample_times_seconds().first().copied(),
+                snapshot.sample_times_seconds().last().copied(),
+            ),
+            snapshot.videos().to_owned(),
+        ));
         let signal_lanes = Arc::new(signal_lanes(&snapshot, TRACE_BUCKETS));
         Ok(Self {
             snapshot,
@@ -134,22 +134,23 @@ impl EpisodeInspectionCache {
         self.entries
             .iter()
             .find(|entry| {
-                entry.snapshot.episode.id == episode
-                    && expected_frames.is_none_or(|frames| entry.snapshot.episode.frames == frames)
+                entry.snapshot.episode().id() == episode
+                    && expected_frames
+                        .is_none_or(|frames| entry.snapshot.episode().frames() == frames)
             })
             .cloned()
     }
 
     fn insert(&mut self, inspection: Arc<CachedInspection>) {
         self.entries
-            .retain(|entry| entry.snapshot.episode.id != inspection.snapshot.episode.id);
+            .retain(|entry| entry.snapshot.episode().id() != inspection.snapshot.episode().id());
         self.entries.push_front(inspection);
         self.entries.truncate(MAX_CACHED_EPISODES);
     }
 
     pub(crate) fn invalidate(&mut self, episode: &str) {
         self.entries
-            .retain(|entry| entry.snapshot.episode.id != episode);
+            .retain(|entry| entry.snapshot.episode().id() != episode);
     }
 }
 
@@ -219,11 +220,11 @@ pub(crate) fn request_historical_preview(
     // flight. Record the newest requested time without starting another read;
     // the completion below samples that newest time from the loaded snapshot.
     let same_episode_loading = state.peek().as_ref().is_some_and(|source| {
-        source.episode == episode && matches!(source.state, LoadState::Loading { .. })
+        source.episode() == episode && matches!(source.state(), LoadState::Loading { .. })
     });
     if same_episode_loading && cache.peek().get(&episode, expected_frames).is_none() {
         if let Some(source) = state.write().as_mut() {
-            source.seconds = seconds;
+            source.set_seconds(seconds);
         }
         return;
     }
@@ -232,20 +233,20 @@ pub(crate) fn request_historical_preview(
     revision.set(ticket);
     if let Some(inspection) = cache.peek().get(&episode, expected_frames) {
         match inspection.preview_at(seconds) {
-            Ok(preview) => state.set(Some(RecordedSource {
+            Ok(preview) => state.set(Some(RecordedSource::new(
                 episode,
                 seconds,
-                state: LoadState::Ready(preview),
-            })),
+                LoadState::Ready(preview),
+            ))),
             Err(error) => {
-                state.set(Some(RecordedSource {
+                state.set(Some(RecordedSource::new(
                     episode,
                     seconds,
-                    state: LoadState::Failed {
+                    LoadState::Failed {
                         reason: error.clone(),
                         previous: None,
                     },
-                }));
+                )));
                 studio.report(error);
             }
         }
@@ -255,16 +256,16 @@ pub(crate) fn request_historical_preview(
     let previous = state
         .peek()
         .as_ref()
-        .filter(|source| source.episode == episode)
+        .filter(|source| source.episode() == episode)
         .and_then(RecordedSource::renderable)
         .cloned();
-    state.set(Some(RecordedSource {
-        episode: episode.clone(),
+    state.set(Some(RecordedSource::new(
+        episode.clone(),
         seconds,
-        state: LoadState::Loading {
+        LoadState::Loading {
             previous: previous.clone(),
         },
-    }));
+    )));
     spawn(async move {
         let path = api::episode_inspection_url(&episode);
         let loaded = with_deadline(
@@ -281,60 +282,60 @@ pub(crate) fn request_historical_preview(
         match loaded {
             Ok(inspection) => {
                 if expected_frames
-                    .is_some_and(|frames| inspection.snapshot.episode.frames != frames)
+                    .is_some_and(|frames| inspection.snapshot.episode().frames() != frames)
                 {
                     let error = format!(
                         "The episode changed while it was loading (expected {expected} frames, received {actual}). Reload it to inspect the latest revision.",
                         expected = expected_frames.unwrap_or_default(),
-                        actual = inspection.snapshot.episode.frames,
+                        actual = inspection.snapshot.episode().frames(),
                     );
-                    state.set(Some(RecordedSource {
+                    state.set(Some(RecordedSource::new(
                         episode,
                         seconds,
-                        state: LoadState::Failed {
+                        LoadState::Failed {
                             reason: error.clone(),
                             previous,
                         },
-                    }));
+                    )));
                     studio.report(error);
                     return;
                 }
                 let requested_seconds = state
                     .peek()
                     .as_ref()
-                    .filter(|source| source.episode == episode)
-                    .map_or(seconds, |source| source.seconds);
+                    .filter(|source| source.episode() == episode)
+                    .map_or(seconds, |source| source.seconds());
                 match inspection.preview_at(requested_seconds) {
                     Ok(preview) => {
                         cache.write().insert(Arc::clone(&inspection));
-                        state.set(Some(RecordedSource {
+                        state.set(Some(RecordedSource::new(
                             episode,
-                            seconds: requested_seconds,
-                            state: LoadState::Ready(preview),
-                        }));
+                            requested_seconds,
+                            LoadState::Ready(preview),
+                        )));
                     }
                     Err(error) => {
-                        state.set(Some(RecordedSource {
+                        state.set(Some(RecordedSource::new(
                             episode,
-                            seconds: requested_seconds,
-                            state: LoadState::Failed {
+                            requested_seconds,
+                            LoadState::Failed {
                                 reason: error.clone(),
                                 previous,
                             },
-                        }));
+                        )));
                         studio.report(error);
                     }
                 }
             }
             Err(error) => {
-                state.set(Some(RecordedSource {
+                state.set(Some(RecordedSource::new(
                     episode,
                     seconds,
-                    state: LoadState::Failed {
+                    LoadState::Failed {
                         reason: error.clone(),
                         previous,
                     },
-                }));
+                )));
                 studio.report(error);
             }
         }
@@ -342,90 +343,103 @@ pub(crate) fn request_historical_preview(
 }
 
 fn validate_snapshot(snapshot: &EpisodeInspectionSnapshot) -> Result<(), String> {
-    let frames = snapshot.sample_times_seconds.len();
+    let frames = snapshot.sample_times_seconds().len();
     if frames == 0 {
         return Err(format!(
             "Episode {:?} has no visual samples.",
-            snapshot.episode.id
+            snapshot.episode().id()
         ));
     }
-    if snapshot.episode.frames != frames as u64 {
+    if snapshot.episode().frames() != frames as u64 {
         return Err(format!(
             "Episode {:?} declares {} frames but delivered {frames} visual samples.",
-            snapshot.episode.id, snapshot.episode.frames
+            snapshot.episode().id(),
+            snapshot.episode().frames()
         ));
     }
-    if snapshot.follow_error_degrees.len() != frames {
+    if snapshot.follow_error_degrees().len() != frames {
         return Err(format!(
             "Episode {:?} delivered an inconsistent follow-error track.",
-            snapshot.episode.id
+            snapshot.episode().id()
         ));
     }
     let mut previous = None;
-    for seconds in &snapshot.sample_times_seconds {
+    for seconds in snapshot.sample_times_seconds() {
         if !seconds.is_finite() || *seconds < 0.0 || previous.is_some_and(|last| *seconds < last) {
             return Err(format!(
                 "Episode {:?} delivered an invalid visual sample clock.",
-                snapshot.episode.id
+                snapshot.episode().id()
             ));
         }
         previous = Some(*seconds);
     }
-    if snapshot.arms.len() != snapshot.episode.arms.len() {
+    if snapshot.arms().len() != snapshot.episode().arms().len() {
         return Err(format!(
             "Episode {:?} delivered an inconsistent arm layout.",
-            snapshot.episode.id
+            snapshot.episode().id()
         ));
     }
-    for arm in &snapshot.arms {
+    for arm in snapshot.arms() {
         let Some(expected) = snapshot
-            .episode
-            .arms
+            .episode()
+            .arms()
             .iter()
-            .find(|expected| expected.id == arm.arm)
+            .find(|expected| expected.id() == arm.arm())
         else {
             return Err(format!(
                 "Episode {:?} delivered an unknown arm {:?}.",
-                snapshot.episode.id, arm.arm
+                snapshot.episode().id(),
+                arm.arm()
             ));
         };
-        if arm.joints != expected.joints {
+        if arm.joints() != expected.joints() {
             return Err(format!(
                 "Episode {:?} delivered a different joint layout for {:?}.",
-                snapshot.episode.id, arm.arm
+                snapshot.episode().id(),
+                arm.arm()
             ));
         }
         let values = frames
-            .checked_mul(arm.joints.len())
+            .checked_mul(arm.joints().len())
             .ok_or_else(|| "Episode inspection dimensions overflowed.".to_owned())?;
-        if arm.normalized.len() != values || arm.raw.len() != values {
+        if arm.normalized().len() != values || arm.raw().len() != values {
             return Err(format!(
                 "Episode {:?} delivered an incomplete state track for {:?}.",
-                snapshot.episode.id, arm.arm
+                snapshot.episode().id(),
+                arm.arm()
             ));
         }
-        validate_optional_matrix(snapshot, arm, "velocity", &arm.velocity, frames, values)?;
-        validate_optional_matrix(snapshot, arm, "effort", &arm.effort, frames, values)?;
-        validate_optional_matrix(snapshot, arm, "action", &arm.action, frames, values)?;
+        let matrices = OptionalMatrixValidation {
+            snapshot,
+            arm,
+            frames,
+            values,
+        };
+        matrices.validate("velocity", arm.velocity())?;
+        matrices.validate("effort", arm.effort())?;
+        matrices.validate("action", arm.action())?;
     }
     Ok(())
 }
 
-fn validate_optional_matrix(
-    snapshot: &EpisodeInspectionSnapshot,
-    arm: &EpisodeInspectionArm,
-    label: &str,
-    matrix: &EpisodeOptionalFrameMatrix,
+struct OptionalMatrixValidation<'a> {
+    snapshot: &'a EpisodeInspectionSnapshot,
+    arm: &'a EpisodeInspectionArm,
     frames: usize,
     values: usize,
-) -> Result<(), String> {
-    if matrix.present.len() != frames || matrix.values.len() != values {
-        return Err(format!(
-            "Episode {:?} delivered an incomplete {label} track for {:?}.",
-            snapshot.episode.id, arm.arm
-        ));
+}
+
+impl OptionalMatrixValidation<'_> {
+    fn validate(&self, label: &str, matrix: &EpisodeOptionalFrameMatrix) -> Result<(), String> {
+        if matrix.present().len() != self.frames || matrix.values().len() != self.values {
+            return Err(format!(
+                "Episode {:?} delivered an incomplete {label} track for {:?}.",
+                self.snapshot.episode().id(),
+                self.arm.arm()
+            ));
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 fn sample_at(
@@ -435,19 +449,21 @@ fn sample_at(
     if !seconds.is_finite() {
         return Err("Timeline time must be finite.".to_owned());
     }
-    let frame = nearest_frame(&snapshot.sample_times_seconds, seconds)
-        .ok_or_else(|| format!("Episode {:?} has no visual samples.", snapshot.episode.id))?;
+    let frame = nearest_frame(snapshot.sample_times_seconds(), seconds).ok_or_else(|| {
+        format!(
+            "Episode {:?} has no visual samples.",
+            snapshot.episode().id()
+        )
+    })?;
     let arms = snapshot
-        .arms
+        .arms()
         .iter()
         .map(|arm| sample_arm(arm, frame))
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(api::TimelineSample {
-        frame: frame as u64,
-        seconds: snapshot.sample_times_seconds[frame],
-        follow_error_degrees: snapshot.follow_error_degrees[frame],
-        arms,
-    })
+    Ok(
+        api::TimelineSample::new(frame as u64, snapshot.sample_times_seconds()[frame])
+            .with_measurements(snapshot.follow_error_degrees()[frame], arms),
+    )
 }
 
 fn nearest_frame(times: &[f64], requested: f64) -> Option<usize> {
@@ -470,65 +486,61 @@ fn nearest_frame(times: &[f64], requested: f64) -> Option<usize> {
 }
 
 fn sample_arm(arm: &EpisodeInspectionArm, frame: usize) -> Result<api::TimelineArmSample, String> {
-    let joint_count = arm.joints.len();
+    let joint_count = arm.joints().len();
     let start = frame
         .checked_mul(joint_count)
         .ok_or_else(|| "Episode inspection frame offset overflowed.".to_owned())?;
     let end = start + joint_count;
     let optional = |matrix: &EpisodeOptionalFrameMatrix| {
-        matrix.present[frame].then(|| {
-            arm.joints
+        matrix.present()[frame].then(|| {
+            arm.joints()
                 .iter()
                 .cloned()
-                .zip(matrix.values[start..end].iter().copied())
+                .zip(matrix.values()[start..end].iter().copied())
                 .collect::<BTreeMap<_, _>>()
         })
     };
-    Ok(api::TimelineArmSample {
-        arm: arm.arm.clone(),
-        normalized: arm
-            .joints
+    Ok(api::TimelineArmSample::new(
+        arm.arm(),
+        arm.joints()
             .iter()
             .cloned()
-            .zip(arm.normalized[start..end].iter().copied())
+            .zip(arm.normalized()[start..end].iter().copied())
             .collect(),
-        raw: arm
-            .joints
+        arm.joints()
             .iter()
             .cloned()
-            .zip(arm.raw[start..end].iter().copied())
+            .zip(arm.raw()[start..end].iter().copied())
             .collect(),
-        velocity: optional(&arm.velocity),
-        effort: optional(&arm.effort),
-        action: optional(&arm.action),
-    })
+    )
+    .with_optional_channels(api::TimelineOptionalArmChannels::new(
+        optional(arm.velocity()),
+        optional(arm.effort()),
+        optional(arm.action()),
+    )))
 }
 
 fn signal_lanes(snapshot: &EpisodeInspectionSnapshot, buckets: usize) -> [TimelineSignalLane; 6] {
     std::array::from_fn(|lane_index| {
         let joint = SO101_JOINTS[lane_index];
         let series = snapshot
-            .arms
+            .arms()
             .iter()
             .filter_map(|arm| {
-                let joint_index = arm.joints.iter().position(|name| name == joint.name())?;
-                let joint_count = arm.joints.len();
+                let joint_index = arm.joints().iter().position(|name| name == joint.name())?;
+                let joint_count = arm.joints().len();
                 let values = arm
-                    .normalized
+                    .normalized()
                     .chunks_exact(joint_count)
                     .map(|frame| frame[joint_index]);
-                Some(TimelineSignalSeries {
-                    arm: arm.arm.clone(),
-                    points: reduce_trace(&snapshot.sample_times_seconds, values, buckets),
-                })
+                Some(TimelineSignalSeries::new(
+                    arm.arm(),
+                    reduce_trace(snapshot.sample_times_seconds(), values, buckets),
+                ))
             })
             .collect();
-        TimelineSignalLane {
-            joint: joint.name().to_owned(),
-            label: joint.label().to_owned(),
-            color: signal_color(joint.name()).to_owned(),
-            series,
-        }
+        TimelineSignalLane::new(joint.name(), joint.label(), signal_color(joint.name()))
+            .with_series(series)
     })
 }
 
@@ -584,26 +596,17 @@ impl TraceBucket {
     fn into_points(self) -> Vec<TimelineSignalPoint> {
         let mut points = Vec::with_capacity(3);
         if let Some((seconds, value)) = self.minimum {
-            points.push(TimelineSignalPoint {
-                seconds,
-                value: Some(value),
-            });
+            points.push(TimelineSignalPoint::new(seconds, Some(value)));
         }
         if let Some((seconds, value)) = self.maximum
             && self.minimum != self.maximum
         {
-            points.push(TimelineSignalPoint {
-                seconds,
-                value: Some(value),
-            });
+            points.push(TimelineSignalPoint::new(seconds, Some(value)));
         }
         if let Some(seconds) = self.first_missing {
-            points.push(TimelineSignalPoint {
-                seconds,
-                value: None,
-            });
+            points.push(TimelineSignalPoint::new(seconds, None));
         }
-        points.sort_by(|left, right| left.seconds.total_cmp(&right.seconds));
+        points.sort_by(|left, right| left.seconds().total_cmp(&right.seconds()));
         points
     }
 }
@@ -638,45 +641,48 @@ async fn with_deadline<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spiral_robotics_api::recording::{EpisodeArm, EpisodeOptionalFrameMatrix, EpisodeSummary};
+    use spiral_robotics_api::recording::{
+        EpisodeArm, EpisodeArmOptionalChannels, EpisodeArmScalarSamples, EpisodeAssessment,
+        EpisodeIdentity, EpisodeInspectionArm, EpisodeOptionalFrameMatrix, EpisodeSummary,
+        EpisodeTimeline,
+    };
 
     fn snapshot() -> EpisodeInspectionSnapshot {
-        let absent = EpisodeOptionalFrameMatrix {
-            present: vec![false; 3],
-            values: vec![None; 6],
-        };
-        EpisodeInspectionSnapshot {
-            episode: EpisodeSummary {
-                dataset_id: "default".to_owned(),
-                id: "take-1".to_owned(),
-                arms: vec![EpisodeArm {
-                    id: "follower".to_owned(),
-                    robot_type: None,
-                    joints: vec!["shoulder_pan".to_owned(), "gripper".to_owned()],
-                }],
-                frames: 3,
-                duration_seconds: 2.0,
-                recording_gaps: Vec::new(),
-                sample_hz: 1.0,
-                started_ms: 0,
-                source: "Teleoperation".to_owned(),
-                max_follow_error_degrees: None,
-                discarded: false,
-                problem: None,
-            },
-            sample_times_seconds: vec![0.0, 1.0, 2.0],
-            follow_error_degrees: vec![None, Some(0.5), None],
-            arms: vec![EpisodeInspectionArm {
-                arm: "follower".to_owned(),
-                joints: vec!["shoulder_pan".to_owned(), "gripper".to_owned()],
-                normalized: vec![Some(0.0), Some(0.1), Some(0.5), Some(0.6), Some(1.0), None],
-                raw: vec![0, 1, 5, 6, 10, 11],
-                velocity: absent.clone(),
-                effort: absent.clone(),
-                action: absent,
-            }],
-            videos: Vec::new(),
-        }
+        snapshot_with_normalized(vec![
+            Some(0.0),
+            Some(0.1),
+            Some(0.5),
+            Some(0.6),
+            Some(1.0),
+            None,
+        ])
+    }
+
+    fn snapshot_with_normalized(normalized: Vec<Option<f64>>) -> EpisodeInspectionSnapshot {
+        let joints = vec!["shoulder_pan".to_owned(), "gripper".to_owned()];
+        let absent = EpisodeOptionalFrameMatrix::new(vec![false; 3], vec![None; 6]);
+        let episode = EpisodeSummary::new(
+            EpisodeIdentity::new(
+                "take-1",
+                "default",
+                vec![EpisodeArm::new("follower", None, joints.clone())],
+            )
+            .with_source("Teleoperation"),
+            EpisodeTimeline::new(3, 2.0, 1.0),
+            EpisodeAssessment::new(false, None, None),
+        );
+        let arm = EpisodeInspectionArm::new(
+            "follower",
+            joints,
+            EpisodeArmScalarSamples::new(normalized, vec![0, 1, 5, 6, 10, 11]),
+        )
+        .with_optional_channels(EpisodeArmOptionalChannels::new(
+            absent.clone(),
+            absent.clone(),
+            absent,
+        ));
+        EpisodeInspectionSnapshot::new(episode, vec![0.0, 1.0, 2.0], vec![None, Some(0.5), None])
+            .with_arms(vec![arm])
     }
 
     #[test]
@@ -688,16 +694,16 @@ mod tests {
         let cached = cache.get("take-1", Some(3)).expect("cached episode");
         let preview = cached.preview_at(0.6).expect("preview");
 
-        assert_eq!(preview.sample().frame, 1);
-        assert_eq!(preview.sample().seconds, 1.0);
+        assert_eq!(preview.sample().frame(), 1);
+        assert_eq!(preview.sample().seconds(), 1.0);
         let follower = preview
-            .sample
-            .arms
+            .sample()
+            .arms()
             .iter()
-            .find(|arm| arm.arm == "follower")
+            .find(|arm| arm.arm() == "follower")
             .expect("follower sample");
-        assert_eq!(follower.raw["shoulder_pan"], 5);
-        assert_eq!(preview.signal_lanes()[0].series[0].points.len(), 3);
+        assert_eq!(follower.raw()["shoulder_pan"], 5);
+        assert_eq!(preview.signal_lanes()[0].series()[0].points().len(), 3);
     }
 
     #[test]
@@ -712,8 +718,8 @@ mod tests {
 
     #[test]
     fn malformed_frame_matrices_fail_before_becoming_renderable() {
-        let mut malformed = snapshot();
-        malformed.arms[0].normalized.pop();
+        let malformed =
+            snapshot_with_normalized(vec![Some(0.0), Some(0.1), Some(0.5), Some(0.6), Some(1.0)]);
 
         assert!(
             CachedInspection::try_new(malformed)

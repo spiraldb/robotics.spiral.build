@@ -38,14 +38,14 @@ pub(super) fn router() -> Router<AppState> {
 }
 
 async fn capabilities(State(state): State<AppState>) -> Json<WorkflowCapabilities> {
-    Json(state.workflow.capabilities())
+    Json(state.workflow().capabilities())
 }
 
 async fn relations(
     State(state): State<AppState>,
 ) -> Result<Json<WorkflowRelationsResponse>, Failure> {
     let token = state
-        .catalog_lease
+        .catalog_lease()
         .try_acquire(CatalogLeaseOwner::WorkflowCatalogRead)
         .ok_or_else(|| {
             Failure::conflict(
@@ -53,22 +53,22 @@ async fn relations(
             )
         })?;
     let result = state
-        .workflow
+        .workflow()
         .relations()
         .await
         .map(Json)
         .map_err(Failure::import);
-    let released = state.catalog_lease.release(token);
+    let released = state.catalog_lease().release(token);
     debug_assert!(released, "Workflow catalog read releases its lease once");
     result
 }
 
 async fn state(State(state): State<AppState>) -> Json<WorkflowStateResponse> {
-    Json(state.workflow.state())
+    Json(state.workflow().state())
 }
 
 async fn snapshot(State(state): State<AppState>) -> Json<WorkflowRunSnapshot> {
-    Json(state.workflow.state().snapshot)
+    Json(state.workflow().state().snapshot().clone())
 }
 
 async fn save(
@@ -76,22 +76,22 @@ async fn save(
     Json(request): Json<SaveWorkflowRequest>,
 ) -> Result<Json<WorkflowStateResponse>, Failure> {
     let token = state
-        .catalog_lease
+        .catalog_lease()
         .try_acquire(CatalogLeaseOwner::WorkflowStart)
         .ok_or_else(|| {
             Failure::conflict(
                 "Wait for the current recording or catalog change before applying Workflow",
             )
         })?;
-    if state.workflow_agent.is_active() {
-        let released = state.catalog_lease.release(token);
+    if state.workflow_agent().is_active() {
+        let released = state.catalog_lease().release(token);
         debug_assert!(released, "Workflow save releases its admission lease once");
         return Err(Failure::conflict(
             "Wait for the active Assistant turn before applying manual graph changes",
         ));
     }
-    let result = state.workflow.save(request).map(Json).map_err(Into::into);
-    let released = state.catalog_lease.release(token);
+    let result = state.workflow().save(request).map(Json).map_err(Into::into);
+    let released = state.catalog_lease().release(token);
     debug_assert!(released, "Workflow save releases its admission lease once");
     result
 }
@@ -101,15 +101,15 @@ async fn run(
     Json(request): Json<RunWorkflowRequest>,
 ) -> Result<Json<WorkflowRunSnapshot>, Failure> {
     let token = state
-        .catalog_lease
+        .catalog_lease()
         .try_acquire(CatalogLeaseOwner::WorkflowStart)
         .ok_or_else(|| {
             Failure::conflict(
                 "Wait for the current recording or catalog change before running Workflow",
             )
         })?;
-    if state.workflow_agent.is_active() {
-        let released = state.catalog_lease.release(token);
+    if state.workflow_agent().is_active() {
+        let released = state.catalog_lease().release(token);
         debug_assert!(
             released,
             "manual Workflow start releases its admission lease once"
@@ -118,8 +118,12 @@ async fn run(
             "Wait for the active Assistant turn before starting a manual Workflow run",
         ));
     }
-    let result = state.workflow.start(request).map(Json).map_err(Into::into);
-    let released = state.catalog_lease.release(token);
+    let result = state
+        .workflow()
+        .start(request)
+        .map(Json)
+        .map_err(Into::into);
+    let released = state.catalog_lease().release(token);
     debug_assert!(released, "Workflow start releases its admission lease once");
     result
 }
@@ -128,11 +132,15 @@ async fn cancel(
     State(state): State<AppState>,
     Json(request): Json<CancelWorkflowRequest>,
 ) -> Result<Json<WorkflowRunSnapshot>, Failure> {
-    state.workflow.cancel(request).map(Json).map_err(Into::into)
+    state
+        .workflow()
+        .cancel(request)
+        .map(Json)
+        .map_err(Into::into)
 }
 
 async fn agent_state(State(state): State<AppState>) -> Json<WorkflowAgentStateResponse> {
-    Json(state.workflow_agent.state())
+    Json(state.workflow_agent().state())
 }
 
 async fn agent_turn(
@@ -141,7 +149,7 @@ async fn agent_turn(
 ) -> Result<(StatusCode, Json<WorkflowAgentTurnAccepted>), Failure> {
     require_agent_history_store(&state)?;
     state
-        .workflow_agent
+        .workflow_agent()
         .start_turn(request)
         .map(|accepted| (StatusCode::ACCEPTED, Json(accepted)))
         .map_err(Into::into)
@@ -152,7 +160,7 @@ async fn agent_create_conversation(
     Json(request): Json<WorkflowAgentCreateConversationRequest>,
 ) -> Result<(StatusCode, Json<WorkflowAgentStateResponse>), Failure> {
     let token = state
-        .catalog_lease
+        .catalog_lease()
         .try_acquire(CatalogLeaseOwner::WorkflowAgentHistory)
         .ok_or_else(|| {
             Failure::conflict(
@@ -162,12 +170,12 @@ async fn agent_create_conversation(
     let result = (|| {
         require_agent_history_store(&state)?;
         state
-            .workflow_agent
+            .workflow_agent()
             .create_conversation(request)
             .map(|state| (StatusCode::CREATED, Json(state)))
             .map_err(Into::into)
     })();
-    let released = state.catalog_lease.release(token);
+    let released = state.catalog_lease().release(token);
     debug_assert!(
         released,
         "Assistant conversation create releases its lease once"
@@ -180,7 +188,7 @@ async fn agent_activate_conversation(
     Json(request): Json<WorkflowAgentActivateConversationRequest>,
 ) -> Result<Json<WorkflowAgentStateResponse>, Failure> {
     let token = state
-        .catalog_lease
+        .catalog_lease()
         .try_acquire(CatalogLeaseOwner::WorkflowAgentHistory)
         .ok_or_else(|| {
             Failure::conflict(
@@ -190,12 +198,12 @@ async fn agent_activate_conversation(
     let result = (|| {
         require_agent_history_store(&state)?;
         state
-            .workflow_agent
+            .workflow_agent()
             .activate_conversation(request)
             .map(Json)
             .map_err(Into::into)
     })();
-    let released = state.catalog_lease.release(token);
+    let released = state.catalog_lease().release(token);
     debug_assert!(
         released,
         "Assistant conversation select releases its lease once"
@@ -208,7 +216,7 @@ async fn agent_cancel(
     Json(request): Json<WorkflowAgentCancelRequest>,
 ) -> Result<Json<WorkflowAgentStateResponse>, Failure> {
     state
-        .workflow_agent
+        .workflow_agent()
         .cancel(request)
         .await
         .map(Json)
@@ -216,7 +224,7 @@ async fn agent_cancel(
 }
 
 fn require_agent_history_store(state: &AppState) -> Result<(), Failure> {
-    if state.bootstrap.current().catalog_available {
+    if state.bootstrap().current().catalog_available() {
         Ok(())
     } else {
         Err(Failure::conflict(

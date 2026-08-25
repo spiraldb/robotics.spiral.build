@@ -29,7 +29,7 @@ pub(crate) fn rollout_controller() -> RolloutController {
 
 impl RolloutController {
     pub(crate) fn checkpoint(&self) -> Option<String> {
-        self.checkpoint.read().clone()
+        self.checkpoint.read().to_owned()
     }
 
     pub(crate) fn select_checkpoint(mut self, checkpoint: Option<String>) {
@@ -37,7 +37,7 @@ impl RolloutController {
     }
 
     pub(crate) fn duration_draft(&self) -> String {
-        self.duration_draft.read().clone()
+        self.duration_draft.read().to_owned()
     }
 
     pub(crate) fn duration_seconds(&self) -> Option<u32> {

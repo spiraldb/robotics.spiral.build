@@ -6,7 +6,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use crate::http::routes::{self, AppState, BootstrapState};
+use crate::http::routes::{
+    self, AppActivityManagers, AppCatalogResources, AppPlatformResources, AppRoboticsResources,
+    AppRuntimeResources, AppState, AppVideoResources, AppWorkflowManagers, BootstrapState,
+};
 use crate::robotics::cameras::CameraManager;
 use crate::robotics::video::VideoEncoderSettings;
 use crate::robots::workspace::RobotWorkspace;
@@ -20,10 +23,10 @@ use spiral_robotics_hardware::cameras;
 use spiral_robotics_hardware::{
     ControlSettings, DEFAULT_MAX_STEP_COUNTS, DEFAULT_TELEOP_MAX_STEP_COUNTS, HardwareHandle,
 };
-use spiral_robotics_storage::adbc::ProjectStore;
+use spiral_robotics_storage::ProjectStore;
+use spiral_robotics_storage::StorageManager;
 use spiral_robotics_storage::episodes::EpisodeStore;
-use spiral_robotics_storage::manager::StorageManager;
-use spiral_robotics_storage::settings::{
+use spiral_robotics_storage::{
     BackendStateStore, SpiralConnectionSettings, StudioPreferencesStore,
     environment_spiral_endpoint, environment_spiral_spfs_endpoint, normalize_spiral_endpoint,
     normalize_spiral_spfs_endpoint,
@@ -267,7 +270,7 @@ async fn serve(startup: ServerStartup) -> Result<()> {
         .or_else(|| std::env::var("SPIRAL_PROJECT_ID").ok())
         .filter(|project| !project.trim().is_empty())
         .or_else(|| backend_state.project_id());
-    if !spiral_robotics_storage::schema::is_identifier(arguments.spiral.spiral_namespace.trim()) {
+    if !spiral_robotics_storage::is_identifier(arguments.spiral.spiral_namespace.trim()) {
         return Err(std::io::Error::other(
             "Spiral namespace must start with a letter or '_' and contain only letters, numbers, or '_'",
         )
@@ -313,26 +316,24 @@ async fn serve(startup: ServerStartup) -> Result<()> {
         cameras.note_issue(format!("camera previews will stay blank: {error}"));
     }
 
-    let state = AppState {
-        workspace: workspace.clone(),
-        episodes: episodes.clone(),
-        hardware: hardware.clone(),
-        cameras: cameras.clone(),
-        backend_state,
-        preferences,
-        storage,
-        training: training.clone(),
-        workflow: workflow.clone(),
-        workflow_agent: workflow_agent.clone(),
-        rollout: rollout.clone(),
-        bootstrap: BootstrapState::new(),
-        catalog_lease,
-        recording_video: Arc::new(tokio::sync::Mutex::new(None)),
-        video_encoder: VideoEncoderSettings::new(
+    let catalog = AppCatalogResources::new(workspace.clone(), episodes.clone(), storage)
+        .with_lease(catalog_lease);
+    let video = AppVideoResources::new(
+        Arc::new(tokio::sync::Mutex::new(None)),
+        VideoEncoderSettings::new(
             arguments.video.ffmpeg.clone(),
             arguments.video.video_codec.clone(),
         ),
-    };
+    );
+    let robotics = AppRoboticsResources::new(hardware.clone(), cameras.clone(), video);
+    let workflow_managers = AppWorkflowManagers::new(workflow.clone(), workflow_agent.clone());
+    let activities = AppActivityManagers::new(training.clone(), rollout.clone(), workflow_managers);
+    let platform = AppPlatformResources::new(backend_state, preferences, BootstrapState::new());
+    let state = AppState::new(
+        catalog,
+        robotics,
+        AppRuntimeResources::new(activities, platform),
+    );
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let address = listener.local_addr()?;
 
@@ -430,11 +431,11 @@ async fn bootstrap_services(state: AppState, discover_cameras: bool) {
         if !discover_cameras {
             return;
         }
-        let cameras = state.cameras.clone();
+        let cameras = state.cameras().clone();
         if let Err(error) = tokio::task::spawn_blocking(move || cameras.refresh_blocking()).await {
             let message = format!("camera discovery task stopped: {error}");
             tracing::warn!("{message}");
-            state.cameras.note_issue(message);
+            state.cameras().note_issue(message);
         }
     };
     tokio::join!(catalog, camera);
@@ -442,27 +443,27 @@ async fn bootstrap_services(state: AppState, discover_cameras: bool) {
 
 async fn bootstrap_catalog(state: AppState) {
     state
-        .bootstrap
+        .bootstrap()
         .bootstrapping("Connecting to SpiralDB and warming the shared ADBC pool");
-    if let Err(error) = state.storage.prewarm().await {
+    if let Err(error) = state.storage().prewarm().await {
         tracing::warn!("could not prewarm SpiralDB during startup: {error}");
-        state.bootstrap.degraded(false, error);
+        state.bootstrap().degraded(false, error);
         return;
     }
 
     state
-        .bootstrap
+        .bootstrap()
         .bootstrapping("Loading Studio preferences and run history");
     let preferences = {
         let state = state.clone();
         async move {
-            let preferences_storage = state.storage.clone();
+            let preferences_storage = state.storage().clone();
             let loaded =
                 tokio::task::spawn_blocking(move || preferences_storage.load_studio_preferences())
                     .await;
             let issue = match loaded {
                 Ok(Ok(preferences)) => {
-                    state.preferences.replace(preferences);
+                    state.preferences().replace(preferences);
                     None
                 }
                 Ok(Err(error)) => Some(format!("could not load Studio preferences: {error}")),
@@ -471,15 +472,15 @@ async fn bootstrap_catalog(state: AppState) {
             // Runtime selection lives in project preferences. Start both
             // readiness probes as soon as those preferences resolve, while
             // the independent history loads may still be running.
-            state.training.refresh_readiness().await;
+            state.training().refresh_readiness().await;
             issue
         }
     };
-    let training = state.training.hydrate_from_storage();
-    let workflow = state.workflow.hydrate_from_storage();
-    let workflow_agent = state.workflow_agent.hydrate_from_storage();
+    let training = state.training().hydrate_from_storage();
+    let workflow = state.workflow().hydrate_from_storage();
+    let workflow_agent = state.workflow_agent().hydrate_from_storage();
     let rollout = {
-        let rollout = state.rollout.clone();
+        let rollout = state.rollout().clone();
         tokio::task::spawn_blocking(move || rollout.reload_from_storage())
     };
     let (preferences, training, workflow, workflow_agent, rollout) =
@@ -506,11 +507,11 @@ async fn bootstrap_catalog(state: AppState) {
         Err(error) => issues.push(format!("rollout history task stopped: {error}")),
     }
     if issues.is_empty() {
-        state.bootstrap.ready();
+        state.bootstrap().ready();
     } else {
         let detail = issues.join("; ");
         tracing::warn!("Studio started with reduced history/preferences state: {detail}");
-        state.bootstrap.degraded(true, detail);
+        state.bootstrap().degraded(true, detail);
     }
     routes::auto_connect_saved_robots(state).await;
 }

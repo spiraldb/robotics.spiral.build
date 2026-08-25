@@ -2,6 +2,9 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
+use syn::visit::{self, Visit};
+use syn::{Attribute, Fields, ImplItem, Item, Signature, TraitItem, Visibility};
+
 fn collect_production_rust_sources(directory: &Path, sources: &mut Vec<std::path::PathBuf>) {
     for entry in fs::read_dir(directory).expect("source directory must exist") {
         let entry = entry.expect("source entry must be readable");
@@ -30,6 +33,194 @@ fn declares_local_dependency(manifest: &str, dependency: &str) -> bool {
         let line = line.trim_start();
         line.starts_with(&workspace_key) || line.starts_with(&table_key)
     })
+}
+
+fn has_cfg_test(attributes: &[Attribute]) -> bool {
+    attributes.iter().any(|attribute| {
+        if !attribute.path().is_ident("cfg") {
+            return false;
+        }
+        let mut is_test = false;
+        let _ = attribute.parse_nested_meta(|meta| {
+            is_test |= meta.path.is_ident("test");
+            Ok(())
+        });
+        is_test
+    })
+}
+
+struct ComplexityBoundaryVisitor<'a> {
+    source_path: &'a Path,
+    violations: Vec<String>,
+}
+
+impl ComplexityBoundaryVisitor<'_> {
+    fn check_signature(&mut self, signature: &Signature) {
+        let parameter_count = signature.inputs.len();
+        if parameter_count > 3 {
+            self.violations.push(format!(
+                "{} function {:?} has {parameter_count} parameters",
+                self.source_path.display(),
+                signature.ident,
+            ));
+        }
+    }
+
+    fn check_fields(&mut self, item_name: &str, fields: &Fields) {
+        let field_count = fields.len();
+        if field_count > 7 {
+            self.violations.push(format!(
+                "{} type {item_name:?} has {field_count} fields",
+                self.source_path.display(),
+            ));
+        }
+        for field in fields {
+            if !matches!(field.vis, Visibility::Inherited) {
+                let field_name = field
+                    .ident
+                    .as_ref()
+                    .map_or_else(|| "<tuple field>".to_owned(), ToString::to_string);
+                self.violations.push(format!(
+                    "{} type {item_name:?} exposes field {field_name:?}",
+                    self.source_path.display(),
+                ));
+            }
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for ComplexityBoundaryVisitor<'_> {
+    fn visit_item(&mut self, item: &'ast Item) {
+        let attributes: &[Attribute] = match item {
+            Item::Const(item) => &item.attrs,
+            Item::Enum(item) => &item.attrs,
+            Item::ExternCrate(item) => &item.attrs,
+            Item::Fn(item) => &item.attrs,
+            Item::ForeignMod(item) => &item.attrs,
+            Item::Impl(item) => &item.attrs,
+            Item::Macro(item) => &item.attrs,
+            Item::Mod(item) => &item.attrs,
+            Item::Static(item) => &item.attrs,
+            Item::Struct(item) => &item.attrs,
+            Item::Trait(item) => &item.attrs,
+            Item::TraitAlias(item) => &item.attrs,
+            Item::Type(item) => &item.attrs,
+            Item::Union(item) => &item.attrs,
+            Item::Use(item) => &item.attrs,
+            _ => &[],
+        };
+        if !has_cfg_test(attributes) {
+            visit::visit_item(self, item);
+        }
+    }
+
+    fn visit_impl_item(&mut self, item: &'ast ImplItem) {
+        let attributes: &[Attribute] = match item {
+            ImplItem::Const(item) => &item.attrs,
+            ImplItem::Fn(item) => &item.attrs,
+            ImplItem::Type(item) => &item.attrs,
+            ImplItem::Macro(item) => &item.attrs,
+            _ => &[],
+        };
+        if !has_cfg_test(attributes) {
+            visit::visit_impl_item(self, item);
+        }
+    }
+
+    fn visit_trait_item(&mut self, item: &'ast TraitItem) {
+        let attributes: &[Attribute] = match item {
+            TraitItem::Const(item) => &item.attrs,
+            TraitItem::Fn(item) => &item.attrs,
+            TraitItem::Type(item) => &item.attrs,
+            TraitItem::Macro(item) => &item.attrs,
+            _ => &[],
+        };
+        if !has_cfg_test(attributes) {
+            visit::visit_trait_item(self, item);
+        }
+    }
+
+    fn visit_item_fn(&mut self, function: &'ast syn::ItemFn) {
+        self.check_signature(&function.sig);
+        visit::visit_item_fn(self, function);
+    }
+
+    fn visit_impl_item_fn(&mut self, function: &'ast syn::ImplItemFn) {
+        self.check_signature(&function.sig);
+        visit::visit_impl_item_fn(self, function);
+    }
+
+    fn visit_trait_item_fn(&mut self, function: &'ast syn::TraitItemFn) {
+        self.check_signature(&function.sig);
+        visit::visit_trait_item_fn(self, function);
+    }
+
+    fn visit_item_struct(&mut self, item: &'ast syn::ItemStruct) {
+        self.check_fields(&item.ident.to_string(), &item.fields);
+        visit::visit_item_struct(self, item);
+    }
+
+    fn visit_item_enum(&mut self, item: &'ast syn::ItemEnum) {
+        for variant in &item.variants {
+            self.check_fields(
+                &format!("{}::{}", item.ident, variant.ident),
+                &variant.fields,
+            );
+        }
+        visit::visit_item_enum(self, item);
+    }
+
+    fn visit_item_static(&mut self, item: &'ast syn::ItemStatic) {
+        self.violations.push(format!(
+            "{} declares static {:?}",
+            self.source_path.display(),
+            item.ident,
+        ));
+        visit::visit_item_static(self, item);
+    }
+}
+
+#[test]
+fn first_party_items_stay_within_cognitive_complexity_bounds() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("backend crate lives under workspace/crates");
+    let crates_root = workspace_root.join("crates");
+    let mut sources = Vec::new();
+    for entry in fs::read_dir(&crates_root).expect("workspace crates directory must exist") {
+        let entry = entry.expect("workspace crate entry must be readable");
+        if !entry
+            .file_type()
+            .expect("crate entry type must be readable")
+            .is_dir()
+        {
+            continue;
+        }
+        let crate_root = entry.path();
+        let source_root = crate_root.join("src");
+        if crate_root.join("Cargo.toml").is_file() && source_root.is_dir() {
+            collect_production_rust_sources(&source_root, &mut sources);
+        }
+    }
+    sources.sort();
+    let mut violations = Vec::new();
+    for source_path in sources {
+        let source = fs::read_to_string(&source_path).expect("Rust source must be readable");
+        let syntax = syn::parse_file(&source)
+            .unwrap_or_else(|error| panic!("{} must parse: {error}", source_path.display()));
+        let mut visitor = ComplexityBoundaryVisitor {
+            source_path: &source_path,
+            violations: Vec::new(),
+        };
+        visitor.visit_file(&syntax);
+        violations.extend(visitor.violations);
+    }
+    assert!(
+        violations.is_empty(),
+        "first-party architecture bounds were exceeded:\n{}",
+        violations.join("\n")
+    );
 }
 
 #[test]
@@ -89,9 +280,86 @@ fn product_crates_follow_functional_boundaries() {
         "workflow",
     ] {
         assert!(
-            backend_library.contains(&format!("pub mod {capability};")),
-            "backend capability {capability:?} must be visible at the crate root"
+            backend_library.contains(&format!("mod {capability};"))
+                && !backend_library.contains(&format!("pub mod {capability};")),
+            "backend capability {capability:?} must stay internal to the launcher crate"
         );
+    }
+    assert!(
+        backend_library.contains("pub use http::server::run;"),
+        "the backend's sole external capability must remain its launcher"
+    );
+}
+
+#[test]
+fn workspace_public_surface_stays_explicit_and_state_has_owners() {
+    let backend = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let crates = backend.parent().expect("workspace crates directory");
+
+    let backend_library = fs::read_to_string(backend.join("src/lib.rs")).expect("backend library");
+    let backend_exports = backend_library
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("pub "))
+        .collect::<Vec<_>>();
+    assert_eq!(backend_exports, ["pub use http::server::run;"]);
+
+    let frontend_library = fs::read_to_string(crates.join("spiral-robotics-frontend/src/lib.rs"))
+        .expect("frontend library");
+    let frontend_exports = frontend_library
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("pub "))
+        .collect::<Vec<_>>();
+    assert_eq!(frontend_exports, ["pub use shell::App;"]);
+
+    let storage_library = fs::read_to_string(crates.join("spiral-robotics-storage/src/lib.rs"))
+        .expect("storage library");
+    for implementation_module in ["adbc", "manager", "schema", "settings", "sql"] {
+        assert!(
+            !storage_library.contains(&format!("pub mod {implementation_module};")),
+            "storage implementation module {implementation_module:?} must not become public"
+        );
+    }
+
+    for entry in fs::read_dir(crates).expect("workspace crates must be readable") {
+        let entry = entry.expect("workspace crate entry must be readable");
+        if !entry.file_type().expect("crate entry type").is_dir() {
+            continue;
+        }
+        let source_root = entry.path().join("src");
+        if !source_root.is_dir() {
+            continue;
+        }
+        let mut sources = Vec::new();
+        collect_production_rust_sources(&source_root, &mut sources);
+        for path in sources {
+            let source = fs::read_to_string(&path).expect("Rust source must be readable");
+            for (line_index, line) in source.lines().enumerate() {
+                let code = line.split("//").next().unwrap_or_default().trim();
+                let tokens = code
+                    .split(|character: char| {
+                        !(character == '_' || character.is_ascii_alphanumeric())
+                    })
+                    .filter(|token| !token.is_empty())
+                    .collect::<Vec<_>>();
+                let placeholder_declaration = tokens.windows(2).any(|tokens| {
+                    matches!(tokens[0], "struct" | "enum" | "type" | "mod" | "fn")
+                        && matches!(tokens[1], "Built" | "Common" | "View")
+                });
+                assert!(
+                    !placeholder_declaration,
+                    "{}:{} declares a placeholder domain name",
+                    path.display(),
+                    line_index + 1
+                );
+            }
+            assert!(
+                !source.contains("SiglipConcept"),
+                "{} restores the unconstrained SiglipConcept facade",
+                path.display()
+            );
+        }
     }
 }
 
@@ -142,7 +410,7 @@ fn read_controllers_delegate_selection_and_admission_to_backend_capabilities() {
     let routes = fs::read_to_string(root.join("routes.rs")).expect("routes source");
     for seam in [
         "robots::list(&robot_adapter)",
-        "devices::CameraDiscoveryAdapter(state.cameras.clone())",
+        "devices::CameraDiscoveryAdapter::new(state.cameras().clone())",
     ] {
         assert!(routes.contains(seam), "state snapshot bypasses {seam}");
     }
@@ -467,7 +735,7 @@ fn synchronous_adbc_is_confined_to_one_bounded_adapter() {
         "Studio must not accept a runtime path for its linked SpiralDB driver"
     );
     for operation in [
-        "pub async fn run",
+        "pub(crate) async fn run",
         "pub fn run_blocking",
         "pub fn run_invalidating_blocking",
         "pub fn run_exclusive_blocking",

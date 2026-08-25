@@ -7,9 +7,11 @@ use std::time::Duration;
 
 use spiral_robotics_api::settings::ConnectionTestResponse;
 use spiral_robotics_api::training::{
-    MAX_TRAINING_HISTORY_RUNS, StartTrainingRequest, TrainingCheckpoint, TrainingMetricPoint,
-    TrainingReadiness, TrainingRun, TrainingRunPhase, TrainingRuntimeInfo, TrainingSnapshot,
-    TrainingSource, TrainingUpdate,
+    ActArchitectureConfig, ActAttentionConfig, ActInputConfig, MAX_TRAINING_HISTORY_RUNS,
+    StartTrainingRequest, TrainingCheckpoint, TrainingMetricPoint, TrainingMetricProgress,
+    TrainingReadiness, TrainingResourceMetrics, TrainingRun, TrainingRunHistory as ApiRunHistory,
+    TrainingRunIdentity as ApiRunIdentity, TrainingRunLifecycle, TrainingRunPhase,
+    TrainingRuntimeInfo, TrainingSnapshot, TrainingSource, TrainingStageTimings, TrainingUpdate,
 };
 use spiral_robotics_training::{
     ActLayerCounts, ActModelDimensions, ActTrainingArchitecture, ActTrainingInput,
@@ -29,16 +31,26 @@ use crate::training::execution::{
 };
 use crate::training::runs::{RunPhase as CapabilityRunPhase, RunRecord, TrainingRunRegistry};
 use crate::training::service::{
+    ActTrainingInputSettings as CapabilityActInputSettings,
+    ActTrainingLayerSettings as CapabilityActLayerSettings,
+    ActTrainingModelSettings as CapabilityActModelSettings,
     ActTrainingSettings as CapabilityActTrainingSettings,
     StartTrainingCommand as CapabilityStartTrainingCommand,
-    TrainingCheckpoint as CapabilityTrainingCheckpoint, TrainingMetric as CapabilityTrainingMetric,
-    TrainingPolicy as CapabilityTrainingPolicy, TrainingReadiness as CapabilityTrainingReadiness,
-    TrainingRun as CapabilityTrainingRun, TrainingRunPhase as CapabilityTrainingRunPhase,
-    TrainingSource as CapabilityTrainingSource,
+    TrainingCheckpoint as CapabilityTrainingCheckpoint,
+    TrainingCheckpointSettings as CapabilityCheckpointSettings,
+    TrainingCommandIdentity as CapabilityCommandIdentity,
+    TrainingDataSettings as CapabilityDataSettings,
+    TrainingExecutionSettings as CapabilityExecutionSettings,
+    TrainingMetric as CapabilityTrainingMetric,
+    TrainingOptimizerSettings as CapabilityOptimizerSettings,
+    TrainingPolicy as CapabilityTrainingPolicy,
+    TrainingProgressSettings as CapabilityProgressSettings,
+    TrainingReadiness as CapabilityTrainingReadiness, TrainingRun as CapabilityTrainingRun,
+    TrainingRunPhase as CapabilityTrainingRunPhase, TrainingSource as CapabilityTrainingSource,
 };
-use spiral_robotics_core::error::OperationError;
+use spiral_robotics_core::OperationError;
+use spiral_robotics_storage::StorageManager;
 use spiral_robotics_storage::checkpoints::CheckpointStore;
-use spiral_robotics_storage::manager::StorageManager;
 
 #[derive(Clone)]
 pub(crate) struct TrainingManager {
@@ -60,6 +72,117 @@ struct RemoteReplayState {
     checkpoint_step: u64,
     persisted_logs: std::collections::BTreeSet<String>,
     configured: bool,
+}
+
+struct RemoteJobSnapshot<'a> {
+    run_id: &'a str,
+    request: &'a StartTrainingRequest,
+    snapshot: &'a TrainingJobSnapshot,
+}
+
+impl<'a> RemoteJobSnapshot<'a> {
+    fn new(
+        run_id: &'a str,
+        request: &'a StartTrainingRequest,
+        snapshot: &'a TrainingJobSnapshot,
+    ) -> Self {
+        Self {
+            run_id,
+            request,
+            snapshot,
+        }
+    }
+}
+
+struct RemoteJobCompletion {
+    run_id: String,
+    phase: TrainingJobPhase,
+    current_step: u64,
+    message: String,
+}
+
+impl RemoteJobCompletion {
+    fn new(run_id: String, phase: TrainingJobPhase, current_step: u64) -> Self {
+        Self {
+            run_id,
+            phase,
+            current_step,
+            message: String::new(),
+        }
+    }
+
+    fn with_message(mut self, message: impl Into<String>) -> Self {
+        self.message = message.into();
+        self
+    }
+}
+
+struct TrainingPhaseUpdate {
+    run_id: String,
+    phase: TrainingRunPhase,
+    finished_ms: Option<i64>,
+    message: Option<String>,
+}
+
+impl TrainingPhaseUpdate {
+    fn new(run_id: String, phase: TrainingRunPhase) -> Self {
+        Self {
+            run_id,
+            phase,
+            finished_ms: None,
+            message: None,
+        }
+    }
+
+    fn with_completion(mut self, finished_ms: Option<i64>, message: Option<String>) -> Self {
+        self.finished_ms = finished_ms;
+        self.message = message;
+        self
+    }
+}
+
+struct PersistenceFailure<'a> {
+    run_id: &'a str,
+    finished_ms: i64,
+    error: &'a str,
+}
+
+impl<'a> PersistenceFailure<'a> {
+    fn new(run_id: &'a str, finished_ms: i64, error: &'a str) -> Self {
+        Self {
+            run_id,
+            finished_ms,
+            error,
+        }
+    }
+
+    fn updates(
+        self,
+        snapshot: &TrainingSnapshot,
+    ) -> Result<(TrainingUpdate, TrainingUpdate), String> {
+        let run = snapshot
+            .runs()
+            .iter()
+            .find(|run| run.id() == self.run_id)
+            .ok_or_else(|| format!("training run {:?} is not in history", self.run_id))?;
+        let message = format!(
+            "Training history could not be persisted, so execution was stopped: {}",
+            self.error
+        );
+        Ok((
+            TrainingUpdate::Log {
+                run_id: self.run_id.to_owned(),
+                line: message.clone(),
+            },
+            TrainingUpdate::RunState {
+                run_id: self.run_id.to_owned(),
+                phase: TrainingRunPhase::Failed,
+                current_step: run.current_step(),
+                finished_ms: Some(self.finished_ms),
+                message: Some(message),
+            },
+        ))
+    }
 }
 
 impl TrainingManager {
@@ -101,11 +224,16 @@ impl TrainingManager {
             .retained_ids()
             .map(str::to_owned)
             .collect::<std::collections::BTreeSet<_>>();
-        snapshot.runs.retain(|run| retained.contains(&run.id));
+        let retained_runs = snapshot
+            .runs()
+            .iter()
+            .filter(|run| retained.contains(run.id()))
+            .cloned()
+            .collect();
         // Readiness is live service state, not durable history. Preserve the
         // concurrently computed value if probes finish before hydration.
         let mut current = lock(&self.inner.snapshot);
-        snapshot.readiness = current.readiness.clone();
+        snapshot = TrainingSnapshot::new(current.readiness().clone(), retained_runs);
         *current = snapshot.clone();
         drop(current);
         let _ = self.inner.updates.send(TrainingUpdate::Snapshot {
@@ -114,17 +242,18 @@ impl TrainingManager {
         // A worker-owned job continues while Studio is down. Re-submit the
         // immutable ID (the runtime treats POST as idempotent) and resume
         // polling its replayable state instead of marking the run failed.
-        for run in snapshot.runs.into_iter().filter(|run| run.phase.active()) {
+        for run in snapshot.runs().iter().filter(|run| run.phase().active()) {
+            let run = run.clone();
             let cancel = Arc::new(AtomicBool::new(false));
-            lock(&self.inner.controls).insert(run.id.clone(), cancel.clone());
+            lock(&self.inner.controls).insert(run.id().to_owned(), cancel.clone());
             let manager = self.clone();
             tokio::spawn(async move {
                 manager
                     .run_backend(
-                        TrainingLaunch {
-                            run_id: run.id,
-                            command: capability_training_command(run.config),
-                        },
+                        TrainingLaunch::new(
+                            run.id(),
+                            capability_training_command(run.config().clone()),
+                        ),
                         cancel,
                     )
                     .await;
@@ -158,7 +287,7 @@ impl TrainingManager {
 
     pub(crate) async fn refresh_readiness(&self) -> TrainingReadiness {
         let next = readiness(&self.inner.storage, &self.inner.training_backend).await;
-        if lock(&self.inner.snapshot).readiness != next {
+        if lock(&self.inner.snapshot).readiness() != &next {
             let _ = self.apply_update(
                 TrainingUpdate::Readiness {
                     readiness: next.clone(),
@@ -171,14 +300,10 @@ impl TrainingManager {
 
     pub(crate) async fn test_runtime(&self) -> ConnectionTestResponse {
         match probe_training_backend(&self.inner.training_backend).await {
-            Ok(info) => ConnectionTestResponse {
-                ok: true,
-                message: format!("Connected · {}", info.display_summary()),
-            },
-            Err(error) => ConnectionTestResponse {
-                ok: false,
-                message: error,
-            },
+            Ok(info) => {
+                ConnectionTestResponse::new(true, format!("Connected · {}", info.display_summary()))
+            }
+            Err(error) => ConnectionTestResponse::new(false, error),
         }
     }
 
@@ -204,12 +329,12 @@ impl TrainingManager {
             ));
         }
         let run = lock(&self.inner.snapshot)
-            .runs
+            .runs()
             .iter()
-            .find(|run| run.id == run_id)
+            .find(|run| run.id() == run_id)
             .cloned()
             .ok_or_else(|| format!("training run {run_id:?} is no longer available"))?;
-        if run.phase.active() {
+        if run.phase().active() {
             return Err(format!(
                 "training run {run_id:?} is still active; stop it before deleting it"
             ));
@@ -230,11 +355,11 @@ impl TrainingManager {
         };
         let mut snapshot = lock(&self.inner.snapshot);
         let current = snapshot
-            .runs
+            .runs()
             .iter()
-            .find(|candidate| candidate.id == run_id)
+            .find(|candidate| candidate.id() == run_id)
             .ok_or_else(|| format!("training run {run_id:?} is no longer available"))?;
-        if current.phase.active() {
+        if current.phase().active() {
             return Err(format!(
                 "training run {run_id:?} became active while deletion was in progress"
             ));
@@ -255,8 +380,8 @@ impl TrainingManager {
     }
 
     async fn run_backend(&self, launch: TrainingLaunch, cancel: Arc<AtomicBool>) {
-        let run_id = launch.run_id;
-        let request = contract_training_request(launch.command);
+        let (run_id, command) = launch.into_parts();
+        let request = contract_training_request(command);
         let credentials = self.inner.storage.spiral_credentials();
         let spiral = SpiralJobConnection::new(
             SpiralServiceEndpoints::new(
@@ -277,50 +402,54 @@ impl TrainingManager {
         let data = TrainingDataSelection::new(
             spiral,
             TrainingDataQuery::new(
-                request.sql.clone(),
+                request.sql().to_owned(),
                 TrainingDataColumns::new(
-                    request.state_column.clone(),
-                    request.action_column.clone(),
+                    request.state_column().to_owned(),
+                    request.action_column().to_owned(),
                 ),
-                spiral_robotics_storage::schema::SCHEMA_VERSION,
+                spiral_robotics_storage::SCHEMA_VERSION,
             ),
         );
-        let initialization = if request.act.pretrained_backbone {
+        let initialization = if request.act().pretrained_backbone() {
             TrainingInitialization::PretrainedBackbone
         } else {
             TrainingInitialization::Random
         };
         let schedule = TrainingSchedule::new(
-            TrainingProgress::new(request.steps, request.batch_size, request.validation_split),
-            TrainingOptimizer::new(request.learning_rate, request.seed),
-            TrainingCheckpointSchedule::new(request.checkpoint_every, request.chunk_size),
+            TrainingProgress::new(
+                request.steps(),
+                request.batch_size(),
+                request.validation_split(),
+            ),
+            TrainingOptimizer::new(request.learning_rate(), request.seed()),
+            TrainingCheckpointSchedule::new(request.checkpoint_every(), request.chunk_size()),
         );
         let act = ActTrainingJobConfig::new(
             ActTrainingInput::new(
-                request.act.camera_streams.clone(),
-                TrainingImageSize::new(request.act.image_width, request.act.image_height),
-                request.act.video_decoder.clone(),
+                request.act().camera_streams().to_vec(),
+                TrainingImageSize::new(request.act().image_width(), request.act().image_height()),
+                request.act().video_decoder().to_owned(),
             ),
             ActTrainingArchitecture::new(
                 ActModelDimensions::new(
-                    request.act.hidden_dim,
-                    request.act.latent_dim,
-                    request.act.feedforward_dim,
+                    request.act().hidden_dim(),
+                    request.act().latent_dim(),
+                    request.act().feedforward_dim(),
                 ),
-                request.act.attention_heads,
+                request.act().attention_heads(),
                 ActLayerCounts::new(
-                    request.act.encoder_layers,
-                    request.act.vae_encoder_layers,
-                    request.act.decoder_layers,
+                    request.act().encoder_layers(),
+                    request.act().vae_encoder_layers(),
+                    request.act().decoder_layers(),
                 ),
             ),
-            request.act.kl_weight,
+            request.act().kl_weight(),
         );
         let job_request = TrainingJobRequest::new(
-            TrainingJobIdentity::new(run_id.clone(), request.run_name.clone()),
+            TrainingJobIdentity::new(run_id.clone(), request.run_name().to_owned()),
             data,
             TrainingJobPlan::new(
-                TrainingRuntimeSelection::new(request.device.clone(), initialization),
+                TrainingRuntimeSelection::new(request.device().to_owned(), initialization),
                 schedule,
                 act,
             ),
@@ -337,41 +466,43 @@ impl TrainingManager {
         let mut snapshot = match initial {
             Ok(Ok(snapshot)) => snapshot,
             Ok(Err(error)) => {
-                self.finish_remote_job(&run_id, TrainingJobPhase::Failed, 0, error.to_string());
+                self.finish_remote_job(
+                    RemoteJobCompletion::new(run_id.clone(), TrainingJobPhase::Failed, 0)
+                        .with_message(error.to_string()),
+                );
                 return;
             }
             Err(error) => {
                 self.finish_remote_job(
-                    &run_id,
-                    TrainingJobPhase::Failed,
-                    0,
-                    format!("training job launch task stopped: {error}"),
+                    RemoteJobCompletion::new(run_id.clone(), TrainingJobPhase::Failed, 0)
+                        .with_message(format!("training job launch task stopped: {error}")),
                 );
                 return;
             }
         };
         let persisted_run = lock(&self.inner.snapshot)
-            .runs
+            .runs()
             .iter()
-            .find(|run| run.id == run_id)
+            .find(|run| run.id() == run_id)
             .cloned();
         let metric_step = persisted_run
             .as_ref()
-            .and_then(|run| run.metrics.iter().map(|metric| metric.step).max())
+            .and_then(|run| run.metrics().iter().map(|metric| metric.step()).max())
             .unwrap_or(0);
         let checkpoint_step = persisted_run
             .as_ref()
             .and_then(|run| {
-                run.checkpoints
+                run.checkpoints()
                     .iter()
-                    .map(|checkpoint| checkpoint.step)
+                    .map(|checkpoint| checkpoint.step())
                     .max()
             })
             .unwrap_or(0);
         let persisted_logs = persisted_run
             .map(|run| {
-                run.logs
-                    .into_iter()
+                run.logs()
+                    .iter()
+                    .cloned()
                     .collect::<std::collections::BTreeSet<_>>()
             })
             .unwrap_or_default();
@@ -384,23 +515,28 @@ impl TrainingManager {
         let mut stop_sent = false;
         let mut poll_failures = 0_u64;
         loop {
-            if let Err(error) =
-                self.apply_remote_job_snapshot(&run_id, &request, &snapshot, &mut replay)
-            {
+            if let Err(error) = self.apply_remote_job_snapshot(
+                RemoteJobSnapshot::new(&run_id, &request, &snapshot),
+                &mut replay,
+            ) {
                 self.finish_remote_job(
-                    &run_id,
-                    TrainingJobPhase::Failed,
-                    snapshot.current_step(),
-                    error,
+                    RemoteJobCompletion::new(
+                        run_id.clone(),
+                        TrainingJobPhase::Failed,
+                        snapshot.current_step(),
+                    )
+                    .with_message(error),
                 );
                 return;
             }
             if snapshot.phase().is_terminal() {
                 self.finish_remote_job(
-                    &run_id,
-                    snapshot.phase(),
-                    snapshot.current_step(),
-                    snapshot.message().unwrap_or_default().to_owned(),
+                    RemoteJobCompletion::new(
+                        run_id.clone(),
+                        snapshot.phase(),
+                        snapshot.current_step(),
+                    )
+                    .with_message(snapshot.message().unwrap_or_default()),
                 );
                 return;
             }
@@ -445,10 +581,12 @@ impl TrainingManager {
                 }
                 Err(error) => {
                     self.finish_remote_job(
-                        &run_id,
-                        TrainingJobPhase::Failed,
-                        snapshot.current_step(),
-                        format!("training job poll task stopped: {error}"),
+                        RemoteJobCompletion::new(
+                            run_id.clone(),
+                            TrainingJobPhase::Failed,
+                            snapshot.current_step(),
+                        )
+                        .with_message(format!("training job poll task stopped: {error}")),
                     );
                     return;
                 }
@@ -458,19 +596,24 @@ impl TrainingManager {
 
     fn apply_remote_job_snapshot(
         &self,
-        run_id: &str,
-        request: &StartTrainingRequest,
-        snapshot: &TrainingJobSnapshot,
+        remote: RemoteJobSnapshot<'_>,
         replay: &mut RemoteReplayState,
     ) -> Result<(), String> {
+        let RemoteJobSnapshot {
+            run_id,
+            request,
+            snapshot,
+        } = remote;
         if snapshot.job_id() != run_id {
             return Err("training runtime returned the wrong job ID".to_owned());
         }
         if !replay.configured
             && let Some(resolved) = snapshot.resolved()
         {
-            let mut resolved_request = request.clone();
-            resolved_request.act.camera_streams = resolved.camera_streams().to_vec();
+            let resolved_request = contract_training_request(
+                capability_training_command(request.clone())
+                    .with_camera_streams(resolved.camera_streams().to_vec()),
+            );
             self.apply_update(
                 TrainingUpdate::RunConfigured {
                     run_id: run_id.to_owned(),
@@ -484,10 +627,8 @@ impl TrainingManager {
             && self.phase(run_id) == Some(TrainingRunPhase::Starting)
         {
             self.set_phase(
-                run_id,
-                TrainingRunPhase::Running,
-                None,
-                snapshot.message().map(str::to_owned),
+                TrainingPhaseUpdate::new(run_id.to_owned(), TrainingRunPhase::Running)
+                    .with_completion(None, snapshot.message().map(str::to_owned)),
             )?;
         }
         if let Some(gap) = snapshot.history_gap() {
@@ -505,24 +646,20 @@ impl TrainingManager {
             self.apply_update(
                 TrainingUpdate::Metric {
                     run_id: run_id.to_owned(),
-                    point: Box::new(TrainingMetricPoint {
-                        step: metric.step(),
-                        train_loss: metric.train_loss(),
-                        validation_loss: metric.validation_loss(),
-                        learning_rate: metric.learning_rate(),
-                        transfer_bytes_per_second: 0.0,
-                        examples_per_second: metric.examples_per_second(),
-                        cpu_percent: metric.cpu_percent(),
-                        gpu_percent: metric.gpu_percent(),
-                        memory_bytes: metric.memory_bytes(),
-                        loader_ms: metric.loader_ms(),
-                        arrow_encode_ms: None,
-                        upload_ms: None,
-                        device_copy_ms: metric.device_copy_ms(),
-                        model_ms: metric.model_ms(),
-                        elapsed_seconds: metric.elapsed_seconds(),
-                        event: metric.event().map(str::to_owned),
-                    }),
+                    point: Box::new(TrainingMetricPoint::new(
+                        TrainingMetricProgress::new(
+                            metric.step(),
+                            metric.train_loss(),
+                            metric.learning_rate(),
+                        )
+                        .with_validation_loss(metric.validation_loss())
+                        .with_timeline(metric.elapsed_seconds(), metric.event().map(str::to_owned)),
+                        TrainingResourceMetrics::new(0.0, metric.examples_per_second())
+                            .with_utilization(metric.cpu_percent(), metric.gpu_percent())
+                            .with_memory_bytes(metric.memory_bytes()),
+                        TrainingStageTimings::new(metric.loader_ms(), None, None)
+                            .with_runtime(metric.device_copy_ms(), metric.model_ms()),
+                    )),
                 },
                 false,
             )?;
@@ -538,15 +675,13 @@ impl TrainingManager {
             self.apply_update(
                 TrainingUpdate::Checkpoint {
                     run_id: run_id.to_owned(),
-                    checkpoint: TrainingCheckpoint {
-                        step: checkpoint.step(),
-                        created_ms: checkpoint.created_ms(),
-                        validation_loss: checkpoint.validation_loss(),
-                        byte_size: checkpoint.byte_size(),
-                        inference_ready: true,
-                        recommended_action_steps: checkpoint.recommended_action_steps(),
-                        sample_hz: checkpoint.sample_hz(),
-                    },
+                    checkpoint: TrainingCheckpoint::new(checkpoint.step(), checkpoint.created_ms())
+                        .with_validation_loss(checkpoint.validation_loss())
+                        .with_artifact(checkpoint.byte_size(), true)
+                        .with_rollout(
+                            checkpoint.recommended_action_steps(),
+                            checkpoint.sample_hz(),
+                        ),
                 },
                 true,
             )?;
@@ -560,14 +695,8 @@ impl TrainingManager {
         Ok(())
     }
 
-    fn finish_remote_job(
-        &self,
-        run_id: &str,
-        phase: TrainingJobPhase,
-        current_step: u64,
-        message: String,
-    ) {
-        let phase = match phase {
+    fn finish_remote_job(&self, completion: RemoteJobCompletion) {
+        let phase = match completion.phase {
             TrainingJobPhase::Completed => TrainingRunPhase::Completed,
             TrainingJobPhase::Stopped => TrainingRunPhase::Stopped,
             TrainingJobPhase::Stopping => TrainingRunPhase::Stopping,
@@ -576,37 +705,38 @@ impl TrainingManager {
             }
         };
         let update = TrainingUpdate::RunState {
-            run_id: run_id.to_owned(),
+            run_id: completion.run_id.clone(),
             phase,
-            current_step,
+            current_step: completion.current_step,
             finished_ms: (!phase.active()).then(|| self.inner.clock.now_ms()),
-            message: (!message.is_empty()).then_some(message),
+            message: (!completion.message.is_empty()).then_some(completion.message),
         };
         let _ = self.apply_update(update, true);
-        lock(&self.inner.controls).remove(run_id);
+        lock(&self.inner.controls).remove(&completion.run_id);
     }
 
     fn phase(&self, run_id: &str) -> Option<TrainingRunPhase> {
         lock(&self.inner.snapshot)
-            .runs
+            .runs()
             .iter()
-            .find(|run| run.id == run_id)
-            .map(|run| run.phase)
+            .find(|run| run.id() == run_id)
+            .map(|run| run.phase())
     }
 
-    fn set_phase(
-        &self,
-        run_id: &str,
-        phase: TrainingRunPhase,
-        finished_ms: Option<i64>,
-        message: Option<String>,
-    ) -> Result<(), String> {
+    fn set_phase(&self, update: TrainingPhaseUpdate) -> Result<(), String> {
+        let TrainingPhaseUpdate {
+            run_id,
+            phase,
+            finished_ms,
+            message,
+        } = update;
+        let run_id = run_id.as_str();
         let mut snapshot = lock(&self.inner.snapshot);
         let current_step = snapshot
-            .runs
+            .runs()
             .iter()
-            .find(|run| run.id == run_id)
-            .map_or(0, |run| run.current_step);
+            .find(|run| run.id() == run_id)
+            .map_or(0, |run| run.current_step());
         let mut registry = registry(&snapshot)?;
         registry.transition(run_id, capability_phase(phase))?;
         let update = TrainingUpdate::RunState {
@@ -630,7 +760,7 @@ impl TrainingManager {
         }
         let mut snapshot = lock(&self.inner.snapshot);
         let Ok((log_update, state_update)) =
-            persistence_failure_updates(&snapshot, run_id, self.inner.clock.now_ms(), error)
+            PersistenceFailure::new(run_id, self.inner.clock.now_ms(), error).updates(&snapshot)
         else {
             return;
         };
@@ -673,10 +803,8 @@ impl TrainingRunPort for TrainingManager {
 
     fn transition_run(&self, run_id: &str, change: RunStateChange) -> Result<(), String> {
         self.set_phase(
-            run_id,
-            contract_training_phase(change.phase),
-            change.finished_ms,
-            change.message,
+            TrainingPhaseUpdate::new(run_id.to_owned(), contract_training_phase(change.phase()))
+                .with_completion(change.finished_ms(), change.message().map(str::to_owned)),
         )
     }
 
@@ -708,9 +836,7 @@ impl TrainingCoordinatorPort for TrainingManager {
         &self,
         dataset_id: &str,
     ) -> Result<CapabilityTrainingSource, OperationError> {
-        Ok(CapabilityTrainingSource {
-            dataset_id: dataset_id.to_owned(),
-        })
+        Ok(CapabilityTrainingSource::new(dataset_id))
     }
 
     async fn validate_training_query(
@@ -729,7 +855,7 @@ impl TrainingCoordinatorPort for TrainingManager {
             .run_ids
             .next(self.inner.clock.as_ref())
             .into_parts();
-        TrainingRunIdentity { id, created_ms }
+        TrainingRunIdentity::new(id, created_ms)
     }
 
     fn admit_training_run(&self, run: CapabilityTrainingRun) -> Result<(), OperationError> {
@@ -751,13 +877,13 @@ impl TrainingCoordinatorPort for TrainingManager {
         let cancel = Arc::new(AtomicBool::new(false));
         {
             let mut controls = lock(&self.inner.controls);
-            if controls.contains_key(&launch.run_id) {
+            if controls.contains_key(launch.run_id()) {
                 return Err(OperationError::Internal(format!(
                     "training runtime {:?} was already launched",
-                    launch.run_id
+                    launch.run_id()
                 )));
             }
-            controls.insert(launch.run_id.clone(), cancel.clone());
+            controls.insert(launch.run_id().to_owned(), cancel.clone());
         }
         let manager = self.clone();
         tokio::spawn(async move {
@@ -775,23 +901,20 @@ async fn readiness(
     let spiral_probe = async {
         tokio::time::timeout(Duration::from_secs(8), storage.test_spiral())
             .await
-            .unwrap_or_else(|_| ConnectionTestResponse {
-                ok: false,
-                message: "the connection probe timed out after 8 seconds".to_owned(),
+            .unwrap_or_else(|_| {
+                ConnectionTestResponse::new(false, "the connection probe timed out after 8 seconds")
             })
     };
     let (backend, connection) = tokio::join!(backend_probe, spiral_probe);
-    let runtime = backend.as_ref().ok().map(|info| TrainingRuntimeInfo {
-        id: info.id().to_owned(),
-        display_name: info.display_name().to_owned(),
-        runtime: info.runtime().to_owned(),
-        devices: info.devices().to_vec(),
+    let runtime = backend.as_ref().ok().map(|info| {
+        TrainingRuntimeInfo::new(info.id(), info.display_name(), info.runtime())
+            .with_devices(info.devices().to_vec())
     });
-    let spiral_ready = connection.ok;
+    let spiral_ready = connection.ok();
     let ready = spiral_ready && backend.is_ok();
     let summary = match (connection, backend) {
-        (result, _) if !result.ok => {
-            format!("Spiral is not ready for training: {}", result.message)
+        (result, _) if !result.ok() => {
+            format!("Spiral is not ready for training: {}", result.message())
         }
         (_, Err(error)) => format!("Training runtime is not ready: {error}"),
         (_, Ok(backend)) => format!(
@@ -801,12 +924,7 @@ async fn readiness(
             probe = backend.display_summary(),
         ),
     };
-    TrainingReadiness {
-        ready,
-        spiral_ready,
-        runtime,
-        summary,
-    }
+    TrainingReadiness::new(ready, spiral_ready, summary).with_runtime(runtime)
 }
 
 fn remote_poll_delay(consecutive_failures: u64) -> Duration {
@@ -831,90 +949,108 @@ async fn probe_training_backend(
         result.map_err(|error| format!("training backend health task failed: {error}"))
     })
     .and_then(|result| result.map_err(|error| error.to_string()))
-    .and_then(|info| {
-        match info.compatibility_error(spiral_robotics_storage::schema::SCHEMA_VERSION) {
+    .and_then(
+        |info| match info.compatibility_error(spiral_robotics_storage::SCHEMA_VERSION) {
             Some(error) => Err(error),
             None => Ok(info),
-        }
-    })
+        },
+    )
 }
 
 fn capability_training_command(request: StartTrainingRequest) -> CapabilityStartTrainingCommand {
-    CapabilityStartTrainingCommand {
-        run_name: request.run_name,
-        dataset_id: request.dataset_id,
-        policy: match request.policy {
+    let identity = CapabilityCommandIdentity::new(
+        request.run_name(),
+        request.dataset_id(),
+        match request.policy() {
             spiral_robotics_api::training::TrainingPolicy::Act => CapabilityTrainingPolicy::Act,
         },
-        query: request.sql,
-        state_column: request.state_column,
-        action_column: request.action_column,
-        device: request.device,
-        steps: request.steps,
-        batch_size: request.batch_size,
-        validation_split: request.validation_split,
-        learning_rate: request.learning_rate,
-        checkpoint_every: request.checkpoint_every,
-        chunk_size: request.chunk_size,
-        seed: request.seed,
-        act: CapabilityActTrainingSettings {
-            camera_streams: request.act.camera_streams,
-            image_width: request.act.image_width,
-            image_height: request.act.image_height,
-            video_decoder: request.act.video_decoder,
-            pretrained_backbone: request.act.pretrained_backbone,
-            hidden_dim: request.act.hidden_dim,
-            latent_dim: request.act.latent_dim,
-            encoder_layers: request.act.encoder_layers,
-            vae_encoder_layers: request.act.vae_encoder_layers,
-            decoder_layers: request.act.decoder_layers,
-            attention_heads: request.act.attention_heads,
-            feedforward_dim: request.act.feedforward_dim,
-            kl_weight: request.act.kl_weight,
-        },
-    }
+    );
+    let data = CapabilityDataSettings::new(
+        request.sql(),
+        request.state_column(),
+        request.action_column(),
+    );
+    let act = CapabilityActTrainingSettings::new(
+        CapabilityActInputSettings::new(
+            request.act().camera_streams().to_vec(),
+            (request.act().image_width(), request.act().image_height()),
+            request.act().video_decoder(),
+        )
+        .with_pretrained_backbone(request.act().pretrained_backbone()),
+        CapabilityActModelSettings::new(
+            request.act().hidden_dim(),
+            request.act().latent_dim(),
+            request.act().attention_heads(),
+        )
+        .with_feedforward(request.act().feedforward_dim(), request.act().kl_weight()),
+        CapabilityActLayerSettings::new(
+            request.act().encoder_layers(),
+            request.act().vae_encoder_layers(),
+            request.act().decoder_layers(),
+        ),
+    );
+    let execution = CapabilityExecutionSettings::new(
+        request.device(),
+        CapabilityProgressSettings::new(
+            request.steps(),
+            request.batch_size(),
+            request.validation_split(),
+        ),
+        act,
+    )
+    .with_schedule(
+        CapabilityOptimizerSettings::new(request.learning_rate(), request.seed()),
+        CapabilityCheckpointSettings::new(request.checkpoint_every(), request.chunk_size()),
+    );
+    CapabilityStartTrainingCommand::new(identity, data, execution)
 }
 
 fn contract_training_request(command: CapabilityStartTrainingCommand) -> StartTrainingRequest {
-    StartTrainingRequest {
-        run_name: command.run_name,
-        dataset_id: command.dataset_id,
-        policy: match command.policy {
-            CapabilityTrainingPolicy::Act => spiral_robotics_api::training::TrainingPolicy::Act,
-        },
-        sql: command.query,
-        state_column: command.state_column,
-        action_column: command.action_column,
-        device: command.device,
-        steps: command.steps,
-        batch_size: command.batch_size,
-        validation_split: command.validation_split,
-        learning_rate: command.learning_rate,
-        checkpoint_every: command.checkpoint_every,
-        chunk_size: command.chunk_size,
-        seed: command.seed,
-        act: spiral_robotics_api::training::ActTrainingConfig {
-            camera_streams: command.act.camera_streams,
-            image_width: command.act.image_width,
-            image_height: command.act.image_height,
-            video_decoder: command.act.video_decoder,
-            pretrained_backbone: command.act.pretrained_backbone,
-            hidden_dim: command.act.hidden_dim,
-            latent_dim: command.act.latent_dim,
-            encoder_layers: command.act.encoder_layers,
-            vae_encoder_layers: command.act.vae_encoder_layers,
-            decoder_layers: command.act.decoder_layers,
-            attention_heads: command.act.attention_heads,
-            feedforward_dim: command.act.feedforward_dim,
-            kl_weight: command.act.kl_weight,
-        },
-    }
+    let selection = spiral_robotics_api::training::TrainingDataSelection::new(
+        command.run_name(),
+        command.dataset_id(),
+        command.query(),
+    )
+    .with_policy(match command.policy() {
+        CapabilityTrainingPolicy::Act => spiral_robotics_api::training::TrainingPolicy::Act,
+    })
+    .with_columns(command.state_column(), command.action_column())
+    .with_device(command.device());
+    let optimization = spiral_robotics_api::training::TrainingOptimizationConfig::new(
+        command.steps(),
+        command.batch_size(),
+        command.learning_rate(),
+    )
+    .with_validation_split(command.validation_split())
+    .with_checkpoint_schedule(command.checkpoint_every(), command.chunk_size())
+    .with_seed(command.seed());
+    let act = spiral_robotics_api::training::ActTrainingConfig::new(
+        ActInputConfig::new(
+            command.act().camera_streams().to_vec(),
+            (command.act().image_width(), command.act().image_height()),
+            command.act().video_decoder(),
+        )
+        .with_pretrained_backbone(command.act().pretrained_backbone()),
+        ActArchitectureConfig::new(
+            command.act().hidden_dim(),
+            command.act().latent_dim(),
+            spiral_robotics_api::training::ActLayerCounts::new(
+                command.act().encoder_layers(),
+                command.act().vae_encoder_layers(),
+                command.act().decoder_layers(),
+            ),
+        ),
+        ActAttentionConfig::new(
+            command.act().attention_heads(),
+            command.act().feedforward_dim(),
+            command.act().kl_weight(),
+        ),
+    );
+    StartTrainingRequest::new(selection, optimization, act)
 }
 
 fn contract_training_source(source: CapabilityTrainingSource) -> TrainingSource {
-    TrainingSource {
-        dataset_id: source.dataset_id,
-    }
+    TrainingSource::new(source.dataset_id())
 }
 
 fn contract_training_phase(phase: CapabilityTrainingRunPhase) -> TrainingRunPhase {
@@ -929,76 +1065,78 @@ fn contract_training_phase(phase: CapabilityTrainingRunPhase) -> TrainingRunPhas
 }
 
 fn capability_training_readiness(readiness: TrainingReadiness) -> CapabilityTrainingReadiness {
-    CapabilityTrainingReadiness {
-        ready: readiness.ready,
-        spiral_ready: readiness.spiral_ready,
-        runtime: readiness
-            .runtime
-            .map(|runtime| crate::training::service::TrainingRuntimeInfo {
-                id: runtime.id,
-                display_name: runtime.display_name,
-                runtime: runtime.runtime,
-                devices: runtime.devices,
-            }),
-        summary: readiness.summary,
-    }
+    CapabilityTrainingReadiness::new(
+        readiness.ready(),
+        readiness.spiral_ready(),
+        readiness.summary(),
+    )
+    .with_runtime(readiness.runtime().map(|runtime| {
+        crate::training::service::TrainingRuntimeInfo::new(
+            runtime.id(),
+            runtime.display_name(),
+            runtime.runtime(),
+        )
+        .with_devices(runtime.devices().to_vec())
+    }))
 }
 
 fn contract_training_metric(metric: CapabilityTrainingMetric) -> TrainingMetricPoint {
-    TrainingMetricPoint {
-        step: metric.step,
-        train_loss: metric.train_loss,
-        validation_loss: metric.validation_loss,
-        learning_rate: metric.learning_rate,
-        transfer_bytes_per_second: metric.transfer_bytes_per_second,
-        examples_per_second: metric.examples_per_second,
-        cpu_percent: metric.cpu_percent,
-        gpu_percent: metric.gpu_percent,
-        memory_bytes: metric.memory_bytes,
-        loader_ms: metric.loader_ms,
-        arrow_encode_ms: metric.batch_encode_ms,
-        upload_ms: metric.upload_ms,
-        device_copy_ms: metric.device_copy_ms,
-        model_ms: metric.model_ms,
-        elapsed_seconds: metric.elapsed_seconds,
-        event: metric.event,
-    }
+    TrainingMetricPoint::new(
+        TrainingMetricProgress::new(metric.step(), metric.train_loss(), metric.learning_rate())
+            .with_validation_loss(metric.validation_loss())
+            .with_timeline(metric.elapsed_seconds(), metric.event().map(str::to_owned)),
+        TrainingResourceMetrics::new(
+            metric.transfer_bytes_per_second(),
+            metric.examples_per_second(),
+        )
+        .with_utilization(metric.cpu_percent(), metric.gpu_percent())
+        .with_memory_bytes(metric.memory_bytes()),
+        TrainingStageTimings::new(
+            metric.loader_ms(),
+            metric.batch_encode_ms(),
+            metric.upload_ms(),
+        )
+        .with_runtime(metric.device_copy_ms(), metric.model_ms()),
+    )
 }
 
 fn contract_training_checkpoint(checkpoint: CapabilityTrainingCheckpoint) -> TrainingCheckpoint {
-    TrainingCheckpoint {
-        step: checkpoint.step,
-        created_ms: checkpoint.created_ms,
-        validation_loss: checkpoint.validation_loss,
-        byte_size: checkpoint.byte_size,
-        inference_ready: checkpoint.inference_ready,
-        recommended_action_steps: checkpoint.recommended_action_steps,
-        sample_hz: checkpoint.sample_hz,
-    }
+    TrainingCheckpoint::new(checkpoint.step(), checkpoint.created_ms())
+        .with_validation_loss(checkpoint.validation_loss())
+        .with_artifact(checkpoint.byte_size(), checkpoint.inference_ready())
+        .with_rollout(
+            checkpoint.recommended_action_steps(),
+            checkpoint.sample_hz(),
+        )
 }
 
 fn contract_training_run(run: CapabilityTrainingRun) -> TrainingRun {
-    TrainingRun {
-        id: run.id,
-        config: contract_training_request(run.config),
-        source: contract_training_source(run.source),
-        phase: contract_training_phase(run.phase),
-        current_step: run.current_step,
-        started_ms: run.started_ms,
-        finished_ms: run.finished_ms,
-        message: run.message,
-        metrics: run
-            .metrics
-            .into_iter()
-            .map(contract_training_metric)
-            .collect(),
-        checkpoints: run
-            .checkpoints
-            .into_iter()
-            .map(contract_training_checkpoint)
-            .collect(),
-        logs: run.logs,
-    }
+    TrainingRun::new(
+        ApiRunIdentity::new(
+            run.id(),
+            contract_training_request(run.config().clone()),
+            contract_training_source(run.source().clone()),
+        ),
+        TrainingRunLifecycle::new(
+            contract_training_phase(run.phase()),
+            run.current_step(),
+            run.started_ms(),
+        )
+        .with_completion(run.finished_ms(), run.message().map(str::to_owned)),
+        ApiRunHistory::new(
+            run.metrics()
+                .iter()
+                .cloned()
+                .map(contract_training_metric)
+                .collect(),
+            run.checkpoints()
+                .iter()
+                .cloned()
+                .map(contract_training_checkpoint)
+                .collect(),
+            run.logs().to_vec(),
+        ),
+    )
 }
 
 fn capability_phase(phase: TrainingRunPhase) -> CapabilityRunPhase {
@@ -1015,10 +1153,10 @@ fn capability_phase(phase: TrainingRunPhase) -> CapabilityRunPhase {
 fn registry(snapshot: &TrainingSnapshot) -> Result<TrainingRunRegistry, String> {
     TrainingRunRegistry::new(
         MAX_TRAINING_HISTORY_RUNS,
-        snapshot.runs.iter().map(|run| RunRecord {
-            id: run.id.clone(),
-            phase: capability_phase(run.phase),
-        }),
+        snapshot
+            .runs()
+            .iter()
+            .map(|run| RunRecord::new(run.id(), capability_phase(run.phase()))),
     )
 }
 
@@ -1028,10 +1166,7 @@ fn admitted_snapshot(
     run: TrainingRun,
 ) -> Result<(TrainingSnapshot, TrainingUpdate), String> {
     let mut registry = registry(snapshot)?;
-    registry.admit(RunRecord {
-        id: run.id.clone(),
-        phase: capability_phase(run.phase),
-    })?;
+    registry.admit(RunRecord::new(run.id(), capability_phase(run.phase())))?;
     let retained = registry
         .retained_ids()
         .map(str::to_owned)
@@ -1039,37 +1174,17 @@ fn admitted_snapshot(
     let update = TrainingUpdate::RunAdded { run: Box::new(run) };
     let mut candidate = snapshot.clone();
     candidate.apply(update.clone());
-    candidate.runs.retain(|run| retained.contains(&run.id));
+    let removed = candidate
+        .runs()
+        .iter()
+        .filter(|run| !retained.contains(run.id()))
+        .map(|run| run.id().to_owned())
+        .collect::<Vec<_>>();
+    for run_id in removed {
+        candidate.apply(TrainingUpdate::RunRemoved { run_id });
+    }
     storage.save_training_snapshot(&candidate)?;
     Ok((candidate, update))
-}
-
-fn persistence_failure_updates(
-    snapshot: &TrainingSnapshot,
-    run_id: &str,
-    finished_ms: i64,
-    error: &str,
-) -> Result<(TrainingUpdate, TrainingUpdate), String> {
-    let run = snapshot
-        .runs
-        .iter()
-        .find(|run| run.id == run_id)
-        .ok_or_else(|| format!("training run {run_id:?} is not in history"))?;
-    let message =
-        format!("Training history could not be persisted, so execution was stopped: {error}");
-    Ok((
-        TrainingUpdate::Log {
-            run_id: run_id.to_owned(),
-            line: message.clone(),
-        },
-        TrainingUpdate::RunState {
-            run_id: run_id.to_owned(),
-            phase: TrainingRunPhase::Failed,
-            current_step: run.current_step,
-            finished_ms: Some(finished_ms),
-            message: Some(message),
-        },
-    ))
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -1082,20 +1197,16 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 mod tests {
     use super::*;
 
-    fn run(id: &str) -> TrainingRun {
-        TrainingRun {
-            id: id.to_owned(),
-            config: StartTrainingRequest::default(),
-            source: TrainingSource::default(),
-            phase: TrainingRunPhase::Starting,
-            current_step: 0,
-            started_ms: 1,
-            finished_ms: None,
-            message: None,
-            metrics: Vec::new(),
-            checkpoints: Vec::new(),
-            logs: Vec::new(),
-        }
+    fn run(id: &str, phase: TrainingRunPhase, current_step: u64) -> TrainingRun {
+        TrainingRun::new(
+            spiral_robotics_api::training::TrainingRunIdentity::new(
+                id,
+                StartTrainingRequest::default(),
+                TrainingSource::default(),
+            ),
+            spiral_robotics_api::training::TrainingRunLifecycle::new(phase, current_step, 1),
+            spiral_robotics_api::training::TrainingRunHistory::default(),
+        )
     }
 
     #[test]
@@ -1108,33 +1219,23 @@ mod tests {
 
     #[test]
     fn runtime_persistence_failure_becomes_a_visible_failed_run_and_log() {
-        let mut active = run("active");
-        active.phase = TrainingRunPhase::Running;
-        active.current_step = 12;
-        let mut snapshot = TrainingSnapshot {
-            runs: vec![active],
-            ..TrainingSnapshot::default()
-        };
+        let active = run("active", TrainingRunPhase::Running, 12);
+        let mut snapshot = TrainingSnapshot::new(TrainingReadiness::default(), vec![active]);
 
-        let (log, state) =
-            persistence_failure_updates(&snapshot, "active", 99, "Spiral unavailable").unwrap();
+        let (log, state) = PersistenceFailure::new("active", 99, "Spiral unavailable")
+            .updates(&snapshot)
+            .unwrap();
         snapshot.apply(log);
         snapshot.apply(state);
 
-        let failed = &snapshot.runs[0];
-        assert_eq!(failed.phase, TrainingRunPhase::Failed);
-        assert_eq!(failed.current_step, 12);
-        assert_eq!(failed.finished_ms, Some(99));
+        let failed = &snapshot.runs()[0];
+        assert_eq!(failed.phase(), TrainingRunPhase::Failed);
+        assert_eq!(failed.current_step(), 12);
+        assert_eq!(failed.finished_ms(), Some(99));
+        assert!(failed.message().unwrap().contains("Spiral unavailable"));
         assert!(
             failed
-                .message
-                .as_deref()
-                .unwrap()
-                .contains("Spiral unavailable")
-        );
-        assert!(
-            failed
-                .logs
+                .logs()
                 .last()
                 .unwrap()
                 .contains("execution was stopped")

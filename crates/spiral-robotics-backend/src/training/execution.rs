@@ -5,33 +5,73 @@
 //! boundaries; runtime execution and checkpoint writes belong to the worker.
 
 use crate::training::service::{
-    StartTrainingCommand, TrainingReadiness, TrainingRun, TrainingRunPhase, TrainingSource,
+    StartTrainingCommand, TrainingReadiness, TrainingRun, TrainingRunHistory,
+    TrainingRunIdentity as StoredTrainingRunIdentity, TrainingRunPhase, TrainingRunState,
+    TrainingSource,
 };
-use spiral_robotics_core::error::OperationError;
+use spiral_robotics_core::OperationError;
 
 const STARTING_MESSAGE: &str = "Opening SpiralDB and starting the remote training job…";
 const STOPPING_MESSAGE: &str = "Finishing the current Spiral read or optimizer step…";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TrainingRunIdentity {
-    pub id: String,
-    pub created_ms: i64,
+pub(crate) struct TrainingRunIdentity {
+    id: String,
+    created_ms: i64,
 }
 
 /// Immutable input handed to the remote-job adapter after admission.
-pub struct TrainingLaunch {
-    pub run_id: String,
-    pub command: StartTrainingCommand,
+pub(crate) struct TrainingLaunch {
+    run_id: String,
+    command: StartTrainingCommand,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RunStateChange {
-    pub phase: TrainingRunPhase,
-    pub finished_ms: Option<i64>,
-    pub message: Option<String>,
+pub(crate) struct RunStateChange {
+    phase: TrainingRunPhase,
+    finished_ms: Option<i64>,
+    message: Option<String>,
 }
 
-pub trait TrainingRunPort: Send + Sync {
+impl TrainingLaunch {
+    pub(crate) fn new(run_id: impl Into<String>, command: StartTrainingCommand) -> Self {
+        Self {
+            run_id: run_id.into(),
+            command,
+        }
+    }
+
+    pub(crate) fn run_id(&self) -> &str {
+        &self.run_id
+    }
+
+    pub(crate) fn into_parts(self) -> (String, StartTrainingCommand) {
+        (self.run_id, self.command)
+    }
+}
+
+impl TrainingRunIdentity {
+    pub(crate) fn new(id: impl Into<String>, created_ms: i64) -> Self {
+        Self {
+            id: id.into(),
+            created_ms,
+        }
+    }
+}
+
+impl RunStateChange {
+    pub(crate) const fn phase(&self) -> TrainingRunPhase {
+        self.phase
+    }
+    pub(crate) const fn finished_ms(&self) -> Option<i64> {
+        self.finished_ms
+    }
+    pub(crate) fn message(&self) -> Option<&str> {
+        self.message.as_deref()
+    }
+}
+
+pub(crate) trait TrainingRunPort: Send + Sync {
     fn runtime_is_active(&self, run_id: &str) -> bool;
     fn transition_run(&self, run_id: &str, change: RunStateChange) -> Result<(), String>;
     fn signal_runtime_stop(&self, run_id: &str);
@@ -40,7 +80,7 @@ pub trait TrainingRunPort: Send + Sync {
     fn now_ms(&self) -> i64;
 }
 
-pub trait TrainingCoordinatorPort: TrainingRunPort {
+pub(crate) trait TrainingCoordinatorPort: TrainingRunPort {
     async fn refresh_training_readiness(&self) -> TrainingReadiness;
     fn resolve_training_source(&self, dataset_id: &str) -> Result<TrainingSource, OperationError>;
     async fn validate_training_query(
@@ -52,7 +92,7 @@ pub trait TrainingCoordinatorPort: TrainingRunPort {
     fn launch_training_runtime(&self, launch: TrainingLaunch) -> Result<(), OperationError>;
 }
 
-pub async fn coordinate_training_start<P>(
+pub(crate) async fn coordinate_training_start<P>(
     port: &P,
     command: StartTrainingCommand,
 ) -> Result<TrainingRun, OperationError>
@@ -60,39 +100,29 @@ where
     P: TrainingCoordinatorPort + ?Sized,
 {
     let readiness = port.refresh_training_readiness().await;
-    if !readiness.ready {
-        return Err(OperationError::Conflict(readiness.summary));
+    if !readiness.ready() {
+        return Err(OperationError::Conflict(readiness.summary().to_owned()));
     }
-    let source = port.resolve_training_source(&command.dataset_id)?;
+    let source = port.resolve_training_source(command.dataset_id())?;
     port.validate_training_query(&command).await?;
     let identity = port.next_training_identity();
-    let run = TrainingRun {
-        id: identity.id.clone(),
-        config: command.clone(),
-        source,
-        phase: TrainingRunPhase::Starting,
-        current_step: 0,
-        started_ms: identity.created_ms,
-        finished_ms: None,
-        message: Some(STARTING_MESSAGE.to_owned()),
-        metrics: Vec::new(),
-        checkpoints: Vec::new(),
-        logs: Vec::new(),
-    };
+    let run = TrainingRun::new(
+        StoredTrainingRunIdentity::new(identity.id.clone(), command.clone(), source),
+        TrainingRunState::new(TrainingRunPhase::Starting, 0, identity.created_ms)
+            .finished(None, Some(STARTING_MESSAGE.to_owned())),
+        TrainingRunHistory::default(),
+    );
     port.admit_training_run(run.clone())?;
-    let launch = TrainingLaunch {
-        run_id: run.id.clone(),
-        command,
-    };
+    let launch = TrainingLaunch::new(run.id(), command);
     if let Err(error) = port.launch_training_runtime(launch) {
-        fail_run(port, &run.id, error.message().to_owned());
-        port.cleanup_runtime(&run.id);
+        fail_run(port, run.id(), error.message().to_owned());
+        port.cleanup_runtime(run.id());
         return Err(error);
     }
     Ok(run)
 }
 
-pub fn coordinate_training_stop<P>(port: &P, run_id: &str) -> Result<(), OperationError>
+pub(crate) fn coordinate_training_stop<P>(port: &P, run_id: &str) -> Result<(), OperationError>
 where
     P: TrainingRunPort + ?Sized,
 {
@@ -138,7 +168,12 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use crate::training::service::{ActTrainingSettings, TrainingPolicy};
+    use crate::training::service::{
+        ActTrainingInputSettings, ActTrainingLayerSettings, ActTrainingModelSettings,
+        ActTrainingSettings, TrainingCheckpointSettings, TrainingCommandIdentity,
+        TrainingDataSettings, TrainingExecutionSettings, TrainingOptimizerSettings, TrainingPolicy,
+        TrainingProgressSettings,
+    };
 
     struct FakePort {
         events: Mutex<Vec<String>>,
@@ -151,12 +186,7 @@ mod tests {
         fn ready() -> Self {
             Self {
                 events: Mutex::new(Vec::new()),
-                readiness: TrainingReadiness {
-                    ready: true,
-                    spiral_ready: true,
-                    runtime: None,
-                    summary: "ready".to_owned(),
-                },
+                readiness: TrainingReadiness::new(true, true, "ready"),
                 active: true,
                 fail: None,
             }
@@ -214,9 +244,7 @@ mod tests {
             dataset_id: &str,
         ) -> Result<TrainingSource, OperationError> {
             self.push(format!("resolve:{dataset_id}"));
-            Ok(TrainingSource {
-                dataset_id: dataset_id.to_owned(),
-            })
+            Ok(TrainingSource::new(dataset_id))
         }
         async fn validate_training_query(
             &self,
@@ -230,20 +258,17 @@ mod tests {
         }
         fn next_training_identity(&self) -> TrainingRunIdentity {
             self.push("identity");
-            TrainingRunIdentity {
-                id: "run-1".to_owned(),
-                created_ms: 7,
-            }
+            TrainingRunIdentity::new("run-1", 7)
         }
         fn admit_training_run(&self, run: TrainingRun) -> Result<(), OperationError> {
-            self.push(format!("admit:{}", run.id));
+            self.push(format!("admit:{}", run.id()));
             if self.fail == Some("admit") {
                 return Err(OperationError::Conflict("admission failed".to_owned()));
             }
             Ok(())
         }
         fn launch_training_runtime(&self, launch: TrainingLaunch) -> Result<(), OperationError> {
-            self.push(format!("launch:{}", launch.run_id));
+            self.push(format!("launch:{}", launch.run_id()));
             if self.fail == Some("launch") {
                 return Err(OperationError::Internal("launch failed".to_owned()));
             }
@@ -252,44 +277,27 @@ mod tests {
     }
 
     fn command() -> StartTrainingCommand {
-        StartTrainingCommand {
-            run_name: "run".to_owned(),
-            dataset_id: "dataset".to_owned(),
-            policy: TrainingPolicy::Act,
-            query: "SELECT * FROM episodes".to_owned(),
-            state_column: "state".to_owned(),
-            action_column: "action".to_owned(),
-            device: "cpu".to_owned(),
-            steps: 10,
-            batch_size: 1,
-            validation_split: 0.1,
-            learning_rate: 0.001,
-            checkpoint_every: 5,
-            chunk_size: 4,
-            seed: 1,
-            act: ActTrainingSettings {
-                camera_streams: vec!["front".to_owned()],
-                image_width: 32,
-                image_height: 32,
-                video_decoder: "auto".to_owned(),
-                pretrained_backbone: false,
-                hidden_dim: 64,
-                latent_dim: 4,
-                encoder_layers: 1,
-                vae_encoder_layers: 1,
-                decoder_layers: 1,
-                attention_heads: 1,
-                feedforward_dim: 64,
-                kl_weight: 1.0,
-            },
-        }
+        let act = ActTrainingSettings::new(
+            ActTrainingInputSettings::new(vec!["front".to_owned()], (32, 32), "auto"),
+            ActTrainingModelSettings::new(64, 4, 1).with_feedforward(64, 1.0),
+            ActTrainingLayerSettings::new(1, 1, 1),
+        );
+        StartTrainingCommand::new(
+            TrainingCommandIdentity::new("run", "dataset", TrainingPolicy::Act),
+            TrainingDataSettings::new("SELECT * FROM episodes", "state", "action"),
+            TrainingExecutionSettings::new("cpu", TrainingProgressSettings::new(10, 1, 0.1), act)
+                .with_schedule(
+                    TrainingOptimizerSettings::new(0.001, 1),
+                    TrainingCheckpointSettings::new(5, 4),
+                ),
+        )
     }
 
     #[tokio::test]
     async fn start_orders_all_effects_before_launch() {
         let port = FakePort::ready();
         let run = coordinate_training_start(&port, command()).await.unwrap();
-        assert_eq!(run.id, "run-1");
+        assert_eq!(run.id(), "run-1");
         assert_eq!(
             port.events(),
             [
@@ -306,8 +314,7 @@ mod tests {
     #[tokio::test]
     async fn failed_readiness_short_circuits_start() {
         let mut port = FakePort::ready();
-        port.readiness.ready = false;
-        port.readiness.summary = "not ready".to_owned();
+        port.readiness = TrainingReadiness::new(false, true, "not ready");
         assert!(coordinate_training_start(&port, command()).await.is_err());
         assert_eq!(port.events(), ["readiness"]);
     }

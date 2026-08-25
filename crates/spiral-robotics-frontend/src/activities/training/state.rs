@@ -17,15 +17,30 @@ use crate::shell::state::Studio;
 
 #[derive(Clone, Copy)]
 pub(crate) struct TrainingController {
+    draft: TrainingDraftSignals,
+    history: TrainingHistorySignals,
+    commands: TrainingCommandSignals,
+}
+
+#[derive(Clone, Copy)]
+struct TrainingDraftSignals {
     request: Signal<StartTrainingRequest>,
     generated_sql: Signal<String>,
+    automatic_run_name: Signal<bool>,
+}
+
+#[derive(Clone, Copy)]
+struct TrainingHistorySignals {
     selected_run: Signal<Option<String>>,
     opened_runs: Signal<Vec<String>>,
+}
+
+#[derive(Clone, Copy)]
+struct TrainingCommandSignals {
     starting: Signal<bool>,
     stopping: Signal<Option<String>>,
     deleting: Signal<Option<String>>,
     confirming_delete: Signal<Option<String>>,
-    automatic_run_name: Signal<bool>,
 }
 
 pub(crate) fn use_training_controller(
@@ -37,27 +52,34 @@ pub(crate) fn use_training_controller(
     let request_sql = initial_sql.clone();
     let request_dataset = dataset_id.to_owned();
     let controller = TrainingController {
-        request: use_signal(move || StartTrainingRequest {
-            run_name: "act-run-001".to_owned(),
-            dataset_id: request_dataset,
-            sql: request_sql,
-            ..StartTrainingRequest::default()
-        }),
-        generated_sql: use_signal(move || initial_sql),
-        selected_run: use_signal(|| None),
-        opened_runs: use_signal(Vec::new),
-        starting: use_signal(|| false),
-        stopping: use_signal(|| None),
-        deleting: use_signal(|| None),
-        confirming_delete: use_signal(|| None),
-        automatic_run_name: use_signal(|| true),
+        draft: TrainingDraftSignals {
+            request: use_signal(move || {
+                StartTrainingRequest::for_dataset("act-run-001", request_dataset, request_sql)
+            }),
+            generated_sql: use_signal(move || initial_sql),
+            automatic_run_name: use_signal(|| true),
+        },
+        history: TrainingHistorySignals {
+            selected_run: use_signal(|| None),
+            opened_runs: use_signal(Vec::new),
+        },
+        commands: TrainingCommandSignals {
+            starting: use_signal(|| false),
+            stopping: use_signal(|| None),
+            deleting: use_signal(|| None),
+            confirming_delete: use_signal(|| None),
+        },
     };
     let namespace_dependency = namespace.to_owned();
     let dataset_dependency = dataset_id.to_owned();
     use_effect(use_reactive(
         (&namespace_dependency, &dataset_dependency),
         move |(namespace, dataset_id)| {
-            controller.sync_dataset(&namespace, &dataset_id, default_sql)
+            controller.sync_dataset(DatasetSync {
+                namespace: &namespace,
+                dataset_id: &dataset_id,
+                default_sql,
+            })
         },
     ));
     use_context_provider(|| controller)
@@ -67,115 +89,136 @@ pub(crate) fn training_controller() -> TrainingController {
     use_context::<TrainingController>()
 }
 
+struct DatasetSync<'a> {
+    namespace: &'a str,
+    dataset_id: &'a str,
+    default_sql: fn(&str, &str) -> String,
+}
+
+pub(crate) struct TrainingRunIdentity {
+    id: String,
+    name: String,
+}
+
+impl TrainingRunIdentity {
+    pub(crate) fn new(id: String, name: String) -> Self {
+        Self { id, name }
+    }
+}
+
 impl TrainingController {
-    fn sync_dataset(
-        mut self,
-        namespace: &str,
-        dataset_id: &str,
-        default_sql: fn(&str, &str) -> String,
-    ) {
-        let previous = self.generated_sql.peek().clone();
-        let next = default_sql(namespace, dataset_id);
-        self.request.write().dataset_id = dataset_id.to_owned();
+    fn sync_dataset(mut self, dataset: DatasetSync<'_>) {
+        let previous = self.draft.generated_sql.peek().to_owned();
+        let next = (dataset.default_sql)(dataset.namespace, dataset.dataset_id);
+        self.draft
+            .request
+            .write()
+            .set_dataset_id(dataset.dataset_id);
         if previous == next {
             return;
         }
         {
-            let mut request = self.request.write();
-            rebase_generated_sql(&mut request.sql, &previous, &next);
+            let mut request = self.draft.request.write();
+            let mut sql = request.sql().to_owned();
+            if rebase_generated_sql(&mut sql, &previous, &next) {
+                request.set_sql(sql);
+            }
         }
-        self.generated_sql.set(next);
+        self.draft.generated_sql.set(next);
     }
 
     pub(crate) fn request(&self) -> StartTrainingRequest {
-        self.request.read().clone()
+        self.draft.request.read().to_owned()
     }
 
     pub(crate) fn edit_request(mut self, edit: impl FnOnce(&mut StartTrainingRequest)) {
-        edit(&mut self.request.write());
+        edit(&mut self.draft.request.write());
     }
 
     pub(crate) fn set_run_name(mut self, value: String) {
-        self.automatic_run_name.set(false);
-        self.request.write().run_name = value;
+        self.draft.automatic_run_name.set(false);
+        self.draft.request.write().set_run_name(value);
     }
 
     pub(crate) fn sync_automatic_run_name(mut self, existing_names: &[String]) {
-        if self.automatic_run_name.peek().to_owned() {
-            self.request.write().run_name = next_default_run_name(existing_names);
+        if self.draft.automatic_run_name.peek().to_owned() {
+            self.draft
+                .request
+                .write()
+                .set_run_name(next_default_run_name(existing_names));
         }
     }
 
     pub(crate) fn selected_run(&self) -> Option<String> {
-        self.selected_run.read().clone()
+        self.history.selected_run.read().to_owned()
     }
 
     pub(crate) fn opened_runs(&self) -> Vec<String> {
-        self.opened_runs.read().clone()
+        self.history.opened_runs.read().to_owned()
     }
 
     pub(crate) fn starting(&self) -> bool {
-        self.starting.read().to_owned()
+        self.commands.starting.read().to_owned()
     }
 
     pub(crate) fn stopping(&self) -> Option<String> {
-        self.stopping.read().clone()
+        self.commands.stopping.read().to_owned()
     }
 
     pub(crate) fn deleting(&self) -> Option<String> {
-        self.deleting.read().clone()
+        self.commands.deleting.read().to_owned()
     }
 
     pub(crate) fn confirming_delete(&self) -> Option<String> {
-        self.confirming_delete.read().clone()
+        self.commands.confirming_delete.read().to_owned()
     }
 
     pub(crate) fn confirm_delete(mut self, id: String) {
-        if self.deleting.peek().is_none() {
-            self.confirming_delete.set(Some(id));
+        if self.commands.deleting.peek().is_none() {
+            self.commands.confirming_delete.set(Some(id));
         }
     }
 
     pub(crate) fn cancel_delete(mut self) {
-        self.confirming_delete.set(None);
+        self.commands.confirming_delete.set(None);
     }
 
     pub(crate) fn open_run(mut self, id: String) {
-        self.confirming_delete.set(None);
-        if !self.opened_runs.peek().contains(&id) {
-            self.opened_runs.write().push(id.clone());
+        self.commands.confirming_delete.set(None);
+        if !self.history.opened_runs.peek().contains(&id) {
+            self.history.opened_runs.write().push(id.clone());
         }
-        self.selected_run.set(Some(id));
+        self.history.selected_run.set(Some(id));
     }
 
     pub(crate) fn select_run(mut self, id: String) {
-        self.confirming_delete.set(None);
-        self.selected_run.set(Some(id));
+        self.commands.confirming_delete.set(None);
+        self.history.selected_run.set(Some(id));
     }
 
     pub(crate) fn close_run(mut self, id: String) {
-        self.confirming_delete.set(None);
-        let selected = self.selected_run.peek().clone();
+        self.commands.confirming_delete.set(None);
+        let selected = self.history.selected_run.peek().to_owned();
         let next_selected = {
-            let mut opened = self.opened_runs.write();
+            let mut opened = self.history.opened_runs.write();
             selection_after_close(&mut opened, selected.as_deref(), &id)
         };
         if selected.as_deref() == Some(id.as_str()) {
-            self.selected_run.set(next_selected);
+            self.history.selected_run.set(next_selected);
         }
     }
 
     pub(crate) fn start(mut self, studio: Studio) {
-        if self.starting.peek().to_owned() {
+        if self.commands.starting.peek().to_owned() {
             return;
         }
-        self.starting.set(true);
-        let request = (self.request)();
-        let mut starting = self.starting;
-        let mut selected_run = self.selected_run;
-        let mut opened_runs = self.opened_runs;
-        let mut request_signal = self.request;
-        let mut automatic_run_name = self.automatic_run_name;
+        self.commands.starting.set(true);
+        let request = (self.draft.request)();
+        let mut starting = self.commands.starting;
+        let mut selected_run = self.history.selected_run;
+        let mut opened_runs = self.history.opened_runs;
+        let mut request_signal = self.draft.request;
+        let mut automatic_run_name = self.draft.automatic_run_name;
         spawn(async move {
             let result = api::send_json::<_, TrainingRun>(
                 Method::POST,
@@ -187,21 +230,26 @@ impl TrainingController {
             match result {
                 Ok(run) => {
                     let mut existing_names = studio
-                        .training
+                        .training()
                         .read()
-                        .runs
+                        .runs()
                         .iter()
-                        .map(|existing| existing.config.run_name.clone())
+                        .map(|existing| existing.config().run_name().to_owned())
                         .collect::<Vec<_>>();
-                    if !existing_names.contains(&run.config.run_name) {
-                        existing_names.push(run.config.run_name.clone());
+                    if !existing_names
+                        .iter()
+                        .any(|name| name == run.config().run_name())
+                    {
+                        existing_names.push(run.config().run_name().to_owned());
                     }
-                    request_signal.write().run_name = next_default_run_name(&existing_names);
+                    request_signal
+                        .write()
+                        .set_run_name(next_default_run_name(&existing_names));
                     automatic_run_name.set(true);
-                    if !opened_runs.peek().contains(&run.id) {
-                        opened_runs.write().push(run.id.clone());
+                    if !opened_runs.peek().iter().any(|id| id == run.id()) {
+                        opened_runs.write().push(run.id().to_owned());
                     }
-                    selected_run.set(Some(run.id));
+                    selected_run.set(Some(run.id().to_owned()));
                 }
                 Err(error) => studio.report_from(MessageSource::Training, error),
             }
@@ -209,11 +257,11 @@ impl TrainingController {
     }
 
     pub(crate) fn stop(mut self, studio: Studio, id: String) {
-        if self.stopping.peek().is_some() {
+        if self.commands.stopping.peek().is_some() {
             return;
         }
-        self.stopping.set(Some(id.clone()));
-        let mut stopping = self.stopping;
+        self.commands.stopping.set(Some(id.clone()));
+        let mut stopping = self.commands.stopping;
         studio.run_utility("Stop requested.", async move {
             let result = api::post(&format!("/api/training/runs/{id}/stop")).await;
             stopping.set(None);
@@ -221,23 +269,23 @@ impl TrainingController {
         });
     }
 
-    pub(crate) fn delete(mut self, studio: Studio, id: String, name: String) {
-        if self.deleting.peek().is_some() {
+    pub(crate) fn delete(mut self, studio: Studio, run: TrainingRunIdentity) {
+        if self.commands.deleting.peek().is_some() {
             return;
         }
-        self.deleting.set(Some(id.clone()));
-        let path = format!("/api/training/runs/{id}");
-        let deleted_id = id.clone();
-        let mut deleting = self.deleting;
-        let mut confirming_delete = self.confirming_delete;
-        let mut selected_run = self.selected_run;
-        let mut opened_runs = self.opened_runs;
-        studio.run_utility(format!("Deleted run {name}."), async move {
+        self.commands.deleting.set(Some(run.id.clone()));
+        let path = format!("/api/training/runs/{}", run.id);
+        let deleted_id = run.id.clone();
+        let mut deleting = self.commands.deleting;
+        let mut confirming_delete = self.commands.confirming_delete;
+        let mut selected_run = self.history.selected_run;
+        let mut opened_runs = self.history.opened_runs;
+        studio.run_utility(format!("Deleted run {}.", run.name), async move {
             let result = api::send::<()>(Method::DELETE, &path, None).await;
             deleting.set(None);
             if result.is_ok() {
                 confirming_delete.set(None);
-                let selected = selected_run.peek().clone();
+                let selected = selected_run.peek().to_owned();
                 let next_selected = selection_after_close(
                     &mut opened_runs.write(),
                     selected.as_deref(),

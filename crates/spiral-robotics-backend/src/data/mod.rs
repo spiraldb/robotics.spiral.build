@@ -1,58 +1,58 @@
 //! Framework-neutral data settings, query, and remote replay actions.
 
-pub mod catalog;
-pub mod catalog_lease;
-pub mod episode_arms;
-pub mod queries;
-pub mod seek;
+pub(crate) mod catalog;
+pub(crate) mod catalog_lease;
+pub(crate) mod episode_arms;
+pub(crate) mod queries;
+pub(crate) mod seek;
 
 use std::collections::BTreeMap;
 
 use spiral_robotics_core::query::{ReadOnlyQuery, ReadOnlyQueryMode};
 use url::Url;
 
-use spiral_robotics_core::error::OperationError;
+use spiral_robotics_core::OperationError;
 
 const MAX_QUERY_ROWS: usize = 1_000;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SpiralDestinationSettings {
-    pub endpoint: String,
-    pub spfs_endpoint: String,
-    pub project_id: String,
-    pub client_id: String,
-    pub client_secret_configured: bool,
-    pub namespace: String,
-    pub endpoint_restart_required: bool,
+pub(crate) struct SpiralDestinationSettings {
+    endpoint: String,
+    spfs_endpoint: String,
+    project_id: String,
+    client_id: String,
+    client_secret_configured: bool,
+    namespace: String,
+    endpoint_restart_required: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct UpdateDataSettingsCommand {
-    pub spiral_endpoint: String,
-    pub spiral_spfs_endpoint: String,
-    pub project_id: String,
-    pub client_id: String,
+pub(crate) struct UpdateDataSettingsCommand {
+    spiral_endpoint: String,
+    spiral_spfs_endpoint: String,
+    project_id: String,
+    client_id: String,
     /// `None` preserves the saved secret; `Some("")` clears it.
-    pub client_secret: Option<String>,
-    pub training_endpoint: String,
-    pub video_enabled: bool,
+    client_secret: Option<String>,
+    training_endpoint: String,
+    video_enabled: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DataSettingsSnapshot {
-    pub spiral: SpiralDestinationSettings,
-    pub training_endpoint: String,
-    pub video_enabled: bool,
+pub(crate) struct DataSettingsSnapshot {
+    spiral: SpiralDestinationSettings,
+    training_endpoint: String,
+    video_enabled: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ConnectionCheck {
-    pub ok: bool,
-    pub message: String,
+pub(crate) struct ConnectionCheck {
+    ok: bool,
+    message: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum QueryValue {
+pub(crate) enum QueryValue {
     Null,
     Bool(bool),
     Signed(i64),
@@ -64,49 +64,315 @@ pub enum QueryValue {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct QueryColumn {
-    pub name: String,
-    pub data_type: String,
-    pub nullable: bool,
-    pub semantic_type: Option<String>,
+pub(crate) struct QueryColumn {
+    name: String,
+    data_type: String,
+    nullable: bool,
+    semantic_type: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct QueryResult {
-    pub columns: Vec<QueryColumn>,
-    pub rows: Vec<BTreeMap<String, QueryValue>>,
-    pub truncated: bool,
-    pub elapsed_ms: u64,
+pub(crate) struct QueryResult {
+    columns: Vec<QueryColumn>,
+    rows: Vec<BTreeMap<String, QueryValue>>,
+    truncated: bool,
+    elapsed_ms: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct QueryCommand {
-    pub statement: String,
-    pub max_rows: usize,
+pub(crate) struct QueryCommand {
+    statement: String,
+    max_rows: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StartSpiralReplayCommand {
-    pub episode: String,
-    pub robot: String,
-    pub stream: String,
+pub(crate) struct StartSpiralReplayCommand {
+    episode: String,
+    robot: String,
+    stream: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct ReplayTrajectory {
-    pub sample_hz: f64,
-    pub frames: Vec<BTreeMap<String, f64>>,
+pub(crate) struct ReplayTrajectory {
+    sample_hz: f64,
+    frames: Vec<BTreeMap<String, f64>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct VideoAssetQuery {
-    pub episode: String,
-    pub stream: String,
-    pub segment: Option<u32>,
+pub(crate) struct VideoAssetQuery {
+    episode: String,
+    stream: String,
+    segment: Option<u32>,
+}
+
+impl SpiralDestinationSettings {
+    pub(crate) fn new(
+        endpoint: impl Into<String>,
+        spfs_endpoint: impl Into<String>,
+        project_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            endpoint: endpoint.into(),
+            spfs_endpoint: spfs_endpoint.into(),
+            project_id: project_id.into(),
+            client_id: String::new(),
+            client_secret_configured: false,
+            namespace: String::new(),
+            endpoint_restart_required: false,
+        }
+    }
+
+    pub(crate) fn with_client(
+        mut self,
+        client_id: impl Into<String>,
+        secret_configured: bool,
+    ) -> Self {
+        self.client_id = client_id.into();
+        self.client_secret_configured = secret_configured;
+        self
+    }
+
+    pub(crate) fn with_namespace(mut self, namespace: impl Into<String>) -> Self {
+        self.namespace = namespace.into();
+        self
+    }
+
+    pub(crate) fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+    pub(crate) fn spfs_endpoint(&self) -> &str {
+        &self.spfs_endpoint
+    }
+    pub(crate) fn project_id(&self) -> &str {
+        &self.project_id
+    }
+    pub(crate) fn client_id(&self) -> &str {
+        &self.client_id
+    }
+    pub(crate) fn client_secret_configured(&self) -> bool {
+        self.client_secret_configured
+    }
+    pub(crate) fn namespace(&self) -> &str {
+        &self.namespace
+    }
+    pub(crate) fn endpoint_restart_required(&self) -> bool {
+        self.endpoint_restart_required
+    }
+}
+
+impl UpdateDataSettingsCommand {
+    pub(crate) fn new(
+        spiral_endpoint: impl Into<String>,
+        project_id: impl Into<String>,
+        training_endpoint: impl Into<String>,
+    ) -> Self {
+        Self {
+            spiral_endpoint: spiral_endpoint.into(),
+            spiral_spfs_endpoint: String::new(),
+            project_id: project_id.into(),
+            client_id: String::new(),
+            client_secret: None,
+            training_endpoint: training_endpoint.into(),
+            video_enabled: false,
+        }
+    }
+
+    pub(crate) fn with_spfs_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.spiral_spfs_endpoint = endpoint.into();
+        self
+    }
+
+    pub(crate) fn with_client(mut self, client_id: impl Into<String>) -> Self {
+        self.client_id = client_id.into();
+        self
+    }
+
+    pub(crate) fn with_client_secret(mut self, secret: Option<String>) -> Self {
+        self.client_secret = secret;
+        self
+    }
+
+    pub(crate) fn with_video_enabled(mut self, enabled: bool) -> Self {
+        self.video_enabled = enabled;
+        self
+    }
+
+    pub(crate) fn spiral_endpoint(&self) -> &str {
+        &self.spiral_endpoint
+    }
+    pub(crate) fn spiral_spfs_endpoint(&self) -> &str {
+        &self.spiral_spfs_endpoint
+    }
+    pub(crate) fn project_id(&self) -> &str {
+        &self.project_id
+    }
+    pub(crate) fn client_id(&self) -> &str {
+        &self.client_id
+    }
+    pub(crate) fn client_secret(&self) -> Option<&str> {
+        self.client_secret.as_deref()
+    }
+    pub(crate) fn training_endpoint(&self) -> &str {
+        &self.training_endpoint
+    }
+    pub(crate) fn video_enabled(&self) -> bool {
+        self.video_enabled
+    }
+}
+
+impl DataSettingsSnapshot {
+    pub(crate) fn new(
+        spiral: SpiralDestinationSettings,
+        training_endpoint: impl Into<String>,
+        video_enabled: bool,
+    ) -> Self {
+        Self {
+            spiral,
+            training_endpoint: training_endpoint.into(),
+            video_enabled,
+        }
+    }
+
+    pub(crate) fn spiral(&self) -> &SpiralDestinationSettings {
+        &self.spiral
+    }
+    pub(crate) fn training_endpoint(&self) -> &str {
+        &self.training_endpoint
+    }
+    pub(crate) fn video_enabled(&self) -> bool {
+        self.video_enabled
+    }
+}
+
+impl ConnectionCheck {
+    pub(crate) fn new(ok: bool, message: impl Into<String>) -> Self {
+        Self {
+            ok,
+            message: message.into(),
+        }
+    }
+
+    pub(crate) fn into_parts(self) -> (bool, String) {
+        (self.ok, self.message)
+    }
+}
+
+impl QueryColumn {
+    pub(crate) fn new(
+        name: impl Into<String>,
+        data_type: impl Into<String>,
+        nullable: bool,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            data_type: data_type.into(),
+            nullable,
+            semantic_type: None,
+        }
+    }
+
+    pub(crate) fn with_semantic_type(mut self, semantic_type: Option<String>) -> Self {
+        self.semantic_type = semantic_type;
+        self
+    }
+
+    pub(crate) fn into_parts(self) -> (String, String, bool, Option<String>) {
+        (self.name, self.data_type, self.nullable, self.semantic_type)
+    }
+}
+
+impl QueryResult {
+    pub(crate) fn new(columns: Vec<QueryColumn>, rows: Vec<BTreeMap<String, QueryValue>>) -> Self {
+        Self {
+            columns,
+            rows,
+            truncated: false,
+            elapsed_ms: 0,
+        }
+    }
+
+    pub(crate) fn with_status(mut self, truncated: bool, elapsed_ms: u64) -> Self {
+        self.truncated = truncated;
+        self.elapsed_ms = elapsed_ms;
+        self
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        Vec<QueryColumn>,
+        Vec<BTreeMap<String, QueryValue>>,
+        bool,
+        u64,
+    ) {
+        (self.columns, self.rows, self.truncated, self.elapsed_ms)
+    }
+}
+
+impl QueryCommand {
+    pub(crate) fn new(statement: impl Into<String>, max_rows: usize) -> Self {
+        Self {
+            statement: statement.into(),
+            max_rows,
+        }
+    }
+
+    pub(crate) fn statement(&self) -> &str {
+        &self.statement
+    }
+    pub(crate) fn max_rows(&self) -> usize {
+        self.max_rows
+    }
+}
+
+impl StartSpiralReplayCommand {
+    pub(crate) fn new(
+        episode: impl Into<String>,
+        robot: impl Into<String>,
+        stream: impl Into<String>,
+    ) -> Self {
+        Self {
+            episode: episode.into(),
+            robot: robot.into(),
+            stream: stream.into(),
+        }
+    }
+
+    pub(crate) fn into_parts(self) -> (String, String, String) {
+        (self.episode, self.robot, self.stream)
+    }
+}
+
+impl ReplayTrajectory {
+    pub(crate) fn new(sample_hz: f64, frames: Vec<BTreeMap<String, f64>>) -> Self {
+        Self { sample_hz, frames }
+    }
+
+    pub(crate) fn into_parts(self) -> (f64, Vec<BTreeMap<String, f64>>) {
+        (self.sample_hz, self.frames)
+    }
+}
+
+impl VideoAssetQuery {
+    pub(crate) fn new(
+        episode: impl Into<String>,
+        stream: impl Into<String>,
+        segment: Option<u32>,
+    ) -> Self {
+        Self {
+            episode: episode.into(),
+            stream: stream.into(),
+            segment,
+        }
+    }
+
+    pub(crate) fn into_parts(self) -> (String, String, Option<u32>) {
+        (self.episode, self.stream, self.segment)
+    }
 }
 
 /// Data-catalog consequences expressed only in capability-owned models.
-pub trait DataCatalogPort: Send + Sync {
+pub(crate) trait DataCatalogPort: Send + Sync {
     fn settings(&self) -> DataSettingsSnapshot;
     fn update_settings(
         &self,
@@ -125,7 +391,7 @@ pub trait DataCatalogPort: Send + Sync {
 }
 
 impl VideoAssetQuery {
-    pub async fn load<P: DataCatalogPort + ?Sized>(
+    pub(crate) async fn load<P: DataCatalogPort + ?Sized>(
         self,
         port: &P,
     ) -> Result<Vec<u8>, OperationError> {
@@ -137,7 +403,7 @@ impl VideoAssetQuery {
 
 /// Control consequence for a trajectory already admitted and loaded by the
 /// data-catalog action.
-pub trait SpiralReplayPort: Send + Sync {
+pub(crate) trait SpiralReplayPort: Send + Sync {
     async fn start_spiral_replay(
         &self,
         command: StartSpiralReplayCommand,
@@ -146,7 +412,7 @@ pub trait SpiralReplayPort: Send + Sync {
 }
 
 impl UpdateDataSettingsCommand {
-    pub async fn apply<P: DataCatalogPort + ?Sized>(
+    pub(crate) async fn apply<P: DataCatalogPort + ?Sized>(
         self,
         port: &P,
     ) -> Result<DataSettingsSnapshot, OperationError> {
@@ -160,7 +426,7 @@ impl UpdateDataSettingsCommand {
 }
 
 impl QueryCommand {
-    pub async fn execute<P: DataCatalogPort + ?Sized>(
+    pub(crate) async fn execute<P: DataCatalogPort + ?Sized>(
         mut self,
         port: &P,
     ) -> Result<QueryResult, OperationError> {
@@ -173,7 +439,7 @@ impl QueryCommand {
 }
 
 impl StartSpiralReplayCommand {
-    pub async fn start<D, R>(self, data: &D, replay: &R) -> Result<(), OperationError>
+    pub(crate) async fn start<D, R>(self, data: &D, replay: &R) -> Result<(), OperationError>
     where
         D: DataCatalogPort + ?Sized,
         R: SpiralReplayPort + ?Sized,

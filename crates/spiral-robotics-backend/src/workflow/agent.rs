@@ -14,22 +14,25 @@ use spiral_robotics_api::workflow::{
     MAX_WORKFLOW_AGENT_CONVERSATIONS, MAX_WORKFLOW_AGENT_INPUT_CHARS,
     MAX_WORKFLOW_AGENT_MESSAGES_PER_CONVERSATION, MAX_WORKFLOW_AGENT_QUERY_ROWS,
     RunWorkflowRequest, SaveWorkflowRequest, WorkflowAgentActivateConversationRequest,
-    WorkflowAgentArtifactKind, WorkflowAgentArtifactReceipt, WorkflowAgentCancelRequest,
-    WorkflowAgentConversationSummary, WorkflowAgentCreateConversationRequest, WorkflowAgentMessage,
-    WorkflowAgentMessagePhase, WorkflowAgentPhase, WorkflowAgentReadiness,
-    WorkflowAgentReadinessStatus, WorkflowAgentRole, WorkflowAgentSession,
-    WorkflowAgentStateResponse, WorkflowAgentToolPhase, WorkflowAgentToolSummary,
-    WorkflowAgentTurnAccepted, WorkflowAgentTurnRequest, WorkflowAgentUpdate, WorkflowNodeConfig,
-    WorkflowRunPhase, WorkflowSpec,
+    WorkflowAgentActivity, WorkflowAgentArtifactKind, WorkflowAgentArtifactReceipt,
+    WorkflowAgentCancelRequest, WorkflowAgentConversationSummary,
+    WorkflowAgentCreateConversationRequest, WorkflowAgentMessage, WorkflowAgentMessageContent,
+    WorkflowAgentMessageIdentity, WorkflowAgentMessagePhase, WorkflowAgentPhase,
+    WorkflowAgentReadiness, WorkflowAgentReadinessStatus, WorkflowAgentRole, WorkflowAgentSession,
+    WorkflowAgentSessionIdentity, WorkflowAgentStateIdentity, WorkflowAgentStateResponse,
+    WorkflowAgentToolPhase, WorkflowAgentToolSummary, WorkflowAgentTurnAccepted,
+    WorkflowAgentTurnRequest, WorkflowAgentUpdate, WorkflowNodeConfig, WorkflowRunPhase,
+    WorkflowSpec,
 };
-use spiral_robotics_core::error::OperationError;
+use spiral_robotics_core::OperationError;
 use tokio::sync::broadcast;
 
 use crate::workflow::manager::WorkflowManager;
 use crate::workflow::provider::{
-    OpenAiProvider, ProviderConfig, ProviderMessage, ProviderResponse, ProviderToolCall,
+    OpenAiProvider, ProviderCompletion, ProviderConfig, ProviderMessage, ProviderResponse,
+    ProviderToolCall,
 };
-use spiral_robotics_storage::manager::StorageManager;
+use spiral_robotics_storage::StorageManager;
 
 const MAX_PUBLIC_MESSAGES: usize = MAX_WORKFLOW_AGENT_MESSAGES_PER_CONVERSATION;
 const MAX_PROVIDER_MESSAGES: usize = 80;
@@ -109,11 +112,11 @@ impl AgentConversation {
             title: "New conversation".to_owned(),
             created_ms: now_ms,
             updated_ms: now_ms,
-            session: WorkflowAgentSession {
-                conversation_id,
-                updated_ms: now_ms,
-                ..WorkflowAgentSession::default()
-            },
+            session: WorkflowAgentSession::new(
+                WorkflowAgentSessionIdentity::new(DEFAULT_WORKFLOW_ID, conversation_id, 0),
+                WorkflowAgentActivity::new(WorkflowAgentPhase::Idle, Vec::new()),
+                now_ms,
+            ),
             provider_messages: Vec::new(),
             owned_run_id: None,
         }
@@ -121,12 +124,12 @@ impl AgentConversation {
 
     fn is_pristine_empty(&self) -> bool {
         self.title == "New conversation"
-            && self.session.revision == 0
-            && self.session.phase == WorkflowAgentPhase::Idle
-            && self.session.messages.is_empty()
-            && self.session.active_turn_id.is_none()
-            && self.session.deferred_run_id.is_none()
-            && self.session.error.is_none()
+            && self.session.revision() == 0
+            && self.session.phase() == WorkflowAgentPhase::Idle
+            && self.session.messages().is_empty()
+            && self.session.active_turn_id().is_none()
+            && self.session.deferred_run_id().is_none()
+            && self.session.error().is_none()
             && self.provider_messages.is_empty()
             && self.owned_run_id.is_none()
     }
@@ -174,6 +177,169 @@ struct ToolContext {
     workflow_revision: u64,
     deferred_run_id: Option<String>,
     owned_run_id: Arc<Mutex<Option<String>>>,
+}
+
+#[derive(Clone, Copy)]
+struct TurnIdentity<'a> {
+    conversation_id: &'a str,
+    turn_id: &'a str,
+}
+
+impl<'a> TurnIdentity<'a> {
+    fn new(conversation_id: &'a str, turn_id: &'a str) -> Self {
+        Self {
+            conversation_id,
+            turn_id,
+        }
+    }
+}
+
+struct ConversationChange<'a> {
+    turn_active: bool,
+    scope_id: &'a str,
+    expected_revision: u64,
+}
+
+impl<'a> ConversationChange<'a> {
+    fn new(turn_active: bool, scope_id: &'a str, expected_revision: u64) -> Self {
+        Self {
+            turn_active,
+            scope_id,
+            expected_revision,
+        }
+    }
+}
+
+struct TurnTask {
+    conversation_id: String,
+    turn_id: String,
+    cancel: Arc<AtomicBool>,
+    owned_run_id: Arc<Mutex<Option<String>>>,
+}
+
+impl TurnTask {
+    fn new(conversation_id: String, turn_id: String) -> Self {
+        Self {
+            conversation_id,
+            turn_id,
+            cancel: Arc::new(AtomicBool::new(false)),
+            owned_run_id: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    fn with_runtime(
+        mut self,
+        cancel: Arc<AtomicBool>,
+        owned_run_id: Arc<Mutex<Option<String>>>,
+    ) -> Self {
+        self.cancel = cancel;
+        self.owned_run_id = owned_run_id;
+        self
+    }
+}
+
+struct ProviderLoop<'a> {
+    identity: TurnIdentity<'a>,
+    cancel: Arc<AtomicBool>,
+    context: Option<&'a mut ToolContext>,
+    budget: Option<&'a mut TurnBudget>,
+}
+
+impl<'a> ProviderLoop<'a> {
+    fn new(identity: TurnIdentity<'a>, cancel: Arc<AtomicBool>) -> Self {
+        Self {
+            identity,
+            cancel,
+            context: None,
+            budget: None,
+        }
+    }
+
+    fn with_state(mut self, context: &'a mut ToolContext, budget: &'a mut TurnBudget) -> Self {
+        self.context = Some(context);
+        self.budget = Some(budget);
+        self
+    }
+}
+
+struct ToolRuntime<'a> {
+    context: &'a mut ToolContext,
+    cancel: Arc<AtomicBool>,
+}
+
+impl<'a> ToolRuntime<'a> {
+    fn new(context: &'a mut ToolContext, cancel: Arc<AtomicBool>) -> Self {
+        Self { context, cancel }
+    }
+}
+
+struct ToolOutput<'a> {
+    call_id: &'a str,
+    output: String,
+}
+
+impl<'a> ToolOutput<'a> {
+    fn new(call_id: &'a str, output: String) -> Self {
+        Self { call_id, output }
+    }
+}
+
+struct UnexecutedTools<'a> {
+    calls: &'a [ProviderToolCall],
+    detail: &'a str,
+}
+
+impl<'a> UnexecutedTools<'a> {
+    fn new(calls: &'a [ProviderToolCall], detail: &'a str) -> Self {
+        Self { calls, detail }
+    }
+}
+
+struct ToolRunCompletion<'a> {
+    call: &'a ProviderToolCall,
+    ok: bool,
+    detail: &'a str,
+}
+
+impl<'a> ToolRunCompletion<'a> {
+    fn new(call: &'a ProviderToolCall, ok: bool, detail: &'a str) -> Self {
+        Self { call, ok, detail }
+    }
+}
+
+struct TurnFinish<'a> {
+    identity: TurnIdentity<'a>,
+    phase: WorkflowAgentPhase,
+    error: Option<String>,
+    cancelled: bool,
+}
+
+struct TurnFailureDetail<'a> {
+    error: &'a str,
+    cancelled: bool,
+}
+
+impl<'a> TurnFailureDetail<'a> {
+    fn new(error: &'a str, cancelled: bool) -> Self {
+        Self { error, cancelled }
+    }
+}
+
+impl<'a> TurnFinish<'a> {
+    fn new(identity: TurnIdentity<'a>, phase: WorkflowAgentPhase) -> Self {
+        Self {
+            identity,
+            phase,
+            error: None,
+            cancelled: false,
+        }
+    }
+
+    fn with_error(mut self, error: Option<String>, cancelled: bool) -> Self {
+        self.error = error;
+        self.cancelled = cancelled;
+        self
+    }
 }
 
 #[derive(Default)]
@@ -364,9 +530,11 @@ impl WorkflowAgentManager {
         let mut document = lock(&self.inner.document);
         self.admit_conversation_change(
             &document,
-            active.is_some(),
-            &request.scope_id,
-            request.expected_revision,
+            ConversationChange::new(
+                active.is_some(),
+                request.scope_id(),
+                request.expected_revision(),
+            ),
         )?;
         let Some(candidate) = create_conversation_candidate(&document, now_millis())
             .map_err(OperationError::Conflict)?
@@ -391,17 +559,19 @@ impl WorkflowAgentManager {
         let mut document = lock(&self.inner.document);
         self.admit_conversation_change(
             &document,
-            active.is_some(),
-            &request.scope_id,
-            request.expected_revision,
+            ConversationChange::new(
+                active.is_some(),
+                request.scope_id(),
+                request.expected_revision(),
+            ),
         )?;
-        if document.conversation(&request.conversation_id).is_none() {
+        if document.conversation(request.conversation_id()).is_none() {
             return Err(OperationError::InvalidInput(
                 "That Assistant conversation no longer exists. Reload the conversation list."
                     .to_owned(),
             ));
         }
-        let Some(candidate) = activate_conversation_candidate(&document, &request.conversation_id)
+        let Some(candidate) = activate_conversation_candidate(&document, request.conversation_id())
             .map_err(OperationError::External)?
         else {
             return Ok(self.state_for(&document));
@@ -419,10 +589,13 @@ impl WorkflowAgentManager {
     fn admit_conversation_change(
         &self,
         document: &AgentDocument,
-        turn_active: bool,
-        scope_id: &str,
-        expected_revision: u64,
+        change: ConversationChange<'_>,
     ) -> Result<(), OperationError> {
+        let ConversationChange {
+            turn_active,
+            scope_id,
+            expected_revision,
+        } = change;
         if !self.inner.services.storage.is_configured() {
             return Err(OperationError::Conflict(
                 "Configure or reconnect Spiral before changing Assistant conversations.".to_owned(),
@@ -448,9 +621,10 @@ impl WorkflowAgentManager {
                 "Stop the active Assistant turn before changing conversations.".to_owned(),
             ));
         }
-        let workflow = self.inner.services.workflow.state().snapshot;
-        if workflow.phase.active()
-            && workflow.run_id.as_deref().is_some_and(|run_id| {
+        let workflow_state = self.inner.services.workflow.state();
+        let workflow = workflow_state.snapshot();
+        if workflow.phase().active()
+            && workflow.run_id().is_some_and(|run_id| {
                 document
                     .conversations
                     .iter()
@@ -469,7 +643,7 @@ impl WorkflowAgentManager {
         &self,
         request: WorkflowAgentTurnRequest,
     ) -> Result<WorkflowAgentTurnAccepted, OperationError> {
-        let text = request.text.trim();
+        let text = request.text().trim();
         if text.is_empty() {
             return Err(OperationError::InvalidInput(
                 "Describe the Workflow change or result you want.".to_owned(),
@@ -492,7 +666,7 @@ impl WorkflowAgentManager {
         }
         if self.inner.services.provider.is_none() {
             return Err(OperationError::External(
-                self.inner.readiness.detail.clone(),
+                self.inner.readiness.detail().to_owned(),
             ));
         }
         let lease = self
@@ -520,15 +694,15 @@ impl WorkflowAgentManager {
                 ));
             }
             let mut document = lock(&self.inner.document);
-            if request.scope_id != *lock(&self.inner.scope_id)
-                || request.conversation_id != document.active_conversation_id
+            if request.scope_id() != *lock(&self.inner.scope_id)
+                || request.conversation_id() != document.active_conversation_id
             {
                 return Err(OperationError::Conflict(
                     "The active Assistant conversation changed. Reload it before sending."
                         .to_owned(),
                 ));
             }
-            if request.expected_revision != document.revision {
+            if request.expected_revision() != document.revision {
                 return Err(OperationError::Conflict(
                     "Assistant history changed in another session. Reload it before sending."
                         .to_owned(),
@@ -539,7 +713,7 @@ impl WorkflowAgentManager {
                     "The selected Assistant conversation is unavailable.".to_owned(),
                 )
             })?;
-            ensure_public_message_capacity(conversation.session.messages.len(), 2)
+            ensure_public_message_capacity(conversation.session.messages().len(), 2)
                 .map_err(OperationError::Conflict)?;
             let turn_id = next_id("agent-turn");
             let user_id = next_id("agent-user");
@@ -553,41 +727,57 @@ impl WorkflowAgentManager {
             if conversation.title == "New conversation"
                 && !conversation
                     .session
-                    .messages
+                    .messages()
                     .iter()
-                    .any(|message| message.role == WorkflowAgentRole::User)
+                    .any(|message| message.role() == WorkflowAgentRole::User)
             {
                 conversation.title = conversation_title(text);
             }
             let user_sequence = next_sequence(&conversation.session);
-            conversation.session.messages.push(WorkflowAgentMessage {
-                id: user_id,
-                sequence: user_sequence,
-                role: WorkflowAgentRole::User,
-                phase: WorkflowAgentMessagePhase::Complete,
-                text: text.to_owned(),
-                tools: Vec::new(),
-                run_id: None,
-                created_ms,
-            });
+            conversation
+                .session
+                .messages_mut()
+                .push(WorkflowAgentMessage::new(
+                    WorkflowAgentMessageIdentity::new(
+                        user_id,
+                        user_sequence,
+                        WorkflowAgentRole::User,
+                    )
+                    .with_created_ms(created_ms),
+                    WorkflowAgentMessageContent::new(
+                        WorkflowAgentMessagePhase::Complete,
+                        text,
+                        Vec::new(),
+                    ),
+                ));
             let assistant_sequence = next_sequence(&conversation.session);
-            conversation.session.messages.push(WorkflowAgentMessage {
-                id: assistant_id,
-                sequence: assistant_sequence,
-                role: WorkflowAgentRole::Assistant,
-                phase: WorkflowAgentMessagePhase::Streaming,
-                text: String::new(),
-                tools: Vec::new(),
-                run_id: None,
-                created_ms,
-            });
+            conversation
+                .session
+                .messages_mut()
+                .push(WorkflowAgentMessage::new(
+                    WorkflowAgentMessageIdentity::new(
+                        assistant_id,
+                        assistant_sequence,
+                        WorkflowAgentRole::Assistant,
+                    )
+                    .with_created_ms(created_ms),
+                    WorkflowAgentMessageContent::new(
+                        WorkflowAgentMessagePhase::Streaming,
+                        String::new(),
+                        Vec::new(),
+                    ),
+                ));
             conversation
                 .provider_messages
                 .push(ProviderMessage::text("user", text));
-            conversation.session.phase = WorkflowAgentPhase::Responding;
-            conversation.session.active_turn_id = Some(turn_id.clone());
-            conversation.session.deferred_run_id = None;
-            conversation.session.error = None;
+            conversation
+                .session
+                .set_phase(WorkflowAgentPhase::Responding);
+            conversation
+                .session
+                .set_active_turn_id(Some(turn_id.clone()));
+            conversation.session.set_deferred_run_id(None);
+            conversation.session.set_error(None);
             bump_conversation(&mut candidate, &conversation_id)
                 .map_err(OperationError::External)?;
             trim_provider_history(&mut candidate, &conversation_id);
@@ -603,20 +793,18 @@ impl WorkflowAgentManager {
                 owned_run_id: owned_run_id.clone(),
                 task: None,
             });
-            let response = WorkflowAgentTurnAccepted {
-                turn_id: turn_id.clone(),
-                state: self.state_for(&document),
-            };
+            let response =
+                WorkflowAgentTurnAccepted::new(turn_id.clone(), self.state_for(&document));
             drop(document);
             drop(active);
             self.publish();
             let manager = self.clone();
             let task_conversation_id = conversation_id.clone();
             let task_turn_id = turn_id.clone();
+            let turn_task = TurnTask::new(task_conversation_id, task_turn_id)
+                .with_runtime(cancel, owned_run_id);
             let task = tokio::spawn(async move {
-                manager
-                    .run_turn(task_conversation_id, task_turn_id, cancel, owned_run_id)
-                    .await;
+                manager.run_turn(turn_task).await;
             });
             if let Some(current) = lock(&self.inner.active).as_mut()
                 && current.turn_id == turn_id
@@ -637,7 +825,7 @@ impl WorkflowAgentManager {
         &self,
         request: WorkflowAgentCancelRequest,
     ) -> Result<WorkflowAgentStateResponse, OperationError> {
-        if request.scope_id != *lock(&self.inner.scope_id) {
+        if request.scope_id() != *lock(&self.inner.scope_id) {
             return Err(OperationError::Conflict(
                 "The active Spiral project changed. Reload Assistant conversations.".to_owned(),
             ));
@@ -647,8 +835,8 @@ impl WorkflowAgentManager {
             let active = active.as_mut().ok_or_else(|| {
                 OperationError::Conflict("No Assistant turn is active.".to_owned())
             })?;
-            if active.conversation_id != request.conversation_id
-                || active.turn_id != request.turn_id
+            if active.conversation_id != request.conversation_id()
+                || active.turn_id != request.turn_id()
             {
                 return Err(OperationError::Conflict(
                     "The active Assistant turn changed. Reload it before stopping.".to_owned(),
@@ -666,10 +854,12 @@ impl WorkflowAgentManager {
             let mut document = lock(&self.inner.document);
             let mut candidate = document.clone();
             if let Some(conversation) = candidate.conversation_mut(&conversation_id)
-                && conversation.session.active_turn_id.as_deref() == Some(turn_id.as_str())
+                && conversation.session.active_turn_id() == Some(turn_id.as_str())
             {
-                conversation.session.phase = WorkflowAgentPhase::Cancelling;
-                conversation.session.error = None;
+                conversation
+                    .session
+                    .set_phase(WorkflowAgentPhase::Cancelling);
+                conversation.session.set_error(None);
                 if bump_conversation(&mut candidate, &conversation_id).is_ok()
                     && self.persist_document(&candidate).is_ok()
                 {
@@ -686,28 +876,23 @@ impl WorkflowAgentManager {
         // observing the turn token. Re-read the synchronized ownership cell
         // after the task exits so Stop cannot orphan that run.
         self.cancel_owned_run(&owned_run_id);
-        self.finish_failed(&conversation_id, &turn_id, "Agent turn cancelled.", true);
+        self.finish_failed(
+            TurnIdentity::new(&conversation_id, &turn_id),
+            TurnFailureDetail::new("Agent turn cancelled.", true),
+        );
         Ok(self.state())
     }
 
     fn cancel_owned_run(&self, owned_run_id: &Arc<Mutex<Option<String>>>) {
         let owned_run = lock(owned_run_id).clone();
         if let Some(run_id) = owned_run
-            && self
-                .inner
-                .services
-                .workflow
-                .state()
-                .snapshot
-                .run_id
-                .as_deref()
-                == Some(run_id.as_str())
+            && self.inner.services.workflow.state().snapshot().run_id() == Some(run_id.as_str())
             && self.inner.services.workflow.is_active()
         {
             let _ = self.inner.services.workflow.cancel(
-                spiral_robotics_api::workflow::CancelWorkflowRequest {
-                    scope_id: self.inner.services.workflow.scope_id(),
-                },
+                spiral_robotics_api::workflow::CancelWorkflowRequest::new(
+                    self.inner.services.workflow.scope_id(),
+                ),
             );
         }
     }
@@ -739,14 +924,14 @@ impl WorkflowAgentManager {
         }
     }
 
-    async fn run_turn(
-        &self,
-        conversation_id: String,
-        turn_id: String,
-        cancel: Arc<AtomicBool>,
-        owned_run_id: Arc<Mutex<Option<String>>>,
-    ) {
-        let workflow_revision = self.inner.services.workflow.state().workflow.revision;
+    async fn run_turn(&self, task: TurnTask) {
+        let TurnTask {
+            conversation_id,
+            turn_id,
+            cancel,
+            owned_run_id,
+        } = task;
+        let workflow_revision = self.inner.services.workflow.state().workflow().revision();
         let mut context = ToolContext {
             conversation_id: conversation_id.clone(),
             workflow_revision,
@@ -757,74 +942,83 @@ impl WorkflowAgentManager {
         loop {
             let outcome = self
                 .run_provider_loop(
-                    &conversation_id,
-                    &turn_id,
-                    cancel.clone(),
-                    &mut context,
-                    &mut budget,
+                    ProviderLoop::new(
+                        TurnIdentity::new(&conversation_id, &turn_id),
+                        cancel.clone(),
+                    )
+                    .with_state(&mut context, &mut budget),
                 )
                 .await;
             if let Err(error) = outcome {
                 self.finish_failed(
-                    &conversation_id,
-                    &turn_id,
-                    &error,
-                    cancel.load(Ordering::SeqCst),
+                    TurnIdentity::new(&conversation_id, &turn_id),
+                    TurnFailureDetail::new(&error, cancel.load(Ordering::SeqCst)),
                 );
                 return;
             }
             if context.deferred_run_id.is_none()
                 && let Some(run_id) = lock(&context.owned_run_id).clone()
-                && self
-                    .inner
-                    .services
-                    .workflow
-                    .state()
-                    .snapshot
-                    .run_id
-                    .as_deref()
-                    == Some(run_id.as_str())
+                && self.inner.services.workflow.state().snapshot().run_id() == Some(run_id.as_str())
                 && self.inner.services.workflow.is_active()
             {
                 context.deferred_run_id = Some(run_id);
             }
             let Some(run_id) = context.deferred_run_id.take() else {
-                self.finish_complete(&conversation_id, &turn_id);
+                self.finish_complete(TurnIdentity::new(&conversation_id, &turn_id));
                 return;
             };
-            if let Err(error) = self.finish_waiting(&conversation_id, &turn_id, &run_id) {
-                self.finish_failed(&conversation_id, &turn_id, &error, false);
+            if let Err(error) =
+                self.finish_waiting(TurnIdentity::new(&conversation_id, &turn_id), &run_id)
+            {
+                self.finish_failed(
+                    TurnIdentity::new(&conversation_id, &turn_id),
+                    TurnFailureDetail::new(&error, false),
+                );
                 return;
             }
             let snapshot = self.wait_for_terminal(&run_id, cancel.clone()).await;
             let Ok(snapshot) = snapshot else {
                 self.finish_failed(
-                    &conversation_id,
-                    &turn_id,
-                    "The deferred Workflow wait was cancelled or interrupted.",
-                    cancel.load(Ordering::SeqCst),
+                    TurnIdentity::new(&conversation_id, &turn_id),
+                    TurnFailureDetail::new(
+                        "The deferred Workflow wait was cancelled or interrupted.",
+                        cancel.load(Ordering::SeqCst),
+                    ),
                 );
                 return;
             };
             if cancel.load(Ordering::SeqCst) {
-                self.finish_failed(&conversation_id, &turn_id, "Agent turn cancelled.", true);
+                self.finish_failed(
+                    TurnIdentity::new(&conversation_id, &turn_id),
+                    TurnFailureDetail::new("Agent turn cancelled.", true),
+                );
                 return;
             }
-            if let Err(error) = self.begin_auto_resume(&conversation_id, &turn_id, &snapshot) {
-                self.finish_failed(&conversation_id, &turn_id, &error, false);
+            if let Err(error) =
+                self.begin_auto_resume(TurnIdentity::new(&conversation_id, &turn_id), &snapshot)
+            {
+                self.finish_failed(
+                    TurnIdentity::new(&conversation_id, &turn_id),
+                    TurnFailureDetail::new(&error, false),
+                );
                 return;
             }
         }
     }
 
-    async fn run_provider_loop(
-        &self,
-        conversation_id: &str,
-        turn_id: &str,
-        cancel: Arc<AtomicBool>,
-        context: &mut ToolContext,
-        budget: &mut TurnBudget,
-    ) -> Result<(), String> {
+    async fn run_provider_loop(&self, provider_loop: ProviderLoop<'_>) -> Result<(), String> {
+        let ProviderLoop {
+            identity:
+                TurnIdentity {
+                    conversation_id,
+                    turn_id,
+                },
+            cancel,
+            context,
+            budget,
+        } = provider_loop;
+        let context = context.expect("provider tool context is configured");
+        let budget = budget.expect("provider turn budget is configured");
         let provider = self
             .inner
             .services
@@ -849,9 +1043,15 @@ impl WorkflowAgentManager {
             let delta_conversation = conversation_id.to_owned();
             let delta_turn = turn_id.to_owned();
             let response = provider
-                .complete(&messages, &tools, cancel.clone(), move |delta| {
-                    delta_manager.append_text_delta(&delta_conversation, &delta_turn, delta);
-                })
+                .complete(
+                    ProviderCompletion::new(&messages, &tools, cancel.clone()),
+                    move |delta| {
+                        delta_manager.append_text_delta(
+                            TurnIdentity::new(&delta_conversation, &delta_turn),
+                            delta,
+                        );
+                    },
+                )
                 .await
                 .map_err(|error| {
                     tracing::warn!(error = %error, "Workflow Assistant provider turn failed");
@@ -861,29 +1061,36 @@ impl WorkflowAgentManager {
             // calls. A budget rejection must not leave calls with no matching
             // tool-result messages in durable provider history.
             let provider_message = admit_provider_response(budget, &response)?;
-            self.record_provider_response(conversation_id, turn_id, provider_message)?;
-            if response.tool_calls.is_empty() {
+            let identity = TurnIdentity::new(conversation_id, turn_id);
+            self.record_provider_response(identity, provider_message)?;
+            if response.tool_calls().is_empty() {
                 return Ok(());
             }
-            for (index, call) in response.tool_calls.iter().enumerate() {
+            for (index, call) in response.tool_calls().iter().enumerate() {
                 if cancel.load(Ordering::SeqCst) {
                     self.record_unexecuted_tool_outputs(
-                        conversation_id,
-                        turn_id,
-                        &response.tool_calls[index..],
-                        "Agent turn cancelled before this tool ran.",
+                        identity,
+                        UnexecutedTools::new(
+                            &response.tool_calls()[index..],
+                            "Agent turn cancelled before this tool ran.",
+                        ),
                     )?;
                     return Err("Agent turn cancelled.".to_owned());
                 }
-                self.tool_started(conversation_id, turn_id, call)?;
-                let result = self.execute_tool(call, context, cancel.clone()).await;
+                self.tool_started(identity, call)?;
+                let result = self
+                    .execute_tool(call, ToolRuntime::new(context, cancel.clone()))
+                    .await;
                 let (output, transport_ok) = match result {
                     Ok(output) => (output, true),
                     Err(error) => (json!({"ok": false, "error": error}).to_string(), false),
                 };
                 let bounded = bound_tool_output(output);
-                self.tool_finished(conversation_id, turn_id, call, transport_ok, &bounded)?;
-                self.record_tool_output(conversation_id, turn_id, &call.id, bounded)?;
+                self.tool_finished(
+                    identity,
+                    ToolRunCompletion::new(call, transport_ok, &bounded),
+                )?;
+                self.record_tool_output(identity, ToolOutput::new(call.id(), bounded))?;
             }
             if context.deferred_run_id.is_some() {
                 return Ok(());
@@ -894,18 +1101,18 @@ impl WorkflowAgentManager {
     async fn execute_tool(
         &self,
         call: &ProviderToolCall,
-        context: &mut ToolContext,
-        cancel: Arc<AtomicBool>,
+        runtime: ToolRuntime<'_>,
     ) -> Result<String, String> {
-        let args: Value = serde_json::from_str(&call.function.arguments)
+        let ToolRuntime { context, cancel } = runtime;
+        let args: Value = serde_json::from_str(call.function().arguments())
             .map_err(|error| format!("Tool arguments are malformed: {error}"))?;
-        match call.function.name.as_str() {
+        match call.function().name() {
             "list_relations" => {
                 let response = self.inner.services.storage.workflow_relations().await?;
                 Ok(json!({
-                    "relations": response.relations.iter().map(|relation| &relation.name).collect::<Vec<_>>(),
-                    "complete": response.complete,
-                    "limitation": response.limitation,
+                    "relations": response.relations().iter().map(|relation| relation.name()).collect::<Vec<_>>(),
+                    "complete": response.complete(),
+                    "limitation": response.limitation(),
                 }).to_string())
             }
             "describe_relations" => {
@@ -919,9 +1126,9 @@ impl WorkflowAgentManager {
                 let discovered = self.inner.services.storage.workflow_relations().await?;
                 let requested = names.iter().filter_map(Value::as_str).collect::<Vec<_>>();
                 let relations = discovered
-                    .relations
-                    .into_iter()
-                    .filter(|relation| requested.contains(&relation.name.as_str()))
+                    .relations()
+                    .iter()
+                    .filter(|relation| requested.contains(&relation.name()))
                     .collect::<Vec<_>>();
                 Ok(serde_json::to_string(&json!({"relations": relations}))
                     .map_err(|error| error.to_string())?)
@@ -975,21 +1182,21 @@ impl WorkflowAgentManager {
                     .inner
                     .services
                     .workflow
-                    .save(SaveWorkflowRequest {
-                        scope_id: self.inner.services.workflow.scope_id(),
-                        expected_revision: context.workflow_revision,
-                        workflow: resolved,
-                    })
+                    .save(SaveWorkflowRequest::new(
+                        self.inner.services.workflow.scope_id(),
+                        context.workflow_revision,
+                        resolved,
+                    ))
                     .map_err(|error| error.to_string());
                 let released = self.inner.services.catalog_lease.release(lease);
                 debug_assert!(released, "agent Workflow save releases its lease once");
                 let saved = saved?;
-                context.workflow_revision = saved.workflow.revision;
+                context.workflow_revision = saved.workflow().revision();
                 Ok(json!({
                     "ok": true,
-                    "workflow": saved.workflow,
-                    "validation": saved.validation,
-                    "resolved_models": resolved_models(&saved.workflow),
+                    "workflow": saved.workflow(),
+                    "validation": saved.validation(),
+                    "resolved_models": resolved_models(saved.workflow()),
                 })
                 .to_string())
             }
@@ -1007,37 +1214,28 @@ impl WorkflowAgentManager {
                     .inner
                     .services
                     .workflow
-                    .start(RunWorkflowRequest {
-                        scope_id: self.inner.services.workflow.scope_id(),
-                        revision: context.workflow_revision,
-                    })
+                    .start(RunWorkflowRequest::new(
+                        self.inner.services.workflow.scope_id(),
+                        context.workflow_revision,
+                    ))
                     .map_err(|error| error.to_string());
                 let released = self.inner.services.catalog_lease.release(lease);
                 debug_assert!(released, "agent Workflow start releases its lease once");
                 let snapshot = result?;
                 let run_id = snapshot
-                    .run_id
-                    .clone()
+                    .run_id()
                     .ok_or_else(|| "Workflow start returned no run identity.".to_owned())?;
-                let cancelled = record_owned_run(&context.owned_run_id, &cancel, &run_id);
+                let cancelled = record_owned_run(&context.owned_run_id, &cancel, run_id);
                 if let Err(error) =
-                    self.record_conversation_owned_run(&context.conversation_id, &run_id)
+                    self.record_conversation_owned_run(&context.conversation_id, run_id)
                 {
-                    if self
-                        .inner
-                        .services
-                        .workflow
-                        .state()
-                        .snapshot
-                        .run_id
-                        .as_deref()
-                        == Some(run_id.as_str())
+                    if self.inner.services.workflow.state().snapshot().run_id() == Some(run_id)
                         && self.inner.services.workflow.is_active()
                     {
                         let _ = self.inner.services.workflow.cancel(
-                            spiral_robotics_api::workflow::CancelWorkflowRequest {
-                                scope_id: self.inner.services.workflow.scope_id(),
-                            },
+                            spiral_robotics_api::workflow::CancelWorkflowRequest::new(
+                                self.inner.services.workflow.scope_id(),
+                            ),
                         );
                     }
                     return Err(format!(
@@ -1045,28 +1243,20 @@ impl WorkflowAgentManager {
                     ));
                 }
                 if cancelled {
-                    if self
-                        .inner
-                        .services
-                        .workflow
-                        .state()
-                        .snapshot
-                        .run_id
-                        .as_deref()
-                        == Some(run_id.as_str())
+                    if self.inner.services.workflow.state().snapshot().run_id() == Some(run_id)
                         && self.inner.services.workflow.is_active()
                     {
                         let _ = self.inner.services.workflow.cancel(
-                            spiral_robotics_api::workflow::CancelWorkflowRequest {
-                                scope_id: self.inner.services.workflow.scope_id(),
-                            },
+                            spiral_robotics_api::workflow::CancelWorkflowRequest::new(
+                                self.inner.services.workflow.scope_id(),
+                            ),
                         );
                     }
                     return Err(
                         "Agent turn was cancelled after starting the Workflow run.".to_owned()
                     );
                 }
-                Ok(json!({"ok": true, "run_id": run_id, "phase": snapshot.phase}).to_string())
+                Ok(json!({"ok": true, "run_id": run_id, "phase": snapshot.phase()}).to_string())
             }
             "wait_for_run" => {
                 let timeout = args
@@ -1076,7 +1266,15 @@ impl WorkflowAgentManager {
                     .clamp(1, 60);
                 let run_id = lock(&context.owned_run_id)
                     .clone()
-                    .or_else(|| self.inner.services.workflow.state().snapshot.run_id)
+                    .or_else(|| {
+                        self.inner
+                            .services
+                            .workflow
+                            .state()
+                            .snapshot()
+                            .run_id()
+                            .map(str::to_owned)
+                    })
                     .ok_or_else(|| "There is no Workflow run to wait for.".to_owned())?;
                 match tokio::time::timeout(
                     std::time::Duration::from_secs(timeout),
@@ -1126,22 +1324,26 @@ impl WorkflowAgentManager {
             if cancel.load(Ordering::SeqCst) {
                 return Err("Agent turn cancelled.".to_owned());
             }
-            if state.snapshot.run_id.as_deref() != Some(run_id) {
+            if state.snapshot().run_id() != Some(run_id) {
                 return Err(
                     "The active Workflow run changed while the Assistant was waiting.".to_owned(),
                 );
             }
-            if state.snapshot.phase.terminal() {
-                return Ok(state.snapshot);
+            if state.snapshot().phase().terminal() {
+                return Ok(state.snapshot().clone());
             }
             state = tokio::select! {
-                update = updates.recv() => update.map_err(|_| "Workflow updates stopped while waiting.".to_owned())?.state,
+                update = updates.recv() => update.map_err(|_| "Workflow updates stopped while waiting.".to_owned())?.state().clone(),
                 () = tokio::time::sleep(std::time::Duration::from_millis(100)) => continue,
             };
         }
     }
 
-    fn append_text_delta(&self, conversation_id: &str, turn_id: &str, delta: &str) {
+    fn append_text_delta(&self, identity: TurnIdentity<'_>, delta: &str) {
+        let TurnIdentity {
+            conversation_id,
+            turn_id,
+        } = identity;
         if delta.is_empty() {
             return;
         }
@@ -1149,14 +1351,16 @@ impl WorkflowAgentManager {
         let Some(conversation) = document.conversation_mut(conversation_id) else {
             return;
         };
-        if conversation.session.active_turn_id.as_deref() != Some(turn_id) {
+        if conversation.session.active_turn_id() != Some(turn_id) {
             return;
         }
         if let Some(message) = current_assistant_mut(&mut conversation.session, turn_id) {
-            message.text.push_str(delta);
-            if message.text.chars().count() > 32_000 {
-                message.text = message.text.chars().take(32_000).collect();
+            let mut text = message.text().to_owned();
+            text.push_str(delta);
+            if text.chars().count() > 32_000 {
+                text = text.chars().take(32_000).collect();
             }
+            message.set_text(text);
         }
         let _ = bump_conversation(&mut document, conversation_id);
         drop(document);
@@ -1165,12 +1369,11 @@ impl WorkflowAgentManager {
 
     fn record_provider_response(
         &self,
-        conversation_id: &str,
-        turn_id: &str,
+        identity: TurnIdentity<'_>,
         message: ProviderMessage,
     ) -> Result<(), String> {
         let mut document = lock(&self.inner.document);
-        let candidate = provider_message_candidate(&document, conversation_id, turn_id, message)?;
+        let candidate = provider_message_candidate(&document, identity, message)?;
         self.persist_document(&candidate)?;
         *document = candidate;
         Ok(())
@@ -1178,17 +1381,14 @@ impl WorkflowAgentManager {
 
     fn record_tool_output(
         &self,
-        conversation_id: &str,
-        turn_id: &str,
-        call_id: &str,
-        output: String,
+        identity: TurnIdentity<'_>,
+        output: ToolOutput<'_>,
     ) -> Result<(), String> {
         let mut document = lock(&self.inner.document);
         let candidate = provider_message_candidate(
             &document,
-            conversation_id,
-            turn_id,
-            ProviderMessage::tool(call_id.to_owned(), output),
+            identity,
+            ProviderMessage::tool(output.call_id.to_owned(), output.output),
         )?;
         self.persist_document(&candidate)?;
         *document = candidate;
@@ -1197,11 +1397,13 @@ impl WorkflowAgentManager {
 
     fn record_unexecuted_tool_outputs(
         &self,
-        conversation_id: &str,
-        turn_id: &str,
-        calls: &[ProviderToolCall],
-        detail: &str,
+        identity: TurnIdentity<'_>,
+        unexecuted: UnexecutedTools<'_>,
     ) -> Result<(), String> {
+        let TurnIdentity {
+            conversation_id,
+            turn_id,
+        } = identity;
         let mut document = lock(&self.inner.document);
         ensure_turn(&document, conversation_id, turn_id)?;
         let mut candidate = document.clone();
@@ -1210,8 +1412,8 @@ impl WorkflowAgentManager {
                 .conversation_mut(conversation_id)
                 .expect("the active conversation was checked")
                 .provider_messages,
-            calls,
-            detail,
+            unexecuted.calls,
+            unexecuted.detail,
         );
         trim_provider_history(&mut candidate, conversation_id);
         self.persist_document(&candidate)?;
@@ -1221,10 +1423,13 @@ impl WorkflowAgentManager {
 
     fn tool_started(
         &self,
-        conversation_id: &str,
-        turn_id: &str,
+        identity: TurnIdentity<'_>,
         call: &ProviderToolCall,
     ) -> Result<(), String> {
+        let TurnIdentity {
+            conversation_id,
+            turn_id,
+        } = identity;
         let mut document = lock(&self.inner.document);
         ensure_turn(&document, conversation_id, turn_id)?;
         let message = current_assistant_mut(
@@ -1235,14 +1440,11 @@ impl WorkflowAgentManager {
             turn_id,
         )
         .ok_or_else(|| "Assistant message disappeared during tool execution.".to_owned())?;
-        message.tools.push(WorkflowAgentToolSummary {
-            call_id: call.id.clone(),
-            name: call.function.name.clone(),
-            phase: WorkflowAgentToolPhase::Running,
-            summary: tool_running_summary(&call.function.name),
-            error: None,
-            receipt: None,
-        });
+        message.tools_mut().push(WorkflowAgentToolSummary::new(
+            call.id(),
+            call.function().name(),
+            tool_running_summary(call.function().name()),
+        ));
         bump_conversation(&mut document, conversation_id)?;
         drop(document);
         self.publish();
@@ -1251,12 +1453,14 @@ impl WorkflowAgentManager {
 
     fn tool_finished(
         &self,
-        conversation_id: &str,
-        turn_id: &str,
-        call: &ProviderToolCall,
-        ok: bool,
-        detail: &str,
+        identity: TurnIdentity<'_>,
+        completion: ToolRunCompletion<'_>,
     ) -> Result<(), String> {
+        let TurnIdentity {
+            conversation_id,
+            turn_id,
+        } = identity;
+        let ToolRunCompletion { call, ok, detail } = completion;
         let mut document = lock(&self.inner.document);
         ensure_turn(&document, conversation_id, turn_id)?;
         let mut candidate = document.clone();
@@ -1269,9 +1473,9 @@ impl WorkflowAgentManager {
         )
         .ok_or_else(|| "Assistant message disappeared during tool execution.".to_owned())?;
         let summary = message
-            .tools
+            .tools_mut()
             .iter_mut()
-            .find(|summary| summary.call_id == call.id)
+            .find(|summary| summary.call_id() == call.id())
             .ok_or_else(|| "Assistant tool summary disappeared.".to_owned())?;
         let detail_value = serde_json::from_str::<Value>(detail).unwrap_or(Value::Null);
         let effective_ok = ok
@@ -1279,17 +1483,20 @@ impl WorkflowAgentManager {
                 .get("ok")
                 .and_then(Value::as_bool)
                 .unwrap_or(true);
-        summary.phase = if effective_ok {
+        let phase = if effective_ok {
             WorkflowAgentToolPhase::Complete
         } else {
             WorkflowAgentToolPhase::Failed
         };
-        let completion = tool_completion(&call.function.name, effective_ok, detail);
-        summary.summary = completion.summary;
-        summary.error = (!effective_ok)
-            .then(|| public_tool_detail(detail))
-            .flatten();
-        summary.receipt = completion.receipt;
+        let completion = tool_completion(call.function().name(), effective_ok, detail);
+        summary.set_phase(phase);
+        summary.set_summary(completion.summary);
+        summary.set_error(
+            (!effective_ok)
+                .then(|| public_tool_detail(detail))
+                .flatten(),
+        );
+        summary.set_receipt(completion.receipt);
         bump_conversation(&mut candidate, conversation_id)?;
         self.persist_document(&candidate)?;
         *document = candidate;
@@ -1298,38 +1505,38 @@ impl WorkflowAgentManager {
         Ok(())
     }
 
-    fn finish_complete(&self, conversation_id: &str, turn_id: &str) {
+    fn finish_complete(&self, identity: TurnIdentity<'_>) {
+        self.finish(TurnFinish::new(identity, WorkflowAgentPhase::Idle));
+    }
+
+    fn finish_failed(&self, identity: TurnIdentity<'_>, failure: TurnFailureDetail<'_>) {
         self.finish(
-            conversation_id,
-            turn_id,
-            WorkflowAgentPhase::Idle,
-            None,
-            false,
+            TurnFinish::new(
+                identity,
+                if failure.cancelled {
+                    WorkflowAgentPhase::Cancelled
+                } else {
+                    WorkflowAgentPhase::Failed
+                },
+            )
+            .with_error(
+                (!failure.cancelled).then(|| public_tool_error(failure.error)),
+                failure.cancelled,
+            ),
         );
     }
 
-    fn finish_failed(&self, conversation_id: &str, turn_id: &str, error: &str, cancelled: bool) {
-        self.finish(
-            conversation_id,
-            turn_id,
-            if cancelled {
-                WorkflowAgentPhase::Cancelled
-            } else {
-                WorkflowAgentPhase::Failed
-            },
-            (!cancelled).then(|| public_tool_error(error)),
+    fn finish(&self, finish: TurnFinish<'_>) {
+        let TurnFinish {
+            identity:
+                TurnIdentity {
+                    conversation_id,
+                    turn_id,
+                },
+            phase,
+            error,
             cancelled,
-        );
-    }
-
-    fn finish(
-        &self,
-        conversation_id: &str,
-        turn_id: &str,
-        phase: WorkflowAgentPhase,
-        error: Option<String>,
-        cancelled: bool,
-    ) {
+        } = finish;
         let mut active = lock(&self.inner.active);
         if active.as_ref().is_none_or(|active| {
             active.turn_id != turn_id || active.conversation_id != conversation_id
@@ -1341,21 +1548,21 @@ impl WorkflowAgentManager {
         let Some(conversation) = candidate.conversation_mut(conversation_id) else {
             return;
         };
-        if conversation.session.active_turn_id.as_deref() != Some(turn_id) {
+        if conversation.session.active_turn_id() != Some(turn_id) {
             return;
         }
-        conversation.session.phase = phase;
-        conversation.session.error = error;
-        conversation.session.active_turn_id = None;
-        conversation.session.deferred_run_id = None;
+        conversation.session.set_phase(phase);
+        conversation.session.set_error(error);
+        conversation.session.set_active_turn_id(None);
+        conversation.session.set_deferred_run_id(None);
         if let Some(message) = current_assistant_mut(&mut conversation.session, turn_id) {
-            message.phase = if cancelled {
+            message.set_phase(if cancelled {
                 WorkflowAgentMessagePhase::Cancelled
             } else if phase == WorkflowAgentPhase::Failed {
                 WorkflowAgentMessagePhase::Failed
             } else {
                 WorkflowAgentMessagePhase::Complete
-            };
+            });
         }
         // A turn may fail after the assistant tool-call batch was durably
         // recorded but before all tool results were saved. Do not transition
@@ -1366,11 +1573,11 @@ impl WorkflowAgentManager {
         if let Err(persist_error) = self.persist_document(&candidate)
             && let Some(conversation) = candidate.conversation_mut(conversation_id)
         {
-            conversation.session.phase = WorkflowAgentPhase::Failed;
-            conversation.session.error = Some(format!(
+            conversation.session.set_phase(WorkflowAgentPhase::Failed);
+            conversation.session.set_error(Some(format!(
                 "Could not persist Assistant history: {}",
                 public_tool_error(&persist_error)
-            ));
+            )));
         }
         // Even when durable storage is temporarily unavailable, install only
         // the structurally valid candidate. A later Retry can persist it; the
@@ -1382,28 +1589,31 @@ impl WorkflowAgentManager {
         self.publish();
     }
 
-    fn finish_waiting(
-        &self,
-        conversation_id: &str,
-        turn_id: &str,
-        run_id: &str,
-    ) -> Result<(), String> {
+    fn finish_waiting(&self, identity: TurnIdentity<'_>, run_id: &str) -> Result<(), String> {
+        let TurnIdentity {
+            conversation_id,
+            turn_id,
+        } = identity;
         let mut document = lock(&self.inner.document);
         let mut candidate = document.clone();
         let conversation = candidate
             .conversation_mut(conversation_id)
             .ok_or_else(|| "Assistant conversation disappeared.".to_owned())?;
-        if conversation.session.active_turn_id.as_deref() != Some(turn_id) {
+        if conversation.session.active_turn_id() != Some(turn_id) {
             return Err("Assistant turn is no longer active.".to_owned());
         }
-        conversation.session.phase = WorkflowAgentPhase::WaitingForRun;
-        conversation.session.deferred_run_id = Some(run_id.to_owned());
+        conversation
+            .session
+            .set_phase(WorkflowAgentPhase::WaitingForRun);
+        conversation
+            .session
+            .set_deferred_run_id(Some(run_id.to_owned()));
         conversation.owned_run_id = Some(run_id.to_owned());
         if let Some(message) = current_assistant_mut(&mut conversation.session, turn_id) {
-            message.phase = WorkflowAgentMessagePhase::Complete;
-            message.run_id = Some(run_id.to_owned());
-            if message.text.trim().is_empty() {
-                message.text = "The Workflow is still running. I’ll continue this turn when the backend publishes its terminal state.".to_owned();
+            message.set_phase(WorkflowAgentMessagePhase::Complete);
+            message.set_run_id(Some(run_id.to_owned()));
+            if message.text().trim().is_empty() {
+                message.set_text("The Workflow is still running. I’ll continue this turn when the backend publishes its terminal state.");
             }
         }
         bump_conversation(&mut candidate, conversation_id)?;
@@ -1416,61 +1626,80 @@ impl WorkflowAgentManager {
 
     fn begin_auto_resume(
         &self,
-        conversation_id: &str,
-        turn_id: &str,
+        identity: TurnIdentity<'_>,
         snapshot: &spiral_robotics_api::workflow::WorkflowRunSnapshot,
     ) -> Result<(), String> {
+        let TurnIdentity {
+            conversation_id,
+            turn_id,
+        } = identity;
         let mut document = lock(&self.inner.document);
         let conversation = document
             .conversation(conversation_id)
             .ok_or_else(|| "Assistant conversation disappeared.".to_owned())?;
-        if conversation.session.active_turn_id.as_deref() != Some(turn_id) {
+        if conversation.session.active_turn_id() != Some(turn_id) {
             return Err("Assistant turn is no longer active.".to_owned());
         }
-        ensure_public_message_capacity(conversation.session.messages.len(), 2)?;
+        ensure_public_message_capacity(conversation.session.messages().len(), 2)?;
         let mut candidate = document.clone();
         let conversation = candidate
             .conversation_mut(conversation_id)
             .ok_or_else(|| "Assistant conversation disappeared.".to_owned())?;
         let summary = run_snapshot_summary(snapshot).to_string();
-        refresh_deferred_wait_receipt(&mut conversation.session.messages, snapshot, &summary);
+        refresh_deferred_wait_receipt(conversation.session.messages_mut(), snapshot, &summary);
         conversation.provider_messages.push(ProviderMessage::text(
             "user",
             format!("[Backend Workflow completion]\n{summary}"),
         ));
         let sequence = next_sequence(&conversation.session);
-        conversation.session.messages.push(WorkflowAgentMessage {
-            id: next_id("agent-run"),
-            sequence,
-            role: WorkflowAgentRole::Synthetic,
-            phase: WorkflowAgentMessagePhase::Complete,
-            text: format!(
-                "Workflow {} is {}.",
-                snapshot.run_id.as_deref().unwrap_or("run"),
-                human_phase(
-                    &serde_json::to_value(snapshot.phase)
-                        .ok()
-                        .and_then(|value| value.as_str().map(str::to_owned))
-                        .unwrap_or_else(|| "updated".to_owned())
+        conversation
+            .session
+            .messages_mut()
+            .push(WorkflowAgentMessage::new(
+                WorkflowAgentMessageIdentity::new(
+                    next_id("agent-run"),
+                    sequence,
+                    WorkflowAgentRole::Synthetic,
                 )
-            ),
-            tools: Vec::new(),
-            run_id: snapshot.run_id.clone(),
-            created_ms: now_millis(),
-        });
+                .with_created_ms(now_millis()),
+                WorkflowAgentMessageContent::new(
+                    WorkflowAgentMessagePhase::Complete,
+                    format!(
+                        "Workflow {} is {}.",
+                        snapshot.run_id().unwrap_or("run"),
+                        human_phase(
+                            &serde_json::to_value(snapshot.phase())
+                                .ok()
+                                .and_then(|value| value.as_str().map(str::to_owned))
+                                .unwrap_or_else(|| "updated".to_owned())
+                        )
+                    ),
+                    Vec::new(),
+                )
+                .with_run_id(snapshot.run_id().map(str::to_owned)),
+            ));
         let sequence = next_sequence(&conversation.session);
-        conversation.session.messages.push(WorkflowAgentMessage {
-            id: next_id("agent-assistant"),
-            sequence,
-            role: WorkflowAgentRole::Assistant,
-            phase: WorkflowAgentMessagePhase::Streaming,
-            text: String::new(),
-            tools: Vec::new(),
-            run_id: snapshot.run_id.clone(),
-            created_ms: now_millis(),
-        });
-        conversation.session.phase = WorkflowAgentPhase::Responding;
-        conversation.session.deferred_run_id = None;
+        conversation
+            .session
+            .messages_mut()
+            .push(WorkflowAgentMessage::new(
+                WorkflowAgentMessageIdentity::new(
+                    next_id("agent-assistant"),
+                    sequence,
+                    WorkflowAgentRole::Assistant,
+                )
+                .with_created_ms(now_millis()),
+                WorkflowAgentMessageContent::new(
+                    WorkflowAgentMessagePhase::Streaming,
+                    String::new(),
+                    Vec::new(),
+                )
+                .with_run_id(snapshot.run_id().map(str::to_owned)),
+            ));
+        conversation
+            .session
+            .set_phase(WorkflowAgentPhase::Responding);
+        conversation.session.set_deferred_run_id(None);
         conversation.owned_run_id = None;
         bump_conversation(&mut candidate, conversation_id)?;
         trim_provider_history(&mut candidate, conversation_id);
@@ -1489,38 +1718,52 @@ impl WorkflowAgentManager {
         let history_error = lock(&self.inner.history_error);
         let readiness = history_error
             .as_ref()
-            .map(|error| WorkflowAgentReadiness {
-                configured: false,
-                status: WorkflowAgentReadinessStatus::Error,
-                provider: self.inner.readiness.provider.clone(),
-                model: self.inner.readiness.model.clone(),
-                detail: format!(
-                    "Assistant history is unavailable for this project: {}",
-                    error
-                ),
+            .map(|error| {
+                WorkflowAgentReadiness::new(
+                    false,
+                    WorkflowAgentReadinessStatus::Error,
+                    format!(
+                        "Assistant history is unavailable for this project: {}",
+                        error
+                    ),
+                )
+                .with_provider(
+                    self.inner.readiness.provider(),
+                    self.inner.readiness.model(),
+                )
             })
             .unwrap_or_else(|| self.inner.readiness.clone());
-        WorkflowAgentStateResponse {
+        WorkflowAgentStateResponse::new(
             readiness,
-            history_available: history_error.is_none(),
-            scope_id: lock(&self.inner.scope_id).clone(),
-            revision: document.revision,
-            active_conversation_id: document.active_conversation_id.clone(),
-            conversations: document
+            WorkflowAgentStateIdentity::new(
+                history_error.is_none(),
+                lock(&self.inner.scope_id).clone(),
+                document.revision,
+            )
+            .with_conversation(
+                document.active_conversation_id.clone(),
+                MAX_WORKFLOW_AGENT_CONVERSATIONS,
+            ),
+            session,
+        )
+        .with_conversations(
+            document
                 .conversations
                 .iter()
-                .map(|conversation| WorkflowAgentConversationSummary {
-                    conversation_id: conversation.conversation_id.clone(),
-                    title: conversation.title.clone(),
-                    created_ms: conversation.created_ms,
-                    updated_ms: conversation.updated_ms,
-                    message_count: conversation.session.messages.len(),
-                    owned_run_id: conversation.owned_run_id.clone(),
+                .map(|conversation| {
+                    WorkflowAgentConversationSummary::new(
+                        conversation.conversation_id.clone(),
+                        conversation.title.clone(),
+                        conversation.created_ms,
+                    )
+                    .with_activity(
+                        conversation.updated_ms,
+                        conversation.session.messages().len(),
+                    )
+                    .with_owned_run_id(conversation.owned_run_id.clone())
                 })
                 .collect(),
-            conversation_limit: MAX_WORKFLOW_AGENT_CONVERSATIONS,
-            session,
-        }
+        )
     }
 
     fn persist_document(&self, document: &AgentDocument) -> Result<(), String> {
@@ -1534,11 +1777,11 @@ impl WorkflowAgentManager {
     fn install_unavailable_scope(&self, error: &str) {
         let mut document = AgentDocument::default();
         if let Some(conversation) = document.active_mut() {
-            conversation.session.phase = WorkflowAgentPhase::Failed;
-            conversation.session.error = Some(
+            conversation.session.set_phase(WorkflowAgentPhase::Failed);
+            conversation.session.set_error(Some(
                 "Assistant history could not be reset for the active Spiral project. Reconnect Spiral and reload Studio."
                     .to_owned(),
-            );
+            ));
         }
         *lock(&self.inner.document) = document;
         *lock(&self.inner.history_error) = Some(error.to_owned());
@@ -1548,7 +1791,7 @@ impl WorkflowAgentManager {
 
     fn publish(&self) {
         let state = self.state();
-        let _ = self.inner.updates.send(WorkflowAgentUpdate { state });
+        let _ = self.inner.updates.send(WorkflowAgentUpdate::new(state));
     }
 }
 
@@ -1572,13 +1815,11 @@ fn admit_provider_response(
     budget: &mut TurnBudget,
     response: &ProviderResponse,
 ) -> Result<ProviderMessage, String> {
-    budget.admit_tool_calls(response.tool_calls.len())?;
-    Ok(ProviderMessage {
-        role: "assistant".to_owned(),
-        content: (!response.content.is_empty()).then(|| response.content.clone()),
-        tool_call_id: None,
-        tool_calls: response.tool_calls.clone(),
-    })
+    budget.admit_tool_calls(response.tool_calls().len())?;
+    Ok(ProviderMessage::assistant(
+        (!response.content().is_empty()).then(|| response.content().to_owned()),
+        response.tool_calls().to_vec(),
+    ))
 }
 
 fn tool_definitions() -> Vec<Value> {
@@ -1743,16 +1984,16 @@ fn function_tool(name: &str, description: &str, parameters: Value) -> Value {
 
 fn resolved_models(workflow: &WorkflowSpec) -> Vec<Value> {
     workflow
-        .nodes
+        .nodes()
         .iter()
-        .filter_map(|node| match &node.config {
+        .filter_map(|node| match &node.config() {
             WorkflowNodeConfig::Model {
                 model_id,
                 feature_cache_relation,
                 features,
                 ..
             } => Some(json!({
-                "node_id": node.id,
+                "node_id": node.id(),
                 "model_id": model_id,
                 "feature_cache_relation": feature_cache_relation,
                 "features": features,
@@ -1763,41 +2004,44 @@ fn resolved_models(workflow: &WorkflowSpec) -> Vec<Value> {
 }
 
 fn serialize_query_for_prompt(response: SpiralQueryResponse) -> String {
-    let row_count = response.rows.len();
-    let source_truncated = response.truncated;
-    let elapsed_ms = response.elapsed_ms;
+    let row_count = response.rows().len();
+    let source_truncated = response.truncated();
+    let elapsed_ms = response.elapsed_ms();
     let semantic = response
-        .columns
+        .columns()
         .iter()
-        .map(|column| (column.name.clone(), column.semantic_type.clone()))
+        .map(|column| {
+            (
+                column.name().to_owned(),
+                column.semantic_type().map(str::to_owned),
+            )
+        })
         .collect::<BTreeMap<_, _>>();
     let mut rows = Vec::new();
     let mut used = 0_usize;
-    for row in response
-        .rows
-        .into_iter()
-        .take(MAX_WORKFLOW_AGENT_QUERY_ROWS)
-    {
+    for row in response.rows().iter().take(MAX_WORKFLOW_AGENT_QUERY_ROWS) {
         let mut safe = serde_json::Map::new();
         for (name, value) in row {
             let converted = safe_cell(
-                value,
-                semantic.get(&name).and_then(|value| value.as_deref()),
+                value.clone(),
+                semantic
+                    .get(name.as_str())
+                    .and_then(|value| value.as_deref()),
             );
             let encoded = converted.to_string();
             if used.saturating_add(encoded.len()) > MAX_QUERY_PROMPT_BYTES {
-                safe.insert(name, json!({"type":"truncated"}));
+                safe.insert(name.clone(), json!({"type":"truncated"}));
                 break;
             }
             used = used.saturating_add(encoded.len());
-            safe.insert(name, converted);
+            safe.insert(name.clone(), converted);
         }
         rows.push(Value::Object(safe));
         if used >= MAX_QUERY_PROMPT_BYTES {
             break;
         }
     }
-    let mut columns = response.columns;
+    let mut columns = response.columns().to_vec();
     let mut truncated = source_truncated || used >= MAX_QUERY_PROMPT_BYTES;
     loop {
         let encoded = json!({
@@ -1842,18 +2086,18 @@ fn safe_cell(value: Value, semantic_type: Option<&str>) -> Value {
 
 fn run_snapshot_summary(snapshot: &spiral_robotics_api::workflow::WorkflowRunSnapshot) -> Value {
     json!({
-        "ok": snapshot.phase == WorkflowRunPhase::Completed,
-        "run_id": snapshot.run_id,
-        "phase": snapshot.phase,
-        "error": snapshot.error,
-        "result_stale": snapshot.result_stale,
-        "result": snapshot.result.as_ref().filter(|_| {
-            snapshot.phase == WorkflowRunPhase::Completed && !snapshot.result_stale
+        "ok": snapshot.phase() == WorkflowRunPhase::Completed,
+        "run_id": snapshot.run_id(),
+        "phase": snapshot.phase(),
+        "error": snapshot.error(),
+        "result_stale": snapshot.result_stale(),
+        "result": snapshot.result().as_ref().filter(|_| {
+            snapshot.phase() == WorkflowRunPhase::Completed && !snapshot.result_stale()
         }).map(|result| json!({
-            "columns": result.columns,
-            "row_count": result.rows.len(),
-            "truncated": result.truncated,
-            "elapsed_ms": result.elapsed_ms,
+            "columns": result.columns(),
+            "row_count": result.rows().len(),
+            "truncated": result.truncated(),
+            "elapsed_ms": result.elapsed_ms(),
         })),
     })
 }
@@ -1866,27 +2110,23 @@ fn refresh_deferred_wait_receipt(
     let Some(wait) = messages
         .iter_mut()
         .rev()
-        .flat_map(|message| message.tools.iter_mut().rev())
+        .flat_map(|message| message.tools_mut().iter_mut().rev())
         .find(|tool| {
-            tool.name == "wait_for_run"
-                && tool
-                    .receipt
-                    .as_ref()
-                    .and_then(|receipt| receipt.run_id.as_deref())
-                    == snapshot.run_id.as_deref()
+            tool.name() == "wait_for_run"
+                && tool.receipt().as_ref().and_then(|receipt| receipt.run_id()) == snapshot.run_id()
         })
     else {
         return;
     };
     let completion = tool_completion("wait_for_run", true, summary);
-    wait.phase = if snapshot.phase == WorkflowRunPhase::Completed {
+    wait.set_phase(if snapshot.phase() == WorkflowRunPhase::Completed {
         WorkflowAgentToolPhase::Complete
     } else {
         WorkflowAgentToolPhase::Failed
-    };
-    wait.summary = completion.summary;
-    wait.error = snapshot.error.as_deref().map(public_tool_error);
-    wait.receipt = completion.receipt;
+    });
+    wait.set_summary(completion.summary);
+    wait.set_error(snapshot.error().map(public_tool_error));
+    wait.set_receipt(completion.receipt);
 }
 
 fn bound_tool_output(output: String) -> String {
@@ -1952,13 +2192,13 @@ fn tool_completion(name: &str, ok: bool, detail: &str) -> ToolCompletion {
             let suffix = revision.map_or_else(String::new, |revision| format!(" · r{revision}"));
             ToolCompletion {
                 summary: format!("Saved {name}{suffix}"),
-                receipt: Some(WorkflowAgentArtifactReceipt {
-                    kind: WorkflowAgentArtifactKind::Graph,
-                    label: "View graph".to_owned(),
-                    revision,
-                    run_id: None,
-                    row_count: None,
-                }),
+                receipt: Some(
+                    WorkflowAgentArtifactReceipt::new(
+                        WorkflowAgentArtifactKind::Graph,
+                        "View graph",
+                    )
+                    .with_revision(revision),
+                ),
             }
         }
         "run_workflow" => {
@@ -1973,13 +2213,10 @@ fn tool_completion(name: &str, ok: bool, detail: &str) -> ToolCompletion {
                     || format!("Workflow {phase}"),
                     |run_id| format!("Started {run_id} · {phase}"),
                 ),
-                receipt: Some(WorkflowAgentArtifactReceipt {
-                    kind: WorkflowAgentArtifactKind::Run,
-                    label: "View run".to_owned(),
-                    revision: None,
-                    run_id,
-                    row_count: None,
-                }),
+                receipt: Some(
+                    WorkflowAgentArtifactReceipt::new(WorkflowAgentArtifactKind::Run, "View run")
+                        .with_run_id(run_id),
+                ),
             }
         }
         "wait_for_run" => wait_completion(&value),
@@ -2057,21 +2294,22 @@ fn wait_completion(value: &Value) -> ToolCompletion {
     };
     ToolCompletion {
         summary,
-        receipt: Some(WorkflowAgentArtifactReceipt {
-            kind: if terminal_with_results {
-                WorkflowAgentArtifactKind::Results
-            } else {
-                WorkflowAgentArtifactKind::Run
-            },
-            label: if terminal_with_results {
-                "View results".to_owned()
-            } else {
-                "View run".to_owned()
-            },
-            revision: None,
-            run_id,
-            row_count,
-        }),
+        receipt: Some(
+            WorkflowAgentArtifactReceipt::new(
+                if terminal_with_results {
+                    WorkflowAgentArtifactKind::Results
+                } else {
+                    WorkflowAgentArtifactKind::Run
+                },
+                if terminal_with_results {
+                    "View results"
+                } else {
+                    "View run"
+                },
+            )
+            .with_run_id(run_id)
+            .with_row_count(row_count),
+        ),
     }
 }
 
@@ -2176,10 +2414,10 @@ fn current_assistant_mut<'a>(
     _turn_id: &str,
 ) -> Option<&'a mut WorkflowAgentMessage> {
     session
-        .messages
+        .messages_mut()
         .iter_mut()
         .rev()
-        .find(|message| message.role == WorkflowAgentRole::Assistant)
+        .find(|message| message.role() == WorkflowAgentRole::Assistant)
 }
 
 fn ensure_turn(
@@ -2189,7 +2427,7 @@ fn ensure_turn(
 ) -> Result<(), String> {
     if document
         .conversation(conversation_id)
-        .is_some_and(|conversation| conversation.session.active_turn_id.as_deref() == Some(turn_id))
+        .is_some_and(|conversation| conversation.session.active_turn_id() == Some(turn_id))
     {
         Ok(())
     } else {
@@ -2199,10 +2437,13 @@ fn ensure_turn(
 
 fn provider_message_candidate(
     document: &AgentDocument,
-    conversation_id: &str,
-    turn_id: &str,
+    identity: TurnIdentity<'_>,
     message: ProviderMessage,
 ) -> Result<AgentDocument, String> {
+    let TurnIdentity {
+        conversation_id,
+        turn_id,
+    } = identity;
     ensure_turn(document, conversation_id, turn_id)?;
     let mut candidate = document.clone();
     candidate
@@ -2223,7 +2464,7 @@ fn append_unexecuted_tool_outputs(
     messages.extend(
         calls
             .iter()
-            .map(|call| ProviderMessage::tool(call.id.clone(), output.clone())),
+            .map(|call| ProviderMessage::tool(call.id().to_owned(), output.clone())),
     );
 }
 
@@ -2239,7 +2480,7 @@ fn trim_provider_history(document: &mut AgentDocument, conversation_id: &str) ->
             .iter()
             .enumerate()
             .skip(minimum)
-            .find_map(|(index, message)| (message.role == "user").then_some(index))
+            .find_map(|(index, message)| (message.role() == "user").then_some(index))
         {
             // Provider history begins only at a user/backend-completion
             // boundary. This cannot retain a tool result without its
@@ -2279,7 +2520,7 @@ fn prepare_loaded_document(
     let active_ids = document
         .conversations
         .iter()
-        .filter(|conversation| conversation.session.phase.active())
+        .filter(|conversation| conversation.session.phase().active())
         .map(|conversation| conversation.conversation_id.clone())
         .collect::<Vec<_>>();
     for conversation_id in active_ids {
@@ -2287,19 +2528,23 @@ fn prepare_loaded_document(
             .conversation_mut(&conversation_id)
             .expect("the active conversation came from this document");
         remove_incomplete_provider_tool_exchange(&mut conversation.provider_messages);
-        conversation.session.phase = WorkflowAgentPhase::Interrupted;
-        conversation.session.active_turn_id = None;
-        conversation.session.deferred_run_id = None;
+        conversation
+            .session
+            .set_phase(WorkflowAgentPhase::Interrupted);
+        conversation.session.set_active_turn_id(None);
+        conversation.session.set_deferred_run_id(None);
         conversation.owned_run_id = None;
-        conversation.session.error = Some(interruption_detail.to_owned());
+        conversation
+            .session
+            .set_error(Some(interruption_detail.to_owned()));
         if let Some(message) = conversation
             .session
-            .messages
+            .messages_mut()
             .iter_mut()
             .rev()
-            .find(|message| message.phase == WorkflowAgentMessagePhase::Streaming)
+            .find(|message| message.phase() == WorkflowAgentMessagePhase::Streaming)
         {
-            message.phase = WorkflowAgentMessagePhase::Failed;
+            message.set_phase(WorkflowAgentMessagePhase::Failed);
         }
         bump_conversation(&mut document, &conversation_id)?;
         changed = true;
@@ -2361,21 +2606,19 @@ fn create_conversation_candidate(
 }
 
 fn public_provider_readiness(ready: bool) -> WorkflowAgentReadiness {
-    WorkflowAgentReadiness {
-        configured: ready,
-        status: if ready {
+    WorkflowAgentReadiness::new(
+        ready,
+        if ready {
             WorkflowAgentReadinessStatus::Ready
         } else {
             WorkflowAgentReadinessStatus::Error
         },
-        provider: String::new(),
-        model: String::new(),
-        detail: if ready {
+        if ready {
             ASSISTANT_READY_DETAIL.to_owned()
         } else {
             ASSISTANT_UNAVAILABLE_DETAIL.to_owned()
         },
-    }
+    )
 }
 
 fn activate_conversation_candidate(
@@ -2423,26 +2666,26 @@ fn validate_agent_document(document: &AgentDocument) -> Result<(), String> {
         );
     }
     for conversation in &document.conversations {
-        if conversation.session.workflow_id != DEFAULT_WORKFLOW_ID
-            || conversation.session.conversation_id != conversation.conversation_id
+        if conversation.session.workflow_id() != DEFAULT_WORKFLOW_ID
+            || conversation.session.conversation_id() != conversation.conversation_id
             || conversation.title.trim().is_empty()
             || conversation.title.chars().count() > MAX_WORKFLOW_AGENT_CONVERSATION_TITLE_CHARS
-            || conversation.session.messages.len() > MAX_PUBLIC_MESSAGES
+            || conversation.session.messages().len() > MAX_PUBLIC_MESSAGES
             || conversation.provider_messages.len() > MAX_PROVIDER_MESSAGES
             || !provider_history_is_structurally_valid(
                 &conversation.provider_messages,
-                conversation.session.phase.active(),
+                conversation.session.phase().active(),
             )
         {
             return Err("Assistant conversation exceeds its persisted bounds.".to_owned());
         }
         let message_ids = conversation
             .session
-            .messages
+            .messages()
             .iter()
-            .map(|message| message.id.as_str())
+            .map(|message| message.id())
             .collect::<std::collections::BTreeSet<_>>();
-        if message_ids.len() != conversation.session.messages.len() {
+        if message_ids.len() != conversation.session.messages().len() {
             return Err("Assistant conversation has duplicate message identities.".to_owned());
         }
     }
@@ -2467,15 +2710,12 @@ fn provider_history_is_structurally_valid(
         // The system prompt is constructed in memory for each request. Only
         // conversation roles produced by Studio may cross the persistence
         // boundary, so imported history cannot inject system/developer text.
-        if !matches!(message.role.as_str(), "user" | "assistant" | "tool") {
+        if !matches!(message.role(), "user" | "assistant" | "tool") {
             return false;
         }
         if let Some(expected) = pending.as_mut() {
-            if message.role != "tool"
-                || message
-                    .tool_call_id
-                    .as_deref()
-                    .is_none_or(|id| !expected.remove(id))
+            if message.role() != "tool"
+                || message.tool_call_id().is_none_or(|id| !expected.remove(id))
             {
                 return false;
             }
@@ -2484,19 +2724,20 @@ fn provider_history_is_structurally_valid(
             }
             continue;
         }
-        if message.role == "tool" {
+        if message.role() == "tool" {
             return false;
         }
-        if !message.tool_calls.is_empty() {
-            if message.role != "assistant" {
+        if !message.tool_calls().is_empty() {
+            if message.role() != "assistant" {
                 return false;
             }
             let expected = message
-                .tool_calls
+                .tool_calls()
                 .iter()
-                .map(|call| call.id.as_str())
+                .map(|call| call.id())
                 .collect::<BTreeSet<_>>();
-            if expected.len() != message.tool_calls.len() || expected.iter().any(|id| id.is_empty())
+            if expected.len() != message.tool_calls().len()
+                || expected.iter().any(|id| id.is_empty())
             {
                 return false;
             }
@@ -2512,7 +2753,7 @@ fn remove_incomplete_provider_tool_exchange(messages: &mut Vec<ProviderMessage>)
     }
     let Some(start) = messages
         .iter()
-        .rposition(|message| message.role == "assistant" && !message.tool_calls.is_empty())
+        .rposition(|message| message.role() == "assistant" && !message.tool_calls().is_empty())
     else {
         return false;
     };
@@ -2550,12 +2791,14 @@ fn bump_conversation(document: &mut AgentDocument, conversation_id: &str) -> Res
         .ok_or_else(|| "Assistant conversation disappeared.".to_owned())?;
     let next_conversation_revision = conversation
         .session
-        .revision
+        .revision()
         .checked_add(1)
         .ok_or_else(|| "Assistant message revision overflowed.".to_owned())?;
     let now = now_millis();
-    conversation.session.revision = next_conversation_revision;
-    conversation.session.updated_ms = now;
+    conversation
+        .session
+        .set_revision(next_conversation_revision);
+    conversation.session.set_updated_ms(now);
     conversation.updated_ms = now;
     document.revision = next_document_revision;
     Ok(())
@@ -2580,9 +2823,9 @@ fn conversation_title(text: &str) -> String {
 
 fn next_sequence(session: &WorkflowAgentSession) -> u64 {
     session
-        .messages
+        .messages()
         .last()
-        .map_or(1, |message| message.sequence.saturating_add(1))
+        .map_or(1, |message| message.sequence().saturating_add(1))
 }
 
 fn next_id(prefix: &str) -> String {
@@ -2607,7 +2850,9 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workflow::provider::ProviderFunctionCall;
+    use spiral_robotics_api::workflow::{
+        WorkflowRunExecution, WorkflowRunIdentity, WorkflowRunTiming,
+    };
 
     #[test]
     fn media_and_long_cells_never_enter_prompt_payloads() {
@@ -2632,23 +2877,21 @@ mod tests {
     #[test]
     fn serialized_query_prompt_is_hard_bounded_including_schema_and_json_overhead() {
         let columns = (0..40)
-            .map(|index| spiral_robotics_api::relations::QueryColumn {
-                name: format!("field_{index}_{}", "x".repeat(900)),
-                data_type: format!("Struct<{}>", "y".repeat(900)),
-                nullable: true,
-                semantic_type: None,
+            .map(|index| {
+                spiral_robotics_api::relations::QueryColumn::new(
+                    format!("field_{index}_{}", "x".repeat(900)),
+                    format!("Struct<{}>", "y".repeat(900)),
+                    true,
+                )
             })
             .collect::<Vec<_>>();
         let row = columns
             .iter()
-            .map(|column| (column.name.clone(), Value::String("value".repeat(100))))
+            .map(|column| (column.name().to_owned(), Value::String("value".repeat(100))))
             .collect();
-        let encoded = serialize_query_for_prompt(SpiralQueryResponse {
-            columns,
-            rows: vec![row],
-            truncated: false,
-            elapsed_ms: 1,
-        });
+        let encoded = serialize_query_for_prompt(
+            SpiralQueryResponse::new(columns, vec![row], false).with_elapsed_ms(1),
+        );
         assert!(encoded.len() <= MAX_QUERY_PROMPT_BYTES);
         let payload = serde_json::from_str::<Value>(&encoded).unwrap();
         assert_eq!(payload["row_count"], 1);
@@ -2728,8 +2971,8 @@ mod tests {
         );
         assert_eq!(saved.summary, "Saved Holding evidence · r7");
         let receipt = saved.receipt.expect("saved graph receipt");
-        assert_eq!(receipt.kind, WorkflowAgentArtifactKind::Graph);
-        assert_eq!(receipt.revision, Some(7));
+        assert_eq!(receipt.kind(), WorkflowAgentArtifactKind::Graph);
+        assert_eq!(receipt.revision(), Some(7));
         assert!(!serde_json::to_string(&receipt).unwrap().contains("secret"));
 
         let waited = tool_completion(
@@ -2745,9 +2988,9 @@ mod tests {
         );
         assert_eq!(waited.summary, "Completed run-42 · 0 rows");
         let receipt = waited.receipt.expect("terminal result receipt");
-        assert_eq!(receipt.kind, WorkflowAgentArtifactKind::Results);
-        assert_eq!(receipt.run_id.as_deref(), Some("run-42"));
-        assert_eq!(receipt.row_count, Some(0));
+        assert_eq!(receipt.kind(), WorkflowAgentArtifactKind::Results);
+        assert_eq!(receipt.run_id(), Some("run-42"));
+        assert_eq!(receipt.row_count(), Some(0));
 
         assert_eq!(
             tool_completion(
@@ -2771,51 +3014,49 @@ mod tests {
 
     #[test]
     fn deferred_wait_refreshes_only_the_matching_run_receipt() {
-        let wait = |call_id: &str, run_id: &str| WorkflowAgentToolSummary {
-            call_id: call_id.to_owned(),
-            name: "wait_for_run".to_owned(),
-            phase: WorkflowAgentToolPhase::Complete,
-            summary: format!("{run_id} is still running"),
-            error: None,
-            receipt: Some(WorkflowAgentArtifactReceipt {
-                kind: WorkflowAgentArtifactKind::Run,
-                label: "View run".to_owned(),
-                revision: None,
-                run_id: Some(run_id.to_owned()),
-                row_count: None,
-            }),
+        let wait = |call_id: &str, run_id: &str| {
+            let mut summary = WorkflowAgentToolSummary::new(
+                call_id,
+                "wait_for_run",
+                format!("{run_id} is still running"),
+            );
+            summary.set_phase(WorkflowAgentToolPhase::Complete);
+            summary.set_receipt(Some(
+                WorkflowAgentArtifactReceipt::new(WorkflowAgentArtifactKind::Run, "View run")
+                    .with_run_id(Some(run_id.to_owned())),
+            ));
+            summary
         };
-        let mut messages = vec![WorkflowAgentMessage {
-            id: "assistant-1".to_owned(),
-            sequence: 1,
-            role: WorkflowAgentRole::Assistant,
-            phase: WorkflowAgentMessagePhase::Complete,
-            text: String::new(),
-            tools: vec![wait("old", "run-old"), wait("current", "run-42")],
-            run_id: Some("run-42".to_owned()),
-            created_ms: 1,
-        }];
-        let snapshot = spiral_robotics_api::workflow::WorkflowRunSnapshot {
-            run_id: Some("run-42".to_owned()),
-            phase: WorkflowRunPhase::Completed,
-            result: Some(SpiralQueryResponse {
-                columns: Vec::new(),
-                rows: Vec::new(),
-                truncated: false,
-                elapsed_ms: 2,
-            }),
-            ..Default::default()
-        };
+        let mut messages = vec![WorkflowAgentMessage::new(
+            WorkflowAgentMessageIdentity::new("assistant-1", 1, WorkflowAgentRole::Assistant)
+                .with_created_ms(1),
+            WorkflowAgentMessageContent::new(
+                WorkflowAgentMessagePhase::Complete,
+                "",
+                vec![wait("old", "run-old"), wait("current", "run-42")],
+            )
+            .with_run_id(Some("run-42".to_owned())),
+        )];
+        let snapshot = spiral_robotics_api::workflow::WorkflowRunSnapshot::new(
+            WorkflowRunIdentity::new("workflow", 0).with_run_id(Some("run-42".to_owned())),
+            WorkflowRunExecution::new(WorkflowRunPhase::Completed, Vec::new()).with_result(
+                Some(SpiralQueryResponse::new(Vec::new(), Vec::new(), false).with_elapsed_ms(2)),
+                false,
+            ),
+            WorkflowRunTiming::default(),
+        );
         let summary = run_snapshot_summary(&snapshot).to_string();
         refresh_deferred_wait_receipt(&mut messages, &snapshot, &summary);
 
-        assert_eq!(messages[0].tools[0].summary, "run-old is still running");
-        assert_eq!(messages[0].tools[1].summary, "Completed run-42 · 0 rows");
+        assert_eq!(messages[0].tools()[0].summary(), "run-old is still running");
         assert_eq!(
-            messages[0].tools[1]
-                .receipt
-                .as_ref()
-                .map(|receipt| receipt.kind),
+            messages[0].tools()[1].summary(),
+            "Completed run-42 · 0 rows"
+        );
+        assert_eq!(
+            messages[0].tools()[1]
+                .receipt()
+                .map(WorkflowAgentArtifactReceipt::kind),
             Some(WorkflowAgentArtifactKind::Results)
         );
     }
@@ -2940,10 +3181,7 @@ mod tests {
             provider_iterations: 0,
             tool_calls: MAX_TOOL_CALLS,
         };
-        let response = ProviderResponse {
-            content: String::new(),
-            tool_calls: vec![tool_call("overflow")],
-        };
+        let response = ProviderResponse::test_response("", vec![tool_call("overflow")]);
         assert!(admit_provider_response(&mut budget, &response).is_err());
     }
 
@@ -2958,18 +3196,18 @@ mod tests {
     #[test]
     fn public_provider_readiness_is_operator_facing_and_provider_agnostic() {
         let ready = public_provider_readiness(true);
-        assert!(ready.configured);
-        assert_eq!(ready.status, WorkflowAgentReadinessStatus::Ready);
-        assert_eq!(ready.detail, ASSISTANT_READY_DETAIL);
+        assert!(ready.configured());
+        assert_eq!(ready.status(), WorkflowAgentReadinessStatus::Ready);
+        assert_eq!(ready.detail(), ASSISTANT_READY_DETAIL);
 
         let unavailable = public_provider_readiness(false);
-        assert!(!unavailable.configured);
-        assert_eq!(unavailable.status, WorkflowAgentReadinessStatus::Error);
-        assert_eq!(unavailable.detail, ASSISTANT_UNAVAILABLE_DETAIL);
+        assert!(!unavailable.configured());
+        assert_eq!(unavailable.status(), WorkflowAgentReadinessStatus::Error);
+        assert_eq!(unavailable.detail(), ASSISTANT_UNAVAILABLE_DETAIL);
 
         for readiness in [ready, unavailable] {
-            assert!(readiness.provider.is_empty());
-            assert!(readiness.model.is_empty());
+            assert!(readiness.provider().is_empty());
+            assert!(readiness.model().is_empty());
             let encoded = serde_json::to_string(&readiness).unwrap();
             for forbidden in [
                 "LLM_",
@@ -3003,12 +3241,12 @@ mod tests {
         let fresh = fresh_agent_document().expect("reset candidate is valid current history");
         assert_eq!(fresh.schema_version, AGENT_DOCUMENT_SCHEMA_VERSION);
         assert_eq!(fresh.conversations.len(), 1);
-        assert!(fresh.active().unwrap().session.messages.is_empty());
+        assert!(fresh.active().unwrap().session.messages().is_empty());
         let created = create_conversation_candidate(&fresh, 42)
             .expect("New conversation remains usable after an incompatible reset");
         assert!(created.is_none());
         assert_eq!(fresh.conversations.len(), 1);
-        assert!(fresh.active().unwrap().session.messages.is_empty());
+        assert!(fresh.active().unwrap().session.messages().is_empty());
     }
 
     #[test]
@@ -3042,7 +3280,20 @@ mod tests {
         );
 
         let mut foreign_workflow = AgentDocument::default();
-        foreign_workflow.active_mut().unwrap().session.workflow_id = "other".to_owned();
+        let conversation = foreign_workflow.active_mut().unwrap();
+        let session = &conversation.session;
+        conversation.session = WorkflowAgentSession::new(
+            WorkflowAgentSessionIdentity::new(
+                "other",
+                session.conversation_id(),
+                session.revision(),
+            ),
+            WorkflowAgentActivity::new(session.phase(), session.messages().to_vec()).with_turns(
+                session.active_turn_id().map(str::to_owned),
+                session.deferred_run_id().map(str::to_owned),
+            ),
+            session.updated_ms(),
+        );
         assert!(
             prepare_loaded_document(foreign_workflow, "restart")
                 .unwrap_err()
@@ -3179,17 +3430,23 @@ mod tests {
     fn mark_active_conversation_nonempty(document: &mut AgentDocument) {
         let conversation = document.active_mut().unwrap();
         conversation.title = "Existing conversation".to_owned();
-        conversation.session.revision = 1;
-        conversation.session.messages.push(WorkflowAgentMessage {
-            id: "existing-user-message".to_owned(),
-            sequence: 1,
-            role: WorkflowAgentRole::User,
-            phase: WorkflowAgentMessagePhase::Complete,
-            text: "Inspect the workflow".to_owned(),
-            tools: Vec::new(),
-            run_id: None,
-            created_ms: 1,
-        });
+        conversation.session.set_revision(1);
+        conversation
+            .session
+            .messages_mut()
+            .push(WorkflowAgentMessage::new(
+                WorkflowAgentMessageIdentity::new(
+                    "existing-user-message",
+                    1,
+                    WorkflowAgentRole::User,
+                )
+                .with_created_ms(1),
+                WorkflowAgentMessageContent::new(
+                    WorkflowAgentMessagePhase::Complete,
+                    "Inspect the workflow",
+                    Vec::new(),
+                ),
+            ));
         conversation
             .provider_messages
             .push(ProviderMessage::text("user", "Inspect the workflow"));
@@ -3223,21 +3480,17 @@ mod tests {
             .conversation_mut(&first)
             .unwrap()
             .session
-            .active_turn_id = Some("turn-first".to_owned());
+            .set_active_turn_id(Some("turn-first".to_owned()));
         document.active_conversation_id = second_id.clone();
 
         assert!(ensure_turn(&document, &first, "turn-first").is_ok());
         assert!(ensure_turn(&document, &second_id, "turn-first").is_err());
         assert_eq!(
-            document.conversation(&first).unwrap().provider_messages[0]
-                .content
-                .as_deref(),
+            document.conversation(&first).unwrap().provider_messages[0].content(),
             Some("first history")
         );
         assert_eq!(
-            document.conversation(&second_id).unwrap().provider_messages[0]
-                .content
-                .as_deref(),
+            document.conversation(&second_id).unwrap().provider_messages[0].content(),
             Some("second history")
         );
     }
@@ -3247,16 +3500,19 @@ mod tests {
         let mut document = AgentDocument::default();
         let conversation_id = document.active_conversation_id.clone();
         let conversation = document.conversation_mut(&conversation_id).unwrap();
-        conversation.session.phase = WorkflowAgentPhase::Responding;
-        conversation.session.active_turn_id = Some("turn-1".to_owned());
+        conversation
+            .session
+            .set_phase(WorkflowAgentPhase::Responding);
+        conversation
+            .session
+            .set_active_turn_id(Some("turn-1".to_owned()));
         conversation
             .provider_messages
             .push(ProviderMessage::text("user", "inspect relations"));
 
         let candidate = provider_message_candidate(
             &document,
-            &conversation_id,
-            "turn-1",
+            TurnIdentity::new(&conversation_id, "turn-1"),
             ProviderMessage::text("assistant", "I found them."),
         )
         .unwrap();
@@ -3287,27 +3543,39 @@ mod tests {
         let conversation = document
             .conversation_mut(&conversation_id)
             .expect("default conversation");
-        conversation.session.phase = WorkflowAgentPhase::WaitingForRun;
-        conversation.session.active_turn_id = Some("turn-1".to_owned());
-        conversation.session.deferred_run_id = Some("run-1".to_owned());
-        conversation.session.messages.push(WorkflowAgentMessage {
-            id: "assistant-1".to_owned(),
-            sequence: 1,
-            role: WorkflowAgentRole::Assistant,
-            phase: WorkflowAgentMessagePhase::Streaming,
-            text: String::new(),
-            tools: Vec::new(),
-            run_id: Some("run-1".to_owned()),
-            created_ms: 1,
-        });
+        conversation
+            .session
+            .set_phase(WorkflowAgentPhase::WaitingForRun);
+        conversation
+            .session
+            .set_active_turn_id(Some("turn-1".to_owned()));
+        conversation
+            .session
+            .set_deferred_run_id(Some("run-1".to_owned()));
+        conversation
+            .session
+            .messages_mut()
+            .push(WorkflowAgentMessage::new(
+                WorkflowAgentMessageIdentity::new("assistant-1", 1, WorkflowAgentRole::Assistant)
+                    .with_created_ms(1),
+                WorkflowAgentMessageContent::new(
+                    WorkflowAgentMessagePhase::Streaming,
+                    "",
+                    Vec::new(),
+                )
+                .with_run_id(Some("run-1".to_owned())),
+            ));
         let (document, changed) = prepare_loaded_document(document, "Restarted").unwrap();
         assert!(changed);
         let conversation = document.conversation(&conversation_id).unwrap();
-        assert_eq!(conversation.session.phase, WorkflowAgentPhase::Interrupted);
-        assert_eq!(conversation.session.active_turn_id, None);
-        assert_eq!(conversation.session.deferred_run_id, None);
         assert_eq!(
-            conversation.session.messages[0].phase,
+            conversation.session.phase(),
+            WorkflowAgentPhase::Interrupted
+        );
+        assert_eq!(conversation.session.active_turn_id(), None);
+        assert_eq!(conversation.session.deferred_run_id(), None);
+        assert_eq!(
+            conversation.session.messages()[0].phase(),
             WorkflowAgentMessagePhase::Failed
         );
         let (_, changed) = prepare_loaded_document(document, "again").unwrap();
@@ -3319,17 +3587,21 @@ mod tests {
         let mut document = AgentDocument::default();
         let conversation_id = document.active_conversation_id.clone();
         let conversation = document.conversation_mut(&conversation_id).unwrap();
-        conversation.session.phase = WorkflowAgentPhase::Responding;
-        conversation.session.active_turn_id = Some("turn-1".to_owned());
+        conversation
+            .session
+            .set_phase(WorkflowAgentPhase::Responding);
+        conversation
+            .session
+            .set_active_turn_id(Some("turn-1".to_owned()));
         conversation
             .provider_messages
             .push(ProviderMessage::text("user", "inspect relations"));
-        conversation.provider_messages.push(ProviderMessage {
-            role: "assistant".to_owned(),
-            content: None,
-            tool_call_id: None,
-            tool_calls: vec![tool_call("first"), tool_call("second")],
-        });
+        conversation
+            .provider_messages
+            .push(ProviderMessage::assistant(
+                None,
+                vec![tool_call("first"), tool_call("second")],
+            ));
         conversation.provider_messages.push(ProviderMessage::tool(
             "first".to_owned(),
             serde_json::json!({"ok": true}).to_string(),
@@ -3338,9 +3610,12 @@ mod tests {
         let (document, changed) = prepare_loaded_document(document, "Restarted").unwrap();
         assert!(changed);
         let conversation = document.conversation(&conversation_id).unwrap();
-        assert_eq!(conversation.session.phase, WorkflowAgentPhase::Interrupted);
+        assert_eq!(
+            conversation.session.phase(),
+            WorkflowAgentPhase::Interrupted
+        );
         assert_eq!(conversation.provider_messages.len(), 1);
-        assert_eq!(conversation.provider_messages[0].role, "user");
+        assert_eq!(conversation.provider_messages[0].role(), "user");
         assert!(provider_history_is_structurally_valid(
             &conversation.provider_messages,
             false
@@ -3356,17 +3631,20 @@ mod tests {
                 .conversation_mut(&conversation_id)
                 .unwrap()
                 .session
-                .messages
-                .push(WorkflowAgentMessage {
-                    id: format!("message-{index}"),
-                    sequence: index as u64,
-                    role: WorkflowAgentRole::User,
-                    phase: WorkflowAgentMessagePhase::Complete,
-                    text: "bounded".to_owned(),
-                    tools: Vec::new(),
-                    run_id: None,
-                    created_ms: index as u64,
-                });
+                .messages_mut()
+                .push(WorkflowAgentMessage::new(
+                    WorkflowAgentMessageIdentity::new(
+                        format!("message-{index}"),
+                        index as u64,
+                        WorkflowAgentRole::User,
+                    )
+                    .with_created_ms(index as u64),
+                    WorkflowAgentMessageContent::new(
+                        WorkflowAgentMessagePhase::Complete,
+                        "bounded",
+                        Vec::new(),
+                    ),
+                ));
             document
                 .conversation_mut(&conversation_id)
                 .unwrap()
@@ -3379,8 +3657,8 @@ mod tests {
                 .conversation(&conversation_id)
                 .unwrap()
                 .session
-                .messages[0]
-                .id,
+                .messages()[0]
+                .id(),
             "message-0"
         );
     }
@@ -3408,19 +3686,14 @@ mod tests {
                 .conversation_mut(&conversation_id)
                 .unwrap()
                 .provider_messages
-                .push(ProviderMessage {
-                    role: "assistant".to_owned(),
-                    content: None,
-                    tool_call_id: None,
-                    tool_calls: vec![ProviderToolCall {
-                        id: call_id.clone(),
-                        kind: "function".to_owned(),
-                        function: ProviderFunctionCall {
-                            name: "list_relations".to_owned(),
-                            arguments: "{}".to_owned(),
-                        },
-                    }],
-                });
+                .push(ProviderMessage::assistant(
+                    None,
+                    vec![ProviderToolCall::test_function(
+                        call_id.clone(),
+                        "list_relations",
+                        "{}",
+                    )],
+                ));
             document
                 .conversation_mut(&conversation_id)
                 .unwrap()
@@ -3433,15 +3706,15 @@ mod tests {
             .unwrap()
             .provider_messages;
         assert!(provider_messages.len() <= MAX_PROVIDER_MESSAGES);
-        assert_eq!(provider_messages[0].role, "user");
+        assert_eq!(provider_messages[0].role(), "user");
 
         let mut pending = std::collections::BTreeSet::new();
         for message in provider_messages {
-            for call in &message.tool_calls {
-                pending.insert(call.id.clone());
+            for call in message.tool_calls() {
+                pending.insert(call.id().to_owned());
             }
-            if message.role == "tool" {
-                let call_id = message.tool_call_id.as_ref().unwrap();
+            if message.role() == "tool" {
+                let call_id = message.tool_call_id().unwrap();
                 assert!(
                     pending.remove(call_id),
                     "tool result retained without its call"
@@ -3457,35 +3730,17 @@ mod tests {
     #[test]
     fn mid_batch_cancel_records_results_for_every_unexecuted_call() {
         let calls = vec![tool_call("first"), tool_call("second")];
-        let mut messages = vec![ProviderMessage {
-            role: "assistant".to_owned(),
-            content: None,
-            tool_call_id: None,
-            tool_calls: calls.clone(),
-        }];
+        let mut messages = vec![ProviderMessage::assistant(None, calls.clone())];
         append_unexecuted_tool_outputs(&mut messages, &calls, "cancelled");
         let result_ids = messages
             .iter()
-            .filter_map(|message| message.tool_call_id.as_deref())
+            .filter_map(ProviderMessage::tool_call_id)
             .collect::<Vec<_>>();
         assert_eq!(result_ids, ["first", "second"]);
-        assert!(
-            messages[1]
-                .content
-                .as_deref()
-                .unwrap()
-                .contains("cancelled")
-        );
+        assert!(messages[1].content().unwrap().contains("cancelled"));
     }
 
     fn tool_call(id: &str) -> ProviderToolCall {
-        ProviderToolCall {
-            id: id.to_owned(),
-            kind: "function".to_owned(),
-            function: ProviderFunctionCall {
-                name: "list_relations".to_owned(),
-                arguments: "{}".to_owned(),
-            },
-        }
+        ProviderToolCall::test_function(id, "list_relations", "{}")
     }
 }

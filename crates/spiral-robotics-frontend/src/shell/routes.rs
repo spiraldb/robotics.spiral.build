@@ -62,8 +62,8 @@ impl StudioRoute {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct StudioConfiguration {
-    pub(crate) dataset: String,
-    pub(crate) spiral_query_available: bool,
+    dataset: String,
+    spiral_query_available: bool,
 }
 
 impl Default for StudioConfiguration {
@@ -72,6 +72,16 @@ impl Default for StudioConfiguration {
             dataset: "spiral_robotics".to_owned(),
             spiral_query_available: false,
         }
+    }
+}
+
+impl StudioConfiguration {
+    pub(crate) fn dataset(&self) -> &str {
+        &self.dataset
+    }
+
+    pub(crate) const fn spiral_query_available(&self) -> bool {
+        self.spiral_query_available
     }
 }
 
@@ -88,7 +98,7 @@ pub(crate) fn StudioRouter() -> Element {
 /// runs, messages, and long-running backend commands survive navigation.
 #[component]
 fn StudioShell() -> Element {
-    let mut studio = crate::shell::state::studio();
+    let studio = crate::shell::state::studio();
     let route = use_route::<StudioRoute>();
     let activity = route.activity();
     let navigator = use_navigator();
@@ -96,7 +106,7 @@ fn StudioShell() -> Element {
     let mut settings_busy = use_signal(|| false);
     let mut settings =
         use_resource(|| async { api::get::<DataSettings>("/api/settings/data").await });
-    let settings_result = settings.read_unchecked().clone();
+    let settings_result = settings.read_unchecked().to_owned();
     let loaded_settings = settings_result
         .as_ref()
         .and_then(|result| result.as_ref().ok())
@@ -108,12 +118,12 @@ fn StudioShell() -> Element {
     let configuration = StudioConfiguration {
         dataset: loaded_settings
             .as_ref()
-            .map(|settings| settings.spiral.namespace.clone())
+            .map(|settings| settings.spiral().namespace().to_owned())
             .filter(|dataset| !dataset.trim().is_empty())
             .unwrap_or_else(|| "spiral_robotics".to_owned()),
         spiral_query_available: loaded_settings
             .as_ref()
-            .is_some_and(|settings| !settings.spiral.project_id.trim().is_empty()),
+            .is_some_and(|settings| !settings.spiral().project_id().trim().is_empty()),
     };
     let mut configuration_signal = use_signal(StudioConfiguration::default);
     use_context_provider(|| configuration_signal);
@@ -123,7 +133,7 @@ fn StudioShell() -> Element {
         }
     }));
 
-    let selected_dataset = studio.selected_dataset.read().clone();
+    let selected_dataset = studio.selected_dataset().read().to_owned();
     use_data_controller(&configuration.dataset, &selected_dataset);
     use_workflow_controller();
     use_training_controller(
@@ -139,7 +149,7 @@ fn StudioShell() -> Element {
     use_effect(use_reactive((&loaded_settings,), move |(settings,)| {
         if settings
             .as_ref()
-            .is_some_and(|settings| settings.spiral.project_id.trim().is_empty())
+            .is_some_and(|settings| settings.spiral().project_id().trim().is_empty())
             && !project_setup_prompted()
         {
             project_setup_prompted.set(true);
@@ -175,11 +185,13 @@ fn StudioShell() -> Element {
                 class: "studio-shell-background",
                 main { class: "studio-v2-body",
                     ActivityRail {
-                        activity,
-                        settings_active: settings_open,
+                        state: crate::shell::frame::ActivityRailState::new(
+                            activity,
+                            settings_open,
+                        ),
                         on_activity: move |next| {
                             timeline.stop_preview();
-                            studio.notifications.write().close();
+                            studio.notifications().write().close();
                             shell.dispatch(ShellAction::CloseSettings);
                             navigator.push(StudioRoute::for_activity(next));
                         },
@@ -187,20 +199,24 @@ fn StudioShell() -> Element {
                     }
                     if settings_open {
                         SettingsPanel {
-                            initial: loaded_settings.clone(),
-                            load_error: settings_error.clone(),
-                            on_close: move |_| {
-                                if !settings_busy() {
-                                    shell.dispatch(ShellAction::CloseSettings);
-                                }
-                            },
-                            on_saved: move |_| {
-                                settings.restart();
-                                spawn(async move {
-                                    let _ = studio.refresh_episode_catalog().await;
-                                });
-                            },
-                            on_busy_change: move |busy| settings_busy.set(busy),
+                            state: crate::settings::panel::SettingsLoadState::new(
+                                loaded_settings.clone(),
+                                settings_error.clone(),
+                            ),
+                            handlers: crate::settings::panel::SettingsPanelHandlers::new(
+                                move |_| {
+                                    if !settings_busy() {
+                                        shell.dispatch(ShellAction::CloseSettings);
+                                    }
+                                },
+                                move |_| {
+                                    settings.restart();
+                                    spawn(async move {
+                                        let _ = studio.refresh_episode_catalog().await;
+                                    });
+                                },
+                                move |busy| settings_busy.set(busy),
+                            ),
                         }
                     } else {
                         Outlet::<StudioRoute> {}
@@ -209,7 +225,7 @@ fn StudioShell() -> Element {
                 StatusBar {
                     mode: activity,
                     on_open_episode: move |episode| {
-                        studio.selected_episode.set(Some(episode));
+                        studio.selected_episode().set(Some(episode));
                         navigator.push(StudioRoute::Data {});
                     },
                 }

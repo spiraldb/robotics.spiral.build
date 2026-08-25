@@ -112,7 +112,22 @@ impl SceneSource {
     fn recorded_status(&self) -> Option<(bool, Option<&str>)> {
         match self {
             Self::Live => None,
-            Self::Recorded(source) => Some((source.state.is_loading(), source.state.reason())),
+            Self::Recorded(source) => Some((source.state().is_loading(), source.state().reason())),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ViewportPresentation {
+    visible_robot: Option<String>,
+    resize_revision: u64,
+}
+
+impl ViewportPresentation {
+    pub(crate) const fn new(visible_robot: Option<String>, resize_revision: u64) -> Self {
+        Self {
+            visible_robot,
+            resize_revision,
         }
     }
 }
@@ -120,10 +135,13 @@ impl SceneSource {
 #[component]
 pub(crate) fn Viewport(
     source: SceneSource,
-    #[props(default)] visible_robot: Option<String>,
-    #[props(default)] resize_revision: u64,
+    presentation: ViewportPresentation,
     on_select: EventHandler<Option<Selection>>,
 ) -> Element {
+    let ViewportPresentation {
+        visible_robot,
+        resize_revision,
+    } = presentation;
     let studio = studio();
     let urdf = crate::shell::state::description();
     let bench = use_hook(|| Rc::new(RefCell::new(Option::<Bench>::None)));
@@ -167,14 +185,15 @@ pub(crate) fn Viewport(
             let Ok(urdf) = draw_urdf.as_ref() else {
                 return;
             };
-            let scene = build_robot_scene(
+            let scene = SceneBuildRequest {
                 urdf,
-                &studio,
+                studio: &studio,
                 grid,
-                &draw_source,
-                hovered.as_ref().map(|it| &it.entity),
-                visible_robot.as_deref(),
-            );
+                source: &draw_source,
+                hovered: hovered.as_ref().map(|it| &it.entity),
+                visible_robot: visible_robot.as_deref(),
+            }
+            .build();
 
             let Some(canvas) = canvas() else { return };
             let mut slot = draw_bench.borrow_mut();
@@ -196,14 +215,14 @@ pub(crate) fn Viewport(
     ));
 
     let arms = studio
-        .snapshot
+        .snapshot()
         .read()
-        .robots
+        .robots()
         .iter()
         .filter(|robot| {
             visible_robot
                 .as_ref()
-                .is_none_or(|visible| &robot.id == visible)
+                .is_none_or(|visible| robot.id() == visible)
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -215,14 +234,15 @@ pub(crate) fn Viewport(
     // scene the crate just drew, so a mark cannot drift away from the part it
     // is about as the camera moves.
     let marks = if source.is_live() {
-        condition_marks(
-            &urdf,
-            &studio,
-            &bench,
-            camera(),
-            show_grid(),
-            visible_robot.as_deref(),
-        )
+        ConditionMarksRequest {
+            urdf: &urdf,
+            studio: &studio,
+            bench: &bench,
+            camera: camera(),
+            grid: show_grid(),
+            visible_robot: visible_robot.as_deref(),
+        }
+        .marks()
     } else {
         Vec::new()
     };
@@ -273,18 +293,21 @@ pub(crate) fn Viewport(
                         }
                         // Only while nothing is being dragged: an orbit is not
                         // a tour of everything the pointer sweeps past.
-                        hover.set(hovered(
-                            &urdf,
-                            &studio,
-                            &bench,
-                            camera(),
-                            show_grid(),
-                            PickContext {
+                        hover.set(
+                            HoverRequest {
+                                urdf: &urdf,
+                                studio: &studio,
+                                bench: &bench,
+                                camera: camera(),
+                                grid: show_grid(),
+                                pick: PickContext {
                                 source: &source,
                                 visible_robot: visible_robot.as_deref(),
                                 at: position,
                             },
-                        ));
+                            }
+                            .pick(),
+                        );
                     }
                 },
                 onpointerup: {
@@ -295,18 +318,19 @@ pub(crate) fn Viewport(
                     move |event| {
                         if drag().is_some_and(|active| !active.moved()) {
                             let position = point(&event);
-                            let picked = hovered(
-                                &urdf,
-                                &studio,
-                                &bench,
-                                camera(),
-                                show_grid(),
-                                PickContext {
+                            let picked = HoverRequest {
+                                urdf: &urdf,
+                                studio: &studio,
+                                bench: &bench,
+                                camera: camera(),
+                                grid: show_grid(),
+                                pick: PickContext {
                                     source: &source,
                                     visible_robot: visible_robot.as_deref(),
                                     at: position,
                                 },
-                            );
+                            }
+                            .pick();
                             // Clicking bare bench clears the selection, the way
                             // clicking empty space does everywhere else.
                             on_select.call(picked.map(|hit| selection_of(&hit.entity)));
@@ -383,7 +407,7 @@ pub(crate) fn Viewport(
                 if let Some(sample) = source.sample() {
                     div {
                         class: "pointer-events-none absolute left-1/2 top-2 z-20 -translate-x-1/2 rounded-sm border border-line bg-surface px-2 py-1 font-mono text-[10px] tabular-nums text-ink-soft",
-                        "History · {format_history_time(sample.seconds)}"
+                        "History · {format_history_time(sample.seconds())}"
                     }
                 } else if let Some((loading, reason)) = recorded_status {
                     // The chip says which of the two things happened and stops
@@ -463,20 +487,19 @@ fn describe(
         RobotEntity::Joint { robot, joint } => {
             let label = spiral_robotics_core::arm::so101_joint(joint)
                 .map_or_else(|| joint.clone(), |joint| joint.label().to_owned());
-            let telemetry = studio.robot_telemetry(robot).and_then(|telemetry| {
-                telemetry
-                    .joints
-                    .into_iter()
-                    .find(|candidate| candidate.name == *joint)
-            });
+            let telemetry = studio.robot_telemetry(robot);
             let detail = (!historical)
-                .then_some(telemetry)
+                .then(|| {
+                    telemetry.as_ref().and_then(|telemetry| {
+                        telemetry
+                            .joints()
+                            .iter()
+                            .find(|candidate| candidate.name() == *joint)
+                            .and_then(|joint| joint.temperature_celsius())
+                    })
+                })
                 .flatten()
-                .and_then(|telemetry| {
-                    telemetry
-                        .temperature_celsius
-                        .map(|celsius| format!("{celsius:.0} °C"))
-                });
+                .map(|celsius| format!("{celsius:.0} °C"));
             (label, detail)
         }
     }
@@ -523,67 +546,73 @@ fn matches_selection(selection: Option<&Selection>, entity: &RobotEntity) -> boo
 /// the operator is doing with a thing, the other what its hardware is saying
 /// about itself. Neither is stored in the scene, because both change far more
 /// often than the geometry does.
-fn build_robot_scene(
-    urdf: &spiral_robotics_viewport::Urdf,
-    studio: &crate::shell::state::Studio,
+struct SceneBuildRequest<'a> {
+    urdf: &'a spiral_robotics_viewport::Urdf,
+    studio: &'a crate::shell::state::Studio,
     grid: bool,
-    source: &SceneSource,
-    hovered: Option<&RobotEntity>,
-    visible_robot: Option<&str>,
-) -> RobotScene {
-    let selected = studio.selected.read().clone();
-    // Hovering a joint row in the inspector lights the motor on the bench, the
-    // same way hovering the motor lights the row: one object, seen twice.
-    let pointed = studio.pointed.read().clone();
-    let hovered = hovered.cloned();
-    let conditions = if source.is_live() {
-        motor_conditions(studio)
-    } else {
-        Default::default()
-    };
+    source: &'a SceneSource,
+    hovered: Option<&'a RobotEntity>,
+    visible_robot: Option<&'a str>,
+}
 
-    RobotScene::compose(
-        urdf,
-        &placements(studio, source, visible_robot),
-        SceneAppearance::new(
-            grid,
-            |entity: &RobotEntity| {
-                if matches_selection(selected.as_ref(), entity) {
-                    Interaction::Selected
-                } else if hovered.as_ref() == Some(entity)
-                    || matches_selection(pointed.as_ref(), entity)
-                {
-                    Interaction::Hovered
-                } else {
-                    Interaction::Resting
-                }
-            },
-            |entity: &RobotEntity| match entity {
-                RobotEntity::Joint { robot, joint } => conditions
-                    .get(&(robot.clone(), joint.clone()))
-                    .copied()
-                    .unwrap_or_default(),
-                _ => Condition::Nominal,
-            },
-        ),
-    )
+impl SceneBuildRequest<'_> {
+    fn build(&self) -> RobotScene {
+        let selected = self.studio.selection().read().to_owned();
+        // Hovering a joint row in the inspector lights the motor on the bench, the
+        // same way hovering the motor lights the row: one object, seen twice.
+        let pointed = self.studio.pointed_selection().read().to_owned();
+        let hovered = self.hovered.cloned();
+        let conditions = if self.source.is_live() {
+            motor_conditions(self.studio)
+        } else {
+            Default::default()
+        };
+
+        RobotScene::compose(
+            self.urdf,
+            &placements(self.studio, self.source, self.visible_robot),
+            SceneAppearance::new(
+                self.grid,
+                |entity: &RobotEntity| {
+                    if matches_selection(selected.as_ref(), entity) {
+                        Interaction::Selected
+                    } else if hovered.as_ref() == Some(entity)
+                        || matches_selection(pointed.as_ref(), entity)
+                    {
+                        Interaction::Hovered
+                    } else {
+                        Interaction::Resting
+                    }
+                },
+                |entity: &RobotEntity| match entity {
+                    RobotEntity::Joint { robot, joint } => conditions
+                        .get(&(robot.clone(), joint.clone()))
+                        .copied()
+                        .unwrap_or_default(),
+                    _ => Condition::Nominal,
+                },
+            ),
+        )
+    }
 }
 
 /// Every motor's condition, judged once per frame against its own limits.
 fn motor_conditions(studio: &crate::shell::state::Studio) -> BTreeMap<(String, String), Condition> {
-    let snapshot = studio.snapshot.read();
-    let telemetry = studio.telemetry.read();
+    let snapshot_signal = studio.snapshot();
+    let telemetry_signal = studio.telemetry();
+    let snapshot = snapshot_signal.read();
+    let telemetry = telemetry_signal.read();
     let mut conditions = BTreeMap::new();
-    for robot in &telemetry.robots {
-        let Some(summary) = snapshot.robots.iter().find(|arm| arm.id == robot.id) else {
+    for robot in telemetry.robots() {
+        let Some(summary) = snapshot.robots().iter().find(|arm| arm.id() == robot.id()) else {
             continue;
         };
-        for joint in &robot.joints {
+        for joint in robot.joints() {
             let limits = summary
-                .motors
+                .motors()
                 .iter()
-                .find(|motor| motor.name == joint.name)
-                .map(|motor| motor.limits)
+                .find(|motor| motor.name() == joint.name())
+                .map(|motor| motor.limits())
                 .unwrap_or_default();
             let condition = match joint.condition(&limits) {
                 MotorCondition::Nominal => Condition::Nominal,
@@ -591,7 +620,7 @@ fn motor_conditions(studio: &crate::shell::state::Studio) -> BTreeMap<(String, S
                 MotorCondition::Fault => Condition::Fault,
             };
             if condition != Condition::Nominal {
-                conditions.insert((robot.id.clone(), joint.name.clone()), condition);
+                conditions.insert((robot.id().to_owned(), joint.name().to_owned()), condition);
             }
         }
     }
@@ -602,47 +631,59 @@ fn motor_conditions(studio: &crate::shell::state::Studio) -> BTreeMap<(String, S
 /// caution — one entry per motor currently reporting trouble.
 type Mark = (String, f64, f64, bool);
 
-fn condition_marks(
-    urdf: &crate::shell::state::Description,
-    studio: &crate::shell::state::Studio,
-    bench: &Rc<RefCell<Option<Bench>>>,
+struct ConditionMarksRequest<'a> {
+    urdf: &'a crate::shell::state::Description,
+    studio: &'a crate::shell::state::Studio,
+    bench: &'a Rc<RefCell<Option<Bench>>>,
     camera: Camera,
     grid: bool,
-    visible_robot: Option<&str>,
-) -> Vec<Mark> {
-    let Ok(urdf) = urdf.as_ref().as_ref() else {
-        return Vec::new();
-    };
-    let Ok(slot) = bench.try_borrow() else {
-        return Vec::new();
-    };
-    let Some(bench) = slot.as_ref() else {
-        return Vec::new();
-    };
-    let scene = build_robot_scene(urdf, studio, grid, &SceneSource::Live, None, visible_robot);
-    let rect = canvas().map(|canvas| canvas.get_bounding_client_rect());
-    let (left, top) = rect.map_or((0.0, 0.0), |rect| (rect.left(), rect.top()));
+    visible_robot: Option<&'a str>,
+}
 
-    scene
-        .scene()
-        .entities()
-        .filter(|entity| entity.condition() != Condition::Nominal)
-        .map(|entity| entity.key())
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .filter_map(|key| {
-            let entity = scene.entity(key)?;
-            let RobotEntity::Joint { robot, joint } = entity else {
-                return None;
-            };
-            let at = bench.anchor(&camera, scene.scene().anchor_point(key)?)?;
-            let fault = scene
-                .scene()
-                .entity(key)
-                .is_some_and(|entity| entity.condition() == Condition::Fault);
-            Some((format!("{robot}/{joint}"), at.0 - left, at.1 - top, fault))
-        })
-        .collect()
+impl ConditionMarksRequest<'_> {
+    fn marks(&self) -> Vec<Mark> {
+        let Ok(urdf) = self.urdf.as_ref().as_ref() else {
+            return Vec::new();
+        };
+        let Ok(slot) = self.bench.try_borrow() else {
+            return Vec::new();
+        };
+        let Some(bench) = slot.as_ref() else {
+            return Vec::new();
+        };
+        let scene = SceneBuildRequest {
+            urdf,
+            studio: self.studio,
+            grid: self.grid,
+            source: &SceneSource::Live,
+            hovered: None,
+            visible_robot: self.visible_robot,
+        }
+        .build();
+        let rect = canvas().map(|canvas| canvas.get_bounding_client_rect());
+        let (left, top) = rect.map_or((0.0, 0.0), |rect| (rect.left(), rect.top()));
+
+        scene
+            .scene()
+            .entities()
+            .filter(|entity| entity.condition() != Condition::Nominal)
+            .map(|entity| entity.key())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .filter_map(|key| {
+                let entity = scene.entity(key)?;
+                let RobotEntity::Joint { robot, joint } = entity else {
+                    return None;
+                };
+                let at = bench.anchor(&self.camera, scene.scene().anchor_point(key)?)?;
+                let fault = scene
+                    .scene()
+                    .entity(key)
+                    .is_some_and(|entity| entity.condition() == Condition::Fault);
+                Some((format!("{robot}/{joint}"), at.0 - left, at.1 - top, fault))
+            })
+            .collect()
+    }
 }
 
 /// What the pointer is over, and where the note about it belongs.
@@ -652,24 +693,36 @@ struct PickContext<'a> {
     at: (f64, f64),
 }
 
-fn hovered(
-    urdf: &crate::shell::state::Description,
-    studio: &crate::shell::state::Studio,
-    bench: &Rc<RefCell<Option<Bench>>>,
+struct HoverRequest<'a> {
+    urdf: &'a crate::shell::state::Description,
+    studio: &'a crate::shell::state::Studio,
+    bench: &'a Rc<RefCell<Option<Bench>>>,
     camera: Camera,
     grid: bool,
-    pick: PickContext<'_>,
-) -> Option<Hover> {
-    let urdf = urdf.as_ref().as_ref().ok()?;
-    let slot = bench.try_borrow().ok()?;
-    let bench = slot.as_ref()?;
-    let scene = build_robot_scene(urdf, studio, grid, pick.source, None, pick.visible_robot);
-    let key = bench.pick(PickRequest::new(&camera, scene.scene(), pick.at))?;
-    let rect = canvas()?.get_bounding_client_rect();
-    Some(Hover {
-        entity: scene.entity(key)?.clone(),
-        at: (pick.at.0 - rect.left(), pick.at.1 - rect.top()),
-    })
+    pick: PickContext<'a>,
+}
+
+impl HoverRequest<'_> {
+    fn pick(&self) -> Option<Hover> {
+        let urdf = self.urdf.as_ref().as_ref().ok()?;
+        let slot = self.bench.try_borrow().ok()?;
+        let bench = slot.as_ref()?;
+        let scene = SceneBuildRequest {
+            urdf,
+            studio: self.studio,
+            grid: self.grid,
+            source: self.pick.source,
+            hovered: None,
+            visible_robot: self.pick.visible_robot,
+        }
+        .build();
+        let key = bench.pick(PickRequest::new(&self.camera, scene.scene(), self.pick.at))?;
+        let rect = canvas()?.get_bounding_client_rect();
+        Some(Hover {
+            entity: scene.entity(key)?.clone(),
+            at: (self.pick.at.0 - rect.left(), self.pick.at.1 - rect.top()),
+        })
+    }
 }
 
 /// Every arm on the bench, posed from what it is currently reporting.
@@ -679,11 +732,11 @@ fn placements(
     visible_robot: Option<&str>,
 ) -> Vec<ArmPlacement> {
     let arms = studio
-        .snapshot
+        .snapshot()
         .read()
-        .robots
+        .robots()
         .iter()
-        .filter(|arm| visible_robot.is_none_or(|visible| arm.id == visible))
+        .filter(|arm| visible_robot.is_none_or(|visible| arm.id() == visible))
         .cloned()
         .collect::<Vec<_>>();
     let count = arms.len();
@@ -695,23 +748,27 @@ fn placements(
             // left out — an empty bench says less than a greyed-out one.
             let historical_angles = source
                 .sample()
-                .and_then(|sample| sample.arms.iter().find(|sample| sample.arm == arm.id))
+                .and_then(|sample| sample.arms().iter().find(|sample| sample.arm() == arm.id()))
                 .and_then(|sample| historical_angles(arm, sample));
             let telemetry = source
                 .is_live()
-                .then(|| studio.robot_telemetry(&arm.id).filter(|_| arm.calibrated))
+                .then(|| {
+                    studio
+                        .robot_telemetry(arm.id())
+                        .filter(|_| arm.calibrated())
+                })
                 .flatten();
             let angles = historical_angles.or_else(|| {
                 telemetry
                     .as_ref()
-                    .map(|robot| crate::activities::live::control::measured_angles(&robot.joints))
+                    .map(|robot| crate::activities::live::control::measured_angles(robot.joints()))
             });
             let placement = ArmPlacement::new(
-                arm.id.clone(),
-                ACCENTS[studio.position_of(&arm.id) % ACCENTS.len()].0,
+                arm.id().to_owned(),
+                ACCENTS[studio.position_of(arm.id()) % ACCENTS.len()].0,
                 BenchPosition::new(index, count),
             )
-            .with_cameras(arm.cameras.iter().filter_map(mount_of).collect());
+            .with_cameras(arm.cameras().iter().filter_map(mount_of).collect());
             match angles {
                 Some(angles) => placement.with_live_pose(angles),
                 None => placement,
@@ -725,16 +782,15 @@ fn placements(
 /// the same calibration validation on the server before it can move anything.
 fn historical_angles(arm: &RobotSummary, sample: &TimelineArmSample) -> Option<JointAngles> {
     let degrees = sample
-        .normalized
+        .normalized()
         .iter()
         .filter_map(|(joint, normalized)| {
             let normalized = (*normalized)?;
             let calibration = arm
-                .motors
+                .motors()
                 .iter()
-                .find(|motor| motor.name == *joint)?
-                .calibration
-                .as_ref()?;
+                .find(|motor| motor.name() == *joint)?
+                .calibration()?;
             let raw = calibration.denormalize(normalized).ok()?;
             let degrees = counts_to_degrees(raw.saturating_sub(calibration.reading().center()));
             let degrees = match calibration.direction() {
@@ -745,7 +801,7 @@ fn historical_angles(arm: &RobotSummary, sample: &TimelineArmSample) -> Option<J
         })
         .collect::<BTreeMap<_, _>>();
     let gripper = sample
-        .normalized
+        .normalized()
         .get("gripper")
         .copied()
         .flatten()
@@ -762,15 +818,16 @@ fn format_history_time(seconds: f64) -> String {
 
 /// Where a bound camera sits, for the ones whose file says.
 fn mount_of(binding: &spiral_robotics_api::robots::CameraBinding) -> Option<CameraMount> {
-    let mount = binding.mount.as_ref()?;
+    let camera_mount = binding.mount();
+    let mount = camera_mount.as_ref()?;
     Some(CameraMount::new(
-        binding.name.clone(),
+        binding.name().to_owned(),
         CameraAttachment::new(
-            mount.frame.clone(),
-            mount.xyz.map(|value| value as f32),
-            mount.rpy.map(|value| value as f32),
+            mount.frame().map(str::to_owned),
+            mount.xyz().map(|value| value as f32),
+            mount.rpy().map(|value| value as f32),
         ),
-        mount.fov_degrees as f32,
+        mount.fov_degrees() as f32,
     ))
 }
 
@@ -789,20 +846,20 @@ fn Legend(arms: Vec<RobotSummary>, on_select: EventHandler<Option<Selection>>) -
     rsx! {
         ul { class: "viewport-legend",
             for (index, arm) in arms.into_iter().enumerate() {
-                li { key: "{arm.id}",
+                li { key: "{arm.id()}",
                     Action {
                         purpose: ActionPurpose::Select,
                         variant: ActionVariant::Row,
                         class: "viewport-legend-row",
-                        aria_pressed: studio.selected.read().as_ref().is_some_and(|selection| selection.matches_robot(&arm.id)),
-                        title: "Select {arm.id}; press F to frame it",
+                        aria_pressed: studio.selection().read().as_ref().is_some_and(|selection| selection.matches_robot(arm.id())),
+                        title: "Select {arm.id()}; press F to frame it",
                         onclick: {
-                            let id = arm.id.clone();
+                            let id = arm.id().to_owned();
                             move |_| on_select.call(Some(Selection::Robot(id.clone())))
                         },
                         span { class: "h-1.5 w-1.5 shrink-0 rounded-full", style: "background: {accent_css(index)}" }
-                        span { "{arm.id}" }
-                        if !arm.connection.connected { span { class: "text-ink-faint", "offline" } }
+                        span { "{arm.id()}" }
+                        if !arm.connection().connected() { span { class: "text-ink-faint", "offline" } }
                     }
                 }
             }
@@ -857,11 +914,11 @@ fn frame_selection(
 ) {
     let robot = visible_robot.map(str::to_owned).or_else(|| {
         studio
-            .selected
+            .selection()
             .read()
             .as_ref()
             .map(|selection| selection.robot_id().to_owned())
-            .or_else(|| studio.focused().map(|robot| robot.id))
+            .or_else(|| studio.focused().map(|robot| robot.id().to_owned()))
     });
     let Some(robot) = robot else {
         camera.set(Camera::default());
@@ -870,7 +927,7 @@ fn frame_selection(
     let count = if visible_robot.is_some() {
         1
     } else {
-        studio.snapshot.read().robots.len()
+        studio.snapshot().read().robots().len()
     };
     let index = if visible_robot.is_some() {
         0
@@ -954,29 +1011,21 @@ impl Drop for WindowListener {
 
 #[cfg(test)]
 mod tests {
-    use spiral_robotics_api::robots::{ConnectionStatus, MotorLimits, MotorSummary};
+    use spiral_robotics_api::robots::{ConnectionStatus, MotorSummary, RobotAvailability};
     use spiral_robotics_core::calibration::{MotorCalibration, MotorReading};
 
     use super::*;
 
     fn robot(calibration: MotorCalibration) -> RobotSummary {
-        RobotSummary {
-            id: "follower".to_owned(),
-            robot_type: Some("so101_follower".to_owned()),
-            port: None,
-            motors: vec![MotorSummary {
-                name: "shoulder_pan".to_owned(),
-                id: 1,
-                direction: calibration.direction(),
-                model: None,
-                calibration: Some(calibration),
-                limits: MotorLimits::default(),
-            }],
-            cameras: Vec::new(),
-            calibrated: true,
-            problem: None,
-            connection: ConnectionStatus::default(),
-        }
+        RobotSummary::new(
+            "follower",
+            Some("so101_follower".to_owned()),
+            RobotAvailability::new(true, None, ConnectionStatus::default()),
+        )
+        .with_motors(vec![
+            MotorSummary::new("shoulder_pan", 1, calibration.direction())
+                .with_calibration(Some(calibration)),
+        ])
     }
 
     #[test]
@@ -987,11 +1036,11 @@ mod tests {
             MotorReading::new(2_000, 1_000, 3_000),
         )
         .unwrap();
-        let sample = TimelineArmSample {
-            arm: "follower".to_owned(),
-            normalized: BTreeMap::from([("shoulder_pan".to_owned(), Some(1.0))]),
-            ..TimelineArmSample::default()
-        };
+        let sample = TimelineArmSample::new(
+            "follower",
+            BTreeMap::from([("shoulder_pan".to_owned(), Some(1.0))]),
+            BTreeMap::new(),
+        );
 
         let pose = historical_angles(&robot(calibration), &sample).expect("historical pose");
         assert_eq!(pose.pan_degrees(), counts_to_degrees(1_000));
@@ -1005,11 +1054,11 @@ mod tests {
             MotorReading::new(2_000, 1_000, 3_000),
         )
         .unwrap();
-        let sample = TimelineArmSample {
-            arm: "follower".to_owned(),
-            normalized: BTreeMap::from([("shoulder_pan".to_owned(), None)]),
-            ..TimelineArmSample::default()
-        };
+        let sample = TimelineArmSample::new(
+            "follower",
+            BTreeMap::from([("shoulder_pan".to_owned(), None)]),
+            BTreeMap::new(),
+        );
         assert!(historical_angles(&robot(calibration), &sample).is_none());
     }
 }

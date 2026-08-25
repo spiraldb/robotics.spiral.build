@@ -3,6 +3,7 @@
 //! Layout belongs to each product surface. Action meaning, interaction states,
 //! confirmation behavior, focus movement, and target sizing belong here.
 
+use dioxus::dioxus_core::AttributeValue;
 use dioxus::prelude::*;
 
 mod icons;
@@ -132,89 +133,66 @@ impl ActionSize {
 
 #[derive(Props, Clone, PartialEq)]
 pub(crate) struct ActionProps {
-    pub children: Element,
-    pub purpose: ActionPurpose,
+    children: Element,
+    purpose: ActionPurpose,
     #[props(default)]
-    pub variant: ActionVariant,
+    variant: ActionVariant,
     #[props(default)]
-    pub size: ActionSize,
+    size: ActionSize,
+    #[props(extends = GlobalAttributes, extends = button)]
+    attributes: Vec<Attribute>,
     #[props(default)]
-    pub class: Option<String>,
+    onclick: Option<EventHandler<MouseEvent>>,
     #[props(default)]
-    pub id: Option<String>,
-    #[props(default)]
-    pub title: Option<String>,
-    #[props(default)]
-    pub role: Option<String>,
-    #[props(default)]
-    pub tabindex: Option<String>,
-    #[props(default)]
-    pub draggable: Option<String>,
-    #[props(default)]
-    pub disabled: bool,
-    #[props(default)]
-    pub aria_label: Option<String>,
-    #[props(default)]
-    pub aria_pressed: Option<bool>,
-    #[props(default)]
-    pub aria_selected: Option<bool>,
-    #[props(default)]
-    pub aria_expanded: Option<bool>,
-    #[props(default)]
-    pub aria_controls: Option<String>,
-    #[props(default)]
-    pub aria_current: Option<String>,
-    #[props(default)]
-    pub aria_busy: Option<bool>,
-    #[props(default)]
-    pub onclick: Option<EventHandler<MouseEvent>>,
-    #[props(default)]
-    pub onkeydown: Option<EventHandler<KeyboardEvent>>,
-    #[props(default)]
-    pub ondragstart: Option<EventHandler<DragEvent>>,
-    #[props(default)]
-    pub onfocus: Option<EventHandler<FocusEvent>>,
-    #[props(default)]
-    pub onblur: Option<EventHandler<FocusEvent>>,
+    auxiliary_handlers: ActionAuxiliaryHandlers,
+}
+
+#[derive(Clone, Default, PartialEq)]
+pub(crate) struct ActionAuxiliaryHandlers {
+    onkeydown: Option<EventHandler<KeyboardEvent>>,
+    ondragstart: Option<EventHandler<DragEvent>>,
+    onfocus: Option<EventHandler<FocusEvent>>,
+    onblur: Option<EventHandler<FocusEvent>>,
+}
+
+impl ActionAuxiliaryHandlers {
+    pub(crate) fn keydown(handler: impl FnMut(KeyboardEvent) + 'static) -> Self {
+        Self {
+            onkeydown: Some(EventHandler::new(handler)),
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn with_focus(
+        mut self,
+        onfocus: impl FnMut(FocusEvent) + 'static,
+        onblur: impl FnMut(FocusEvent) + 'static,
+    ) -> Self {
+        self.onfocus = Some(EventHandler::new(onfocus));
+        self.onblur = Some(EventHandler::new(onblur));
+        self
+    }
 }
 
 /// The only ordinary button primitive. Native button attributes and events are
 /// forwarded, while the purpose remains visible in the DOM and in code review.
 #[component]
 pub(crate) fn Action(props: ActionProps) -> Element {
-    let class = action_class(
-        props.variant,
-        props.size,
-        props.class.as_deref().unwrap_or_default(),
-    );
+    let (extra_class, attributes) = split_class_attribute(props.attributes);
+    let class = action_class(props.variant, props.size, &extra_class);
     let onclick = props.onclick;
-    let onkeydown = props.onkeydown;
-    let ondragstart = props.ondragstart;
-    let onfocus = props.onfocus;
-    let onblur = props.onblur;
+    let handlers = props.auxiliary_handlers;
     rsx! {
         button {
-            id: props.id,
             r#type: "button",
-            class,
+            class: class,
             "data-action": props.purpose.as_str(),
-            title: props.title,
-            role: props.role,
-            tabindex: props.tabindex,
-            draggable: props.draggable,
-            disabled: props.disabled,
-            "aria-label": props.aria_label,
-            "aria-pressed": props.aria_pressed,
-            "aria-selected": props.aria_selected,
-            "aria-expanded": props.aria_expanded,
-            "aria-controls": props.aria_controls,
-            "aria-current": props.aria_current,
-            "aria-busy": props.aria_busy,
             onclick: move |event| if let Some(handler) = onclick { handler.call(event) },
-            onkeydown: move |event| if let Some(handler) = onkeydown { handler.call(event) },
-            ondragstart: move |event| if let Some(handler) = ondragstart { handler.call(event) },
-            onfocus: move |event| if let Some(handler) = onfocus { handler.call(event) },
-            onblur: move |event| if let Some(handler) = onblur { handler.call(event) },
+            onkeydown: move |event| if let Some(handler) = handlers.onkeydown { handler.call(event) },
+            ondragstart: move |event| if let Some(handler) = handlers.ondragstart { handler.call(event) },
+            onfocus: move |event| if let Some(handler) = handlers.onfocus { handler.call(event) },
+            onblur: move |event| if let Some(handler) = handlers.onblur { handler.call(event) },
+            ..attributes,
             {props.children}
         }
     }
@@ -222,18 +200,18 @@ pub(crate) fn Action(props: ActionProps) -> Element {
 
 #[derive(Props, Clone, PartialEq)]
 pub(crate) struct ActionLinkProps {
-    pub children: Element,
-    pub href: String,
-    pub purpose: ActionPurpose,
+    children: Element,
+    href: String,
+    purpose: ActionPurpose,
     #[props(default)]
-    pub variant: ActionVariant,
+    variant: ActionVariant,
     #[props(default)]
-    pub title: Option<String>,
+    title: Option<String>,
     #[props(default)]
-    pub download: Option<String>,
+    download: Option<String>,
 }
 
-/// Anchor counterpart to [`Action`], for real downloads and navigation.
+/// Anchor counterpart to [`Action()`], for real downloads and navigation.
 #[component]
 pub(crate) fn ActionLink(props: ActionLinkProps) -> Element {
     let class = action_class(props.variant, ActionSize::Compact, "");
@@ -251,46 +229,60 @@ pub(crate) fn ActionLink(props: ActionLinkProps) -> Element {
 
 #[derive(Props, Clone, PartialEq)]
 pub(crate) struct FileActionProps {
-    pub children: Element,
-    pub accept: String,
-    pub onchange: EventHandler<FormEvent>,
+    children: Element,
+    input: FileInput,
     #[props(default)]
-    pub disabled: bool,
-    #[props(default)]
-    pub aria_busy: Option<bool>,
-    pub purpose: ActionPurpose,
+    disabled: bool,
+    purpose: ActionPurpose,
     #[props(default = ActionVariant::Outline)]
-    pub variant: ActionVariant,
-    #[props(default)]
-    pub class: Option<String>,
-    #[props(default)]
-    pub title: Option<String>,
-    #[props(default)]
-    pub input_id: Option<String>,
+    variant: ActionVariant,
+    #[props(extends = GlobalAttributes, extends = label)]
+    attributes: Vec<Attribute>,
+}
+
+#[derive(Clone, PartialEq)]
+pub(crate) struct FileInput {
+    accept: String,
+    onchange: EventHandler<FormEvent>,
+    input_id: Option<String>,
+}
+
+impl FileInput {
+    pub(crate) fn new(
+        accept: impl Into<String>,
+        onchange: impl FnMut(FormEvent) + 'static,
+    ) -> Self {
+        Self {
+            accept: accept.into(),
+            onchange: EventHandler::new(onchange),
+            input_id: None,
+        }
+    }
+
+    pub(crate) fn with_id(mut self, input_id: impl Into<String>) -> Self {
+        self.input_id = Some(input_id.into());
+        self
+    }
 }
 
 /// Keyboard-visible file picker styled by the same contract as every action.
 #[component]
 pub(crate) fn FileAction(props: FileActionProps) -> Element {
-    let class = action_class(
-        props.variant,
-        ActionSize::Compact,
-        props.class.as_deref().unwrap_or_default(),
-    );
+    let (extra_class, attributes) = split_class_attribute(props.attributes);
+    let class = action_class(props.variant, ActionSize::Compact, &extra_class);
     rsx! {
         label {
-            class,
-            title: props.title,
+            class: class,
             "data-action": props.purpose.as_str(),
             "aria-disabled": props.disabled,
-            "aria-busy": props.aria_busy,
+            ..attributes,
             input {
-                id: props.input_id,
+                id: props.input.input_id,
                 class: "ui-file-input",
                 r#type: "file",
-                accept: props.accept,
+                accept: props.input.accept,
                 disabled: props.disabled,
-                onchange: move |event| props.onchange.call(event),
+                onchange: move |event| props.input.onchange.call(event),
             }
             {props.children}
         }
@@ -299,10 +291,10 @@ pub(crate) fn FileAction(props: FileActionProps) -> Element {
 
 #[derive(Props, Clone, PartialEq)]
 pub(crate) struct ModeGroupProps {
-    pub label: String,
-    pub children: Element,
+    label: String,
+    children: Element,
     #[props(default)]
-    pub class: Option<String>,
+    class: Option<String>,
 }
 
 #[component]
@@ -332,42 +324,31 @@ pub(crate) fn ModeGroup(props: ModeGroupProps) -> Element {
 
 #[derive(Props, Clone, PartialEq)]
 pub(crate) struct ModeActionProps {
-    pub children: Element,
-    pub checked: bool,
-    pub purpose: ActionPurpose,
+    children: Element,
+    checked: bool,
+    purpose: ActionPurpose,
+    #[props(extends = GlobalAttributes, extends = button)]
+    attributes: Vec<Attribute>,
     #[props(default)]
-    pub class: Option<String>,
-    #[props(default)]
-    pub id: Option<String>,
-    #[props(default)]
-    pub disabled: bool,
-    #[props(default)]
-    pub aria_label: Option<String>,
-    #[props(default)]
-    pub onclick: Option<EventHandler<MouseEvent>>,
+    onclick: Option<EventHandler<MouseEvent>>,
 }
 
 /// A mutually exclusive mode control with native radio semantics.
 #[component]
 pub(crate) fn ModeAction(props: ModeActionProps) -> Element {
-    let class = action_class(
-        ActionVariant::Segment,
-        ActionSize::Compact,
-        props.class.as_deref().unwrap_or_default(),
-    );
+    let (extra_class, attributes) = split_class_attribute(props.attributes);
+    let class = action_class(ActionVariant::Segment, ActionSize::Compact, &extra_class);
     let onclick = props.onclick;
     rsx! {
         button {
-            id: props.id,
             r#type: "button",
-            class,
+            class: class,
             "data-action": props.purpose.as_str(),
             role: "radio",
             "aria-checked": props.checked,
             tabindex: if props.checked { "0" } else { "-1" },
-            "aria-label": props.aria_label,
-            disabled: props.disabled,
             onclick: move |event| if let Some(handler) = onclick { handler.call(event) },
+            ..attributes,
             {props.children}
         }
     }
@@ -375,17 +356,17 @@ pub(crate) fn ModeAction(props: ModeActionProps) -> Element {
 
 #[derive(Props, Clone, PartialEq)]
 pub(crate) struct ToggleProps {
-    pub label: String,
-    pub checked: bool,
-    pub onchange: EventHandler<bool>,
+    label: String,
+    checked: bool,
+    onchange: EventHandler<bool>,
     #[props(default)]
-    pub disabled: bool,
+    disabled: bool,
     #[props(default)]
-    pub title: Option<String>,
+    title: Option<String>,
     #[props(default)]
-    pub class: Option<String>,
+    class: Option<String>,
     #[props(default = ActionPurpose::Toggle)]
-    pub purpose: ActionPurpose,
+    purpose: ActionPurpose,
 }
 
 /// A binary option whose label and hit target are always part of the control.
@@ -411,30 +392,82 @@ pub(crate) fn Toggle(props: ToggleProps) -> Element {
 
 #[derive(Props, Clone, PartialEq)]
 pub(crate) struct InlineConfirmationProps {
-    pub id: String,
-    pub message: String,
-    pub confirm_label: String,
-    pub cancel_label: String,
-    pub purpose: ActionPurpose,
-    pub on_confirm: EventHandler<()>,
-    pub on_cancel: EventHandler<()>,
-    pub return_focus_id: String,
+    id: String,
+    copy: ConfirmationCopy,
+    response: ConfirmationResponse,
+    dismissal: ConfirmationDismissal,
     #[props(default)]
-    pub pending: bool,
-    #[props(default)]
-    pub class: Option<String>,
+    class: Option<String>,
 }
 
 #[derive(Props, Clone, PartialEq)]
 struct ConfirmationActionsProps {
     cancel_id: String,
+    copy: ConfirmationCopy,
+    response: ConfirmationResponse,
+    dismissal: ConfirmationDismissal,
+}
+
+#[derive(Clone, PartialEq)]
+pub(crate) struct ConfirmationCopy {
+    message: String,
     confirm_label: String,
     cancel_label: String,
+}
+
+impl ConfirmationCopy {
+    pub(crate) fn new(
+        message: impl Into<String>,
+        confirm_label: impl Into<String>,
+        cancel_label: impl Into<String>,
+    ) -> Self {
+        Self {
+            message: message.into(),
+            confirm_label: confirm_label.into(),
+            cancel_label: cancel_label.into(),
+        }
+    }
+}
+
+#[derive(Clone, PartialEq)]
+pub(crate) struct ConfirmationResponse {
     purpose: ActionPurpose,
-    pending: bool,
     on_confirm: EventHandler<()>,
     on_cancel: EventHandler<()>,
+}
+
+impl ConfirmationResponse {
+    pub(crate) fn new(
+        purpose: ActionPurpose,
+        on_confirm: impl FnMut(()) + 'static,
+        on_cancel: impl FnMut(()) + 'static,
+    ) -> Self {
+        Self {
+            purpose,
+            on_confirm: EventHandler::new(on_confirm),
+            on_cancel: EventHandler::new(on_cancel),
+        }
+    }
+}
+
+#[derive(Clone, PartialEq)]
+pub(crate) struct ConfirmationDismissal {
     return_focus_id: String,
+    pending: bool,
+}
+
+impl ConfirmationDismissal {
+    pub(crate) fn new(return_focus_id: impl Into<String>) -> Self {
+        Self {
+            return_focus_id: return_focus_id.into(),
+            pending: false,
+        }
+    }
+
+    pub(crate) const fn with_pending(mut self, pending: bool) -> Self {
+        self.pending = pending;
+        self
+    }
 }
 
 #[component]
@@ -445,17 +478,20 @@ fn ConfirmationActions(props: ConfirmationActionsProps) -> Element {
                 id: props.cancel_id,
                 purpose: ActionPurpose::Cancel,
                 variant: ActionVariant::Outline,
-                disabled: props.pending,
-                onclick: move |_| dismiss_confirmation(props.on_cancel, &props.return_focus_id),
-                "{props.cancel_label}"
+                disabled: props.dismissal.pending,
+                onclick: move |_| dismiss_confirmation(
+                    props.response.on_cancel,
+                    &props.dismissal.return_focus_id,
+                ),
+                "{props.copy.cancel_label}"
             }
             Action {
-                purpose: props.purpose,
+                purpose: props.response.purpose,
                 variant: ActionVariant::Solid,
-                disabled: props.pending,
-                aria_busy: props.pending,
-                onclick: move |_| props.on_confirm.call(()),
-                "{props.confirm_label}"
+                disabled: props.dismissal.pending,
+                aria_busy: props.dismissal.pending,
+                onclick: move |_| props.response.on_confirm.call(()),
+                "{props.copy.confirm_label}"
             }
         }
     }
@@ -470,8 +506,9 @@ pub(crate) fn InlineConfirmation(props: InlineConfirmationProps) -> Element {
     let initial_focus_id = cancel_id.clone();
     use_effect(move || focus_after_render(initial_focus_id.clone()));
 
-    let cancel_from_key = props.on_cancel;
-    let return_from_key = props.return_focus_id.clone();
+    let cancel_from_key = props.response.on_cancel;
+    let return_from_key = props.dismissal.return_focus_id.clone();
+    let pending = props.dismissal.pending;
     rsx! {
         div {
             id: props.id,
@@ -480,21 +517,17 @@ pub(crate) fn InlineConfirmation(props: InlineConfirmationProps) -> Element {
             "aria-label": "Confirmation",
             onkeydown: move |event| {
                 event.stop_propagation();
-                if event.key() == Key::Escape && !props.pending {
+                if event.key() == Key::Escape && !pending {
                     event.prevent_default();
                     dismiss_confirmation(cancel_from_key, &return_from_key);
                 }
             },
-            p { "{props.message}" }
+            p { "{props.copy.message}" }
             ConfirmationActions {
                 cancel_id,
-                confirm_label: props.confirm_label,
-                cancel_label: props.cancel_label,
-                purpose: props.purpose,
-                pending: props.pending,
-                on_confirm: props.on_confirm,
-                on_cancel: props.on_cancel,
-                return_focus_id: props.return_focus_id,
+                copy: props.copy,
+                response: props.response,
+                dismissal: props.dismissal,
             }
         }
     }
@@ -502,18 +535,12 @@ pub(crate) fn InlineConfirmation(props: InlineConfirmationProps) -> Element {
 
 #[derive(Props, Clone, PartialEq)]
 pub(crate) struct BlockingConfirmationProps {
-    pub id: String,
-    pub title: String,
-    pub message: String,
-    pub consequence: String,
-    pub confirm_label: String,
-    pub cancel_label: String,
-    pub purpose: ActionPurpose,
-    pub on_confirm: EventHandler<()>,
-    pub on_cancel: EventHandler<()>,
-    pub return_focus_id: String,
-    #[props(default)]
-    pub pending: bool,
+    id: String,
+    title: String,
+    consequence: String,
+    copy: ConfirmationCopy,
+    response: ConfirmationResponse,
+    dismissal: ConfirmationDismissal,
 }
 
 /// Tier-two confirmation for scope-wide or physical consequences.
@@ -526,15 +553,16 @@ pub(crate) fn BlockingConfirmation(props: BlockingConfirmationProps) -> Element 
     let initial_focus_id = cancel_id.clone();
     use_effect(move || focus_after_render(initial_focus_id.clone()));
 
-    let cancel_from_key = props.on_cancel;
-    let cancel_from_backdrop = props.on_cancel;
-    let return_from_key = props.return_focus_id.clone();
-    let return_from_backdrop = props.return_focus_id.clone();
+    let cancel_from_key = props.response.on_cancel;
+    let cancel_from_backdrop = props.response.on_cancel;
+    let return_from_key = props.dismissal.return_focus_id.clone();
+    let return_from_backdrop = props.dismissal.return_focus_id.clone();
+    let pending = props.dismissal.pending;
     rsx! {
         div {
             class: "ui-dialog-backdrop",
             onclick: move |_| {
-                if !props.pending {
+                if !pending {
                     dismiss_confirmation(cancel_from_backdrop, &return_from_backdrop);
                 }
             },
@@ -550,7 +578,7 @@ pub(crate) fn BlockingConfirmation(props: BlockingConfirmationProps) -> Element 
             onclick: move |event| event.stop_propagation(),
             onkeydown: move |event| {
                 event.stop_propagation();
-                if event.key() == Key::Escape && !props.pending {
+                if event.key() == Key::Escape && !pending {
                     event.prevent_default();
                     dismiss_confirmation(cancel_from_key, &return_from_key);
                 } else if event.key() == Key::Tab
@@ -563,19 +591,15 @@ pub(crate) fn BlockingConfirmation(props: BlockingConfirmationProps) -> Element 
                 h2 { id: title_id, "{props.title}" }
             }
             div { id: description_id, class: "ui-confirmation-copy",
-                p { "{props.message}" }
+                p { "{props.copy.message}" }
                 p { class: "ui-confirmation-consequence", "{props.consequence}" }
             }
             footer {
                 ConfirmationActions {
                     cancel_id,
-                    confirm_label: props.confirm_label,
-                    cancel_label: props.cancel_label,
-                    purpose: props.purpose,
-                    pending: props.pending,
-                    on_confirm: props.on_confirm,
-                    on_cancel: props.on_cancel,
-                    return_focus_id: props.return_focus_id,
+                    copy: props.copy,
+                    response: props.response,
+                    dismissal: props.dismissal,
                 }
             }
         }
@@ -585,6 +609,22 @@ pub(crate) fn BlockingConfirmation(props: BlockingConfirmationProps) -> Element 
 fn action_class(variant: ActionVariant, size: ActionSize, extra: &str) -> String {
     let base = format!("ui-action {} {}", variant.class_name(), size.class_name());
     class_with(&base, Some(extra))
+}
+
+fn split_class_attribute(attributes: Vec<Attribute>) -> (String, Vec<Attribute>) {
+    let mut class_names = Vec::new();
+    let mut forwarded = Vec::with_capacity(attributes.len());
+    for attribute in attributes {
+        match attribute {
+            Attribute {
+                name: "class",
+                value: AttributeValue::Text(class_name),
+                ..
+            } => class_names.push(class_name),
+            attribute => forwarded.push(attribute),
+        }
+    }
+    (class_names.join(" "), forwarded)
 }
 
 fn class_with(base: &str, extra: Option<&str>) -> String {

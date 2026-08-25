@@ -29,16 +29,18 @@ use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use spiral_robotics_api::recording::{
-    EpisodeCatalogResponse, EpisodeInspectionArm, EpisodeInspectionSnapshot,
-    EpisodeOptionalFrameMatrix, EpisodeSummary, EpisodeVideoAssetMetadata, JudgeEpisodeRequest,
-    SetRecordingPausedRequest, SetReplayPausedRequest, StartRecordingRequest, StartReplayRequest,
-    StartSpiralReplayRequest, StopRecordingRequest,
+    EpisodeArmOptionalChannels, EpisodeArmScalarSamples, EpisodeAssessment, EpisodeCatalogResponse,
+    EpisodeIdentity, EpisodeInspectionArm, EpisodeInspectionSnapshot, EpisodeOptionalFrameMatrix,
+    EpisodeSummary, EpisodeTimeline, EpisodeVideoAssetMetadata, EpisodeVideoFormat,
+    EpisodeVideoIdentity, EpisodeVideoTimeline, JudgeEpisodeRequest, SetRecordingPausedRequest,
+    SetReplayPausedRequest, StartRecordingRequest, StartReplayRequest, StartSpiralReplayRequest,
+    StopRecordingRequest,
 };
 use spiral_robotics_api::relations::{SpiralQueryRequest, SpiralQueryResponse};
 use spiral_robotics_api::robots::{
-    CalibrationReapplyResponse, CameraStatus, ConnectionStatus, CreateRobotRequest, GoalRequest,
-    IdentifyPortRequest, IdentifyPortResponse, ModeSelection, PortSettings, RobotSummary,
-    SerialPortSummary, UpdateRobotRequest,
+    CalibrationReapplyResponse, CameraStatus, CameraStreamFormat, CameraStreamState,
+    ConnectionStatus, CreateRobotRequest, GoalRequest, IdentifyPortRequest, IdentifyPortResponse,
+    ModeSelection, PortSettings, RobotSummary, SerialPortSummary, UpdateRobotRequest,
 };
 use spiral_robotics_api::rollout::{RolloutSnapshot, StartRolloutRequest};
 use spiral_robotics_api::settings::{
@@ -60,11 +62,13 @@ use crate::data::catalog::{
 };
 use crate::data::catalog_lease::{CatalogLeaseOwner, CatalogLeaseToken, CatalogMutationLease};
 use crate::data::queries::{
-    EpisodeArmRecord, EpisodeInspectionArmRecord, EpisodeInspectionRecord, EpisodeQueries,
-    EpisodeQueryPort, EpisodeRecord, EpisodeTimelineRecord, EpisodeTraceQuery,
-    OptionalFrameMatrixRecord, RecordingGapRecord, TimelineArmSampleRecord, TimelineMetadataRecord,
-    TimelineSampleRecord, TimelineTraceCollection, TimelineTraceLaneRecord,
-    TimelineTracePointRecord, TimelineTraceSeriesRecord, VideoAssetRecord,
+    EpisodeArmRecord, EpisodeCaptureSummary, EpisodeDisposition, EpisodeInspectionArmRecord,
+    EpisodeInspectionRecord, EpisodeQueries, EpisodeQueryPort, EpisodeRecord,
+    EpisodeRecordIdentity, EpisodeTimelineRecord, EpisodeTraceQuery, OptionalFrameMatrixRecord,
+    RecordingGapRecord, TimelineArmSampleRecord, TimelineMetadataRecord, TimelineSampleRecord,
+    TimelineTraceCollection, TimelineTraceLaneRecord, TimelineTracePointRecord,
+    TimelineTraceSeriesRecord, VideoAssetFormat, VideoAssetIdentity, VideoAssetRecord,
+    VideoAssetTimeline,
 };
 use crate::data::seek::{
     self as episode_seek, ActiveRecording, HistoricalSample, HistoricalSeekState, PhysicalSeekPlan,
@@ -93,8 +97,8 @@ use crate::robots::calibration::{
 };
 use crate::robots::control::{self as robot_control, RobotControlCommand};
 use crate::robots::discovery::{
-    CameraDiscoveryPort, DiscoveredCamera, IdentifySerialPortCommand, SerialPortDescriptor,
-    SerialPortInventory, SerialPortQueryPort,
+    CameraDiscoveryFormat, CameraDiscoveryPort, CameraDiscoveryStatus, DiscoveredCamera,
+    IdentifySerialPortCommand, SerialPortDescriptor, SerialPortInventory, SerialPortQueryPort,
 };
 use crate::robots::mode::{self as mode_control, OperatorMode};
 use crate::robots::service::{
@@ -111,25 +115,30 @@ use crate::rollout::service::{
 };
 use crate::training::manager::TrainingManager;
 use crate::training::service::{
-    self as training_application, ActTrainingSettings, DeleteTrainingRunCommand,
-    StartTrainingCommand, TrainingCheckpoint as CapabilityTrainingCheckpoint,
-    TrainingCheckpointStatus, TrainingMetric as CapabilityTrainingMetric,
-    TrainingPolicy as CapabilityTrainingPolicy, TrainingPort,
-    TrainingReadiness as CapabilityTrainingReadiness, TrainingRun as CapabilityTrainingRun,
-    TrainingRunActivity, TrainingRunPhase as CapabilityTrainingRunPhase, TrainingRunStatus,
-    TrainingSnapshot as CapabilityTrainingSnapshot, TrainingSource as CapabilityTrainingSource,
+    self as training_application, ActTrainingInputSettings, ActTrainingLayerSettings,
+    ActTrainingModelSettings, ActTrainingSettings, DeleteTrainingRunCommand, StartTrainingCommand,
+    TrainingCheckpoint as CapabilityTrainingCheckpoint, TrainingCheckpointSettings,
+    TrainingCheckpointStatus, TrainingCommandIdentity, TrainingDataSettings,
+    TrainingExecutionSettings, TrainingMetric as CapabilityTrainingMetric, TrainingMetricProgress,
+    TrainingMetricResources, TrainingMetricThroughput, TrainingMetricTimings,
+    TrainingOptimizerSettings, TrainingPolicy as CapabilityTrainingPolicy, TrainingPort,
+    TrainingProgressSettings, TrainingReadiness as CapabilityTrainingReadiness,
+    TrainingRun as CapabilityTrainingRun, TrainingRunActivity, TrainingRunHistory,
+    TrainingRunIdentity, TrainingRunPhase as CapabilityTrainingRunPhase, TrainingRunState,
+    TrainingRunStatus, TrainingSnapshot as CapabilityTrainingSnapshot,
+    TrainingSource as CapabilityTrainingSource,
 };
 use crate::workflow::agent::WorkflowAgentManager;
 use crate::workflow::manager::WorkflowManager;
-use spiral_robotics_core::error::OperationError;
+use spiral_robotics_core::OperationError;
 use spiral_robotics_hardware::{HardwareHandle, HardwareState, RobotSpec};
+use spiral_robotics_storage::BackendStateStore;
+use spiral_robotics_storage::StorageManager;
+use spiral_robotics_storage::StudioPreferencesStore;
 use spiral_robotics_storage::episodes::{
     ArmCondition, EpisodeError, EpisodeInspection, EpisodeRecordingRequest, EpisodeStore,
     EpisodeWriter, ReplayRequest, TimelineMetadata, TimelineSample, TimelineTraces, build_arms,
 };
-use spiral_robotics_storage::manager::StorageManager;
-use spiral_robotics_storage::settings::BackendStateStore;
-use spiral_robotics_storage::settings::StudioPreferencesStore;
 use spiral_robotics_storage::video::{
     VideoAssetKey, VideoByteRange, VideoSegment, VideoSize, VideoTiming,
 };
@@ -151,21 +160,211 @@ const VIDEO_RECORDING_STOP_TICKS: u8 = 5;
 /// Everything a request handler can reach.
 #[derive(Clone)]
 pub(crate) struct AppState {
-    pub(crate) workspace: Arc<RobotWorkspace>,
-    pub(crate) episodes: Arc<EpisodeStore>,
-    pub(crate) hardware: Arc<HardwareHandle>,
-    pub(crate) cameras: Arc<CameraManager>,
-    pub(crate) backend_state: Arc<BackendStateStore>,
-    pub(crate) preferences: Arc<StudioPreferencesStore>,
-    pub(crate) storage: Arc<StorageManager>,
-    pub(crate) training: Arc<TrainingManager>,
-    pub(crate) workflow: Arc<WorkflowManager>,
-    pub(crate) workflow_agent: Arc<WorkflowAgentManager>,
-    pub(crate) rollout: Arc<RolloutManager>,
-    pub(crate) bootstrap: BootstrapState,
-    pub(crate) catalog_lease: Arc<CatalogMutationLease>,
-    pub(crate) recording_video: Arc<tokio::sync::Mutex<Option<VideoCapture>>>,
-    pub(crate) video_encoder: VideoEncoderSettings,
+    catalog: AppCatalogResources,
+    robotics: AppRoboticsResources,
+    runtime: AppRuntimeResources,
+}
+
+#[derive(Clone)]
+pub(crate) struct AppCatalogResources {
+    workspace: Arc<RobotWorkspace>,
+    episodes: Arc<EpisodeStore>,
+    storage: Arc<StorageManager>,
+    catalog_lease: Arc<CatalogMutationLease>,
+}
+
+impl AppCatalogResources {
+    pub(crate) fn new(
+        workspace: Arc<RobotWorkspace>,
+        episodes: Arc<EpisodeStore>,
+        storage: Arc<StorageManager>,
+    ) -> Self {
+        Self {
+            workspace,
+            episodes,
+            storage,
+            catalog_lease: Arc::new(CatalogMutationLease::default()),
+        }
+    }
+
+    pub(crate) fn with_lease(mut self, catalog_lease: Arc<CatalogMutationLease>) -> Self {
+        self.catalog_lease = catalog_lease;
+        self
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct AppRoboticsResources {
+    hardware: Arc<HardwareHandle>,
+    cameras: Arc<CameraManager>,
+    video: AppVideoResources,
+}
+
+#[derive(Clone)]
+pub(crate) struct AppVideoResources {
+    recording_video: Arc<tokio::sync::Mutex<Option<VideoCapture>>>,
+    video_encoder: VideoEncoderSettings,
+}
+
+impl AppVideoResources {
+    pub(crate) fn new(
+        recording_video: Arc<tokio::sync::Mutex<Option<VideoCapture>>>,
+        video_encoder: VideoEncoderSettings,
+    ) -> Self {
+        Self {
+            recording_video,
+            video_encoder,
+        }
+    }
+}
+
+impl AppRoboticsResources {
+    pub(crate) fn new(
+        hardware: Arc<HardwareHandle>,
+        cameras: Arc<CameraManager>,
+        video: AppVideoResources,
+    ) -> Self {
+        Self {
+            hardware,
+            cameras,
+            video,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct AppActivityManagers {
+    training: Arc<TrainingManager>,
+    rollout: Arc<RolloutManager>,
+    workflow: AppWorkflowManagers,
+}
+
+#[derive(Clone)]
+pub(crate) struct AppWorkflowManagers {
+    workflow: Arc<WorkflowManager>,
+    workflow_agent: Arc<WorkflowAgentManager>,
+}
+
+impl AppWorkflowManagers {
+    pub(crate) fn new(
+        workflow: Arc<WorkflowManager>,
+        workflow_agent: Arc<WorkflowAgentManager>,
+    ) -> Self {
+        Self {
+            workflow,
+            workflow_agent,
+        }
+    }
+}
+
+impl AppActivityManagers {
+    pub(crate) fn new(
+        training: Arc<TrainingManager>,
+        rollout: Arc<RolloutManager>,
+        workflow: AppWorkflowManagers,
+    ) -> Self {
+        Self {
+            training,
+            rollout,
+            workflow,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct AppPlatformResources {
+    backend_state: Arc<BackendStateStore>,
+    preferences: Arc<StudioPreferencesStore>,
+    bootstrap: BootstrapState,
+}
+
+impl AppPlatformResources {
+    pub(crate) fn new(
+        backend_state: Arc<BackendStateStore>,
+        preferences: Arc<StudioPreferencesStore>,
+        bootstrap: BootstrapState,
+    ) -> Self {
+        Self {
+            backend_state,
+            preferences,
+            bootstrap,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct AppRuntimeResources {
+    activities: AppActivityManagers,
+    platform: AppPlatformResources,
+}
+
+impl AppRuntimeResources {
+    pub(crate) fn new(activities: AppActivityManagers, platform: AppPlatformResources) -> Self {
+        Self {
+            activities,
+            platform,
+        }
+    }
+}
+
+impl AppState {
+    pub(crate) fn new(
+        catalog: AppCatalogResources,
+        robotics: AppRoboticsResources,
+        runtime: AppRuntimeResources,
+    ) -> Self {
+        Self {
+            catalog,
+            robotics,
+            runtime,
+        }
+    }
+
+    pub(crate) fn workspace(&self) -> &Arc<RobotWorkspace> {
+        &self.catalog.workspace
+    }
+    pub(crate) fn episodes(&self) -> &Arc<EpisodeStore> {
+        &self.catalog.episodes
+    }
+    pub(crate) fn storage(&self) -> &Arc<StorageManager> {
+        &self.catalog.storage
+    }
+    pub(crate) fn catalog_lease(&self) -> &Arc<CatalogMutationLease> {
+        &self.catalog.catalog_lease
+    }
+    pub(crate) fn hardware(&self) -> &Arc<HardwareHandle> {
+        &self.robotics.hardware
+    }
+    pub(crate) fn cameras(&self) -> &Arc<CameraManager> {
+        &self.robotics.cameras
+    }
+    pub(crate) fn recording_video(&self) -> &Arc<tokio::sync::Mutex<Option<VideoCapture>>> {
+        &self.robotics.video.recording_video
+    }
+    pub(crate) fn video_encoder(&self) -> &VideoEncoderSettings {
+        &self.robotics.video.video_encoder
+    }
+    pub(crate) fn training(&self) -> &Arc<TrainingManager> {
+        &self.runtime.activities.training
+    }
+    pub(crate) fn workflow(&self) -> &Arc<WorkflowManager> {
+        &self.runtime.activities.workflow.workflow
+    }
+    pub(crate) fn workflow_agent(&self) -> &Arc<WorkflowAgentManager> {
+        &self.runtime.activities.workflow.workflow_agent
+    }
+    pub(crate) fn rollout(&self) -> &Arc<RolloutManager> {
+        &self.runtime.activities.rollout
+    }
+    pub(crate) fn backend_state(&self) -> &Arc<BackendStateStore> {
+        &self.runtime.platform.backend_state
+    }
+    pub(crate) fn preferences(&self) -> &Arc<StudioPreferencesStore> {
+        &self.runtime.platform.preferences
+    }
+    pub(crate) fn bootstrap(&self) -> &BootstrapState {
+        &self.runtime.platform.bootstrap
+    }
 }
 
 /// Shared backend lifecycle published to the browser and consulted by
@@ -187,32 +386,32 @@ impl BootstrapState {
     }
 
     pub(crate) fn bootstrapping(&self, detail: impl Into<String>) {
-        self.current.send_replace(BackendReadiness {
-            state: BackendReadinessState::Bootstrapping,
-            catalog_available: false,
-            detail: detail.into(),
-        });
+        self.current.send_replace(BackendReadiness::new(
+            BackendReadinessState::Bootstrapping,
+            false,
+            detail,
+        ));
     }
 
     pub(crate) fn ready(&self) {
-        self.current.send_replace(BackendReadiness {
-            state: BackendReadinessState::Ready,
-            catalog_available: true,
-            detail: "Studio services are ready".to_owned(),
-        });
+        self.current.send_replace(BackendReadiness::new(
+            BackendReadinessState::Ready,
+            true,
+            "Studio services are ready",
+        ));
     }
 
     pub(crate) fn degraded(&self, catalog_available: bool, detail: impl Into<String>) {
-        self.current.send_replace(BackendReadiness {
-            state: BackendReadinessState::Degraded,
+        self.current.send_replace(BackendReadiness::new(
+            BackendReadinessState::Degraded,
             catalog_available,
-            detail: detail.into(),
-        });
+            detail,
+        ));
     }
 
     fn catalog_unavailable(&self) -> Option<String> {
         let current = self.current();
-        (!current.catalog_available).then_some(current.detail)
+        (!current.catalog_available()).then(|| current.detail().to_owned())
     }
 }
 
@@ -223,23 +422,26 @@ pub(crate) async fn monitor_video_recording(state: AppState) {
     loop {
         ticker.tick().await;
         let capture_episode = state
-            .recording_video
+            .recording_video()
             .lock()
             .await
             .as_ref()
             .map(|capture| capture.episode_id().to_owned());
-        let watched_episode = state.catalog_lease.recording_episode().or(capture_episode);
+        let watched_episode = state
+            .catalog_lease()
+            .recording_episode()
+            .or(capture_episode);
         let Some(capture_episode) = watched_episode else {
             missing_episode.clear();
             missing_ticks = 0;
             continue;
         };
-        let hardware_episode = state
-            .hardware
-            .state()
-            .telemetry
-            .recording
-            .map(|recording| recording.episode);
+        let hardware = state.hardware().state();
+        let hardware_episode = hardware
+            .telemetry()
+            .recording()
+            .as_ref()
+            .map(|recording| recording.episode().to_owned());
         if hardware_episode.as_deref() == Some(&capture_episode) {
             missing_episode.clear();
             missing_ticks = 0;
@@ -271,14 +473,14 @@ pub(crate) async fn finish_stale_video_capture(state: &AppState) {
     // episode and finalized media have both been committed. This exists
     // independently of VideoCapture because camera-less recordings still
     // allocate catalog identities.
-    let recording = state.catalog_lease.claim_recording();
-    let capture = state.recording_video.lock().await.take();
+    let recording = state.catalog_lease().claim_recording();
+    let capture = state.recording_video().lock().await.take();
     if recording.is_none() && capture.is_none() {
         return;
     }
     let episode_id = recording
         .as_ref()
-        .map(|recording| recording.episode.clone())
+        .map(|recording| recording.episode().to_owned())
         .or_else(|| {
             capture
                 .as_ref()
@@ -289,8 +491,8 @@ pub(crate) async fn finish_stale_video_capture(state: &AppState) {
         None => Vec::new(),
     };
     if let Some(episode_id) = episode_id {
-        let episodes = state.episodes.clone();
-        let storage = state.storage.clone();
+        let episodes = state.episodes().clone();
+        let storage = state.storage().clone();
         let committed = tokio::task::spawn_blocking(move || {
             let episode = episodes
                 .completed(&episode_id)
@@ -303,13 +505,13 @@ pub(crate) async fn finish_stale_video_capture(state: &AppState) {
             .and_then(|result| result)
         {
             tracing::error!("could not commit automatically stopped episode media: {error}");
-            state.cameras.note_issue(format!(
+            state.cameras().note_issue(format!(
                 "episode media could not be committed to SpiralDB: {error}"
             ));
         }
     }
     if let Some(recording) = recording {
-        let released = state.catalog_lease.release(recording.token);
+        let released = state.catalog_lease().release(recording.token());
         debug_assert!(
             released,
             "claimed recording lease must release exactly once"
@@ -324,7 +526,7 @@ pub(super) async fn finish_video_capture(
     let (videos, failures) = capture.finish().await;
     for failure in failures {
         state
-            .cameras
+            .cameras()
             .note_issue(format!("episode video was not saved: {failure}"));
     }
     videos
@@ -341,7 +543,7 @@ impl Failure {
 
     fn import(message: impl Into<String>) -> Self {
         let message = message.into();
-        let status = if spiral_robotics_storage::adbc::is_unavailable_error(&message) {
+        let status = if spiral_robotics_storage::is_unavailable_error(&message) {
             StatusCode::SERVICE_UNAVAILABLE
         } else {
             StatusCode::BAD_REQUEST
@@ -463,7 +665,7 @@ async fn require_catalog_ready(
     request: Request,
     next: Next,
 ) -> Result<Response, Failure> {
-    match state.bootstrap.catalog_unavailable() {
+    match state.bootstrap().catalog_unavailable() {
         Some(detail) => Err(Failure::unavailable(format!(
             "Studio catalog is not ready: {detail}"
         ))),
@@ -473,27 +675,34 @@ async fn require_catalog_ready(
 
 /// Assemble the current setup-level view of the studio.
 pub(crate) fn build_snapshot(state: &AppState) -> StudioSnapshot {
-    let hardware = state.hardware.state();
-    let readiness = state.bootstrap.current();
-    let robots = if readiness.catalog_available {
+    let hardware = state.hardware().state();
+    let readiness = state.bootstrap().current();
+    let robots = if readiness.catalog_available() {
         let robot_adapter = devices::RobotHttpAdapter::prefetched(state);
         robots::list(&robot_adapter)
             .into_iter()
             .filter_map(|saved| {
                 let connection = hardware
-                    .connections
-                    .get(&saved.id)
+                    .connections()
+                    .get(saved.id())
                     .cloned()
                     .unwrap_or_default();
-                let mut summary = robot_adapter.summary(&saved.id, connection).ok()?;
+                let mut summary = robot_adapter.summary(saved.id(), connection).ok()?;
                 // Limits come from the motors, not the saved configuration, so they
                 // are folded in here after loading the SpiralDB row.
-                if let Some(limits) = hardware.limits.get(&saved.id) {
-                    for motor in &mut summary.motors {
-                        if let Some(limits) = limits.get(&motor.name) {
-                            motor.limits = *limits;
-                        }
-                    }
+                if let Some(limits) = hardware.limits().get(saved.id()) {
+                    let motors = summary
+                        .motors()
+                        .iter()
+                        .cloned()
+                        .map(|mut motor| {
+                            if let Some(limits) = limits.get(motor.name()) {
+                                motor.set_limits(*limits);
+                            }
+                            motor
+                        })
+                        .collect();
+                    summary = summary.with_motors(motors);
                 }
                 Some(summary)
             })
@@ -502,37 +711,38 @@ pub(crate) fn build_snapshot(state: &AppState) -> StudioSnapshot {
         Vec::new()
     };
 
-    let mut issues = if readiness.catalog_available {
-        state.workspace.issues()
+    let mut issues = if readiness.catalog_available() {
+        state.workspace().issues()
     } else {
         Vec::new()
     };
-    issues.extend(state.cameras.issues());
+    issues.extend(state.cameras().issues());
     // A take that stopped itself has to be visible after the counters that were
     // describing it have gone.
-    issues.extend(hardware.recording_issue);
-
-    StudioSnapshot {
-        readiness,
-        storage: "SpiralDB".to_owned(),
-        robots,
-        cameras: devices::CameraDiscoveryAdapter(state.cameras.clone())
-            .cameras()
-            .into_iter()
-            .map(|camera| CameraStatus {
-                id: camera.id,
-                name: camera.name,
-                width: camera.width,
-                height: camera.height,
-                fps: camera.fps,
-                streaming: camera.streaming,
-                frames: camera.frames,
-                error: camera.error,
-            })
-            .collect(),
-        mode: hardware.mode,
-        issues,
+    if let Some(issue) = hardware.recording_issue() {
+        issues.push(issue.to_owned());
     }
+
+    let cameras = devices::CameraDiscoveryAdapter::new(state.cameras().clone())
+        .cameras()
+        .into_iter()
+        .map(|camera| {
+            CameraStatus::new(
+                camera.id(),
+                camera.name(),
+                CameraStreamFormat::new(camera.width(), camera.height(), camera.fps()),
+            )
+            .with_state(CameraStreamState::new(
+                camera.streaming(),
+                camera.frames(),
+                camera.error().map(str::to_owned),
+            ))
+        })
+        .collect();
+    StudioSnapshot::new(readiness, "SpiralDB", hardware.mode().clone())
+        .with_robots(robots)
+        .with_cameras(cameras)
+        .with_issues(issues)
 }
 
 async fn get_state(State(state): State<AppState>) -> Json<StudioSnapshot> {
@@ -550,16 +760,16 @@ async fn events(
         let mut snapshot_timer = tokio::time::interval(SNAPSHOT_INTERVAL);
         snapshot_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut telemetry_timer = tokio::time::interval(TELEMETRY_INTERVAL);
-        let (initial_training, mut training) = state.training.subscription();
-        let (initial_workflow, mut workflow) = state.workflow.subscription();
+        let (initial_training, mut training) = state.training().subscription();
+        let (initial_workflow, mut workflow) = state.workflow().subscription();
         let mut last_workflow = initial_workflow.clone();
-        let (initial_agent, mut workflow_agent) = state.workflow_agent.subscription();
+        let (initial_agent, mut workflow_agent) = state.workflow_agent().subscription();
         let mut last_agent_cursor = (
-            initial_agent.scope_id.clone(),
-            initial_agent.revision,
+            initial_agent.scope_id().to_owned(),
+            initial_agent.revision(),
         );
-        let initial_rollout = RolloutManager::snapshot(state.rollout.as_ref());
-        let mut rollout = state.rollout.subscribe();
+        let initial_rollout = RolloutManager::snapshot(state.rollout().as_ref());
+        let mut rollout = state.rollout().subscribe();
         let mut last_snapshot: Option<StudioSnapshot> = None;
         let mut last_sequence = 0_u64;
 
@@ -601,12 +811,13 @@ async fn events(
                     }
                 }
                 _ = telemetry_timer.tick() => {
-                    let telemetry = state.hardware.state().telemetry;
-                    if telemetry.sequence == last_sequence {
+                    let hardware = state.hardware().state();
+                    let telemetry = hardware.telemetry();
+                    if telemetry.sequence() == last_sequence {
                         continue;
                     }
-                    last_sequence = telemetry.sequence;
-                    if let Ok(event) = Event::default().event("telemetry").json_data(&telemetry) {
+                    last_sequence = telemetry.sequence();
+                    if let Ok(event) = Event::default().event("telemetry").json_data(telemetry) {
                         yield Ok(event);
                     }
                 }
@@ -621,7 +832,7 @@ async fn events(
                             }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            let (snapshot, replacement) = state.training.subscription();
+                            let (snapshot, replacement) = state.training().subscription();
                             training = replacement;
                             if let Ok(event) = Event::default()
                                 .event("training_snapshot")
@@ -640,14 +851,12 @@ async fn events(
                             // from the project that was just replaced must not
                             // overwrite the manager's newer, lower-revision
                             // scoped state.
-                            let snapshot = state.workflow.state();
+                            let snapshot = state.workflow().state();
                             if snapshot == last_workflow {
                                 continue;
                             }
                             last_workflow = snapshot.clone();
-                            let update = spiral_robotics_api::workflow::WorkflowUpdate {
-                                state: snapshot,
-                            };
+                            let update = spiral_robotics_api::workflow::WorkflowUpdate::new(snapshot);
                             if let Ok(event) = Event::default()
                                 .event("workflow_update")
                                 .json_data(&update)
@@ -656,7 +865,7 @@ async fn events(
                             }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            let (snapshot, replacement) = state.workflow.subscription();
+                            let (snapshot, replacement) = state.workflow().subscription();
                             workflow = replacement;
                             if snapshot == last_workflow {
                                 continue;
@@ -678,8 +887,8 @@ async fn events(
                             // Broadcast values are wakeups. Snapshot current
                             // manager truth so a queued update from a prior
                             // conversation or project scope cannot regress SSE.
-                            let snapshot = state.workflow_agent.state();
-                            let cursor = (snapshot.scope_id.clone(), snapshot.revision);
+                            let snapshot = state.workflow_agent().state();
+                            let cursor = (snapshot.scope_id().to_owned(), snapshot.revision());
                             if !replace_agent_cursor(&mut last_agent_cursor, &cursor) {
                                 continue;
                             }
@@ -691,9 +900,9 @@ async fn events(
                             }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            let (snapshot, replacement) = state.workflow_agent.subscription();
+                            let (snapshot, replacement) = state.workflow_agent().subscription();
                             workflow_agent = replacement;
-                            let cursor = (snapshot.scope_id.clone(), snapshot.revision);
+                            let cursor = (snapshot.scope_id().to_owned(), snapshot.revision());
                             if !replace_agent_cursor(&mut last_agent_cursor, &cursor) {
                                 continue;
                             }

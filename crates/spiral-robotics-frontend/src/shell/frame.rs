@@ -12,13 +12,31 @@ use crate::components::icons::{
 use crate::shell::activity::Activity;
 use crate::shell::notifications::MessageAction;
 
-#[component]
-pub(crate) fn ActivityRail(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ActivityRailState {
     activity: Activity,
     settings_active: bool,
+}
+
+impl ActivityRailState {
+    pub(crate) const fn new(activity: Activity, settings_active: bool) -> Self {
+        Self {
+            activity,
+            settings_active,
+        }
+    }
+}
+
+#[component]
+pub(crate) fn ActivityRail(
+    state: ActivityRailState,
     on_activity: EventHandler<Activity>,
     on_settings: EventHandler<()>,
 ) -> Element {
+    let ActivityRailState {
+        activity,
+        settings_active,
+    } = state;
     rsx! {
         nav { class: "studio-activity-rail", "aria-label": "Application",
             Action {
@@ -84,17 +102,17 @@ pub(crate) fn ActivityRail(
 
 #[component]
 pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -> Element {
-    let mut studio = crate::shell::state::studio();
-    let snapshot = studio.snapshot.read().clone();
-    let telemetry = studio.telemetry.read().clone();
-    let training = studio.training.read().clone();
-    let workflow = studio.workflow_state.read().clone();
+    let studio = crate::shell::state::studio();
+    let snapshot = studio.snapshot().read().to_owned();
+    let telemetry = studio.telemetry().read().to_owned();
+    let training = studio.training().read().to_owned();
+    let workflow = studio.workflow_state().read().to_owned();
     let connected = studio.controls_available();
-    let backend_connected = (studio.live)();
+    let backend_connected = (studio.live())();
     let (service_label, service_style) = if !backend_connected {
         ("Reconnecting", "background: var(--tone-danger)")
     } else {
-        match snapshot.readiness.state {
+        match snapshot.readiness().state() {
             BackendReadinessState::Bootstrapping => {
                 ("Starting…", "background: var(--tone-caution)")
             }
@@ -104,30 +122,35 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
                 ("Reconnecting", "background: var(--tone-danger)")
             }
             BackendReadinessState::Ready => ("Connected", "background: var(--tone-good)"),
-            BackendReadinessState::Degraded if snapshot.readiness.catalog_available => {
+            BackendReadinessState::Degraded if snapshot.readiness().catalog_available() => {
                 ("Limited", "background: var(--tone-caution)")
             }
             BackendReadinessState::Degraded => ("Unavailable", "background: var(--tone-danger)"),
         }
     };
     let connected_arms = snapshot
-        .robots
+        .robots()
         .iter()
-        .filter(|robot| robot.connection.connected)
+        .filter(|robot| robot.connection().connected())
         .count();
-    let holding = telemetry.robots.iter().filter(|robot| robot.torque).count();
-    let mode_label = snapshot.mode.selection.label();
+    let holding = telemetry
+        .robots()
+        .iter()
+        .filter(|robot| robot.torque())
+        .count();
+    let mode_label = snapshot.mode().selection().label();
     let status_mode = format!("{} · {mode_label}", mode.label());
-    let arms_label = format!("{connected_arms}/{} arms", snapshot.robots.len());
+    let arms_label = format!("{connected_arms}/{} arms", snapshot.robots().len());
     // A bench with nothing wrong on it does not need a line saying so, and the
     // count that appears when something is wrong should be able to say "1 robot
     // problem" without the trailing s the fixed string used to force.
-    let robot_problems_label = match snapshot.issues.len() {
+    let robot_problems_label = match snapshot.issues().len() {
         0 => None,
         1 => Some("1 robot problem".to_owned()),
         count => Some(format!("{count} robot problems")),
     };
-    let training_problem_count = snapshot.issues.len() + usize::from(!training.readiness.ready);
+    let training_problem_count =
+        snapshot.issues().len() + usize::from(!training.readiness().ready());
     let training_problems_label = format!(
         "{training_problem_count} {}",
         if training_problem_count == 1 {
@@ -136,27 +159,28 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
             "problems"
         }
     );
-    let rate_label = format!("{:.0}/{:.0} Hz", telemetry.loop_hz, telemetry.target_hz);
-    let recording_label = telemetry.recording.as_ref().map(|recording| {
+    let rate_label = format!("{:.0}/{:.0} Hz", telemetry.loop_hz(), telemetry.target_hz());
+    let recording_label = telemetry.recording().as_ref().map(|recording| {
         format!(
             "Recording {} · {}",
-            format_elapsed_status(recording.elapsed_seconds),
-            recording.dataset_id,
+            format_elapsed_status(recording.elapsed_seconds()),
+            recording.dataset_id(),
         )
     });
     let training_run = training.active_run();
-    let training_phase = training_run.map(|run| run.phase.label());
+    let training_phase = training_run.map(|run| run.phase().label());
     let training_step =
-        training_run.map(|run| format!("step {} / {}", run.current_step, run.config.steps));
-    let training_runs_label = format!("{} runs", training.runs.len());
-    let workflow_status = workflow_status_projection(
-        workflow.as_ref(),
+        training_run.map(|run| format!("step {} / {}", run.current_step(), run.config().steps()));
+    let training_runs_label = format!("{} runs", training.runs().len());
+    let workflow_status = WorkflowStatusContext {
+        state: workflow.as_ref(),
         backend_connected,
-        snapshot.readiness.state,
-        snapshot.readiness.catalog_available,
-    );
-    let center = studio.notifications.read().clone();
-    let now = (studio.clock_ms)();
+        readiness: snapshot.readiness().state(),
+        catalog_available: snapshot.readiness().catalog_available(),
+    }
+    .project();
+    let center = studio.notifications().read().to_owned();
+    let now = (studio.clock_ms())();
     let unread = center.unread_count();
     let latest = center.latest_prominent(now).cloned();
     let message_count = center.messages().count();
@@ -198,7 +222,7 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
                 onkeydown: move |event| {
                     if event.key() == Key::Escape {
                         event.prevent_default();
-                        studio.notifications.write().close();
+                        studio.notifications().write().close();
                     }
                 },
                 header { class: "notification-center-header",
@@ -211,7 +235,7 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
                             purpose: ActionPurpose::Remove,
                             variant: ActionVariant::Link,
                             class: "notification-center-action",
-                            onclick: move |_| studio.notifications.write().clear(),
+                            onclick: move |_| studio.notifications().write().clear(),
                             "Clear all"
                         }
                     }
@@ -220,7 +244,7 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
                         purpose: ActionPurpose::Close,
                         variant: ActionVariant::Link,
                         class: "notification-center-action",
-                        onclick: move |_| studio.notifications.write().close(),
+                        onclick: move |_| studio.notifications().write().close(),
                         "Close"
                     }
                 }
@@ -255,7 +279,7 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
                                                     match &action_for_click {
                                                         MessageAction::OpenEpisode(episode) => on_open_episode.call(episode.clone()),
                                                     }
-                                                    studio.notifications.write().close();
+                                                    studio.notifications().write().close();
                                                 },
                                                 "{action_label}"
                                             } }
@@ -265,7 +289,7 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
                                         purpose: ActionPurpose::Remove,
                                         variant: ActionVariant::Link,
                                         class: "notification-center-action",
-                                        onclick: move |_| studio.notifications.write().dismiss(message_id),
+                                        onclick: move |_| studio.notifications().write().dismiss(message_id),
                                         "Dismiss"
                                     }
                                 }
@@ -280,12 +304,12 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
             footer { class: "studio-status-bar",
                 div { class: "status-bar-group",
                     span { class: "status-bar-item",
-                        title: "{snapshot.readiness.detail}",
+                        title: "{snapshot.readiness().detail()}",
                         span { class: "status-dot", style: service_style }
                         "{service_label}"
                     }
                     span { class: "status-bar-item",
-                        if training.readiness.ready { "Training ready" } else { "Training unavailable" }
+                        if training.readiness().ready() { "Training ready" } else { "Training unavailable" }
                     }
                     span { class: "status-bar-item", "{training_runs_label}" }
                 }
@@ -309,7 +333,7 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
             footer { class: "studio-status-bar",
                 div { class: "status-bar-group",
                     span { class: "status-bar-item",
-                        title: "{snapshot.readiness.detail}",
+                        title: "{snapshot.readiness().detail()}",
                         span { class: "status-dot", style: service_style }
                         "{service_label}"
                     }
@@ -334,7 +358,7 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
             footer { class: "studio-status-bar",
                 div { class: "status-bar-group",
                     span { class: "status-bar-item",
-                        title: "{snapshot.readiness.detail}",
+                        title: "{snapshot.readiness().detail()}",
                         span { class: "status-dot", style: service_style }
                         "{service_label}"
                     }
@@ -356,7 +380,7 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
                     }
                     if holding > 0 { span { class: "status-bar-item status-bar-danger", "{holding} holding" } }
                     span { class: "status-bar-item status-bar-accent", "{status_mode}" }
-                    if telemetry.target_hz > 0.0 { span { class: "status-bar-item status-bar-rate", "{rate_label}" } }
+                    if telemetry.target_hz() > 0.0 { span { class: "status-bar-item status-bar-rate", "{rate_label}" } }
                     if let Some(robot_problems_label) = robot_problems_label {
                         span { class: "status-bar-item status-bar-caution", "{robot_problems_label}" }
                     }
@@ -390,7 +414,7 @@ fn SavedToDataCue(episode: String) -> Element {
 
 #[component]
 fn NotificationTrigger(unread: usize, open: bool) -> Element {
-    let mut studio = crate::shell::state::studio();
+    let studio = crate::shell::state::studio();
     rsx! {
         Action {
             id: "notification-center-trigger",
@@ -401,7 +425,7 @@ fn NotificationTrigger(unread: usize, open: bool) -> Element {
             aria_expanded: open,
             aria_controls: "notification-center",
             title: if unread == 0 { "Notifications" } else { "{unread} unread notifications" },
-            onclick: move |_| studio.notifications.write().toggle(),
+            onclick: move |_| studio.notifications().write().toggle(),
             NotificationIcon {}
             if unread > 0 { span { "{unread}" } }
         }
@@ -432,59 +456,66 @@ struct WorkflowStatusProjection {
     graph: String,
 }
 
-fn workflow_status_projection(
-    state: Option<&WorkflowStateResponse>,
+struct WorkflowStatusContext<'a> {
+    state: Option<&'a WorkflowStateResponse>,
     backend_connected: bool,
     readiness: BackendReadinessState,
     catalog_available: bool,
-) -> WorkflowStatusProjection {
-    if !backend_connected
-        || (readiness != BackendReadinessState::Bootstrapping && !catalog_available)
-    {
-        return WorkflowStatusProjection {
-            domain: "Workflow unavailable".to_owned(),
-            phase: "State unavailable".to_owned(),
-            graph: "Graph unavailable".to_owned(),
-        };
-    }
+}
 
-    let Some(state) = state.filter(|_| readiness != BackendReadinessState::Bootstrapping) else {
-        return WorkflowStatusProjection {
+impl WorkflowStatusContext<'_> {
+    fn project(&self) -> WorkflowStatusProjection {
+        if !self.backend_connected
+            || (self.readiness != BackendReadinessState::Bootstrapping && !self.catalog_available)
+        {
+            return WorkflowStatusProjection {
+                domain: "Workflow unavailable".to_owned(),
+                phase: "State unavailable".to_owned(),
+                graph: "Graph unavailable".to_owned(),
+            };
+        }
+
+        let Some(state) = self
+            .state
+            .filter(|_| self.readiness != BackendReadinessState::Bootstrapping)
+        else {
+            return WorkflowStatusProjection {
+                domain: "Spiral relations".to_owned(),
+                phase: "Loading saved workflow…".to_owned(),
+                graph: "Loading graph…".to_owned(),
+            };
+        };
+
+        let phase = match state.snapshot().phase() {
+            WorkflowRunPhase::Idle => "Idle · saved",
+            WorkflowRunPhase::Validating => "Validating",
+            WorkflowRunPhase::Running => "Running",
+            WorkflowRunPhase::Cancelling => "Cancelling",
+            WorkflowRunPhase::Completed => "Complete",
+            WorkflowRunPhase::Failed => "Failed",
+            WorkflowRunPhase::Cancelled => "Cancelled",
+            WorkflowRunPhase::Interrupted => "Interrupted",
+        };
+        let node_label = if state.workflow().nodes().len() == 1 {
+            "node"
+        } else {
+            "nodes"
+        };
+        let connection_label = if state.workflow().edges().len() == 1 {
+            "connection"
+        } else {
+            "connections"
+        };
+        WorkflowStatusProjection {
             domain: "Spiral relations".to_owned(),
-            phase: "Loading saved workflow…".to_owned(),
-            graph: "Loading graph…".to_owned(),
-        };
-    };
-
-    let phase = match state.snapshot.phase {
-        WorkflowRunPhase::Idle => "Idle · saved",
-        WorkflowRunPhase::Validating => "Validating",
-        WorkflowRunPhase::Running => "Running",
-        WorkflowRunPhase::Cancelling => "Cancelling",
-        WorkflowRunPhase::Completed => "Complete",
-        WorkflowRunPhase::Failed => "Failed",
-        WorkflowRunPhase::Cancelled => "Cancelled",
-        WorkflowRunPhase::Interrupted => "Interrupted",
-    };
-    let node_label = if state.workflow.nodes.len() == 1 {
-        "node"
-    } else {
-        "nodes"
-    };
-    let connection_label = if state.workflow.edges.len() == 1 {
-        "connection"
-    } else {
-        "connections"
-    };
-    WorkflowStatusProjection {
-        domain: "Spiral relations".to_owned(),
-        phase: phase.to_owned(),
-        graph: format!(
-            "{} {node_label} · {} {connection_label} · r{}",
-            state.workflow.nodes.len(),
-            state.workflow.edges.len(),
-            state.workflow.revision,
-        ),
+            phase: phase.to_owned(),
+            graph: format!(
+                "{} {node_label} · {} {connection_label} · r{}",
+                state.workflow().nodes().len(),
+                state.workflow().edges().len(),
+                state.workflow().revision(),
+            ),
+        }
     }
 }
 
@@ -495,11 +526,16 @@ mod tests {
     #[test]
     fn workflow_status_projects_authoritative_graph_and_run_phase() {
         let mut state = WorkflowStateResponse::default();
-        state.workflow.revision = 7;
-        state.snapshot.phase = WorkflowRunPhase::Running;
+        state.workflow_mut().set_revision(7);
+        state.snapshot_mut().set_phase(WorkflowRunPhase::Running);
 
-        let status =
-            workflow_status_projection(Some(&state), true, BackendReadinessState::Ready, true);
+        let status = WorkflowStatusContext {
+            state: Some(&state),
+            backend_connected: true,
+            readiness: BackendReadinessState::Ready,
+            catalog_available: true,
+        }
+        .project();
 
         assert_eq!(status.domain, "Spiral relations");
         assert_eq!(status.phase, "Running");
@@ -508,17 +544,24 @@ mod tests {
 
     #[test]
     fn workflow_status_does_not_invent_state_while_loading_or_unavailable() {
-        let loading =
-            workflow_status_projection(None, true, BackendReadinessState::Bootstrapping, false);
+        let loading = WorkflowStatusContext {
+            state: None,
+            backend_connected: true,
+            readiness: BackendReadinessState::Bootstrapping,
+            catalog_available: false,
+        }
+        .project();
         assert_eq!(loading.phase, "Loading saved workflow…");
         assert_eq!(loading.graph, "Loading graph…");
 
-        let unavailable = workflow_status_projection(
-            Some(&WorkflowStateResponse::default()),
-            false,
-            BackendReadinessState::Ready,
-            true,
-        );
+        let state = WorkflowStateResponse::default();
+        let unavailable = WorkflowStatusContext {
+            state: Some(&state),
+            backend_connected: false,
+            readiness: BackendReadinessState::Ready,
+            catalog_available: true,
+        }
+        .project();
         assert_eq!(unavailable.domain, "Workflow unavailable");
         assert_eq!(unavailable.phase, "State unavailable");
         assert_eq!(unavailable.graph, "Graph unavailable");

@@ -20,8 +20,9 @@ use crate::activities::data::workbench::{
     QueryExecutionPresentation, QueryState, render_query_result,
 };
 use crate::activities::workflow::state::{
-    ASSISTANT_PANEL_ID, AcceptedAgentDraft, AgentDraftKey, CANVAS_PANEL_ID, NODE_PANEL_ID,
-    RESULTS_PANEL_ID, WorkflowAgentCommand, WorkflowCommand, WorkflowNodeData, workflow_controller,
+    ASSISTANT_PANEL_ID, AcceptedAgentDraft, AgentDraftKey, CANVAS_PANEL_ID, ModelFeatureTarget,
+    NODE_PANEL_ID, RESULTS_PANEL_ID, WorkflowAgentCommand, WorkflowCommand, WorkflowNodeData,
+    workflow_controller,
 };
 use crate::components::icons::{
     FitViewIcon, ModelNodeIcon, QueryNodeIcon, ResultNodeIcon, TableNodeIcon, WorkflowIcon,
@@ -124,40 +125,40 @@ fn WorkflowAssistant() -> Element {
     let mut drafts = controller.agent_drafts();
     let mut accepted_draft = controller.agent_accepted_draft();
     use_effect(move || {
-        let accepted = accepted_draft.read().clone();
+        let accepted = accepted_draft.read().to_owned();
         if let Some(accepted) = accepted {
             clear_accepted_draft(&mut drafts.write(), &accepted);
             accepted_draft.set(None);
         }
     });
     let command = controller.agent_command();
-    let active = state.session.phase.active();
-    let configured = state.readiness.configured;
-    let conversation_id = state.active_conversation_id.clone();
-    let draft_key = AgentDraftKey::new(&state.scope_id, &conversation_id);
+    let active = state.session().phase().active();
+    let configured = state.readiness().configured();
+    let conversation_id = state.active_conversation_id().to_owned();
+    let draft_key = AgentDraftKey::new(state.scope_id(), &conversation_id);
     let draft = drafts.read().get(&draft_key).cloned().unwrap_or_default();
-    let catalog_available = studio.snapshot.read().readiness.catalog_available;
+    let catalog_available = studio.snapshot().read().readiness().catalog_available();
     let conversation_reason =
-        controller.agent_conversation_disabled_reason((studio.live)(), catalog_available);
+        controller.agent_conversation_disabled_reason((studio.live())(), catalog_available);
     let new_conversation_reason =
-        controller.new_agent_conversation_disabled_reason((studio.live)(), catalog_available);
-    let workflow_active = controller.snapshot().phase.active();
+        controller.new_agent_conversation_disabled_reason((studio.live())(), catalog_available);
+    let workflow_active = controller.snapshot().phase().active();
     let can_send = configured
-        && state.history_available
+        && state.history_available()
         && controller.agent_loaded()
         && !active
         && command.is_none()
         && catalog_available
         && !workflow_active
         && !draft.trim().is_empty();
-    let status = if !state.history_available {
+    let status = if !state.history_available() {
         "Assistant history needs attention"
-    } else if !(studio.live)() {
+    } else if !(studio.live())() {
         "Reconnecting to Studio…"
     } else if !controller.agent_loaded() {
         "Connecting to Assistant…"
     } else {
-        match state.session.phase {
+        match state.session().phase() {
             WorkflowAgentPhase::Responding => "Assistant is working…",
             WorkflowAgentPhase::WaitingForRun => "Waiting for the Workflow run…",
             WorkflowAgentPhase::Cancelling => "Stopping Assistant turn…",
@@ -173,26 +174,25 @@ fn WorkflowAssistant() -> Element {
             }
         }
     };
-    let latest_signature = state
-        .session
-        .messages
+    let messages = state.session().messages().to_owned();
+    let latest_signature = messages
         .last()
         .map(|message| {
             format!(
                 "{}:{}:{}:{:?}:{:?}",
-                state.session.messages.len(),
-                message.text.len(),
-                message.tools.len(),
-                message.phase,
-                state.session.phase,
+                messages.len(),
+                message.text().len(),
+                message.tools().len(),
+                message.phase(),
+                state.session().phase(),
             )
         })
-        .unwrap_or_else(|| format!("0:{:?}", state.session.phase));
+        .unwrap_or_else(|| format!("0:{:?}", state.session().phase()));
     use_effect(use_reactive((&latest_signature,), move |_| {
         if !*follow_latest.peek() {
             return;
         }
-        let tail = thread_tail.peek().clone();
+        let tail = thread_tail.peek().to_owned();
         spawn(async move {
             gloo_timers::future::TimeoutFuture::new(24).await;
             if let Some(tail) = tail {
@@ -200,17 +200,22 @@ fn WorkflowAssistant() -> Element {
             }
         });
     }));
-    let composer_hint = assistant_composer_hint(
-        state.history_available,
-        (studio.live)(),
-        controller.agent_loaded(),
-        configured,
-        catalog_available,
-        active,
-        command,
-        workflow_active,
-        draft.trim().is_empty(),
-    );
+    let composer_hint = AssistantComposerState {
+        availability: AssistantAvailability {
+            history_available: state.history_available(),
+            studio_live: (studio.live())(),
+            agent_loaded: controller.agent_loaded(),
+            configured,
+            catalog_available,
+        },
+        activity: AssistantActivity {
+            active,
+            command,
+            workflow_active,
+            draft_empty: draft.trim().is_empty(),
+        },
+    }
+    .hint();
     let starter_relations_key = draft_key.clone();
     let starter_siglip_key = draft_key.clone();
     let submit_key = draft_key.clone();
@@ -237,15 +242,15 @@ fn WorkflowAssistant() -> Element {
                             id: "workflow-agent-conversation",
                             class: "workflow-assistant-conversation-select",
                             disabled: conversation_reason.is_some(),
-                            value: "{state.active_conversation_id}",
+                            value: "{state.active_conversation_id()}",
                             title: conversation_reason.clone().unwrap_or_else(|| "Switch Assistant conversation".to_owned()),
                             onchange: move |event| {
                                 controller.activate_agent_conversation(event.value(), studio);
                             },
-                            for conversation in &state.conversations {
+                            for conversation in &state.conversations() {
                                 option {
-                                    value: "{conversation.conversation_id}",
-                                    selected: conversation.conversation_id == state.active_conversation_id,
+                                    value: "{conversation.conversation_id()}",
+                                    selected: conversation.conversation_id() == state.active_conversation_id(),
                                     "{conversation_option_label(conversation)}"
                                 }
                             }
@@ -276,7 +281,7 @@ fn WorkflowAssistant() -> Element {
                     follow_latest.set(near_latest);
                     show_latest_action.set(!near_latest);
                 },
-                if state.session.messages.is_empty() {
+                if messages.is_empty() {
                     section { class: "workflow-assistant-empty",
                         h3 { "What should we find?" }
                         p { "Describe a moment or comparison. I’ll inspect Spiral, build the graph, and show the evidence." }
@@ -309,35 +314,35 @@ fn WorkflowAssistant() -> Element {
                     }
                 } else {
                     ol { class: "workflow-assistant-thread",
-                        for message in &state.session.messages {
+                        for message in messages.clone() {
                             li {
-                                class: match message.role { WorkflowAgentRole::User => "workflow-agent-message is-user", WorkflowAgentRole::Assistant => "workflow-agent-message is-assistant", WorkflowAgentRole::Synthetic => "workflow-agent-message is-system" },
+                                class: match message.role() { WorkflowAgentRole::User => "workflow-agent-message is-user", WorkflowAgentRole::Assistant => "workflow-agent-message is-assistant", WorkflowAgentRole::Synthetic => "workflow-agent-message is-system" },
                                 div { class: "workflow-agent-message-meta",
-                                    strong { match message.role { WorkflowAgentRole::User => "You", WorkflowAgentRole::Assistant => "Assistant", WorkflowAgentRole::Synthetic => "Workflow" } }
-                                    if message.phase == WorkflowAgentMessagePhase::Streaming {
+                                    strong { match message.role() { WorkflowAgentRole::User => "You", WorkflowAgentRole::Assistant => "Assistant", WorkflowAgentRole::Synthetic => "Workflow" } }
+                                    if message.phase() == WorkflowAgentMessagePhase::Streaming {
                                         span { "Working…" }
                                     }
                                 }
-                                if !message.text.is_empty() {
-                                    {render_assistant_text(&message.text)}
+                                if !message.text().is_empty() {
+                                    {render_assistant_text(message.text())}
                                 }
-                                if !message.tools.is_empty() {
+                                if !message.tools().is_empty() {
                                     details {
                                         class: "workflow-agent-tools-disclosure",
-                                        open: message.phase == WorkflowAgentMessagePhase::Failed,
-                                        summary { "{tool_trace_summary(&message.tools, message.phase)}" }
+                                        open: message.phase() == WorkflowAgentMessagePhase::Failed,
+                                        summary { "{tool_trace_summary(message.tools(), message.phase())}" }
                                         ul { class: "workflow-agent-tools", "aria-label": "Assistant execution trace",
-                                        for tool in &message.tools {
-                                            li { class: match tool.phase { WorkflowAgentToolPhase::Running => "is-running", WorkflowAgentToolPhase::Complete => "is-complete", WorkflowAgentToolPhase::Failed => "is-failed" },
+                                        for tool in message.tools().to_owned() {
+                                            li { class: match tool.phase() { WorkflowAgentToolPhase::Running => "is-running", WorkflowAgentToolPhase::Complete => "is-complete", WorkflowAgentToolPhase::Failed => "is-failed" },
                                                 span { class: "workflow-agent-tool-mark", aria_hidden: "true" }
                                                 div { class: "workflow-agent-tool-detail",
-                                                    strong { "{tool.summary}" }
-                                                    if let Some(error) = &tool.error { p { "{error}" } }
-                                                    if let Some(receipt) = &tool.receipt {
+                                                    strong { "{tool.summary()}" }
+                                                    if let Some(error) = tool.error() { p { "{error}" } }
+                                                    if let Some(receipt) = tool.receipt() {
                                                         if controller.receipt_panel(receipt).is_some() {
                                                             {
-                                                                let target = receipt.clone();
-                                                                let label = receipt.label.clone();
+                                                                let target = receipt.to_owned();
+                                                                let label = receipt.label().to_owned();
                                                                 rsx! {
                                                                     Action {
                                                                         purpose: ActionPurpose::Navigate,
@@ -360,11 +365,14 @@ fn WorkflowAssistant() -> Element {
                         }
                     }
                 }
-                if let Some(error) = controller.agent_error().or(state.session.error.clone()) {
+                if let Some(error) = controller
+                    .agent_error()
+                    .or_else(|| state.session().error().map(str::to_owned))
+                {
                     div { class: "workflow-assistant-error", role: "alert",
                         strong { "Assistant needs attention" }
                         p { "{error}" }
-                        if state.history_available && !active && configured {
+                        if state.history_available() && !active && configured {
                             Action {
                                 purpose: ActionPurpose::Retry,
                                 variant: ActionVariant::Outline,
@@ -399,7 +407,7 @@ fn WorkflowAssistant() -> Element {
                         onclick: move |_| {
                             follow_latest.set(true);
                             show_latest_action.set(false);
-                            let tail = thread_tail.peek().clone();
+                            let tail = thread_tail.peek().to_owned();
                             spawn(async move {
                                 if let Some(tail) = tail {
                                     let _ = tail.scroll_to(ScrollBehavior::Smooth).await;
@@ -413,8 +421,8 @@ fn WorkflowAssistant() -> Element {
                     id: "workflow-agent-input",
                     rows: "1",
                     maxlength: "8000",
-                    disabled: !state.history_available || !configured || active || command.is_some() || !catalog_available,
-                    placeholder: if !state.history_available { "Assistant history is unavailable" } else if configured { "Ask about your robotics data…" } else { "Assistant is temporarily unavailable" },
+                    disabled: !state.history_available() || !configured || active || command.is_some() || !catalog_available,
+                    placeholder: if !state.history_available() { "Assistant history is unavailable" } else if configured { "Ask about your robotics data…" } else { "Assistant is temporarily unavailable" },
                     value: "{draft}",
                     oninput: {
                         let draft_key = input_key.clone();
@@ -471,8 +479,8 @@ fn clear_accepted_draft(
     drafts: &mut BTreeMap<AgentDraftKey, String>,
     accepted: &AcceptedAgentDraft,
 ) -> bool {
-    let key = AgentDraftKey::new(&accepted.scope_id, &accepted.conversation_id);
-    if drafts.get(&key) != Some(&accepted.text) {
+    let key = AgentDraftKey::new(accepted.scope_id(), accepted.conversation_id());
+    if drafts.get(&key).map(String::as_str) != Some(accepted.text()) {
         return false;
     }
     drafts.remove(&key);
@@ -480,17 +488,18 @@ fn clear_accepted_draft(
 }
 
 fn conversation_option_label(conversation: &WorkflowAgentConversationSummary) -> String {
-    if conversation.message_count == 0 {
-        return conversation.title.clone();
+    if conversation.message_count() == 0 {
+        return conversation.title().to_owned();
     }
-    let noun = if conversation.message_count == 1 {
+    let noun = if conversation.message_count() == 1 {
         "message"
     } else {
         "messages"
     };
     format!(
         "{} · {} {noun}",
-        conversation.title, conversation.message_count
+        conversation.title(),
+        conversation.message_count()
     )
 }
 
@@ -501,13 +510,13 @@ fn tool_trace_summary(
     if let Some(tool) = tools
         .iter()
         .rev()
-        .find(|tool| tool.phase == WorkflowAgentToolPhase::Running)
+        .find(|tool| tool.phase() == WorkflowAgentToolPhase::Running)
     {
-        return format!("Working · {}", tool.summary);
+        return format!("Working · {}", tool.summary());
     }
     let failed = tools
         .iter()
-        .filter(|tool| tool.phase == WorkflowAgentToolPhase::Failed)
+        .filter(|tool| tool.phase() == WorkflowAgentToolPhase::Failed)
         .count();
     if failed > 0 {
         let label = match message_phase {
@@ -522,46 +531,57 @@ fn tool_trace_summary(
     format!("{} {noun} completed", tools.len())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn assistant_composer_hint(
+struct AssistantAvailability {
     history_available: bool,
     studio_live: bool,
     agent_loaded: bool,
     configured: bool,
     catalog_available: bool,
+}
+
+struct AssistantActivity {
     active: bool,
     command: Option<WorkflowAgentCommand>,
     workflow_active: bool,
     draft_empty: bool,
-) -> &'static str {
-    if !history_available {
-        return "Assistant history needs attention.";
+}
+
+struct AssistantComposerState {
+    availability: AssistantAvailability,
+    activity: AssistantActivity,
+}
+
+impl AssistantComposerState {
+    fn hint(&self) -> &'static str {
+        if !self.availability.history_available {
+            return "Assistant history needs attention.";
+        }
+        if !self.availability.studio_live {
+            return "Reconnecting to Studio…";
+        }
+        if !self.availability.agent_loaded {
+            return "Connecting to Assistant…";
+        }
+        if !self.availability.catalog_available {
+            return "Connect to Spiral to ask about this project.";
+        }
+        if !self.availability.configured {
+            return "Assistant is temporarily unavailable. Retry in a moment.";
+        }
+        if self.activity.active {
+            return "Assistant is working. You can stop this turn.";
+        }
+        if self.activity.command.is_some() {
+            return "Finishing the current Assistant action…";
+        }
+        if self.activity.workflow_active {
+            return "Waiting for the active Workflow run to finish.";
+        }
+        if self.activity.draft_empty {
+            return "Enter to send · Shift+Enter for a new line.";
+        }
+        "Enter to send · Shift+Enter for a new line."
     }
-    if !studio_live {
-        return "Reconnecting to Studio…";
-    }
-    if !agent_loaded {
-        return "Connecting to Assistant…";
-    }
-    if !catalog_available {
-        return "Connect to Spiral to ask about this project.";
-    }
-    if !configured {
-        return "Assistant is temporarily unavailable. Retry in a moment.";
-    }
-    if active {
-        return "Assistant is working. You can stop this turn.";
-    }
-    if command.is_some() {
-        return "Finishing the current Assistant action…";
-    }
-    if workflow_active {
-        return "Waiting for the active Workflow run to finish.";
-    }
-    if draft_empty {
-        return "Enter to send · Shift+Enter for a new line.";
-    }
-    "Enter to send · Shift+Enter for a new line."
 }
 
 fn render_assistant_text(text: &str) -> Element {
@@ -747,7 +767,7 @@ fn WorkflowNodeInspector() -> Element {
     let selected = controller.selected_node_data();
     let relations = controller.relations();
     let capabilities = controller.capabilities();
-    let snapshot_active = controller.snapshot().phase.active();
+    let snapshot_active = controller.snapshot().phase().active();
     let command_pending = controller.command().is_some();
     let active = snapshot_active || command_pending;
     rsx! {
@@ -755,38 +775,37 @@ fn WorkflowNodeInspector() -> Element {
             if let Some((node_id, title, data)) = selected {
                 header { class: "workflow-inspector-heading",
                     div { class: "workflow-inspector-kind",
-                        {node_kind_icon(data.kind)}
+                        {node_kind_icon(data.kind())}
                         span { "{data.kind_label()}" }
                     }
                     h2 { "{title}" }
-                    p { "{data.description}" }
+                    p { "{data.description()}" }
                 }
-                if let Some(error) = &data.error {
+                if let Some(error) = &data.error() {
                     div { class: "workflow-inspector-error", role: "alert",
                         strong { "{data.phase_label()}" }
                         p { "{error}" }
                     }
                 }
-                if !data.warnings.is_empty() {
+                if !data.warnings().is_empty() {
                     div { class: "workflow-inspector-warning", role: "status",
                         strong { "Completed with warnings" }
-                        for warning in &data.warnings { p { "{warning}" } }
+                        for warning in &data.warnings() { p { "{warning}" } }
                     }
                 }
                 dl { class: "workflow-inspector-facts",
                     div {
                         dt { "State" }
-                        dd { class: "{data.phase_class()}", "{data.phase_label()} · {data.detail}" }
+                        dd { class: "{data.phase_class()}", "{data.phase_label()} · {data.detail()}" }
                     }
-                    if let Some(relation) = &data.relation {
+                    if let Some(relation) = &data.relation() {
                         div {
                             dt { "Relation" }
                             dd { code { "{relation}" } }
                         }
                     }
                     if let Some(output) = data
-                        .feature_cache_relation
-                        .as_deref()
+                        .feature_cache_relation()
                         .filter(|output| !output.is_empty())
                     {
                         div {
@@ -794,52 +813,52 @@ fn WorkflowNodeInspector() -> Element {
                             dd { code { "{output}" } }
                         }
                     }
-                    if !data.fields.is_empty() {
+                    if !data.fields().is_empty() {
                         div {
                             dt { "Fields" }
                             dd { class: "workflow-inspector-fields",
-                                for field in &data.fields { code { "{field}" } }
+                                for field in &data.fields() { code { "{field}" } }
                             }
                         }
                     }
-                    if let Some(progress) = &data.progress {
+                    if let Some(progress) = &data.progress() {
                         div {
                             dt { "Progress" }
-                            dd { class: "font-mono tabular-nums", "{progress.completed} / {progress.total} {progress.unit}" }
+                            dd { class: "font-mono tabular-nums", "{progress.completed()} / {progress.total()} {progress.unit()}" }
                         }
                     }
-                    if data.quarantine.count > 0 {
+                    if data.quarantine().count() > 0 {
                         div {
                             dt { "Quarantine" }
-                            dd { "{data.quarantine.count} rows" }
+                            dd { "{data.quarantine().count()} rows" }
                         }
                     }
-                    if let Some(model) = &data.model {
+                    if let Some(model) = &data.model_run() {
                         div {
                             dt { "Device" }
-                            dd { "{model.device}" }
+                            dd { "{model.device()}" }
                         }
                         div {
                             dt { "Materialization" }
                             dd {
-                                if model.reused { "Reused · " } else { "Computed · " }
-                                span { class: "font-mono tabular-nums", "{model.decode_ms} ms decode · {model.inference_ms} ms inference" }
+                                if model.reused() { "Reused · " } else { "Computed · " }
+                                span { class: "font-mono tabular-nums", "{model.decode_ms()} ms decode · {model.inference_ms()} ms inference" }
                             }
                         }
                         div {
                             dt { "Fingerprint" }
-                            dd { code { title: "{model.fingerprint}", "{model.fingerprint.chars().take(12).collect::<String>()}" } }
+                            dd { code { title: "{model.fingerprint()}", "{model.fingerprint().chars().take(12).collect::<String>()}" } }
                         }
                     }
                 }
-                if data.kind == WorkflowNodeKind::Table {
+                if data.kind() == WorkflowNodeKind::Table {
                     section { class: "workflow-inspector-editor",
                         label {
                             span { class: "label", "Spiral relation" }
                             select {
                                 class: "field",
                                 disabled: active,
-                                value: data.relation.clone().unwrap_or_default(),
+                                value: data.relation().unwrap_or_default(),
                                 onchange: {
                                     let node_id = node_id.clone();
                                     move |event| controller.set_table_relation(&node_id, event.value())
@@ -847,9 +866,9 @@ fn WorkflowNodeInspector() -> Element {
                                 option { value: "", "Choose a qualified relation…" }
                                 for relation in &relations {
                                     option {
-                                        value: "{relation.name}",
-                                        selected: data.relation.as_deref() == Some(relation.name.as_str()),
-                                        "{relation.name}"
+                                        value: "{relation.name()}",
+                                        selected: data.relation() == Some(relation.name()),
+                                        "{relation.name()}"
                                     }
                                 }
                             }
@@ -866,7 +885,7 @@ fn WorkflowNodeInspector() -> Element {
                     p { class: "workflow-inspector-boundary",
                         "Import provenance belongs in Data. Workflow always begins from qualified Spiral relations."
                     }
-                } else if data.kind == WorkflowNodeKind::Query {
+                } else if data.kind() == WorkflowNodeKind::Query {
                     section { class: "workflow-inspector-editor workflow-inspector-query-editor",
                         label {
                             span { class: "label", "Read-only SQL" }
@@ -874,7 +893,7 @@ fn WorkflowNodeInspector() -> Element {
                                 class: "query-input workflow-query-input",
                                 spellcheck: "false",
                                 disabled: active,
-                                value: data.sql.clone().unwrap_or_default(),
+                                value: data.sql().unwrap_or_default(),
                                 oninput: {
                                     let node_id = node_id.clone();
                                     move |event| controller.set_query_sql(&node_id, event.value())
@@ -887,16 +906,16 @@ fn WorkflowNodeInspector() -> Element {
                             "."
                         }
                     }
-                } else if data.kind == WorkflowNodeKind::Model {
+                } else if data.kind() == WorkflowNodeKind::Model {
                     section { class: "workflow-inspector-editor workflow-inspector-model-editor",
                         label {
                             span { class: "label", "Model" }
                             select {
                                 class: "field",
                                 disabled: true,
-                                value: data.model_id.clone().unwrap_or_default(),
-                                for model in &capabilities.models {
-                                    option { value: "{model.id}", "{model.label}" }
+                                value: data.model_id().unwrap_or_default(),
+                                for model in &capabilities.models() {
+                                    option { value: "{model.id()}", "{model.label()}" }
                                 }
                             }
                         }
@@ -904,11 +923,11 @@ fn WorkflowNodeInspector() -> Element {
                             "The candidate Query must project the five stable frame identity fields and each decoded spql.image.Image field named below. Studio registers compatible definitions and fills only missing applicable cells in the shared source cache; decoded images are never cached."
                         }
                         div { class: "workflow-feature-definitions",
-                            for (index, feature) in data.features.iter().enumerate() {
+                            for (index, feature) in data.features().iter().enumerate() {
                                 section { class: "workflow-feature-definition",
                                     header {
                                         strong { "Feature {index + 1}" }
-                                        if data.features.len() > 1 {
+                                        if data.features().len() > 1 {
                                             Action {
                                                 purpose: ActionPurpose::Remove,
                                                 disabled: active,
@@ -929,12 +948,12 @@ fn WorkflowNodeInspector() -> Element {
                                             spellcheck: "false",
                                             disabled: active,
                                             placeholder: "is_gripper_open_feature",
-                                            value: feature.name.clone(),
+                                            value: feature.name().to_owned(),
                                             oninput: {
                                                 let node_id = node_id.clone();
                                                 move |event| {
                                                     let value = event.value();
-                                                    controller.set_model_feature(&node_id, index, move |feature| feature.name = value);
+                                                    controller.set_model_feature(ModelFeatureTarget::new(&node_id, index), move |feature| feature.set_name(value));
                                                 }
                                             },
                                         }
@@ -946,12 +965,12 @@ fn WorkflowNodeInspector() -> Element {
                                             r#type: "text",
                                             disabled: active,
                                             placeholder: "Probability that the gripper is open",
-                                            value: feature.description.clone(),
+                                            value: feature.description().to_owned(),
                                             oninput: {
                                                 let node_id = node_id.clone();
                                                 move |event| {
                                                     let value = event.value();
-                                                    controller.set_model_feature(&node_id, index, move |feature| feature.description = value);
+                                                    controller.set_model_feature(ModelFeatureTarget::new(&node_id, index), move |feature| feature.set_description(value));
                                                 }
                                             },
                                         }
@@ -963,12 +982,12 @@ fn WorkflowNodeInspector() -> Element {
                                             r#type: "text",
                                             disabled: active,
                                             placeholder: "gripper open",
-                                            value: feature.concept.clone(),
+                                            value: feature.concept().to_owned(),
                                             oninput: {
                                                 let node_id = node_id.clone();
                                                 move |event| {
                                                     let value = event.value();
-                                                    controller.set_model_feature(&node_id, index, move |feature| feature.concept = value);
+                                                    controller.set_model_feature(ModelFeatureTarget::new(&node_id, index), move |feature| feature.set_concept(value));
                                                 }
                                             },
                                         }
@@ -981,12 +1000,12 @@ fn WorkflowNodeInspector() -> Element {
                                                 r#type: "text",
                                                 spellcheck: "false",
                                                 disabled: active,
-                                                value: feature.applicability.media_field.clone(),
+                                                value: feature.applicability().media_field().to_owned(),
                                                 oninput: {
                                                     let node_id = node_id.clone();
                                                     move |event| {
                                                         let value = event.value();
-                                                        controller.set_model_feature(&node_id, index, move |feature| feature.applicability.media_field = value);
+                                                        controller.set_model_feature(ModelFeatureTarget::new(&node_id, index), move |feature| feature.set_media_field(value));
                                                     }
                                                 },
                                             }
@@ -998,12 +1017,12 @@ fn WorkflowNodeInspector() -> Element {
                                                 r#type: "text",
                                                 disabled: active,
                                                 placeholder: "camera.top, camera.wrist",
-                                                value: feature.applicability.stream_ids.join(", "),
+                                                value: feature.applicability().stream_ids().join(", "),
                                                 oninput: {
                                                     let node_id = node_id.clone();
                                                     move |event| {
                                                         let streams = event.value().split(',').map(str::trim).filter(|value| !value.is_empty()).map(str::to_owned).collect();
-                                                        controller.set_model_feature(&node_id, index, move |feature| feature.applicability.stream_ids = streams);
+                                                        controller.set_model_feature(ModelFeatureTarget::new(&node_id, index), move |feature| feature.set_stream_ids(streams));
                                                     }
                                                 },
                                             }
@@ -1011,10 +1030,10 @@ fn WorkflowNodeInspector() -> Element {
                                     }
                                     p { class: "workflow-inspector-help",
                                         "Source "
-                                        if feature.applicability.source_relation.is_empty() {
+                                        if feature.applicability().source_relation().is_empty() {
                                             span { "Not configured" }
                                         } else {
-                                            code { "{feature.applicability.source_relation}" }
+                                            code { "{feature.applicability().source_relation()}" }
                                         }
                                     }
                                 }
@@ -1045,10 +1064,10 @@ fn WorkflowNodeInspector() -> Element {
                             }
                         }
                     }
-                    if !data.quarantine.examples.is_empty() {
+                    if !data.quarantine().examples().is_empty() {
                         section { class: "workflow-inspector-boundary workflow-quarantine-examples",
                             strong { "Quarantine examples" }
-                            for example in &data.quarantine.examples { code { "{example}" } }
+                            for example in &data.quarantine().examples() { code { "{example}" } }
                         }
                     }
                 }
@@ -1067,17 +1086,17 @@ fn WorkflowNodeInspector() -> Element {
 fn node_validation_issues(node_id: &str) -> Element {
     let validation = workflow_controller().validation();
     let issues = validation
-        .errors
-        .into_iter()
-        .filter(|issue| issue.node_id.as_deref().is_none_or(|id| id == node_id))
+        .errors()
+        .iter()
+        .filter(|issue| issue.node_id().is_none_or(|id| id == node_id))
         .collect::<Vec<_>>();
     rsx! {
         if !issues.is_empty() {
             section { class: "workflow-validation", role: "alert",
                 for issue in issues {
                     div {
-                        strong { "{issue.message}" }
-                        p { "{issue.recovery}" }
+                        strong { "{issue.message()}" }
+                        p { "{issue.recovery()}" }
                     }
                 }
             }
@@ -1106,26 +1125,26 @@ fn WorkflowCanvas() -> Element {
     let run_reason = controller.run_disabled_reason();
     let apply_reason = controller.apply_disabled_reason();
     let command = controller.command();
-    let active = snapshot.phase.active();
+    let active = snapshot.phase().active();
     let topology_blocked = active || command.is_some();
     let agent_topology_blocked =
-        controller.agent_state().session.phase.active() || controller.agent_command().is_some();
+        controller.agent_state().session().phase().active() || controller.agent_command().is_some();
     let state_load_failed = controller.load_error().is_some();
     let dirty = controller.dirty();
-    let empty = spec.nodes.is_empty() && spec.edges.is_empty();
+    let empty = spec.nodes().is_empty() && spec.edges().is_empty();
     let edit_label = if dirty {
         "Modified".to_owned()
     } else {
-        format!("Saved · r{}", spec.revision)
+        format!("Saved · r{}", spec.revision())
     };
-    let complete_with_warnings = snapshot.phase == WorkflowRunPhase::Completed
-        && snapshot.nodes.iter().any(|node| {
-            node.phase == WorkflowNodePhase::CompleteWithWarnings || !node.warnings.is_empty()
+    let complete_with_warnings = snapshot.phase() == WorkflowRunPhase::Completed
+        && snapshot.nodes().iter().any(|node| {
+            node.phase() == WorkflowNodePhase::CompleteWithWarnings || !node.warnings().is_empty()
         });
     let run_label = if complete_with_warnings {
         "Complete with warnings"
     } else {
-        run_phase_label(snapshot.phase)
+        run_phase_label(snapshot.phase())
     };
 
     use_effect(move || {
@@ -1204,10 +1223,10 @@ fn WorkflowCanvas() -> Element {
             header { class: "workflow-canvas-toolbar",
                 div {
                     strong { class: if dirty { "workflow-edit-badge is-modified" } else { "workflow-edit-badge" }, "{edit_label}" }
-                    strong { class: run_badge_class(snapshot.phase, complete_with_warnings), "{run_label}" }
-                    span { "{spec.nodes.len()} nodes · {spec.edges.len()} connections" }
+                    strong { class: run_badge_class(snapshot.phase(), complete_with_warnings), "{run_label}" }
+                    span { "{spec.nodes().len()} nodes · {spec.edges().len()} connections" }
                 }
-                if !spec.nodes.is_empty() {
+                if !spec.nodes().is_empty() {
                     Action {
                         purpose: ActionPurpose::Create,
                         variant: ActionVariant::Outline,
@@ -1217,12 +1236,12 @@ fn WorkflowCanvas() -> Element {
                         "New workflow"
                     }
                 }
-                if !spec.nodes.is_empty() && !controller.has_model() {
+                if !spec.nodes().is_empty() && !controller.has_model() {
                     Action {
                         purpose: ActionPurpose::Create,
                         variant: ActionVariant::Outline,
                         disabled: topology_blocked,
-                        title: if snapshot.phase.active() { "Cancel the active run before adding a Model node" } else if command.is_some() { "Wait for the current Workflow command before adding a Model node" } else { "Insert SigLIP between the first Table and Query" },
+                        title: if snapshot.phase().active() { "Cancel the active run before adding a Model node" } else if command.is_some() { "Wait for the current Workflow command before adding a Model node" } else { "Insert SigLIP between the first Table and Query" },
                         onclick: move |_| controller.add_siglip_model(),
                         "Add model"
                     }
@@ -1267,11 +1286,11 @@ fn WorkflowCanvas() -> Element {
                     Action {
                         purpose: ActionPurpose::Cancel,
                         variant: ActionVariant::Outline,
-                        disabled: command.is_some() || snapshot.phase == WorkflowRunPhase::Cancelling,
+                        disabled: command.is_some() || snapshot.phase() == WorkflowRunPhase::Cancelling,
                         aria_busy: command == Some(WorkflowCommand::Cancelling),
                         title: "Cancel after the current Spiral operation",
                         onclick: move |_| controller.cancel(studio),
-                        if snapshot.phase == WorkflowRunPhase::Cancelling || command == Some(WorkflowCommand::Cancelling) { "Cancelling…" } else { "Cancel" }
+                        if snapshot.phase() == WorkflowRunPhase::Cancelling || command == Some(WorkflowCommand::Cancelling) { "Cancelling…" } else { "Cancel" }
                     }
                 } else {
                     Action {
@@ -1392,15 +1411,15 @@ fn run_badge_class(phase: WorkflowRunPhase, complete_with_warnings: bool) -> &'s
 fn WorkflowNodeCard(ctx: NodeViewCtx<WorkflowNodeData>) -> Element {
     let node = &ctx.node;
     let data = &node.data;
-    let fields = if data.fields.is_empty() {
-        match data.kind {
+    let fields = if data.fields().is_empty() {
+        match data.kind() {
             WorkflowNodeKind::Table => "Choose a relation".to_owned(),
             WorkflowNodeKind::Model => "Define a feature".to_owned(),
             WorkflowNodeKind::Query => "Read-only SQL".to_owned(),
             WorkflowNodeKind::Result => "Terminal payload".to_owned(),
         }
     } else {
-        data.fields.join(" · ")
+        data.fields().join(" · ")
     };
     let selected_class = if node.selected {
         "workflow-node-selected"
@@ -1416,49 +1435,48 @@ fn WorkflowNodeCard(ctx: NodeViewCtx<WorkflowNodeData>) -> Element {
     rsx! {
         article {
             class: "workflow-node-card {data.kind_class()} {data.phase_class()} {selected_class} {dragging_class}",
-            title: data.error.clone().unwrap_or_default(),
+            title: data.error().unwrap_or_default(),
             "aria-current": if node.selected { "true" } else { "false" },
-            if data.kind != WorkflowNodeKind::Table {
+            if data.kind() != WorkflowNodeKind::Table {
                 Handle { kind: HandleKind::Target, position: node.target_side }
             }
             header { class: "workflow-node-heading",
-                {node_kind_icon(data.kind)}
+                {node_kind_icon(data.kind())}
                 span { "{data.kind_label()}" }
             }
             div { class: "workflow-node-body",
                 h3 { title: "{node.label}", "{node.label}" }
                 p { class: "workflow-node-fields", title: "{fields}", "{fields}" }
-                if let Some(relation) = &data.relation {
+                if let Some(relation) = &data.relation() {
                     p { class: "workflow-node-relation", "reads ", code { "{relation}" } }
                 }
                 if let Some(output) = data
-                    .feature_cache_relation
-                    .as_deref()
+                    .feature_cache_relation()
                     .filter(|output| !output.is_empty())
                 {
                     p { class: "workflow-node-relation", "writes ", code { "{output}" } }
                 }
-                if let Some(sql) = &data.sql {
+                if let Some(sql) = &data.sql() {
                     code { class: "workflow-node-sql", "{sql}" }
                 }
             }
             footer { class: "workflow-node-footer",
                 span { class: "workflow-node-status-dot {data.phase_class()}", "aria-hidden": "true" }
-                if let Some(progress) = &data.progress {
-                    span { "{data.phase_label()} · {progress.completed}/{progress.total} {progress.unit}" }
+                if let Some(progress) = &data.progress() {
+                    span { "{data.phase_label()} · {progress.completed()}/{progress.total()} {progress.unit()}" }
                 } else {
-                    span { "{data.phase_label()} · {data.detail}" }
+                    span { "{data.phase_label()} · {data.detail()}" }
                 }
             }
-            if let Some(progress) = &data.progress {
+            if let Some(progress) = &data.progress() {
                 progress {
                     class: "workflow-node-progress",
-                    value: "{progress.completed}",
-                    max: "{progress.total.max(1)}",
-                    "aria-label": "{data.phase_label()}: {progress.completed} of {progress.total} {progress.unit}"
+                    value: "{progress.completed()}",
+                    max: "{progress.total().max(1)}",
+                    "aria-label": "{data.phase_label()}: {progress.completed()} of {progress.total()} {progress.unit()}"
                 }
             }
-            if data.kind != WorkflowNodeKind::Result {
+            if data.kind() != WorkflowNodeKind::Result {
                 Handle { kind: HandleKind::Source, position: node.source_side }
             }
         }
@@ -1481,23 +1499,23 @@ fn WorkflowResults() -> Element {
     let snapshot = controller.snapshot();
     let run_reason = controller.run_disabled_reason();
     let can_run_again = matches!(
-        snapshot.phase,
+        snapshot.phase(),
         WorkflowRunPhase::Cancelled | WorkflowRunPhase::Interrupted | WorkflowRunPhase::Failed
     ) && run_reason.is_none();
     let spec = controller.spec();
-    let empty_workflow = spec.nodes.is_empty() && spec.edges.is_empty();
-    let query = spec.nodes.into_iter().find_map(|node| {
-        let WorkflowNodeConfig::Query { sql, max_rows } = node.config else {
+    let empty_workflow = spec.nodes().is_empty() && spec.edges().is_empty();
+    let query = spec.nodes().iter().find_map(|node| {
+        let WorkflowNodeConfig::Query { sql, max_rows } = node.config() else {
             return None;
         };
-        Some((sql, max_rows))
+        Some((sql.to_owned(), *max_rows))
     });
     let (sql, max_rows) = query.unwrap_or_else(|| ("Read-only Workflow query".to_owned(), 100));
-    let result_model = snapshot.result.clone().map(|result| {
+    let result_model = snapshot.result().cloned().map(|result| {
         QueryExecutionPresentation::new(sql.clone(), max_rows, QueryState::Ready(result))
     });
     let transient_model = if result_model.is_none() {
-        match snapshot.phase {
+        match snapshot.phase() {
             WorkflowRunPhase::Validating
             | WorkflowRunPhase::Running
             | WorkflowRunPhase::Cancelling => Some(QueryExecutionPresentation::new(
@@ -1506,7 +1524,7 @@ fn WorkflowResults() -> Element {
                 QueryState::Running,
             )),
             WorkflowRunPhase::Failed | WorkflowRunPhase::Interrupted => {
-                snapshot.error.clone().map(|error| {
+                snapshot.error().map(str::to_owned).map(|error| {
                     QueryExecutionPresentation::new(
                         sql.clone(),
                         max_rows,
@@ -1520,7 +1538,7 @@ fn WorkflowResults() -> Element {
         None
     };
     let (empty_title, empty_detail) = workflow_empty_result_copy(
-        snapshot.phase,
+        snapshot.phase(),
         controller.validation().valid(),
         empty_workflow,
     );
@@ -1528,12 +1546,12 @@ fn WorkflowResults() -> Element {
     rsx! {
         section { class: "workflow-results", "aria-label": "Workflow results",
             header { class: "workflow-results-meta",
-                span { "{run_phase_label(snapshot.phase)}" }
-                if let Some(result) = &snapshot.result {
-                    span { class: "font-mono tabular-nums", "{result.rows.len()} rows · {result.elapsed_ms} ms" }
-                    if result.truncated { span { class: "chip chip-caution", "Truncated" } }
+                span { "{run_phase_label(snapshot.phase())}" }
+                if let Some(result) = &snapshot.result() {
+                    span { class: "font-mono tabular-nums", "{result.rows().len()} rows · {result.elapsed_ms()} ms" }
+                    if result.truncated() { span { class: "chip chip-caution", "Truncated" } }
                 }
-                if can_run_again && snapshot.result.is_some() {
+                if can_run_again && snapshot.result().is_some() {
                     Action {
                         purpose: ActionPurpose::Retry,
                         variant: ActionVariant::Link,
@@ -1543,14 +1561,14 @@ fn WorkflowResults() -> Element {
                     }
                 }
             }
-            if snapshot.result_stale {
+            if snapshot.result_stale() {
                 div { class: "workflow-results-stale", role: "status",
                     strong { "Previous run" }
-                    span { "{stale_result_copy(snapshot.phase)}" }
+                    span { "{stale_result_copy(snapshot.phase())}" }
                 }
             }
-            if snapshot.result.is_some() && snapshot.error.is_some() {
-                div { class: "workflow-results-error", role: "alert", "{snapshot.error.clone().unwrap_or_default()}" }
+            if snapshot.result().is_some() && snapshot.error().is_some() {
+                div { class: "workflow-results-error", role: "alert", "{snapshot.error().clone().unwrap_or_default()}" }
             }
             div { class: "workflow-result-body",
                 if let Some(model) = result_model.or(transient_model) {
@@ -1763,35 +1781,26 @@ mod tests {
 
     #[test]
     fn conversation_and_tool_summaries_stay_specific_without_exposing_provider_plumbing() {
-        let conversation = WorkflowAgentConversationSummary {
-            title: "Gripper evidence".to_owned(),
-            message_count: 4,
-            ..WorkflowAgentConversationSummary::default()
-        };
+        let conversation =
+            WorkflowAgentConversationSummary::new("", "Gripper evidence", 0).with_activity(0, 4);
         assert_eq!(
             conversation_option_label(&conversation),
             "Gripper evidence · 4 messages"
         );
-        let tools = vec![WorkflowAgentToolSummary {
-            call_id: "call-1".to_owned(),
-            name: "get_relations".to_owned(),
-            summary: "Inspecting camera relations".to_owned(),
-            phase: WorkflowAgentToolPhase::Running,
-            error: None,
-            receipt: None,
-        }];
+        let tools = vec![WorkflowAgentToolSummary::new(
+            "call-1",
+            "get_relations",
+            "Inspecting camera relations",
+        )];
         assert_eq!(
             tool_trace_summary(&tools, WorkflowAgentMessagePhase::Streaming),
             "Working · Inspecting camera relations"
         );
-        let recovered = vec![WorkflowAgentToolSummary {
-            call_id: "call-2".to_owned(),
-            name: "run_query".to_owned(),
-            summary: "Couldn’t inspect query results".to_owned(),
-            phase: WorkflowAgentToolPhase::Failed,
-            error: Some("Unsupported extension".to_owned()),
-            receipt: None,
-        }];
+        let mut recovered_tool =
+            WorkflowAgentToolSummary::new("call-2", "run_query", "Couldn’t inspect query results");
+        recovered_tool.set_phase(WorkflowAgentToolPhase::Failed);
+        recovered_tool.set_error(Some("Unsupported extension".to_owned()));
+        let recovered = vec![recovered_tool];
         assert_eq!(
             tool_trace_summary(&recovered, WorkflowAgentMessagePhase::Complete),
             "1 step · 1 recovered"
@@ -1845,11 +1854,7 @@ mod tests {
         );
         assert!(!clear_accepted_draft(
             &mut drafts,
-            &AcceptedAgentDraft {
-                scope_id: "project-a".to_owned(),
-                conversation_id: "conversation-a".to_owned(),
-                text: "stale request".to_owned(),
-            }
+            &AcceptedAgentDraft::new("project-a", "conversation-a", "stale request")
         ));
         assert_eq!(drafts.len(), 3);
         assert_eq!(
@@ -1861,11 +1866,7 @@ mod tests {
         );
         assert!(clear_accepted_draft(
             &mut drafts,
-            &AcceptedAgentDraft {
-                scope_id: "project-a".to_owned(),
-                conversation_id: "conversation-a".to_owned(),
-                text: "first request".to_owned(),
-            }
+            &AcceptedAgentDraft::new("project-a", "conversation-a", "first request")
         ));
         assert_eq!(
             drafts

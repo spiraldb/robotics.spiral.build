@@ -86,19 +86,19 @@ impl SpiralConnectionSettings {
         self
     }
 
-    pub fn endpoint(&self) -> &str {
+    pub(crate) fn endpoint(&self) -> &str {
         &self.endpoint
     }
 
-    pub fn spfs_endpoint(&self) -> &str {
+    pub(crate) fn spfs_endpoint(&self) -> &str {
         &self.spfs_endpoint
     }
 
-    pub fn project_id(&self) -> Option<&str> {
+    pub(crate) fn project_id(&self) -> Option<&str> {
         self.project_id.as_deref()
     }
 
-    pub fn credentials(&self) -> Option<&SpiralCredentials> {
+    pub(crate) fn credentials(&self) -> Option<&SpiralCredentials> {
         self.credentials.as_ref()
     }
 }
@@ -247,9 +247,22 @@ pub fn environment_spiral_spfs_endpoint() -> String {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct StoredStudioPreferences {
     #[serde(default)]
-    pub training: TrainingRuntimeSettings,
+    training: TrainingRuntimeSettings,
     #[serde(default)]
-    pub video: VideoSettings,
+    video: VideoSettings,
+}
+
+impl StoredStudioPreferences {
+    pub const fn new(training: TrainingRuntimeSettings, video: VideoSettings) -> Self {
+        Self { training, video }
+    }
+
+    pub const fn training(&self) -> &TrainingRuntimeSettings {
+        &self.training
+    }
+    pub const fn video(&self) -> &VideoSettings {
+        &self.video
+    }
 }
 
 pub struct StudioPreferencesStore {
@@ -272,9 +285,9 @@ impl StudioPreferencesStore {
         mut training: TrainingRuntimeSettings,
         video: VideoSettings,
     ) -> Result<StoredStudioPreferences, String> {
-        let endpoint = training.endpoint.trim();
-        training.endpoint = normalize_training_runtime_endpoint(endpoint)?;
-        Ok(StoredStudioPreferences { training, video })
+        let endpoint = training.endpoint().trim().to_owned();
+        training.set_endpoint(normalize_training_runtime_endpoint(&endpoint)?);
+        Ok(StoredStudioPreferences::new(training, video))
     }
 
     pub fn replace(&self, preferences: StoredStudioPreferences) -> StoredStudioPreferences {
@@ -406,9 +419,7 @@ mod tests {
     #[test]
     fn training_runtime_requires_an_http_or_https_endpoint() {
         let store = StudioPreferencesStore::new(StoredStudioPreferences::default());
-        let invalid = TrainingRuntimeSettings {
-            endpoint: "ftp://runtime.example".to_owned(),
-        };
+        let invalid = TrainingRuntimeSettings::new("ftp://runtime.example");
         assert!(
             store
                 .stage_update(invalid, VideoSettings::default())
@@ -416,12 +427,10 @@ mod tests {
                 .contains("http:// or https://")
         );
 
-        let valid = TrainingRuntimeSettings {
-            endpoint: " http://runtime.example:50051 ".to_owned(),
-        };
+        let valid = TrainingRuntimeSettings::new(" http://runtime.example:50051 ");
         let staged = store
             .stage_update(valid, VideoSettings::default())
             .expect("HTTP runtime endpoint is accepted");
-        assert_eq!(staged.training.endpoint, "http://runtime.example:50051");
+        assert_eq!(staged.training.endpoint(), "http://runtime.example:50051");
     }
 }

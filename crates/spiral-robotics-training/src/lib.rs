@@ -65,6 +65,13 @@ mod tests {
     }
 
     #[test]
+    fn training_image_size_preserves_the_native_resolution_sentinel() {
+        TrainingImageSize::new(0, 0);
+        TrainingImageSize::new(224, 224);
+        assert!(std::panic::catch_unwind(|| TrainingImageSize::new(0, 224)).is_err());
+    }
+
+    #[test]
     fn compatibility_uses_major_minor_and_schema_range_rules() {
         let current_schema = TRAINING_BACKEND_MIN_SPIRAL_SCHEMA_VERSION;
         assert_eq!(
@@ -123,13 +130,16 @@ mod tests {
             health.spiral_schema_maximum(),
             TRAINING_BACKEND_MAX_SPIRAL_SCHEMA_VERSION
         );
-        let request: TrainingJobRequest =
+        let request_fixture: serde_json::Value =
             serde_json::from_str(include_str!("../fixtures/job-request.json")).unwrap();
+        let storage_schema: serde_json::Value = serde_json::from_str(include_str!(
+            "../../spiral-robotics-storage/schema/version.json"
+        ))
+        .unwrap();
         assert_eq!(
-            request.spiral_schema_version(),
-            TRAINING_CURRENT_SPIRAL_SCHEMA_VERSION
+            request_fixture["spiral_schema_version"],
+            storage_schema["current"]
         );
-
         CanonicalWireFixture(include_str!("../fixtures/health.json"))
             .assert_round_trip::<TrainingBackendInfo>();
         CanonicalWireFixture(include_str!("../fixtures/job-request.json"))

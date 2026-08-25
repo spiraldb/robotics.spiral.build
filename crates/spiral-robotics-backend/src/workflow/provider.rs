@@ -22,9 +22,9 @@ const MAX_ATTEMPTS: usize = 3;
 
 #[derive(Clone)]
 pub(crate) struct ProviderConfig {
-    pub(crate) base_url: Url,
-    pub(crate) api_key: String,
-    pub(crate) model: String,
+    base_url: Url,
+    api_key: String,
+    model: String,
 }
 
 impl ProviderConfig {
@@ -223,13 +223,13 @@ fn parse_local_value(raw: &str, line: usize) -> Result<String, String> {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ProviderMessage {
-    pub(crate) role: String,
+    role: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) content: Option<String>,
+    content: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) tool_call_id: Option<String>,
+    tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(crate) tool_calls: Vec<ProviderToolCall>,
+    tool_calls: Vec<ProviderToolCall>,
 }
 
 impl ProviderMessage {
@@ -250,28 +250,105 @@ impl ProviderMessage {
             tool_calls: Vec::new(),
         }
     }
+
+    pub(crate) fn assistant(content: Option<String>, tool_calls: Vec<ProviderToolCall>) -> Self {
+        Self {
+            role: "assistant".to_owned(),
+            content,
+            tool_call_id: None,
+            tool_calls,
+        }
+    }
+
+    pub(crate) fn role(&self) -> &str {
+        &self.role
+    }
+    #[cfg(test)]
+    pub(crate) fn content(&self) -> Option<&str> {
+        self.content.as_deref()
+    }
+    pub(crate) fn tool_call_id(&self) -> Option<&str> {
+        self.tool_call_id.as_deref()
+    }
+    pub(crate) fn tool_calls(&self) -> &[ProviderToolCall] {
+        &self.tool_calls
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ProviderToolCall {
-    pub(crate) id: String,
+    id: String,
     #[serde(rename = "type")]
-    pub(crate) kind: String,
-    pub(crate) function: ProviderFunctionCall,
+    kind: String,
+    function: ProviderFunctionCall,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ProviderFunctionCall {
-    pub(crate) name: String,
-    pub(crate) arguments: String,
+    name: String,
+    arguments: String,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct ProviderResponse {
-    pub(crate) content: String,
-    pub(crate) tool_calls: Vec<ProviderToolCall>,
+    content: String,
+    tool_calls: Vec<ProviderToolCall>,
+}
+
+impl ProviderToolCall {
+    #[cfg(test)]
+    pub(crate) fn test_function(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            kind: "function".to_owned(),
+            function: ProviderFunctionCall {
+                name: name.into(),
+                arguments: arguments.into(),
+            },
+        }
+    }
+
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
+    pub(crate) const fn function(&self) -> &ProviderFunctionCall {
+        &self.function
+    }
+}
+
+impl ProviderFunctionCall {
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+    pub(crate) fn arguments(&self) -> &str {
+        &self.arguments
+    }
+}
+
+impl ProviderResponse {
+    #[cfg(test)]
+    pub(crate) fn test_response(
+        content: impl Into<String>,
+        tool_calls: Vec<ProviderToolCall>,
+    ) -> Self {
+        Self {
+            content: content.into(),
+            tool_calls,
+        }
+    }
+
+    pub(crate) fn content(&self) -> &str {
+        &self.content
+    }
+    pub(crate) fn tool_calls(&self) -> &[ProviderToolCall] {
+        &self.tool_calls
+    }
 }
 
 #[derive(Serialize)]
@@ -332,6 +409,26 @@ pub(crate) struct OpenAiProvider {
     client: Client,
 }
 
+pub(crate) struct ProviderCompletion<'a> {
+    messages: &'a [ProviderMessage],
+    tools: &'a [Value],
+    cancel: Arc<AtomicBool>,
+}
+
+impl<'a> ProviderCompletion<'a> {
+    pub(crate) fn new(
+        messages: &'a [ProviderMessage],
+        tools: &'a [Value],
+        cancel: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            messages,
+            tools,
+            cancel,
+        }
+    }
+}
+
 impl OpenAiProvider {
     pub(crate) fn new(config: ProviderConfig) -> Result<Self, String> {
         let client = Client::builder()
@@ -344,14 +441,17 @@ impl OpenAiProvider {
 
     pub(crate) async fn complete<F>(
         &self,
-        messages: &[ProviderMessage],
-        tools: &[Value],
-        cancel: Arc<AtomicBool>,
+        completion: ProviderCompletion<'_>,
         mut on_text_delta: F,
     ) -> Result<ProviderResponse, String>
     where
         F: FnMut(&str),
     {
+        let ProviderCompletion {
+            messages,
+            tools,
+            cancel,
+        } = completion;
         let endpoint = self.config.completions_url()?;
         for attempt in 0..MAX_ATTEMPTS {
             if cancel.load(Ordering::SeqCst) {
@@ -697,9 +797,11 @@ mod tests {
         let mut deltas = String::new();
         let response = provider
             .complete(
-                &[ProviderMessage::text("user", "show relations")],
-                &[serde_json::json!({"type":"function"})],
-                Arc::new(AtomicBool::new(false)),
+                ProviderCompletion::new(
+                    &[ProviderMessage::text("user", "show relations")],
+                    &[serde_json::json!({"type":"function"})],
+                    Arc::new(AtomicBool::new(false)),
+                ),
                 |delta| deltas.push_str(delta),
             )
             .await
@@ -722,7 +824,10 @@ mod tests {
         );
         let provider = test_provider(app).await;
         let response = provider
-            .complete(&[], &[], Arc::new(AtomicBool::new(false)), |_| {})
+            .complete(
+                ProviderCompletion::new(&[], &[], Arc::new(AtomicBool::new(false))),
+                |_| {},
+            )
             .await
             .unwrap();
         assert_eq!(response.tool_calls.len(), 2);
@@ -751,7 +856,10 @@ mod tests {
         );
         let provider = test_provider(app).await;
         let error = provider
-            .complete(&[], &[], Arc::new(AtomicBool::new(false)), |_| {})
+            .complete(
+                ProviderCompletion::new(&[], &[], Arc::new(AtomicBool::new(false))),
+                |_| {},
+            )
             .await
             .unwrap_err();
         assert!(error.contains("tool-call index"));
@@ -787,9 +895,10 @@ mod tests {
         let provider = test_provider(app).await;
         let mut deltas = String::new();
         let response = provider
-            .complete(&[], &[], Arc::new(AtomicBool::new(false)), |delta| {
-                deltas.push_str(delta)
-            })
+            .complete(
+                ProviderCompletion::new(&[], &[], Arc::new(AtomicBool::new(false))),
+                |delta| deltas.push_str(delta),
+            )
             .await
             .unwrap();
         assert_eq!(response.content, "café robot");
@@ -820,9 +929,11 @@ mod tests {
         let provider = test_provider(app).await;
         let response = provider
             .complete(
-                &[ProviderMessage::text("user", "hello")],
-                &[],
-                Arc::new(AtomicBool::new(false)),
+                ProviderCompletion::new(
+                    &[ProviderMessage::text("user", "hello")],
+                    &[],
+                    Arc::new(AtomicBool::new(false)),
+                ),
                 |_| {},
             )
             .await
@@ -845,9 +956,11 @@ mod tests {
         let provider = test_provider(app).await;
         let error = provider
             .complete(
-                &[ProviderMessage::text("user", "hello")],
-                &[],
-                Arc::new(AtomicBool::new(false)),
+                ProviderCompletion::new(
+                    &[ProviderMessage::text("user", "hello")],
+                    &[],
+                    Arc::new(AtomicBool::new(false)),
+                ),
                 |_| {},
             )
             .await
@@ -856,7 +969,7 @@ mod tests {
 
         let cancel = Arc::new(AtomicBool::new(true));
         let error = provider
-            .complete(&[], &[], cancel, |_| {})
+            .complete(ProviderCompletion::new(&[], &[], cancel), |_| {})
             .await
             .unwrap_err();
         assert_eq!(error, "Agent turn cancelled.");
@@ -870,7 +983,10 @@ mod tests {
         );
         let provider = test_provider(app).await;
         let error = provider
-            .complete(&[], &[], Arc::new(AtomicBool::new(false)), |_| {})
+            .complete(
+                ProviderCompletion::new(&[], &[], Arc::new(AtomicBool::new(false))),
+                |_| {},
+            )
             .await
             .unwrap_err();
         assert!(!error.contains("test-secret"));
@@ -892,7 +1008,10 @@ mod tests {
         );
         let provider = test_provider(app).await;
         let error = provider
-            .complete(&[], &[], Arc::new(AtomicBool::new(false)), |_| {})
+            .complete(
+                ProviderCompletion::new(&[], &[], Arc::new(AtomicBool::new(false))),
+                |_| {},
+            )
             .await
             .unwrap_err();
         assert!(error.contains("2 MiB safety limit"));

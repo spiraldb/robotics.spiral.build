@@ -1,9 +1,8 @@
-//! Camera discovery, still capture, and live JPEG streaming.
+//! Camera discovery and live JPEG streaming.
 //!
 //! Probing an unknown video node can hang or take a driver down with it, so
-//! discovery and still capture run in a short-lived copy of the current
-//! executable and are killed if they overrun. Any binary that calls
-//! [`discover`] or [`capture_still`] must therefore hand control to
+//! discovery runs in a short-lived copy of the current executable and is
+//! killed if it overruns. Any binary that calls [`discover`] must hand control to
 //! [`run_worker`] at startup when [`worker_mode`] returns a mode.
 //!
 //! Live streaming runs in the calling thread instead: by the time an operator
@@ -33,12 +32,10 @@ use tempfile::{Builder as TempDirBuilder, TempDir};
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
 const CAMERA_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
-const CAPTURE_GRACE_PERIOD: Duration = Duration::from_secs(10);
 const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const WORKER_MODE_ENV: &str = "SPIRAL_ROBOTICS_INTERNAL_CAMERA_WORKER";
 const WORKER_REQUEST_ENV: &str = "SPIRAL_ROBOTICS_INTERNAL_CAMERA_REQUEST";
 const WORKER_RESPONSE_ENV: &str = "SPIRAL_ROBOTICS_INTERNAL_CAMERA_RESPONSE";
-const WORKER_IMAGE_ENV: &str = "SPIRAL_ROBOTICS_INTERNAL_CAMERA_IMAGE";
 
 /// JPEG quality used when a camera's frames have to be re-encoded.
 pub const DEFAULT_JPEG_QUALITY: u8 = 80;
@@ -46,8 +43,8 @@ pub const DEFAULT_JPEG_QUALITY: u8 = 80;
 /// A camera that answered a probe, together with the profile it will stream.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct DetectedCamera {
-    pub info: CameraInfo,
-    pub stream_format: CameraFormat,
+    info: CameraInfo,
+    stream_format: CameraFormat,
 }
 
 impl DetectedCamera {
@@ -77,22 +74,6 @@ impl DetectedCamera {
     }
 }
 
-/// Timing for choosing a representative still after a camera warms up.
-#[derive(Clone, Copy, Debug)]
-pub struct CaptureTiming {
-    warmup: Duration,
-    record_time: Duration,
-}
-
-impl CaptureTiming {
-    pub const fn new(warmup: Duration, record_time: Duration) -> Self {
-        Self {
-            warmup,
-            record_time,
-        }
-    }
-}
-
 /// Lifetime and encoding quality for one live JPEG stream.
 #[derive(Clone, Copy, Debug)]
 pub struct JpegStreamConfig<'a> {
@@ -107,14 +88,6 @@ impl<'a> JpegStreamConfig<'a> {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-struct CaptureRequest {
-    camera: DetectedCamera,
-    warmup_secs: u64,
-    record_time_secs: u64,
-    record_time_nanos: u32,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
 enum ProbeResponse {
     Camera(DetectedCamera),
     UnsupportedVideoNode,
@@ -124,22 +97,37 @@ enum ProbeResponse {
 #[derive(Debug, Default)]
 pub struct ProbeOutcome {
     /// Cameras that opened successfully.
-    pub cameras: Vec<DetectedCamera>,
+    cameras: Vec<DetectedCamera>,
     /// Nodes that exist but are not usable video-capture devices.
-    pub skipped: Vec<String>,
+    skipped: Vec<String>,
     /// Cameras that failed to probe, each described with its reason.
-    pub failures: Vec<String>,
+    failures: Vec<String>,
+}
+
+impl ProbeOutcome {
+    /// Split discovery into the usable devices and the two diagnostic classes.
+    pub fn into_parts(self) -> (Vec<DetectedCamera>, Vec<String>, Vec<String>) {
+        (self.cameras, self.skipped, self.failures)
+    }
 }
 
 /// A single encoded frame from a live camera.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JpegFrame {
     /// A complete JPEG image.
-    pub bytes: Vec<u8>,
-    pub width: u32,
-    pub height: u32,
+    bytes: Vec<u8>,
     /// Frames delivered on this stream so far, starting at one.
-    pub sequence: u64,
+    sequence: u64,
+}
+
+impl JpegFrame {
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+
+    pub const fn sequence(&self) -> u64 {
+        self.sequence
+    }
 }
 
 /// Return the worker mode this process was launched with, if any.
@@ -174,15 +162,6 @@ pub fn run_worker(mode: &str) -> Result<()> {
                 ProbeResponse::UnsupportedVideoNode
             };
             write_json(&response_path, &response)
-        }
-        "capture" => {
-            let request: CaptureRequest = read_json(&request_path)?;
-            let image_path = required_worker_path(WORKER_IMAGE_ENV)?;
-            let warmup = Duration::from_secs(request.warmup_secs);
-            let record_time = Duration::new(request.record_time_secs, request.record_time_nanos);
-            let image = capture_latest_frame(&request.camera, warmup, record_time)?;
-            image.save(image_path)?;
-            Ok(())
         }
         _ => Err(format!("unknown internal camera worker mode '{mode}'").into()),
     })();
@@ -252,40 +231,6 @@ pub fn discover() -> Result<ProbeOutcome> {
 }
 
 impl DetectedCamera {
-    /// Save one recent frame into `output_dir` as a PNG.
-    pub fn capture_still(&self, output_dir: &Path, timing: CaptureTiming) -> Result<PathBuf> {
-        let identifier = sanitize_camera_identifier(&self.identifier());
-        let output_path = output_dir.join(format!("opencv_{identifier}.png"));
-        let workspace = private_workspace(Some(output_dir), ".spiral-robotics-camera-capture-")?;
-        let image_path = workspace.path().join("image.png");
-        let request_path = workspace.path().join("request.json");
-        let response_path = workspace.path().join("response.txt");
-        let request = CaptureRequest {
-            camera: self.clone(),
-            warmup_secs: timing.warmup.as_secs(),
-            record_time_secs: timing.record_time.as_secs(),
-            record_time_nanos: timing.record_time.subsec_nanos(),
-        };
-        let timeout = timing
-            .warmup
-            .saturating_add(timing.record_time)
-            .saturating_add(CAPTURE_GRACE_PERIOD);
-
-        write_json(&request_path, &request)?;
-        WorkerInvocation {
-            mode: "capture",
-            request_path: &request_path,
-            response_path: &response_path,
-            image_path: Some(&image_path),
-        }
-        .invoke(timeout)?;
-        if !image_path.is_file() {
-            return Err("camera worker exited without producing an image".into());
-        }
-        promote_capture(&image_path, &output_path)?;
-        Ok(output_path)
-    }
-
     /// Stream JPEG frames until the configured stop flag is set.
     ///
     /// Cameras that already deliver MJPEG are passed through untouched; anything
@@ -309,7 +254,6 @@ impl DetectedCamera {
                     break;
                 }
             };
-            let resolution = frame.resolution();
             let bytes = match frame.source_frame_format() {
                 FrameFormat::MJPEG => frame.buffer().to_vec(),
                 _ => match frame.decode_image::<RgbFormat>() {
@@ -328,35 +272,12 @@ impl DetectedCamera {
             };
 
             sequence += 1;
-            sink(JpegFrame {
-                bytes,
-                width: resolution.width(),
-                height: resolution.height(),
-                sequence,
-            });
+            sink(JpegFrame { bytes, sequence });
         }
 
         // Always release the device, even when the loop failed.
         let stopped = camera.stop_stream();
         result.and_then(|()| stopped.map_err(Into::into))
-    }
-}
-
-/// Build a filesystem-safe suffix from a camera identifier.
-fn sanitize_camera_identifier(identifier: &str) -> String {
-    let sanitized = identifier
-        .chars()
-        .map(|character| match character {
-            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
-            character if character.is_control() => '_',
-            character => character,
-        })
-        .collect::<String>();
-
-    if sanitized.is_empty() {
-        "unknown".to_owned()
-    } else {
-        sanitized
     }
 }
 
@@ -391,7 +312,6 @@ fn probe_in_worker(info: CameraInfo) -> Result<ProbeResponse> {
         mode: "probe",
         request_path: &request_path,
         response_path: &response_path,
-        image_path: None,
     }
     .invoke(CAMERA_PROBE_TIMEOUT)?;
     read_json(&response_path)
@@ -426,31 +346,6 @@ fn is_supported_video_capture_node(_info: &CameraInfo) -> Result<bool> {
     Ok(true)
 }
 
-fn capture_latest_frame(
-    detected: &DetectedCamera,
-    warmup: Duration,
-    record_time: Duration,
-) -> Result<RgbImage> {
-    let requested =
-        RequestedFormat::new::<RgbFormat>(RequestedFormatType::Exact(detected.stream_format));
-    let mut camera = Camera::new(camera_open_index(&detected.info), requested)?;
-    camera.open_stream()?;
-
-    if !warmup.is_zero() {
-        thread::sleep(warmup);
-    }
-
-    let started = Instant::now();
-    let mut latest = None;
-    while latest.is_none() || started.elapsed() < record_time {
-        let frame = camera.frame()?;
-        latest = Some(frame.decode_image::<RgbFormat>()?);
-    }
-
-    camera.stop_stream()?;
-    Ok(latest.expect("the capture loop always reads at least one frame"))
-}
-
 fn camera_open_index(info: &CameraInfo) -> CameraIndex {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
@@ -469,7 +364,6 @@ struct WorkerInvocation<'a> {
     mode: &'a str,
     request_path: &'a Path,
     response_path: &'a Path,
-    image_path: Option<&'a Path>,
 }
 
 impl Drop for WorkerChild {
@@ -497,9 +391,6 @@ impl WorkerInvocation<'_> {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        if let Some(image_path) = self.image_path {
-            command.env(WORKER_IMAGE_ENV, image_path);
-        }
         let mut child = WorkerChild(command.spawn()?);
 
         let status = wait_for_child(&mut child.0, timeout)?;
@@ -581,56 +472,11 @@ fn private_workspace(directory: Option<&Path>, prefix: &str) -> Result<TempDir> 
     }
 }
 
-#[cfg(not(target_os = "windows"))]
-fn promote_capture(temporary: &Path, output: &Path) -> Result<()> {
-    fs::rename(temporary, output)?;
-    Ok(())
-}
-
-#[cfg(target_os = "windows")]
-fn promote_capture(temporary: &Path, output: &Path) -> Result<()> {
-    use std::io;
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-    };
-
-    let temporary: Vec<u16> = temporary.as_os_str().encode_wide().chain(Some(0)).collect();
-    let output: Vec<u16> = output.as_os_str().encode_wide().chain(Some(0)).collect();
-    // SAFETY: Both paths are owned, NUL-terminated UTF-16 buffers that remain
-    // alive for the duration of this call.
-    let moved = unsafe {
-        MoveFileExW(
-            temporary.as_ptr(),
-            output.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if moved == 0 {
-        Err(io::Error::last_os_error().into())
-    } else {
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const SLEEPING_CHILD_ENV: &str = "SPIRAL_ROBOTICS_TEST_SLEEPING_CAMERA_CHILD";
-
-    #[test]
-    fn makes_camera_identifiers_safe_for_paths() {
-        assert_eq!(
-            sanitize_camera_identifier("/dev/video0\\stream:main?"),
-            "_dev_video0_stream_main_"
-        );
-    }
-
-    #[test]
-    fn gives_empty_identifiers_a_name() {
-        assert_eq!(sanitize_camera_identifier(""), "unknown");
-    }
 
     #[test]
     fn creates_distinct_private_workspaces() {

@@ -15,7 +15,9 @@ use adbc_driver_spiraldb::{
     Connection as SpiralConnection, Database as SpiralDatabase, Driver as SpiralDriver,
     Statement as SpiralStatement,
 };
-use arrow_array::{Array as _, ListArray, RecordBatchReader, StringArray, StructArray};
+use arrow_array::{
+    Array as _, ListArray, RecordBatch, RecordBatchReader, StringArray, StructArray,
+};
 use arrow_schema::Schema;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -51,9 +53,26 @@ pub struct StorageConnection {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CatalogRelation {
-    pub name: String,
-    pub relation_type: String,
+pub(crate) struct CatalogRelation {
+    name: String,
+    relation_type: String,
+}
+
+impl CatalogRelation {
+    fn new(name: String, relation_type: String) -> Self {
+        Self {
+            name,
+            relation_type,
+        }
+    }
+
+    pub(crate) fn into_name(self) -> String {
+        self.name
+    }
+
+    pub(crate) fn into_parts(self) -> (String, String) {
+        (self.name, self.relation_type)
+    }
 }
 
 impl StorageConnection {
@@ -67,11 +86,66 @@ impl StorageConnection {
         self.reusable = false;
     }
 
-    pub fn new_statement(&mut self) -> Result<StorageStatement, String> {
+    pub(crate) fn new_statement(&mut self) -> Result<StorageStatement, String> {
         self.inner
             .new_statement()
             .map(|inner| StorageStatement { inner })
             .map_err(|error| error.to_string())
+    }
+
+    /// Execute one read query without exposing the mutable ADBC statement
+    /// lifecycle outside the storage crate.
+    pub fn execute_query(
+        &mut self,
+        sql: impl AsRef<str>,
+    ) -> Result<Box<dyn RecordBatchReader + Send + 'static>, String> {
+        let mut statement = self.new_statement()?;
+        statement.set_sql_query(sql)?;
+        statement.execute()
+    }
+
+    pub fn ensure_dataset_namespace(&mut self, namespace: &str) -> Result<(), String> {
+        crate::manager::ensure_dataset_namespace(self, namespace)
+    }
+
+    pub fn ingest_batch(&mut self, target: &str, batch: RecordBatch) -> Result<(), String> {
+        crate::manager::ingest_batch(self, target, batch)
+    }
+
+    pub fn replace_batches(
+        &mut self,
+        target: &str,
+        batches: Vec<RecordBatch>,
+    ) -> Result<(), String> {
+        crate::manager::replace_batches(self, target, batches)
+    }
+
+    pub fn table_exists(&self, target: &str) -> Result<bool, String> {
+        crate::manager::table_exists(self, target)
+    }
+
+    pub fn execute_update_sql(&mut self, sql: &str) -> Result<(), String> {
+        crate::manager::execute_update_sql(self, sql)
+    }
+
+    pub fn execute_delete_sql(&mut self, sql: &str) -> Result<(), String> {
+        crate::manager::execute_delete_sql(self, sql)
+    }
+
+    pub fn run_query(
+        &mut self,
+        sql: &str,
+        max_rows: usize,
+    ) -> Result<spiral_robotics_api::relations::SpiralQueryResponse, String> {
+        crate::manager::run_query(self, sql, max_rows)
+    }
+
+    pub fn rebuild_video_dataset(
+        &mut self,
+        namespace: &str,
+        recover_existing: bool,
+    ) -> Result<(), String> {
+        crate::manager::rebuild_video_dataset(self, namespace, recover_existing)
     }
 
     pub fn table_schema(&self, table: &str) -> Result<Option<Schema>, String> {
@@ -82,7 +156,7 @@ impl StorageConnection {
         }
     }
 
-    pub fn check_catalog_table(&self, project: &str, table: &str) -> Result<(), String> {
+    pub(crate) fn check_catalog_table(&self, project: &str, table: &str) -> Result<(), String> {
         let reader = self
             .inner
             .get_objects(
@@ -103,7 +177,10 @@ impl StorageConnection {
     /// Enumerate the durable relations advertised by the active Spiral
     /// project. Temporary query-session relations are intentionally absent
     /// from the driver's ADBC catalog.
-    pub fn list_catalog_relations(&self, project: &str) -> Result<Vec<CatalogRelation>, String> {
+    pub(crate) fn list_catalog_relations(
+        &self,
+        project: &str,
+    ) -> Result<Vec<CatalogRelation>, String> {
         let reader = self
             .inner
             .get_objects(
@@ -160,10 +237,10 @@ impl StorageConnection {
                         if names.is_null(table_row) || types.is_null(table_row) {
                             continue;
                         }
-                        relations.push(CatalogRelation {
-                            name: names.value(table_row).to_owned(),
-                            relation_type: types.value(table_row).to_owned(),
-                        });
+                        relations.push(CatalogRelation::new(
+                            names.value(table_row).to_owned(),
+                            types.value(table_row).to_owned(),
+                        ));
                     }
                 }
             }
@@ -171,6 +248,17 @@ impl StorageConnection {
         relations.sort_by(|left, right| left.name.cmp(&right.name));
         relations.dedup_by(|left, right| left.name == right.name);
         Ok(relations)
+    }
+
+    /// List durable relation names without exposing the driver's catalog
+    /// representation across the storage boundary.
+    pub fn catalog_relation_names(&self, project: &str) -> Result<Vec<String>, String> {
+        self.list_catalog_relations(project).map(|relations| {
+            relations
+                .into_iter()
+                .map(|relation| relation.name)
+                .collect()
+        })
     }
 
     pub fn set_autocommit(&mut self, enabled: bool) -> Result<(), String> {
@@ -190,22 +278,22 @@ impl StorageConnection {
 
 /// A statement whose synchronous ADBC implementation remains private to this
 /// adapter. Callers can compose project_store work without importing ADBC.
-pub struct StorageStatement {
+pub(crate) struct StorageStatement {
     inner: SpiralStatement,
 }
 
 impl StorageStatement {
-    pub fn set_sql_query(&mut self, sql: impl AsRef<str>) -> Result<(), String> {
+    pub(crate) fn set_sql_query(&mut self, sql: impl AsRef<str>) -> Result<(), String> {
         self.inner
             .set_sql_query(sql)
             .map_err(|error| error.to_string())
     }
 
-    pub fn configure_ingest(&mut self, target: &str) -> Result<(), String> {
+    pub(crate) fn configure_ingest(&mut self, target: &str) -> Result<(), String> {
         self.configure_ingest_mode(target, IngestMode::CreateAppend)
     }
 
-    pub fn configure_replace(&mut self, target: &str) -> Result<(), String> {
+    pub(crate) fn configure_replace(&mut self, target: &str) -> Result<(), String> {
         self.configure_ingest_mode(target, IngestMode::Replace)
     }
 
@@ -218,17 +306,22 @@ impl StorageStatement {
             .map_err(|error| error.to_string())
     }
 
-    pub fn bind_stream(&mut self, reader: Box<dyn RecordBatchReader + Send>) -> Result<(), String> {
+    pub(crate) fn bind_stream(
+        &mut self,
+        reader: Box<dyn RecordBatchReader + Send>,
+    ) -> Result<(), String> {
         self.inner
             .bind_stream(reader)
             .map_err(|error| error.to_string())
     }
 
-    pub fn execute(&mut self) -> Result<Box<dyn RecordBatchReader + Send + 'static>, String> {
+    pub(crate) fn execute(
+        &mut self,
+    ) -> Result<Box<dyn RecordBatchReader + Send + 'static>, String> {
         self.inner.execute().map_err(|error| error.to_string())
     }
 
-    pub fn execute_update(&mut self) -> Result<Option<i64>, String> {
+    pub(crate) fn execute_update(&mut self) -> Result<Option<i64>, String> {
         self.inner
             .execute_update()
             .map_err(|error| error.to_string())
@@ -305,25 +398,25 @@ impl ProjectStore {
             .to_owned()
     }
 
-    pub fn endpoint(&self) -> String {
+    pub(crate) fn endpoint(&self) -> String {
         read(&self.connection_settings).endpoint().to_owned()
     }
 
-    pub fn spfs_endpoint(&self) -> String {
+    pub(crate) fn spfs_endpoint(&self) -> String {
         read(&self.connection_settings).spfs_endpoint().to_owned()
     }
 
-    pub fn credentials(&self) -> Option<SpiralCredentials> {
+    pub(crate) fn credentials(&self) -> Option<SpiralCredentials> {
         read(&self.connection_settings).credentials().cloned()
     }
 
-    pub fn is_configured(&self) -> bool {
+    pub(crate) fn is_configured(&self) -> bool {
         read(&self.connection_settings).project_id().is_some()
     }
 
     /// Initialize the shared driver/database and force one authenticated
     /// project-catalog lookup without mutating project data.
-    pub async fn prewarm(&self) -> Result<(), String> {
+    pub(crate) async fn prewarm(&self) -> Result<(), String> {
         let namespace = self.namespace.clone();
         self.run(move |connection| {
             let _ = connection.table_schema(&namespace)?;
@@ -349,7 +442,7 @@ impl ProjectStore {
     /// Atomically switch the complete per-database destination. Active work is
     /// drained before the old pool is discarded; the next checkout opens a
     /// database with the new scoped endpoint and credential options.
-    pub fn configure_connection(
+    pub(crate) fn configure_connection(
         &self,
         connection_settings: SpiralConnectionSettings,
     ) -> Result<(), String> {
@@ -377,7 +470,7 @@ impl ProjectStore {
         &self.namespace
     }
 
-    pub async fn run<T, F>(&self, operation: F) -> Result<T, String>
+    pub(crate) async fn run<T, F>(&self, operation: F) -> Result<T, String>
     where
         T: Send + 'static,
         F: FnOnce(&mut StorageConnection) -> Result<T, String> + Send + 'static,

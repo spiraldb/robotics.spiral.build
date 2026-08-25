@@ -13,11 +13,27 @@ use crate::robotics::cameras::{CameraManager, Frame};
 
 #[derive(Clone, Debug)]
 pub(crate) struct CameraCaptureSpec {
-    pub(crate) stream_id: String,
-    pub(crate) camera_id: String,
-    pub(crate) width: u32,
-    pub(crate) height: u32,
-    pub(crate) fps: u32,
+    stream_id: String,
+    camera_id: String,
+    width: u32,
+    height: u32,
+    fps: u32,
+}
+
+impl CameraCaptureSpec {
+    pub(crate) fn new(
+        stream_id: impl Into<String>,
+        camera_id: impl Into<String>,
+        format: (u32, u32, u32),
+    ) -> Self {
+        Self {
+            stream_id: stream_id.into(),
+            camera_id: camera_id.into(),
+            width: format.0,
+            height: format.1,
+            fps: format.2,
+        }
+    }
 }
 
 /// Hard ceiling for one active camera segment. Camera bytes are transient
@@ -68,6 +84,161 @@ struct PreparedCameraSegment {
     spec: CameraCaptureSpec,
     frames: watch::Receiver<Option<Arc<Frame>>>,
     segment: CameraSegment,
+}
+
+impl PreparedCameraSegment {
+    async fn record(
+        self,
+        mut control: watch::Receiver<CaptureState>,
+    ) -> Result<VideoAsset, String> {
+        let Self {
+            spec,
+            mut frames,
+            segment,
+        } = self;
+        let encoder_fps = spec.fps.clamp(1, 120);
+        let rate = encoder_fps.to_string();
+        let mut child = tokio::process::Command::new(&segment.ffmpeg)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "image2pipe",
+                "-vcodec",
+                "mjpeg",
+                "-framerate",
+                &rate,
+                "-i",
+                "pipe:0",
+                "-an",
+                "-c:v",
+                &segment.codec,
+                "-vf",
+                "scale=in_range=auto:out_range=tv",
+                "-pix_fmt",
+                "yuv420p",
+                "-color_range",
+                "tv",
+                "-movflags",
+                "frag_keyframe+empty_moov+default_base_moof",
+                "-f",
+                "mp4",
+                "-y",
+            ])
+            .arg("pipe:1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|error| format!("could not start {:?}: {error}", segment.ffmpeg))?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "FFmpeg did not open its input pipe".to_owned())?;
+        let mut stderr = child.stderr.take();
+        let mut stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "FFmpeg did not open its output pipe".to_owned())?;
+        let output_task = tokio::spawn(async move {
+            let mut payload = Vec::new();
+            let mut buffer = vec![0_u8; 64 * 1024];
+            loop {
+                let read = stdout
+                    .read(&mut buffer)
+                    .await
+                    .map_err(|error| format!("could not read FFmpeg MP4 output: {error}"))?;
+                if read == 0 {
+                    break;
+                }
+                if payload.len().saturating_add(read) > MAX_VIDEO_SEGMENT_BYTES {
+                    return Err(format!(
+                        "camera segment exceeded the {} MiB in-memory transaction limit",
+                        MAX_VIDEO_SEGMENT_BYTES / (1024 * 1024)
+                    ));
+                }
+                payload.extend_from_slice(&buffer[..read]);
+            }
+            Ok::<_, String>(payload)
+        });
+        let stderr_task = tokio::spawn(async move {
+            let mut bytes = Vec::new();
+            if let Some(mut stderr) = stderr.take() {
+                let _ = stderr.read_to_end(&mut bytes).await;
+            }
+            String::from_utf8_lossy(&bytes).trim().to_owned()
+        });
+
+        let mut written = 0_u64;
+        let mut last_sequence = 0_u64;
+        loop {
+            if *control.borrow() == CaptureState::Finish {
+                break;
+            }
+            tokio::select! {
+                biased;
+                changed = control.changed() => {
+                    if changed.is_err() || *control.borrow() == CaptureState::Finish {
+                        break;
+                    }
+                }
+                changed = frames.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                    let frame = frames.borrow_and_update().clone();
+                    let Some(frame) = frame else { continue };
+                    if frame.sequence() <= last_sequence {
+                        continue;
+                    }
+                    stdin.write_all(frame.bytes()).await.map_err(|error| {
+                        format!("camera {} could not write to FFmpeg: {error}", spec.stream_id)
+                    })?;
+                    last_sequence = frame.sequence();
+                    written += 1;
+                }
+            }
+        }
+        drop(stdin);
+
+        let status = match tokio::time::timeout(Duration::from_secs(10), child.wait()).await {
+            Ok(result) => result.map_err(|error| format!("FFmpeg wait failed: {error}"))?,
+            Err(_) => {
+                let _ = child.kill().await;
+                return Err(format!("FFmpeg did not finish camera {}", spec.stream_id));
+            }
+        };
+        let stderr = stderr_task.await.unwrap_or_default();
+        if !status.success() {
+            return Err(format!(
+                "FFmpeg failed for camera {}{}",
+                spec.stream_id,
+                if stderr.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {stderr}")
+                }
+            ));
+        }
+        let payload = output_task
+            .await
+            .map_err(|error| format!("FFmpeg output task failed: {error}"))??;
+        if written == 0 || payload.is_empty() {
+            return Err(format!(
+                "camera {} delivered no video frames",
+                spec.stream_id
+            ));
+        }
+        Ok(VideoAsset::new(spec.stream_id, spec.camera_id, payload)
+            .with_size(VideoSize::new(spec.width, spec.height))
+            .with_timing(VideoTiming::new(encoder_fps, written))
+            .with_segment(VideoSegment::new(
+                segment.index,
+                Some(segment.timeline_offset_seconds),
+            )))
+    }
 }
 
 /// Immutable configuration for one encoded interval of one camera stream.
@@ -204,12 +375,7 @@ impl VideoCapture {
         let (control, _) = watch::channel(CaptureState::Recording);
         let mut tasks = Vec::with_capacity(prepared.len());
         for prepared in prepared {
-            tasks.push(tokio::spawn(record_camera(
-                prepared.spec,
-                prepared.frames,
-                control.subscribe(),
-                prepared.segment,
-            )));
+            tasks.push(tokio::spawn(prepared.record(control.subscribe())));
         }
         self.progress.next_segment += 1;
         self.progress.active = Some(VideoCaptureRun { control, tasks });
@@ -273,159 +439,6 @@ impl VideoCapture {
         let failures = self.finish_active().await;
         (self.progress.completed, failures)
     }
-}
-
-async fn record_camera(
-    spec: CameraCaptureSpec,
-    mut frames: watch::Receiver<Option<Arc<Frame>>>,
-    mut control: watch::Receiver<CaptureState>,
-    segment: CameraSegment,
-) -> Result<VideoAsset, String> {
-    let encoder_fps = spec.fps.clamp(1, 120);
-    let rate = encoder_fps.to_string();
-    let mut child = tokio::process::Command::new(&segment.ffmpeg)
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-f",
-            "image2pipe",
-            "-vcodec",
-            "mjpeg",
-            "-framerate",
-            &rate,
-            "-i",
-            "pipe:0",
-            "-an",
-            "-c:v",
-            &segment.codec,
-            // JPEG camera frames are full-range. Convert their sample values as
-            // well as tagging the H.264 output, so decoders see ordinary
-            // limited-range yuv420p instead of the deprecated yuvj420p alias.
-            "-vf",
-            "scale=in_range=auto:out_range=tv",
-            "-pix_fmt",
-            "yuv420p",
-            "-color_range",
-            "tv",
-            "-movflags",
-            "frag_keyframe+empty_moov+default_base_moof",
-            "-f",
-            "mp4",
-            "-y",
-        ])
-        .arg("pipe:1")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|error| format!("could not start {:?}: {error}", segment.ffmpeg))?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| "FFmpeg did not open its input pipe".to_owned())?;
-    let mut stderr = child.stderr.take();
-    let mut stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "FFmpeg did not open its output pipe".to_owned())?;
-    let output_task = tokio::spawn(async move {
-        let mut payload = Vec::new();
-        let mut buffer = vec![0_u8; 64 * 1024];
-        loop {
-            let read = stdout
-                .read(&mut buffer)
-                .await
-                .map_err(|error| format!("could not read FFmpeg MP4 output: {error}"))?;
-            if read == 0 {
-                break;
-            }
-            if payload.len().saturating_add(read) > MAX_VIDEO_SEGMENT_BYTES {
-                return Err(format!(
-                    "camera segment exceeded the {} MiB in-memory transaction limit",
-                    MAX_VIDEO_SEGMENT_BYTES / (1024 * 1024)
-                ));
-            }
-            payload.extend_from_slice(&buffer[..read]);
-        }
-        Ok::<_, String>(payload)
-    });
-    let stderr_task = tokio::spawn(async move {
-        let mut bytes = Vec::new();
-        if let Some(mut stderr) = stderr.take() {
-            let _ = stderr.read_to_end(&mut bytes).await;
-        }
-        String::from_utf8_lossy(&bytes).trim().to_owned()
-    });
-
-    let mut written = 0_u64;
-    let mut last_sequence = 0_u64;
-    loop {
-        if *control.borrow() == CaptureState::Finish {
-            break;
-        }
-        tokio::select! {
-            biased;
-            changed = control.changed() => {
-                if changed.is_err() || *control.borrow() == CaptureState::Finish {
-                    break;
-                }
-            }
-            changed = frames.changed() => {
-                if changed.is_err() {
-                    break;
-                }
-                let frame = frames.borrow_and_update().clone();
-                let Some(frame) = frame else { continue };
-                if frame.sequence <= last_sequence {
-                    continue;
-                }
-                stdin.write_all(&frame.bytes).await.map_err(|error| {
-                    format!("camera {} could not write to FFmpeg: {error}", spec.stream_id)
-                })?;
-                last_sequence = frame.sequence;
-                written += 1;
-            }
-        }
-    }
-    drop(stdin);
-
-    let status = match tokio::time::timeout(Duration::from_secs(10), child.wait()).await {
-        Ok(result) => result.map_err(|error| format!("FFmpeg wait failed: {error}"))?,
-        Err(_) => {
-            let _ = child.kill().await;
-            return Err(format!("FFmpeg did not finish camera {}", spec.stream_id));
-        }
-    };
-    let stderr = stderr_task.await.unwrap_or_default();
-    if !status.success() {
-        return Err(format!(
-            "FFmpeg failed for camera {}{}",
-            spec.stream_id,
-            if stderr.is_empty() {
-                String::new()
-            } else {
-                format!(": {stderr}")
-            }
-        ));
-    }
-    let payload = output_task
-        .await
-        .map_err(|error| format!("FFmpeg output task failed: {error}"))??;
-    if written == 0 || payload.is_empty() {
-        return Err(format!(
-            "camera {} delivered no video frames",
-            spec.stream_id
-        ));
-    }
-    Ok(VideoAsset::new(spec.stream_id, spec.camera_id, payload)
-        .with_size(VideoSize::new(spec.width, spec.height))
-        .with_timing(VideoTiming::new(encoder_fps, written))
-        .with_segment(VideoSegment::new(
-            segment.index,
-            Some(segment.timeline_offset_seconds),
-        )))
 }
 
 fn safe_path_component(value: &str) -> bool {

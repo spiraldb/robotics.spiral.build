@@ -11,11 +11,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::schema::{Table, column as db};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
-use spiral_robotics_api::recording::{EpisodeArm, EpisodeSummary, RecordingGap};
+use spiral_robotics_api::recording::{
+    EpisodeArm, EpisodeAssessment, EpisodeIdentity as EpisodeSummaryIdentity, EpisodeSummary,
+    EpisodeTimeline, RecordingGap,
+};
 use spiral_robotics_api::robots::MotorLimits;
+pub use spiral_robotics_core::MAX_EPISODE_FRAMES;
 use spiral_robotics_core::arm::SO101_JOINTS;
 use spiral_robotics_core::calibration::Calibration;
-pub use spiral_robotics_core::episode::MAX_EPISODE_FRAMES;
 use spiral_robotics_hardware::RecordingCompletion;
 use spiral_robotics_hardware::RecordingWriter;
 pub use spiral_robotics_hardware::{ArmConditionSummary, EpisodeCheckpoint, Sample};
@@ -23,7 +26,7 @@ pub use spiral_robotics_hardware::{ArmConditionSummary, EpisodeCheckpoint, Sampl
 use crate::adbc::ProjectStore;
 use crate::episode_schema::{SpiralEpisodeEncoder, episode_completion_batch, joint_samples_batch};
 use crate::manager::{
-    execute_update_sql, ingest_batch, replace_episode_blocking, run_query, table_exists,
+    EpisodeReplacement, execute_update_sql, ingest_batch, run_query, table_exists,
 };
 use crate::sql;
 use crate::video::{VideoAssetMetadata, VideoSegment, VideoSize, VideoTiming};
@@ -33,12 +36,27 @@ const MAX_EPISODE_ROWS: usize = MAX_EPISODE_FRAMES as usize * 16;
 const NO_SAMPLE_TIMESTAMP_BITS: u64 = u64::MAX;
 
 type NormalizedPose = BTreeMap<String, f64>;
+pub type TimelineJointValues = BTreeMap<String, Option<f64>>;
 
 #[derive(Debug)]
 pub struct ReplayTrajectory {
-    pub frames: Vec<NormalizedPose>,
-    pub start_frame: usize,
-    pub resolved_start_seconds: f64,
+    frames: Vec<NormalizedPose>,
+    start_frame: usize,
+    resolved_start_seconds: f64,
+}
+
+impl ReplayTrajectory {
+    pub fn into_frames(self) -> Vec<NormalizedPose> {
+        self.frames
+    }
+
+    pub const fn start_frame(&self) -> usize {
+        self.start_frame
+    }
+
+    pub const fn resolved_start_seconds(&self) -> f64 {
+        self.resolved_start_seconds
+    }
 }
 
 #[derive(Debug)]
@@ -65,22 +83,132 @@ impl std::error::Error for EpisodeError {}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ArmCondition {
-    pub arm: String,
-    pub temperature_celsius: Vec<Option<f64>>,
-    pub voltage_volts: Vec<Option<f64>>,
-    pub limits: Vec<MotorLimits>,
+    arm: String,
+    temperature_celsius: Vec<Option<f64>>,
+    voltage_volts: Vec<Option<f64>>,
+    limits: Vec<MotorLimits>,
+}
+
+impl ArmCondition {
+    pub fn new(arm: String) -> Self {
+        Self {
+            arm,
+            temperature_celsius: Vec::new(),
+            voltage_volts: Vec::new(),
+            limits: Vec::new(),
+        }
+    }
+
+    pub fn with_measurements(
+        mut self,
+        temperature_celsius: Vec<Option<f64>>,
+        voltage_volts: Vec<Option<f64>>,
+    ) -> Self {
+        self.temperature_celsius = temperature_celsius;
+        self.voltage_volts = voltage_volts;
+        self
+    }
+
+    pub fn with_limits(mut self, limits: Vec<MotorLimits>) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    pub fn arm(&self) -> &str {
+        &self.arm
+    }
+
+    pub fn temperature_celsius(&self) -> &[Option<f64>] {
+        &self.temperature_celsius
+    }
+
+    pub fn voltage_volts(&self) -> &[Option<f64>] {
+        &self.voltage_volts
+    }
+
+    pub fn limits(&self) -> &[MotorLimits] {
+        &self.limits
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct EpisodeStart {
-    pub id: String,
-    pub dataset_id: String,
-    pub started_ms: i64,
-    pub sample_hz: f64,
-    pub source: String,
-    pub note: Option<String>,
-    pub arms: Vec<EpisodeArm>,
-    pub condition: Vec<ArmCondition>,
+    #[serde(flatten)]
+    identity: EpisodeIdentity,
+    #[serde(flatten)]
+    recording: EpisodeRecordingMetadata,
+    arms: Vec<EpisodeArm>,
+    condition: Vec<ArmCondition>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct EpisodeIdentity {
+    id: String,
+    dataset_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct EpisodeRecordingMetadata {
+    started_ms: i64,
+    sample_hz: f64,
+    source: String,
+    note: Option<String>,
+}
+
+impl EpisodeStart {
+    pub(crate) fn new(id: String, dataset_id: String) -> Self {
+        Self {
+            identity: EpisodeIdentity { id, dataset_id },
+            recording: EpisodeRecordingMetadata {
+                started_ms: 0,
+                sample_hz: 0.0,
+                source: String::new(),
+                note: None,
+            },
+            arms: Vec::new(),
+            condition: Vec::new(),
+        }
+    }
+
+    pub(crate) fn with_timing(mut self, started_ms: i64, sample_hz: f64) -> Self {
+        self.recording.started_ms = started_ms;
+        self.recording.sample_hz = sample_hz;
+        self
+    }
+
+    pub(crate) fn with_source(mut self, source: String, note: Option<String>) -> Self {
+        self.recording.source = source;
+        self.recording.note = note;
+        self
+    }
+
+    pub(crate) fn with_arms(mut self, arms: Vec<EpisodeArm>, condition: Vec<ArmCondition>) -> Self {
+        self.arms = arms;
+        self.condition = condition;
+        self
+    }
+
+    pub fn id(&self) -> &str {
+        &self.identity.id
+    }
+    pub fn dataset_id(&self) -> &str {
+        &self.identity.dataset_id
+    }
+    pub const fn started_ms(&self) -> i64 {
+        self.recording.started_ms
+    }
+    pub const fn sample_hz(&self) -> f64 {
+        self.recording.sample_hz
+    }
+    pub fn source(&self) -> &str {
+        &self.recording.source
+    }
+    pub fn note(&self) -> Option<&str> {
+        self.recording.note.as_deref()
+    }
+    pub fn arms(&self) -> &[EpisodeArm] {
+        &self.arms
+    }
 }
 
 /// Inputs supplied by the recording workflow before storage assigns identity
@@ -130,86 +258,416 @@ impl<'a> ReplayRequest<'a> {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct EpisodeCompletion {
-    pub duration_seconds: f64,
-    pub recording_gaps: Vec<RecordingGap>,
-    pub max_follow_error_degrees: Option<f64>,
-    pub discarded: bool,
-    pub condition: Vec<ArmConditionSummary>,
+pub(crate) struct EpisodeCompletion {
+    duration_seconds: f64,
+    recording_gaps: Vec<RecordingGap>,
+    max_follow_error_degrees: Option<f64>,
+    discarded: bool,
+    condition: Vec<ArmConditionSummary>,
+}
+
+impl EpisodeCompletion {
+    pub(crate) fn new(
+        duration_seconds: f64,
+        recording_gaps: Vec<RecordingGap>,
+        condition: Vec<ArmConditionSummary>,
+    ) -> Self {
+        Self {
+            duration_seconds,
+            recording_gaps,
+            max_follow_error_degrees: None,
+            discarded: false,
+            condition,
+        }
+    }
+
+    pub(crate) const fn with_max_follow_error_degrees(
+        mut self,
+        max_follow_error_degrees: Option<f64>,
+    ) -> Self {
+        self.max_follow_error_degrees = max_follow_error_degrees;
+        self
+    }
+
+    pub(crate) const fn with_discarded(mut self, discarded: bool) -> Self {
+        self.discarded = discarded;
+        self
+    }
+
+    pub(crate) const fn duration_seconds(&self) -> f64 {
+        self.duration_seconds
+    }
+
+    pub(crate) fn recording_gaps(&self) -> &[RecordingGap] {
+        &self.recording_gaps
+    }
+
+    pub(crate) const fn max_follow_error_degrees(&self) -> Option<f64> {
+        self.max_follow_error_degrees
+    }
+
+    pub(crate) const fn discarded(&self) -> bool {
+        self.discarded
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct CompletedEpisode {
-    pub start: EpisodeStart,
-    pub samples: Vec<Sample>,
-    pub completion: EpisodeCompletion,
+    start: EpisodeStart,
+    samples: Vec<Sample>,
+    completion: EpisodeCompletion,
+}
+
+impl CompletedEpisode {
+    pub const fn start(&self) -> &EpisodeStart {
+        &self.start
+    }
+    pub fn samples(&self) -> &[Sample] {
+        &self.samples
+    }
+
+    pub(crate) const fn completion(&self) -> &EpisodeCompletion {
+        &self.completion
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct EpisodeInspection {
-    pub episode: CompletedEpisode,
-    pub summary: EpisodeSummary,
-    pub videos: Vec<VideoAssetMetadata>,
+    episode: CompletedEpisode,
+    summary: EpisodeSummary,
+    videos: Vec<VideoAssetMetadata>,
+}
+
+impl EpisodeInspection {
+    pub fn into_parts(self) -> (CompletedEpisode, EpisodeSummary, Vec<VideoAssetMetadata>) {
+        (self.episode, self.summary, self.videos)
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ReappliedEpisodePositions {
-    pub updated_episode_ids: Vec<String>,
-    pub frames_updated: u64,
-    pub episodes_unchanged: u64,
-    pub episodes_skipped: u64,
-    pub warnings: Vec<String>,
+    updated_episode_ids: Vec<String>,
+    frames_updated: u64,
+    episodes_unchanged: u64,
+    episodes_skipped: u64,
+    warnings: Vec<String>,
+}
+
+impl ReappliedEpisodePositions {
+    pub const fn frames_updated(&self) -> u64 {
+        self.frames_updated
+    }
+    pub const fn episodes_unchanged(&self) -> u64 {
+        self.episodes_unchanged
+    }
+    pub const fn episodes_skipped(&self) -> u64 {
+        self.episodes_skipped
+    }
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+    pub fn into_parts(self) -> (Vec<String>, u64, u64, u64, Vec<String>) {
+        (
+            self.updated_episode_ids,
+            self.frames_updated,
+            self.episodes_unchanged,
+            self.episodes_skipped,
+            self.warnings,
+        )
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct TimelineMetadata {
-    pub samples: u64,
-    pub first_seconds: Option<f64>,
-    pub last_seconds: Option<f64>,
+    samples: u64,
+    first_seconds: Option<f64>,
+    last_seconds: Option<f64>,
+}
+
+impl TimelineMetadata {
+    pub const fn new(samples: u64, first_seconds: Option<f64>, last_seconds: Option<f64>) -> Self {
+        Self {
+            samples,
+            first_seconds,
+            last_seconds,
+        }
+    }
+    pub const fn samples(&self) -> u64 {
+        self.samples
+    }
+    pub const fn first_seconds(&self) -> Option<f64> {
+        self.first_seconds
+    }
+    pub const fn last_seconds(&self) -> Option<f64> {
+        self.last_seconds
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct TimelineArmSample {
-    pub arm: String,
-    pub normalized: BTreeMap<String, Option<f64>>,
-    pub raw: BTreeMap<String, i64>,
-    pub velocity: Option<BTreeMap<String, Option<f64>>>,
-    pub effort: Option<BTreeMap<String, Option<f64>>>,
-    pub action: Option<BTreeMap<String, Option<f64>>>,
+    arm: String,
+    normalized: TimelineJointValues,
+    raw: BTreeMap<String, i64>,
+    velocity: Option<TimelineJointValues>,
+    effort: Option<TimelineJointValues>,
+    action: Option<TimelineJointValues>,
+}
+
+/// Owned position values from one arm at a timeline sample.
+pub struct TimelineArmPose {
+    arm: String,
+    normalized: TimelineJointValues,
+    raw: BTreeMap<String, i64>,
+}
+
+impl TimelineArmPose {
+    pub fn into_parts(self) -> (String, TimelineJointValues, BTreeMap<String, i64>) {
+        (self.arm, self.normalized, self.raw)
+    }
+}
+
+/// Owned optional dynamics and action values from one arm sample.
+pub struct TimelineArmSignals {
+    velocity: Option<TimelineJointValues>,
+    effort: Option<TimelineJointValues>,
+    action: Option<TimelineJointValues>,
+}
+
+impl TimelineArmSignals {
+    pub fn into_parts(
+        self,
+    ) -> (
+        Option<TimelineJointValues>,
+        Option<TimelineJointValues>,
+        Option<TimelineJointValues>,
+    ) {
+        (self.velocity, self.effort, self.action)
+    }
+}
+
+impl TimelineArmSample {
+    pub fn new(
+        arm: String,
+        normalized: BTreeMap<String, Option<f64>>,
+        raw: BTreeMap<String, i64>,
+    ) -> Self {
+        Self {
+            arm,
+            normalized,
+            raw,
+            ..Self::default()
+        }
+    }
+    pub fn with_velocity(mut self, velocity: Option<BTreeMap<String, Option<f64>>>) -> Self {
+        self.velocity = velocity;
+        self
+    }
+    pub fn with_effort(mut self, effort: Option<BTreeMap<String, Option<f64>>>) -> Self {
+        self.effort = effort;
+        self
+    }
+    pub fn with_action(mut self, action: Option<BTreeMap<String, Option<f64>>>) -> Self {
+        self.action = action;
+        self
+    }
+    pub fn arm(&self) -> &str {
+        &self.arm
+    }
+    pub fn normalized(&self) -> &BTreeMap<String, Option<f64>> {
+        &self.normalized
+    }
+    pub fn raw(&self) -> &BTreeMap<String, i64> {
+        &self.raw
+    }
+    pub fn velocity(&self) -> Option<&BTreeMap<String, Option<f64>>> {
+        self.velocity.as_ref()
+    }
+    pub fn effort(&self) -> Option<&BTreeMap<String, Option<f64>>> {
+        self.effort.as_ref()
+    }
+    pub fn action(&self) -> Option<&BTreeMap<String, Option<f64>>> {
+        self.action.as_ref()
+    }
+    pub fn into_groups(self) -> (TimelineArmPose, TimelineArmSignals) {
+        (
+            TimelineArmPose {
+                arm: self.arm,
+                normalized: self.normalized,
+                raw: self.raw,
+            },
+            TimelineArmSignals {
+                velocity: self.velocity,
+                effort: self.effort,
+                action: self.action,
+            },
+        )
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct TimelineSample {
-    pub frame: u64,
-    pub seconds: f64,
-    pub follow_error_degrees: Option<f64>,
-    pub arms: Vec<TimelineArmSample>,
+    frame: u64,
+    seconds: f64,
+    follow_error_degrees: Option<f64>,
+    arms: Vec<TimelineArmSample>,
+}
+
+impl TimelineSample {
+    pub const fn new(frame: u64, seconds: f64) -> Self {
+        Self {
+            frame,
+            seconds,
+            follow_error_degrees: None,
+            arms: Vec::new(),
+        }
+    }
+    pub fn with_follow_error_degrees(mut self, value: Option<f64>) -> Self {
+        self.follow_error_degrees = value;
+        self
+    }
+    pub fn with_arms(mut self, arms: Vec<TimelineArmSample>) -> Self {
+        self.arms = arms;
+        self
+    }
+    pub const fn frame(&self) -> u64 {
+        self.frame
+    }
+    pub const fn seconds(&self) -> f64 {
+        self.seconds
+    }
+    pub const fn follow_error_degrees(&self) -> Option<f64> {
+        self.follow_error_degrees
+    }
+    pub fn arms(&self) -> &[TimelineArmSample] {
+        &self.arms
+    }
+    pub fn into_parts(self) -> (u64, f64, Option<f64>, Vec<TimelineArmSample>) {
+        (
+            self.frame,
+            self.seconds,
+            self.follow_error_degrees,
+            self.arms,
+        )
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct TimelineTraces {
-    pub episode: String,
-    pub samples: u64,
-    pub buckets: usize,
-    pub start_seconds: Option<f64>,
-    pub end_seconds: Option<f64>,
-    pub lanes: Vec<TimelineTraceLane>,
+    episode: String,
+    samples: u64,
+    buckets: usize,
+    start_seconds: Option<f64>,
+    end_seconds: Option<f64>,
+    lanes: Vec<TimelineTraceLane>,
+}
+
+impl TimelineTraces {
+    pub fn new(episode: String, samples: u64, buckets: usize) -> Self {
+        Self {
+            episode,
+            samples,
+            buckets,
+            ..Self::default()
+        }
+    }
+    pub fn with_range(mut self, start_seconds: Option<f64>, end_seconds: Option<f64>) -> Self {
+        self.start_seconds = start_seconds;
+        self.end_seconds = end_seconds;
+        self
+    }
+    pub fn with_lanes(mut self, lanes: Vec<TimelineTraceLane>) -> Self {
+        self.lanes = lanes;
+        self
+    }
+    pub fn episode(&self) -> &str {
+        &self.episode
+    }
+    pub const fn samples(&self) -> u64 {
+        self.samples
+    }
+    pub const fn buckets(&self) -> usize {
+        self.buckets
+    }
+    pub const fn start_seconds(&self) -> Option<f64> {
+        self.start_seconds
+    }
+    pub fn into_parts(
+        self,
+    ) -> (
+        String,
+        u64,
+        usize,
+        Option<f64>,
+        Option<f64>,
+        Vec<TimelineTraceLane>,
+    ) {
+        (
+            self.episode,
+            self.samples,
+            self.buckets,
+            self.start_seconds,
+            self.end_seconds,
+            self.lanes,
+        )
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct TimelineTraceLane {
-    pub joint: String,
-    pub series: Vec<TimelineTraceSeries>,
+    joint: String,
+    series: Vec<TimelineTraceSeries>,
+}
+
+impl TimelineTraceLane {
+    pub fn new(joint: String, series: Vec<TimelineTraceSeries>) -> Self {
+        Self { joint, series }
+    }
+    pub fn joint(&self) -> &str {
+        &self.joint
+    }
+    pub fn series(&self) -> &[TimelineTraceSeries] {
+        &self.series
+    }
+    pub fn into_parts(self) -> (String, Vec<TimelineTraceSeries>) {
+        (self.joint, self.series)
+    }
 }
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct TimelineTraceSeries {
-    pub arm: String,
-    pub points: Vec<TimelineTracePoint>,
+    arm: String,
+    points: Vec<TimelineTracePoint>,
+}
+
+impl TimelineTraceSeries {
+    pub fn new(arm: String, points: Vec<TimelineTracePoint>) -> Self {
+        Self { arm, points }
+    }
+    pub fn arm(&self) -> &str {
+        &self.arm
+    }
+    pub fn points(&self) -> &[TimelineTracePoint] {
+        &self.points
+    }
+    pub fn into_parts(self) -> (String, Vec<TimelineTracePoint>) {
+        (self.arm, self.points)
+    }
 }
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct TimelineTracePoint {
-    pub seconds: f64,
-    pub value: Option<f64>,
+    seconds: f64,
+    value: Option<f64>,
+}
+
+impl TimelineTracePoint {
+    pub const fn new(seconds: f64, value: Option<f64>) -> Self {
+        Self { seconds, value }
+    }
+    pub const fn seconds(&self) -> f64 {
+        self.seconds
+    }
+    pub const fn value(&self) -> Option<f64> {
+        self.value
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -297,7 +755,7 @@ impl EpisodeStore {
         validate_episode_id(id)?;
         self.try_list()?
             .into_iter()
-            .find(|episode| episode.id == id)
+            .find(|episode| episode.id() == id)
             .ok_or_else(|| EpisodeError::NotFound(id.to_owned()))
     }
 
@@ -322,7 +780,7 @@ impl EpisodeStore {
                     1,
                 )?;
                 let row = metadata
-                    .rows
+                    .rows()
                     .first()
                     .ok_or_else(|| EpisodeError::NotFound(id.to_owned()).to_string())?;
                 let metadata = row
@@ -334,10 +792,10 @@ impl EpisodeStore {
                         .map_err(|error| format!("episode {id:?} metadata is invalid: {error}"))?;
                 let rows = if table_exists(connection, &samples)? {
                     let result = run_query(connection, &sample_query, MAX_EPISODE_ROWS)?;
-                    if result.truncated {
+                    if result.truncated() {
                         return Err(format!("episode {id:?} exceeds the supported row limit"));
                     }
-                    result.rows
+                    result.into_rows()
                 } else {
                     Vec::new()
                 };
@@ -370,7 +828,7 @@ impl EpisodeStore {
         let highest = self
             .try_list()?
             .iter()
-            .filter_map(|episode| episode_number(&episode.id))
+            .filter_map(|episode| episode_number(episode.id()))
             .max()
             .unwrap_or(0);
         Ok(format!("episode_{:06}", highest + 1))
@@ -385,16 +843,10 @@ impl EpisodeStore {
                 "a take needs at least one connected arm to sample".to_owned(),
             ));
         }
-        let start = EpisodeStart {
-            id: self.next_id()?,
-            dataset_id: request.dataset_id,
-            started_ms: unix_millis(),
-            sample_hz: request.sample_hz,
-            source: request.source,
-            note: request.note,
-            arms: request.arms,
-            condition: request.condition,
-        };
+        let start = EpisodeStart::new(self.next_id()?, request.dataset_id)
+            .with_timing(unix_millis(), request.sample_hz)
+            .with_source(request.source, request.note)
+            .with_arms(request.arms, request.condition);
         SpiralEpisodeEncoder::new(start.clone())?;
         EpisodeWriter::start(start, self.project_store.clone())
     }
@@ -424,10 +876,10 @@ impl EpisodeStore {
     ) -> Result<ReappliedEpisodePositions, EpisodeError> {
         let mut result = ReappliedEpisodePositions::default();
         for summary in self.try_list()? {
-            let Some(arm_index) = summary.arms.iter().position(|arm| arm.id == robot) else {
+            let Some(arm_index) = summary.arms().iter().position(|arm| arm.id() == robot) else {
                 continue;
             };
-            let joints = &summary.arms[arm_index].joints;
+            let joints = summary.arms()[arm_index].joints();
             let missing = joints
                 .iter()
                 .filter(|joint| !calibration.motors().contains_key(*joint))
@@ -437,26 +889,30 @@ impl EpisodeStore {
                 result.episodes_skipped += 1;
                 result.warnings.push(format!(
                     "take {:?} uses joints absent from the current calibration: {}",
-                    summary.id,
+                    summary.id(),
                     missing.join(", ")
                 ));
                 continue;
             }
-            let mut episode = self.completed(&summary.id)?;
+            let mut episode = self.completed(summary.id())?;
             let mut changed = false;
             for sample in &mut episode.samples {
                 let normalized = joints.iter().enumerate().map(|(joint_index, joint)| {
-                    calibration.motors()[joint].normalize_raw(sample.raw[arm_index][joint_index]).map(Some).map_err(|error| EpisodeError::Invalid(format!("could not reapply calibration to take {:?} joint {joint:?}: {error}", summary.id)))
+                    calibration.motors()[joint].normalize_raw(sample.raw()[arm_index][joint_index]).map(Some).map_err(|error| EpisodeError::Invalid(format!("could not reapply calibration to take {:?} joint {joint:?}: {error}", summary.id())))
                 }).collect::<Result<Vec<_>, _>>()?;
-                if sample.normalized[arm_index] != normalized {
-                    sample.normalized[arm_index] = normalized;
+                if sample.normalized()[arm_index] != normalized {
+                    sample
+                        .replace_normalized_arm(arm_index, normalized)
+                        .map_err(|_| {
+                            EpisodeError::Invalid("calibration arm index disappeared".to_owned())
+                        })?;
                     changed = true;
                 }
             }
             if changed {
                 self.replace_samples(&episode)?;
-                result.frames_updated = result.frames_updated.saturating_add(summary.frames);
-                result.updated_episode_ids.push(summary.id);
+                result.frames_updated = result.frames_updated.saturating_add(summary.frames());
+                result.updated_episode_ids.push(summary.id().to_owned());
             } else {
                 result.episodes_unchanged += 1;
             }
@@ -481,21 +937,21 @@ impl EpisodeStore {
             .start
             .arms
             .iter()
-            .position(|entry| entry.id == arm)
+            .position(|entry| entry.id() == arm)
             .ok_or_else(|| {
                 EpisodeError::Invalid(format!("take {id:?} did not record arm {arm:?}"))
             })?;
-        let joints = &episode.start.arms[arm_index].joints;
+        let joints = episode.start.arms()[arm_index].joints();
         let timestamped = episode
             .samples
             .iter()
             .filter_map(|sample| {
-                let values = &sample.normalized[arm_index];
+                let values = &sample.normalized()[arm_index];
                 if values.iter().any(Option::is_none) {
                     return None;
                 }
                 Some((
-                    sample.seconds,
+                    sample.seconds(),
                     joints
                         .iter()
                         .enumerate()
@@ -534,8 +990,8 @@ impl EpisodeStore {
         let episode = self.completed(id)?;
         Ok(TimelineMetadata {
             samples: episode.samples.len() as u64,
-            first_seconds: episode.samples.first().map(|sample| sample.seconds),
-            last_seconds: episode.samples.last().map(|sample| sample.seconds),
+            first_seconds: episode.samples.first().map(|sample| sample.seconds()),
+            last_seconds: episode.samples.last().map(|sample| sample.seconds()),
         })
     }
 
@@ -551,9 +1007,9 @@ impl EpisodeStore {
             .iter()
             .enumerate()
             .min_by(|(left_index, left), (right_index, right)| {
-                (seconds - left.seconds)
+                (seconds - left.seconds())
                     .abs()
-                    .total_cmp(&(seconds - right.seconds).abs())
+                    .total_cmp(&(seconds - right.seconds()).abs())
                     .then_with(|| left_index.cmp(right_index))
             })
             .ok_or_else(|| EpisodeError::Invalid(format!("take {id:?} has no samples")))?;
@@ -590,7 +1046,7 @@ impl EpisodeStore {
             .map(|chunk| {
                 chunk
                     .iter()
-                    .filter_map(|sample| sample.follow_error_degrees)
+                    .filter_map(|sample| sample.follow_error_degrees())
                     .filter(|value| value.is_finite())
                     .reduce(f64::max)
             })
@@ -605,8 +1061,8 @@ impl EpisodeStore {
         let episode = self.completed(id)?;
         let sample_count = episode.samples.len();
         let bucket_count = buckets.clamp(1, 512).min(sample_count);
-        let start_seconds = episode.samples.first().map(|sample| sample.seconds);
-        let end_seconds = episode.samples.last().map(|sample| sample.seconds);
+        let start_seconds = episode.samples.first().map(|sample| sample.seconds());
+        let end_seconds = episode.samples.last().map(|sample| sample.seconds());
         let trace_range = TraceRange {
             start_seconds: start_seconds.unwrap_or_default(),
             end_seconds: end_seconds.or(start_seconds).unwrap_or_default(),
@@ -615,21 +1071,23 @@ impl EpisodeStore {
         let mut lanes = Vec::new();
         for joint in SO101_JOINTS {
             let mut series = Vec::new();
-            for (arm_index, arm) in episode.start.arms.iter().enumerate() {
-                let Some(joint_index) = arm.joints.iter().position(|name| name == joint.name())
+            for (arm_index, arm) in episode.start.arms().iter().enumerate() {
+                let Some(joint_index) = arm.joints().iter().position(|name| name == joint.name())
                 else {
                     continue;
                 };
                 let mut reduced = vec![TraceBucket::default(); bucket_count];
                 if bucket_count > 0 {
                     for sample in &episode.samples {
-                        let bucket = trace_range.bucket(sample.seconds);
-                        reduced[bucket]
-                            .observe(sample.seconds, sample.normalized[arm_index][joint_index]);
+                        let bucket = trace_range.bucket(sample.seconds());
+                        reduced[bucket].observe(
+                            sample.seconds(),
+                            sample.normalized()[arm_index][joint_index],
+                        );
                     }
                 }
                 series.push(TimelineTraceSeries {
-                    arm: arm.id.clone(),
+                    arm: arm.id().to_owned(),
                     points: reduced
                         .into_iter()
                         .flat_map(TraceBucket::into_points)
@@ -665,7 +1123,7 @@ impl EpisodeStore {
         self.project_store.run_blocking(move |connection| {
             if !table_exists(connection, &relation)? { return Ok(Vec::new()); }
             let result = run_query(connection, &format!("SELECT {}, {}, {}, {}, {}, {}, {}, {} FROM {relation} WHERE {} = {id} ORDER BY {}, {}", db::STREAM_ID, db::CAMERA_ID, db::WIDTH, db::HEIGHT, db::FPS, db::FRAMES, db::SEGMENT_INDEX, db::TIMELINE_OFFSET_NS, db::EPISODE_ID, db::STREAM_ID, db::SEGMENT_INDEX), 10_000)?;
-            result.rows.into_iter().map(|row| video_metadata_row(&row)).collect()
+            result.into_rows().into_iter().map(|row| video_metadata_row(&row)).collect()
         }).map_err(EpisodeError::Invalid)
     }
 
@@ -687,7 +1145,7 @@ impl EpisodeStore {
                     100_000,
                 )?;
                 result
-                    .rows
+                    .into_rows()
                     .into_iter()
                     .map(|row| summary_row(&row))
                     .collect()
@@ -703,7 +1161,7 @@ impl EpisodeStore {
                 let relation = Table::Episodes.qualified_name(&namespace);
                 execute_update_sql(
                     connection,
-                    &sql::delete_episode(&relation, &episode.start.id),
+                    &sql::delete_episode(&relation, episode.start.id()),
                 )?;
                 ingest_batch(
                     connection,
@@ -728,11 +1186,11 @@ impl EpisodeStore {
                 let episode_relation = Table::Episodes.qualified_name(&namespace);
                 execute_update_sql(
                     connection,
-                    &sql::delete_episode(&sample_relation, &episode.start.id),
+                    &sql::delete_episode(&sample_relation, episode.start.id()),
                 )?;
                 execute_update_sql(
                     connection,
-                    &sql::delete_episode(&episode_relation, &episode.start.id),
+                    &sql::delete_episode(&episode_relation, episode.start.id()),
                 )?;
                 let mut encoder = SpiralEpisodeEncoder::new(episode.start.clone())
                     .map_err(|error| error.to_string())?;
@@ -778,7 +1236,7 @@ enum WriterMessage {
     },
 }
 
-pub trait EpisodeWriteSession: Send {
+pub(crate) trait EpisodeWriteSession: Send {
     fn start(&self) -> &EpisodeStart;
     fn push(&self, sample: Sample) -> bool;
     fn checkpoint(&self, completion: EpisodeCompletion) -> Result<EpisodeCheckpoint, String>;
@@ -794,7 +1252,7 @@ pub struct EpisodeWriter {
 }
 
 impl EpisodeWriter {
-    pub fn from_session(session: impl EpisodeWriteSession + 'static) -> Self {
+    pub(crate) fn from_session(session: impl EpisodeWriteSession + 'static) -> Self {
         Self {
             session: Box::new(session),
         }
@@ -833,24 +1291,30 @@ impl EpisodeWriter {
         }))
     }
     pub fn id(&self) -> &str {
-        &self.session.start().id
+        self.session.start().id()
     }
     pub fn dataset_id(&self) -> &str {
-        &self.session.start().dataset_id
+        self.session.start().dataset_id()
     }
     pub fn started_ms(&self) -> i64 {
-        self.session.start().started_ms
+        self.session.start().started_ms()
     }
     pub fn push(&self, sample: Sample) -> bool {
         self.session.push(sample)
     }
-    pub fn checkpoint(&self, completion: EpisodeCompletion) -> Result<EpisodeCheckpoint, String> {
+    pub(crate) fn checkpoint(
+        &self,
+        completion: EpisodeCompletion,
+    ) -> Result<EpisodeCheckpoint, String> {
         self.session.checkpoint(completion)
     }
     pub fn failure(&self) -> Option<String> {
         self.session.failure()
     }
-    pub fn finish(self, completion: EpisodeCompletion) -> Result<EpisodeSummary, EpisodeError> {
+    pub(crate) fn finish(
+        self,
+        completion: EpisodeCompletion,
+    ) -> Result<EpisodeSummary, EpisodeError> {
         self.session.finish(completion)
     }
 }
@@ -871,13 +1335,12 @@ impl RecordingWriter for EpisodeWriter {
     fn checkpoint(&self, completion: RecordingCompletion) -> Result<EpisodeCheckpoint, String> {
         EpisodeWriter::checkpoint(
             self,
-            EpisodeCompletion {
-                duration_seconds: completion.duration_seconds(),
-                recording_gaps: completion.recording_gaps().to_vec(),
-                max_follow_error_degrees: completion.max_follow_error_degrees(),
-                discarded: false,
-                condition: completion.condition().to_vec(),
-            },
+            EpisodeCompletion::new(
+                completion.duration_seconds(),
+                completion.recording_gaps().to_vec(),
+                completion.condition().to_vec(),
+            )
+            .with_max_follow_error_degrees(completion.max_follow_error_degrees()),
         )
     }
 
@@ -888,13 +1351,13 @@ impl RecordingWriter for EpisodeWriter {
     fn finish(self: Box<Self>, completion: RecordingCompletion) -> Result<EpisodeSummary, String> {
         EpisodeWriter::finish(
             *self,
-            EpisodeCompletion {
-                duration_seconds: completion.duration_seconds(),
-                recording_gaps: completion.recording_gaps().to_vec(),
-                max_follow_error_degrees: completion.max_follow_error_degrees(),
-                discarded: completion.discarded(),
-                condition: completion.condition().to_vec(),
-            },
+            EpisodeCompletion::new(
+                completion.duration_seconds(),
+                completion.recording_gaps().to_vec(),
+                completion.condition().to_vec(),
+            )
+            .with_max_follow_error_degrees(completion.max_follow_error_degrees())
+            .with_discarded(completion.discarded()),
         )
         .map_err(|error| error.to_string())
     }
@@ -914,13 +1377,13 @@ impl EpisodeWriteSession for SpiralEpisodeWriter {
         &self.start
     }
     fn push(&self, sample: Sample) -> bool {
-        if !sample.seconds.is_finite() || sample.seconds < 0.0 {
+        if !sample.seconds().is_finite() || sample.seconds() < 0.0 {
             return self.fail("sample time must be finite and non-negative");
         }
-        let next = sample.seconds.to_bits();
+        let next = sample.seconds().to_bits();
         let mut previous = self.last_queued_seconds.load(Ordering::Relaxed);
         loop {
-            if previous != NO_SAMPLE_TIMESTAMP_BITS && sample.seconds < f64::from_bits(previous) {
+            if previous != NO_SAMPLE_TIMESTAMP_BITS && sample.seconds() < f64::from_bits(previous) {
                 return self.fail("sample time moved backwards");
             }
             match self.last_queued_seconds.compare_exchange_weak(
@@ -981,7 +1444,7 @@ impl EpisodeWriteSession for SpiralEpisodeWriter {
         let namespace = self.project_store.namespace().to_owned();
         self.project_store
             .run_blocking(|connection| {
-                replace_episode_blocking(connection, &namespace, &completed, &[])
+                EpisodeReplacement::new(&namespace, &completed, &[]).save(connection)
             })
             .map_err(EpisodeError::Invalid)?;
         Ok(summary(
@@ -1051,7 +1514,7 @@ impl EpisodeDrain<'_> {
                     };
                     let namespace = self.project_store.namespace().to_owned();
                     let result = self.project_store.run_blocking(|connection| {
-                        replace_episode_blocking(connection, &namespace, &completed, &[])
+                        EpisodeReplacement::new(&namespace, &completed, &[]).save(connection)
                     });
                     if let Err(error) = &result {
                         *lock(&self.shared.failure) = Some(error.clone());
@@ -1086,19 +1549,19 @@ fn decode_samples(
         let arm = start
             .arms
             .iter()
-            .position(|arm| arm.id == stream)
+            .position(|arm| arm.id() == stream)
             .ok_or_else(|| {
                 format!(
                     "episode {:?} has sample for unknown stream {stream:?}",
-                    start.id
+                    start.id()
                 )
             })?;
         let frame = frames.entry(index).or_insert_with(|| SampleBuilder {
-            normalized: vec![None; start.arms.len()],
-            raw: vec![None; start.arms.len()],
-            velocity: vec![None; start.arms.len()],
-            effort: vec![None; start.arms.len()],
-            action: vec![None; start.arms.len()],
+            normalized: vec![None; start.arms().len()],
+            raw: vec![None; start.arms().len()],
+            velocity: vec![None; start.arms().len()],
+            effort: vec![None; start.arms().len()],
+            action: vec![None; start.arms().len()],
             ..SampleBuilder::default()
         });
         let seconds = json_u64(&row, db::EPISODE_TIME_NS)? as f64 / 1_000_000_000.0;
@@ -1108,7 +1571,7 @@ fn decode_samples(
         {
             return Err(format!(
                 "episode {:?} sample {index} has inconsistent clocks",
-                start.id
+                start.id()
             ));
         }
         frame.seconds = Some(seconds);
@@ -1132,24 +1595,24 @@ fn decode_samples(
         .into_iter()
         .map(|(index, frame)| {
             let location = SampleLocation {
-                episode_id: &start.id,
+                episode_id: start.id(),
                 sample_index: index,
             };
             let normalized = location.require(frame.normalized, "state")?;
             let raw = location.require(frame.raw, "raw state")?;
             let velocity = location.all_or_none(frame.velocity, "velocity")?;
             let effort = location.all_or_none(frame.effort, "effort")?;
-            Ok(Sample {
-                seconds: frame
-                    .seconds
-                    .ok_or_else(|| format!("episode {:?} sample {index} has no clock", start.id))?,
+            Ok(Sample::new(
+                frame.seconds.ok_or_else(|| {
+                    format!("episode {:?} sample {index} has no clock", start.id())
+                })?,
                 normalized,
                 raw,
-                velocity,
-                effort,
-                action: frame.action,
-                follow_error_degrees: frame.follow_error,
-            })
+            )
+            .with_velocity(velocity)
+            .with_effort(effort)
+            .with_action(frame.action)
+            .with_follow_error_degrees(frame.follow_error))
         })
         .collect()
 }
@@ -1195,20 +1658,18 @@ fn summary_row(row: &JsonMap<String, JsonValue>) -> Result<EpisodeSummary, Strin
 }
 
 fn summary(start: &EpisodeStart, completion: &EpisodeCompletion, frames: u64) -> EpisodeSummary {
-    EpisodeSummary {
-        id: start.id.clone(),
-        dataset_id: start.dataset_id.clone(),
-        arms: start.arms.clone(),
-        frames,
-        duration_seconds: completion.duration_seconds,
-        recording_gaps: completion.recording_gaps.clone(),
-        sample_hz: start.sample_hz,
-        started_ms: start.started_ms,
-        source: start.source.clone(),
-        max_follow_error_degrees: completion.max_follow_error_degrees,
-        discarded: completion.discarded,
-        problem: None,
-    }
+    let identity =
+        EpisodeSummaryIdentity::new(start.id(), start.dataset_id(), start.arms().to_vec())
+            .with_source(start.source());
+    let timeline = EpisodeTimeline::new(frames, completion.duration_seconds(), start.sample_hz())
+        .with_recording_gaps(completion.recording_gaps().to_vec())
+        .with_started_ms(start.started_ms());
+    let assessment = EpisodeAssessment::new(
+        completion.discarded(),
+        completion.max_follow_error_degrees(),
+        None,
+    );
+    EpisodeSummary::new(identity, timeline, assessment)
 }
 
 fn render_timeline_sample(start: &EpisodeStart, sample: &Sample, frame: u64) -> TimelineSample {
@@ -1217,9 +1678,9 @@ fn render_timeline_sample(start: &EpisodeStart, sample: &Sample, frame: u64) -> 
         .iter()
         .enumerate()
         .map(|(arm_index, arm)| {
-            let values = |values: Option<&Vec<Vec<Option<f64>>>>| {
+            let values = |values: Option<&[Vec<Option<f64>>]>| {
                 values.map(|values| {
-                    arm.joints
+                    arm.joints()
                         .iter()
                         .enumerate()
                         .map(|(joint_index, joint)| (joint.clone(), values[arm_index][joint_index]))
@@ -1227,29 +1688,31 @@ fn render_timeline_sample(start: &EpisodeStart, sample: &Sample, frame: u64) -> 
                 })
             };
             TimelineArmSample {
-                arm: arm.id.clone(),
+                arm: arm.id().to_owned(),
                 normalized: arm
-                    .joints
+                    .joints()
                     .iter()
                     .enumerate()
                     .map(|(joint_index, joint)| {
-                        (joint.clone(), sample.normalized[arm_index][joint_index])
+                        (joint.clone(), sample.normalized()[arm_index][joint_index])
                     })
                     .collect(),
                 raw: arm
-                    .joints
+                    .joints()
                     .iter()
                     .enumerate()
-                    .map(|(joint_index, joint)| (joint.clone(), sample.raw[arm_index][joint_index]))
+                    .map(|(joint_index, joint)| {
+                        (joint.clone(), sample.raw()[arm_index][joint_index])
+                    })
                     .collect(),
-                velocity: values(sample.velocity.as_ref()),
-                effort: values(sample.effort.as_ref()),
+                velocity: values(sample.velocity()),
+                effort: values(sample.effort()),
                 action: sample
-                    .action
+                    .action()
                     .get(arm_index)
                     .and_then(Option::as_ref)
                     .map(|values| {
-                        arm.joints
+                        arm.joints()
                             .iter()
                             .enumerate()
                             .map(|(joint_index, joint)| (joint.clone(), values[joint_index]))
@@ -1260,8 +1723,8 @@ fn render_timeline_sample(start: &EpisodeStart, sample: &Sample, frame: u64) -> 
         .collect();
     TimelineSample {
         frame,
-        seconds: sample.seconds,
-        follow_error_degrees: sample.follow_error_degrees,
+        seconds: sample.seconds(),
+        follow_error_degrees: sample.follow_error_degrees(),
         arms,
     }
 }
@@ -1369,7 +1832,7 @@ fn unix_millis() -> i64 {
         .map(|value| value.as_millis().min(i64::MAX as u128) as i64)
         .unwrap_or(0)
 }
-pub fn validate_episode_id(id: &str) -> Result<(), EpisodeError> {
+pub(crate) fn validate_episode_id(id: &str) -> Result<(), EpisodeError> {
     (!id.is_empty()
         && id.len() <= 64
         && id
@@ -1390,11 +1853,7 @@ pub fn build_arms(arms: &[(String, Vec<String>)]) -> Result<Vec<EpisodeArm>, Epi
             if !seen.insert(id.clone()) {
                 return Err(EpisodeError::Invalid(format!("arm {id:?} was named twice")));
             }
-            Ok(EpisodeArm {
-                id: id.clone(),
-                robot_type: None,
-                joints: joints.clone(),
-            })
+            Ok(EpisodeArm::new(id, None, joints.clone()))
         })
         .collect()
 }

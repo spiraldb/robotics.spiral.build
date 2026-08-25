@@ -272,11 +272,6 @@ impl MotorHealthLimits {
         self
     }
 
-    pub fn with_voltage_range(mut self, voltage_range: Option<(f64, f64)>) -> Self {
-        (self.min_voltage_volts, self.max_voltage_volts) = voltage_range.unzip();
-        self
-    }
-
     pub fn with_min_voltage_volts(mut self, min_voltage_volts: Option<f64>) -> Self {
         self.min_voltage_volts = min_voltage_volts;
         self

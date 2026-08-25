@@ -6,9 +6,12 @@
 
 pub mod arm;
 pub mod calibration;
-pub mod episode;
-pub mod error;
+mod episode;
+mod error;
 pub mod identity;
 pub mod operation;
 pub mod query;
 pub mod workflow;
+
+pub use episode::MAX_EPISODE_FRAMES;
+pub use error::OperationError;

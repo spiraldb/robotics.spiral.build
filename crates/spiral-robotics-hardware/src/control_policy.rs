@@ -48,15 +48,24 @@ pub(crate) enum CalibrationAdmission {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RobotAdmission {
-    pub(crate) calibration: CalibrationAdmission,
-    pub(crate) calibration_in_progress: bool,
+    calibration: CalibrationAdmission,
+    calibration_in_progress: bool,
+}
+
+impl RobotAdmission {
+    pub(crate) fn new(calibration: CalibrationAdmission, calibration_in_progress: bool) -> Self {
+        Self {
+            calibration,
+            calibration_in_progress,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ControlState {
-    pub(crate) mode: ControlMode,
+    mode: ControlMode,
     /// Connected robots only. Absence is the connection fact.
-    pub(crate) robots: BTreeMap<String, RobotAdmission>,
+    robots: BTreeMap<String, RobotAdmission>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -119,7 +128,7 @@ pub(crate) enum Effect {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Decision {
-    pub(crate) effects: Vec<Effect>,
+    effects: Vec<Effect>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -171,6 +180,10 @@ impl fmt::Display for AdmissionError {
 
 /// Decide one complete control-session transition.
 impl ControlState {
+    pub(crate) fn new(mode: ControlMode, robots: BTreeMap<String, RobotAdmission>) -> Self {
+        Self { mode, robots }
+    }
+
     pub(crate) fn decide(&self, intent: Intent) -> Result<Decision, AdmissionError> {
         match intent {
             Intent::Select(mode) => self.decide_mode_selection(mode),
@@ -377,10 +390,34 @@ impl ControlState {
     }
 }
 
+impl Decision {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.effects.is_empty()
+    }
+
+    pub(crate) fn into_effects(self) -> Vec<Effect> {
+        self.effects
+    }
+
+    fn idle_effects() -> Vec<Effect> {
+        vec![
+            Effect::ClearReplay,
+            Effect::ResetAllTargets,
+            Effect::CommitMode(ControlMode::Idle),
+        ]
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct FailureDecision {
-    pub(crate) effects: Vec<Effect>,
-    pub(crate) error: String,
+    effects: Vec<Effect>,
+    error: String,
+}
+
+impl FailureDecision {
+    pub(crate) fn into_parts(self) -> (Vec<Effect>, String) {
+        (self.effects, self.error)
+    }
 }
 
 /// Decide the state consequence of a physical effect failure.
@@ -388,13 +425,13 @@ impl FailureAction {
     pub(crate) fn failure_decision(self, cause: String) -> FailureDecision {
         match self {
             FailureAction::AbandonTransition => FailureDecision {
-                effects: idle_effects(),
+                effects: Decision::idle_effects(),
                 error: format!(
                     "could not establish the requested control mode: {cause}; returned control to Idle"
                 ),
             },
             FailureAction::AbandonHold { robot } => FailureDecision {
-                effects: idle_effects(),
+                effects: Decision::idle_effects(),
                 error: format!(
                     "could not engage holding torque for robot {robot:?}: {cause}; returned control to Idle"
                 ),
@@ -409,14 +446,6 @@ impl FailureAction {
             },
         }
     }
-}
-
-fn idle_effects() -> Vec<Effect> {
-    vec![
-        Effect::ClearReplay,
-        Effect::ResetAllTargets,
-        Effect::CommitMode(ControlMode::Idle),
-    ]
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -484,29 +513,27 @@ mod tests {
     use super::*;
 
     fn ready(joints: &[&str]) -> RobotAdmission {
-        RobotAdmission {
-            calibration: CalibrationAdmission::Ready(
-                joints.iter().map(|joint| (*joint).to_owned()).collect(),
-            ),
-            calibration_in_progress: false,
-        }
+        RobotAdmission::new(
+            CalibrationAdmission::Ready(joints.iter().map(|joint| (*joint).to_owned()).collect()),
+            false,
+        )
     }
 
     fn state() -> ControlState {
-        ControlState {
-            mode: ControlMode::Idle,
-            robots: BTreeMap::from([
+        ControlState::new(
+            ControlMode::Idle,
+            BTreeMap::from([
                 ("leader".to_owned(), ready(&["shoulder", "elbow"])),
                 ("follower".to_owned(), ready(&["elbow", "wrist"])),
                 ("other".to_owned(), ready(&["gripper"])),
             ]),
-        }
+        )
     }
 
     #[test]
     fn idle_clears_replay_resets_targets_then_commits() {
         let decision = state().decide(Intent::Select(ControlMode::Idle)).unwrap();
-        assert_eq!(decision.effects, idle_effects());
+        assert_eq!(decision.effects, Decision::idle_effects());
     }
 
     #[test]
@@ -546,7 +573,7 @@ mod tests {
             robot: "leader".to_owned(),
         }
         .failure_decision("driver refused".to_owned());
-        assert_eq!(recovery.effects, idle_effects());
+        assert_eq!(recovery.effects, Decision::idle_effects());
         assert!(recovery.error.contains("returned control to Idle"));
     }
 
@@ -557,7 +584,7 @@ mod tests {
                 robot: "leader".to_owned(),
             })
             .unwrap();
-        assert_eq!(&decision.effects[..3], idle_effects());
+        assert_eq!(&decision.effects[..3], Decision::idle_effects());
         assert_eq!(
             decision.effects[3],
             Effect::SetTorque {

@@ -88,26 +88,6 @@ impl SpiralJobConnection {
         self.client_secret = client_secret;
         self
     }
-
-    pub fn api_url(&self) -> &str {
-        &self.api_url
-    }
-
-    pub fn spfs_url(&self) -> &str {
-        &self.spfs_url
-    }
-
-    pub fn project_id(&self) -> &str {
-        &self.project_id
-    }
-
-    pub fn namespace(&self) -> &str {
-        &self.namespace
-    }
-
-    pub fn client_id(&self) -> Option<&str> {
-        self.client_id.as_deref()
-    }
 }
 
 impl fmt::Debug for SpiralJobConnection {
@@ -135,8 +115,10 @@ pub struct TrainingImageSize {
 
 impl TrainingImageSize {
     pub fn new(image_width: usize, image_height: usize) -> Self {
-        assert!(image_width > 0, "training image width must be positive");
-        assert!(image_height > 0, "training image height must be positive");
+        assert!(
+            (image_width == 0 && image_height == 0) || (image_width > 0 && image_height > 0),
+            "training image dimensions must both be zero for native resolution or both be positive"
+        );
         Self {
             image_width,
             image_height,
@@ -295,54 +277,6 @@ impl ActTrainingJobConfig {
             architecture,
             kl_weight,
         }
-    }
-
-    pub fn camera_streams(&self) -> &[String] {
-        &self.input.camera_streams
-    }
-
-    pub const fn image_width(&self) -> usize {
-        self.input.image_size.image_width
-    }
-
-    pub const fn image_height(&self) -> usize {
-        self.input.image_size.image_height
-    }
-
-    pub fn video_decoder(&self) -> &str {
-        &self.input.video_decoder
-    }
-
-    pub const fn hidden_dimensions(&self) -> usize {
-        self.architecture.dimensions.hidden_dimensions
-    }
-
-    pub const fn latent_dimensions(&self) -> usize {
-        self.architecture.dimensions.latent_dimensions
-    }
-
-    pub const fn attention_heads(&self) -> usize {
-        self.architecture.attention_heads
-    }
-
-    pub const fn feedforward_dimensions(&self) -> usize {
-        self.architecture.dimensions.feedforward_dimensions
-    }
-
-    pub const fn encoder_layers(&self) -> usize {
-        self.architecture.layers.encoder_layers
-    }
-
-    pub const fn vae_encoder_layers(&self) -> usize {
-        self.architecture.layers.vae_encoder_layers
-    }
-
-    pub const fn decoder_layers(&self) -> usize {
-        self.architecture.layers.decoder_layers
-    }
-
-    pub const fn kl_weight(&self) -> f64 {
-        self.kl_weight
     }
 }
 
@@ -591,74 +525,6 @@ impl TrainingJobRequest {
             plan,
         }
     }
-
-    pub fn job_id(&self) -> &str {
-        &self.identity.job_id
-    }
-
-    pub fn run_name(&self) -> &str {
-        &self.identity.run_name
-    }
-
-    pub const fn spiral(&self) -> &SpiralJobConnection {
-        &self.data.spiral
-    }
-
-    pub fn sql(&self) -> &str {
-        &self.data.query.sql
-    }
-
-    pub fn state_column(&self) -> &str {
-        &self.data.query.columns.state_column
-    }
-
-    pub fn action_column(&self) -> &str {
-        &self.data.query.columns.action_column
-    }
-
-    pub const fn spiral_schema_version(&self) -> u32 {
-        self.data.query.spiral_schema_version
-    }
-
-    pub fn device(&self) -> &str {
-        &self.plan.runtime.device
-    }
-
-    pub const fn initialization(&self) -> TrainingInitialization {
-        self.plan.runtime.initialization
-    }
-
-    pub const fn steps(&self) -> u64 {
-        self.plan.schedule.progress.steps
-    }
-
-    pub const fn batch_size(&self) -> usize {
-        self.plan.schedule.progress.batch_size
-    }
-
-    pub const fn validation_split(&self) -> f64 {
-        self.plan.schedule.progress.validation_split
-    }
-
-    pub const fn learning_rate(&self) -> f64 {
-        self.plan.schedule.optimizer.learning_rate
-    }
-
-    pub const fn checkpoint_every(&self) -> u64 {
-        self.plan.schedule.checkpoints.checkpoint_every
-    }
-
-    pub const fn chunk_size(&self) -> usize {
-        self.plan.schedule.checkpoints.chunk_size
-    }
-
-    pub const fn seed(&self) -> u64 {
-        self.plan.schedule.optimizer.seed
-    }
-
-    pub const fn act(&self) -> &ActTrainingJobConfig {
-        &self.plan.act
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -713,42 +579,6 @@ pub struct TrainingJobResolved {
 impl TrainingJobResolved {
     pub fn camera_streams(&self) -> &[String] {
         &self.observation.camera_streams
-    }
-
-    pub const fn state_dimensions(&self) -> usize {
-        self.observation.state_dimensions
-    }
-
-    pub const fn action_dimensions(&self) -> usize {
-        self.action.action_dimensions
-    }
-
-    pub const fn image_width(&self) -> usize {
-        self.observation.image_width
-    }
-
-    pub const fn image_height(&self) -> usize {
-        self.observation.image_height
-    }
-
-    pub const fn sample_hz(&self) -> f64 {
-        self.action.sample_hz
-    }
-
-    pub fn robot_type(&self) -> &str {
-        &self.action.robot_type
-    }
-
-    pub fn joint_names(&self) -> &[String] {
-        &self.action.joint_names
-    }
-
-    pub const fn parameter_count(&self) -> usize {
-        self.runtime.parameter_count
-    }
-
-    pub fn device(&self) -> &str {
-        &self.runtime.device
     }
 }
 
@@ -915,10 +745,6 @@ pub struct TrainingJobLog {
 }
 
 impl TrainingJobLog {
-    pub const fn offset(&self) -> u64 {
-        self.offset
-    }
-
     pub fn line(&self) -> &str {
         &self.line
     }

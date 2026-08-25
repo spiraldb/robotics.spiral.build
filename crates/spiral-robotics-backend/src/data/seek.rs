@@ -7,93 +7,263 @@
 use std::collections::BTreeMap;
 
 use super::episode_arms::RecordedArms;
-use spiral_robotics_core::error::OperationError;
+use spiral_robotics_core::OperationError;
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct SeekEpisodeCommand {
-    pub episode: String,
-    pub robot: String,
-    pub source_arm: Option<String>,
-    pub seconds: f64,
+pub(crate) struct SeekEpisodeCommand {
+    episode: String,
+    robot: String,
+    source_arm: Option<String>,
+    seconds: f64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SeekControlMode {
+pub(crate) enum SeekControlMode {
     Idle,
     Replay,
     Other,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ActiveRecording {
-    pub episode: String,
-    pub paused: bool,
+pub(crate) struct ActiveRecording {
+    episode: String,
+    paused: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SeekActivity {
-    pub recording: Option<ActiveRecording>,
-    pub mode: SeekControlMode,
+pub(crate) struct SeekActivity {
+    recording: Option<ActiveRecording>,
+    mode: SeekControlMode,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SeekTarget {
-    pub id: String,
-    pub robot_type: Option<String>,
-    pub connected: bool,
-    pub calibrated: bool,
-    pub problem: Option<String>,
+pub(crate) struct SeekTarget {
+    id: String,
+    robot_type: Option<String>,
+    connected: bool,
+    calibrated: bool,
+    problem: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct SeekableEpisode {
-    pub id: String,
-    pub arms: Vec<String>,
-    pub sample_hz: f64,
-    pub problem: Option<String>,
-    pub unfinished: bool,
+pub(crate) struct SeekableEpisode {
+    id: String,
+    arms: Vec<String>,
+    sample_hz: f64,
+    problem: Option<String>,
+    unfinished: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct SampledArm {
-    pub id: String,
-    pub normalized: BTreeMap<String, Option<f64>>,
+pub(crate) struct SampledArm {
+    id: String,
+    normalized: BTreeMap<String, Option<f64>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct HistoricalSample {
-    pub seconds: f64,
-    pub frame: u64,
-    pub arms: Vec<SampledArm>,
+pub(crate) struct HistoricalSample {
+    seconds: f64,
+    frame: u64,
+    arms: Vec<SampledArm>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct PhysicalSeekPlan {
-    pub ticket: u64,
-    pub robot: String,
-    pub episode: String,
-    pub pose: BTreeMap<String, f64>,
-    pub sample_hz: f64,
+pub(crate) struct PhysicalSeekPlan {
+    ticket: u64,
+    robot: String,
+    episode: String,
+    pose: BTreeMap<String, f64>,
+    sample_hz: f64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum HistoricalSeekState {
+pub(crate) enum HistoricalSeekState {
     Seeking,
     Coalesced,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct HistoricalSeekResult {
-    pub state: HistoricalSeekState,
-    pub episode: String,
-    pub robot: String,
-    pub source_arm: String,
-    pub requested_seconds: f64,
-    pub resolved_seconds: f64,
-    pub frame: u64,
+pub(crate) struct HistoricalSeekResult {
+    state: HistoricalSeekState,
+    episode: String,
+    robot: String,
+    source_arm: String,
+    requested_seconds: f64,
+    resolved_seconds: f64,
+    frame: u64,
 }
 
-pub trait PhysicalSeekPort {
+impl SeekEpisodeCommand {
+    pub(crate) fn new(episode: impl Into<String>, robot: impl Into<String>, seconds: f64) -> Self {
+        Self {
+            episode: episode.into(),
+            robot: robot.into(),
+            source_arm: None,
+            seconds,
+        }
+    }
+
+    pub(crate) fn with_source_arm(mut self, source_arm: Option<String>) -> Self {
+        self.source_arm = source_arm;
+        self
+    }
+}
+
+impl ActiveRecording {
+    pub(crate) fn new(episode: impl Into<String>, paused: bool) -> Self {
+        Self {
+            episode: episode.into(),
+            paused,
+        }
+    }
+}
+
+impl SeekActivity {
+    pub(crate) fn new(recording: Option<ActiveRecording>, mode: SeekControlMode) -> Self {
+        Self { recording, mode }
+    }
+}
+
+impl SeekTarget {
+    pub(crate) fn new(id: impl Into<String>, robot_type: Option<String>, connected: bool) -> Self {
+        Self {
+            id: id.into(),
+            robot_type,
+            connected,
+            calibrated: false,
+            problem: None,
+        }
+    }
+
+    pub(crate) fn with_readiness(mut self, calibrated: bool, problem: Option<String>) -> Self {
+        self.calibrated = calibrated;
+        self.problem = problem;
+        self
+    }
+}
+
+impl SeekableEpisode {
+    pub(crate) fn new(id: impl Into<String>, arms: Vec<String>, sample_hz: f64) -> Self {
+        Self {
+            id: id.into(),
+            arms,
+            sample_hz,
+            problem: None,
+            unfinished: false,
+        }
+    }
+
+    pub(crate) fn with_state(mut self, problem: Option<String>, unfinished: bool) -> Self {
+        self.problem = problem;
+        self.unfinished = unfinished;
+        self
+    }
+}
+
+impl SampledArm {
+    pub(crate) fn new(id: impl Into<String>, normalized: BTreeMap<String, Option<f64>>) -> Self {
+        Self {
+            id: id.into(),
+            normalized,
+        }
+    }
+}
+
+impl HistoricalSample {
+    pub(crate) fn new(seconds: f64, frame: u64, arms: Vec<SampledArm>) -> Self {
+        Self {
+            seconds,
+            frame,
+            arms,
+        }
+    }
+}
+
+impl PhysicalSeekPlan {
+    pub(crate) fn new(ticket: u64, robot: impl Into<String>, episode: impl Into<String>) -> Self {
+        Self {
+            ticket,
+            robot: robot.into(),
+            episode: episode.into(),
+            pose: BTreeMap::new(),
+            sample_hz: 0.0,
+        }
+    }
+
+    pub(crate) fn with_trajectory(mut self, pose: BTreeMap<String, f64>, sample_hz: f64) -> Self {
+        self.pose = pose;
+        self.sample_hz = sample_hz;
+        self
+    }
+
+    pub(crate) fn into_parts(self) -> (u64, String, String, BTreeMap<String, f64>, f64) {
+        (
+            self.ticket,
+            self.robot,
+            self.episode,
+            self.pose,
+            self.sample_hz,
+        )
+    }
+}
+
+impl HistoricalSeekResult {
+    pub(crate) fn new(
+        state: HistoricalSeekState,
+        episode: impl Into<String>,
+        robot: impl Into<String>,
+    ) -> Self {
+        Self {
+            state,
+            episode: episode.into(),
+            robot: robot.into(),
+            source_arm: String::new(),
+            requested_seconds: 0.0,
+            resolved_seconds: 0.0,
+            frame: 0,
+        }
+    }
+
+    pub(crate) fn with_source_arm(mut self, source_arm: impl Into<String>) -> Self {
+        self.source_arm = source_arm.into();
+        self
+    }
+
+    pub(crate) fn with_times(mut self, requested_seconds: f64, resolved_seconds: f64) -> Self {
+        self.requested_seconds = requested_seconds;
+        self.resolved_seconds = resolved_seconds;
+        self
+    }
+
+    pub(crate) fn with_frame(mut self, frame: u64) -> Self {
+        self.frame = frame;
+        self
+    }
+
+    pub(crate) fn state(&self) -> HistoricalSeekState {
+        self.state
+    }
+    pub(crate) fn episode(&self) -> &str {
+        &self.episode
+    }
+    pub(crate) fn robot(&self) -> &str {
+        &self.robot
+    }
+    pub(crate) fn source_arm(&self) -> &str {
+        &self.source_arm
+    }
+    pub(crate) fn requested_seconds(&self) -> f64 {
+        self.requested_seconds
+    }
+    pub(crate) fn resolved_seconds(&self) -> f64 {
+        self.resolved_seconds
+    }
+    pub(crate) fn frame(&self) -> u64 {
+        self.frame
+    }
+}
+
+pub(crate) trait PhysicalSeekPort {
     fn activity(&self) -> SeekActivity;
     fn target(&self, robot: &str) -> Result<Option<SeekTarget>, OperationError>;
     fn episode(&self, episode: &str) -> Result<SeekableEpisode, OperationError>;
@@ -110,7 +280,7 @@ pub trait PhysicalSeekPort {
     async fn commit_if_current(&self, plan: PhysicalSeekPlan) -> Result<bool, OperationError>;
 }
 
-pub async fn seek<P: PhysicalSeekPort + ?Sized>(
+pub(crate) async fn seek<P: PhysicalSeekPort + ?Sized>(
     port: &P,
     command: SeekEpisodeCommand,
 ) -> Result<HistoricalSeekResult, OperationError> {
@@ -224,28 +394,24 @@ pub async fn seek<P: PhysicalSeekPort + ?Sized>(
     }
 
     let committed = port
-        .commit_if_current(PhysicalSeekPlan {
-            ticket,
-            robot: command.robot.clone(),
-            episode: command.episode.clone(),
-            pose,
-            sample_hz: episode.sample_hz,
-        })
+        .commit_if_current(
+            PhysicalSeekPlan::new(ticket, command.robot.clone(), command.episode.clone())
+                .with_trajectory(pose, episode.sample_hz),
+        )
         .await?;
 
-    Ok(HistoricalSeekResult {
-        state: if committed {
+    Ok(HistoricalSeekResult::new(
+        if committed {
             HistoricalSeekState::Seeking
         } else {
             HistoricalSeekState::Coalesced
         },
-        episode: command.episode,
-        robot: command.robot,
-        source_arm: source,
-        requested_seconds: command.seconds,
-        resolved_seconds: sample.seconds,
-        frame: sample.frame,
-    })
+        command.episode,
+        command.robot,
+    )
+    .with_source_arm(source)
+    .with_times(command.seconds, sample.seconds)
+    .with_frame(sample.frame))
 }
 
 fn recording_blocker(recording: Option<&ActiveRecording>, episode: &str) -> Option<String> {

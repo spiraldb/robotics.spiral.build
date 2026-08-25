@@ -43,16 +43,36 @@ pub(crate) fn signal_color(name: &str) -> &'static str {
 /// One joint's measured angle at every sample in a take.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct JointSignal {
-    pub(crate) name: String,
+    name: String,
     /// `None` means that no calibrated angle was reported for that sample.
-    pub(crate) values: Vec<Option<f32>>,
+    values: Vec<Option<f32>>,
+}
+
+impl JointSignal {
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub(crate) fn values(&self) -> &[Option<f32>] {
+        &self.values
+    }
 }
 
 /// One arm's joint signals, in the order first reported by that arm.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct ArmSignals {
-    pub(crate) id: String,
-    pub(crate) joints: Vec<JointSignal>,
+    id: String,
+    joints: Vec<JointSignal>,
+}
+
+impl ArmSignals {
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub(crate) fn joints(&self) -> &[JointSignal] {
+        &self.joints
+    }
 }
 
 /// Samples for the active take, or the last take after recording stops.
@@ -93,7 +113,7 @@ impl SignalStore {
     // for inspection in the Timeline.
     #[cfg(any(test, all(feature = "web", target_arch = "wasm32")))]
     pub(crate) fn observe(&mut self, frame: &TelemetryFrame) {
-        let Some(recording) = frame.recording.as_ref() else {
+        let Some(recording) = frame.recording() else {
             self.idle = self.idle.saturating_add(1);
             if self.idle >= 2 {
                 self.live = false;
@@ -104,42 +124,42 @@ impl SignalStore {
 
         // Episode ids can repeat after a server restart, so the clock and live
         // transition also participate in take identity.
-        let different_take = self.take.as_deref() != Some(recording.episode.as_str());
+        let different_take = self.take.as_deref() != Some(recording.episode());
         let resumed = !self.live;
         let rewound = self
             .times
             .last()
-            .is_some_and(|last| (recording.elapsed_seconds as f32) < *last);
+            .is_some_and(|last| (recording.elapsed_seconds() as f32) < *last);
         if different_take || resumed || rewound {
-            self.reset(&recording.episode);
+            self.reset(recording.episode());
         }
         self.live = true;
 
-        self.times.push(recording.elapsed_seconds as f32);
+        self.times.push(recording.elapsed_seconds() as f32);
         let sample_count = self.times.len();
 
-        for robot in &frame.robots {
-            let arm = match self.arms.iter_mut().position(|arm| arm.id == robot.id) {
+        for robot in frame.robots() {
+            let arm = match self.arms.iter_mut().position(|arm| arm.id == robot.id()) {
                 Some(index) => &mut self.arms[index],
                 None => {
                     self.arms.push(ArmSignals {
-                        id: robot.id.clone(),
+                        id: robot.id().to_owned(),
                         joints: Vec::new(),
                     });
                     self.arms.last_mut().expect("an arm was just appended")
                 }
             };
 
-            for joint in &robot.joints {
+            for joint in robot.joints() {
                 let signal = match arm
                     .joints
                     .iter_mut()
-                    .find(|signal| signal.name == joint.name)
+                    .find(|signal| signal.name == joint.name())
                 {
                     Some(signal) => signal,
                     None => {
                         arm.joints.push(JointSignal {
-                            name: joint.name.clone(),
+                            name: joint.name().to_owned(),
                             // An arm or joint appearing mid-take begins with a
                             // gap; its first reading is never backdated.
                             values: vec![None; sample_count - 1],
@@ -149,7 +169,7 @@ impl SignalStore {
                 };
                 signal
                     .values
-                    .push(joint.degrees.map(|degrees| degrees as f32));
+                    .push(joint.degrees().map(|degrees| degrees as f32));
             }
         }
 
@@ -188,28 +208,19 @@ impl SignalStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spiral_robotics_api::recording::RecordingProgress;
-    use spiral_robotics_api::robots::{JointTelemetry, RobotTelemetry};
+    use spiral_robotics_api::recording::{
+        RecordingClock, RecordingIdentity, RecordingProgress, RecordingState,
+    };
+    use spiral_robotics_api::robots::{
+        JointDiagnostics, JointIdentity, JointKinematics, JointTelemetry, RobotTelemetry,
+    };
 
     fn joint(name: &str, degrees: Option<f64>) -> JointTelemetry {
-        JointTelemetry {
-            name: name.to_owned(),
-            id: 1,
-            raw: 0,
-            degrees,
-            normalized: None,
-            goal_raw: None,
-            target_raw: None,
-            target_degrees: None,
-            range: None,
-            temperature_celsius: None,
-            voltage_volts: None,
-            current_amps: None,
-            load: None,
-            speed_degrees_per_second: None,
-            temperature_rise_per_minute: None,
-            faults: Vec::new(),
-        }
+        JointTelemetry::new(
+            JointIdentity::new(name, 1),
+            JointKinematics::new(0, degrees, None),
+            JointDiagnostics::default(),
+        )
     }
 
     fn frame(
@@ -217,34 +228,22 @@ mod tests {
         elapsed: f64,
         arms: Vec<(&str, Vec<JointTelemetry>)>,
     ) -> TelemetryFrame {
-        TelemetryFrame {
-            sequence: 0,
-            loop_hz: 60.0,
-            target_hz: 60.0,
-            robots: arms
-                .into_iter()
-                .map(|(id, joints)| RobotTelemetry {
-                    id: id.to_owned(),
-                    torque: false,
-                    joints,
-                    error: None,
-                    calibration: None,
-                })
-                .collect(),
-            recording: episode.map(|episode| RecordingProgress {
-                episode: episode.to_owned(),
-                dataset_id: "default".to_owned(),
-                frames: 1,
-                elapsed_seconds: elapsed,
-                wall_elapsed_seconds: elapsed,
-                paused_seconds: 0.0,
-                paused: false,
-                arms: Vec::new(),
-                max_follow_error_degrees: None,
-                error: None,
-            }),
-            replay: None,
-        }
+        TelemetryFrame::new(0, 60.0, 60.0)
+            .with_robots(
+                arms.into_iter()
+                    .map(|(id, joints)| RobotTelemetry::new(id, false, joints))
+                    .collect(),
+            )
+            .with_operations(
+                episode.map(|episode| {
+                    RecordingProgress::new(
+                        RecordingIdentity::new(episode, "default", Vec::new()),
+                        RecordingClock::new(1, elapsed, elapsed),
+                        RecordingState::default(),
+                    )
+                }),
+                None,
+            )
     }
 
     fn reading(store: &SignalStore, arm: &str, joint: &str, at: usize) -> Option<f32> {

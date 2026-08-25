@@ -14,7 +14,7 @@ mod feetech;
 pub mod serial_ports;
 
 pub use control::{
-    ArmConditionSummary, CONTROL_HZ, CONTROL_PERIOD, ControlSettings, DEFAULT_MAX_STEP_COUNTS,
+    ArmConditionSummary, CONTROL_HZ, ControlSettings, DEFAULT_MAX_STEP_COUNTS,
     DEFAULT_TELEOP_MAX_STEP_COUNTS, EpisodeCheckpoint, HardwareHandle, HardwareState, PolicyGoals,
     RecordingCompletion, RecordingWriter, ReplayRequest, ReplayTrajectory, RobotSpec, Sample,
 };

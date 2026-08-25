@@ -10643,6 +10643,7 @@ dependencies = [
  "spiral-robotics-inference",
  "spiral-robotics-storage",
  "spiral-robotics-training",
+ "syn 2.0.119",
  "tempfile",
  "tokenizers",
  "tokio",
@@ -10703,11 +10704,7 @@ dependencies = [
 name = "spiral-robotics-inference"
 version = "0.1.0"
 dependencies = [
- "dirs",
- "reqwest 0.12.28",
  "serde",
- "sha2 0.10.9",
- "tempfile",
  "thiserror 2.0.19",
 ]
 

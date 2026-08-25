@@ -2,6 +2,7 @@
 
 use dioxus::prelude::*;
 
+use crate::client::commands::{RecordingCompletion, TimelineSeekBody};
 use crate::client::historical::{
     HistoricalPreviewRequest, HistoricalPreviewSignals, historical_replay_slot,
     request_historical_preview,
@@ -41,12 +42,12 @@ impl PreviewTransport {
 
 #[derive(Clone, Copy)]
 pub(crate) struct TimelineController {
-    pub(crate) playhead: Signal<f64>,
-    pub(crate) preview: Signal<PreviewTransport>,
-    pub(crate) follow_live: Signal<bool>,
-    pub(crate) robot_sync_target: Signal<Option<TimelineTarget>>,
+    playhead: Signal<f64>,
+    preview: Signal<PreviewTransport>,
+    follow_live: Signal<bool>,
+    robot_sync_target: Signal<Option<TimelineTarget>>,
     #[cfg(feature = "web")]
-    pub(crate) preview_tick_seconds: Signal<Option<f64>>,
+    preview_tick_seconds: Signal<Option<f64>>,
 }
 
 pub(crate) fn use_timeline_controller() -> TimelineController {
@@ -66,6 +67,23 @@ pub(crate) fn timeline_controller() -> TimelineController {
 }
 
 impl TimelineController {
+    pub(crate) const fn playhead_signal(self) -> Signal<f64> {
+        self.playhead
+    }
+
+    pub(crate) const fn follow_live_signal(self) -> Signal<bool> {
+        self.follow_live
+    }
+
+    pub(crate) const fn robot_sync_target_signal(self) -> Signal<Option<TimelineTarget>> {
+        self.robot_sync_target
+    }
+
+    #[cfg(feature = "web")]
+    pub(crate) const fn preview_tick_signal(self) -> Signal<Option<f64>> {
+        self.preview_tick_seconds
+    }
+
     pub(crate) fn start_preview(mut self, episode: String, duration_seconds: f64) {
         self.preview.set(PreviewTransport::Playing {
             episode,
@@ -217,16 +235,18 @@ pub(crate) fn dispatch_timeline_action(context: TimelineActionContext, action: T
                     let finished_episode = episode.clone();
                     studio.stop_recording(
                         &episode,
-                        keep,
-                        EventHandler::new(
-                            move |_: spiral_robotics_api::recording::EpisodeSummary| {
-                                historical_cache.write().invalidate(&finished_episode);
-                                let next_revision = historical_revision.peek().wrapping_add(1);
-                                historical_revision.set(next_revision);
-                                historical_state.set(None);
-                                automatic_preview_target.set(None);
-                                interactive_preview_target.set(None);
-                            },
+                        RecordingCompletion::new(
+                            keep,
+                            EventHandler::new(
+                                move |_: spiral_robotics_api::recording::EpisodeSummary| {
+                                    historical_cache.write().invalidate(&finished_episode);
+                                    let next_revision = historical_revision.peek().wrapping_add(1);
+                                    historical_revision.set(next_revision);
+                                    historical_state.set(None);
+                                    automatic_preview_target.set(None);
+                                    interactive_preview_target.set(None);
+                                },
+                            ),
                         ),
                     );
                 }
@@ -261,17 +281,18 @@ pub(crate) fn dispatch_timeline_action(context: TimelineActionContext, action: T
                 TimelineRobotSyncAction::Resume => studio.set_replay_paused(&episode, false),
             }
         }
-        TimelineAction::Seek(request) if subject.target().as_ref() == Some(&request.target) => {
+        TimelineAction::Seek(request) if subject.target().as_ref() == Some(request.target()) => {
             controller.stop_preview();
-            playhead.set(request.seconds);
+            playhead.set(request.seconds());
             if let Some(episode) = review_episode.clone() {
-                let target = (episode.clone(), historical_replay_slot(request.seconds));
-                if request.committed || interactive_preview_target.peek().as_ref() != Some(&target)
+                let target = (episode.clone(), historical_replay_slot(request.seconds()));
+                if request.committed()
+                    || interactive_preview_target.peek().as_ref() != Some(&target)
                 {
                     interactive_preview_target.set(Some(target));
                     request_historical_preview(
                         studio,
-                        HistoricalPreviewRequest::new(episode, None, request.seconds),
+                        HistoricalPreviewRequest::new(episode, None, request.seconds()),
                         HistoricalPreviewSignals::new(
                             historical_state,
                             historical_revision,
@@ -280,11 +301,14 @@ pub(crate) fn dispatch_timeline_action(context: TimelineActionContext, action: T
                     );
                 }
             }
-            if request.committed
-                && request.move_robot
+            if request.committed()
+                && request.moves_robot()
                 && let Some((episode, robot, source_arm)) = seek_context
             {
-                studio.physical_seek(episode, robot, source_arm, request.seconds);
+                studio.physical_seek(
+                    episode,
+                    TimelineSeekBody::new(robot, source_arm, request.seconds()),
+                );
             }
         }
         TimelineAction::SetFollowLive(next) => {
@@ -292,7 +316,7 @@ pub(crate) fn dispatch_timeline_action(context: TimelineActionContext, action: T
             if next {
                 controller.stop_preview();
                 if let Some(recording) = studio.recording() {
-                    playhead.set(recording.elapsed_seconds);
+                    playhead.set(recording.elapsed_seconds());
                 }
             }
         }
@@ -305,9 +329,9 @@ pub(crate) fn dispatch_timeline_action(context: TimelineActionContext, action: T
             } else {
                 robot_sync_target.set(None);
                 if let Some(replay) = studio.replay()
-                    && subject.episode_id() == Some(replay.episode.as_str())
+                    && subject.episode_id() == Some(replay.episode())
                 {
-                    studio.stop_replay(&replay.episode);
+                    studio.stop_replay(replay.episode());
                 }
             }
         }

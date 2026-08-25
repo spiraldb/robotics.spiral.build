@@ -8,9 +8,21 @@ use crate::datasets::default_dataset_id;
 /// Replay a trajectory fetched directly from SpiralDB.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct StartSpiralReplayRequest {
-    pub episode: String,
-    pub robot: String,
-    pub stream: String,
+    episode: String,
+    robot: String,
+    stream: String,
+}
+
+impl StartSpiralReplayRequest {
+    pub fn episode(&self) -> &str {
+        &self.episode
+    }
+    pub fn robot(&self) -> &str {
+        &self.robot
+    }
+    pub fn stream(&self) -> &str {
+        &self.stream
+    }
 }
 
 /// One recorded episode, as summarised from SpiralDB.
@@ -21,65 +33,214 @@ pub struct StartSpiralReplayRequest {
 /// raw counts after the originating arm is recalibrated.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct EpisodeSummary {
+    #[serde(flatten)]
+    identity: EpisodeIdentity,
+    #[serde(flatten)]
+    timeline: EpisodeTimeline,
+    #[serde(flatten)]
+    assessment: EpisodeAssessment,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct EpisodeIdentity {
     /// Stable identifier for the episode and all of its related rows.
-    pub id: String,
+    id: String,
     /// Dataset row this episode belongs to. Streams and samples reference the
     /// episode; only the episode row carries dataset membership.
     #[serde(default = "default_dataset_id")]
-    pub dataset_id: String,
+    dataset_id: String,
     /// Arms sampled in this take, in the order their joints appear in a frame.
-    pub arms: Vec<EpisodeArm>,
-    pub frames: u64,
-    pub duration_seconds: f64,
+    arms: Vec<EpisodeArm>,
+    source: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct EpisodeTimeline {
+    frames: u64,
+    duration_seconds: f64,
     /// Wall-clock intervals deliberately omitted from the episode timeline.
     ///
     /// Samples and recorded video use the active timeline, so pausing does not
     /// create a motionless training-data plateau. Each entry preserves where
     /// the omission happened and how much real time passed there.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub recording_gaps: Vec<RecordingGap>,
+    recording_gaps: Vec<RecordingGap>,
     /// Rate the take was captured at, so a replay can honour its timing.
-    pub sample_hz: f64,
+    sample_hz: f64,
     /// When the take started, as milliseconds since the Unix epoch.
     ///
     /// Carried as a number rather than a formatted string so the client can
     /// render it in the operator's own locale and timezone.
-    pub started_ms: i64,
-    /// The mode that produced the take, in the studio's own words.
-    pub source: String,
+    started_ms: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct EpisodeAssessment {
     /// Largest gap between a measured and a commanded joint angle during the
     /// take, in degrees — the same quantity the inspector shows live as
     /// `Follow Δ`, kept for the whole take instead of for one instant.
-    pub max_follow_error_degrees: Option<f64>,
+    max_follow_error_degrees: Option<f64>,
     /// True once the operator has judged this take unusable.
     ///
     /// A discarded take remains in SpiralDB and is excluded from training,
     /// because the judgement is the operator's and deleting on their behalf is not.
-    pub discarded: bool,
+    discarded: bool,
     /// Why this committed take cannot currently be replayed or trained.
-    pub problem: Option<String>,
+    problem: Option<String>,
 }
 
 /// One logical dataset known to Studio, including datasets whose native
 /// imported relations do not project into Studio's recorded-episode schema.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DatasetSummary {
-    pub id: String,
-    pub name: String,
-    pub created_ms: i64,
+    id: String,
+    name: String,
+    created_ms: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
+    description: Option<String>,
+}
+
+impl DatasetSummary {
+    pub fn new(id: impl Into<String>, name: impl Into<String>, created_ms: i64) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            created_ms,
+            description: None,
+        }
+    }
+    pub fn with_description(mut self, description: Option<String>) -> Self {
+        self.description = description;
+        self
+    }
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub const fn created_ms(&self) -> i64 {
+        self.created_ms
+    }
+    pub fn description(&self) -> Option<&str> {
+        self.description.as_deref()
+    }
 }
 
 impl EpisodeSummary {
+    pub fn new(
+        identity: EpisodeIdentity,
+        timeline: EpisodeTimeline,
+        assessment: EpisodeAssessment,
+    ) -> Self {
+        Self {
+            identity,
+            timeline,
+            assessment,
+        }
+    }
+
+    pub fn id(&self) -> &str {
+        &self.identity.id
+    }
+
+    pub fn arms(&self) -> &[EpisodeArm] {
+        &self.identity.arms
+    }
+
+    pub const fn frames(&self) -> u64 {
+        self.timeline.frames
+    }
+
     /// True when the take is complete enough to replay or export.
     pub fn usable(&self) -> bool {
-        EpisodeOutcome::new(self.frames, self.problem.is_some()).is_usable()
+        EpisodeOutcome::new(self.timeline.frames, self.assessment.problem.is_some()).is_usable()
     }
 
     /// The joints of the arm named, when this take sampled it.
     pub fn arm(&self, id: &str) -> Option<&EpisodeArm> {
-        self.arms.iter().find(|arm| arm.id == id)
+        self.identity.arms.iter().find(|arm| arm.id == id)
+    }
+
+    pub fn dataset_id(&self) -> &str {
+        &self.identity.dataset_id
+    }
+    pub const fn duration_seconds(&self) -> f64 {
+        self.timeline.duration_seconds
+    }
+    pub fn recording_gaps(&self) -> &[RecordingGap] {
+        &self.timeline.recording_gaps
+    }
+    pub const fn sample_hz(&self) -> f64 {
+        self.timeline.sample_hz
+    }
+    pub const fn started_ms(&self) -> i64 {
+        self.timeline.started_ms
+    }
+    pub fn source(&self) -> &str {
+        &self.identity.source
+    }
+    pub const fn max_follow_error_degrees(&self) -> Option<f64> {
+        self.assessment.max_follow_error_degrees
+    }
+    pub const fn discarded(&self) -> bool {
+        self.assessment.discarded
+    }
+    pub fn problem(&self) -> Option<&str> {
+        self.assessment.problem.as_deref()
+    }
+}
+
+impl EpisodeIdentity {
+    pub fn new(
+        id: impl Into<String>,
+        dataset_id: impl Into<String>,
+        arms: Vec<EpisodeArm>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            dataset_id: dataset_id.into(),
+            arms,
+            source: String::new(),
+        }
+    }
+    pub fn with_source(mut self, source: impl Into<String>) -> Self {
+        self.source = source.into();
+        self
+    }
+}
+
+impl EpisodeTimeline {
+    pub const fn new(frames: u64, duration_seconds: f64, sample_hz: f64) -> Self {
+        Self {
+            frames,
+            duration_seconds,
+            recording_gaps: Vec::new(),
+            sample_hz,
+            started_ms: 0,
+        }
+    }
+    pub fn with_recording_gaps(mut self, recording_gaps: Vec<RecordingGap>) -> Self {
+        self.recording_gaps = recording_gaps;
+        self
+    }
+    pub const fn with_started_ms(mut self, started_ms: i64) -> Self {
+        self.started_ms = started_ms;
+        self
+    }
+}
+
+impl EpisodeAssessment {
+    pub fn new(
+        discarded: bool,
+        max_follow_error_degrees: Option<f64>,
+        problem: Option<String>,
+    ) -> Self {
+        Self {
+            max_follow_error_degrees,
+            discarded,
+            problem,
+        }
     }
 }
 
@@ -90,11 +251,53 @@ impl EpisodeSummary {
 /// memory. Video bytes remain separate range-addressable resources.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct EpisodeInspectionSnapshot {
-    pub episode: EpisodeSummary,
-    pub sample_times_seconds: Vec<f64>,
-    pub follow_error_degrees: Vec<Option<f64>>,
-    pub arms: Vec<EpisodeInspectionArm>,
-    pub videos: Vec<EpisodeVideoAssetMetadata>,
+    episode: EpisodeSummary,
+    sample_times_seconds: Vec<f64>,
+    follow_error_degrees: Vec<Option<f64>>,
+    arms: Vec<EpisodeInspectionArm>,
+    videos: Vec<EpisodeVideoAssetMetadata>,
+}
+
+impl EpisodeInspectionSnapshot {
+    pub fn new(
+        episode: EpisodeSummary,
+        sample_times_seconds: Vec<f64>,
+        follow_error_degrees: Vec<Option<f64>>,
+    ) -> Self {
+        Self {
+            episode,
+            sample_times_seconds,
+            follow_error_degrees,
+            arms: Vec::new(),
+            videos: Vec::new(),
+        }
+    }
+
+    pub fn with_arms(mut self, arms: Vec<EpisodeInspectionArm>) -> Self {
+        self.arms = arms;
+        self
+    }
+
+    pub fn with_videos(mut self, videos: Vec<EpisodeVideoAssetMetadata>) -> Self {
+        self.videos = videos;
+        self
+    }
+
+    pub const fn episode(&self) -> &EpisodeSummary {
+        &self.episode
+    }
+    pub fn sample_times_seconds(&self) -> &[f64] {
+        &self.sample_times_seconds
+    }
+    pub fn follow_error_degrees(&self) -> &[Option<f64>] {
+        &self.follow_error_degrees
+    }
+    pub fn arms(&self) -> &[EpisodeInspectionArm] {
+        &self.arms
+    }
+    pub fn videos(&self) -> &[EpisodeVideoAssetMetadata] {
+        &self.videos
+    }
 }
 
 /// All recorded scalar channels for one arm, sharing one frame and joint
@@ -102,13 +305,95 @@ pub struct EpisodeInspectionSnapshot {
 /// `f * joints.len() + j`.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct EpisodeInspectionArm {
-    pub arm: String,
-    pub joints: Vec<String>,
-    pub normalized: Vec<Option<f64>>,
-    pub raw: Vec<i64>,
-    pub velocity: EpisodeOptionalFrameMatrix,
-    pub effort: EpisodeOptionalFrameMatrix,
-    pub action: EpisodeOptionalFrameMatrix,
+    arm: String,
+    joints: Vec<String>,
+    normalized: Vec<Option<f64>>,
+    raw: Vec<i64>,
+    velocity: EpisodeOptionalFrameMatrix,
+    effort: EpisodeOptionalFrameMatrix,
+    action: EpisodeOptionalFrameMatrix,
+}
+
+/// Dense scalar matrices that are present for every recorded arm frame.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EpisodeArmScalarSamples {
+    normalized: Vec<Option<f64>>,
+    raw: Vec<i64>,
+}
+
+impl EpisodeArmScalarSamples {
+    pub const fn new(normalized: Vec<Option<f64>>, raw: Vec<i64>) -> Self {
+        Self { normalized, raw }
+    }
+}
+
+/// Optional per-frame channels recorded beside an arm's scalar samples.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EpisodeArmOptionalChannels {
+    velocity: EpisodeOptionalFrameMatrix,
+    effort: EpisodeOptionalFrameMatrix,
+    action: EpisodeOptionalFrameMatrix,
+}
+
+impl EpisodeArmOptionalChannels {
+    pub const fn new(
+        velocity: EpisodeOptionalFrameMatrix,
+        effort: EpisodeOptionalFrameMatrix,
+        action: EpisodeOptionalFrameMatrix,
+    ) -> Self {
+        Self {
+            velocity,
+            effort,
+            action,
+        }
+    }
+}
+
+impl EpisodeInspectionArm {
+    pub fn new(
+        arm: impl Into<String>,
+        joints: Vec<String>,
+        samples: EpisodeArmScalarSamples,
+    ) -> Self {
+        Self {
+            arm: arm.into(),
+            joints,
+            normalized: samples.normalized,
+            raw: samples.raw,
+            velocity: EpisodeOptionalFrameMatrix::default(),
+            effort: EpisodeOptionalFrameMatrix::default(),
+            action: EpisodeOptionalFrameMatrix::default(),
+        }
+    }
+
+    pub fn with_optional_channels(mut self, channels: EpisodeArmOptionalChannels) -> Self {
+        self.velocity = channels.velocity;
+        self.effort = channels.effort;
+        self.action = channels.action;
+        self
+    }
+
+    pub fn arm(&self) -> &str {
+        &self.arm
+    }
+    pub fn joints(&self) -> &[String] {
+        &self.joints
+    }
+    pub fn normalized(&self) -> &[Option<f64>] {
+        &self.normalized
+    }
+    pub fn raw(&self) -> &[i64] {
+        &self.raw
+    }
+    pub const fn velocity(&self) -> &EpisodeOptionalFrameMatrix {
+        &self.velocity
+    }
+    pub const fn effort(&self) -> &EpisodeOptionalFrameMatrix {
+        &self.effort
+    }
+    pub const fn action(&self) -> &EpisodeOptionalFrameMatrix {
+        &self.action
+    }
 }
 
 /// A channel that may be absent for an entire arm at an individual frame.
@@ -116,23 +401,130 @@ pub struct EpisodeInspectionArm {
 /// nulls for unavailable joints without repeating arm or joint names.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct EpisodeOptionalFrameMatrix {
-    pub present: Vec<bool>,
-    pub values: Vec<Option<f64>>,
+    present: Vec<bool>,
+    values: Vec<Option<f64>>,
+}
+
+impl EpisodeOptionalFrameMatrix {
+    pub const fn new(present: Vec<bool>, values: Vec<Option<f64>>) -> Self {
+        Self { present, values }
+    }
+
+    pub fn present(&self) -> &[bool] {
+        &self.present
+    }
+    pub fn values(&self) -> &[Option<f64>] {
+        &self.values
+    }
 }
 
 /// Filesystem-free metadata needed to align a browser-native video with the
 /// episode clock. The MP4 payload deliberately does not travel in the snapshot.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct EpisodeVideoAssetMetadata {
-    pub stream_id: String,
-    pub camera_id: String,
-    pub width: u32,
-    pub height: u32,
-    pub fps: u32,
-    pub frames: u64,
-    pub duration_seconds: f64,
-    pub segment_index: u32,
-    pub timeline_offset_seconds: Option<f64>,
+    #[serde(flatten)]
+    identity: EpisodeVideoIdentity,
+    #[serde(flatten)]
+    format: EpisodeVideoFormat,
+    #[serde(flatten)]
+    timeline: EpisodeVideoTimeline,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct EpisodeVideoIdentity {
+    stream_id: String,
+    camera_id: String,
+    segment_index: u32,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub struct EpisodeVideoFormat {
+    width: u32,
+    height: u32,
+    fps: u32,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub struct EpisodeVideoTimeline {
+    frames: u64,
+    duration_seconds: f64,
+    timeline_offset_seconds: Option<f64>,
+}
+
+impl EpisodeVideoIdentity {
+    pub fn new(
+        stream_id: impl Into<String>,
+        camera_id: impl Into<String>,
+        segment_index: u32,
+    ) -> Self {
+        Self {
+            stream_id: stream_id.into(),
+            camera_id: camera_id.into(),
+            segment_index,
+        }
+    }
+}
+impl EpisodeVideoFormat {
+    pub const fn new(width: u32, height: u32, fps: u32) -> Self {
+        Self { width, height, fps }
+    }
+}
+impl EpisodeVideoTimeline {
+    pub const fn new(
+        frames: u64,
+        duration_seconds: f64,
+        timeline_offset_seconds: Option<f64>,
+    ) -> Self {
+        Self {
+            frames,
+            duration_seconds,
+            timeline_offset_seconds,
+        }
+    }
+}
+impl EpisodeVideoAssetMetadata {
+    pub const fn new(
+        identity: EpisodeVideoIdentity,
+        format: EpisodeVideoFormat,
+        timeline: EpisodeVideoTimeline,
+    ) -> Self {
+        Self {
+            identity,
+            format,
+            timeline,
+        }
+    }
+    pub fn stream_id(&self) -> &str {
+        &self.identity.stream_id
+    }
+    pub fn camera_id(&self) -> &str {
+        &self.identity.camera_id
+    }
+    pub const fn width(&self) -> u32 {
+        self.format.width
+    }
+    pub const fn height(&self) -> u32 {
+        self.format.height
+    }
+    pub const fn fps(&self) -> u32 {
+        self.format.fps
+    }
+    pub const fn frames(&self) -> u64 {
+        self.timeline.frames
+    }
+    pub const fn duration_seconds(&self) -> f64 {
+        self.timeline.duration_seconds
+    }
+    pub const fn segment_index(&self) -> u32 {
+        self.identity.segment_index
+    }
+    pub const fn timeline_offset_seconds(&self) -> Option<f64> {
+        self.timeline.timeline_offset_seconds
+    }
+    pub fn with_stream_id(mut self, stream_id: impl Into<String>) -> Self {
+        self.identity.stream_id = stream_id.into();
+        self
+    }
 }
 
 /// Browser-owned episode catalog loaded on startup or explicit refresh.
@@ -140,61 +532,190 @@ pub struct EpisodeVideoAssetMetadata {
 pub struct EpisodeCatalogResponse {
     /// Every logical dataset, oldest first.
     #[serde(default)]
-    pub datasets: Vec<DatasetSummary>,
+    datasets: Vec<DatasetSummary>,
     /// Every stored episode, oldest first.
-    pub episodes: Vec<EpisodeSummary>,
+    episodes: Vec<EpisodeSummary>,
     /// Catalog rows that could not be decoded.
-    pub issues: Vec<String>,
+    issues: Vec<String>,
+}
+
+impl EpisodeCatalogResponse {
+    pub const fn new(
+        datasets: Vec<DatasetSummary>,
+        episodes: Vec<EpisodeSummary>,
+        issues: Vec<String>,
+    ) -> Self {
+        Self {
+            datasets,
+            episodes,
+            issues,
+        }
+    }
+
+    pub fn datasets(&self) -> &[DatasetSummary] {
+        &self.datasets
+    }
+    pub fn episodes(&self) -> &[EpisodeSummary] {
+        &self.episodes
+    }
+    pub fn issues(&self) -> &[String] {
+        &self.issues
+    }
+    pub fn into_parts(self) -> (Vec<DatasetSummary>, Vec<EpisodeSummary>, Vec<String>) {
+        (self.datasets, self.episodes, self.issues)
+    }
 }
 
 /// One arm's presence in a take.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct EpisodeArm {
-    pub id: String,
+    id: String,
     /// Stable hardware family/role captured with the episode, such as
     /// `so101_follower`. Training uses this instead of guessing from the ID.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub robot_type: Option<String>,
+    robot_type: Option<String>,
     /// Joint names, in the order their values appear in every frame.
-    pub joints: Vec<String>,
+    joints: Vec<String>,
 }
 
-impl spiral_robotics_core::episode::ArmLayout for EpisodeArm {
-    fn id(&self) -> &str {
+impl EpisodeArm {
+    pub fn new(id: impl Into<String>, robot_type: Option<String>, joints: Vec<String>) -> Self {
+        Self {
+            id: id.into(),
+            robot_type,
+            joints,
+        }
+    }
+
+    pub fn id(&self) -> &str {
         &self.id
     }
 
-    fn joint_count(&self) -> usize {
-        self.joints.len()
+    pub fn robot_type(&self) -> Option<&str> {
+        self.robot_type.as_deref()
+    }
+
+    pub fn joints(&self) -> &[String] {
+        &self.joints
     }
 }
 
 /// A take being captured right now.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct RecordingProgress {
+    #[serde(flatten)]
+    identity: RecordingIdentity,
+    #[serde(flatten)]
+    clock: RecordingClock,
+    #[serde(flatten)]
+    state: RecordingState,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RecordingIdentity {
     /// Identifier the finished take will have.
-    pub episode: String,
+    episode: String,
     /// Logical dataset row this take will reference when it completes.
     #[serde(default = "default_dataset_id")]
-    pub dataset_id: String,
-    pub frames: u64,
-    pub elapsed_seconds: f64,
+    dataset_id: String,
+    arms: Vec<String>,
+}
+
+impl RecordingIdentity {
+    pub fn new(
+        episode: impl Into<String>,
+        dataset_id: impl Into<String>,
+        arms: Vec<String>,
+    ) -> Self {
+        Self {
+            episode: episode.into(),
+            dataset_id: dataset_id.into(),
+            arms,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct RecordingClock {
+    frames: u64,
+    elapsed_seconds: f64,
     /// Real time since Record was pressed, including deliberate pauses.
     #[serde(default)]
-    pub wall_elapsed_seconds: f64,
+    wall_elapsed_seconds: f64,
     /// Real time omitted from the active episode timeline so far.
     #[serde(default)]
-    pub paused_seconds: f64,
+    paused_seconds: f64,
+}
+
+impl RecordingClock {
+    pub const fn new(frames: u64, elapsed_seconds: f64, wall_elapsed_seconds: f64) -> Self {
+        Self {
+            frames,
+            elapsed_seconds,
+            wall_elapsed_seconds,
+            paused_seconds: 0.0,
+        }
+    }
+    pub const fn with_paused_seconds(mut self, paused_seconds: f64) -> Self {
+        self.paused_seconds = paused_seconds;
+        self
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct RecordingState {
     /// Whether samples and camera frames are currently being omitted.
     #[serde(default)]
-    pub paused: bool,
-    /// Arms being sampled.
-    pub arms: Vec<String>,
+    paused: bool,
     /// Largest `Follow Δ` seen so far in this take, in degrees.
-    pub max_follow_error_degrees: Option<f64>,
+    max_follow_error_degrees: Option<f64>,
     /// Set when the capture stopped itself — a full disk, or an arm that went
     /// away mid-take.
-    pub error: Option<String>,
+    error: Option<String>,
+}
+
+impl RecordingState {
+    pub fn new(paused: bool, max_follow_error_degrees: Option<f64>, error: Option<String>) -> Self {
+        Self {
+            paused,
+            max_follow_error_degrees,
+            error,
+        }
+    }
+}
+
+impl RecordingProgress {
+    pub fn new(identity: RecordingIdentity, clock: RecordingClock, state: RecordingState) -> Self {
+        Self {
+            identity,
+            clock,
+            state,
+        }
+    }
+    pub fn episode(&self) -> &str {
+        &self.identity.episode
+    }
+    pub fn dataset_id(&self) -> &str {
+        &self.identity.dataset_id
+    }
+    pub fn arms(&self) -> &[String] {
+        &self.identity.arms
+    }
+    pub const fn frames(&self) -> u64 {
+        self.clock.frames
+    }
+    pub const fn elapsed_seconds(&self) -> f64 {
+        self.clock.elapsed_seconds
+    }
+    pub const fn paused(&self) -> bool {
+        self.state.paused
+    }
+    pub const fn max_follow_error_degrees(&self) -> Option<f64> {
+        self.state.max_follow_error_degrees
+    }
+    pub fn error(&self) -> Option<&str> {
+        self.state.error.as_deref()
+    }
 }
 
 /// A deliberate pause in an otherwise continuous recording session.
@@ -204,8 +725,23 @@ pub struct RecordingProgress {
 /// display or audit every omitted wall-clock interval.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 pub struct RecordingGap {
-    pub after_seconds: f64,
-    pub duration_seconds: f64,
+    after_seconds: f64,
+    duration_seconds: f64,
+}
+
+impl RecordingGap {
+    pub const fn new(after_seconds: f64, duration_seconds: f64) -> Self {
+        Self {
+            after_seconds,
+            duration_seconds,
+        }
+    }
+    pub const fn after_seconds(self) -> f64 {
+        self.after_seconds
+    }
+    pub const fn duration_seconds(self) -> f64 {
+        self.duration_seconds
+    }
 }
 
 /// Why a replay trajectory is loaded.
@@ -232,24 +768,120 @@ pub enum ReplayPhase {
 /// An episode being played back right now.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ReplayProgress {
-    pub episode: String,
+    #[serde(flatten)]
+    identity: ReplayIdentity,
+    #[serde(flatten)]
+    timeline: ReplayTimeline,
+    #[serde(flatten)]
+    transport: ReplayTransport,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ReplayIdentity {
+    episode: String,
     /// The arm being driven.
-    pub robot: String,
+    robot: String,
+}
+
+impl ReplayIdentity {
+    pub fn new(episode: impl Into<String>, robot: impl Into<String>) -> Self {
+        Self {
+            episode: episode.into(),
+            robot: robot.into(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct ReplayTimeline {
     /// Frames played so far.
-    pub frame: u64,
-    pub frames: u64,
-    pub elapsed_seconds: f64,
-    pub duration_seconds: f64,
+    frame: u64,
+    frames: u64,
+    elapsed_seconds: f64,
+    duration_seconds: f64,
+}
+
+impl ReplayTimeline {
+    pub const fn new(frame: u64, frames: u64, elapsed_seconds: f64) -> Self {
+        Self {
+            frame,
+            frames,
+            elapsed_seconds,
+            duration_seconds: 0.0,
+        }
+    }
+    pub const fn with_duration_seconds(mut self, duration_seconds: f64) -> Self {
+        self.duration_seconds = duration_seconds;
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ReplayTransport {
     /// Whether this is Timeline transport or a one-pose physical seek.
     #[serde(default)]
-    pub purpose: ReplayPurpose,
+    purpose: ReplayPurpose,
     /// Positioning never advances the episode clock or recorded media.
     #[serde(default)]
-    pub phase: ReplayPhase,
+    phase: ReplayPhase,
     /// Whether playback is holding its current frame without discarding the
     /// loaded trajectory. Resuming continues from this exact position.
     #[serde(default)]
-    pub paused: bool,
+    paused: bool,
+}
+
+impl ReplayTransport {
+    pub const fn new(purpose: ReplayPurpose, phase: ReplayPhase, paused: bool) -> Self {
+        Self {
+            purpose,
+            phase,
+            paused,
+        }
+    }
+}
+
+impl ReplayProgress {
+    pub fn new(
+        identity: ReplayIdentity,
+        timeline: ReplayTimeline,
+        transport: ReplayTransport,
+    ) -> Self {
+        Self {
+            identity,
+            timeline,
+            transport,
+        }
+    }
+    pub fn episode(&self) -> &str {
+        &self.identity.episode
+    }
+    pub fn robot(&self) -> &str {
+        &self.identity.robot
+    }
+    pub const fn frame(&self) -> u64 {
+        self.timeline.frame
+    }
+    pub const fn frames(&self) -> u64 {
+        self.timeline.frames
+    }
+    pub const fn elapsed_seconds(&self) -> f64 {
+        self.timeline.elapsed_seconds
+    }
+    pub const fn duration_seconds(&self) -> f64 {
+        self.timeline.duration_seconds
+    }
+    pub const fn purpose(&self) -> ReplayPurpose {
+        self.transport.purpose
+    }
+    pub const fn phase(&self) -> ReplayPhase {
+        self.transport.phase
+    }
+    pub const fn paused(&self) -> bool {
+        self.transport.paused
+    }
+    pub const fn set_transport(&mut self, transport: ReplayTransport) {
+        self.transport = transport;
+    }
 }
 
 /// Begin capturing a take.
@@ -257,14 +889,14 @@ pub struct ReplayProgress {
 pub struct StartRecordingRequest {
     /// Dataset row that will own the completed episode.
     #[serde(default = "default_dataset_id")]
-    pub dataset_id: String,
+    dataset_id: String,
     /// Arms to sample. Empty means every connected arm, which is the useful
     /// default: a take is a record of the whole scene, not of one arm.
     #[serde(default)]
-    pub arms: Vec<String>,
+    arms: Vec<String>,
     /// A short operator note stored with the take.
     #[serde(default)]
-    pub note: Option<String>,
+    note: Option<String>,
 }
 
 impl Default for StartRecordingRequest {
@@ -277,44 +909,140 @@ impl Default for StartRecordingRequest {
     }
 }
 
+impl StartRecordingRequest {
+    pub fn new(dataset_id: impl Into<String>) -> Self {
+        Self {
+            dataset_id: dataset_id.into(),
+            arms: Vec::new(),
+            note: None,
+        }
+    }
+
+    pub fn with_arms(mut self, arms: Vec<String>) -> Self {
+        self.arms = arms;
+        self
+    }
+
+    pub fn with_note(mut self, note: Option<String>) -> Self {
+        self.note = note;
+        self
+    }
+
+    pub fn dataset_id(&self) -> &str {
+        &self.dataset_id
+    }
+    pub fn arms(&self) -> &[String] {
+        &self.arms
+    }
+    pub fn note(&self) -> Option<&str> {
+        self.note.as_deref()
+    }
+}
+
 /// Finish the take in progress.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct StopRecordingRequest {
     /// False marks the finished take discarded in the same gesture that ends
     /// it, for the common case of knowing the take was bad while it ran.
-    pub keep: bool,
+    keep: bool,
 }
 
 /// Pause or resume the take in progress without changing its episode ID.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SetRecordingPausedRequest {
-    pub paused: bool,
+    paused: bool,
 }
 
 /// Pause or resume a replay without unloading its trajectory.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SetReplayPausedRequest {
-    pub paused: bool,
+    paused: bool,
 }
 
 /// Change the operator's judgement of a stored take.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct JudgeEpisodeRequest {
-    pub discarded: bool,
+    discarded: bool,
 }
 
 /// Play a stored episode back onto one arm.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct StartReplayRequest {
-    pub episode: String,
+    episode: String,
     /// The arm to drive. It must be connected and calibrated.
-    pub robot: String,
+    robot: String,
     /// Which recorded arm's trajectory to play, when the take holds more than
     /// one. Defaults to the arm being driven, then to the take's only arm.
     #[serde(default)]
-    pub source_arm: Option<String>,
+    source_arm: Option<String>,
     /// Episode-clock position where replay should begin. Older clients omit
     /// this and retain the original frame-zero behavior.
     #[serde(default)]
-    pub start_seconds: f64,
+    start_seconds: f64,
+}
+
+impl StopRecordingRequest {
+    pub const fn new(keep: bool) -> Self {
+        Self { keep }
+    }
+    pub const fn keep(&self) -> bool {
+        self.keep
+    }
+}
+
+impl SetRecordingPausedRequest {
+    pub const fn new(paused: bool) -> Self {
+        Self { paused }
+    }
+    pub const fn paused(&self) -> bool {
+        self.paused
+    }
+}
+
+impl SetReplayPausedRequest {
+    pub const fn new(paused: bool) -> Self {
+        Self { paused }
+    }
+    pub const fn paused(&self) -> bool {
+        self.paused
+    }
+}
+
+impl StartReplayRequest {
+    pub fn new(episode: impl Into<String>, robot: impl Into<String>) -> Self {
+        Self {
+            episode: episode.into(),
+            robot: robot.into(),
+            source_arm: None,
+            start_seconds: 0.0,
+        }
+    }
+
+    pub fn with_source_arm(mut self, source_arm: Option<String>) -> Self {
+        self.source_arm = source_arm;
+        self
+    }
+
+    pub const fn starting_at(mut self, start_seconds: f64) -> Self {
+        self.start_seconds = start_seconds;
+        self
+    }
+    pub fn episode(&self) -> &str {
+        &self.episode
+    }
+    pub fn robot(&self) -> &str {
+        &self.robot
+    }
+    pub fn source_arm(&self) -> Option<&str> {
+        self.source_arm.as_deref()
+    }
+    pub const fn start_seconds(&self) -> f64 {
+        self.start_seconds
+    }
+}
+
+impl JudgeEpisodeRequest {
+    pub const fn discarded(&self) -> bool {
+        self.discarded
+    }
 }

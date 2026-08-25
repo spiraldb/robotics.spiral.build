@@ -3,7 +3,8 @@
 use std::collections::BTreeSet;
 
 use crate::components::interaction::{
-    Action, ActionPurpose, ActionSize, ActionVariant, DeleteIcon, InlineConfirmation,
+    Action, ActionPurpose, ActionSize, ActionVariant, ConfirmationCopy, ConfirmationDismissal,
+    ConfirmationResponse, DeleteIcon, InlineConfirmation,
 };
 use charming::Chart;
 use charming::component::{Axis, DataZoom, DataZoomType, FilterMode, Grid};
@@ -36,19 +37,19 @@ const TRAINING_CHART_POINT_BUDGET: usize = 1_200;
 #[component]
 pub(crate) fn TrainingWorkspace() -> Element {
     let studio = studio();
-    let dataset_id = studio.selected_dataset.read().clone();
+    let dataset_id = studio.selected_dataset().read().to_owned();
     let controller = training_controller();
-    let snapshot = studio.training.read().clone();
+    let snapshot = studio.training().read().to_owned();
     let run_names = snapshot
-        .runs
+        .runs()
         .iter()
-        .map(|run| run.config.run_name.clone())
+        .map(|run| run.config().run_name().to_owned())
         .collect::<Vec<_>>();
     use_effect(use_reactive((&run_names,), move |(names,)| {
         controller.sync_automatic_run_name(&names);
     }));
     let active_run = snapshot.active_run().cloned();
-    let active_run_id = active_run.as_ref().map(|run| run.id.clone());
+    let active_run_id = active_run.as_ref().map(|run| run.id().to_owned());
     use_effect(use_reactive((&active_run_id,), move |(run_id,)| {
         if let Some(run_id) = run_id {
             controller.open_run(run_id);
@@ -62,7 +63,7 @@ pub(crate) fn TrainingWorkspace() -> Element {
         rsx! {
             TrainingRunControl {
                 dataset_id: dataset_id.clone(),
-                readiness: snapshot.readiness.clone(),
+                readiness: snapshot.readiness().to_owned(),
                 active_run: active_run.clone(),
             }
         },
@@ -72,18 +73,18 @@ pub(crate) fn TrainingWorkspace() -> Element {
         "training-history",
         "Runs",
         "training-history",
-        rsx! { TrainingHistory { history: snapshot.runs.clone() } },
+        rsx! { TrainingHistory { history: snapshot.runs().to_owned() } },
     )
     .with_class("training-history-editor");
 
     let opened_ids = controller.opened_runs();
     let opened_runs = opened_ids
         .iter()
-        .filter_map(|id| snapshot.runs.iter().find(|run| &run.id == id).cloned())
+        .filter_map(|id| snapshot.runs().iter().find(|run| run.id() == id).cloned())
         .collect::<Vec<_>>();
     let registered_runs = opened_runs
         .iter()
-        .map(|run| (run_panel_id(&run.id), run.id.clone()))
+        .map(|run| (run_panel_id(run.id()), run.id().to_owned()))
         .collect::<Vec<_>>();
     let mut panels = vec![control, history];
     let right_panel_ids = if opened_runs.is_empty() {
@@ -104,14 +105,14 @@ pub(crate) fn TrainingWorkspace() -> Element {
     } else {
         let ids = opened_runs
             .iter()
-            .map(|run| run_panel_id(&run.id))
+            .map(|run| run_panel_id(run.id()))
             .collect::<Vec<_>>();
         for run in opened_runs {
-            let panel_id = run_panel_id(&run.id);
+            let panel_id = run_panel_id(run.id());
             panels.push(
                 Panel::new(
                     panel_id,
-                    run.config.run_name.clone(),
+                    run.config().run_name().to_owned(),
                     "training-runs",
                     rsx! {
                         TrainingRunDetail {
@@ -128,7 +129,7 @@ pub(crate) fn TrainingWorkspace() -> Element {
 
     let selected_panel = controller
         .selected_run()
-        .filter(|id| snapshot.runs.iter().any(|run| &run.id == id))
+        .filter(|id| snapshot.runs().iter().any(|run| run.id() == id))
         .map(|id| PanelId::from(run_panel_id(&id)));
     let closeable_runs = registered_runs.clone();
     let left = LayoutNode::split(
@@ -181,36 +182,36 @@ fn TrainingRunControl(
     active_run: Option<TrainingRun>,
 ) -> Element {
     let studio = studio();
-    let mut selected_dataset = studio.selected_dataset;
+    let mut selected_dataset = studio.selected_dataset();
     let controller = training_controller();
     let request = controller.request();
     let dataset_ids = studio
         .episodes()
         .into_iter()
-        .map(|episode| episode.dataset_id)
+        .map(|episode| episode.dataset_id().to_owned())
         .chain(std::iter::once(dataset_id.clone()))
         .collect::<BTreeSet<_>>();
     let starting = controller.starting();
     let stopping = controller.stopping();
     let dataset_valid = spiral::is_dataset_id(dataset_id.trim());
-    let can_start = readiness.ready && active_run.is_none() && !starting && dataset_valid;
-    let active_id = active_run.as_ref().map(|run| run.id.clone());
+    let can_start = readiness.ready() && active_run.is_none() && !starting && dataset_valid;
+    let active_id = active_run.as_ref().map(|run| run.id().to_owned());
     let progress = active_run.as_ref().map(|run| {
-        if run.config.steps == 0 {
+        if run.config().steps() == 0 {
             0.0
         } else {
-            run.current_step as f64 / run.config.steps as f64 * 100.0
+            run.current_step() as f64 / run.config().steps() as f64 * 100.0
         }
     });
     let (readiness_summary, readiness_recovery) = training_readiness_guidance(&readiness);
     let runtime_summary = readiness
-        .runtime
+        .runtime()
         .as_ref()
-        .map(|runtime| format!("{} · {}", runtime.display_name, runtime.runtime))
+        .map(|runtime| format!("{} · {}", runtime.display_name(), runtime.runtime()))
         .unwrap_or_else(|| "Runtime unavailable".to_owned());
     let mut runtime_devices = vec![("auto".to_owned(), "Auto".to_owned())];
-    if let Some(runtime) = &readiness.runtime {
-        for label in &runtime.devices {
+    if let Some(runtime) = &readiness.runtime() {
+        for label in runtime.devices() {
             let (value, label) = runtime_device_option(label);
             if !runtime_devices
                 .iter()
@@ -222,25 +223,25 @@ fn TrainingRunControl(
     }
     if !runtime_devices
         .iter()
-        .any(|(value, _)| value == &request.device)
+        .any(|(value, _)| value == request.device())
     {
-        runtime_devices.push((request.device.clone(), request.device.clone()));
+        runtime_devices.push((request.device().to_owned(), request.device().to_owned()));
     }
-    let camera_summary = if request.act.camera_streams.is_empty() {
+    let camera_summary = if request.act().camera_streams().is_empty() {
         "All available".to_owned()
     } else {
         format!(
             "{} · {}",
-            request.act.camera_streams.len(),
-            request.act.camera_streams.join(", ")
+            request.act().camera_streams().len(),
+            request.act().camera_streams().join(", ")
         )
     };
-    let validation_percent = request.validation_split * 100.0;
+    let validation_percent = request.validation_split() * 100.0;
 
     rsx! {
         div { class: "training-control",
             div { class: "training-control-scroll",
-            if !readiness.ready {
+            if !readiness.ready() {
                 div { class: "training-inline-state training-inline-state-caution",
                     div { class: "training-inline-copy",
                         strong { "Training is not ready" }
@@ -248,7 +249,7 @@ fn TrainingRunControl(
                         p { "{readiness_recovery}" }
                         details { class: "technical-details",
                             summary { "Technical details" }
-                            code { "{readiness.summary}" }
+                            code { "{readiness.summary()}" }
                         }
                     }
                 }
@@ -258,24 +259,24 @@ fn TrainingRunControl(
                 section { class: "training-active-run",
                     div { class: "training-active-heading",
                         div {
-                            strong { "{run.config.run_name}" }
-                            span { class: phase_class(run.phase), "{run.phase.label()}" }
-                            small { "Dataset · {run.config.dataset_id}" }
+                            strong { "{run.config().run_name()}" }
+                            span { class: phase_class(run.phase()), "{run.phase().label()}" }
+                            small { "Dataset · {run.config().dataset_id()}" }
                         }
-                        span { class: "training-step-readout", "{run.current_step} / {run.config.steps}" }
+                        span { class: "training-step-readout", "{run.current_step()} / {run.config().steps()}" }
                     }
                     div {
                         class: "training-progress-track",
                         role: "progressbar",
                         "aria-label": "Training progress",
                         "aria-valuemin": "0",
-                        "aria-valuemax": "{run.config.steps}",
-                        "aria-valuenow": "{run.current_step}",
-                        "aria-valuetext": "Step {run.current_step} of {run.config.steps}",
+                        "aria-valuemax": "{run.config().steps()}",
+                        "aria-valuenow": "{run.current_step()}",
+                        "aria-valuetext": "Step {run.current_step()} of {run.config().steps()}",
                         div { class: "training-progress-fill", style: "width: {progress.unwrap_or_default().clamp(0.0, 100.0):.2}%" }
                     }
-                    if run.phase != TrainingRunPhase::Running {
-                        if let Some(message) = run.message {
+                    if run.phase() != TrainingRunPhase::Running {
+                        if let Some(message) = run.message() {
                         p { "{message}" }
                         }
                     }
@@ -285,13 +286,13 @@ fn TrainingRunControl(
                         size: ActionSize::Standard,
                         class: "training-stop-action",
                         title: "Finish the current step, save a checkpoint, and stop",
-                        disabled: run.phase == TrainingRunPhase::Stopping || stopping.is_some(),
-                        aria_busy: run.phase == TrainingRunPhase::Stopping || stopping.is_some(),
+                        disabled: run.phase() == TrainingRunPhase::Stopping || stopping.is_some(),
+                        aria_busy: run.phase() == TrainingRunPhase::Stopping || stopping.is_some(),
                         onclick: move |_| {
                             let id = active_id.clone().unwrap_or_default();
                             controller.stop(studio, id);
                         },
-                        if run.phase == TrainingRunPhase::Stopping || stopping.is_some() { "Stopping…" } else { "Stop training" }
+                        if run.phase() == TrainingRunPhase::Stopping || stopping.is_some() { "Stopping…" } else { "Stop training" }
                     }
                 }
             }
@@ -323,13 +324,13 @@ fn TrainingRunControl(
                 }
                 div { class: "training-runtime-summary",
                     span {
-                        class: if readiness.runtime.is_some() { "training-runtime-dot training-runtime-dot-ready" } else { "training-runtime-dot" },
+                        class: if readiness.runtime().is_some() { "training-runtime-dot training-runtime-dot-ready" } else { "training-runtime-dot" },
                         "aria-hidden": "true"
                     }
                     div {
                         strong { "{runtime_summary}" }
                         span {
-                            if readiness.runtime.is_some() {
+                            if readiness.runtime().is_some() {
                                 "Connected through Arrow IPC over HTTP"
                             } else {
                                 "Connect a runtime in Settings"
@@ -340,11 +341,11 @@ fn TrainingRunControl(
                 label { class: "training-field training-field-wide",
                     span { "Device" }
                     select {
-                        value: request.device.clone(),
-                        disabled: active_run.is_some() || readiness.runtime.is_none(),
+                        value: request.device().to_owned(),
+                        disabled: active_run.is_some() || readiness.runtime().is_none(),
                         onchange: move |event| {
                             let value = event.value();
-                            controller.edit_request(move |request| request.device = value);
+                            controller.edit_request(move |request| request.set_device(value));
                         },
                         for (value, label) in runtime_devices {
                             option { value: "{value}", "{label}" }
@@ -361,7 +362,7 @@ fn TrainingRunControl(
                     label { class: "training-field",
                         span { "Run name" }
                         input {
-                            value: request.run_name.clone(),
+                            value: request.run_name().to_owned(),
                             disabled: active_run.is_some(),
                             oninput: move |event| {
                                 controller.set_run_name(event.value());
@@ -372,10 +373,10 @@ fn TrainingRunControl(
                         span { "Steps" }
                         input {
                             r#type: "number", min: "1", step: "100",
-                            value: "{request.steps}",
+                            value: "{request.steps()}",
                             disabled: active_run.is_some(),
                             oninput: move |event| if let Ok(value) = event.value().parse() {
-                                controller.edit_request(move |request| request.steps = value);
+                                controller.edit_request(move |request| request.set_steps(value));
                             },
                         }
                     }
@@ -390,10 +391,10 @@ fn TrainingRunControl(
                         span { "Batch" }
                         input {
                             r#type: "number", min: "1",
-                            value: "{request.batch_size}",
+                            value: "{request.batch_size()}",
                             disabled: active_run.is_some(),
                             oninput: move |event| if let Ok(value) = event.value().parse() {
-                                controller.edit_request(move |request| request.batch_size = value);
+                                controller.edit_request(move |request| request.set_batch_size(value));
                             },
                         }
                     }
@@ -405,7 +406,7 @@ fn TrainingRunControl(
                             value: "{validation_percent}",
                             disabled: active_run.is_some(),
                             oninput: move |event| if let Ok(value) = event.value().parse::<f64>() {
-                                controller.edit_request(move |request| request.validation_split = value / 100.0);
+                                controller.edit_request(move |request| request.set_validation_split(value / 100.0));
                             },
                         }
                     }
@@ -413,10 +414,10 @@ fn TrainingRunControl(
                         span { "Action horizon" }
                         input {
                             r#type: "number", min: "1", max: "256",
-                            value: "{request.chunk_size}",
+                            value: "{request.chunk_size()}",
                             disabled: active_run.is_some(),
                             oninput: move |event| if let Ok(value) = event.value().parse() {
-                                controller.edit_request(move |request| request.chunk_size = value);
+                                controller.edit_request(move |request| request.set_chunk_size(value));
                             },
                         }
                     }
@@ -424,10 +425,10 @@ fn TrainingRunControl(
                         span { "Learning rate" }
                         input {
                             r#type: "number", min: "0", step: "0.00001",
-                            value: "{request.learning_rate}",
+                            value: "{request.learning_rate()}",
                             disabled: active_run.is_some(),
                             oninput: move |event| if let Ok(value) = event.value().parse() {
-                                controller.edit_request(move |request| request.learning_rate = value);
+                                controller.edit_request(move |request| request.set_learning_rate(value));
                             },
                         }
                     }
@@ -435,10 +436,10 @@ fn TrainingRunControl(
                         span { "Checkpoint interval" }
                         input {
                             r#type: "number", min: "1", step: "100",
-                            value: "{request.checkpoint_every}",
+                            value: "{request.checkpoint_every()}",
                             disabled: active_run.is_some(),
                             oninput: move |event| if let Ok(value) = event.value().parse() {
-                                controller.edit_request(move |request| request.checkpoint_every = value);
+                                controller.edit_request(move |request| request.set_checkpoint_every(value));
                             },
                         }
                     }
@@ -447,33 +448,33 @@ fn TrainingRunControl(
                     textarea {
                         "aria-label": "Training data query",
                         spellcheck: "false",
-                        value: request.sql.clone(),
+                        value: request.sql().to_owned(),
                         disabled: active_run.is_some(),
                         oninput: move |event| {
                             let value = event.value();
-                            controller.edit_request(move |request| request.sql = value);
+                            controller.edit_request(move |request| request.set_sql(value));
                         },
                     }
                     div { class: "training-column-row",
                         label { class: "training-field",
                             span { "State column" }
                             input {
-                                value: request.state_column.clone(),
+                                value: request.state_column().to_owned(),
                                 disabled: active_run.is_some(),
                                 oninput: move |event| {
                                     let value = event.value();
-                                    controller.edit_request(move |request| request.state_column = value);
+                                    controller.edit_request(move |request| request.set_state_column(value));
                                 },
                             }
                         }
                         label { class: "training-field",
                             span { "Action column" }
                             input {
-                                value: request.action_column.clone(),
+                                value: request.action_column().to_owned(),
                                 disabled: active_run.is_some(),
                                 oninput: move |event| {
                                     let value = event.value();
-                                    controller.edit_request(move |request| request.action_column = value);
+                                    controller.edit_request(move |request| request.set_action_column(value));
                                 },
                             }
                         }
@@ -482,7 +483,7 @@ fn TrainingRunControl(
                         label { class: "training-field training-field-wide",
                             span { "Camera streams" }
                             input {
-                                value: request.act.camera_streams.join(", "),
+                                value: request.act().camera_streams().join(", "),
                                 placeholder: "All available",
                                 disabled: active_run.is_some(),
                                 oninput: move |event| {
@@ -492,7 +493,7 @@ fn TrainingRunControl(
                                         .filter(|stream| !stream.is_empty())
                                         .map(str::to_owned)
                                         .collect();
-                                    controller.edit_request(move |request| request.act.camera_streams = streams);
+                                    controller.edit_request(move |request| request.act_mut().set_camera_streams(streams));
                                 },
                             }
                         }
@@ -500,10 +501,10 @@ fn TrainingRunControl(
                             span { "Image width (0 = source)" }
                             input {
                                 r#type: "number", min: "0", max: "1024", step: "1",
-                                value: "{request.act.image_width}",
+                                value: "{request.act().image_width()}",
                                 disabled: active_run.is_some(),
                                 oninput: move |event| if let Ok(value) = event.value().parse() {
-                                    controller.edit_request(move |request| request.act.image_width = value);
+                                    controller.edit_request(move |request| request.act_mut().set_image_width(value));
                                 },
                             }
                         }
@@ -511,10 +512,10 @@ fn TrainingRunControl(
                             span { "Image height (0 = source)" }
                             input {
                                 r#type: "number", min: "0", max: "1024", step: "1",
-                                value: "{request.act.image_height}",
+                                value: "{request.act().image_height()}",
                                 disabled: active_run.is_some(),
                                 oninput: move |event| if let Ok(value) = event.value().parse() {
-                                    controller.edit_request(move |request| request.act.image_height = value);
+                                    controller.edit_request(move |request| request.act_mut().set_image_height(value));
                                 },
                             }
                         }
@@ -530,7 +531,7 @@ fn TrainingRunControl(
                 class: "training-start-action",
                 disabled: !can_start,
                 aria_busy: starting,
-                title: if active_run.is_some() { "Stop the active run first".to_owned() } else if !dataset_valid { "Choose a valid dataset ID first".to_owned() } else if !readiness.ready { readiness_recovery.clone() } else { "Start training".to_owned() },
+                title: if active_run.is_some() { "Stop the active run first".to_owned() } else if !dataset_valid { "Choose a valid dataset ID first".to_owned() } else if !readiness.ready() { readiness_recovery.clone() } else { "Start training".to_owned() },
                 onclick: move |_| {
                     controller.start(studio);
                 },
@@ -554,7 +555,7 @@ fn TrainingHistory(history: Vec<TrainingRun>) -> Element {
             }
             for run in history {
                 TrainingHistoryRow {
-                    selected: selected_run.as_deref() == Some(run.id.as_str()),
+                    selected: selected_run.as_deref() == Some(run.id()),
                     run,
                 }
             }
@@ -567,15 +568,15 @@ fn TrainingHistoryRow(run: TrainingRun, selected: bool) -> Element {
     let studio = studio();
     let controller = training_controller();
     let deleting_run = controller.deleting();
-    let deleting = deleting_run.as_deref() == Some(run.id.as_str());
-    let delete_disabled = run.phase.active() || deleting_run.is_some();
-    let confirming = controller.confirming_delete().as_deref() == Some(run.id.as_str());
-    let checkpoint_word = if run.checkpoints.len() == 1 {
+    let deleting = deleting_run.as_deref() == Some(run.id());
+    let delete_disabled = run.phase().active() || deleting_run.is_some();
+    let confirming = controller.confirming_delete().as_deref() == Some(run.id());
+    let checkpoint_word = if run.checkpoints().len() == 1 {
         "checkpoint"
     } else {
         "checkpoints"
     };
-    let delete_title = if run.phase.active() {
+    let delete_title = if run.phase().active() {
         "Stop training before deleting this run."
     } else if deleting {
         "Deleting this run and its checkpoints."
@@ -591,51 +592,60 @@ fn TrainingHistoryRow(run: TrainingRun, selected: bool) -> Element {
                 variant: ActionVariant::Row,
                 class: "training-history-row",
                 aria_pressed: selected,
-                title: "Open {run.config.run_name}",
+                title: "Open {run.config().run_name()}",
                 onclick: {
-                    let id = run.id.clone();
+                    let id = run.id().to_owned();
                     move |_| controller.open_run(id.clone())
                 },
-                span { class: "training-history-name", "{run.config.run_name}" }
-                span { class: "training-history-dataset", "{run.config.dataset_id}" }
-                span { class: phase_class(run.phase), "{run.phase.label()}" }
-                span { class: "training-history-step", "{run.current_step} / {run.config.steps}" }
+                span { class: "training-history-name", "{run.config().run_name()}" }
+                span { class: "training-history-dataset", "{run.config().dataset_id()}" }
+                span { class: phase_class(run.phase()), "{run.phase().label()}" }
+                span { class: "training-history-step", "{run.current_step()} / {run.config().steps()}" }
             }
             Action {
-                id: "delete-run-{run.id}",
+                id: "delete-run-{run.id()}",
                 purpose: ActionPurpose::Delete,
                 variant: ActionVariant::Icon,
                 class: "training-history-delete",
                 disabled: delete_disabled,
                 title: "{delete_title}",
-                aria_label: "Delete run {run.config.run_name}",
+                aria_label: "Delete run {run.config().run_name()}",
                 onclick: {
-                    let id = run.id.clone();
+                    let id = run.id().to_owned();
                     move |_| controller.confirm_delete(id.clone())
                 },
                 DeleteIcon {}
             }
             if confirming {
                 InlineConfirmation {
-                    id: "delete-run-confirmation-{run.id}",
+                    id: "delete-run-confirmation-{run.id()}",
                     class: "training-history-delete-confirmation",
-                    message: format!(
-                        "Delete {} and its {} {}? Metrics and logs will be permanently removed.",
-                        run.config.run_name,
-                        run.checkpoints.len(),
-                        checkpoint_word,
+                    copy: ConfirmationCopy::new(
+                        format!(
+                            "Delete {} and its {} {}? Metrics and logs will be permanently removed.",
+                            run.config().run_name(),
+                            run.checkpoints().len(),
+                            checkpoint_word,
+                        ),
+                        if deleting { "Deleting…" } else { "Delete run" },
+                        "Keep run",
                     ),
-                    confirm_label: if deleting { "Deleting…" } else { "Delete run" },
-                    cancel_label: "Keep run",
-                    purpose: ActionPurpose::Delete,
-                    pending: deleting,
-                    return_focus_id: "delete-run-{run.id}",
-                    on_confirm: {
-                        let id = run.id.clone();
-                        let name = run.config.run_name.clone();
-                        move |_| controller.delete(studio, id.clone(), name.clone())
-                    },
-                    on_cancel: move |_| controller.cancel_delete(),
+                    response: ConfirmationResponse::new(
+                        ActionPurpose::Delete,
+                        {
+                            let id = run.id().to_owned();
+                            let name = run.config().run_name().to_owned();
+                            move |_| {
+                                controller.delete(
+                                    studio,
+                                    super::state::TrainingRunIdentity::new(id.clone(), name.clone()),
+                                )
+                            }
+                        },
+                        move |_| controller.cancel_delete(),
+                    ),
+                    dismissal: ConfirmationDismissal::new(format!("delete-run-{}", run.id()))
+                        .with_pending(deleting),
                 }
             }
         }
@@ -644,14 +654,14 @@ fn TrainingHistoryRow(run: TrainingRun, selected: bool) -> Element {
 
 #[component]
 fn TrainingRunDetail(run: TrainingRun) -> Element {
-    let progress = if run.config.steps == 0 {
+    let progress = if run.config().steps() == 0 {
         0.0
     } else {
-        run.current_step as f64 / run.config.steps as f64 * 100.0
+        run.current_step() as f64 / run.config().steps() as f64 * 100.0
     };
-    let message = run.message.clone();
-    let logs = run.logs.clone();
-    let message_class = if run.phase == TrainingRunPhase::Failed {
+    let message = run.message().to_owned();
+    let logs = run.logs().to_owned();
+    let message_class = if run.phase() == TrainingRunPhase::Failed {
         "training-run-message training-run-message-danger"
     } else {
         "training-run-message"
@@ -661,15 +671,15 @@ fn TrainingRunDetail(run: TrainingRun) -> Element {
             header { class: "training-run-overview",
                 div { class: "training-run-identity",
                     div {
-                        h2 { "{run.config.run_name}" }
-                        span { class: phase_class(run.phase), "{run.phase.label()}" }
+                        h2 { "{run.config().run_name()}" }
+                        span { class: phase_class(run.phase()), "{run.phase().label()}" }
                     }
-                    p { "Dataset · {run.config.dataset_id} · {run.config.policy.label()} · {run.config.device}" }
+                    p { "Dataset · {run.config().dataset_id()} · {run.config().policy().label()} · {run.config().device()}" }
                 }
                 dl { class: "training-run-facts",
-                    div { dt { "Step" } dd { "{run.current_step} / {run.config.steps}" } }
+                    div { dt { "Step" } dd { "{run.current_step()} / {run.config().steps()}" } }
                     div { dt { "Progress" } dd { "{progress.clamp(0.0, 100.0):.1}%" } }
-                    div { dt { "Checkpoints" } dd { "{run.checkpoints.len()}" } }
+                    div { dt { "Checkpoints" } dd { "{run.checkpoints().len()}" } }
                 }
             }
             if let Some(message) = message {
@@ -720,43 +730,46 @@ fn run_panel_id(run_id: &str) -> String {
 }
 
 fn training_readiness_guidance(readiness: &TrainingReadiness) -> (String, String) {
-    if !readiness.spiral_ready {
+    if !readiness.spiral_ready() {
         return (
             "SpiralDB is unavailable.".to_owned(),
             "Open Settings and test the SpiralDB connection.".to_owned(),
         );
     }
-    if readiness.runtime.is_none() {
+    if readiness.runtime().is_none() {
         return (
-            readiness.summary.clone(),
+            readiness.summary().to_owned(),
             "Open Settings and connect the policy compute runtime.".to_owned(),
         );
     }
-    if !readiness.ready {
+    if !readiness.ready() {
         return (
-            readiness.summary.clone(),
+            readiness.summary().to_owned(),
             "Resolve the reported blocker, then retry training.".to_owned(),
         );
     }
-    (readiness.summary.clone(), "Training is ready.".to_owned())
+    (
+        readiness.summary().to_owned(),
+        "Training is ready.".to_owned(),
+    )
 }
 
 #[component]
 fn TrainingLearning(run: TrainingRun) -> Element {
-    let last = run.metrics.last();
-    let latest_train = last.map(|point| format_loss(point.train_loss));
+    let last = run.metrics().last();
+    let latest_train = last.map(|point| format_loss(point.train_loss()));
     let latest_validation = run
-        .metrics
+        .metrics()
         .iter()
         .rev()
-        .find_map(|point| point.validation_loss)
+        .find_map(|point| point.validation_loss())
         .map(format_loss);
-    let lr = last.map(|point| format!("{:.2e}", point.learning_rate));
+    let lr = last.map(|point| format!("{:.2e}", point.learning_rate()));
     let latest_train = latest_train.unwrap_or_else(|| "—".to_owned());
     let latest_validation = latest_validation.unwrap_or_else(|| "—".to_owned());
     let lr = lr.unwrap_or_else(|| "—".to_owned());
-    let chart_id = chart_dom_id("training-loss", &run.id);
-    let chart_group = training_chart_group(&run.id);
+    let chart_id = chart_dom_id("training-loss", run.id());
+    let chart_group = training_chart_group(run.id());
     let loss_chart = training_loss_chart(&run);
 
     rsx! {
@@ -778,11 +791,11 @@ fn TrainingLearning(run: TrainingRun) -> Element {
                 }
             }
             div { class: "training-chart-wrap",
-                if run.metrics.is_empty() {
+                if run.metrics().is_empty() {
                     div { class: "training-chart-empty",
-                        if run.phase == TrainingRunPhase::Failed {
+                        if run.phase() == TrainingRunPhase::Failed {
                             "No metrics."
-                        } else if run.phase.active() {
+                        } else if run.phase().active() {
                             "Waiting for step 1…"
                         } else {
                             "No metrics."
@@ -792,26 +805,28 @@ fn TrainingLearning(run: TrainingRun) -> Element {
                 CharmingChart {
                     id: chart_id,
                     chart: loss_chart,
-                    class: "training-loss-chart".to_owned(),
-                    aria_label: "Training and validation loss by optimizer step".to_owned(),
-                    group: Some(chart_group),
+                    presentation: crate::components::charts::ChartPresentation::new(
+                        "training-loss-chart",
+                        "Training and validation loss by optimizer step",
+                    )
+                    .with_group(chart_group),
                 }
             }
             div { class: "training-event-strip",
                 div { class: "training-event-track",
                     i { class: "training-event-axis" }
-                    for checkpoint in &run.checkpoints {
+                    for checkpoint in &run.checkpoints() {
                         span {
                             class: "training-event-tick training-event-checkpoint",
-                            style: "left: {step_percent(checkpoint.step, run.config.steps):.3}%",
-                            title: "Checkpoint saved at step {checkpoint.step}",
-                            "aria-label": "Checkpoint at step {checkpoint.step}",
+                            style: "left: {step_percent(checkpoint.step(), run.config().steps()):.3}%",
+                            title: "Checkpoint saved at step {checkpoint.step()}",
+                            "aria-label": "Checkpoint at step {checkpoint.step()}",
                         }
                     }
-                    for point in run.metrics.iter().filter(|point| point.event.is_some()) {
+                    for point in run.metrics().iter().filter(|point| point.event().is_some()) {
                         span {
-                            class: if point.event.as_deref().is_some_and(|event| event.contains("loader stall")) { "training-event-tick training-event-stall" } else { "training-event-tick training-event-validation" },
-                            style: "left: {step_percent(point.step, run.config.steps):.3}%",
+                            class: if point.event().is_some_and(|event| event.contains("loader stall")) { "training-event-tick training-event-stall" } else { "training-event-tick training-event-validation" },
+                            style: "left: {step_percent(point.step(), run.config().steps()):.3}%",
                             title: metric_event_label(point),
                             "aria-label": metric_event_label(point),
                         }
@@ -829,21 +844,24 @@ fn TrainingLearning(run: TrainingRun) -> Element {
 
 #[component]
 fn TrainingInputs(run: TrainingRun) -> Element {
-    let cameras = if run.config.act.camera_streams.is_empty() {
+    let cameras = if run.config().act().camera_streams().is_empty() {
         "All available".to_owned()
     } else {
-        run.config.act.camera_streams.join(", ")
+        run.config().act().camera_streams().join(", ")
     };
-    let image_size = match (run.config.act.image_width, run.config.act.image_height) {
+    let image_size = match (
+        run.config().act().image_width(),
+        run.config().act().image_height(),
+    ) {
         (0, 0) => "Source size".to_owned(),
         (0, height) => format!("Source width × {height}"),
         (width, 0) => format!("{width} × source height"),
         (width, height) => format!("{width} × {height}"),
     };
-    let validation = if run.config.validation_split == 0.0 {
+    let validation = if run.config().validation_split() == 0.0 {
         "Off".to_owned()
     } else {
-        format!("{:.0}% · episode", run.config.validation_split * 100.0)
+        format!("{:.0}% · episode", run.config().validation_split() * 100.0)
     };
     rsx! {
         section { class: "training-inputs",
@@ -852,11 +870,11 @@ fn TrainingInputs(run: TrainingRun) -> Element {
                     dt { "Cameras" }
                     dd { "{cameras}" }
                 }
-                div { dt { "Batch" } dd { "{run.config.batch_size} samples" } }
+                div { dt { "Batch" } dd { "{run.config().batch_size()} samples" } }
                 div { dt { "Validation" } dd { "{validation}" } }
-                div { dt { "Action horizon" } dd { "{run.config.chunk_size} steps" } }
+                div { dt { "Action horizon" } dd { "{run.config().chunk_size()} steps" } }
                 div { dt { "Image size" } dd { "{image_size}" } }
-                div { dt { "Checkpoint interval" } dd { "{run.config.checkpoint_every} steps" } }
+                div { dt { "Checkpoint interval" } dd { "{run.config().checkpoint_every()} steps" } }
             }
         }
     }
@@ -864,35 +882,37 @@ fn TrainingInputs(run: TrainingRun) -> Element {
 
 #[component]
 fn TrainingPerformance(run: TrainingRun) -> Element {
-    let metrics = run.metrics.as_slice();
+    let metrics = run.metrics();
     let last = metrics.last();
     let observed_steps = last
-        .map_or(run.current_step, |point| point.step.max(run.current_step))
+        .map_or(run.current_step(), |point| {
+            point.step().max(run.current_step())
+        })
         .max(1);
-    let chart_group = training_chart_group(&run.id);
+    let chart_group = training_chart_group(run.id());
     let throughput = last
-        .map(|point| format!("{:.1} samples/s", point.examples_per_second))
+        .map(|point| format!("{:.1} samples/s", point.examples_per_second()))
         .unwrap_or_else(|| "—".to_owned());
     let transfer = last
-        .map(|point| format_rate(point.transfer_bytes_per_second))
+        .map(|point| format_rate(point.transfer_bytes_per_second()))
         .unwrap_or_else(|| "—".to_owned());
     let cpu = last
-        .and_then(|point| point.cpu_percent)
+        .and_then(|point| point.cpu_percent())
         .map(|value| format!("{value:.1}%"))
         .unwrap_or_else(|| "—".to_owned());
     let gpu = last
-        .and_then(|point| point.gpu_percent)
+        .and_then(|point| point.gpu_percent())
         .map(|value| format!("{value:.1}%"))
         .unwrap_or_else(|| "—".to_owned());
     let memory = last
-        .and_then(|point| point.memory_bytes)
+        .and_then(|point| point.memory_bytes())
         .map(format_bytes)
         .unwrap_or_else(|| "—".to_owned());
-    let loader_ms = format_milliseconds(last.and_then(|point| point.loader_ms));
-    let arrow_encode_ms = format_milliseconds(last.and_then(|point| point.arrow_encode_ms));
-    let upload_ms = format_milliseconds(last.and_then(|point| point.upload_ms));
-    let device_copy_ms = format_milliseconds(last.and_then(|point| point.device_copy_ms));
-    let model_ms = format_milliseconds(last.and_then(|point| point.model_ms));
+    let loader_ms = format_milliseconds(last.and_then(|point| point.loader_ms()));
+    let arrow_encode_ms = format_milliseconds(last.and_then(|point| point.arrow_encode_ms()));
+    let upload_ms = format_milliseconds(last.and_then(|point| point.upload_ms()));
+    let device_copy_ms = format_milliseconds(last.and_then(|point| point.device_copy_ms()));
+    let model_ms = format_milliseconds(last.and_then(|point| point.model_ms()));
     let throughput_chart =
         training_resource_chart(metrics, observed_steps, ResourceSeries::Throughput);
     let transfer_chart = training_resource_chart(metrics, observed_steps, ResourceSeries::Transfer);
@@ -925,18 +945,18 @@ fn TrainingPerformance(run: TrainingRun) -> Element {
                 }
             }
             div { class: "training-resource-grid",
-                ResourceLane { id: chart_dom_id("training-rate", &run.id), label: "Training rate", value: throughput, chart: throughput_chart, group: chart_group.clone(), class: "resource-throughput", description: "Samples completed per second." }
-                ResourceLane { id: chart_dom_id("input-rate", &run.id), label: "Input rate", value: transfer, chart: transfer_chart, group: chart_group.clone(), class: "resource-transfer", description: "Prepared camera data per second." }
-                ResourceLane { id: chart_dom_id("cpu-utilization", &run.id), label: "CPU", value: cpu, chart: cpu_chart, group: chart_group.clone(), class: "resource-cpu", description: "Runtime process CPU utilization. 100% is one fully occupied core." }
-                ResourceLane { id: chart_dom_id("gpu-utilization", &run.id), label: "GPU", value: gpu, chart: gpu_chart, group: chart_group.clone(), class: "resource-gpu", description: "Whole-device utilization reported by the selected runtime; other processes may contribute." }
-                ResourceLane { id: chart_dom_id("memory-usage", &run.id), label: "Memory", value: memory, chart: memory_chart, group: chart_group, class: "resource-memory", description: "Current resident memory used by the runtime process, including training allocations." }
+                ResourceLane { lane: ResourceLaneModel::new(chart_dom_id("training-rate", run.id()), "Training rate", throughput).with_chart(throughput_chart, chart_group.clone()).with_presentation("resource-throughput", "Samples completed per second.") }
+                ResourceLane { lane: ResourceLaneModel::new(chart_dom_id("input-rate", run.id()), "Input rate", transfer).with_chart(transfer_chart, chart_group.clone()).with_presentation("resource-transfer", "Prepared camera data per second.") }
+                ResourceLane { lane: ResourceLaneModel::new(chart_dom_id("cpu-utilization", run.id()), "CPU", cpu).with_chart(cpu_chart, chart_group.clone()).with_presentation("resource-cpu", "Runtime process CPU utilization. 100% is one fully occupied core.") }
+                ResourceLane { lane: ResourceLaneModel::new(chart_dom_id("gpu-utilization", run.id()), "GPU", gpu).with_chart(gpu_chart, chart_group.clone()).with_presentation("resource-gpu", "Whole-device utilization reported by the selected runtime; other processes may contribute.") }
+                ResourceLane { lane: ResourceLaneModel::new(chart_dom_id("memory-usage", run.id()), "Memory", memory).with_chart(memory_chart, chart_group).with_presentation("resource-memory", "Current resident memory used by the runtime process, including training allocations.") }
             }
         }
     }
 }
 
-#[component]
-fn ResourceLane(
+#[derive(Clone, PartialEq)]
+struct ResourceLaneModel {
     id: String,
     label: &'static str,
     value: String,
@@ -944,16 +964,56 @@ fn ResourceLane(
     group: String,
     class: &'static str,
     description: &'static str,
-) -> Element {
+}
+
+impl ResourceLaneModel {
+    fn new(id: String, label: &'static str, value: String) -> Self {
+        Self {
+            id,
+            label,
+            value,
+            chart: Chart::new(),
+            group: String::new(),
+            class: "",
+            description: "",
+        }
+    }
+
+    fn with_chart(mut self, chart: Chart, group: String) -> Self {
+        self.chart = chart;
+        self.group = group;
+        self
+    }
+
+    fn with_presentation(mut self, class: &'static str, description: &'static str) -> Self {
+        self.class = class;
+        self.description = description;
+        self
+    }
+}
+
+#[component]
+fn ResourceLane(lane: ResourceLaneModel) -> Element {
+    let ResourceLaneModel {
+        id,
+        label,
+        value,
+        chart,
+        group,
+        class,
+        description,
+    } = lane;
     rsx! {
         div { class: "training-resource-lane {class}", title: "{description}",
             div { span { "{label}" } strong { "{value}" } }
             CharmingChart {
                 id,
                 chart,
-                class: "training-resource-chart".to_owned(),
-                aria_label: format!("{label} by optimizer step. {description}"),
-                group: Some(group),
+                presentation: crate::components::charts::ChartPresentation::new(
+                    "training-resource-chart",
+                    format!("{label} by optimizer step. {description}"),
+                )
+                .with_group(group),
             }
         }
     }
@@ -984,12 +1044,14 @@ fn phase_class(phase: TrainingRunPhase) -> &'static str {
 }
 
 fn training_loss_chart(run: &TrainingRun) -> Chart {
-    let train = metric_series_data(&run.metrics, |point| Some(point.train_loss), true);
-    let validation = metric_series_data(&run.metrics, |point| point.validation_loss, true);
+    let train = metric_series_data(run.metrics(), |point| Some(point.train_loss()), true);
+    let validation = metric_series_data(run.metrics(), |point| point.validation_loss(), true);
     let observed_steps = run
-        .metrics
+        .metrics()
         .last()
-        .map_or(run.current_step, |point| point.step.max(run.current_step))
+        .map_or(run.current_step(), |point| {
+            point.step().max(run.current_step())
+        })
         .max(1);
 
     Chart::new()
@@ -1012,14 +1074,16 @@ fn training_loss_chart(run: &TrainingRun) -> Chart {
         )
         .y_axis(chart_axis(AxisType::Value, true).split_number(5))
         .data_zoom(training_slider_zoom(48.0, 12.0))
-        .series(metric_line("train-loss", "Train", COLOR_TRAIN, train, 2.0))
-        .series(metric_line(
-            "validation-loss",
-            "Validation",
-            COLOR_VALIDATION,
-            validation,
-            1.8,
-        ))
+        .series(
+            MetricLineSpec::new("train-loss", "Train", COLOR_TRAIN)
+                .with_width(2.0)
+                .render(train),
+        )
+        .series(
+            MetricLineSpec::new("validation-loss", "Validation", COLOR_VALIDATION)
+                .with_width(1.8)
+                .render(validation),
+        )
 }
 
 fn training_slider_zoom(left: f64, right: f64) -> DataZoom {
@@ -1054,11 +1118,11 @@ fn training_resource_chart(
     let data = metric_series_data(
         metrics,
         |point| match series {
-            ResourceSeries::Throughput => Some(point.examples_per_second),
-            ResourceSeries::Transfer => Some(point.transfer_bytes_per_second),
-            ResourceSeries::Cpu => point.cpu_percent,
-            ResourceSeries::Gpu => point.gpu_percent,
-            ResourceSeries::Memory => point.memory_bytes.map(|value| value as f64),
+            ResourceSeries::Throughput => Some(point.examples_per_second()),
+            ResourceSeries::Transfer => Some(point.transfer_bytes_per_second()),
+            ResourceSeries::Cpu => point.cpu_percent(),
+            ResourceSeries::Gpu => point.gpu_percent(),
+            ResourceSeries::Memory => point.memory_bytes().map(|value| value as f64),
         },
         false,
     );
@@ -1085,7 +1149,9 @@ fn training_resource_chart(
         })
         .data_zoom(training_slider_zoom(8.0, 8.0))
         .series(
-            metric_line(id, name, color, data, 1.5)
+            MetricLineSpec::new(id, name, color)
+                .with_width(1.5)
+                .render(data)
                 .area_style(AreaStyle::new().color(color).opacity(0.09)),
         )
 }
@@ -1102,7 +1168,7 @@ fn metric_series_data(
             (value.is_finite()
                 && (!positive_only || value > 0.0)
                 && (positive_only || value >= 0.0))
-                .then_some((point.step as f64, value))
+                .then_some((point.step() as f64, value))
         })
         .collect::<Vec<_>>();
     downsample_extrema(&points, TRAINING_CHART_POINT_BUDGET)
@@ -1111,17 +1177,40 @@ fn metric_series_data(
         .collect()
 }
 
-fn metric_line(id: &str, name: &str, color: &str, data: DataFrame, width: f64) -> Line {
-    Line::new()
-        .id(id)
-        .name(name)
-        .show_symbol(false)
-        .symbol(Symbol::None)
-        .sampling(Sampling::Minmax)
-        .connect_nulls(false)
-        .line_style(LineStyle::new().color(color).width(width))
-        .emphasis(Emphasis::new().disabled(true))
-        .data(data)
+struct MetricLineSpec<'a> {
+    id: &'a str,
+    name: &'a str,
+    color: &'a str,
+    width: f64,
+}
+
+impl<'a> MetricLineSpec<'a> {
+    const fn new(id: &'a str, name: &'a str, color: &'a str) -> Self {
+        Self {
+            id,
+            name,
+            color,
+            width: 1.0,
+        }
+    }
+
+    const fn with_width(mut self, width: f64) -> Self {
+        self.width = width;
+        self
+    }
+
+    fn render(self, data: DataFrame) -> Line {
+        Line::new()
+            .id(self.id)
+            .name(self.name)
+            .show_symbol(false)
+            .symbol(Symbol::None)
+            .sampling(Sampling::Minmax)
+            .connect_nulls(false)
+            .line_style(LineStyle::new().color(self.color).width(self.width))
+            .emphasis(Emphasis::new().disabled(true))
+            .data(data)
+    }
 }
 
 fn chart_axis(kind: AxisType, visible: bool) -> Axis {
@@ -1173,8 +1262,8 @@ fn step_percent(step: u64, total_steps: u64) -> f64 {
 fn metric_event_label(point: &TrainingMetricPoint) -> String {
     format!(
         "{} at step {}",
-        point.event.as_deref().unwrap_or("Event"),
-        point.step
+        point.event().unwrap_or("Event"),
+        point.step()
     )
 }
 
@@ -1272,12 +1361,8 @@ mod tests {
 
     #[test]
     fn unavailable_training_never_claims_to_be_ready() {
-        let readiness = TrainingReadiness {
-            ready: false,
-            spiral_ready: true,
-            runtime: None,
-            summary: "Policy compute runtime is unavailable.".to_owned(),
-        };
+        let readiness =
+            TrainingReadiness::new(false, true, "Policy compute runtime is unavailable.");
         let (summary, recovery) = training_readiness_guidance(&readiness);
         assert_eq!(summary, "Policy compute runtime is unavailable.");
         assert_eq!(
@@ -1285,12 +1370,8 @@ mod tests {
             "Open Settings and connect the policy compute runtime."
         );
 
-        let checking = TrainingReadiness {
-            ready: false,
-            spiral_ready: true,
-            runtime: Some(Default::default()),
-            summary: "Checking training storage.".to_owned(),
-        };
+        let checking = TrainingReadiness::new(false, true, "Checking training storage.")
+            .with_runtime(Some(Default::default()));
         assert_ne!(
             training_readiness_guidance(&checking).1,
             "Training is ready."
@@ -1299,11 +1380,11 @@ mod tests {
 
     #[test]
     fn throughput_uses_the_optimizer_step_axis_and_slider_zoom() {
-        let metrics = vec![TrainingMetricPoint {
-            step: 50,
-            examples_per_second: 25.0,
-            ..TrainingMetricPoint::default()
-        }];
+        let metrics = vec![TrainingMetricPoint::new(
+            spiral_robotics_api::training::TrainingMetricProgress::new(50, 0.0, 0.0),
+            spiral_robotics_api::training::TrainingResourceMetrics::new(0.0, 25.0),
+            spiral_robotics_api::training::TrainingStageTimings::default(),
+        )];
         let chart = training_resource_chart(&metrics, 100, ResourceSeries::Throughput);
         let option = serde_json::to_value(chart).expect("chart should serialize");
         assert_eq!(option["xAxis"]["max"], 100.0);
@@ -1317,15 +1398,20 @@ mod tests {
 
     #[test]
     fn loss_chart_uses_a_linear_axis_and_slider_zoom_with_stable_series() {
-        let run = TrainingRun {
-            metrics: vec![TrainingMetricPoint {
-                step: 1,
-                train_loss: 0.25,
-                validation_loss: Some(0.3),
-                ..TrainingMetricPoint::default()
-            }],
-            ..TrainingRun::default()
-        };
+        let run = TrainingRun::new(
+            Default::default(),
+            Default::default(),
+            spiral_robotics_api::training::TrainingRunHistory::new(
+                vec![TrainingMetricPoint::new(
+                    spiral_robotics_api::training::TrainingMetricProgress::new(1, 0.25, 0.0)
+                        .with_validation_loss(Some(0.3)),
+                    spiral_robotics_api::training::TrainingResourceMetrics::default(),
+                    spiral_robotics_api::training::TrainingStageTimings::default(),
+                )],
+                Vec::new(),
+                Vec::new(),
+            ),
+        );
         let option =
             serde_json::to_value(training_loss_chart(&run)).expect("chart should serialize");
 

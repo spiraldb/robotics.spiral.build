@@ -14,49 +14,208 @@ use crate::recording::{RecordingProgress, ReplayProgress};
 /// One robot instance: exactly one arm, stored in SpiralDB.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct RobotSummary {
-    pub id: String,
-    pub robot_type: Option<String>,
-    pub port: Option<PortSettings>,
-    pub motors: Vec<MotorSummary>,
-    pub cameras: Vec<CameraBinding>,
-    /// True when every motor has a stored calibration.
-    pub calibrated: bool,
-    /// Why this robot cannot be used, when its configuration is structurally wrong.
-    ///
-    /// A configuration can still describe an unusable robot — two
-    /// motors sharing a bus ID, for instance. Carrying the reason here keeps
-    /// the card from silently rendering as an empty robot.
-    pub problem: Option<String>,
-    pub connection: ConnectionStatus,
+    id: String,
+    robot_type: Option<String>,
+    port: Option<PortSettings>,
+    motors: Vec<MotorSummary>,
+    cameras: Vec<CameraBinding>,
+    #[serde(flatten)]
+    availability: RobotAvailability,
+}
+
+/// Whether a robot is calibrated, structurally valid, and connected.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RobotAvailability {
+    calibrated: bool,
+    problem: Option<String>,
+    connection: ConnectionStatus,
+}
+
+impl RobotAvailability {
+    pub fn new(calibrated: bool, problem: Option<String>, connection: ConnectionStatus) -> Self {
+        Self {
+            calibrated,
+            problem,
+            connection,
+        }
+    }
+}
+
+impl RobotSummary {
+    pub fn new(
+        id: impl Into<String>,
+        robot_type: Option<String>,
+        availability: RobotAvailability,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            robot_type,
+            port: None,
+            motors: Vec::new(),
+            cameras: Vec::new(),
+            availability,
+        }
+    }
+
+    pub fn with_port(mut self, port: Option<PortSettings>) -> Self {
+        self.port = port;
+        self
+    }
+
+    pub fn with_motors(mut self, motors: Vec<MotorSummary>) -> Self {
+        self.motors = motors;
+        self
+    }
+
+    pub fn with_cameras(mut self, cameras: Vec<CameraBinding>) -> Self {
+        self.cameras = cameras;
+        self
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn robot_type(&self) -> Option<&str> {
+        self.robot_type.as_deref()
+    }
+
+    pub const fn port(&self) -> Option<&PortSettings> {
+        self.port.as_ref()
+    }
+
+    pub fn motors(&self) -> &[MotorSummary] {
+        &self.motors
+    }
+
+    pub fn cameras(&self) -> &[CameraBinding] {
+        &self.cameras
+    }
+
+    pub const fn calibrated(&self) -> bool {
+        self.availability.calibrated
+    }
+
+    pub fn problem(&self) -> Option<&str> {
+        self.availability.problem.as_deref()
+    }
+
+    pub const fn connection(&self) -> &ConnectionStatus {
+        &self.availability.connection
+    }
 }
 
 /// Result of reinterpreting historical measured state with a robot's current calibration.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CalibrationReapplyResponse {
-    pub episodes_updated: u64,
-    pub frames_updated: u64,
-    pub episodes_unchanged: u64,
-    pub episodes_skipped: u64,
-    pub warnings: Vec<String>,
+    episodes_updated: u64,
+    frames_updated: u64,
+    episodes_unchanged: u64,
+    episodes_skipped: u64,
+    warnings: Vec<String>,
+}
+
+impl CalibrationReapplyResponse {
+    pub fn new(episodes_updated: u64, frames_updated: u64, episodes_unchanged: u64) -> Self {
+        Self {
+            episodes_updated,
+            frames_updated,
+            episodes_unchanged,
+            episodes_skipped: 0,
+            warnings: Vec::new(),
+        }
+    }
+
+    pub fn with_skipped(mut self, episodes_skipped: u64, warnings: Vec<String>) -> Self {
+        self.episodes_skipped = episodes_skipped;
+        self.warnings = warnings;
+        self
+    }
+    pub const fn episodes_updated(&self) -> u64 {
+        self.episodes_updated
+    }
+    pub const fn frames_updated(&self) -> u64 {
+        self.frames_updated
+    }
+    pub const fn episodes_unchanged(&self) -> u64 {
+        self.episodes_unchanged
+    }
+    pub const fn episodes_skipped(&self) -> u64 {
+        self.episodes_skipped
+    }
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
 }
 
 /// A motor as configured, with its calibration when one exists.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct MotorSummary {
-    pub name: String,
-    pub id: u32,
+    name: String,
+    id: u32,
     #[serde(with = "direction_serde")]
-    pub direction: MotorDirection,
-    pub model: Option<String>,
+    direction: MotorDirection,
+    model: Option<String>,
     #[serde(default, with = "motor_calibration_option_serde")]
-    pub calibration: Option<MotorCalibration>,
+    calibration: Option<MotorCalibration>,
     /// What this motor will fault at, read from its EEPROM when it connected.
     ///
     /// Lives on the snapshot rather than the telemetry frame because it does
     /// not change while an arm is running; resending it twenty times a second
     /// would be resending a constant.
     #[serde(default)]
-    pub limits: MotorLimits,
+    limits: MotorLimits,
+}
+
+impl MotorSummary {
+    pub fn new(name: impl Into<String>, id: u32, direction: MotorDirection) -> Self {
+        Self {
+            name: name.into(),
+            id,
+            direction,
+            model: None,
+            calibration: None,
+            limits: MotorLimits::default(),
+        }
+    }
+
+    pub fn with_model(mut self, model: Option<String>) -> Self {
+        self.model = model;
+        self
+    }
+
+    pub fn with_calibration(mut self, calibration: Option<MotorCalibration>) -> Self {
+        self.calibration = calibration;
+        self
+    }
+
+    pub const fn with_limits(mut self, limits: MotorLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    pub const fn set_limits(&mut self, limits: MotorLimits) {
+        self.limits = limits;
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub const fn id(&self) -> u32 {
+        self.id
+    }
+    pub const fn direction(&self) -> MotorDirection {
+        self.direction
+    }
+    pub fn model(&self) -> Option<&str> {
+        self.model.as_deref()
+    }
+    pub const fn calibration(&self) -> Option<MotorCalibration> {
+        self.calibration
+    }
+    pub const fn limits(&self) -> MotorLimits {
+        self.limits
+    }
 }
 
 mod direction_serde {
@@ -149,30 +308,114 @@ mod motor_calibration_option_serde {
 /// front of the operator.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct MotorLimits {
-    pub max_temperature_celsius: Option<f64>,
-    pub min_voltage_volts: Option<f64>,
-    pub max_voltage_volts: Option<f64>,
+    max_temperature_celsius: Option<f64>,
+    min_voltage_volts: Option<f64>,
+    max_voltage_volts: Option<f64>,
     /// Configured torque ceiling as a fraction of the motor's rated torque.
-    pub max_load: Option<f64>,
+    max_load: Option<f64>,
+}
+
+/// Optional lower and upper voltage limits reported by one motor.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct MotorVoltageRange {
+    min_voltage_volts: Option<f64>,
+    max_voltage_volts: Option<f64>,
+}
+
+impl MotorVoltageRange {
+    pub const fn new(min_voltage_volts: Option<f64>, max_voltage_volts: Option<f64>) -> Self {
+        Self {
+            min_voltage_volts,
+            max_voltage_volts,
+        }
+    }
+}
+
+impl MotorLimits {
+    pub const fn from_hardware_limits(
+        max_temperature_celsius: Option<f64>,
+        voltage: MotorVoltageRange,
+        max_load: Option<f64>,
+    ) -> Self {
+        Self {
+            max_temperature_celsius,
+            min_voltage_volts: voltage.min_voltage_volts,
+            max_voltage_volts: voltage.max_voltage_volts,
+            max_load,
+        }
+    }
+
+    pub const fn max_temperature_celsius(self) -> Option<f64> {
+        self.max_temperature_celsius
+    }
+
+    pub const fn min_voltage_volts(self) -> Option<f64> {
+        self.min_voltage_volts
+    }
+
+    pub const fn max_voltage_volts(self) -> Option<f64> {
+        self.max_voltage_volts
+    }
+
+    pub const fn max_load(self) -> Option<f64> {
+        self.max_load
+    }
 }
 
 /// Serial settings for a robot's motor bus.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PortSettings {
-    pub path: String,
-    pub baud_rate: u32,
+    path: String,
+    baud_rate: u32,
+}
+
+impl PortSettings {
+    pub fn new(path: impl Into<String>, baud_rate: u32) -> Self {
+        Self {
+            path: path.into(),
+            baud_rate,
+        }
+    }
+
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    pub const fn baud_rate(&self) -> u32 {
+        self.baud_rate
+    }
 }
 
 /// A camera assigned to a robot.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct CameraBinding {
     /// Role the camera plays for this robot, such as `wrist` or `top`.
-    pub name: String,
+    name: String,
     /// Stable device identifier reported by camera discovery.
-    pub id: String,
+    id: String,
     /// Where the camera is bolted, when the robot's file says.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mount: Option<CameraMount>,
+    mount: Option<CameraMount>,
+}
+
+impl CameraBinding {
+    pub fn new(name: impl Into<String>, id: impl Into<String>, mount: Option<CameraMount>) -> Self {
+        Self {
+            name: name.into(),
+            id: id.into(),
+            mount,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+    pub const fn mount(&self) -> Option<&CameraMount> {
+        self.mount.as_ref()
+    }
 }
 
 /// Where a camera sits and how much of the bench it can see.
@@ -186,16 +429,40 @@ pub struct CameraMount {
     /// Link in the robot description the camera rides, or `None` for one fixed
     /// to the bench. A wrist camera moves with the wrist; a top camera does not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub frame: Option<String>,
+    frame: Option<String>,
     /// Offset from that frame, in metres.
     #[serde(default)]
-    pub xyz: [f64; 3],
+    xyz: [f64; 3],
     /// Roll, pitch, and yaw from that frame, in radians.
     #[serde(default)]
-    pub rpy: [f64; 3],
+    rpy: [f64; 3],
     /// Horizontal field of view, in degrees.
     #[serde(default = "default_field_of_view")]
-    pub fov_degrees: f64,
+    fov_degrees: f64,
+}
+
+impl CameraMount {
+    pub fn new(frame: Option<String>, xyz: [f64; 3], rpy: [f64; 3]) -> Self {
+        Self {
+            frame,
+            xyz,
+            rpy,
+            fov_degrees: default_field_of_view(),
+        }
+    }
+
+    pub fn frame(&self) -> Option<&str> {
+        self.frame.as_deref()
+    }
+    pub const fn fov_degrees(&self) -> f64 {
+        self.fov_degrees
+    }
+    pub const fn xyz(&self) -> [f64; 3] {
+        self.xyz
+    }
+    pub const fn rpy(&self) -> [f64; 3] {
+        self.rpy
+    }
 }
 
 /// Field of view assumed for a mount that does not state one.
@@ -210,36 +477,148 @@ fn default_field_of_view() -> f64 {
 /// Whether a robot's motor bus is currently open.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ConnectionStatus {
-    pub connected: bool,
+    connected: bool,
     /// Populated when the last connect or transfer attempt failed.
-    pub error: Option<String>,
+    error: Option<String>,
+}
+
+impl ConnectionStatus {
+    pub fn new(connected: bool, error: Option<String>) -> Self {
+        Self { connected, error }
+    }
+
+    pub const fn connected(&self) -> bool {
+        self.connected
+    }
+
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
 }
 
 /// A camera the server knows about.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CameraStatus {
     /// Stable device identifier, also used in stream URLs.
-    pub id: String,
-    pub name: String,
-    pub width: u32,
-    pub height: u32,
-    pub fps: u32,
-    /// True when a capture thread is running and serving frames.
-    pub streaming: bool,
-    /// Frames delivered since the stream opened.
-    pub frames: u64,
-    pub error: Option<String>,
+    id: String,
+    name: String,
+    #[serde(flatten)]
+    format: CameraStreamFormat,
+    #[serde(flatten)]
+    state: CameraStreamState,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CameraStreamFormat {
+    width: u32,
+    height: u32,
+    fps: u32,
+}
+
+impl CameraStreamFormat {
+    pub const fn new(width: u32, height: u32, fps: u32) -> Self {
+        Self { width, height, fps }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CameraStreamState {
+    streaming: bool,
+    frames: u64,
+    error: Option<String>,
+}
+
+impl CameraStreamState {
+    pub fn new(streaming: bool, frames: u64, error: Option<String>) -> Self {
+        Self {
+            streaming,
+            frames,
+            error,
+        }
+    }
+}
+
+impl CameraStatus {
+    pub fn new(id: impl Into<String>, name: impl Into<String>, format: CameraStreamFormat) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            format,
+            state: CameraStreamState::default(),
+        }
+    }
+
+    pub fn with_state(mut self, state: CameraStreamState) -> Self {
+        self.state = state;
+        self
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub const fn width(&self) -> u32 {
+        self.format.width
+    }
+    pub const fn height(&self) -> u32 {
+        self.format.height
+    }
+    pub const fn fps(&self) -> u32 {
+        self.format.fps
+    }
+    pub const fn streaming(&self) -> bool {
+        self.state.streaming
+    }
+    pub const fn frames(&self) -> u64 {
+        self.state.frames
+    }
+    pub fn error(&self) -> Option<&str> {
+        self.state.error.as_deref()
+    }
 }
 
 /// A serial port offered as a candidate motor bus.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SerialPortSummary {
-    pub path: String,
+    path: String,
     /// `usb`, `bluetooth`, `pci`, or `unknown`.
-    pub kind: String,
-    pub description: Option<String>,
+    kind: String,
+    description: Option<String>,
     /// ID of the robot currently holding this port open, if any.
-    pub used_by: Option<String>,
+    used_by: Option<String>,
+}
+
+impl SerialPortSummary {
+    pub fn new(
+        path: impl Into<String>,
+        kind: impl Into<String>,
+        description: Option<String>,
+    ) -> Self {
+        Self {
+            path: path.into(),
+            kind: kind.into(),
+            description,
+            used_by: None,
+        }
+    }
+    pub fn with_owner(mut self, used_by: Option<String>) -> Self {
+        self.used_by = used_by;
+        self
+    }
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+    pub fn kind(&self) -> &str {
+        &self.kind
+    }
+    pub fn description(&self) -> Option<&str> {
+        self.description.as_deref()
+    }
+    pub fn used_by(&self) -> Option<&str> {
+        self.used_by.as_deref()
+    }
 }
 
 /// The operating mode the studio is in.
@@ -281,95 +660,345 @@ impl ModeSelection {
 /// The selected mode plus whatever went wrong entering or running it.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ModeStatus {
-    pub selection: ModeSelection,
+    selection: ModeSelection,
     /// True once the mode is actually driving motors.
-    pub active: bool,
-    pub error: Option<String>,
+    active: bool,
+    error: Option<String>,
+}
+
+impl ModeStatus {
+    pub fn new(selection: ModeSelection, active: bool, error: Option<String>) -> Self {
+        Self {
+            selection,
+            active,
+            error,
+        }
+    }
+
+    pub const fn selection(&self) -> &ModeSelection {
+        &self.selection
+    }
+
+    pub const fn active(&self) -> bool {
+        self.active
+    }
+
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    pub fn update_activity(&mut self, active: bool, error: Option<String>) {
+        self.active = active;
+        self.error = error;
+    }
 }
 
 /// A live sample of every connected robot.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct TelemetryFrame {
-    pub sequence: u64,
+    sequence: u64,
     /// Measured rate of the hardware control loop.
-    pub loop_hz: f64,
+    loop_hz: f64,
     /// Requested rate of the hardware control loop.
     ///
     /// Keeping the target beside the measurement lets operators distinguish a
     /// deliberately slow configuration from a loop that cannot keep up with
     /// its motor buses.
-    pub target_hz: f64,
-    pub robots: Vec<RobotTelemetry>,
+    target_hz: f64,
+    robots: Vec<RobotTelemetry>,
     /// Present only while a take is being captured.
-    pub recording: Option<RecordingProgress>,
+    recording: Option<RecordingProgress>,
     /// Present only while an episode is being played back.
-    pub replay: Option<ReplayProgress>,
+    replay: Option<ReplayProgress>,
+}
+
+impl TelemetryFrame {
+    pub fn new(sequence: u64, loop_hz: f64, target_hz: f64) -> Self {
+        Self {
+            sequence,
+            loop_hz,
+            target_hz,
+            robots: Vec::new(),
+            recording: None,
+            replay: None,
+        }
+    }
+    pub fn with_robots(mut self, robots: Vec<RobotTelemetry>) -> Self {
+        self.robots = robots;
+        self
+    }
+    pub fn with_operations(
+        mut self,
+        recording: Option<RecordingProgress>,
+        replay: Option<ReplayProgress>,
+    ) -> Self {
+        self.recording = recording;
+        self.replay = replay;
+        self
+    }
+    pub const fn sequence(&self) -> u64 {
+        self.sequence
+    }
+    pub const fn loop_hz(&self) -> f64 {
+        self.loop_hz
+    }
+    pub const fn target_hz(&self) -> f64 {
+        self.target_hz
+    }
+    pub fn robots(&self) -> &[RobotTelemetry] {
+        &self.robots
+    }
+    pub const fn recording(&self) -> Option<&RecordingProgress> {
+        self.recording.as_ref()
+    }
+    pub const fn replay(&self) -> Option<&ReplayProgress> {
+        self.replay.as_ref()
+    }
 }
 
 /// One robot's live state.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct RobotTelemetry {
-    pub id: String,
-    pub torque: bool,
-    pub joints: Vec<JointTelemetry>,
-    pub error: Option<String>,
+    id: String,
+    torque: bool,
+    joints: Vec<JointTelemetry>,
+    error: Option<String>,
     /// Present only while a calibration sweep is running for this robot.
-    pub calibration: Option<CalibrationProgress>,
+    calibration: Option<CalibrationProgress>,
+}
+
+impl RobotTelemetry {
+    pub fn new(id: impl Into<String>, torque: bool, joints: Vec<JointTelemetry>) -> Self {
+        Self {
+            id: id.into(),
+            torque,
+            joints,
+            error: None,
+            calibration: None,
+        }
+    }
+
+    pub fn with_error(mut self, error: Option<String>) -> Self {
+        self.error = error;
+        self
+    }
+
+    pub fn with_calibration(mut self, calibration: Option<CalibrationProgress>) -> Self {
+        self.calibration = calibration;
+        self
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+    pub const fn torque(&self) -> bool {
+        self.torque
+    }
+
+    pub fn joints(&self) -> &[JointTelemetry] {
+        &self.joints
+    }
+
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    pub const fn calibration(&self) -> Option<&CalibrationProgress> {
+        self.calibration.as_ref()
+    }
 }
 
 /// One joint's live state.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct JointTelemetry {
-    pub name: String,
-    pub id: u32,
-    /// Raw encoder reading, always available.
-    pub raw: i64,
-    /// Degrees from the calibrated center; `None` until the joint is calibrated.
-    pub degrees: Option<f64>,
-    /// Position within the calibrated travel, `-1.0` to `1.0`.
-    pub normalized: Option<f64>,
-    /// Last raw position commanded to this joint, when it is being driven.
-    pub goal_raw: Option<i64>,
-    /// Final calibrated target before the controller's safety ramp.
-    pub target_raw: Option<i64>,
-    /// Final target in degrees from the calibrated center.
-    ///
-    /// This is carried explicitly because encoder direction is part of the
-    /// calibration and cannot be reconstructed from [`JointRange`] alone.
-    pub target_degrees: Option<f64>,
-    pub range: Option<JointRange>,
+    #[serde(flatten)]
+    identity: JointIdentity,
+    #[serde(flatten)]
+    kinematics: JointKinematics,
+    #[serde(flatten)]
+    diagnostics: JointDiagnostics,
+}
 
-    /// What the motor reports about its own condition.
-    ///
-    /// Every one of these is optional and stays optional: a bus whose firmware
-    /// will not answer the wider status read still drives the arm perfectly
-    /// well, and a missing measurement reported as zero would put a cold motor
-    /// and an unreadable one in the same cell. Unlike the fields above, none of
-    /// these depend on calibration — they are the only readings an operator can
-    /// get out of an arm that has never been calibrated.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct JointIdentity {
+    name: String,
+    id: u32,
+}
+
+impl JointIdentity {
+    pub fn new(name: impl Into<String>, id: u32) -> Self {
+        Self {
+            name: name.into(),
+            id,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct JointKinematics {
+    raw: i64,
+    degrees: Option<f64>,
+    normalized: Option<f64>,
+    goal_raw: Option<i64>,
+    target_raw: Option<i64>,
+    target_degrees: Option<f64>,
+    range: Option<JointRange>,
+}
+
+impl JointKinematics {
+    pub const fn new(raw: i64, degrees: Option<f64>, normalized: Option<f64>) -> Self {
+        Self {
+            raw,
+            degrees,
+            normalized,
+            goal_raw: None,
+            target_raw: None,
+            target_degrees: None,
+            range: None,
+        }
+    }
+    pub const fn with_raw_targets(
+        mut self,
+        goal_raw: Option<i64>,
+        target_raw: Option<i64>,
+    ) -> Self {
+        self.goal_raw = goal_raw;
+        self.target_raw = target_raw;
+        self
+    }
+    pub const fn with_calibrated_target(
+        mut self,
+        target_degrees: Option<f64>,
+        range: Option<JointRange>,
+    ) -> Self {
+        self.target_degrees = target_degrees;
+        self.range = range;
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct MotorElectricalReadings {
     #[serde(default)]
-    pub temperature_celsius: Option<f64>,
+    temperature_celsius: Option<f64>,
     #[serde(default)]
-    pub voltage_volts: Option<f64>,
+    voltage_volts: Option<f64>,
     #[serde(default)]
-    pub current_amps: Option<f64>,
-    /// Signed fraction of the motor's rated torque.
+    current_amps: Option<f64>,
+}
+
+impl MotorElectricalReadings {
+    pub const fn new(
+        temperature_celsius: Option<f64>,
+        voltage_volts: Option<f64>,
+        current_amps: Option<f64>,
+    ) -> Self {
+        Self {
+            temperature_celsius,
+            voltage_volts,
+            current_amps,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct JointDiagnostics {
+    #[serde(flatten)]
+    electrical: MotorElectricalReadings,
     #[serde(default)]
-    pub load: Option<f64>,
+    load: Option<f64>,
     #[serde(default)]
-    pub speed_degrees_per_second: Option<f64>,
-    /// How fast this motor is heating, in degrees per minute.
-    ///
-    /// A temperature alone cannot be acted on: fifty-eight degrees is fine, or
-    /// four minutes from a shutdown, depending entirely on which way it is
-    /// going. Measured over a window rather than between frames, because these
-    /// registers report whole degrees and a difference taken across two frames
-    /// is quantization noise wearing a unit. `None` until the window fills.
+    speed_degrees_per_second: Option<f64>,
     #[serde(default)]
-    pub temperature_rise_per_minute: Option<f64>,
-    /// Faults the motor is reporting about itself, not thresholds applied here.
+    temperature_rise_per_minute: Option<f64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub faults: Vec<MotorFault>,
+    faults: Vec<MotorFault>,
+}
+
+impl JointDiagnostics {
+    pub fn new(
+        electrical: MotorElectricalReadings,
+        load: Option<f64>,
+        speed_degrees_per_second: Option<f64>,
+    ) -> Self {
+        Self {
+            electrical,
+            load,
+            speed_degrees_per_second,
+            temperature_rise_per_minute: None,
+            faults: Vec::new(),
+        }
+    }
+    pub fn with_temperature_rise(mut self, temperature_rise_per_minute: Option<f64>) -> Self {
+        self.temperature_rise_per_minute = temperature_rise_per_minute;
+        self
+    }
+    pub fn with_faults(mut self, faults: Vec<MotorFault>) -> Self {
+        self.faults = faults;
+        self
+    }
+}
+
+impl JointTelemetry {
+    pub fn new(
+        identity: JointIdentity,
+        kinematics: JointKinematics,
+        diagnostics: JointDiagnostics,
+    ) -> Self {
+        Self {
+            identity,
+            kinematics,
+            diagnostics,
+        }
+    }
+    pub fn name(&self) -> &str {
+        &self.identity.name
+    }
+    pub const fn id(&self) -> u32 {
+        self.identity.id
+    }
+    pub const fn raw(&self) -> i64 {
+        self.kinematics.raw
+    }
+    pub const fn degrees(&self) -> Option<f64> {
+        self.kinematics.degrees
+    }
+    pub const fn normalized(&self) -> Option<f64> {
+        self.kinematics.normalized
+    }
+    pub const fn goal_raw(&self) -> Option<i64> {
+        self.kinematics.goal_raw
+    }
+    pub const fn target_raw(&self) -> Option<i64> {
+        self.kinematics.target_raw
+    }
+    pub const fn target_degrees(&self) -> Option<f64> {
+        self.kinematics.target_degrees
+    }
+    pub const fn range(&self) -> Option<JointRange> {
+        self.kinematics.range
+    }
+    pub const fn temperature_celsius(&self) -> Option<f64> {
+        self.diagnostics.electrical.temperature_celsius
+    }
+    pub const fn voltage_volts(&self) -> Option<f64> {
+        self.diagnostics.electrical.voltage_volts
+    }
+    pub const fn current_amps(&self) -> Option<f64> {
+        self.diagnostics.electrical.current_amps
+    }
+    pub const fn load(&self) -> Option<f64> {
+        self.diagnostics.load
+    }
+    pub const fn speed_degrees_per_second(&self) -> Option<f64> {
+        self.diagnostics.speed_degrees_per_second
+    }
+    pub const fn temperature_rise_per_minute(&self) -> Option<f64> {
+        self.diagnostics.temperature_rise_per_minute
+    }
+    pub fn faults(&self) -> &[MotorFault] {
+        &self.diagnostics.faults
+    }
 }
 
 /// A fault a motor reports about itself.
@@ -419,10 +1048,10 @@ impl JointTelemetry {
     /// Without limits there is nothing to be near, so only the motor's own
     /// faults can speak.
     pub fn condition(&self, limits: &MotorLimits) -> MotorCondition {
-        let readings = MotorHealthReadings::new(!self.faults.is_empty())
-            .with_temperature_celsius(self.temperature_celsius)
-            .with_voltage_volts(self.voltage_volts)
-            .with_load(self.load);
+        let readings = MotorHealthReadings::new(!self.faults().is_empty())
+            .with_temperature_celsius(self.temperature_celsius())
+            .with_voltage_volts(self.voltage_volts())
+            .with_load(self.load());
         let health_limits = MotorHealthLimits::default()
             .with_max_temperature_celsius(limits.max_temperature_celsius)
             .with_min_voltage_volts(limits.min_voltage_volts)
@@ -439,17 +1068,44 @@ impl JointTelemetry {
 /// The calibrated travel of one joint.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct JointRange {
-    pub min: i64,
-    pub center: i64,
-    pub max: i64,
+    min: i64,
+    center: i64,
+    max: i64,
+}
+
+impl JointRange {
+    pub const fn new(min: i64, center: i64, max: i64) -> Self {
+        Self { min, center, max }
+    }
+    pub const fn min(self) -> i64 {
+        self.min
+    }
+    pub const fn center(self) -> i64 {
+        self.center
+    }
+    pub const fn max(self) -> i64 {
+        self.max
+    }
 }
 
 /// Live progress of a calibration sweep.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct CalibrationProgress {
-    pub joints: Vec<CalibrationJointProgress>,
+    joints: Vec<CalibrationJointProgress>,
     /// True once every joint has moved far enough to record a range.
-    pub ready: bool,
+    ready: bool,
+}
+
+impl CalibrationProgress {
+    pub fn new(joints: Vec<CalibrationJointProgress>, ready: bool) -> Self {
+        Self { joints, ready }
+    }
+    pub fn joints(&self) -> &[CalibrationJointProgress] {
+        &self.joints
+    }
+    pub const fn ready(&self) -> bool {
+        self.ready
+    }
 }
 
 /// One joint's progress through its calibration sweep.
@@ -458,13 +1114,37 @@ pub struct CalibrationProgress {
 /// to assume two independently built lists are in the same order.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CalibrationJointProgress {
-    pub name: String,
-    pub min: i64,
-    pub position: i64,
-    pub max: i64,
+    name: String,
+    min: i64,
+    position: i64,
+    max: i64,
 }
 
 impl CalibrationJointProgress {
+    pub fn new(name: impl Into<String>, min: i64, position: i64) -> Self {
+        Self {
+            name: name.into(),
+            min,
+            position,
+            max: position,
+        }
+    }
+    pub const fn with_max(mut self, max: i64) -> Self {
+        self.max = max;
+        self
+    }
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub const fn min(&self) -> i64 {
+        self.min
+    }
+    pub const fn position(&self) -> i64 {
+        self.position
+    }
+    pub const fn max(&self) -> i64 {
+        self.max
+    }
     /// Travel observed so far, in encoder counts.
     pub fn span(&self) -> i64 {
         self.max.saturating_sub(self.min)
@@ -474,14 +1154,14 @@ impl CalibrationJointProgress {
 /// Create a new robot instance in SpiralDB.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CreateRobotRequest {
-    pub id: String,
+    id: String,
     /// Defaults to `so101_follower` when omitted.
     #[serde(default)]
-    pub robot_type: Option<String>,
+    robot_type: Option<String>,
     #[serde(default)]
-    pub port: Option<String>,
+    port: Option<String>,
     #[serde(default)]
-    pub baud_rate: Option<u32>,
+    baud_rate: Option<u32>,
 }
 
 /// Change a robot's port or camera assignments.
@@ -491,11 +1171,11 @@ pub struct CreateRobotRequest {
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct UpdateRobotRequest {
     #[serde(default)]
-    pub robot_type: Option<String>,
+    robot_type: Option<String>,
     #[serde(default)]
-    pub port: Option<PortSettings>,
+    port: Option<PortSettings>,
     #[serde(default)]
-    pub cameras: Option<Vec<CameraBinding>>,
+    cameras: Option<Vec<CameraBinding>>,
 }
 
 /// Command joint positions in normalized `[-1.0, 1.0]` space.
@@ -504,7 +1184,85 @@ pub struct UpdateRobotRequest {
 /// without a calibration, which is exactly the safety property wanted here.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct GoalRequest {
-    pub normalized: BTreeMap<String, f64>,
+    normalized: BTreeMap<String, f64>,
+}
+
+impl CreateRobotRequest {
+    pub fn new(id: impl Into<String>, robot_type: Option<String>) -> Self {
+        Self {
+            id: id.into(),
+            robot_type,
+            port: None,
+            baud_rate: None,
+        }
+    }
+
+    pub fn with_port(mut self, port: impl Into<String>, baud_rate: u32) -> Self {
+        self.port = Some(port.into());
+        self.baud_rate = Some(baud_rate);
+        self
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn robot_type(&self) -> Option<&str> {
+        self.robot_type.as_deref()
+    }
+
+    pub fn port(&self) -> Option<&str> {
+        self.port.as_deref()
+    }
+
+    pub const fn baud_rate(&self) -> Option<u32> {
+        self.baud_rate
+    }
+}
+
+impl UpdateRobotRequest {
+    pub fn with_robot_type(robot_type: Option<String>) -> Self {
+        Self {
+            robot_type,
+            ..Self::default()
+        }
+    }
+
+    pub fn with_port(port: PortSettings) -> Self {
+        Self {
+            port: Some(port),
+            ..Self::default()
+        }
+    }
+
+    pub fn with_cameras(cameras: Vec<CameraBinding>) -> Self {
+        Self {
+            cameras: Some(cameras),
+            ..Self::default()
+        }
+    }
+
+    pub fn robot_type(&self) -> Option<&str> {
+        self.robot_type.as_deref()
+    }
+
+    pub const fn port(&self) -> Option<&PortSettings> {
+        self.port.as_ref()
+    }
+
+    pub fn cameras(&self) -> Option<&[CameraBinding]> {
+        self.cameras.as_deref()
+    }
+}
+
+impl GoalRequest {
+    pub fn new(normalized: BTreeMap<String, f64>) -> Self {
+        Self { normalized }
+    }
+
+    pub const fn normalized(&self) -> &BTreeMap<String, f64> {
+        &self.normalized
+    }
 }
 
 /// Identify a motor bus by comparing the ports present before and after a cable
@@ -512,15 +1270,42 @@ pub struct GoalRequest {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct IdentifyPortRequest {
     /// Port paths observed before the cable was removed.
-    pub before: Vec<String>,
+    before: Vec<String>,
+}
+
+impl IdentifyPortRequest {
+    pub fn new(before: Vec<String>) -> Self {
+        Self { before }
+    }
+
+    pub fn before(&self) -> &[String] {
+        &self.before
+    }
 }
 
 /// The outcome of a port-identification attempt.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct IdentifyPortResponse {
     /// The single port that disappeared, when exactly one did.
-    pub port: Option<String>,
+    port: Option<String>,
     /// Every port that disappeared, for the ambiguous case.
-    pub removed: Vec<String>,
-    pub message: String,
+    removed: Vec<String>,
+    message: String,
+}
+
+impl IdentifyPortResponse {
+    pub fn new(port: Option<String>, removed: Vec<String>, message: impl Into<String>) -> Self {
+        Self {
+            port,
+            removed,
+            message: message.into(),
+        }
+    }
+
+    pub fn port(&self) -> Option<&str> {
+        self.port.as_deref()
+    }
+    pub fn message(&self) -> &str {
+        &self.message
+    }
 }

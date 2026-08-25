@@ -97,12 +97,28 @@ struct BundleAgentConversation {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BundleAgentSession {
+    #[serde(flatten)]
+    identity: BundleAgentSessionIdentity,
+    messages: Vec<BundleAgentMessage>,
+    #[serde(flatten)]
+    lifecycle: BundleAgentSessionLifecycle,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BundleAgentSessionIdentity {
     workflow_id: String,
     #[serde(default, alias = "session_id")]
     conversation_id: String,
     revision: u64,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BundleAgentSessionLifecycle {
     phase: WorkflowAgentPhase,
-    messages: Vec<BundleAgentMessage>,
     #[serde(default)]
     active_turn_id: Option<String>,
     #[serde(default)]
@@ -116,12 +132,36 @@ struct BundleAgentSession {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BundleAgentMessage {
+    #[serde(flatten)]
+    identity: BundleAgentMessageIdentity,
+    #[serde(flatten)]
+    content: BundleAgentMessageContent,
+    #[serde(flatten)]
+    provenance: BundleAgentMessageProvenance,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BundleAgentMessageIdentity {
     id: String,
     sequence: u64,
     role: WorkflowAgentRole,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BundleAgentMessageContent {
     phase: WorkflowAgentMessagePhase,
     text: String,
     tools: Vec<BundleAgentToolSummary>,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BundleAgentMessageProvenance {
     #[serde(default)]
     run_id: Option<String>,
     created_ms: u64,
@@ -196,6 +236,42 @@ impl ProjectBundle {
 }
 
 pub struct EpisodeBundle;
+
+pub(crate) struct BundleSource<'a> {
+    namespace: &'a str,
+    bytes: &'a [u8],
+}
+
+impl<'a> BundleSource<'a> {
+    pub(crate) const fn new(namespace: &'a str, bytes: &'a [u8]) -> Self {
+        Self { namespace, bytes }
+    }
+}
+
+pub(crate) struct EpisodeBundleSelection<'a> {
+    namespace: &'a str,
+    dataset_id: &'a str,
+}
+
+impl<'a> EpisodeBundleSelection<'a> {
+    pub(crate) const fn new(namespace: &'a str, dataset_id: &'a str) -> Self {
+        Self {
+            namespace,
+            dataset_id,
+        }
+    }
+}
+
+pub(crate) struct EpisodeBundleImport<'a> {
+    selection: EpisodeBundleSelection<'a>,
+    bytes: &'a [u8],
+}
+
+impl<'a> EpisodeBundleImport<'a> {
+    pub(crate) const fn new(selection: EpisodeBundleSelection<'a>, bytes: &'a [u8]) -> Self {
+        Self { selection, bytes }
+    }
+}
 
 impl EpisodeBundle {
     pub const MAX_BYTES: usize = ProjectBundle::MAX_BYTES;
@@ -317,7 +393,7 @@ impl WorkflowBundleRegistry {
         self.entries
             .values()
             .filter(|entry| entry.cache_relation == cache_relation)
-            .map(|entry| (entry.definition.name.clone(), entry.definition.clone()))
+            .map(|entry| (entry.definition.name().to_owned(), entry.definition.clone()))
             .collect()
     }
 }
@@ -350,7 +426,7 @@ fn current_workflow_registry(
 }
 
 impl ProjectBundle {
-    pub fn export(
+    pub(crate) fn export(
         &self,
         connection: &mut StorageConnection,
         namespace: &str,
@@ -389,12 +465,15 @@ impl ProjectBundle {
 }
 
 impl EpisodeBundle {
-    pub fn export(
+    pub(crate) fn export(
         &self,
         connection: &mut StorageConnection,
-        namespace: &str,
-        dataset_id: &str,
+        selection: EpisodeBundleSelection<'_>,
     ) -> Result<Vec<u8>, String> {
+        let EpisodeBundleSelection {
+            namespace,
+            dataset_id,
+        } = selection;
         validate_dataset_id(dataset_id)?;
         let datasets = Table::Datasets.qualified_name(namespace);
         let episodes = Table::Episodes.qualified_name(namespace);
@@ -604,13 +683,13 @@ impl BundleSpec {
 }
 
 impl ProjectBundle {
-    pub fn import(
+    pub(crate) fn import(
         &self,
         connection: &mut StorageConnection,
-        namespace: &str,
-        bundle: &[u8],
+        source: BundleSource<'_>,
     ) -> Result<ProjectImportSummary, String> {
-        let decoded = decode_project_entries(PROJECT_SPEC.parse_raw(bundle)?)?;
+        let BundleSource { namespace, bytes } = source;
+        let decoded = decode_project_entries(PROJECT_SPEC.parse_raw(bytes)?)?;
         let fixed_relations = decoded
             .iter()
             .filter_map(|entry| match &entry.relation {
@@ -677,7 +756,6 @@ impl ProjectBundle {
                 let mut summary = ProjectImportSummary::default();
                 for entry in decoded {
                     let relation = entry.relation.target(namespace);
-                    summary.relations += 1;
                     let batches = entry
                         .batches
                         .into_iter()
@@ -689,7 +767,7 @@ impl ProjectBundle {
                             }
                         })
                         .collect::<Result<Vec<_>, _>>()?;
-                    summary.rows = summary.rows.saturating_add(
+                    summary.record_relation(
                         batches.iter().map(RecordBatch::num_rows).sum::<usize>() as u64,
                     );
                     replace_batches(connection, &relation, batches)?;
@@ -698,7 +776,7 @@ impl ProjectBundle {
             })?;
         let can_reconcile = transaction_warning.is_none();
         if let Some(warning) = transaction_warning {
-            summary.warnings.push(warning);
+            summary.push_warning(warning);
         }
         // ADBC ingest can create a relation inside the import transaction, but
         // Spiral's SQL binder cannot resolve that new relation until the commit is
@@ -708,12 +786,12 @@ impl ProjectBundle {
             if let Err(error) =
                 reconcile_project_video_dataset(connection, namespace, &imported_video_episodes)
             {
-                summary.warnings.push(format!(
+                summary.push_warning(format!(
                     "project rows committed, but the derived video dataset needs repair: {error}"
                 ));
             }
         } else {
-            summary.warnings.push(
+            summary.push_warning(
             "project rows committed, but derived video reconciliation was skipped because the transaction connection could not be reused"
                 .to_owned(),
         );
@@ -723,15 +801,18 @@ impl ProjectBundle {
 }
 
 impl EpisodeBundle {
-    pub fn import(
+    pub(crate) fn import(
         &self,
         connection: &mut StorageConnection,
-        namespace: &str,
-        dataset_id: &str,
-        bundle: &[u8],
+        request: EpisodeBundleImport<'_>,
     ) -> Result<EpisodeImportSummary, String> {
+        let EpisodeBundleImport { selection, bytes } = request;
+        let EpisodeBundleSelection {
+            namespace,
+            dataset_id,
+        } = selection;
         validate_dataset_id(dataset_id)?;
-        let mut decoded = EPISODES_SPEC.decode_entries(EPISODES_SPEC.parse(bundle)?)?;
+        let mut decoded = EPISODES_SPEC.decode_entries(EPISODES_SPEC.parse(bytes)?)?;
         sort_relations(&mut decoded, &EPISODE_TABLES);
         let episode_ids = validate_episode_relations(&decoded)?;
         let video_episode_ids = video_episode_ids(&decoded)?;
@@ -752,15 +833,9 @@ impl EpisodeBundle {
             let datasets = Table::Datasets.qualified_name(namespace);
             let dataset_exists = table_exists(connection, &datasets)?
                 && !run_query(connection, &sql::dataset_exists(&datasets, dataset_id), 1)?
-                    .rows
+                    .rows()
                     .is_empty();
-            let mut summary = EpisodeImportSummary {
-                dataset_id: dataset_id.to_owned(),
-                episodes: episode_ids.len() as u64,
-                rows: 0,
-                first_episode: episode_ids.first().cloned(),
-                warnings: Vec::new(),
-            };
+            let mut imported_rows = 0_u64;
             for (table, batches) in decoded {
                 if table == Table::Datasets && dataset_exists {
                     continue;
@@ -776,30 +851,33 @@ impl EpisodeBundle {
                         _ => Ok(batch),
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                summary.rows =
-                    summary.rows.saturating_add(
+                imported_rows =
+                    imported_rows.saturating_add(
                         batches.iter().map(RecordBatch::num_rows).sum::<usize>() as u64,
                     );
                 ingest_batches(connection, &relation, batches)?;
             }
-            Ok(summary)
+            Ok(
+                EpisodeImportSummary::new(dataset_id, episode_ids.len() as u64, imported_rows)
+                    .with_first_episode(episode_ids.first().cloned()),
+            )
         })();
         let (mut summary, transaction_warning) =
             finish_transaction(connection, outcome, "episode import")?;
         let can_reconcile = transaction_warning.is_none();
         if let Some(warning) = transaction_warning {
-            summary.warnings.push(warning);
+            summary.push_warning(warning);
         }
         if can_reconcile {
             if !video_episode_ids.is_empty()
                 && let Err(error) = reconcile_appended_video_dataset(connection, namespace)
             {
-                summary.warnings.push(format!(
+                summary.push_warning(format!(
                     "episode rows committed, but the derived video dataset needs repair: {error}"
                 ));
             }
         } else if !video_episode_ids.is_empty() {
-            summary.warnings.push(
+            summary.push_warning(
             "episode rows committed, but derived video reconciliation was skipped because the transaction connection could not be reused"
                 .to_owned(),
         );
@@ -827,6 +905,51 @@ const ARROW_DECODE_LIMITS: ArrowDecodeLimits = ArrowDecodeLimits {
     message_metadata_bytes: MAX_ARROW_MESSAGE_METADATA_BYTES,
 };
 
+struct ArrowPayload<'a> {
+    relation: &'a str,
+    bytes: Vec<u8>,
+    label: &'a str,
+}
+
+struct ArrowPreflight<'a> {
+    relation: &'a str,
+    label: &'a str,
+    body: &'a [u8],
+    limits: ArrowDecodeLimits,
+}
+
+impl<'a> ArrowPreflight<'a> {
+    const fn new(relation: &'a str, label: &'a str, limits: ArrowDecodeLimits) -> Self {
+        Self {
+            relation,
+            label,
+            body: &[],
+            limits,
+        }
+    }
+
+    const fn with_body(mut self, body: &'a [u8]) -> Self {
+        self.body = body;
+        self
+    }
+}
+
+#[derive(Default)]
+struct ArrowPreflightCounters {
+    claimed_decoded_bytes: usize,
+    rows: usize,
+}
+
+impl<'a> ArrowPayload<'a> {
+    fn new(relation: &'a str, bytes: Vec<u8>, label: &'a str) -> Self {
+        Self {
+            relation,
+            bytes,
+            label,
+        }
+    }
+}
+
 #[derive(Default)]
 struct ArrowDecodeBudget {
     claimed_decoded_bytes: usize,
@@ -834,26 +957,17 @@ struct ArrowDecodeBudget {
 }
 
 impl ArrowDecodeBudget {
-    fn decode(
-        &mut self,
-        relation: &str,
-        payload: Vec<u8>,
-        label: &str,
-    ) -> Result<Vec<RecordBatch>, String> {
-        self.decode_with_limits(relation, payload, label, ARROW_DECODE_LIMITS)
+    fn decode(&mut self, payload: ArrowPayload<'_>) -> Result<Vec<RecordBatch>, String> {
+        self.decode_with_limits(payload, ARROW_DECODE_LIMITS)
     }
 
     fn decode_with_row_limit(
         &mut self,
-        relation: &str,
-        payload: Vec<u8>,
-        label: &str,
+        payload: ArrowPayload<'_>,
         relation_rows: usize,
     ) -> Result<Vec<RecordBatch>, String> {
         self.decode_with_limits(
-            relation,
             payload,
-            label,
             ArrowDecodeLimits {
                 relation_rows,
                 ..ARROW_DECODE_LIMITS
@@ -863,18 +977,21 @@ impl ArrowDecodeBudget {
 
     fn decode_with_limits(
         &mut self,
-        relation: &str,
-        payload: Vec<u8>,
-        label: &str,
+        payload: ArrowPayload<'_>,
         limits: ArrowDecodeLimits,
     ) -> Result<Vec<RecordBatch>, String> {
-        self.preflight(relation, &payload, label, limits)?;
+        self.preflight(&payload, limits)?;
+        let ArrowPayload {
+            relation,
+            bytes,
+            label,
+        } = payload;
         // The preflight above bounds every IPC buffer by its declared decoded
         // length before Arrow can allocate or decompress it. Do not use
         // `RecordBatch::get_array_memory_size` for this bound: the stream reader
         // exposes column buffers as slices of one shared message-body allocation,
         // and that estimate counts the shared capacity once for every slice.
-        let reader = StreamReader::try_new(Cursor::new(payload), None)
+        let reader = StreamReader::try_new(Cursor::new(bytes), None)
             .map_err(|error| format!("opening Arrow stream for {relation}: {error}"))?;
         let schema = reader.schema();
         let mut batches = Vec::new();
@@ -899,14 +1016,14 @@ impl ArrowDecodeBudget {
 
     fn preflight(
         &mut self,
-        relation: &str,
-        payload: &[u8],
-        label: &str,
+        payload: &ArrowPayload<'_>,
         limits: ArrowDecodeLimits,
     ) -> Result<(), String> {
+        let relation = payload.relation;
+        let label = payload.label;
+        let payload = payload.bytes.as_slice();
         let mut position = 0_usize;
-        let mut claimed_decoded_bytes = 0_usize;
-        let mut rows = 0_usize;
+        let mut counters = ArrowPreflightCounters::default();
         while position < payload.len() {
             let first = read_arrow_u32(payload, &mut position, relation)?;
             let metadata_len = if first == u32::MAX {
@@ -930,7 +1047,8 @@ impl ArrowDecodeBudget {
                     limits.message_metadata_bytes / (1024 * 1024),
                 ));
             }
-            claimed_decoded_bytes = claimed_decoded_bytes
+            counters.claimed_decoded_bytes = counters
+            .claimed_decoded_bytes
             .checked_add(metadata_len)
             .filter(|bytes| *bytes <= limits.decoded_bytes)
             .ok_or_else(|| {
@@ -967,21 +1085,15 @@ impl ArrowDecodeBudget {
                     let schema = message.header_as_schema().ok_or_else(|| {
                         format!("{label} Arrow schema metadata for {relation} is invalid")
                     })?;
-                    validate_arrow_schema_bound(relation, schema, label, limits.schema_fields)?;
+                    ArrowPreflight::new(relation, label, limits).validate_schema(schema)?;
                 }
                 arrow_ipc::MessageHeader::RecordBatch => {
                     let batch = message.header_as_record_batch().ok_or_else(|| {
                         format!("{label} Arrow record metadata for {relation} is invalid")
                     })?;
-                    preflight_arrow_record_batch(
-                        relation,
-                        batch,
-                        body,
-                        label,
-                        limits,
-                        &mut claimed_decoded_bytes,
-                        &mut rows,
-                    )?;
+                    ArrowPreflight::new(relation, label, limits)
+                        .with_body(body)
+                        .validate_record_batch(batch, &mut counters)?;
                 }
                 arrow_ipc::MessageHeader::DictionaryBatch => {
                     let dictionary = message.header_as_dictionary_batch().ok_or_else(|| {
@@ -990,22 +1102,16 @@ impl ArrowDecodeBudget {
                     let batch = dictionary.data().ok_or_else(|| {
                         format!("{label} Arrow dictionary for {relation} has no record metadata")
                     })?;
-                    preflight_arrow_record_batch(
-                        relation,
-                        batch,
-                        body,
-                        label,
-                        limits,
-                        &mut claimed_decoded_bytes,
-                        &mut rows,
-                    )?;
+                    ArrowPreflight::new(relation, label, limits)
+                        .with_body(body)
+                        .validate_record_batch(batch, &mut counters)?;
                 }
                 _ => {}
             }
             position = body_end;
         }
 
-        if rows > limits.relation_rows {
+        if counters.rows > limits.relation_rows {
             return Err(format!(
                 "{label} Arrow relation {relation} exceeds the {}-row relation limit",
                 limits.relation_rows,
@@ -1013,7 +1119,7 @@ impl ArrowDecodeBudget {
         }
         self.claimed_decoded_bytes = self
         .claimed_decoded_bytes
-        .checked_add(claimed_decoded_bytes)
+        .checked_add(counters.claimed_decoded_bytes)
         .filter(|bytes| *bytes <= limits.decoded_bytes)
         .ok_or_else(|| {
             format!(
@@ -1023,7 +1129,7 @@ impl ArrowDecodeBudget {
         })?;
         self.rows = self
             .rows
-            .checked_add(rows)
+            .checked_add(counters.rows)
             .filter(|rows| *rows <= limits.decoded_rows)
             .ok_or_else(|| {
                 format!(
@@ -1049,85 +1155,87 @@ fn read_arrow_u32(payload: &[u8], position: &mut usize, relation: &str) -> Resul
     Ok(value)
 }
 
-fn validate_arrow_schema_bound(
-    relation: &str,
-    schema: arrow_ipc::Schema<'_>,
-    label: &str,
-    max_fields: usize,
-) -> Result<(), String> {
-    let Some(fields) = schema.fields() else {
-        return Ok(());
-    };
-    if fields.len() > max_fields {
-        return Err(format!(
-            "{label} Arrow schema for {relation} exceeds the {max_fields}-column limit"
-        ));
-    }
-    let mut pending = fields.iter().collect::<Vec<_>>();
-    let mut total = 0_usize;
-    while let Some(field) = pending.pop() {
-        total = total
-            .checked_add(1)
-            .filter(|count| *count <= max_fields)
-            .ok_or_else(|| {
-                format!("{label} Arrow schema for {relation} exceeds the {max_fields}-field limit")
-            })?;
-        if let Some(children) = field.children() {
-            pending.extend(children.iter());
+impl ArrowPreflight<'_> {
+    fn validate_schema(&self, schema: arrow_ipc::Schema<'_>) -> Result<(), String> {
+        let relation = self.relation;
+        let label = self.label;
+        let max_fields = self.limits.schema_fields;
+        let Some(fields) = schema.fields() else {
+            return Ok(());
+        };
+        if fields.len() > max_fields {
+            return Err(format!(
+                "{label} Arrow schema for {relation} exceeds the {max_fields}-column limit"
+            ));
         }
-    }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn preflight_arrow_record_batch(
-    relation: &str,
-    batch: arrow_ipc::RecordBatch<'_>,
-    body: &[u8],
-    label: &str,
-    limits: ArrowDecodeLimits,
-    claimed_decoded_bytes: &mut usize,
-    rows: &mut usize,
-) -> Result<(), String> {
-    let batch_rows = usize::try_from(batch.length()).map_err(|_| {
-        format!("{label} Arrow record batch for {relation} has an invalid row count")
-    })?;
-    if batch_rows > limits.record_batch_rows {
-        return Err(format!(
-            "{label} Arrow record batch for {relation} exceeds the {}-row batch limit",
-            limits.record_batch_rows,
-        ));
-    }
-    *rows = rows.checked_add(batch_rows).ok_or_else(|| {
-        format!("{label} Arrow row count overflows while reading relation {relation}")
-    })?;
-
-    let compressed = batch.compression().is_some();
-    for buffer in batch.buffers().into_iter().flatten() {
-        let offset = usize::try_from(buffer.offset())
-            .map_err(|_| format!("{label} Arrow buffer for {relation} has an invalid offset"))?;
-        let length = usize::try_from(buffer.length())
-            .map_err(|_| format!("{label} Arrow buffer for {relation} has an invalid length"))?;
-        let end = offset
-            .checked_add(length)
-            .filter(|end| *end <= body.len())
-            .ok_or_else(|| {
-                format!("{label} Arrow buffer for {relation} exceeds its message body")
-            })?;
-        let decoded_length = if length == 0 || !compressed {
-            length
-        } else {
-            if length < 8 {
-                return Err(format!(
-                    "{label} compressed Arrow buffer for {relation} has no length prefix"
-                ));
+        let mut pending = fields.iter().collect::<Vec<_>>();
+        let mut total = 0_usize;
+        while let Some(field) = pending.pop() {
+            total = total
+                .checked_add(1)
+                .filter(|count| *count <= max_fields)
+                .ok_or_else(|| {
+                    format!(
+                        "{label} Arrow schema for {relation} exceeds the {max_fields}-field limit"
+                    )
+                })?;
+            if let Some(children) = field.children() {
+                pending.extend(children.iter());
             }
-            let declared = i64::from_le_bytes(
-                body[offset..offset + 8]
-                    .try_into()
-                    .expect("compressed Arrow prefix has exactly eight bytes"),
-            );
-            match declared {
+        }
+        Ok(())
+    }
+
+    fn validate_record_batch(
+        &self,
+        batch: arrow_ipc::RecordBatch<'_>,
+        counters: &mut ArrowPreflightCounters,
+    ) -> Result<(), String> {
+        let relation = self.relation;
+        let label = self.label;
+        let body = self.body;
+        let limits = self.limits;
+        let batch_rows = usize::try_from(batch.length()).map_err(|_| {
+            format!("{label} Arrow record batch for {relation} has an invalid row count")
+        })?;
+        if batch_rows > limits.record_batch_rows {
+            return Err(format!(
+                "{label} Arrow record batch for {relation} exceeds the {}-row batch limit",
+                limits.record_batch_rows,
+            ));
+        }
+        counters.rows = counters.rows.checked_add(batch_rows).ok_or_else(|| {
+            format!("{label} Arrow row count overflows while reading relation {relation}")
+        })?;
+
+        let compressed = batch.compression().is_some();
+        for buffer in batch.buffers().into_iter().flatten() {
+            let offset = usize::try_from(buffer.offset()).map_err(|_| {
+                format!("{label} Arrow buffer for {relation} has an invalid offset")
+            })?;
+            let length = usize::try_from(buffer.length()).map_err(|_| {
+                format!("{label} Arrow buffer for {relation} has an invalid length")
+            })?;
+            let end = offset
+                .checked_add(length)
+                .filter(|end| *end <= body.len())
+                .ok_or_else(|| {
+                    format!("{label} Arrow buffer for {relation} exceeds its message body")
+                })?;
+            let decoded_length = if length == 0 || !compressed {
+                length
+            } else {
+                if length < 8 {
+                    return Err(format!(
+                        "{label} compressed Arrow buffer for {relation} has no length prefix"
+                    ));
+                }
+                let declared = i64::from_le_bytes(
+                    body[offset..offset + 8]
+                        .try_into()
+                        .expect("compressed Arrow prefix has exactly eight bytes"),
+                );
+                match declared {
                 -1 => length - 8,
                 0.. => usize::try_from(declared).map_err(|_| {
                     format!(
@@ -1140,8 +1248,9 @@ fn preflight_arrow_record_batch(
                     ));
                 }
             }
-        };
-        *claimed_decoded_bytes = claimed_decoded_bytes
+            };
+            counters.claimed_decoded_bytes = counters
+            .claimed_decoded_bytes
             .checked_add(decoded_length)
             .filter(|bytes| *bytes <= limits.decoded_bytes)
             .ok_or_else(|| {
@@ -1150,9 +1259,10 @@ fn preflight_arrow_record_batch(
                     limits.decoded_bytes / (1024 * 1024),
                 )
             })?;
-        debug_assert!(end <= body.len());
+            debug_assert!(end <= body.len());
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 impl BundleSpec {
@@ -1171,7 +1281,7 @@ impl BundleSpec {
     ) -> Result<Vec<(Table, Vec<RecordBatch>)>, String> {
         let mut decoded = Vec::new();
         for (table, payload) in entries {
-            let batches = budget.decode(table.name(), payload, self.label)?;
+            let batches = budget.decode(ArrowPayload::new(table.name(), payload, self.label))?;
             let schema = batches[0].schema();
             table.validate_managed_relation_schema(schema.as_ref(), self.label)?;
             decoded.push((table, batches));
@@ -1391,9 +1501,11 @@ fn decode_project_entries(
         .remove(WORKFLOW_FEATURE_REGISTRY_RELATION)
         .map(|payload| {
             budget.decode_with_row_limit(
-                WORKFLOW_FEATURE_REGISTRY_RELATION,
-                payload,
-                PROJECT_SPEC.label,
+                ArrowPayload::new(
+                    WORKFLOW_FEATURE_REGISTRY_RELATION,
+                    payload,
+                    PROJECT_SPEC.label,
+                ),
                 MAX_FEATURE_REGISTRY_ROWS,
             )
         })
@@ -1439,9 +1551,7 @@ fn decode_project_entries(
             .remove(&relation)
             .expect("declared project cache presence was checked");
         let batches = budget.decode_with_row_limit(
-            &relation,
-            payload,
-            PROJECT_SPEC.label,
+            ArrowPayload::new(&relation, payload, PROJECT_SPEC.label),
             MAX_FEATURE_CACHE_ROWS,
         )?;
         validate_workflow_cache(&relation, &batches, &registry)?;
@@ -1513,7 +1623,7 @@ fn validate_workflow_agent_json(encoded: &str) -> Result<(), String> {
     if canonical.conversations.iter().any(|conversation| {
         !bundle_provider_history_is_structurally_valid(
             &conversation.provider_messages,
-            conversation.session.phase.active(),
+            conversation.session.lifecycle.phase.active(),
         )
     }) {
         return Err(
@@ -1708,16 +1818,17 @@ fn validate_workflow_registry_with_limits(
             let source_relation = required_workflow_text(batch, "source_relation", row)?;
             let cache_relation = required_workflow_text(batch, "cache_relation", row)?;
             let feature_name = required_workflow_text(batch, "feature_name", row)?;
-            let definition = WorkflowFeatureDefinition {
-                name: feature_name.clone(),
-                description: required_workflow_text(batch, "description", row)?,
-                concept: required_workflow_text(batch, "concept", row)?,
-                applicability: WorkflowFeatureApplicability {
-                    source_relation: source_relation.clone(),
-                    media_field: required_workflow_text(batch, "media_field", row)?,
-                    stream_ids: workflow_registry_stream_ids(batch, row)?,
-                },
-            };
+            let applicability = WorkflowFeatureApplicability::new(
+                source_relation.clone(),
+                required_workflow_text(batch, "media_field", row)?,
+            )
+            .with_stream_ids(workflow_registry_stream_ids(batch, row)?);
+            let definition = WorkflowFeatureDefinition::new(
+                feature_name.clone(),
+                required_workflow_text(batch, "description", row)?,
+                required_workflow_text(batch, "concept", row)?,
+            )
+            .with_applicability(applicability);
             QualifiedRelation::try_from(source_relation.as_str()).map_err(|error| {
                 format!("Workflow feature registry has unsafe source relation: {error}")
             })?;
@@ -1829,19 +1940,16 @@ fn validate_workflow_registry_schema(schema: &Schema) -> Result<(), String> {
 }
 
 fn validate_workflow_definition(definition: &WorkflowFeatureDefinition) -> Result<(), String> {
-    let streams = definition
-        .applicability
-        .stream_ids
-        .iter()
-        .collect::<BTreeSet<_>>();
+    let applicability = definition.applicability();
+    let streams = applicability.stream_ids().iter().collect::<BTreeSet<_>>();
     if !definition.has_valid_name()
-        || definition.description.trim().is_empty()
-        || definition.description.chars().count() > MAX_WORKFLOW_FEATURE_DESCRIPTION_LENGTH
-        || definition.concept.trim().is_empty()
-        || definition.concept.chars().count() > MAX_SIGLIP_CONCEPT_LENGTH
-        || UnquotedSqlIdentifier::try_from(definition.applicability.media_field.as_str()).is_err()
-        || definition.applicability.stream_ids.len() > MAX_WORKFLOW_FEATURE_STREAMS
-        || streams.len() != definition.applicability.stream_ids.len()
+        || definition.description().trim().is_empty()
+        || definition.description().chars().count() > MAX_WORKFLOW_FEATURE_DESCRIPTION_LENGTH
+        || definition.concept().trim().is_empty()
+        || definition.concept().chars().count() > MAX_SIGLIP_CONCEPT_LENGTH
+        || UnquotedSqlIdentifier::try_from(applicability.media_field()).is_err()
+        || applicability.stream_ids().len() > MAX_WORKFLOW_FEATURE_STREAMS
+        || streams.len() != applicability.stream_ids().len()
         || streams
             .iter()
             .any(|stream| stream.trim().is_empty() || stream.len() > 128)
@@ -1906,127 +2014,155 @@ struct WorkflowCacheKey {
     episode_time_ns: u64,
 }
 
+#[derive(Clone, Copy)]
+struct WorkflowCacheLimits {
+    rows: usize,
+    features: usize,
+}
+
+impl WorkflowCacheLimits {
+    const fn new(rows: usize, features: usize) -> Self {
+        Self { rows, features }
+    }
+}
+
+struct WorkflowCacheValidator<'a> {
+    relation: &'a str,
+    registered: BTreeMap<String, WorkflowFeatureDefinition>,
+    limits: WorkflowCacheLimits,
+}
+
+impl<'a> WorkflowCacheValidator<'a> {
+    fn new(
+        relation: &'a str,
+        registry: &WorkflowBundleRegistry,
+        limits: WorkflowCacheLimits,
+    ) -> Self {
+        Self {
+            relation,
+            registered: registry.features_for_cache(relation),
+            limits,
+        }
+    }
+}
+
 fn validate_workflow_cache(
     relation: &str,
     batches: &[RecordBatch],
     registry: &WorkflowBundleRegistry,
 ) -> Result<(), String> {
-    validate_workflow_cache_with_limits(
+    WorkflowCacheValidator::new(
         relation,
-        batches,
         registry,
-        MAX_FEATURE_CACHE_ROWS,
-        MAX_FEATURE_CACHE_COLUMNS,
+        WorkflowCacheLimits::new(MAX_FEATURE_CACHE_ROWS, MAX_FEATURE_CACHE_COLUMNS),
     )
+    .validate(batches)
 }
 
-fn validate_workflow_cache_with_limits(
-    relation: &str,
-    batches: &[RecordBatch],
-    registry: &WorkflowBundleRegistry,
-    max_rows: usize,
-    max_features: usize,
-) -> Result<(), String> {
-    let registered = registry.features_for_cache(relation);
-    let schema = batches
-        .first()
-        .map(RecordBatch::schema)
-        .ok_or_else(|| format!("Workflow feature cache {relation:?} has no Arrow schema"))?;
-    validate_workflow_cache_schema(relation, schema.as_ref(), &registered, max_features)?;
-    let mut keys = BTreeSet::new();
-    for batch in batches {
-        if batch.schema() != schema {
-            return Err(format!(
-                "Workflow feature cache {relation:?} changes schema between batches"
-            ));
-        }
-        for row in 0..batch.num_rows() {
-            if keys.len() >= max_rows {
+impl WorkflowCacheValidator<'_> {
+    fn validate(&self, batches: &[RecordBatch]) -> Result<(), String> {
+        let relation = self.relation;
+        let registered = &self.registered;
+        let schema = batches
+            .first()
+            .map(RecordBatch::schema)
+            .ok_or_else(|| format!("Workflow feature cache {relation:?} has no Arrow schema"))?;
+        self.validate_schema(schema.as_ref())?;
+        let mut keys = BTreeSet::new();
+        for batch in batches {
+            if batch.schema() != schema {
                 return Err(format!(
-                    "Workflow feature cache exceeds the bounded limit of {max_rows} rows"
+                    "Workflow feature cache {relation:?} changes schema between batches"
                 ));
             }
-            let key = workflow_cache_key(batch, row)?;
-            if !keys.insert(key) {
-                return Err(
-                    "Workflow feature cache contains duplicate stable frame identities".to_owned(),
-                );
-            }
-            for feature in registered.keys() {
-                let values = batch
-                    .column_by_name(feature)
-                    .and_then(|column| column.as_any().downcast_ref::<Float32Array>())
-                    .ok_or_else(|| {
-                        format!("Workflow feature cache field {feature:?} is not Float32")
-                    })?;
-                if !values.is_null(row) {
-                    let value = values.value(row);
-                    if !value.is_finite() || !(0.0..=1.0).contains(&value) {
-                        return Err(format!(
-                            "Workflow feature cache field {feature:?} violates sigmoid probability semantics"
-                        ));
+            for row in 0..batch.num_rows() {
+                if keys.len() >= self.limits.rows {
+                    return Err(format!(
+                        "Workflow feature cache exceeds the bounded limit of {} rows",
+                        self.limits.rows,
+                    ));
+                }
+                let key = workflow_cache_key(batch, row)?;
+                if !keys.insert(key) {
+                    return Err(
+                        "Workflow feature cache contains duplicate stable frame identities"
+                            .to_owned(),
+                    );
+                }
+                for feature in registered.keys() {
+                    let values = batch
+                        .column_by_name(feature)
+                        .and_then(|column| column.as_any().downcast_ref::<Float32Array>())
+                        .ok_or_else(|| {
+                            format!("Workflow feature cache field {feature:?} is not Float32")
+                        })?;
+                    if !values.is_null(row) {
+                        let value = values.value(row);
+                        if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+                            return Err(format!(
+                                "Workflow feature cache field {feature:?} violates sigmoid probability semantics"
+                            ));
+                        }
                     }
                 }
             }
         }
+        Ok(())
     }
-    Ok(())
-}
 
-fn validate_workflow_cache_schema(
-    relation: &str,
-    schema: &Schema,
-    registered: &BTreeMap<String, WorkflowFeatureDefinition>,
-    max_features: usize,
-) -> Result<(), String> {
-    if schema.fields().len() < CACHE_KEY_FIELDS.len() {
-        return Err(format!(
-            "Workflow feature cache {relation:?} is missing stable identity fields"
-        ));
-    }
-    for (index, (name, expected)) in CACHE_KEY_FIELDS.iter().enumerate() {
-        let field = schema.field(index);
-        if field.name() != name
-            || (field.is_nullable() && !workflow_cache_key_declaration_may_be_nullable(name))
-            || !workflow_storage_type_matches(field.data_type(), expected)
-        {
+    fn validate_schema(&self, schema: &Schema) -> Result<(), String> {
+        let relation = self.relation;
+        let registered = &self.registered;
+        if schema.fields().len() < CACHE_KEY_FIELDS.len() {
             return Err(format!(
-                "Workflow feature cache key field {index} must use compatible {name} {expected:?} storage"
+                "Workflow feature cache {relation:?} is missing stable identity fields"
             ));
         }
-    }
-    let feature_fields = schema
-        .fields()
-        .iter()
-        .skip(CACHE_KEY_FIELDS.len())
-        .collect::<Vec<_>>();
-    if feature_fields.len() > max_features {
-        return Err(format!(
-            "Workflow feature cache exceeds {max_features} feature columns"
-        ));
-    }
-    let actual = feature_fields
-        .iter()
-        .map(|field| field.name().clone())
-        .collect::<BTreeSet<_>>();
-    let expected = registered.keys().cloned().collect::<BTreeSet<_>>();
-    if actual.len() != feature_fields.len() || actual != expected {
-        return Err(format!(
-            "Workflow feature cache {relation:?} feature columns do not exactly match its registry definitions"
-        ));
-    }
-    for field in feature_fields {
-        if field.data_type() != &DataType::Float32 || !field.is_nullable() {
+        for (index, (name, expected)) in CACHE_KEY_FIELDS.iter().enumerate() {
+            let field = schema.field(index);
+            if field.name() != name
+                || (field.is_nullable() && !workflow_cache_key_declaration_may_be_nullable(name))
+                || !workflow_storage_type_matches(field.data_type(), expected)
+            {
+                return Err(format!(
+                    "Workflow feature cache key field {index} must use compatible {name} {expected:?} storage"
+                ));
+            }
+        }
+        let feature_fields = schema
+            .fields()
+            .iter()
+            .skip(CACHE_KEY_FIELDS.len())
+            .collect::<Vec<_>>();
+        if feature_fields.len() > self.limits.features {
             return Err(format!(
-                "Workflow feature cache field {:?} must be nullable Float32",
-                field.name()
+                "Workflow feature cache exceeds {} feature columns",
+                self.limits.features,
             ));
         }
-        // Spiral/Vortex intentionally drops arbitrary Arrow field metadata.
-        // The registry and cache are restored atomically, so the validated
-        // registry row is the durable producer/definition authority.
+        let actual = feature_fields
+            .iter()
+            .map(|field| field.name().clone())
+            .collect::<BTreeSet<_>>();
+        let expected = registered.keys().cloned().collect::<BTreeSet<_>>();
+        if actual.len() != feature_fields.len() || actual != expected {
+            return Err(format!(
+                "Workflow feature cache {relation:?} feature columns do not exactly match its registry definitions"
+            ));
+        }
+        for field in feature_fields {
+            if field.data_type() != &DataType::Float32 || !field.is_nullable() {
+                return Err(format!(
+                    "Workflow feature cache field {:?} must be nullable Float32",
+                    field.name()
+                ));
+            }
+            // Spiral/Vortex intentionally drops arbitrary Arrow field metadata.
+            // The registry and cache are restored atomically, so the validated
+            // registry row is the durable producer/definition authority.
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 fn workflow_cache_key(batch: &RecordBatch, row: usize) -> Result<WorkflowCacheKey, String> {
@@ -2478,7 +2614,7 @@ fn reject_existing_episodes(
         );
         let existing = run_query(connection, &query, chunk.len())?;
         if let Some(value) = existing
-            .rows
+            .rows()
             .first()
             .and_then(|row| row.get(column::EPISODE_ID))
             .and_then(serde_json::Value::as_str)
@@ -2846,9 +2982,7 @@ mod tests {
 
         let error = ArrowDecodeBudget::default()
             .decode_with_limits(
-                "compressed_bomb",
-                payload,
-                "project",
+                ArrowPayload::new("compressed_bomb", payload, "project"),
                 ArrowDecodeLimits {
                     decoded_bytes: 64 * 1_024,
                     ..ARROW_DECODE_LIMITS
@@ -2875,11 +3009,17 @@ mod tests {
         };
         let mut budget = ArrowDecodeBudget::default();
         budget
-            .decode_with_limits("first_relation", payload.clone(), "project", limits)
+            .decode_with_limits(
+                ArrowPayload::new("first_relation", payload.clone(), "project"),
+                limits,
+            )
             .unwrap();
 
         let error = budget
-            .decode_with_limits("second_relation", payload, "project", limits)
+            .decode_with_limits(
+                ArrowPayload::new("second_relation", payload, "project"),
+                limits,
+            )
             .unwrap_err();
 
         assert!(error.contains("decoded-buffer limit"), "{error}");
@@ -2903,9 +3043,7 @@ mod tests {
 
         ArrowDecodeBudget::default()
             .decode_with_limits(
-                "video_assets",
-                payload.clone(),
-                "project",
+                ArrowPayload::new("video_assets", payload.clone(), "project"),
                 ArrowDecodeLimits {
                     decoded_bytes: payload.len(),
                     ..ARROW_DECODE_LIMITS
@@ -2922,9 +3060,7 @@ mod tests {
         );
         let error = ArrowDecodeBudget::default()
             .decode_with_limits(
-                "too_many_rows",
-                arrow_payload(&batch),
-                "project",
+                ArrowPayload::new("too_many_rows", arrow_payload(&batch), "project"),
                 ArrowDecodeLimits {
                     record_batch_rows: 1_000,
                     ..ARROW_DECODE_LIMITS
@@ -2943,9 +3079,11 @@ mod tests {
         );
         let error = ArrowDecodeBudget::default()
             .decode_with_limits(
-                "too_many_relation_rows",
-                arrow_payload_batches(&[batch.clone(), batch]),
-                "project",
+                ArrowPayload::new(
+                    "too_many_relation_rows",
+                    arrow_payload_batches(&[batch.clone(), batch]),
+                    "project",
+                ),
                 ArrowDecodeLimits {
                     relation_rows: 1_000,
                     record_batch_rows: 1_000,
@@ -3041,9 +3179,7 @@ mod tests {
         );
         let error = ArrowDecodeBudget::default()
             .decode_with_limits(
-                "too_many_columns",
-                arrow_payload(&batch),
-                "project",
+                ArrowPayload::new("too_many_columns", arrow_payload(&batch), "project"),
                 ArrowDecodeLimits {
                     schema_fields: 1,
                     ..ARROW_DECODE_LIMITS
@@ -3253,16 +3389,14 @@ mod tests {
     }
 
     fn workflow_definition(source: &str, name: &str) -> WorkflowFeatureDefinition {
-        WorkflowFeatureDefinition {
-            name: name.to_owned(),
-            description: format!("Detect {name}"),
-            concept: name.trim_end_matches("_feature").replace('_', " "),
-            applicability: WorkflowFeatureApplicability {
-                source_relation: source.to_owned(),
-                media_field: "image".to_owned(),
-                stream_ids: vec!["camera_front".to_owned()],
-            },
-        }
+        let applicability = WorkflowFeatureApplicability::new(source, "image")
+            .with_stream_ids(vec!["camera_front".to_owned()]);
+        WorkflowFeatureDefinition::new(
+            name,
+            format!("Detect {name}"),
+            name.trim_end_matches("_feature").replace('_', " "),
+        )
+        .with_applicability(applicability)
     }
 
     fn canonical_registry_batch(definitions: &[WorkflowFeatureDefinition]) -> RecordBatch {
@@ -3275,7 +3409,7 @@ mod tests {
             false,
         )));
         for definition in definitions {
-            for stream in &definition.applicability.stream_ids {
+            for stream in definition.applicability().stream_ids() {
                 streams.values().append_value(stream);
             }
             streams.append(true);
@@ -3303,14 +3437,14 @@ mod tests {
         RecordBatch::try_new(
             Arc::new(Schema::new(fields)),
             vec![
-                text(|definition| definition.applicability.source_relation.clone()),
+                text(|definition| definition.applicability().source_relation().to_owned()),
                 text(|definition| {
-                    derived_feature_cache_relation(&definition.applicability.source_relation)
+                    derived_feature_cache_relation(definition.applicability().source_relation())
                 }),
-                text(|definition| definition.name.clone()),
-                text(|definition| definition.description.clone()),
-                text(|definition| definition.concept.clone()),
-                text(|definition| definition.applicability.media_field.clone()),
+                text(|definition| definition.name().to_owned()),
+                text(|definition| definition.description().to_owned()),
+                text(|definition| definition.concept().to_owned()),
+                text(|definition| definition.applicability().media_field().to_owned()),
                 Arc::new(streams.finish()) as ArrayRef,
                 Arc::new(StringArray::from_iter_values(
                     definitions.iter().map(|_| SIGLIP_BASE_MODEL_ID),
@@ -3343,7 +3477,7 @@ mod tests {
         fields.extend(
             definitions
                 .iter()
-                .map(|definition| Field::new(&definition.name, DataType::Float32, true)),
+                .map(|definition| Field::new(definition.name(), DataType::Float32, true)),
         );
         let rows = frame_indices.len();
         let mut columns = vec![
@@ -3746,24 +3880,22 @@ mod tests {
 
         let rows = canonical_cache_batch(&[first.clone(), second.clone()], &[1, 2]);
         assert!(
-            validate_workflow_cache_with_limits(
+            WorkflowCacheValidator::new(
                 &relation,
-                std::slice::from_ref(&rows),
                 &registry,
-                1,
-                MAX_FEATURE_CACHE_COLUMNS,
+                WorkflowCacheLimits::new(1, MAX_FEATURE_CACHE_COLUMNS),
             )
+            .validate(std::slice::from_ref(&rows))
             .unwrap_err()
             .contains("bounded limit of 1 rows")
         );
         assert!(
-            validate_workflow_cache_with_limits(
+            WorkflowCacheValidator::new(
                 &relation,
-                &[rows],
                 &registry,
-                MAX_FEATURE_CACHE_ROWS,
-                1,
+                WorkflowCacheLimits::new(MAX_FEATURE_CACHE_ROWS, 1),
             )
+            .validate(&[rows])
             .unwrap_err()
             .contains("exceeds 1 feature columns")
         );
@@ -4023,8 +4155,8 @@ mod tests {
         let summary = storage
             .import_project_bundle(&exported)
             .expect("importing the Spiral project must succeed");
-        assert_eq!(summary.relations, 2);
-        assert_eq!(summary.rows, 2);
+        assert_eq!(summary.relations(), 2);
+        assert_eq!(summary.rows(), 2);
 
         let restored = storage
             .export_project_bundle()
@@ -4061,13 +4193,9 @@ mod tests {
         project_store
             .run_exclusive_blocking(|connection| {
                 ensure_dataset_namespace(connection, project_store.namespace())?;
-                seed_episode(
-                    connection,
-                    project_store.namespace(),
-                    "source",
-                    "episode_exported",
-                    10,
-                )
+                EpisodeSeed::new(project_store.namespace(), "source", "episode_exported")
+                    .with_started_ms(10)
+                    .save(connection)
             })
             .expect("seeding the source episode must succeed");
 
@@ -4085,22 +4213,18 @@ mod tests {
         project_store
             .run_exclusive_blocking(|connection| {
                 drop_studio_relations(connection, project_store.namespace())?;
-                seed_episode(
-                    connection,
-                    project_store.namespace(),
-                    "target",
-                    "episode_existing",
-                    20,
-                )
+                EpisodeSeed::new(project_store.namespace(), "target", "episode_existing")
+                    .with_started_ms(20)
+                    .save(connection)
             })
             .expect("seeding the target dataset must succeed");
 
         let summary = storage
             .import_episode_bundle("target", &exported)
             .expect("importing episodes into the target dataset must succeed");
-        assert_eq!(summary.dataset_id, "target");
-        assert_eq!(summary.episodes, 1);
-        assert_eq!(summary.first_episode.as_deref(), Some("episode_exported"));
+        assert_eq!(summary.dataset_id(), "target");
+        assert_eq!(summary.episodes(), 1);
+        assert_eq!(summary.first_episode(), Some("episode_exported"));
 
         project_store
             .run_blocking(|connection| {
@@ -4114,8 +4238,8 @@ mod tests {
                     ),
                     10,
                 )?;
-                assert_eq!(result.rows.len(), 2);
-                assert!(result.rows.iter().all(|row| {
+                assert_eq!(result.rows().len(), 2);
+                assert!(result.rows().iter().all(|row| {
                     row.get(column::DATASET_ID)
                         .and_then(serde_json::Value::as_str)
                         == Some("target")
@@ -4147,27 +4271,18 @@ mod tests {
         let _cleanup = TestNamespace::new(project_store.clone());
         let storage = StorageManager::new(project_store.clone());
         let episode_id = "episode_video_import";
-        let start = EpisodeStart {
-            id: episode_id.to_owned(),
-            dataset_id: "video-transfer".to_owned(),
-            started_ms: 10,
-            sample_hz: 2.0,
-            source: "transfer-e2e".to_owned(),
-            note: None,
-            arms: vec![spiral_robotics_api::recording::EpisodeArm {
-                id: "follower".to_owned(),
-                robot_type: Some("test".to_owned()),
-                joints: vec!["joint".to_owned()],
-            }],
-            condition: Vec::new(),
-        };
-        let completion = EpisodeCompletion {
-            duration_seconds: 1.0,
-            recording_gaps: Vec::new(),
-            max_follow_error_degrees: None,
-            discarded: false,
-            condition: Vec::new(),
-        };
+        let start = EpisodeStart::new(episode_id.to_owned(), "video-transfer".to_owned())
+            .with_timing(10, 2.0)
+            .with_source("transfer-e2e".to_owned(), None)
+            .with_arms(
+                vec![spiral_robotics_api::recording::EpisodeArm::new(
+                    "follower",
+                    Some("test".to_owned()),
+                    vec!["joint".to_owned()],
+                )],
+                Vec::new(),
+            );
+        let completion = EpisodeCompletion::new(1.0, Vec::new(), Vec::new());
         let mut mp4 = test_mp4();
         // A valid top-level `free` box makes the fixture large enough to cross
         // Spiral's managed-Blob outlining threshold without making FFmpeg
@@ -4213,17 +4328,17 @@ mod tests {
             .import_project_bundle(&exported)
             .expect("importing a video project must rebuild its managed dataset");
         assert!(
-            first_import.warnings.is_empty(),
+            first_import.warnings().is_empty(),
             "first import warnings: {:?}",
-            first_import.warnings
+            first_import.warnings()
         );
         let second_import = storage
             .import_project_bundle(&exported)
             .expect("re-importing a video project must replace its managed dataset outputs");
         assert!(
-            second_import.warnings.is_empty(),
+            second_import.warnings().is_empty(),
             "second import warnings: {:?}",
-            second_import.warnings
+            second_import.warnings()
         );
 
         project_store
@@ -4253,7 +4368,7 @@ mod tests {
                     1,
                 )?;
                 assert!(
-                    descriptor.rows[0]
+                    descriptor.rows()[0]
                         .get("uri")
                         .and_then(serde_json::Value::as_str)
                         .is_some_and(|uri| !uri.is_empty()),
@@ -4276,7 +4391,9 @@ mod tests {
                 let output = sql::video_dataset_output(project_store.namespace());
                 let rows = run_query(connection, &sql::count_rows(&output), 1)?;
                 assert_eq!(
-                    rows.rows[0].get("rows").and_then(serde_json::Value::as_u64),
+                    rows.rows()[0]
+                        .get("rows")
+                        .and_then(serde_json::Value::as_u64),
                     Some(1)
                 );
                 let frames = run_query(
@@ -4289,7 +4406,7 @@ mod tests {
                     1,
                 )?;
                 assert_eq!(
-                    frames.rows[0]
+                    frames.rows()[0]
                         .get("count")
                         .and_then(serde_json::Value::as_u64),
                     Some(1)
@@ -4320,7 +4437,7 @@ mod tests {
         );
         let file_start = Instant::now();
         let bytes = fs::read(&bundle_path).expect("the profiling archive must be readable");
-        profile_event("studio.file_read", file_start, 0, bytes.len());
+        profile_event("studio.file_read", file_start, (0, bytes.len()));
 
         let project = required_project();
         let namespace = format!(
@@ -4333,7 +4450,7 @@ mod tests {
         );
         let repository_start = Instant::now();
         let project_store = configured_project_store(project, namespace);
-        profile_event("studio.repository_config", repository_start, 0, 0);
+        profile_event("studio.repository_config", repository_start, (0, 0));
         let cleanup = TestNamespace::new(project_store.clone());
 
         let namespace_start = Instant::now();
@@ -4342,7 +4459,7 @@ mod tests {
                 ensure_dataset_namespace(connection, project_store.namespace())
             })
             .expect("the profiling namespace must be created");
-        profile_event("spiral.setup_namespace", namespace_start, 0, 0);
+        profile_event("spiral.setup_namespace", namespace_start, (0, 0));
 
         let exclusive_start = Instant::now();
         let summary = project_store
@@ -4353,8 +4470,7 @@ mod tests {
         profile_event(
             "studio.exclusive_import_total",
             exclusive_start,
-            summary.rows as usize,
-            bytes.len(),
+            (summary.rows() as usize, bytes.len()),
         );
 
         let storage = StorageManager::new(project_store.clone());
@@ -4362,41 +4478,39 @@ mod tests {
         storage
             .load_studio_preferences()
             .expect("profiled preferences reload must succeed");
-        profile_event("studio.reload_preferences", preferences_start, 0, 0);
+        profile_event("studio.reload_preferences", preferences_start, (0, 0));
         let training_start = Instant::now();
         storage
             .load_training_snapshot::<spiral_robotics_api::training::TrainingSnapshot>()
             .expect("profiled training reload must succeed");
-        profile_event("studio.reload_training", training_start, 0, 0);
+        profile_event("studio.reload_training", training_start, (0, 0));
         let rollout_start = Instant::now();
         storage
             .load_rollout_snapshot::<spiral_robotics_api::rollout::RolloutSnapshot>()
             .expect("profiled rollout reload must succeed");
-        profile_event("studio.reload_rollout", rollout_start, 0, 0);
+        profile_event("studio.reload_rollout", rollout_start, (0, 0));
         let catalog_start = Instant::now();
         let episodes = EpisodeStore::new(project_store.clone()).list();
         profile_event(
             "studio.refresh_episode_catalog",
             catalog_start,
-            episodes.len(),
-            0,
+            (episodes.len(), 0),
         );
 
         profile_event(
             "studio.route_equivalent_total",
             process_start,
-            summary.rows as usize,
-            bytes.len(),
+            (summary.rows() as usize, bytes.len()),
         );
         eprintln!(
             "PROFILE\tmeta\trelations={}\trows={}\twarnings={}",
-            summary.relations,
-            summary.rows,
-            summary.warnings.len()
+            summary.relations(),
+            summary.rows(),
+            summary.warnings().len()
         );
         let cleanup_start = Instant::now();
         drop(cleanup);
-        profile_event("spiral.cleanup", cleanup_start, 0, 0);
+        profile_event("spiral.cleanup", cleanup_start, (0, 0));
     }
 
     /// Measure hosted Arbor's fixed create, append, and replacement costs
@@ -4466,51 +4580,23 @@ mod tests {
                     let autocommit_target =
                         format!("{}.{label}_autocommit", project_store.namespace());
 
-                    profile_autocommit_ingest_operation(
-                        connection,
-                        label,
-                        "ingest_missing_autocommit",
-                        &autocommit_target,
-                        &batches,
-                        rows,
-                        encoded_bytes,
-                    )?;
-                    profile_autocommit_ingest_operation(
-                        connection,
-                        label,
-                        "append_existing_autocommit",
-                        &autocommit_target,
-                        &batches,
-                        rows,
-                        encoded_bytes,
-                    )?;
-                    profile_write_operation(
-                        connection,
-                        label,
-                        "ingest_missing",
-                        &ingest_target,
-                        &batches,
-                        (rows, encoded_bytes),
-                        false,
-                    )?;
-                    profile_write_operation(
-                        connection,
-                        label,
-                        "replace_missing",
-                        &target,
-                        &batches,
-                        (rows, encoded_bytes),
-                        true,
-                    )?;
-                    profile_write_operation(
-                        connection,
-                        label,
-                        "existing_cold",
-                        &target,
-                        &batches,
-                        (rows, encoded_bytes),
-                        true,
-                    )?;
+                    ProfileWrite::new(label, "ingest_missing_autocommit", &autocommit_target)
+                        .with_batches(&batches, (rows, encoded_bytes))
+                        .write_autocommit(connection)?;
+                    ProfileWrite::new(label, "append_existing_autocommit", &autocommit_target)
+                        .with_batches(&batches, (rows, encoded_bytes))
+                        .write_autocommit(connection)?;
+                    ProfileWrite::new(label, "ingest_missing", &ingest_target)
+                        .with_batches(&batches, (rows, encoded_bytes))
+                        .write_transaction(connection)?;
+                    ProfileWrite::new(label, "replace_missing", &target)
+                        .with_batches(&batches, (rows, encoded_bytes))
+                        .with_replace()
+                        .write_transaction(connection)?;
+                    ProfileWrite::new(label, "existing_cold", &target)
+                        .with_batches(&batches, (rows, encoded_bytes))
+                        .with_replace()
+                        .write_transaction(connection)?;
 
                     for bind_index in 1..=10 {
                         let bind_start = Instant::now();
@@ -4529,15 +4615,10 @@ mod tests {
                             bind_start.elapsed().as_secs_f64()
                         );
                     }
-                    profile_write_operation(
-                        connection,
-                        label,
-                        "existing_after_bind",
-                        &target,
-                        &batches,
-                        (rows, encoded_bytes),
-                        true,
-                    )?;
+                    ProfileWrite::new(label, "existing_after_bind", &target)
+                        .with_batches(&batches, (rows, encoded_bytes))
+                        .with_replace()
+                        .write_transaction(connection)?;
                 }
                 Ok(())
             })
@@ -4545,58 +4626,79 @@ mod tests {
 
         let cleanup_start = Instant::now();
         drop(cleanup);
-        profile_event("spiral.cleanup", cleanup_start, 0, 0);
+        profile_event("spiral.cleanup", cleanup_start, (0, 0));
     }
 
-    fn profile_autocommit_ingest_operation(
-        connection: &mut StorageConnection,
-        label: &str,
-        phase: &str,
-        target: &str,
-        batches: &[RecordBatch],
-        rows: usize,
-        bytes: usize,
-    ) -> Result<(), String> {
-        let write_start = Instant::now();
-        ingest_batches(connection, target, batches.to_vec())?;
-        let write_seconds = write_start.elapsed().as_secs_f64();
-        eprintln!(
-            "PROFILE_SCOPED\tcase={label}\tphase={phase}\tseconds={write_seconds:.6}\trows={rows}\tbytes={bytes}"
-        );
-        Ok(())
-    }
-
-    fn profile_write_operation(
-        connection: &mut StorageConnection,
-        label: &str,
-        phase: &str,
-        target: &str,
-        batches: &[RecordBatch],
+    struct ProfileWrite<'a> {
+        label: &'a str,
+        phase: &'a str,
+        target: &'a str,
+        batches: &'a [RecordBatch],
         metrics: (usize, usize),
         replace: bool,
-    ) -> Result<(), String> {
-        let (rows, bytes) = metrics;
-        let begin_start = Instant::now();
-        connection.set_autocommit(false)?;
-        let begin_seconds = begin_start.elapsed().as_secs_f64();
+    }
 
-        let write_start = Instant::now();
-        if replace {
-            replace_batches(connection, target, batches.to_vec())?;
-        } else {
-            ingest_batches(connection, target, batches.to_vec())?;
+    impl<'a> ProfileWrite<'a> {
+        fn new(label: &'a str, phase: &'a str, target: &'a str) -> Self {
+            Self {
+                label,
+                phase,
+                target,
+                batches: &[],
+                metrics: (0, 0),
+                replace: false,
+            }
         }
-        let write_seconds = write_start.elapsed().as_secs_f64();
 
-        let commit_start = Instant::now();
-        commit_catalog_transaction(connection)?;
-        let commit_seconds = commit_start.elapsed().as_secs_f64();
-        connection.set_autocommit(true)?;
+        fn with_batches(mut self, batches: &'a [RecordBatch], metrics: (usize, usize)) -> Self {
+            self.batches = batches;
+            self.metrics = metrics;
+            self
+        }
 
-        eprintln!(
-            "PROFILE_SCOPED\tcase={label}\tphase={phase}\tseconds={write_seconds:.6}\tbegin_seconds={begin_seconds:.6}\tcommit_seconds={commit_seconds:.6}\trows={rows}\tbytes={bytes}"
-        );
-        Ok(())
+        fn with_replace(mut self) -> Self {
+            self.replace = true;
+            self
+        }
+
+        fn write_autocommit(self, connection: &mut StorageConnection) -> Result<(), String> {
+            let write_start = Instant::now();
+            ingest_batches(connection, self.target, self.batches.to_vec())?;
+            let write_seconds = write_start.elapsed().as_secs_f64();
+            let (rows, bytes) = self.metrics;
+            let label = self.label;
+            let phase = self.phase;
+            eprintln!(
+                "PROFILE_SCOPED\tcase={label}\tphase={phase}\tseconds={write_seconds:.6}\trows={rows}\tbytes={bytes}"
+            );
+            Ok(())
+        }
+
+        fn write_transaction(self, connection: &mut StorageConnection) -> Result<(), String> {
+            let begin_start = Instant::now();
+            connection.set_autocommit(false)?;
+            let begin_seconds = begin_start.elapsed().as_secs_f64();
+
+            let write_start = Instant::now();
+            if self.replace {
+                replace_batches(connection, self.target, self.batches.to_vec())?;
+            } else {
+                ingest_batches(connection, self.target, self.batches.to_vec())?;
+            }
+            let write_seconds = write_start.elapsed().as_secs_f64();
+
+            let commit_start = Instant::now();
+            commit_catalog_transaction(connection)?;
+            let commit_seconds = commit_start.elapsed().as_secs_f64();
+            connection.set_autocommit(true)?;
+            let (rows, bytes) = self.metrics;
+            let label = self.label;
+            let phase = self.phase;
+            eprintln!(
+                "PROFILE_SCOPED\tcase={label}\tphase={phase}\tseconds={write_seconds:.6}\tbegin_seconds={begin_seconds:.6}\tcommit_seconds={commit_seconds:.6}\trows={rows}\tbytes={bytes}"
+            );
+            Ok(())
+        }
     }
 
     fn profile_prefix_batches(batches: &[RecordBatch], limit: usize) -> Vec<RecordBatch> {
@@ -4643,7 +4745,7 @@ mod tests {
     ) -> Result<ProjectImportSummary, String> {
         let parse_start = Instant::now();
         let entries = PROJECT_SPEC.parse(bundle)?;
-        profile_event("studio.bundle_parse", parse_start, 0, bundle.len());
+        profile_event("studio.bundle_parse", parse_start, (0, bundle.len()));
 
         let mut decoded = Vec::new();
         for (table, payload) in entries {
@@ -4658,8 +4760,7 @@ mod tests {
             profile_event(
                 &format!("studio.arrow_decode.{}", table.name()),
                 decode_start,
-                rows,
-                payload_bytes,
+                (rows, payload_bytes),
             );
             decoded.append(&mut relation);
         }
@@ -4673,14 +4774,13 @@ mod tests {
         profile_event(
             "studio.collect_video_episode_ids",
             video_ids_start,
-            imported_video_episodes.len(),
-            0,
+            (imported_video_episodes.len(), 0),
         );
         let transaction_start = Instant::now();
         connection
             .set_autocommit(false)
             .map_err(|error| format!("starting profiled project import transaction: {error}"))?;
-        profile_event("spiral.transaction_begin", transaction_start, 0, 0);
+        profile_event("spiral.transaction_begin", transaction_start, (0, 0));
 
         let outcome = (|| {
             for table in Table::ALL.into_iter().rev() {
@@ -4693,8 +4793,7 @@ mod tests {
                 profile_event(
                     &format!("spiral.table_exists.{}", table.name()),
                     exists_start,
-                    0,
-                    0,
+                    (0, 0),
                 );
                 if exists {
                     let drop_start = Instant::now();
@@ -4702,8 +4801,7 @@ mod tests {
                     profile_event(
                         &format!("spiral.drop_relation.{}", table.name()),
                         drop_start,
-                        0,
-                        0,
+                        (0, 0),
                     );
                 }
             }
@@ -4712,7 +4810,6 @@ mod tests {
             let mut summary = ProjectImportSummary::default();
             for (table, batches) in decoded {
                 let relation = table.qualified_name(namespace);
-                summary.relations += 1;
                 let relation_ingest_start = Instant::now();
                 let mut relation_rows = 0usize;
                 let mut relation_bytes = 0usize;
@@ -4727,8 +4824,7 @@ mod tests {
                     profile_event(
                         &format!("studio.transform.{}", table.name()),
                         transform_start,
-                        batch.num_rows(),
-                        batch.get_array_memory_size(),
+                        (batch.num_rows(), batch.get_array_memory_size()),
                     );
                     if batch.num_rows() == 0 {
                         stream_batches.push(batch);
@@ -4746,22 +4842,20 @@ mod tests {
                         stream_batches.push(chunk);
                         relation_rows = relation_rows.saturating_add(len);
                         relation_bytes = relation_bytes.saturating_add(chunk_bytes);
-                        summary.rows = summary.rows.saturating_add(len as u64);
                     }
                 }
+                summary.record_relation(relation_rows as u64);
                 let stream_ingest_start = Instant::now();
                 replace_batches(connection, &relation, stream_batches)?;
                 profile_event(
                     &format!("spiral.replace.{}.stream", table.name()),
                     stream_ingest_start,
-                    relation_rows,
-                    relation_bytes,
+                    (relation_rows, relation_bytes),
                 );
                 profile_event(
                     &format!("spiral.replace_total.{}", table.name()),
                     relation_ingest_start,
-                    relation_rows,
-                    0,
+                    (relation_rows, 0),
                 );
             }
             Ok(summary)
@@ -4775,15 +4869,14 @@ mod tests {
                 profile_event(
                     "spiral.transaction_commit",
                     commit_start,
-                    summary.rows as usize,
-                    0,
+                    (summary.rows() as usize, 0),
                 );
                 summary
             }
             Err(error) => {
                 let rollback_start = Instant::now();
                 let rollback = connection.rollback();
-                profile_event("spiral.transaction_rollback", rollback_start, 0, 0);
+                profile_event("spiral.transaction_rollback", rollback_start, (0, 0));
                 return Err(match rollback {
                     Ok(()) => error,
                     Err(rollback) => format!("{error}; rolling back also failed: {rollback}"),
@@ -4793,15 +4886,14 @@ mod tests {
         let autocommit_start = Instant::now();
         if let Err(error) = connection.set_autocommit(true) {
             connection.discard();
-            summary.warnings.push(format!(
+            summary.push_warning(format!(
                 "profiled project import committed, but its Spiral connection was discarded: {error}"
             ));
         }
         profile_event(
             "spiral.transaction_restore_autocommit",
             autocommit_start,
-            0,
-            0,
+            (0, 0),
         );
 
         if !profile_bool("SPIRAL_PROFILE_SKIP_VIDEO_RECONCILE") {
@@ -4814,8 +4906,7 @@ mod tests {
             profile_event(
                 "spiral.reconcile_video_total",
                 reconcile_total_start,
-                imported_video_episodes.len(),
-                0,
+                (imported_video_episodes.len(), 0),
             );
         }
         Ok(summary)
@@ -4827,7 +4918,7 @@ mod tests {
     ) -> Result<bool, String> {
         let exists_start = Instant::now();
         let dataset_exists = video_dataset_exists(connection, namespace)?;
-        profile_event("spiral.reconcile_video_exists", exists_start, 1, 0);
+        profile_event("spiral.reconcile_video_exists", exists_start, (1, 0));
 
         let sources = sql::video_sources_relation(namespace);
         let assets = Table::VideoAssets.qualified_name(namespace);
@@ -4835,21 +4926,22 @@ mod tests {
         let view_start = Instant::now();
         execute_update_sql(connection, &sql::create_video_sources(&sources, &assets))
             .map_err(|error| format!("creating Spiral video source view: {error}"))?;
-        profile_event("spiral.reconcile_video_view", view_start, 1, 0);
+        profile_event("spiral.reconcile_video_view", view_start, (1, 0));
         if !dataset_exists {
             let create_start = Instant::now();
             execute_update_sql(connection, &sql::create_video_dataset(&dataset, &sources))
                 .map_err(|error| format!("creating Spiral MP4 dataset: {error}"))?;
-            profile_event("spiral.reconcile_video_create", create_start, 1, 0);
+            profile_event("spiral.reconcile_video_create", create_start, (1, 0));
         }
         let refresh_start = Instant::now();
         execute_update_sql(connection, &sql::refresh_dataset(&dataset))
             .map_err(|error| format!("refreshing Spiral MP4 dataset: {error}"))?;
-        profile_event("spiral.reconcile_video_refresh", refresh_start, 1, 0);
+        profile_event("spiral.reconcile_video_refresh", refresh_start, (1, 0));
         Ok(dataset_exists)
     }
 
-    fn profile_event(stage: &str, start: Instant, rows: usize, bytes: usize) {
+    fn profile_event(stage: &str, start: Instant, metrics: (usize, usize)) {
+        let (rows, bytes) = metrics;
         eprintln!(
             "PROFILE\t{stage}\tseconds={:.6}\trows={rows}\tbytes={bytes}",
             start.elapsed().as_secs_f64()
@@ -4994,40 +5086,45 @@ mod tests {
         )
     }
 
-    fn seed_episode(
-        connection: &mut StorageConnection,
-        namespace: &str,
-        dataset_id: &str,
-        episode_id: &str,
+    struct EpisodeSeed<'a> {
+        namespace: &'a str,
+        dataset_id: &'a str,
+        episode_id: &'a str,
         started_ms: i64,
-    ) -> Result<(), String> {
-        let start = EpisodeStart {
-            id: episode_id.to_owned(),
-            dataset_id: dataset_id.to_owned(),
-            started_ms,
-            sample_hz: 60.0,
-            source: "transfer-e2e".to_owned(),
-            note: None,
-            arms: Vec::new(),
-            condition: Vec::new(),
-        };
-        let completion = EpisodeCompletion {
-            duration_seconds: 0.0,
-            recording_gaps: Vec::new(),
-            max_follow_error_degrees: None,
-            discarded: false,
-            condition: Vec::new(),
-        };
-        ingest_batch(
-            connection,
-            &Table::Datasets.qualified_name(namespace),
-            dataset_batch(&start).map_err(|error| error.to_string())?,
-        )?;
-        ingest_batch(
-            connection,
-            &Table::Episodes.qualified_name(namespace),
-            episode_completion_batch(&start, &completion, 0).map_err(|error| error.to_string())?,
-        )
+    }
+
+    impl<'a> EpisodeSeed<'a> {
+        fn new(namespace: &'a str, dataset_id: &'a str, episode_id: &'a str) -> Self {
+            Self {
+                namespace,
+                dataset_id,
+                episode_id,
+                started_ms: 0,
+            }
+        }
+
+        fn with_started_ms(mut self, started_ms: i64) -> Self {
+            self.started_ms = started_ms;
+            self
+        }
+
+        fn save(self, connection: &mut StorageConnection) -> Result<(), String> {
+            let start = EpisodeStart::new(self.episode_id.to_owned(), self.dataset_id.to_owned())
+                .with_timing(self.started_ms, 60.0)
+                .with_source("transfer-e2e".to_owned(), None);
+            let completion = EpisodeCompletion::new(0.0, Vec::new(), Vec::new());
+            ingest_batch(
+                connection,
+                &Table::Datasets.qualified_name(self.namespace),
+                dataset_batch(&start).map_err(|error| error.to_string())?,
+            )?;
+            ingest_batch(
+                connection,
+                &Table::Episodes.qualified_name(self.namespace),
+                episode_completion_batch(&start, &completion, 0)
+                    .map_err(|error| error.to_string())?,
+            )
+        }
     }
 
     fn test_mp4() -> Vec<u8> {

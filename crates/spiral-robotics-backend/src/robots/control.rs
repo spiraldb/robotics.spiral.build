@@ -4,11 +4,11 @@ use std::collections::BTreeMap;
 
 use spiral_robotics_core::calibration::NormalizedPosition;
 
-use spiral_robotics_core::error::OperationError;
+use spiral_robotics_core::OperationError;
 
 /// Consequential robot-control actions shared by every delivery mechanism.
 #[derive(Clone, Debug, PartialEq)]
-pub enum RobotControlCommand {
+pub(crate) enum RobotControlCommand {
     Hold {
         robot: String,
     },
@@ -22,7 +22,7 @@ pub enum RobotControlCommand {
 }
 
 /// The capability-owned boundary implemented by a robot-control adapter.
-pub trait RobotControlPort {
+pub(crate) trait RobotControlPort {
     async fn hold(&self, robot: &str) -> Result<(), String>;
     async fn release(&self, robot: &str) -> Result<(), String>;
     async fn set_joint_goals(
@@ -33,7 +33,7 @@ pub trait RobotControlPort {
 }
 
 /// Execute operator-facing robot-control actions as one control-thread command.
-pub async fn execute<P: RobotControlPort + ?Sized>(
+pub(crate) async fn execute<P: RobotControlPort + ?Sized>(
     control: &P,
     command: RobotControlCommand,
 ) -> Result<(), OperationError> {

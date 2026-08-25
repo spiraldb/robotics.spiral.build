@@ -82,16 +82,18 @@ impl TimelineSubject {
     pub(crate) fn episode_id(&self) -> Option<&str> {
         match self {
             Self::Empty { .. } => None,
-            Self::Recording(progress) => Some(&progress.episode),
-            Self::Episode { episode, .. } => Some(&episode.id),
+            Self::Recording(progress) => Some(progress.episode()),
+            Self::Episode { episode, .. } => Some(episode.id()),
         }
     }
 
     pub(crate) fn target(&self) -> Option<TimelineTarget> {
         match self {
             Self::Empty { .. } => None,
-            Self::Recording(progress) => Some(TimelineTarget::Recording(progress.episode.clone())),
-            Self::Episode { episode, .. } => Some(TimelineTarget::Episode(episode.id.clone())),
+            Self::Recording(progress) => {
+                Some(TimelineTarget::Recording(progress.episode().to_owned()))
+            }
+            Self::Episode { episode, .. } => Some(TimelineTarget::Episode(episode.id().to_owned())),
         }
     }
 
@@ -105,8 +107,8 @@ impl TimelineSubject {
     pub(crate) fn duration_seconds(&self) -> f64 {
         match self {
             Self::Empty { .. } => 0.0,
-            Self::Recording(progress) => progress.elapsed_seconds,
-            Self::Episode { episode, .. } => episode.duration_seconds,
+            Self::Recording(progress) => progress.elapsed_seconds(),
+            Self::Episode { episode, .. } => episode.duration_seconds(),
         }
         .max(0.0)
     }
@@ -114,8 +116,8 @@ impl TimelineSubject {
     pub(crate) fn frames(&self) -> u64 {
         match self {
             Self::Empty { .. } => 0,
-            Self::Recording(progress) => progress.frames,
-            Self::Episode { episode, .. } => episode.frames,
+            Self::Recording(progress) => progress.frames(),
+            Self::Episode { episode, .. } => episode.frames(),
         }
     }
 
@@ -127,13 +129,13 @@ impl TimelineSubject {
     }
 
     pub(crate) fn is_paused_recording(&self) -> bool {
-        self.recording().is_some_and(|progress| progress.paused)
+        self.recording().is_some_and(|progress| progress.paused())
     }
 
     pub(crate) fn available(&self) -> bool {
         match self {
             Self::Empty { .. } => false,
-            Self::Recording(progress) => progress.error.is_none(),
+            Self::Recording(progress) => progress.error().is_none(),
             Self::Episode { episode, .. } => episode.usable(),
         }
     }
@@ -141,16 +143,16 @@ impl TimelineSubject {
     pub(crate) fn problem(&self) -> Option<&str> {
         match self {
             Self::Empty { reason, .. } => Some(reason),
-            Self::Recording(progress) => progress.error.as_deref(),
-            Self::Episode { episode, .. } => episode.problem.as_deref(),
+            Self::Recording(progress) => progress.error(),
+            Self::Episode { episode, .. } => episode.problem(),
         }
     }
 
     /// The episode whose recorded data should be loaded for the current view.
     pub(crate) fn recorded_episode(&self) -> Option<&str> {
         match self {
-            Self::Episode { episode, .. } => Some(&episode.id),
-            Self::Recording(progress) if progress.paused => Some(&progress.episode),
+            Self::Episode { episode, .. } => Some(episode.id()),
+            Self::Recording(progress) if progress.paused() => Some(progress.episode()),
             Self::Empty { .. } | Self::Recording(_) => None,
         }
     }
@@ -175,13 +177,29 @@ pub(crate) enum CameraRegistrySource {
 /// One coherent rendering consequence for the active semantic state.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ActivityProjection {
-    pub(crate) activity: Activity,
-    pub(crate) primary: PrimaryVisualization,
-    pub(crate) cameras: CameraRegistrySource,
-    pub(crate) timeline: TimelineSubject,
+    activity: Activity,
+    primary: PrimaryVisualization,
+    cameras: CameraRegistrySource,
+    timeline: TimelineSubject,
 }
 
 impl ActivityProjection {
+    pub(crate) const fn activity(&self) -> Activity {
+        self.activity
+    }
+
+    pub(crate) const fn primary(&self) -> &PrimaryVisualization {
+        &self.primary
+    }
+
+    pub(crate) const fn cameras(&self) -> &CameraRegistrySource {
+        &self.cameras
+    }
+
+    pub(crate) const fn timeline(&self) -> &TimelineSubject {
+        &self.timeline
+    }
+
     pub(crate) fn derive(
         activity: Activity,
         recording: Option<RecordingProgress>,
@@ -284,12 +302,36 @@ impl<T> LoadState<T> {
 /// A recorded value tied to the identity and time it was requested for.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct RecordedSource<T> {
-    pub(crate) episode: String,
-    pub(crate) seconds: f64,
-    pub(crate) state: LoadState<T>,
+    episode: String,
+    seconds: f64,
+    state: LoadState<T>,
 }
 
 impl<T> RecordedSource<T> {
+    pub(crate) fn new(episode: impl Into<String>, seconds: f64, state: LoadState<T>) -> Self {
+        Self {
+            episode: episode.into(),
+            seconds,
+            state,
+        }
+    }
+
+    pub(crate) fn episode(&self) -> &str {
+        &self.episode
+    }
+
+    pub(crate) const fn seconds(&self) -> f64 {
+        self.seconds
+    }
+
+    pub(crate) fn set_seconds(&mut self, seconds: f64) {
+        self.seconds = seconds;
+    }
+
+    pub(crate) const fn state(&self) -> &LoadState<T> {
+        &self.state
+    }
+
     pub(crate) fn renderable(&self) -> Option<&T> {
         self.state.renderable()
     }
@@ -332,22 +374,14 @@ pub(crate) enum PanelRole {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use spiral_robotics_api::recording::{EpisodeAssessment, EpisodeIdentity, EpisodeTimeline};
 
     fn episode(id: &str) -> EpisodeSummary {
-        EpisodeSummary {
-            dataset_id: "default".to_owned(),
-            id: id.to_owned(),
-            arms: Vec::new(),
-            frames: 120,
-            duration_seconds: 2.0,
-            recording_gaps: Vec::new(),
-            sample_hz: 60.0,
-            started_ms: 0,
-            source: "Teleoperation".to_owned(),
-            max_follow_error_degrees: None,
-            discarded: false,
-            problem: None,
-        }
+        EpisodeSummary::new(
+            EpisodeIdentity::new(id, "default", Vec::new()).with_source("Teleoperation"),
+            EpisodeTimeline::new(120, 2.0, 60.0),
+            EpisodeAssessment::new(false, None, None),
+        )
     }
 
     #[test]
@@ -363,7 +397,7 @@ mod tests {
             projection.cameras,
             CameraRegistrySource::RecordedEpisode(Box::new(selected.clone()))
         );
-        assert_eq!(projection.timeline.episode_id(), Some(selected.id.as_str()));
+        assert_eq!(projection.timeline.episode_id(), Some(selected.id()));
     }
 
     #[test]
@@ -379,7 +413,7 @@ mod tests {
             projection.cameras,
             CameraRegistrySource::RecordedEpisode(Box::new(selected.clone()))
         );
-        assert_eq!(projection.timeline.episode_id(), Some(selected.id.as_str()));
+        assert_eq!(projection.timeline.episode_id(), Some(selected.id()));
     }
 
     #[test]
