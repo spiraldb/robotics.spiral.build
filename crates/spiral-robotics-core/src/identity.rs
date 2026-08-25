@@ -42,6 +42,30 @@ impl fmt::Display for InvalidDatasetId {
 
 impl std::error::Error for InvalidDatasetId {}
 
+/// Convert an external immutable ID into one SQL-safe generated-name component.
+pub fn identifier_component(value: &str) -> String {
+    let rendered = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '_' {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if rendered == value && !rendered.is_empty() {
+        return rendered;
+    }
+    let hash = value
+        .as_bytes()
+        .iter()
+        .fold(0xcbf29ce484222325_u64, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+        });
+    format!("{rendered}_{hash:016x}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

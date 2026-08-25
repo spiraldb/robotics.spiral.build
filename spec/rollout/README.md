@@ -68,11 +68,11 @@ bounded duration while Studio retains motion authority.
 ## Implementation ownership
 
 - Rollout policy:
-  [`spiral-robotics-studio-application/src/rollout.rs`](../../crates/spiral-robotics-studio-application/src/rollout.rs)
+  [`spiral-robotics-backend/src/rollout/service.rs`](../../crates/spiral-robotics-backend/src/rollout/service.rs)
   and
-  [`spiral-robotics-studio-application/src/policy_runtime.rs`](../../crates/spiral-robotics-studio-application/src/policy_runtime.rs)
+  [`spiral-robotics-backend/src/rollout/policy.rs`](../../crates/spiral-robotics-backend/src/rollout/policy.rs)
 - Runtime and hardware supervision:
-  [`backend/rollout`](../../crates/spiral-robotics-studio-backend/src/backend/rollout/)
+  [`backend/rollout`](../../crates/spiral-robotics-backend/src/rollout/)
 - Rollout UI:
-  [`frontend/screens/rollout`](../../crates/spiral-robotics-studio/src/frontend/screens/rollout/)
+  [`frontend/activities/rollout`](../../crates/spiral-robotics-frontend/src/activities/rollout/)
 

@@ -7,6 +7,7 @@
 pub mod arm;
 pub mod calibration;
 pub mod episode;
+pub mod error;
 pub mod identity;
 pub mod operation;
 pub mod query;

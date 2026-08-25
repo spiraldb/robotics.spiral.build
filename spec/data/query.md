@@ -51,8 +51,8 @@ inside the Data route.
 - Query policy:
   [`spiral-robotics-core/src/query.rs`](../../crates/spiral-robotics-core/src/query.rs)
 - Data query use case:
-  [`spiral-robotics-studio-application/src/data.rs`](../../crates/spiral-robotics-studio-application/src/data.rs)
+  [`spiral-robotics-backend/src/data/mod.rs`](../../crates/spiral-robotics-backend/src/data/mod.rs)
 - SQL validation and ADBC adapter:
-  [`backend/storage`](../../crates/spiral-robotics-studio-backend/src/backend/storage/)
+  [`spiral-robotics-storage`](../../crates/spiral-robotics-storage/src/)
 - Query UI:
-  [`frontend/screens/data`](../../crates/spiral-robotics-studio/src/frontend/screens/data/)
+  [`frontend/activities/data`](../../crates/spiral-robotics-frontend/src/activities/data/)

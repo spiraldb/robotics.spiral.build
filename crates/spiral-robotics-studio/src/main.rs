@@ -2,12 +2,12 @@
 
 #[cfg(feature = "server")]
 fn main() -> std::process::ExitCode {
-    spiral_robotics_studio_backend::run(spiral_robotics_studio::App)
+    spiral_robotics_backend::run(spiral_robotics_frontend::App)
 }
 
 #[cfg(all(not(feature = "server"), feature = "web"))]
 fn main() {
-    dioxus::launch(spiral_robotics_studio::App);
+    dioxus::launch(spiral_robotics_frontend::App);
 }
 
 #[cfg(not(any(feature = "server", feature = "web")))]

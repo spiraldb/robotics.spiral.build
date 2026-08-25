@@ -62,7 +62,7 @@ browser confirmation dialogs.
 ## Requirements
 
 - **STUDIO-027** Every product action must use a typed primitive from
-  `spiral-robotics-ui` and declare its semantic purpose.
+  `frontend interaction components` and declare its semantic purpose.
 - **STUDIO-028** A visual variant must not change an action's verb.
 - **STUDIO-029** A feature may define action placement and layout but must not
   redefine shared hover, focus, selected, disabled, pending, or destructive
@@ -152,13 +152,13 @@ browser confirmation dialogs.
 ## Implementation ownership
 
 - Typed actions, toggles, modes, confirmations, focus behavior, and shared
-  states: [`spiral-robotics-ui`](../../crates/spiral-robotics-ui/)
+  states: [`frontend interaction components`](../../crates/spiral-robotics-frontend/src/components/interaction/)
 - Product placement and domain content:
-  [`frontend`](../../crates/spiral-robotics-studio/src/frontend/)
+  [`frontend`](../../crates/spiral-robotics-frontend/src/)
 - Shared product formatting and single-flight request behavior:
-  [`format.rs`](../../crates/spiral-robotics-studio/src/frontend/format.rs) and
-  [`tasks.rs`](../../crates/spiral-robotics-studio/src/frontend/tasks.rs)
+  [`format.rs`](../../crates/spiral-robotics-frontend/src/format.rs) and
+  [`tasks.rs`](../../crates/spiral-robotics-frontend/src/tasks.rs)
 - Docking, tab reordering, and panel keyboard behavior:
   [`dioxus-workbench`](https://github.com/XiangpengHao/dioxus-workbench) (external crate)
 - Migration guard:
-  [`interaction_language.rs`](../../crates/spiral-robotics-studio/tests/interaction_language.rs)
+  [`interaction_language.rs`](../../crates/spiral-robotics-frontend/tests/interaction_language.rs)

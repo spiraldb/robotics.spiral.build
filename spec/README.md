@@ -133,15 +133,17 @@ confirmed requirement to match accidental code.
 
 These rules apply to every feature:
 
-- Core entities and application policy must not depend on HTTP, Dioxus, ADBC,
-  hardware drivers, files, or model frameworks.
-- Each application action must have one use case and explicit ports for external
-  consequences.
+- Core entities must not depend on HTTP, Dioxus, ADBC, hardware drivers, files,
+  or model frameworks. Backend policy is colocated with the capability it
+  governs and remains separate from delivery adapters inside that capability.
+- Each consequential backend action must have one use case and explicit ports
+  for external consequences.
 - HTTP handlers must translate requests, call use cases, and translate results.
-- Adapters may depend on application policy. Application policy must not import
-  adapters.
-- Fixed-rate motor control must remain a separate compile-time boundary from
-  HTTP, persistence, camera, training, and model-runtime adapters.
+- Delivery adapters may depend on capability policy. Capability policy must not
+  import HTTP adapters.
+- Hardware discovery, cameras, device protocols, and fixed-rate motor control
+  share the hardware compile-time boundary; HTTP, persistence, training, and
+  model runtimes remain outside it.
 - The Cargo workspace root must remain a virtual manifest. All first-party Rust
   packages and Rust source must live under `crates/`; do not add root `src/`,
   root `tests/`, or an in-repository dependency `patches/` tree.
@@ -155,8 +157,8 @@ These rules apply to every feature:
   exposed through methods unless they are intentionally part of a public data
   contract; the workspace lint policy denies unreachable public items for every
   first-party package.
-- Critical invariants must be enforced by core or application policy, not only
-  by UI controls.
+- Critical invariants must be enforced by core, backend capability policy, or
+  hardware control policy, not only by UI controls.
 - Pure feature tests must run without hardware, HTTP, SpiralDB, or a compute
   runtime.
 - Adapter and end-to-end tests must verify real external behavior where it
@@ -166,4 +168,4 @@ These rules apply to every feature:
 Architecture enforcement currently lives in
 [`spiral-robotics-core/tests/architecture.rs`](../crates/spiral-robotics-core/tests/architecture.rs)
 and
-[`spiral-robotics-studio-backend/tests/architecture.rs`](../crates/spiral-robotics-studio-backend/tests/architecture.rs).
+[`spiral-robotics-backend/tests/architecture.rs`](../crates/spiral-robotics-backend/tests/architecture.rs).

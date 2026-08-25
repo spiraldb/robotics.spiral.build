@@ -2,7 +2,7 @@
 name = "spiral-robotics-studio"
 version.workspace = true
 edition.workspace = true
-description = "Web studio for setting up, calibrating, and operating SO-ARM101 arms"
+description = "Product launcher and assets for Spiral Robotics Studio"
 publish = false
 
 [lints]
@@ -10,59 +10,19 @@ workspace = true
 
 [features]
 default = []
-web = ["charming/wasm", "dioxus/web", "spiral-robotics-ui/web"]
+web = ["dioxus/web", "spiral-robotics-frontend/web"]
 server = [
     "dioxus/cli-config",
     "dioxus/server",
-    "dep:spiral-robotics-studio-backend",
+    "dep:spiral-robotics-backend",
 ]
 
 [dependencies]
-charming = { version = "0.6.0", default-features = false }
-spiral-robotics-contracts.workspace = true
-spiral-robotics-core.workspace = true
-spiral-robotics-ui.workspace = true
-spiral-robotics-studio-backend = { workspace = true, optional = true }
-spiral-robotics-viewport.workspace = true
+spiral-robotics-backend = { workspace = true, optional = true }
+spiral-robotics-frontend.workspace = true
 dioxus = { workspace = true, features = [
-    "asset",
-    "document",
-    "fullstack",
-    "hooks",
-    "html",
     "launch",
-    "logger",
-    "macro",
-    "router",
-    "signals",
 ] }
-dioxus-flow.workspace = true
-dioxus-workbench.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-serde-wasm-bindgen = "0.6"
-futures-util = { version = "0.3", default-features = false, features = ["std"] }
-gloo-net = { version = "0.7", default-features = false, features = ["eventsource", "http", "json"] }
-gloo-timers = { version = "0.3", features = ["futures"] }
-js-sys = "0.3"
-wasm-bindgen = "=0.2.126"
-web-sys = { version = "0.3", features = [
-    "Document",
-    "DomRect",
-    "Element",
-    "EventTarget",
-    "File",
-    "AbortController",
-    "AbortSignal",
-    "HtmlCanvasElement",
-    "PointerEvent",
-    "ResizeObserver",
-    "Window",
-] }
-
-[dev-dependencies]
-tempfile.workspace = true
-
 
 [[bin]]
 name = "spiral-robotics-studio"

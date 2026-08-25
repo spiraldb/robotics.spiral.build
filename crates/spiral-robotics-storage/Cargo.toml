@@ -1,0 +1,37 @@
+[package]
+name = "spiral-robotics-storage"
+version.workspace = true
+edition.workspace = true
+description = "SpiralDB storage, schemas, queries, ingestion, and project transfer"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+spiral-robotics-api.workspace = true
+spiral-robotics-core.workspace = true
+spiral-robotics-hardware.workspace = true
+adbc_core = "0.24.0"
+adbc-driver-spiraldb.workspace = true
+arrow-array = "58.4.0"
+arrow-schema = "58.4.0"
+arrow-ipc = "58.4.0"
+arrow-json = "58.4.0"
+base64.workspace = true
+dirs = "6"
+futures = { version = "0.3", default-features = false, features = ["executor", "std"] }
+image.workspace = true
+reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls", "stream"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
+tracing = "0.1"
+url = "2"
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[build-dependencies]
+spiral-robotics-boundary-build.workspace = true

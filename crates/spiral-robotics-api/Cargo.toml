@@ -1,0 +1,17 @@
+[package]
+name = "spiral-robotics-api"
+version.workspace = true
+edition.workspace = true
+description = "Wire protocol shared by the Spiral Robotics frontend and backend"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+spiral-robotics-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[build-dependencies]
+spiral-robotics-boundary-build.workspace = true

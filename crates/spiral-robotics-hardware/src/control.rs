@@ -29,7 +29,13 @@ use crate::bus::{
 };
 use crate::feetech::FeetechBus;
 
-use spiral_robotics_contracts::api::{
+use crate::control_policy::{
+    CalibrationAdmission, ControlMode, ControlState, Decision as ControlDecision,
+    Effect as ControlEffect, Event as ControlEvent, Intent as ControlIntent,
+    ReplayDecision as ReplayPolicyDecision, ReplayEvent as ReplayPolicyEvent,
+    ReplayState as ReplayPolicyState, RobotAdmission,
+};
+use spiral_robotics_api::api::{
     CAUTION_FOLLOW_ERROR_DEGREES, CalibrationJointProgress, CalibrationProgress, ConnectionStatus,
     EpisodeArm, EpisodeSummary, JointRange, JointTelemetry, ModeSelection, ModeStatus, MotorFault,
     MotorLimits, PortSettings, RecordingGap, RecordingProgress, ReplayPhase, ReplayProgress,
@@ -40,19 +46,6 @@ use spiral_robotics_core::calibration::{
     Calibration, CalibrationError, CalibrationInput, Direction, MotorCalibration, MotorSpec,
     RangeTracker, validate_motor_specs,
 };
-use spiral_robotics_studio_application::calibration::CalibrationControlPort;
-use spiral_robotics_studio_application::control_session::{
-    CalibrationAdmission, ControlMode, ControlState, Decision as ControlDecision,
-    Effect as ControlEffect, Event as ControlEvent, Intent as ControlIntent,
-    ReplayDecision as ReplayPolicyDecision, ReplayEvent as ReplayPolicyEvent,
-    ReplayState as ReplayPolicyState, RobotAdmission,
-};
-use spiral_robotics_studio_application::data::{
-    ReplayTrajectory as SpiralReplayTrajectory, SpiralReplayPort, StartSpiralReplayCommand,
-};
-use spiral_robotics_studio_application::error::ApplicationError;
-use spiral_robotics_studio_application::mode_control::{ModeControlPort, OperatorMode};
-use spiral_robotics_studio_application::robot_control::RobotControlPort;
 use tokio::sync::{oneshot, watch};
 
 #[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
@@ -79,7 +72,7 @@ pub type EpisodeCheckpoint = oneshot::Receiver<Result<(), String>>;
 
 /// Recording boundary consumed by the fixed-rate hardware thread.
 ///
-/// Persistence stays in the backend crate; the control runtime only owns the
+/// Persistence stays in the storage crate; the control runtime only owns the
 /// sampling contract, which keeps edits on either side independently cached.
 pub trait RecordingWriter: Send {
     fn id(&self) -> &str;
@@ -622,7 +615,7 @@ impl HardwareHandle {
 
     /// Begin sampling the named arms into an already-opened take.
     ///
-    /// The writer is created by the caller at the Spiral repository boundary
+    /// The writer is created by the caller at the Spiral storage boundary
     /// and handed over whole because only this thread runs at the rate a take
     /// has to be sampled at.
     pub async fn start_recording<W: RecordingWriter + 'static>(
@@ -781,95 +774,6 @@ impl HardwareHandle {
         response
             .await
             .map_err(|_| "the control thread stopped before answering".to_owned())?
-    }
-}
-
-impl SpiralReplayPort for HardwareHandle {
-    async fn start_spiral_replay(
-        &self,
-        command: StartSpiralReplayCommand,
-        trajectory: SpiralReplayTrajectory,
-    ) -> Result<(), ApplicationError> {
-        HardwareHandle::start_replay(
-            self,
-            &command.robot,
-            &command.episode,
-            trajectory.frames,
-            trajectory.sample_hz,
-        )
-        .await
-        .map_err(ApplicationError::conflict)
-    }
-}
-
-impl RobotControlPort for HardwareHandle {
-    async fn hold(&self, robot: &str) -> Result<(), String> {
-        HardwareHandle::hold(self, robot).await
-    }
-
-    async fn release(&self, robot: &str) -> Result<(), String> {
-        HardwareHandle::release(self, robot).await
-    }
-
-    async fn set_joint_goals(
-        &self,
-        robot: &str,
-        normalized: BTreeMap<String, spiral_robotics_core::calibration::NormalizedPosition>,
-    ) -> Result<(), String> {
-        HardwareHandle::set_goals(
-            self,
-            robot,
-            normalized
-                .into_iter()
-                .map(|(joint, value)| (joint, value.get()))
-                .collect(),
-        )
-        .await
-    }
-}
-
-impl ModeControlPort for HardwareHandle {
-    async fn set_operator_mode(&self, mode: OperatorMode) -> Result<(), ApplicationError> {
-        let selection = match mode {
-            OperatorMode::Idle => ModeSelection::Idle,
-            OperatorMode::Manual { robot } => ModeSelection::Manual { robot },
-            OperatorMode::Teleoperate { leader, follower } => {
-                ModeSelection::Teleoperate { leader, follower }
-            }
-        };
-        HardwareHandle::set_mode(self, selection)
-            .await
-            .map_err(ApplicationError::conflict)
-    }
-}
-
-impl CalibrationControlPort for HardwareHandle {
-    async fn start_calibration(&self, robot: &str) -> Result<(), ApplicationError> {
-        HardwareHandle::start_calibration(self, robot)
-            .await
-            .map_err(ApplicationError::conflict)
-    }
-
-    async fn calibration_input(&self, robot: &str) -> Result<CalibrationInput, ApplicationError> {
-        HardwareHandle::calibration_input(self, robot)
-            .await
-            .map_err(ApplicationError::conflict)
-    }
-
-    async fn cancel_calibration(&self, robot: &str) -> Result<(), ApplicationError> {
-        HardwareHandle::cancel_calibration(self, robot)
-            .await
-            .map_err(ApplicationError::conflict)
-    }
-
-    async fn apply_calibration(
-        &self,
-        robot: &str,
-        calibration: Calibration,
-    ) -> Result<(), ApplicationError> {
-        HardwareHandle::apply_calibration(self, robot, calibration)
-            .await
-            .map_err(ApplicationError::conflict)
     }
 }
 

@@ -3,7 +3,7 @@
 - **Spiral Robotics** is the complete project.
 - **Studio** is the browser interface.
 - **Studio backend** is the consequential process that owns hardware, safety,
-  data access, and durable application actions.
+  data access, and durable backend actions.
 - **compute runtime** is a selectable local or remote process that performs
   policy training and inference.
 - **robot instance** is one physical arm.
@@ -35,4 +35,3 @@
 - **rollout** is one bounded execution of a checkpoint on the follower.
 - **project** is the durable relational owner of robots, datasets, training
   runs, and rollout runs.
-

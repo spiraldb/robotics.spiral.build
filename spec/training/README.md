@@ -89,19 +89,19 @@ durable checkpoints through a worker that reads and writes SpiralDB directly.
 - **TRAIN-031** Persisted run history must identify the selected relational
   dataset row, but must not duplicate the backend-selected Spiral project,
   namespace, or checkpoint relation. Those locations are derived from the one
-  active repository.
+  active Spiral project.
 
 ## Implementation ownership
 
 - Training feature policy:
-  [`spiral-robotics-studio-application/src/training.rs`](../../crates/spiral-robotics-studio-application/src/training.rs)
+  [`spiral-robotics-backend/src/training/service.rs`](../../crates/spiral-robotics-backend/src/training/service.rs)
   and
-  [`spiral-robotics-studio-application/src/training_execution.rs`](../../crates/spiral-robotics-studio-application/src/training_execution.rs)
+  [`spiral-robotics-backend/src/training/execution.rs`](../../crates/spiral-robotics-backend/src/training/execution.rs)
 - Studio job supervision:
-  [`backend/training/manager.rs`](../../crates/spiral-robotics-studio-backend/src/backend/training/manager.rs)
+  [`backend/training/manager.rs`](../../crates/spiral-robotics-backend/src/training/manager.rs)
 - SpiralDB batch preparation and checkpoint publication:
   [`training/src/spiral_training_runtime`](../../training/src/spiral_training_runtime/)
 - Training UI:
-  [`frontend/screens/training`](../../crates/spiral-robotics-studio/src/frontend/screens/training/)
+  [`frontend/activities/training`](../../crates/spiral-robotics-frontend/src/activities/training/)
 - Framework-neutral contracts:
   [`spiral-robotics-training`](../../crates/spiral-robotics-training/)

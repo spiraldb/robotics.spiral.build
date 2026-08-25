@@ -42,7 +42,7 @@ follower without making visual scrubbing dangerous.
   browser `Range` request into `spql.io.read_bytes(blob, offset, size)` and
   forward exactly those bytes with the corresponding HTTP range headers. It
   must not materialize the complete MP4 before slicing it or introduce an
-  application payload cache to compensate for Binary storage.
+  backend payload cache to compensate for Binary storage.
 
 ## Physical replay
 
@@ -64,12 +64,12 @@ follower without making visual scrubbing dangerous.
 ## Implementation ownership
 
 - Timeline panel and state:
-  [`frontend/panels/timeline`](../../crates/spiral-robotics-studio/src/frontend/panels/timeline/)
+  [`frontend/panels/timeline`](../../crates/spiral-robotics-frontend/src/panels/timeline/)
 - Historical camera panel:
-  [`frontend/panels/camera.rs`](../../crates/spiral-robotics-studio/src/frontend/panels/camera.rs)
+  [`frontend/panels/camera.rs`](../../crates/spiral-robotics-frontend/src/panels/camera.rs)
 - Seek and replay policy:
-  [`spiral-robotics-studio-application/src/episode_seek.rs`](../../crates/spiral-robotics-studio-application/src/episode_seek.rs)
+  [`spiral-robotics-backend/src/data/seek.rs`](../../crates/spiral-robotics-backend/src/data/seek.rs)
   and
-  [`spiral-robotics-studio-application/src/robot_control.rs`](../../crates/spiral-robotics-studio-application/src/robot_control.rs)
+  [`spiral-robotics-backend/src/robots/control.rs`](../../crates/spiral-robotics-backend/src/robots/control.rs)
 - Hardware replay:
   [`spiral-robotics-hardware`](../../crates/spiral-robotics-hardware/)

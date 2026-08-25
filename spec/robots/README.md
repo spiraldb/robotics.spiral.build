@@ -37,11 +37,13 @@ the intended source of truth.
 - Motor buses, Feetech adapters, physical device discovery, camera capture, and
   fixed-rate control:
   [`spiral-robotics-hardware`](../../crates/spiral-robotics-hardware/)
-- Robot configuration codecs and SpiralDB repository:
-  [`backend/robots`](../../crates/spiral-robotics-studio-backend/src/backend/robots/)
+- Robot configuration codecs and capability policy:
+  [`backend/robots`](../../crates/spiral-robotics-backend/src/robots/)
+- SpiralDB robot storage:
+  [`spiral-robotics-storage`](../../crates/spiral-robotics-storage/src/)
 - Camera and video runtime orchestration:
-  [`backend/robotics`](../../crates/spiral-robotics-studio-backend/src/backend/robotics/)
+  [`backend/robotics`](../../crates/spiral-robotics-backend/src/robotics/)
 - Robot use cases:
-  [`spiral-robotics-studio-application`](../../crates/spiral-robotics-studio-application/src/)
+  [`backend capability modules`](../../crates/spiral-robotics-backend/src/)
 - Settings UI:
-  [`frontend/screens/settings/robots`](../../crates/spiral-robotics-studio/src/frontend/screens/settings/robots/)
+  [`frontend/settings/robots`](../../crates/spiral-robotics-frontend/src/settings/robots/)

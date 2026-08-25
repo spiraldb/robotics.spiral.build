@@ -123,10 +123,10 @@ prefixes are not supported by this ingestion path.
 ## Implementation ownership
 
 - Inline Data workflow and dynamic Query relation catalog:
-  [`frontend/screens/data`](../../crates/spiral-robotics-studio/src/frontend/screens/data/)
+  [`frontend/activities/data`](../../crates/spiral-robotics-frontend/src/activities/data/)
 - HTTP inspection, import, and relation routes:
-  [`backend/http/routes/data.rs`](../../crates/spiral-robotics-studio-backend/src/backend/http/routes/data.rs)
+  [`backend/http/routes/data.rs`](../../crates/spiral-robotics-backend/src/http/routes/data.rs)
 - Hugging Face discovery and Spiral materialization:
-  [`backend/storage/ingestion.rs`](../../crates/spiral-robotics-studio-backend/src/backend/storage/ingestion.rs)
+  [`storage/ingestion.rs`](../../crates/spiral-robotics-storage/src/ingestion.rs)
 - Shared API contracts:
-  [`spiral-robotics-contracts/src/api.rs`](../../crates/spiral-robotics-contracts/src/api.rs)
+  [`spiral-robotics-api/src/api.rs`](../../crates/spiral-robotics-api/src/api.rs)

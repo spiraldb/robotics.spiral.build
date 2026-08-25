@@ -86,7 +86,7 @@ allowing visualization panels to be arranged spatially.
   registry and all cache relations it declares.
 - **STUDIO-051** Studio must bind its backend listener before external-service
   probes, camera discovery, project hydration, or saved-robot connection. Its
-  application contract must distinguish Bootstrapping, Ready, and Degraded;
+  backend state contract must distinguish Bootstrapping, Ready, and Degraded;
   the status bar must present that state. State, events, Spiral/runtime
   settings and tests, and camera discovery/preview must remain available while
   bootstrapping. Catalog-dependent routes must return HTTP 503 with a retry
@@ -99,14 +99,21 @@ allowing visualization panels to be arranged spatially.
 - **STUDIO-053** The unauthenticated hardware-control listener must accept
   loopback addresses by default and reject non-loopback binds unless the
   operator supplies an explicit remote-access opt-in.
-- **STUDIO-054** Framework-neutral application policy must live in its own
-  crate. Cargo dependencies, not source-text conventions, must prevent that
-  crate from importing HTTP, UI, database, hardware, or model-runtime adapters.
-- **STUDIO-055** Dependencies must point inward: domain rules are independent,
-  application use cases depend only on domain types and injected ports, and
-  backend/UI crates adapt those ports to HTTP, hardware, persistence, and
-  presentation. Cross-process work must use versioned neutral contracts rather
-  than importing another process's implementation.
+- **STUDIO-054** Crates must follow product functionality: `studio` is only the
+  product launcher and assets; `frontend` owns the browser interface and its
+  interaction components; `backend` is organized by Data, Recording, Robots,
+  Training, Rollout, and Workflow capabilities; `api` is the frontend/backend
+  wire contract; `storage` owns ADBC, schemas, SQL, ingestion, and transfer;
+  and `hardware` owns physical devices and fixed-rate control. The retired
+  `spiral-robotics-studio-application`, `spiral-robotics-contracts`,
+  `spiral-robotics-studio-backend`, and `spiral-robotics-ui` crates must not
+  return.
+- **STUDIO-055** Dependencies must reflect trust boundaries: frontend depends
+  on API but never backend, storage, or hardware; backend composes API, storage,
+  and hardware; storage never depends on frontend or backend; and the Studio
+  launcher composes frontend with backend only for the native server build.
+  Cross-process work must use versioned neutral contracts rather than importing
+  another process's implementation.
 - **STUDIO-056** Settings must be an in-shell utility panel rather than a modal.
   It must retain its section navigation, fixed action footer, the activity rail,
   and the status bar. A scope-wide destructive
@@ -191,21 +198,23 @@ allowing visualization panels to be arranged spatially.
 ## Implementation ownership
 
 - Routes and the global shell:
-  [`frontend/app`](../../crates/spiral-robotics-studio/src/frontend/app/)
+  [`frontend/shell`](../../crates/spiral-robotics-frontend/src/shell/)
 - Route-level composition:
-  [`frontend/screens`](../../crates/spiral-robotics-studio/src/frontend/screens/)
+  [`frontend/activities`](../../crates/spiral-robotics-frontend/src/activities/)
 - Scene, camera, and Timeline panels:
-  [`frontend/panels`](../../crates/spiral-robotics-studio/src/frontend/panels/)
+  [`frontend/panels`](../../crates/spiral-robotics-frontend/src/panels/)
 - Panel layout model:
   [`dioxus-workbench`](https://github.com/XiangpengHao/dioxus-workbench) (external crate)
 - Shared interaction primitives:
-  [`spiral-robotics-ui`](../../crates/spiral-robotics-ui/)
-- Framework-neutral application use cases:
-  [`spiral-robotics-studio-application`](../../crates/spiral-robotics-studio-application/)
+  [`frontend interaction components`](../../crates/spiral-robotics-frontend/src/components/interaction/)
+- Backend capability policy and orchestration:
+  [`spiral-robotics-backend`](../../crates/spiral-robotics-backend/src/)
 - Physical I/O, fixed-rate motor control, and its recording port:
   [`spiral-robotics-hardware`](../../crates/spiral-robotics-hardware/)
-- HTTP, camera, persistence, and runtime adapters:
-  [`spiral-robotics-studio-backend`](../../crates/spiral-robotics-studio-backend/)
+- HTTP and compute-runtime adapters:
+  [`spiral-robotics-backend`](../../crates/spiral-robotics-backend/)
+- ADBC, schemas, SQL, ingestion, and project transfer:
+  [`spiral-robotics-storage`](../../crates/spiral-robotics-storage/)
 - URDF and rendering:
   [`spiral-robotics-viewport`](../../crates/spiral-robotics-viewport/)
 
@@ -215,5 +224,5 @@ Approved screenshots for this feature belong in [`assets/`](assets/README.md).
 
 - **STUDIO-057** is not implemented: the code's activity rail leads with Live
   and `Activity::default()` is Live
-  ([`frontend/app/activity.rs`](../../crates/spiral-robotics-studio/src/frontend/app/activity.rs)).
+  ([`frontend/shell/activity.rs`](../../crates/spiral-robotics-frontend/src/shell/activity.rs)).
   Reordering to Data-first is part of the data-core rearrangement.

@@ -98,11 +98,11 @@ external scripts. Requirements will be added when this feature is designed.
 
 ## Implementation ownership
 
-- Data screen:
-  [`frontend/screens/data`](../../crates/spiral-robotics-studio/src/frontend/screens/data/)
-- Episode import/export and the shared repository:
-  [`backend/storage`](../../crates/spiral-robotics-studio-backend/src/backend/storage/)
+- Data activity:
+  [`frontend/activities/data`](../../crates/spiral-robotics-frontend/src/activities/data/)
+- Episode import/export and the shared project store:
+  [`spiral-robotics-storage`](../../crates/spiral-robotics-storage/src/)
 - Dataset and episode use cases:
-  [`spiral-robotics-studio-application`](../../crates/spiral-robotics-studio-application/src/)
+  [`backend/data`](../../crates/spiral-robotics-backend/src/data/)
 - Stable relation names:
-  [`spiral-robotics-contracts/src/spiral.rs`](../../crates/spiral-robotics-contracts/src/spiral.rs)
+  [`spiral-robotics-storage/src/schema.rs`](../../crates/spiral-robotics-storage/src/schema.rs)

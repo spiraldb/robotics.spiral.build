@@ -2,12 +2,12 @@
 
 ## Outcome
 
-SpiralDB provides one durable relational model for the complete application.
+SpiralDB provides one durable relational model for Studio product data.
 The product does not reconcile a second local source of truth.
 
 ## Durable ownership
 
-- **PERSIST-001** SpiralDB must be the only durable application data store.
+- **PERSIST-001** SpiralDB must be the only durable Studio product-data store.
 - **PERSIST-002** Projects must own robots, datasets, training runs, and rollout
   runs.
 - **PERSIST-003** Datasets must own episodes.
@@ -18,8 +18,8 @@ The product does not reconcile a second local source of truth.
   calibrations must be durable relations.
 - **PERSIST-008** The production system must not treat a local robot workspace
   or episode directory as another source of truth.
-- **PERSIST-009** The system must not use a durable local spool or application
-  data buffer when SpiralDB is unavailable.
+- **PERSIST-009** The system must not use a durable local spool or buffer for
+  product data when SpiralDB is unavailable.
 - **PERSIST-010** Browser panel layouts must remain session state; Studio must
   not create a second durable browser store for them.
 - **PERSIST-011** Studio must not use a persistent local cache for project data
@@ -30,7 +30,7 @@ The product does not reconcile a second local source of truth.
 - **PERSIST-013** Studio must start when no Spiral project is selected. Settings
   must let the operator configure both the Spiral control-plane API endpoint
   and the SpFS endpoint, then select and test the active project. Project
-  switches must drain repository work, discard stale pooled connections, and
+  switches must drain project-store work, discard stale pooled connections, and
   be refused while recording, replay, rollout, training, active motor control,
   or a catalog-visible robot connection is active. When the old catalog is
   unavailable, idle released hardware connections that cannot be represented
@@ -151,7 +151,7 @@ flowchart TD
 - **PERSIST-036** `.spiral-project` and `.spiral-episodes` must have distinct
   format identities and must not be accepted by the other's import path.
 - **PERSIST-037** The synchronous ADBC API must remain private to the shared
-  Spiral repository adapter. During active co-development, the Studio backend
+  Spiral project-store adapter. During active co-development, the Studio backend
   must link the native `adbc-driver-spiraldb` Rust crate from SpiralDB's
   `develop` branch through Cargo's Git source at the revision pinned by
   `Cargo.lock`. Standard CI must use selected-package dependency resolution to
@@ -161,7 +161,7 @@ flowchart TD
   directly; it must not accept a driver-library
   path, use an ADBC driver manager, or load the Spiral driver
   dynamically. For each active project, the adapter must own one native
-  database/engine runtime, expose only repository-owned connection and
+  database/engine runtime, expose only project-store-owned connection and
   statement operations, run asynchronous calls on bounded blocking workers,
   and apply the same fixed connection limit to ordinary, long-lived,
   exclusive, invalidating, and synchronous-worker checkouts. No domain or
@@ -169,7 +169,7 @@ flowchart TD
   Non-Rust workers may continue to use the language-neutral ADBC shared library.
 - **PERSIST-038** After the HTTP listener binds, Studio must prewarm the active
   project's authenticated catalog through the same shared ADBC pool used by
-  ordinary repository work. Only after that succeeds may it hydrate
+  ordinary project-store work. Only after that succeeds may it hydrate
   project-owned preferences and run history, and those independent loads must
   run concurrently on bounded blocking workers rather than delaying listener
   startup or occupying async executor threads.
@@ -208,8 +208,8 @@ flowchart TD
 ## Testability
 
 - **PERSIST-TEST-001** Persistent adapters must converge on one shared
-  `SpiralRepository`; ADBC is the physical persistence boundary.
-- **PERSIST-TEST-002** Pure application-policy tests may use capability fakes,
+  `ProjectStore`; ADBC is the physical persistence boundary.
+- **PERSIST-TEST-002** Pure backend-capability tests may use capability fakes,
   but Studio must not ship a simulated persistence backend or an in-memory
   ADBC destination mode.
 - **PERSIST-TEST-003** SpiralDB integration tests must use the real adapter for
@@ -230,19 +230,19 @@ flowchart TD
   episodes survive and imported rows are retargeted, and prove a repeated
   import is refused rather than overwriting an episode.
 - **PERSIST-TEST-006** Architecture tests must prove that raw ADBC types occur
-  only in the shared repository adapter, that Studio uses the native SpiralDB
-  driver crate rather than the driver manager, and that every repository
+  only in the storage crate's ADBC adapter, that Studio uses the native SpiralDB
+  driver crate rather than the driver manager, and that every project-store
   checkout mode consumes its one capacity gate. A concurrency test must prove
   a synchronous worker waits while the same gate is occupied asynchronously.
 
 ## Implementation ownership
 
 - Stable relation names:
-  [`spiral-robotics-contracts/src/spiral.rs`](../../crates/spiral-robotics-contracts/src/spiral.rs)
-- Shared ADBC repository, query, and transfer formats:
-  [`backend/storage`](../../crates/spiral-robotics-studio-backend/src/backend/storage/)
+  [`spiral-robotics-storage/src/schema.rs`](../../crates/spiral-robotics-storage/src/schema.rs)
+- Shared ADBC project store, queries, ingestion, and transfer formats:
+  [`spiral-robotics-storage`](../../crates/spiral-robotics-storage/src/)
 - Episode relation encoding:
-  [`backend/recording/spiral.rs`](../../crates/spiral-robotics-studio-backend/src/backend/recording/spiral.rs)
+  [`spiral-robotics-storage/src/episode_schema.rs`](../../crates/spiral-robotics-storage/src/episode_schema.rs)
 
 ## Current gap
 

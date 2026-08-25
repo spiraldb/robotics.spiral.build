@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 fn core_exposes_only_domain_modules_and_has_no_outward_dependencies() {
     let manifest = include_str!("../Cargo.toml");
     for forbidden in [
-        "spiral-robotics-contracts",
+        "spiral-robotics-api",
         "axum",
         "dioxus",
         "tokio",
@@ -51,6 +51,7 @@ fn core_exposes_only_domain_modules_and_has_no_outward_dependencies() {
             "arm",
             "calibration",
             "episode",
+            "error",
             "identity",
             "operation",
             "query",
@@ -65,6 +66,7 @@ fn every_core_source_is_free_of_delivery_frameworks_and_ambient_io() {
         ("arm.rs", include_str!("../src/arm.rs")),
         ("calibration.rs", include_str!("../src/calibration.rs")),
         ("episode.rs", include_str!("../src/episode.rs")),
+        ("error.rs", include_str!("../src/error.rs")),
         ("identity.rs", include_str!("../src/identity.rs")),
         ("lib.rs", include_str!("../src/lib.rs")),
         ("operation.rs", include_str!("../src/operation.rs")),
@@ -94,7 +96,7 @@ fn every_core_source_is_free_of_delivery_frameworks_and_ambient_io() {
             "std::fs",
             "std::net",
             "std::process",
-            "spiral_robotics_contracts",
+            "spiral_robotics_api",
             "glam::",
             "roxmltree::",
         ] {

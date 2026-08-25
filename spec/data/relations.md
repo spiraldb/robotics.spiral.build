@@ -51,12 +51,12 @@ plumbing.
 ## Implementation ownership
 
 - Shared response contract:
-  [`spiral-robotics-contracts/src/api.rs`](../../crates/spiral-robotics-contracts/src/api.rs)
+  [`spiral-robotics-api/src/api.rs`](../../crates/spiral-robotics-api/src/api.rs)
 - Catalog filtering, schemas, and counts:
-  [`backend/storage/manager.rs`](../../crates/spiral-robotics-studio-backend/src/backend/storage/manager.rs)
+  [`storage/manager.rs`](../../crates/spiral-robotics-storage/src/manager.rs)
 - Data HTTP route:
-  [`backend/http/routes/data.rs`](../../crates/spiral-robotics-studio-backend/src/backend/http/routes/data.rs)
+  [`backend/http/routes/data.rs`](../../crates/spiral-robotics-backend/src/http/routes/data.rs)
 - Relations panel and relationship projection:
-  [`frontend/screens/data/relations.rs`](../../crates/spiral-robotics-studio/src/frontend/screens/data/relations.rs)
+  [`frontend/activities/data/relations.rs`](../../crates/spiral-robotics-frontend/src/activities/data/relations.rs)
 - Data workspace registration:
-  [`frontend/screens/data/screen.rs`](../../crates/spiral-robotics-studio/src/frontend/screens/data/screen.rs)
+  [`frontend/activities/data/screen.rs`](../../crates/spiral-robotics-frontend/src/activities/data/screen.rs)
