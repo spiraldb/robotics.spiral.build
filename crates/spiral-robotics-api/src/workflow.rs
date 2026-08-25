@@ -944,11 +944,6 @@ pub enum WorkflowNodePhase {
     Unsupported,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct WorkflowUpdate {
-    state: WorkflowStateResponse,
-}
-
 /// Public, secret-free readiness for the backend-owned Workflow agent.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkflowAgentReadiness {
@@ -2172,15 +2167,6 @@ impl WorkflowStateResponse {
     }
 }
 
-impl WorkflowUpdate {
-    pub const fn new(state: WorkflowStateResponse) -> Self {
-        Self { state }
-    }
-
-    pub const fn state(&self) -> &WorkflowStateResponse {
-        &self.state
-    }
-}
 impl WorkflowNodeProgress {
     pub const fn completed(&self) -> u64 {
         self.completed
@@ -2652,7 +2638,7 @@ mod tests {
     }
 
     #[test]
-    fn api_state_and_sse_update_round_trip_as_one_authoritative_shape() {
+    fn api_state_and_sse_events_share_one_authoritative_shape() {
         let workflow = runnable_spec();
         let state = WorkflowStateResponse {
             scope_id: "workflow-scope-1".to_owned(),
@@ -2660,21 +2646,13 @@ mod tests {
             snapshot: WorkflowRunSnapshot::idle_for(&workflow),
             workflow,
         };
-        let json = serde_json::to_value(WorkflowUpdate {
-            state: state.clone(),
-        })
-        .unwrap();
-        assert_eq!(json["state"]["workflow"]["id"], DEFAULT_WORKFLOW_ID);
-        assert_eq!(json["state"]["scope_id"], "workflow-scope-1");
-        assert_eq!(json["state"]["snapshot"]["phase"], "idle");
-        assert!(
-            json["state"]["validation"]["errors"]
-                .as_array()
-                .unwrap()
-                .is_empty()
-        );
-        let decoded: WorkflowUpdate = serde_json::from_value(json).unwrap();
-        assert_eq!(decoded.state, state);
+        let json = serde_json::to_value(&state).unwrap();
+        assert_eq!(json["workflow"]["id"], DEFAULT_WORKFLOW_ID);
+        assert_eq!(json["scope_id"], "workflow-scope-1");
+        assert_eq!(json["snapshot"]["phase"], "idle");
+        assert!(json["validation"]["errors"].as_array().unwrap().is_empty());
+        let decoded: WorkflowStateResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded, state);
     }
 
     #[test]

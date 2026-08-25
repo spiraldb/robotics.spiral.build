@@ -345,10 +345,7 @@ impl Studio {
                         StudioEvent::TrainingSnapshot(value) => training.set(*value),
                         StudioEvent::TrainingUpdate(update) => training.write().apply(*update),
                         StudioEvent::Rollout(value) => rollout.set(*value),
-                        StudioEvent::WorkflowSnapshot(value) => workflow_state.set(Some(*value)),
-                        StudioEvent::WorkflowUpdate(update) => {
-                            workflow_state.set(Some(update.state().clone()));
-                        }
+                        StudioEvent::WorkflowState(value) => workflow_state.set(Some(*value)),
                         StudioEvent::WorkflowAgent(value) => {
                             // The backend treats its broadcast values as
                             // wakeups and emits the latest authoritative agent

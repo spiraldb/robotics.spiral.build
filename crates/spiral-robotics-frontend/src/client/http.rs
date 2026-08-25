@@ -28,9 +28,7 @@ use spiral_robotics_api::status::StudioSnapshot;
 #[cfg(all(feature = "web", target_arch = "wasm32"))]
 use spiral_robotics_api::training::{TrainingSnapshot, TrainingUpdate};
 #[cfg(all(feature = "web", target_arch = "wasm32"))]
-use spiral_robotics_api::workflow::{
-    WorkflowAgentStateResponse, WorkflowStateResponse, WorkflowUpdate,
-};
+use spiral_robotics_api::workflow::{WorkflowAgentStateResponse, WorkflowStateResponse};
 
 pub(crate) struct Http;
 
@@ -434,8 +432,7 @@ pub(crate) enum StudioEvent {
     TrainingSnapshot(Box<TrainingSnapshot>),
     TrainingUpdate(Box<TrainingUpdate>),
     Rollout(Box<RolloutSnapshot>),
-    WorkflowSnapshot(Box<WorkflowStateResponse>),
-    WorkflowUpdate(Box<WorkflowUpdate>),
+    WorkflowState(Box<WorkflowStateResponse>),
     WorkflowAgent(Box<WorkflowAgentStateResponse>),
 }
 
@@ -517,14 +514,9 @@ impl Http {
                         on_event(StudioEvent::Rollout(Box::new(snapshot)));
                     }
                 }
-                "workflow_snapshot" => {
-                    if let Ok(snapshot) = serde_json::from_str(&text) {
-                        on_event(StudioEvent::WorkflowSnapshot(Box::new(snapshot)));
-                    }
-                }
-                "workflow_update" => {
-                    if let Ok(update) = serde_json::from_str(&text) {
-                        on_event(StudioEvent::WorkflowUpdate(Box::new(update)));
+                "workflow_snapshot" | "workflow_update" => {
+                    if let Ok(state) = serde_json::from_str(&text) {
+                        on_event(StudioEvent::WorkflowState(Box::new(state)));
                     }
                 }
                 "workflow_agent" => {

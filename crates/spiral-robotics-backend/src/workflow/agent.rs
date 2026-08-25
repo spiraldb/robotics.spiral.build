@@ -1817,7 +1817,7 @@ impl WorkflowAgentManager {
                 return Ok(state.snapshot().clone());
             }
             state = tokio::select! {
-                update = updates.recv() => update.map_err(|_| "Workflow updates stopped while waiting.".to_owned())?.state().clone(),
+                update = updates.recv() => update.map_err(|_| "Workflow updates stopped while waiting.".to_owned())?,
                 () = tokio::time::sleep(std::time::Duration::from_millis(100)) => continue,
             };
         }

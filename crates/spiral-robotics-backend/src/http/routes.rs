@@ -817,10 +817,9 @@ impl AppState {
                                     continue;
                                 }
                                 last_workflow = snapshot.clone();
-                                let update = spiral_robotics_api::workflow::WorkflowUpdate::new(snapshot);
                                 if let Ok(event) = Event::default()
                                     .event("workflow_update")
-                                    .json_data(&update)
+                                    .json_data(&snapshot)
                                 {
                                     yield Ok(event);
                                 }

@@ -18,7 +18,7 @@ use spiral_robotics_api::workflow::{
     WorkflowDocument, WorkflowNodeArtifacts, WorkflowNodeConfig, WorkflowNodeOutcome,
     WorkflowNodePhase, WorkflowNodeSnapshot, WorkflowNodeStatus, WorkflowQuarantineSummary,
     WorkflowRunExecution, WorkflowRunIdentity, WorkflowRunPhase, WorkflowRunSnapshot,
-    WorkflowRunTiming, WorkflowSpec, WorkflowStateResponse, WorkflowUpdate,
+    WorkflowRunTiming, WorkflowSpec, WorkflowStateResponse,
 };
 use spiral_robotics_core::OperationError;
 use spiral_robotics_core::workflow::{QualifiedRelation, WorkflowSql};
@@ -38,7 +38,7 @@ struct WorkflowManagerInner {
     storage: Arc<StorageManager>,
     identity: WorkflowIdentity,
     document: Mutex<WorkflowDocument>,
-    updates: broadcast::Sender<WorkflowUpdate>,
+    updates: broadcast::Sender<WorkflowStateResponse>,
     active: Mutex<Option<ActiveRun>>,
     terminal_persistence_error: Mutex<Option<TerminalPersistenceError>>,
     #[cfg(test)]
@@ -295,8 +295,7 @@ impl WorkflowManager {
         *self.inner.document.recover_lock() = document;
         self.inner.identity.advance_scope();
         *self.inner.terminal_persistence_error.recover_lock() = None;
-        let update = WorkflowUpdate::new(self.state());
-        let _ = self.inner.updates.send(update);
+        let _ = self.inner.updates.send(self.state());
         Ok(())
     }
 
@@ -365,7 +364,10 @@ impl WorkflowManager {
 
     pub(crate) fn subscription(
         &self,
-    ) -> (WorkflowStateResponse, broadcast::Receiver<WorkflowUpdate>) {
+    ) -> (
+        WorkflowStateResponse,
+        broadcast::Receiver<WorkflowStateResponse>,
+    ) {
         let document = self.inner.document.recover_lock();
         let updates = self.inner.updates.subscribe();
         (self.state_response(&document), updates)
@@ -423,10 +425,7 @@ impl WorkflowManager {
             .map_err(OperationError::External)?;
         *current = candidate;
         let response = self.state_response(&current);
-        let _ = self
-            .inner
-            .updates
-            .send(WorkflowUpdate::new(response.clone()));
+        let _ = self.inner.updates.send(response.clone());
         Ok(response)
     }
 
@@ -466,10 +465,7 @@ impl WorkflowManager {
             task: None,
             terminal_persistence_failed: false,
         });
-        let _ = self
-            .inner
-            .updates
-            .send(WorkflowUpdate::new(self.state_response(&document)));
+        let _ = self.inner.updates.send(self.state_response(&document));
         drop(document);
         drop(active);
 
@@ -549,10 +545,7 @@ impl WorkflowManager {
             .map_err(OperationError::External)?;
         *document = candidate;
         let snapshot = document.snapshot().clone();
-        let _ = self
-            .inner
-            .updates
-            .send(WorkflowUpdate::new(self.state_response(&document)));
+        let _ = self.inner.updates.send(self.state_response(&document));
         drop(document);
         drop(_publication);
         drop(active);
@@ -894,10 +887,7 @@ impl WorkflowManager {
         if phase_changed || materialization_invalidated {
             self.persist_publish(&document);
         } else {
-            let _ = self
-                .inner
-                .updates
-                .send(WorkflowUpdate::new(self.state_response(&document)));
+            let _ = self.inner.updates.send(self.state_response(&document));
         }
     }
 
@@ -1187,10 +1177,7 @@ impl WorkflowManager {
         if let Err(error) = self.save_document(document) {
             tracing::error!(%error, "persisting Workflow snapshot");
         }
-        let _ = self
-            .inner
-            .updates
-            .send(WorkflowUpdate::new(self.state_response(document)));
+        let _ = self.inner.updates.send(self.state_response(document));
     }
 
     fn save_document(&self, document: &WorkflowDocument) -> Result<(), String> {
@@ -1225,18 +1212,12 @@ impl WorkflowManager {
             run_id: run_id.to_owned(),
             detail,
         });
-        let _ = self
-            .inner
-            .updates
-            .send(WorkflowUpdate::new(self.state_response(document)));
+        let _ = self.inner.updates.send(self.state_response(document));
     }
 
     fn publish_committed_terminal(&self, document: &WorkflowDocument) {
         *self.inner.terminal_persistence_error.recover_lock() = None;
-        let _ = self
-            .inner
-            .updates
-            .send(WorkflowUpdate::new(self.state_response(document)));
+        let _ = self.inner.updates.send(self.state_response(document));
     }
 
     fn state_response(&self, document: &WorkflowDocument) -> WorkflowStateResponse {
@@ -1691,10 +1672,7 @@ mod tests {
         let published = updates
             .try_recv()
             .expect("the recovery state must be published");
-        assert_eq!(
-            published.state().snapshot().phase(),
-            WorkflowRunPhase::Running
-        );
+        assert_eq!(published.snapshot().phase(), WorkflowRunPhase::Running);
 
         manager
             .inner
