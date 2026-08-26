@@ -77,7 +77,7 @@ impl Default for StudioConfiguration {
 
 impl StudioConfiguration {
     pub(crate) fn current() -> Self {
-        use_context::<Signal<Self>>()()
+        use_context::<Memo<Self>>()()
     }
 
     pub(crate) fn dataset(&self) -> &str {
@@ -115,28 +115,26 @@ fn StudioShell() -> Element {
         .as_ref()
         .and_then(|result| result.as_ref().err())
         .cloned();
-    let configuration = StudioConfiguration {
-        dataset: loaded_settings
-            .as_ref()
-            .map(|settings| settings.spiral().namespace().to_owned())
-            .filter(|dataset| !dataset.trim().is_empty())
-            .unwrap_or_else(|| "spiral_robotics".to_owned()),
-        spiral_query_available: loaded_settings
-            .as_ref()
-            .is_some_and(|settings| !settings.spiral().project_id().trim().is_empty()),
-    };
-    let mut configuration_signal = use_signal(StudioConfiguration::default);
-    use_context_provider(|| configuration_signal);
-    use_effect(use_reactive((&configuration,), move |(next,)| {
-        if *configuration_signal.peek() != next {
-            configuration_signal.set(next);
+    let configuration = use_memo(use_reactive((&loaded_settings,), move |(settings,)| {
+        StudioConfiguration {
+            dataset: settings
+                .as_ref()
+                .map(|settings| settings.spiral().namespace().to_owned())
+                .filter(|dataset| !dataset.trim().is_empty())
+                .unwrap_or_else(|| "spiral_robotics".to_owned()),
+            spiral_query_available: settings
+                .as_ref()
+                .is_some_and(|settings| !settings.spiral().project_id().trim().is_empty()),
         }
     }));
+    use_context_provider(|| configuration);
+    let configuration_value = configuration();
 
     let selected_dataset = studio.selected_dataset().read().to_owned();
-    let data = use_data_controller(&configuration.dataset, &selected_dataset);
-    use_workflow_controller();
-    use_training_controller(&configuration.dataset, &selected_dataset);
+    let data = use_data_controller(&configuration_value.dataset, &selected_dataset);
+    let workflow = use_workflow_controller();
+    studio.use_event_stream(workflow);
+    use_training_controller(&configuration_value.dataset, &selected_dataset);
     use_rollout_controller();
     let timeline = use_timeline_controller();
     let settings_open = shell.settings_open();

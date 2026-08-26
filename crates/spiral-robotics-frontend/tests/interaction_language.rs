@@ -98,6 +98,10 @@ fn episode_catalog_and_full_data_belong_to_the_data_controller() {
         .expect("Studio state source should be readable");
     let episodes = fs::read_to_string(frontend.join("src/activities/data/workbench.rs"))
         .expect("Episodes panel source should be readable");
+    let workspace = fs::read_to_string(frontend.join("src/shell/workspace.rs"))
+        .expect("Episode workspace source should be readable");
+    let preview = fs::read_to_string(frontend.join("src/client/episode_data.rs"))
+        .expect("Episode preview source should be readable");
 
     for ownership in [
         "episode_catalog: Signal<EpisodeCatalogState>",
@@ -123,6 +127,32 @@ fn episode_catalog_and_full_data_belong_to_the_data_controller() {
         episodes.contains("if !data.episodes_loaded() && !data.episodes_loading()"),
         "the episode catalog must load when the Episodes panel mounts",
     );
+    assert!(
+        workspace.contains("match data.selected_episode_data()"),
+        "Data renderers must derive directly from the selected resource",
+    );
+    assert!(
+        !preview.contains("data: Option<DataController>") && !preview.contains("with_data"),
+        "the non-Data preview cache must not mirror DataController results",
+    );
+}
+
+#[test]
+fn workflow_backend_state_has_one_frontend_owner() {
+    let frontend = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let studio = fs::read_to_string(frontend.join("src/shell/state.rs"))
+        .expect("Studio state source should be readable");
+    let workflow = fs::read_to_string(frontend.join("src/activities/workflow/state.rs"))
+        .expect("Workflow controller source should be readable");
+    let frame = fs::read_to_string(frontend.join("src/shell/frame.rs"))
+        .expect("Status bar source should be readable");
+
+    assert!(!studio.contains("workflow_state: Signal"));
+    assert!(!studio.contains("workflow_agent_state: Signal"));
+    assert!(studio.contains("workflow.accept_streamed_state"));
+    assert!(studio.contains("workflow.accept_streamed_agent"));
+    assert!(workflow.contains("pub(crate) fn accepted_state"));
+    assert!(frame.contains("workflow_controller().accepted_state()"));
 }
 
 #[test]

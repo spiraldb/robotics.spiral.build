@@ -22,13 +22,15 @@ mod urdf;
 pub use arm::{ArmPose, Joint, SO101_JOINTS};
 pub use gesture::Command;
 pub use pick::{Viewport, ViewportError};
-pub use robot::{Frame, FrameError, Target};
+pub use robot::{ArmPresentation, CameraAttachment, CameraMount, Frame, FrameError, Target};
 pub use scene::{Condition, Interaction};
 
-/// Where the SO-101 tool tip sits for a display pose, in millimetres from the
-/// arm base.
-pub fn tool_position(pose: &ArmPose) -> Option<[f32; 3]> {
-    urdf::so101()
-        .so101_tool_position(pose)
-        .map(|position| position.to_array())
+impl ArmPose {
+    /// Where the SO-101 tool tip sits for this display pose, in millimetres
+    /// from the arm base.
+    pub fn tool_position(&self) -> Option<[f32; 3]> {
+        urdf::Urdf::so101()
+            .so101_tool_position(self)
+            .map(|position| position.to_array())
+    }
 }

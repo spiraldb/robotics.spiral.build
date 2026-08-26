@@ -435,6 +435,10 @@ impl ProjectStore {
             .to_owned()
     }
 
+    pub(crate) fn connection_settings(&self) -> SpiralConnectionSettings {
+        self.connection_settings.read_unpoisoned().clone()
+    }
+
     pub(crate) fn endpoint(&self) -> String {
         self.connection_settings
             .read_unpoisoned()
@@ -490,19 +494,15 @@ impl ProjectStore {
         Ok(())
     }
 
-    /// Atomically switch the complete per-database destination. Active work is
-    /// drained before the old pool is discarded; the next checkout opens a
-    /// database with the new scoped endpoint and credential options.
+    /// Atomically replace the complete per-database destination. Active work
+    /// is drained before the old pool is discarded; the next checkout opens a
+    /// database with the new scoped endpoint and credential options. An
+    /// unconfigured value is accepted so a failed first-time setup can restore
+    /// the bootstrap state exactly.
     pub(crate) fn configure_connection(
         &self,
         connection_settings: SpiralConnectionSettings,
     ) -> Result<(), String> {
-        if connection_settings.project_id().is_none() {
-            return Err(
-                "Spiral project is not configured. Choose a project in Settings → SpiralDB."
-                    .to_owned(),
-            );
-        }
         let _operation = self.operation_gate.write_unpoisoned();
         *self.connection_settings.write_unpoisoned() = connection_settings;
         self.hosted.lock_unpoisoned().reset();
@@ -708,6 +708,23 @@ mod tests {
         project_store.configure_project(" project-123 ").unwrap();
         assert!(project_store.is_configured());
         assert_eq!(project_store.project_id(), "project-123");
+    }
+
+    #[test]
+    fn complete_connection_replacement_can_restore_unconfigured_bootstrap_state() {
+        let unconfigured = SpiralConnectionSettings::new(
+            "https://api.spiraldb.dev".to_owned(),
+            "https://spfs.spiraldb.dev".to_owned(),
+        )
+        .unwrap();
+        let project_store =
+            ProjectStore::new(unconfigured.clone(), "spiral_robotics".to_owned()).unwrap();
+        let configured = unconfigured.clone().with_project("project-123").unwrap();
+
+        project_store.configure_connection(configured).unwrap();
+        assert!(project_store.is_configured());
+        project_store.configure_connection(unconfigured).unwrap();
+        assert!(!project_store.is_configured());
     }
 
     #[test]

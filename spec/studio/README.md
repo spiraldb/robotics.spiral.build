@@ -41,6 +41,19 @@ allowing visualization panels to be arranged spatially.
   and problems.
 - **STUDIO-008** Recoverable results and errors must use one notification center
   connected to the status bar.
+- **STUDIO-071** Feature state must have one authoritative frontend owner at
+  the narrowest lifetime that still survives its operations. The shared event
+  stream must route Workflow and Assistant snapshots directly into the
+  shell-lived `WorkflowController`; Studio shell state must not retain a second
+  copy, and the status bar must read a controller projection. Values derived
+  from a Dioxus resource, including stable Studio configuration, must remain
+  derived rather than being synchronized into another writable signal.
+- **STUDIO-072** One backend Spiral connection controller must own the active
+  endpoint, SpFS endpoint, project, and credentials plus their durable
+  bootstrap update. It must perform destination replacement, preference save,
+  and project-scoped Training, Rollout, Workflow, and Assistant reload as one
+  explicit transition. HTTP adapters submit the settings command and must not
+  merge or independently mutate multiple connection copies.
 
 ## Panel workspace
 

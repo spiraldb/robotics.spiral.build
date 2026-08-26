@@ -3,8 +3,8 @@ use std::fmt::Debug;
 use std::hash::Hash;
 
 use spiral_robotics_viewport::{
-    ArmPose, Command, Condition, Frame, FrameError, Interaction, Joint, Target, ViewportError,
-    tool_position,
+    ArmPose, ArmPresentation, CameraAttachment, CameraMount, Command, Condition, Frame, FrameError,
+    Interaction, Joint, Target, ViewportError,
 };
 
 #[test]
@@ -23,15 +23,18 @@ fn a_caller_can_compose_one_valid_frame_without_renderer_types() {
     let mut frame = Frame::new(true);
 
     frame
-        .add_arm("follower", [0.29, 0.56, 0.85, 1.0], Some(pose))
+        .add_arm(
+            "follower",
+            ArmPresentation::new([0.29, 0.56, 0.85, 1.0], Some(pose)),
+        )
         .unwrap()
         .mount_camera(
             "follower",
-            "wrist",
-            Some("wrist_link"),
-            [0.0, 0.0, 0.04],
-            [0.0, 0.0, 0.0],
-            62.0,
+            CameraMount::new(
+                "wrist",
+                CameraAttachment::new(Some("wrist_link"), [0.0, 0.0, 0.04], [0.0, 0.0, 0.0]),
+                62.0,
+            ),
         )
         .unwrap();
 
@@ -39,7 +42,10 @@ fn a_caller_can_compose_one_valid_frame_without_renderer_types() {
     assert!(frame.set_condition(elbow, Condition::Caution));
     assert_eq!(pose.degrees(Joint::ShoulderPan), Some(12.0));
     assert_eq!(pose.gripper_opening(), 0.75);
-    assert!(tool_position(&pose).is_some_and(|position| position.into_iter().all(f32::is_finite)));
+    assert!(
+        pose.tool_position()
+            .is_some_and(|position| position.into_iter().all(f32::is_finite))
+    );
 }
 
 #[test]

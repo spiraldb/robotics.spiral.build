@@ -293,7 +293,9 @@ impl TimelineActionContext {
             {
                 controller.stop_preview();
                 playhead.set(request.seconds());
-                if let Some(episode) = review_episode.clone() {
+                if subject.activity() != Activity::Data
+                    && let Some(episode) = review_episode.clone()
+                {
                     let target = (episode.clone(), request.seconds().replay_slot());
                     if request.committed()
                         || interactive_preview_target.peek().as_ref() != Some(&target)
@@ -305,8 +307,7 @@ impl TimelineActionContext {
                                 episode_preview_state,
                                 episode_preview_revision,
                                 episode_data_cache,
-                            )
-                            .with_data(data),
+                            ),
                         );
                     }
                 }
@@ -350,15 +351,16 @@ impl TimelineActionContext {
                 episode_preview_state.set(None);
                 episode_data_cache.write().invalidate(&episode);
                 data.reload_selected_episode_data(&episode);
-                studio.request_episode_preview(
-                    EpisodePreviewRequest::new(episode, None, playhead()),
-                    EpisodePreviewSignals::new(
-                        episode_preview_state,
-                        episode_preview_revision,
-                        episode_data_cache,
-                    )
-                    .with_data(data),
-                );
+                if subject.activity() != Activity::Data {
+                    studio.request_episode_preview(
+                        EpisodePreviewRequest::new(episode, None, playhead()),
+                        EpisodePreviewSignals::new(
+                            episode_preview_state,
+                            episode_preview_revision,
+                            episode_data_cache,
+                        ),
+                    );
+                }
             }
             _ => studio.report("The Timeline subject changed before the action was applied."),
         }

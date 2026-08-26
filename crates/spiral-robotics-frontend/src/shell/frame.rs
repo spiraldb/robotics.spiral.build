@@ -6,6 +6,7 @@ use spiral_robotics_api::status::BackendReadinessState;
 use spiral_robotics_api::workflow::{WorkflowRunPhase, WorkflowStateResponse};
 
 use crate::activities::data::workbench::EpisodeIdPresentation;
+use crate::activities::workflow::state::workflow_controller;
 use crate::components::icons::{
     DataIcon, NotificationIcon, RobotPanelIcon, RolloutIcon, SettingsIcon, TrainingIcon,
     WorkflowIcon,
@@ -108,7 +109,7 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
     let snapshot = studio.snapshot().read().to_owned();
     let telemetry = studio.telemetry().read().to_owned();
     let training = studio.training().read().to_owned();
-    let workflow = studio.workflow_state().read().to_owned();
+    let workflow = workflow_controller().accepted_state();
     let connected = studio.controls_available();
     let backend_connected = (studio.live())();
     let (service_label, service_style) = if !backend_connected {

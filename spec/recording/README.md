@@ -59,6 +59,11 @@ built-in producer for the data core; external data enters through
 - **RECORD-020** Persistence must not depend on an open browser session.
 - **RECORD-021** Pausing must checkpoint accepted joint samples and completed
   camera segments directly to SpiralDB so paused inspection is deterministic.
+- **RECORD-022** One backend recording-session manager must own the catalog
+  reservation, episode identity, opening/recording/finalizing phase, and
+  optional camera capture through durable commit. Hardware remains the sole
+  authority for physical sampling and motor state; the catalog lease and HTTP
+  application state must not carry independent recording-session copies.
 
 The durable write behavior is defined by [Data persistence](../data/persistence.md).
 Recorded inspection is defined by
@@ -68,6 +73,8 @@ Recorded inspection is defined by
 
 - Recording use case:
   [`spiral-robotics-backend/src/recording.rs`](../../crates/spiral-robotics-backend/src/recording.rs)
+- Recording session lifecycle:
+  [`spiral-robotics-backend/src/recording_session.rs`](../../crates/spiral-robotics-backend/src/recording_session.rs)
 - Hardware capture:
   [`spiral-robotics-hardware`](../../crates/spiral-robotics-hardware/)
   Hardware receives only a durable completion token after storage commits; it

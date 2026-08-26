@@ -210,7 +210,7 @@ pub(crate) fn Viewport(
             let ratio = web_sys::window().map_or(1.0, |window| window.device_pixel_ratio());
             bench.draw(&frame, ratio);
             condition_marks.set(if draw_source.is_live() {
-                marks_for(bench, &conditions)
+                bench.marks_for(&conditions)
             } else {
                 Vec::new()
             });
@@ -283,7 +283,7 @@ pub(crate) fn Viewport(
                             if let Ok(mut slot) = bench.try_borrow_mut()
                                 && slot.as_mut().is_some_and(|bench| bench.drag_to(position))
                             {
-                                bump(&mut view_revision);
+                                view_revision.bump();
                             }
                             return;
                         }
@@ -351,7 +351,7 @@ pub(crate) fn Viewport(
                             && let Some(bench) = slot.as_mut()
                         {
                             bench.command(Command::Wheel(notches));
-                            bump(&mut view_revision);
+                            view_revision.bump();
                         }
                     }
                 },
@@ -376,7 +376,7 @@ pub(crate) fn Viewport(
                                 && let Some(bench) = slot.as_mut()
                                 && bench.frame_robot(robot.as_deref())
                             {
-                                bump(&mut view_revision);
+                                view_revision.bump();
                             }
                             None
                         }
@@ -387,7 +387,7 @@ pub(crate) fn Viewport(
                             && let Some(bench) = slot.as_mut()
                         {
                             bench.command(command);
-                            bump(&mut view_revision);
+                            view_revision.bump();
                         }
                     }
                 },
@@ -458,7 +458,7 @@ pub(crate) fn Viewport(
                                     && let Some(bench) = slot.as_mut()
                                 {
                                     bench.command(Command::Home);
-                                    bump(&mut view_revision);
+                                    view_revision.bump();
                                 }
                             }
                         },
@@ -474,7 +474,7 @@ pub(crate) fn Viewport(
                                 && let Some(bench) = slot.as_mut()
                             {
                                 bench.command(command);
-                                bump(&mut view_revision);
+                                view_revision.bump();
                             }
                         }
                     }
@@ -585,13 +585,12 @@ impl SceneBuildRequest<'_> {
         // same way hovering the motor lights the row: one object, seen twice.
         let pointed = self.studio.pointed_selection().read().to_owned();
         let mut frame = BenchFrame::new(self.grid);
-        self.studio
-            .add_arms(&mut frame, self.source, self.visible_robot)?;
+        self.add_arms(&mut frame)?;
 
-        if let Some(selected) = selected.as_ref().map(target_of) {
+        if let Some(selected) = selected.as_ref().map(Target::from) {
             frame.set_interaction(selected, Interaction::Selected);
         }
-        if let Some(pointed) = pointed.as_ref().map(target_of) {
+        if let Some(pointed) = pointed.as_ref().map(Target::from) {
             frame.set_interaction(pointed, Interaction::Hovered);
         }
         if let Some(hovered) = self.hovered {
@@ -608,21 +607,68 @@ impl SceneBuildRequest<'_> {
         }
         Ok(frame)
     }
+
+    fn add_arms(&self, frame: &mut BenchFrame) -> Result<(), FrameError> {
+        let arms = self
+            .studio
+            .snapshot()
+            .read()
+            .robots()
+            .iter()
+            .filter(|arm| self.visible_robot.is_none_or(|visible| arm.id() == visible))
+            .cloned()
+            .collect::<Vec<_>>();
+        for arm in &arms {
+            let recorded_angles = self
+                .source
+                .sample()
+                .and_then(|sample| sample.arms().iter().find(|sample| sample.arm() == arm.id()))
+                .and_then(RecordedRobotPose::recorded_angles);
+            let telemetry = self
+                .source
+                .is_live()
+                .then(|| {
+                    self.studio
+                        .robot_telemetry(arm.id())
+                        .filter(|_| arm.calibrated())
+                })
+                .flatten();
+            let angles = recorded_angles.or_else(|| {
+                telemetry.as_ref().map(|robot| {
+                    use crate::activities::live::control::MeasuredJointTelemetry;
+                    robot.joints().measured_angles()
+                })
+            });
+            frame.add_arm(
+                arm.id().to_owned(),
+                spiral_robotics_viewport::ArmPresentation::new(
+                    ACCENTS[self.studio.position_of(arm.id()) % ACCENTS.len()].0,
+                    angles,
+                ),
+            )?;
+            for camera in arm.cameras() {
+                camera.add_to(frame, arm.id())?;
+            }
+        }
+        Ok(())
+    }
 }
 
-fn target_of(selection: &Selection) -> Target {
-    match selection {
-        Selection::Robot(robot) => Target::Robot {
-            robot: robot.clone(),
-        },
-        Selection::Joint { robot, joint } => Target::Joint {
-            robot: robot.clone(),
-            joint: joint.clone(),
-        },
-        Selection::Camera { robot, role } => Target::Camera {
-            robot: robot.clone(),
-            role: role.clone(),
-        },
+impl From<&Selection> for Target {
+    fn from(selection: &Selection) -> Self {
+        match selection {
+            Selection::Robot(robot) => Self::Robot {
+                robot: robot.clone(),
+            },
+            Selection::Joint { robot, joint } => Self::Joint {
+                robot: robot.clone(),
+                joint: joint.clone(),
+            },
+            Selection::Camera { robot, role } => Self::Camera {
+                robot: robot.clone(),
+                role: role.clone(),
+            },
+        }
     }
 }
 
@@ -652,23 +698,29 @@ impl crate::shell::state::Studio {
 /// caution — one entry per motor currently reporting trouble.
 type Mark = (String, f64, f64, bool);
 
-fn marks_for(bench: &Bench, conditions: &BTreeMap<(String, String), Condition>) -> Vec<Mark> {
-    conditions
-        .iter()
-        .filter_map(|((robot, joint), condition)| {
-            let target = Target::Joint {
-                robot: robot.clone(),
-                joint: joint.clone(),
-            };
-            let (x, y) = bench.anchor(&target)?;
-            Some((
-                format!("{robot}/{joint}"),
-                x,
-                y,
-                *condition == Condition::Fault,
-            ))
-        })
-        .collect()
+trait BenchMarks {
+    fn marks_for(&self, conditions: &BTreeMap<(String, String), Condition>) -> Vec<Mark>;
+}
+
+impl BenchMarks for Bench {
+    fn marks_for(&self, conditions: &BTreeMap<(String, String), Condition>) -> Vec<Mark> {
+        conditions
+            .iter()
+            .filter_map(|((robot, joint), condition)| {
+                let target = Target::Joint {
+                    robot: robot.clone(),
+                    joint: joint.clone(),
+                };
+                let (x, y) = self.anchor(&target)?;
+                Some((
+                    format!("{robot}/{joint}"),
+                    x,
+                    y,
+                    *condition == Condition::Fault,
+                ))
+            })
+            .collect()
+    }
 }
 
 struct HoverRequest<'a> {
@@ -686,53 +738,6 @@ impl HoverRequest<'_> {
             entity: target,
             at: (self.at.0 - rect.left(), self.at.1 - rect.top()),
         })
-    }
-}
-
-/// Every arm on the bench, posed from what it is currently reporting.
-impl crate::shell::state::Studio {
-    fn add_arms(
-        self,
-        frame: &mut BenchFrame,
-        source: &SceneSource,
-        visible_robot: Option<&str>,
-    ) -> Result<(), FrameError> {
-        let arms = self
-            .snapshot()
-            .read()
-            .robots()
-            .iter()
-            .filter(|arm| visible_robot.is_none_or(|visible| arm.id() == visible))
-            .cloned()
-            .collect::<Vec<_>>();
-        for arm in &arms {
-            // An arm that is offline or uncalibrated has no angles worth
-            // drawing, so it stands at its rest pose and is faded rather than
-            // left out — an empty bench says less than a greyed-out one.
-            let recorded_angles = source
-                .sample()
-                .and_then(|sample| sample.arms().iter().find(|sample| sample.arm() == arm.id()))
-                .and_then(RecordedRobotPose::recorded_angles);
-            let telemetry = source
-                .is_live()
-                .then(|| self.robot_telemetry(arm.id()).filter(|_| arm.calibrated()))
-                .flatten();
-            let angles = recorded_angles.or_else(|| {
-                telemetry.as_ref().map(|robot| {
-                    use crate::activities::live::control::MeasuredJointTelemetry;
-                    robot.joints().measured_angles()
-                })
-            });
-            frame.add_arm(
-                arm.id().to_owned(),
-                ACCENTS[self.position_of(arm.id()) % ACCENTS.len()].0,
-                angles,
-            )?;
-            for camera in arm.cameras() {
-                camera.add_to(frame, arm.id())?;
-            }
-        }
-        Ok(())
     }
 }
 
@@ -785,11 +790,15 @@ impl CameraBindingPresentation for spiral_robotics_api::robots::CameraBinding {
         frame
             .mount_camera(
                 robot,
-                self.name().to_owned(),
-                mount.frame(),
-                mount.xyz(),
-                mount.rpy(),
-                mount.fov_degrees(),
+                spiral_robotics_viewport::CameraMount::new(
+                    self.name().to_owned(),
+                    spiral_robotics_viewport::CameraAttachment::new(
+                        mount.frame(),
+                        mount.xyz(),
+                        mount.rpy(),
+                    ),
+                    mount.fov_degrees(),
+                ),
             )
             .map(|_| ())
     }
@@ -883,9 +892,15 @@ impl crate::shell::state::Studio {
     }
 }
 
-fn bump(revision: &mut Signal<u64>) {
-    let next = revision.peek().wrapping_add(1);
-    revision.set(next);
+trait RevisionSignal {
+    fn bump(&mut self);
+}
+
+impl RevisionSignal for Signal<u64> {
+    fn bump(&mut self) {
+        let next = self.peek().wrapping_add(1);
+        self.set(next);
+    }
 }
 
 trait PointerPosition {

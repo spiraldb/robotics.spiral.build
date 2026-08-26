@@ -19,24 +19,12 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::OnceLock;
 
 use glam::{Mat4, Quat, Vec3};
 use roxmltree::{Document, Node};
 
 /// The SO-ARM101 description the studio ships with.
 pub(crate) const SO101_URDF: &str = include_str!("../assets/so101.urdf");
-
-/// The validated description shipped with the crate.
-///
-/// Its validity is a crate invariant covered by tests, not a runtime choice a
-/// caller should have to make for every viewport or pose readout.
-pub(crate) fn so101() -> &'static Urdf {
-    static DESCRIPTION: OnceLock<Urdf> = OnceLock::new();
-    DESCRIPTION.get_or_init(|| {
-        Urdf::parse(SO101_URDF).expect("the viewport's bundled SO-101 description must be valid")
-    })
-}
 
 /// A rigid transform, as written in a URDF `<origin>` element.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -232,6 +220,14 @@ pub(crate) struct Urdf {
 }
 
 impl Urdf {
+    /// The validated description shipped with the crate.
+    ///
+    /// Its validity is a crate invariant covered by tests, not a runtime choice
+    /// callers need to handle.
+    pub(crate) fn so101() -> Self {
+        Self::parse(SO101_URDF).expect("the viewport's bundled SO-101 description must be valid")
+    }
+
     /// Parse a URDF document.
     pub(crate) fn parse(text: &str) -> Result<Self, UrdfError> {
         UrdfParser::parse(text)

@@ -8,8 +8,8 @@ use spiral_robotics_api::robots::{ModeSelection, RobotSummary, RobotTelemetry, T
 use spiral_robotics_api::rollout::RolloutSnapshot;
 use spiral_robotics_api::status::StudioSnapshot;
 use spiral_robotics_api::training::TrainingSnapshot;
-use spiral_robotics_api::workflow::{WorkflowAgentStateResponse, WorkflowStateResponse};
 
+use crate::activities::workflow::state::WorkflowController;
 #[cfg(all(feature = "web", target_arch = "wasm32"))]
 use crate::client::http::{self as api, StudioEvent};
 use crate::panels::timeline::signals::SignalStore;
@@ -104,10 +104,6 @@ pub(crate) struct BackendSignals {
     training: Signal<TrainingSnapshot>,
     /// Backend-owned remote inference and motor-control lifecycle.
     rollout: Signal<RolloutSnapshot>,
-    /// Backend-owned lifecycle and terminal payload for relation Workflows.
-    workflow_state: Signal<Option<WorkflowStateResponse>>,
-    /// Backend-owned Workflow Assistant readiness and durable conversation.
-    workflow_agent_state: Signal<Option<WorkflowAgentStateResponse>>,
     /// True while the event stream is connected.
     live: Signal<bool>,
     /// Wall-clock time of the last valid event and a periodically updated clock.
@@ -157,14 +153,6 @@ impl Studio {
         self.backend.rollout
     }
 
-    pub(crate) const fn workflow_state(self) -> Signal<Option<WorkflowStateResponse>> {
-        self.backend.workflow_state
-    }
-
-    pub(crate) const fn workflow_agent_state(self) -> Signal<Option<WorkflowAgentStateResponse>> {
-        self.backend.workflow_agent_state
-    }
-
     pub(crate) const fn live(self) -> Signal<bool> {
         self.backend.live
     }
@@ -207,8 +195,6 @@ impl Studio {
         let telemetry = use_signal(TelemetryFrame::default);
         let training = use_signal(TrainingSnapshot::default);
         let rollout = use_signal(RolloutSnapshot::default);
-        let workflow_state = use_signal(|| None);
-        let workflow_agent_state = use_signal(|| None);
         let live = use_signal(|| false);
         let last_event_ms = use_signal(|| 0.0);
         let clock_ms = use_signal(|| 0.0);
@@ -223,8 +209,6 @@ impl Studio {
             backend: BackendSignals {
                 training,
                 rollout,
-                workflow_state,
-                workflow_agent_state,
                 live,
                 last_event_ms,
                 // Keep the server's first render identical to the browser's first
@@ -254,59 +238,6 @@ impl Studio {
         #[cfg(all(feature = "web", target_arch = "wasm32"))]
         let studio = studio;
 
-        // One long-lived task owns the connection and reconnects if the server
-        // restarts, so the page recovers without a manual refresh.
-        #[cfg(all(feature = "web", target_arch = "wasm32"))]
-        use_future(move || async move {
-            let mut snapshot = studio.snapshot();
-            let mut telemetry = studio.telemetry();
-            let mut training = studio.training();
-            let mut rollout = studio.rollout();
-            let mut workflow_state = studio.workflow_state();
-            let mut workflow_agent_state = studio.workflow_agent_state();
-            let mut live = studio.live();
-            let mut last_event_ms = studio.last_event_ms();
-            let mut recording_signals = studio.recording_signals();
-            loop {
-                let _ = api::Http::stream_events(|event| {
-                    // Opening an EventSource is not a connection signal. Only
-                    // mark the UI live after the server has delivered a valid
-                    // event, so controls never look usable during a failed
-                    // connection attempt.
-                    live.set(true);
-                    last_event_ms.set(js_sys::Date::now());
-                    match event {
-                        StudioEvent::Snapshot(value) => snapshot.set(*value),
-                        StudioEvent::TrainingSnapshot(value) => training.set(*value),
-                        StudioEvent::TrainingUpdate(update) => training.write().apply(*update),
-                        StudioEvent::Rollout(value) => rollout.set(*value),
-                        StudioEvent::WorkflowState(value) => workflow_state.set(Some(*value)),
-                        StudioEvent::WorkflowAgent(value) => {
-                            // The backend treats its broadcast values as
-                            // wakeups and emits the latest authoritative agent
-                            // snapshot on this one ordered EventSource. HTTP
-                            // bootstrap/command responses are guarded in the
-                            // Workflow controller; do not perform a second
-                            // different-scope acceptance policy here.
-                            workflow_agent_state.set(Some(*value));
-                        }
-                        StudioEvent::Telemetry(frame) => {
-                            // Only a frame that can change the store touches it.
-                            // Idle writes would mark the signal dirty and
-                            // needlessly rebuild the Timeline view model.
-                            if frame.recording().is_some() || recording_signals.peek().live() {
-                                recording_signals.write().observe(&frame);
-                            }
-                            telemetry.set(*frame);
-                        }
-                    }
-                })
-                .await;
-                live.set(false);
-                gloo_timers::future::TimeoutFuture::new(1_000).await;
-            }
-        });
-
         // The clock the studio measures staleness and message prominence
         // against. Notification history does not expire; only its compact
         // status-bar preview does.
@@ -320,6 +251,49 @@ impl Studio {
         });
 
         studio
+    }
+
+    /// Follow the one backend stream and hand feature events directly to the
+    /// controller that owns their accepted state.
+    pub(crate) fn use_event_stream(self, workflow: WorkflowController) {
+        #[cfg(not(all(feature = "web", target_arch = "wasm32")))]
+        let _ = workflow;
+        #[cfg(all(feature = "web", target_arch = "wasm32"))]
+        use_future(move || async move {
+            let studio = self;
+            let mut snapshot = studio.snapshot();
+            let mut telemetry = studio.telemetry();
+            let mut training = studio.training();
+            let mut rollout = studio.rollout();
+            let mut live = studio.live();
+            let mut last_event_ms = studio.last_event_ms();
+            let mut recording_signals = studio.recording_signals();
+            loop {
+                let _ = api::Http::stream_events(|event| {
+                    live.set(true);
+                    last_event_ms.set(js_sys::Date::now());
+                    match event {
+                        StudioEvent::Snapshot(value) => snapshot.set(*value),
+                        StudioEvent::TrainingSnapshot(value) => training.set(*value),
+                        StudioEvent::TrainingUpdate(update) => training.write().apply(*update),
+                        StudioEvent::Rollout(value) => rollout.set(*value),
+                        StudioEvent::WorkflowState(value) => {
+                            workflow.accept_streamed_state(*value, studio)
+                        }
+                        StudioEvent::WorkflowAgent(value) => workflow.accept_streamed_agent(*value),
+                        StudioEvent::Telemetry(frame) => {
+                            if frame.recording().is_some() || recording_signals.peek().live() {
+                                recording_signals.write().observe(&frame);
+                            }
+                            telemetry.set(*frame);
+                        }
+                    }
+                })
+                .await;
+                live.set(false);
+                gloo_timers::future::TimeoutFuture::new(1_000).await;
+            }
+        });
     }
 
     /// One robot's live readings, present only while it is connected.

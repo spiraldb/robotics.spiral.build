@@ -54,10 +54,13 @@ use spiral_robotics_hardware::{Calibration, MotorSpec, SerialPortCatalog};
 
 use crate::OperationError;
 use crate::adapters::hardware::HardwareApiProjection as _;
+#[cfg(test)]
+use crate::data::SpiralDestinationSettings;
 use crate::data::catalog::{
     DeleteEpisodeCommand, EpisodeActivity, EpisodeCatalogActions, EpisodeCatalogPort,
 };
 use crate::data::catalog_lease::{CatalogLeaseOwner, CatalogLeaseToken, CatalogMutationLease};
+use crate::data::connection::SpiralConnectionController;
 use crate::data::queries::{EpisodeQueries, EpisodeQueryPort};
 use crate::data::seek::{
     ActiveRecording, PhysicalSeekActions, PhysicalSeekPlan, PhysicalSeekPort, RecordedSample,
@@ -66,8 +69,7 @@ use crate::data::seek::{
 };
 use crate::data::{
     ConnectionCheck, DataCatalogPort, DataSettingsSnapshot, QueryColumn as CapabilityQueryColumn,
-    QueryCommand, QueryResult as CapabilityQueryResult, QueryValue, SpiralDestinationSettings,
-    UpdateDataSettingsCommand,
+    QueryCommand, QueryResult as CapabilityQueryResult, QueryValue, UpdateDataSettingsCommand,
 };
 use crate::recording::{
     RecordingActions, RecordingContext, RecordingPort, RecordingResult, ReplayActions,
@@ -75,6 +77,7 @@ use crate::recording::{
     SetReplayPausedCommand, StartRecordingCommand, StartReplayCommand, StopRecordingCommand,
     TeleoperationPair,
 };
+use crate::recording_session::RecordingSessionManager;
 use crate::robotics::cameras::{CameraManager, Frame};
 use crate::robotics::video::{
     CameraCaptureSpec, VideoAsset, VideoCapture, VideoCaptureRequest, VideoEncoderSettings,
@@ -108,7 +111,6 @@ use crate::training::service::{
 use crate::workflow::agent::WorkflowAgentManager;
 use crate::workflow::manager::WorkflowManager;
 use spiral_robotics_hardware::{HardwareHandle, HardwareState, RobotSpec};
-use spiral_robotics_storage::BackendStateStore;
 use spiral_robotics_storage::StorageManager;
 use spiral_robotics_storage::StudioPreferencesStore;
 use spiral_robotics_storage::episodes::{
@@ -176,17 +178,17 @@ pub(crate) struct AppRoboticsResources {
 
 #[derive(Clone)]
 pub(crate) struct AppVideoResources {
-    recording_video: Arc<tokio::sync::Mutex<Option<VideoCapture>>>,
+    recording_session: Arc<RecordingSessionManager>,
     video_encoder: VideoEncoderSettings,
 }
 
 impl AppVideoResources {
     pub(crate) fn new(
-        recording_video: Arc<tokio::sync::Mutex<Option<VideoCapture>>>,
+        recording_session: Arc<RecordingSessionManager>,
         video_encoder: VideoEncoderSettings,
     ) -> Self {
         Self {
-            recording_video,
+            recording_session,
             video_encoder,
         }
     }
@@ -247,19 +249,19 @@ impl AppActivityManagers {
 
 #[derive(Clone)]
 pub(crate) struct AppPlatformResources {
-    backend_state: Arc<BackendStateStore>,
+    connection: Arc<SpiralConnectionController>,
     preferences: Arc<StudioPreferencesStore>,
     bootstrap: BootstrapState,
 }
 
 impl AppPlatformResources {
     pub(crate) fn new(
-        backend_state: Arc<BackendStateStore>,
+        connection: Arc<SpiralConnectionController>,
         preferences: Arc<StudioPreferencesStore>,
         bootstrap: BootstrapState,
     ) -> Self {
         Self {
-            backend_state,
+            connection,
             preferences,
             bootstrap,
         }
@@ -312,8 +314,8 @@ impl AppState {
     pub(crate) fn cameras(&self) -> &Arc<CameraManager> {
         &self.robotics.cameras
     }
-    pub(crate) fn recording_video(&self) -> &Arc<tokio::sync::Mutex<Option<VideoCapture>>> {
-        &self.robotics.video.recording_video
+    pub(crate) fn recording_session(&self) -> &Arc<RecordingSessionManager> {
+        &self.robotics.video.recording_session
     }
     pub(crate) fn video_encoder(&self) -> &VideoEncoderSettings {
         &self.robotics.video.video_encoder
@@ -330,8 +332,8 @@ impl AppState {
     pub(crate) fn rollout(&self) -> &Arc<RolloutManager> {
         &self.runtime.activities.rollout
     }
-    pub(crate) fn backend_state(&self) -> &Arc<BackendStateStore> {
-        &self.runtime.platform.backend_state
+    pub(crate) fn connection(&self) -> &Arc<SpiralConnectionController> {
+        &self.runtime.platform.connection
     }
     pub(crate) fn preferences(&self) -> &Arc<StudioPreferencesStore> {
         &self.runtime.platform.preferences
@@ -396,14 +398,7 @@ impl AppState {
         let mut missing_ticks = 0_u8;
         loop {
             ticker.tick().await;
-            let capture_episode = self
-                .recording_video()
-                .lock()
-                .await
-                .as_ref()
-                .map(|capture| capture.episode_id().to_owned());
-            let watched_episode = self.catalog_lease().recording_episode().or(capture_episode);
-            let Some(capture_episode) = watched_episode else {
+            let Some(capture_episode) = self.recording_session().episode() else {
                 missing_episode.clear();
                 missing_ticks = 0;
                 continue;
@@ -440,19 +435,22 @@ impl AppState {
         // episode and finalized media have both been committed. This exists
         // independently of VideoCapture because camera-less recordings still
         // allocate catalog identities.
-        let recording = self.catalog_lease().claim_recording();
-        let capture = self.recording_video().lock().await.take();
-        if recording.is_none() && capture.is_none() {
+        let token = match self.recording_session().claim_finalization() {
+            Ok(token) => token,
+            Err(error) => {
+                tracing::warn!("could not claim stale recording finalization: {error}");
+                return;
+            }
+        };
+        let capture = self.recording_session().take_media().await;
+        if token.is_none() && capture.is_none() {
             return;
         }
-        let episode_id = recording
-            .as_ref()
-            .map(|recording| recording.episode().to_owned())
-            .or_else(|| {
-                capture
-                    .as_ref()
-                    .map(|capture| capture.episode_id().to_owned())
-            });
+        let episode_id = self.recording_session().episode().or_else(|| {
+            capture
+                .as_ref()
+                .map(|capture| capture.episode_id().to_owned())
+        });
         let videos = match capture {
             Some(capture) => self.finish_video_capture(capture).await,
             None => Vec::new(),
@@ -477,12 +475,8 @@ impl AppState {
                 ));
             }
         }
-        if let Some(recording) = recording {
-            let released = self.catalog_lease().release(recording.token());
-            debug_assert!(
-                released,
-                "claimed recording lease must release exactly once"
-            );
+        if let Some(token) = token {
+            self.recording_session().release(token);
         }
     }
 

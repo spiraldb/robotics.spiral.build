@@ -90,7 +90,7 @@ fn ToolReadout(telemetry: Option<RobotTelemetry>, calibrated: bool) -> Element {
         .as_ref()
         .filter(|_| calibrated)
         .map(|robot| robot.joints().measured_angles());
-    let tip = angles.as_ref().and_then(arm::tool_position);
+    let tip = angles.as_ref().and_then(ArmPose::tool_position);
     let tracking_error = telemetry.as_ref().and_then(|robot| {
         robot
             .joints()

@@ -86,19 +86,19 @@ impl SpiralConnectionSettings {
         self
     }
 
-    pub(crate) fn endpoint(&self) -> &str {
+    pub fn endpoint(&self) -> &str {
         &self.endpoint
     }
 
-    pub(crate) fn spfs_endpoint(&self) -> &str {
+    pub fn spfs_endpoint(&self) -> &str {
         &self.spfs_endpoint
     }
 
-    pub(crate) fn project_id(&self) -> Option<&str> {
+    pub fn project_id(&self) -> Option<&str> {
         self.project_id.as_deref()
     }
 
-    pub(crate) fn credentials(&self) -> Option<&SpiralCredentials> {
+    pub fn credentials(&self) -> Option<&SpiralCredentials> {
         self.credentials.as_ref()
     }
 

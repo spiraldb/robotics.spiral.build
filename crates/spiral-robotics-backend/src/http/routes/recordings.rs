@@ -1,6 +1,6 @@
 use super::*;
 use crate::adapters::hardware::{HardwareApiProjection as _, RecordingArmProjection as _};
-use crate::data::catalog_lease::{CatalogLeaseOwner, CatalogLeaseToken, CatalogMutationLease};
+use crate::data::catalog_lease::CatalogLeaseToken;
 use crate::recording::{RecordingDraftRequest, ReplayTrajectoryRequest};
 use spiral_robotics_hardware::ModeSelection as HardwareModeSelection;
 use spiral_robotics_storage::episodes::EpisodeArmCollection as _;
@@ -73,7 +73,7 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
     type MediaOutput = Vec<VideoAsset>;
 
     fn reserve_recording_start(&self) -> Result<Option<CatalogLeaseToken>, OperationError> {
-        self.state.catalog_lease().reserve_recording(|| {
+        self.state.recording_session().reserve_start(|| {
             (
                 self.state.workflow().is_active(),
                 self.state.workflow_agent().is_active(),
@@ -83,26 +83,17 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
 
     fn bind_recording_lease(&self, token: CatalogLeaseToken, episode: String) {
         assert!(
-            self.state.catalog_lease().bind_recording(token, episode),
+            self.state.recording_session().bind_episode(token, episode),
             "the admitted recording must retain its exact catalog lease"
         );
     }
 
     fn claim_recording_lease(&self) -> Result<Option<CatalogLeaseToken>, OperationError> {
-        if let Some(recording) = self.state.catalog_lease().claim_recording() {
-            return Ok(Some(recording.token()));
-        }
-        if self.state.catalog_lease().recording_is_opening() {
-            return Err(OperationError::Conflict(
-                "the recording is still opening; wait before stopping it".to_owned(),
-            ));
-        }
-        Ok(None)
+        self.state.recording_session().claim_finalization()
     }
 
     fn release_recording_lease(&self, token: CatalogLeaseToken) {
-        let released = self.state.catalog_lease().release(token);
-        debug_assert!(released, "recording releases its exact catalog lease once");
+        self.state.recording_session().release(token);
     }
 
     fn recording_active(&self) -> bool {
@@ -134,11 +125,7 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
         } else {
             spiral_robotics_hardware::CONTROL_HZ as f64
         };
-        let media_finalizing = self
-            .state
-            .recording_video()
-            .try_lock()
-            .map_or(true, |capture| capture.is_some());
+        let media_finalizing = self.state.recording_session().media_finalizing();
         RecordingContext::new(connected_arms, sample_hz, media_finalizing)
     }
 
@@ -197,7 +184,7 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
     }
 
     async fn retain_recording_media(&self, capture: Option<Self::MediaCapture>) {
-        *self.state.recording_video().lock().await = capture;
+        self.state.recording_session().retain_media(capture).await;
     }
 
     async fn abandon_recording_media(&self, capture: Self::MediaCapture) {
@@ -205,7 +192,7 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
     }
 
     async fn take_recording_media(&self) -> Option<Self::MediaCapture> {
-        self.state.recording_video().lock().await.take()
+        self.state.recording_session().take_media().await
     }
 
     fn media_episode(&self, capture: &Self::MediaCapture) -> String {
@@ -259,9 +246,7 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
     }
 
     async fn request_media_pause(&self) {
-        if let Some(capture) = self.state.recording_video().lock().await.as_ref() {
-            capture.request_pause();
-        }
+        self.state.recording_session().request_media_pause().await;
     }
 
     async fn set_recording_paused(&self, paused: bool) -> Result<f64, OperationError> {
@@ -273,13 +258,15 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
     }
 
     async fn finish_media_pause(&self) {
-        let checkpoint = if let Some(capture) = self.state.recording_video().lock().await.as_mut() {
-            for failure in capture.finish_pause().await {
+        let checkpoint = if let Some((episode, media, failures)) =
+            self.state.recording_session().finish_media_pause().await
+        {
+            for failure in failures {
                 self.state
                     .cameras()
                     .note_issue(format!("paused episode video was not saved: {failure}"));
             }
-            Some((capture.episode_id().to_owned(), capture.completed_assets()))
+            Some((episode, media))
         } else {
             None
         };
@@ -304,43 +291,16 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
     }
 
     async fn resume_media(&self, active_seconds: f64) {
-        if let Some(capture) = self.state.recording_video().lock().await.as_mut()
-            && let Err(error) = capture.resume(active_seconds)
+        if let Err(error) = self
+            .state
+            .recording_session()
+            .resume_media(active_seconds)
+            .await
         {
             self.state
                 .cameras()
                 .note_issue(format!("episode video could not resume: {error}"));
         }
-    }
-}
-
-impl CatalogMutationLease {
-    fn reserve_recording(
-        &self,
-        activity: impl FnOnce() -> (bool, bool),
-    ) -> Result<Option<CatalogLeaseToken>, OperationError> {
-        let Some(token) = self.try_acquire(CatalogLeaseOwner::Recording) else {
-            return Ok(None);
-        };
-        let (workflow_active, assistant_active) = activity();
-        let conflict = if workflow_active {
-            Some("Wait for the active Workflow run to finish before recording a new take.")
-        } else if assistant_active {
-            Some(
-                "Wait for the active Workflow Assistant turn to finish before recording a new take.",
-            )
-        } else {
-            None
-        };
-        if let Some(message) = conflict {
-            let released = self.release(token);
-            debug_assert!(
-                released,
-                "rejected recording admission releases its exact catalog lease"
-            );
-            return Err(OperationError::Conflict(message.to_owned()));
-        }
-        Ok(Some(token))
     }
 }
 
@@ -1254,9 +1214,10 @@ mod admission_tests {
                 CatalogLeaseOwner::WorkflowAgentStart,
             ),
         ] {
-            let lease = CatalogMutationLease::default();
-            let error = lease
-                .reserve_recording(|| activity)
+            let lease = Arc::new(CatalogMutationLease::default());
+            let session = crate::recording_session::RecordingSessionManager::new(lease.clone());
+            let error = session
+                .reserve_start(|| activity)
                 .expect_err("published activity must block a later recording");
             assert!(error.to_string().contains(expected));
 
@@ -1269,9 +1230,10 @@ mod admission_tests {
 
     #[test]
     fn admitted_recording_blocks_later_workflow_and_assistant_admission() {
-        let lease = CatalogMutationLease::default();
-        let recording = lease
-            .reserve_recording(|| (false, false))
+        let lease = Arc::new(CatalogMutationLease::default());
+        let session = crate::recording_session::RecordingSessionManager::new(lease.clone());
+        let recording = session
+            .reserve_start(|| (false, false))
             .expect("idle activity check")
             .expect("recording admission");
 
@@ -1287,6 +1249,6 @@ mod admission_tests {
                 .is_none(),
             "Assistant cannot pass an admitted recording"
         );
-        assert!(lease.release(recording));
+        session.release(recording);
     }
 }

@@ -70,17 +70,17 @@ impl Target {
 /// Nothing is drawn for a camera without a mount: an unmounted camera has no
 /// position, and drawing it at the origin would state one it does not have.
 #[derive(Clone, Debug, PartialEq)]
-struct CameraMount {
+struct CameraPlacement {
     role: String,
-    attachment: CameraAttachment,
+    attachment: CameraPlacementAttachment,
     /// Horizontal field of view, in degrees.
     field_of_view_degrees: f32,
 }
 
-impl CameraMount {
+impl CameraPlacement {
     fn new(
         role: impl Into<String>,
-        attachment: CameraAttachment,
+        attachment: CameraPlacementAttachment,
         field_of_view_degrees: f32,
     ) -> Self {
         Self {
@@ -116,7 +116,7 @@ impl CameraMount {
 
 /// A camera's rigid attachment to an optional robot link.
 #[derive(Clone, Debug, PartialEq)]
-struct CameraAttachment {
+struct CameraPlacementAttachment {
     /// Link the camera rides, or `None` for one fixed to the world.
     frame: Option<String>,
     /// Offset from that frame, in metres.
@@ -125,7 +125,7 @@ struct CameraAttachment {
     roll_pitch_yaw: [f32; 3],
 }
 
-impl CameraAttachment {
+impl CameraPlacementAttachment {
     fn new(frame: Option<String>, translation: [f32; 3], roll_pitch_yaw: [f32; 3]) -> Self {
         Self {
             frame,
@@ -148,7 +148,7 @@ struct ArmPlacement {
     id: String,
     accent: [f32; 4],
     pose: PoseState,
-    cameras: Vec<CameraMount>,
+    cameras: Vec<CameraPlacement>,
 }
 
 impl ArmPlacement {
@@ -199,6 +199,63 @@ struct PoseState {
     angles: ArmPose,
 }
 
+/// The appearance and optional live pose of one arm in a [`Frame`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ArmPresentation {
+    accent: [f32; 4],
+    pose: Option<ArmPose>,
+}
+
+impl ArmPresentation {
+    pub fn new(accent: [f32; 4], pose: Option<ArmPose>) -> Self {
+        Self { accent, pose }
+    }
+}
+
+/// A camera's rigid attachment to an optional robot link.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CameraAttachment {
+    frame: Option<String>,
+    translation: [f64; 3],
+    roll_pitch_yaw: [f64; 3],
+}
+
+impl CameraAttachment {
+    pub fn new(
+        frame: Option<impl Into<String>>,
+        translation: [f64; 3],
+        roll_pitch_yaw: [f64; 3],
+    ) -> Self {
+        Self {
+            frame: frame.map(Into::into),
+            translation,
+            roll_pitch_yaw,
+        }
+    }
+}
+
+/// A named camera and the mount information needed to draw it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CameraMount {
+    role: String,
+    attachment: CameraAttachment,
+    field_of_view_degrees: f64,
+}
+
+impl CameraMount {
+    pub fn new(
+        role: impl Into<String>,
+        attachment: CameraAttachment,
+        field_of_view_degrees: f64,
+    ) -> Self {
+        Self {
+            role: role.into(),
+            attachment,
+            field_of_view_degrees,
+        }
+    }
+}
+
 /// One complete, validated set of inputs for a viewport draw.
 ///
 /// Arms are centered on the bench in insertion order. Configuration methods
@@ -224,8 +281,7 @@ impl Frame {
     pub fn add_arm(
         &mut self,
         id: impl Into<String>,
-        accent: [f32; 4],
-        pose: Option<ArmPose>,
+        presentation: ArmPresentation,
     ) -> Result<&mut Self, FrameError> {
         let id = id.into();
         if id.trim().is_empty() {
@@ -234,36 +290,32 @@ impl Frame {
         if self.placements.iter().any(|arm| arm.id == id) {
             return Err(FrameError::DuplicateRobot(id));
         }
-        if !accent
+        if !presentation
+            .accent
             .into_iter()
             .all(|component| component.is_finite() && (0.0..=1.0).contains(&component))
         {
             return Err(FrameError::InvalidAccent(id));
         }
 
-        let placement = match pose {
-            Some(pose) => ArmPlacement::new(id, accent).with_live_pose(pose),
-            None => ArmPlacement::new(id, accent),
+        let placement = match presentation.pose {
+            Some(pose) => ArmPlacement::new(id, presentation.accent).with_live_pose(pose),
+            None => ArmPlacement::new(id, presentation.accent),
         };
         self.placements.push(placement);
         Ok(self)
     }
 
     /// Attach a configured camera to an arm already in this frame.
-    #[allow(clippy::too_many_arguments)]
     pub fn mount_camera(
         &mut self,
         robot: &str,
-        role: impl Into<String>,
-        frame: Option<&str>,
-        translation: [f64; 3],
-        roll_pitch_yaw: [f64; 3],
-        field_of_view_degrees: f64,
+        mount: CameraMount,
     ) -> Result<&mut Self, FrameError> {
         let Some(placement) = self.placements.iter_mut().find(|arm| arm.id == robot) else {
             return Err(FrameError::UnknownRobot(robot.to_owned()));
         };
-        let role = role.into();
+        let role = mount.role;
         if role.trim().is_empty() {
             return Err(FrameError::EmptyCameraRole {
                 robot: robot.to_owned(),
@@ -275,8 +327,8 @@ impl Frame {
                 role,
             });
         }
-        if let Some(frame) = frame
-            && crate::urdf::so101().link_index(frame).is_none()
+        if let Some(frame) = mount.attachment.frame.as_deref()
+            && Urdf::so101().link_index(frame).is_none()
         {
             return Err(FrameError::UnknownCameraFrame {
                 robot: robot.to_owned(),
@@ -284,17 +336,21 @@ impl Frame {
                 frame: frame.to_owned(),
             });
         }
-        let translation =
-            finite_vector(translation).ok_or_else(|| FrameError::InvalidCameraTransform {
+        let translation = mount.attachment.translation.finite_f32().ok_or_else(|| {
+            FrameError::InvalidCameraTransform {
+                robot: robot.to_owned(),
+                role: role.clone(),
+            }
+        })?;
+        let roll_pitch_yaw = mount
+            .attachment
+            .roll_pitch_yaw
+            .finite_f32()
+            .ok_or_else(|| FrameError::InvalidCameraTransform {
                 robot: robot.to_owned(),
                 role: role.clone(),
             })?;
-        let roll_pitch_yaw =
-            finite_vector(roll_pitch_yaw).ok_or_else(|| FrameError::InvalidCameraTransform {
-                robot: robot.to_owned(),
-                role: role.clone(),
-            })?;
-        let field_of_view_degrees = field_of_view_degrees as f32;
+        let field_of_view_degrees = mount.field_of_view_degrees as f32;
         if !field_of_view_degrees.is_finite() || !(0.0..180.0).contains(&field_of_view_degrees) {
             return Err(FrameError::InvalidFieldOfView {
                 robot: robot.to_owned(),
@@ -302,9 +358,9 @@ impl Frame {
             });
         }
 
-        placement.cameras.push(CameraMount::new(
+        placement.cameras.push(CameraPlacement::new(
             role,
-            CameraAttachment::new(frame.map(str::to_owned), translation, roll_pitch_yaw),
+            CameraPlacementAttachment::new(mount.attachment.frame, translation, roll_pitch_yaw),
             field_of_view_degrees,
         ));
         Ok(self)
@@ -381,12 +437,18 @@ impl Frame {
     }
 }
 
-fn finite_vector(values: [f64; 3]) -> Option<[f32; 3]> {
-    let converted = values.map(|value| value as f32);
-    converted
-        .into_iter()
-        .all(f32::is_finite)
-        .then_some(converted)
+trait FiniteVector {
+    fn finite_f32(self) -> Option<[f32; 3]>;
+}
+
+impl FiniteVector for [f64; 3] {
+    fn finite_f32(self) -> Option<[f32; 3]> {
+        let converted = self.map(|value| value as f32);
+        converted
+            .into_iter()
+            .all(f32::is_finite)
+            .then_some(converted)
+    }
 }
 
 /// Why stable scene configuration was rejected.
@@ -706,42 +768,51 @@ mod tests {
     fn frame_rejects_malformed_stable_configuration() {
         let mut frame = Frame::new(true);
         assert_eq!(
-            frame.add_arm("", [0.2, 0.3, 0.4, 1.0], None).unwrap_err(),
+            frame
+                .add_arm("", ArmPresentation::new([0.2, 0.3, 0.4, 1.0], None))
+                .unwrap_err(),
             FrameError::EmptyRobotId
         );
         frame
-            .add_arm("follower", [0.2, 0.3, 0.4, 1.0], None)
+            .add_arm("follower", ArmPresentation::new([0.2, 0.3, 0.4, 1.0], None))
             .unwrap();
         assert_eq!(
             frame
-                .add_arm("follower", [0.2, 0.3, 0.4, 1.0], None)
+                .add_arm("follower", ArmPresentation::new([0.2, 0.3, 0.4, 1.0], None),)
                 .unwrap_err(),
             FrameError::DuplicateRobot("follower".to_owned())
         );
         assert!(matches!(
             frame.mount_camera(
                 "follower",
-                "wrist",
-                Some("not_a_link"),
-                [0.0; 3],
-                [0.0; 3],
-                62.0,
+                CameraMount::new(
+                    "wrist",
+                    CameraAttachment::new(Some("not_a_link"), [0.0; 3], [0.0; 3]),
+                    62.0,
+                ),
             ),
             Err(FrameError::UnknownCameraFrame { .. })
         ));
         assert!(matches!(
             frame.mount_camera(
                 "follower",
-                "wrist",
-                None,
-                [f64::NAN, 0.0, 0.0],
-                [0.0; 3],
-                62.0,
+                CameraMount::new(
+                    "wrist",
+                    CameraAttachment::new(None::<String>, [f64::NAN, 0.0, 0.0], [0.0; 3],),
+                    62.0,
+                ),
             ),
             Err(FrameError::InvalidCameraTransform { .. })
         ));
         assert!(matches!(
-            frame.mount_camera("follower", "wrist", None, [0.0; 3], [0.0; 3], 180.0,),
+            frame.mount_camera(
+                "follower",
+                CameraMount::new(
+                    "wrist",
+                    CameraAttachment::new(None::<String>, [0.0; 3], [0.0; 3]),
+                    180.0,
+                ),
+            ),
             Err(FrameError::InvalidFieldOfView { .. })
         ));
     }
@@ -750,7 +821,7 @@ mod tests {
     fn frame_only_records_appearance_for_targets_it_contains() {
         let mut frame = Frame::new(false);
         frame
-            .add_arm("follower", [0.2, 0.3, 0.4, 1.0], None)
+            .add_arm("follower", ArmPresentation::new([0.2, 0.3, 0.4, 1.0], None))
             .unwrap();
         let robot = Target::Robot {
             robot: "follower".to_owned(),
@@ -779,9 +850,12 @@ mod tests {
     fn every_composed_shape_resolves_to_a_semantic_target() {
         let mut frame = Frame::new(false);
         frame
-            .add_arm("follower", [0.2, 0.3, 0.4, 1.0], Some(ArmPose::default()))
+            .add_arm(
+                "follower",
+                ArmPresentation::new([0.2, 0.3, 0.4, 1.0], Some(ArmPose::default())),
+            )
             .unwrap();
-        let scene = RobotScene::compose(crate::urdf::so101(), &frame);
+        let scene = RobotScene::compose(&Urdf::so101(), &frame);
 
         assert!(scene.scene().entities().next().is_some());
         for entity in scene.scene().entities() {

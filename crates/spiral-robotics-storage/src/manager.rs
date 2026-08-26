@@ -242,6 +242,10 @@ impl StorageManager {
         self.project_store.project_id()
     }
 
+    pub fn connection_settings(&self) -> SpiralConnectionSettings {
+        self.project_store.connection_settings()
+    }
+
     pub fn workflow_model_store(&self) -> Arc<ProjectStore> {
         self.project_store.clone()
     }

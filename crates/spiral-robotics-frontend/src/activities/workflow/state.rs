@@ -215,40 +215,6 @@ pub(crate) enum AgentPendingCommand {
     ActivatingConversation,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct AcceptedAgentDraft {
-    scope_id: String,
-    conversation_id: String,
-    text: String,
-}
-
-impl AcceptedAgentDraft {
-    #[cfg(test)]
-    pub(crate) fn new(
-        scope_id: impl Into<String>,
-        conversation_id: impl Into<String>,
-        text: impl Into<String>,
-    ) -> Self {
-        Self {
-            scope_id: scope_id.into(),
-            conversation_id: conversation_id.into(),
-            text: text.into(),
-        }
-    }
-
-    pub(crate) fn scope_id(&self) -> &str {
-        &self.scope_id
-    }
-
-    pub(crate) fn conversation_id(&self) -> &str {
-        &self.conversation_id
-    }
-
-    pub(crate) fn text(&self) -> &str {
-        &self.text
-    }
-}
-
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) struct AgentDraftKey {
     scope_id: String,
@@ -272,6 +238,18 @@ impl AgentDraftKey {
             scope_id: scope_id.to_owned(),
             conversation_id: conversation_id.to_owned(),
         }
+    }
+
+    pub(crate) fn clear_if_unchanged(
+        &self,
+        drafts: &mut BTreeMap<AgentDraftKey, String>,
+        submitted: &str,
+    ) -> bool {
+        if drafts.get(self).map(String::as_str) != Some(submitted) {
+            return false;
+        }
+        drafts.remove(self);
+        true
     }
 }
 
@@ -310,7 +288,6 @@ struct WorkflowAssistantSignals {
     agent_loaded: Signal<bool>,
     agent_command: Signal<Option<AgentPendingCommand>>,
     agent_error: Signal<Option<String>>,
-    agent_accepted_draft: Signal<Option<AcceptedAgentDraft>>,
     agent_drafts: Signal<BTreeMap<AgentDraftKey, String>>,
 }
 
@@ -340,29 +317,12 @@ pub(crate) fn use_workflow_controller() -> WorkflowController {
             agent_loaded: use_signal(|| false),
             agent_command: use_signal(|| None),
             agent_error: use_signal(|| None),
-            agent_accepted_draft: use_signal(|| None),
             agent_drafts: use_signal(BTreeMap::new),
         },
     };
     let studio = studio();
     use_future(move || async move {
         controller.load(studio).await;
-    });
-    use_effect(move || {
-        if let Some(state) = studio.workflow_state().read().to_owned() {
-            let scope_changed = controller.reconcile_state(state);
-            if scope_changed {
-                let expected_scope_id = controller.document.server.peek().scope_id().to_owned();
-                dioxus::dioxus_core::spawn_forever(async move {
-                    controller.load_relations(studio, expected_scope_id).await;
-                });
-            }
-        }
-    });
-    use_effect(move || {
-        if let Some(state) = studio.workflow_agent_state().read().to_owned() {
-            controller.reconcile_agent(state);
-        }
     });
     use_context_provider(|| controller)
 }
@@ -386,6 +346,13 @@ impl WorkflowController {
 
     pub(crate) fn snapshot(&self) -> WorkflowRunSnapshot {
         self.document.server.read().snapshot().to_owned()
+    }
+
+    pub(crate) fn accepted_state(&self) -> Option<WorkflowStateResponse> {
+        self.lifecycle
+            .loaded
+            .read()
+            .then(|| self.document.server.read().to_owned())
     }
 
     pub(crate) fn relations(&self) -> Vec<CatalogRelation> {
@@ -451,10 +418,6 @@ impl WorkflowController {
 
     pub(crate) fn agent_error(&self) -> Option<String> {
         self.assistant.agent_error.read().to_owned()
-    }
-
-    pub(crate) const fn agent_accepted_draft(self) -> Signal<Option<AcceptedAgentDraft>> {
-        self.assistant.agent_accepted_draft
     }
 
     /// Shell-hoisted unsent text survives Workflow route and Settings outlet
@@ -1027,16 +990,13 @@ impl WorkflowController {
             match response {
                 Ok(state) => {
                     if self.reconcile_agent_command(state, request.scope_id()) {
-                        self.assistant
-                            .agent_accepted_draft
-                            .set(Some(AcceptedAgentDraft {
-                                scope_id: request.scope_id().to_owned(),
-                                conversation_id: request
-                                    .conversation_id()
-                                    .expect("turn commands carry a conversation")
-                                    .to_owned(),
-                                text,
-                            }));
+                        let key = AgentDraftKey::new(
+                            request.scope_id(),
+                            request
+                                .conversation_id()
+                                .expect("turn commands carry a conversation"),
+                        );
+                        key.clear_if_unchanged(&mut self.assistant.agent_drafts.write(), &text);
                     }
                 }
                 Err(error) => {
@@ -1204,6 +1164,16 @@ impl WorkflowController {
         scope_changed
     }
 
+    #[cfg(all(feature = "web", target_arch = "wasm32"))]
+    pub(crate) fn accept_streamed_state(self, state: WorkflowStateResponse, studio: Studio) {
+        if self.reconcile_state(state) {
+            let expected_scope_id = self.document.server.peek().scope_id().to_owned();
+            dioxus::dioxus_core::spawn_forever(async move {
+                self.load_relations(studio, expected_scope_id).await;
+            });
+        }
+    }
+
     fn reconcile_state_command(
         self,
         state: WorkflowStateResponse,
@@ -1247,6 +1217,11 @@ impl WorkflowController {
         self.assistant.agent.set(state);
         self.assistant.agent_loaded.set(true);
         self.assistant.agent_error.set(None);
+    }
+
+    #[cfg(all(feature = "web", target_arch = "wasm32"))]
+    pub(crate) fn accept_streamed_agent(self, state: WorkflowAgentStateResponse) {
+        self.reconcile_agent(state);
     }
 
     fn reconcile_agent_command(

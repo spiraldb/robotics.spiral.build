@@ -121,7 +121,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
             playhead.set(next);
             let slot = next.replay_slot();
             let target = (episode.clone(), slot);
-            if sampled_preview_slot.peek().as_ref() != Some(&target) {
+            if activity != Activity::Data && sampled_preview_slot.peek().as_ref() != Some(&target) {
                 sampled_preview_slot.set(Some(target));
                 studio.request_episode_preview(
                     EpisodePreviewRequest::new(episode.clone(), None, next),
@@ -129,8 +129,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
                         episode_preview_state,
                         episode_preview_revision,
                         episode_data_cache,
-                    )
-                    .with_data(data),
+                    ),
                 );
             }
             if next >= duration {
@@ -155,7 +154,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
             sampled_replay_slot.set(None);
             return;
         };
-        let subject_episode = visible_timeline_episode(activity, studio, data);
+        let subject_episode = activity.visible_timeline_episode(studio, data);
         if !replay.matches_timeline_subject(subject_episode.as_deref()) {
             sampled_replay_slot.set(None);
             return;
@@ -166,15 +165,20 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
             return;
         }
         sampled_replay_slot.set(Some(next));
-        studio.request_episode_preview(
-            EpisodePreviewRequest::new(replay.episode().to_owned(), None, replay.elapsed_seconds()),
-            EpisodePreviewSignals::new(
-                episode_preview_state,
-                episode_preview_revision,
-                episode_data_cache,
-            )
-            .with_data(data),
-        );
+        if activity != Activity::Data {
+            studio.request_episode_preview(
+                EpisodePreviewRequest::new(
+                    replay.episode().to_owned(),
+                    None,
+                    replay.elapsed_seconds(),
+                ),
+                EpisodePreviewSignals::new(
+                    episode_preview_state,
+                    episode_preview_revision,
+                    episode_data_cache,
+                ),
+            );
+        }
     });
 
     // Server progress is authoritative. The UI-owned playhead only takes over
@@ -191,7 +195,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
             .replay()
             .filter(|replay| replay.owns_timeline_transport())
         {
-            let subject_episode = visible_timeline_episode(activity, studio, data);
+            let subject_episode = activity.visible_timeline_episode(studio, data);
             if replay.matches_timeline_subject(subject_episode.as_deref()) {
                 playhead.set(replay.elapsed_seconds());
                 timeline.stop_preview();
@@ -261,8 +265,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
                 episode_preview_state,
                 episode_preview_revision,
                 episode_data_cache,
-            )
-            .with_data(data),
+            ),
         );
     });
 
@@ -279,12 +282,9 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
         }
         TimelineSubject::Empty { .. } | TimelineSubject::Recording(_) => None,
     };
-    let selected_episode_data = (activity == Activity::Data)
-        .then(|| data.selected_episode_data())
-        .flatten();
     use_effect(use_reactive(
-        (&projected_recorded_identity, &selected_episode_data),
-        move |(identity, selected_data)| {
+        (&projected_recorded_identity,),
+        move |(identity,)| {
             let Some((episode, source_frames, seconds)) = identity else {
                 return;
             };
@@ -296,36 +296,6 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
             episode_preview_state.set(None);
             playhead.set(seconds);
             if activity == Activity::Data {
-                match selected_data {
-                    Some(EpisodeDataState::Ready(episode_data)) => {
-                        let state = match episode_data.preview_at(seconds) {
-                            Ok(preview) => LoadState::Ready(preview),
-                            Err(reason) => LoadState::Failed {
-                                reason,
-                                previous: None,
-                            },
-                        };
-                        episode_preview_state
-                            .set(Some(RecordedSource::new(episode, seconds, state)));
-                    }
-                    Some(EpisodeDataState::Failed(reason)) => {
-                        episode_preview_state.set(Some(RecordedSource::new(
-                            episode,
-                            seconds,
-                            LoadState::Failed {
-                                reason,
-                                previous: None,
-                            },
-                        )));
-                    }
-                    None | Some(EpisodeDataState::Unloaded | EpisodeDataState::Loading) => {
-                        episode_preview_state.set(Some(RecordedSource::new(
-                            episode,
-                            seconds,
-                            LoadState::Loading { previous: None },
-                        )));
-                    }
-                }
                 return;
             }
             studio.request_episode_preview(
@@ -334,8 +304,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
                     episode_preview_state,
                     episode_preview_revision,
                     episode_data_cache,
-                )
-                .with_data(data),
+                ),
             );
         },
     ));
@@ -347,10 +316,35 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
     });
     let assigned_cameras = studio.assigned_cameras(projection.activity());
     let review_episode = subject.recorded_episode().map(str::to_owned);
-    let episode_preview_source = episode_preview_state
-        .read()
-        .clone()
-        .filter(|source| Some(source.episode()) == review_episode.as_deref());
+    let episode_preview_source = if activity == Activity::Data {
+        review_episode.as_ref().map(|episode| {
+            let seconds = playhead();
+            let state = match data.selected_episode_data() {
+                Some(EpisodeDataState::Ready(episode_data)) => {
+                    match episode_data.preview_at(seconds) {
+                        Ok(preview) => LoadState::Ready(preview),
+                        Err(reason) => LoadState::Failed {
+                            reason,
+                            previous: None,
+                        },
+                    }
+                }
+                Some(EpisodeDataState::Failed(reason)) => LoadState::Failed {
+                    reason,
+                    previous: None,
+                },
+                None | Some(EpisodeDataState::Unloaded | EpisodeDataState::Loading) => {
+                    LoadState::Loading { previous: None }
+                }
+            };
+            RecordedSource::new(episode.clone(), seconds, state)
+        })
+    } else {
+        episode_preview_state
+            .read()
+            .clone()
+            .filter(|source| Some(source.episode()) == review_episode.as_deref())
+    };
     let episode_preview = episode_preview_source
         .as_ref()
         .and_then(RecordedSource::renderable)
@@ -866,17 +860,19 @@ impl TimelineReplay for spiral_robotics_api::recording::ReplayProgress {
     }
 }
 
-fn visible_timeline_episode(
-    activity: Activity,
-    studio: Studio,
-    data: DataController,
-) -> Option<String> {
-    match activity {
-        Activity::Live => studio
-            .recording()
-            .map(|recording| recording.episode().to_owned()),
-        Activity::Data => data.selected_episode_peek(),
-        Activity::Workflow | Activity::Training | Activity::Rollout => None,
+trait VisibleTimelineEpisode {
+    fn visible_timeline_episode(self, studio: Studio, data: DataController) -> Option<String>;
+}
+
+impl VisibleTimelineEpisode for Activity {
+    fn visible_timeline_episode(self, studio: Studio, data: DataController) -> Option<String> {
+        match self {
+            Activity::Live => studio
+                .recording()
+                .map(|recording| recording.episode().to_owned()),
+            Activity::Data => data.selected_episode_peek(),
+            Activity::Workflow | Activity::Training | Activity::Rollout => None,
+        }
     }
 }
 

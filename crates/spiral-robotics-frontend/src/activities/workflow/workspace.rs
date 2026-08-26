@@ -1,6 +1,5 @@
 //! Four-panel relation Workflow editor, execution canvas, and real results.
 
-use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use crate::components::interaction::{Action, ActionPurpose, ActionVariant};
@@ -18,9 +17,8 @@ use spiral_robotics_api::workflow::{
 
 use crate::activities::data::query_result::{QueryExecutionPresentation, QueryState};
 use crate::activities::workflow::state::{
-    ASSISTANT_PANEL_ID, AcceptedAgentDraft, AgentDraftKey, AgentPendingCommand, CANVAS_PANEL_ID,
-    ModelFeatureTarget, NODE_PANEL_ID, RESULTS_PANEL_ID, WorkflowNodeData, WorkflowPendingCommand,
-    workflow_controller,
+    ASSISTANT_PANEL_ID, AgentDraftKey, AgentPendingCommand, CANVAS_PANEL_ID, ModelFeatureTarget,
+    NODE_PANEL_ID, RESULTS_PANEL_ID, WorkflowNodeData, WorkflowPendingCommand, workflow_controller,
 };
 use crate::components::icons::{
     FitViewIcon, ModelNodeIcon, QueryNodeIcon, ResultNodeIcon, TableNodeIcon, WorkflowIcon,
@@ -125,14 +123,6 @@ fn WorkflowAssistant() -> Element {
     let mut show_latest_action = use_signal(|| false);
     let mut thread_tail = use_signal(|| None::<Rc<MountedData>>);
     let mut drafts = controller.agent_drafts();
-    let mut accepted_draft = controller.agent_accepted_draft();
-    use_effect(move || {
-        let accepted = accepted_draft.read().to_owned();
-        if let Some(accepted) = accepted {
-            accepted.clear_from(&mut drafts.write());
-            accepted_draft.set(None);
-        }
-    });
     let command = controller.agent_command();
     let active = state.session().phase().active();
     let configured = state.readiness().configured();
@@ -474,17 +464,6 @@ fn WorkflowAssistant() -> Element {
                 }
             }
         }
-    }
-}
-
-impl AcceptedAgentDraft {
-    fn clear_from(&self, drafts: &mut BTreeMap<AgentDraftKey, String>) -> bool {
-        let key = AgentDraftKey::new(self.scope_id(), self.conversation_id());
-        if drafts.get(&key).map(String::as_str) != Some(self.text()) {
-            return false;
-        }
-        drafts.remove(&key);
-        true
     }
 }
 
@@ -1707,6 +1686,8 @@ impl WorkflowRunPresentation for WorkflowRunPhase {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
 
     fn collect_tiles<'a>(node: &'a LayoutNode, out: &mut Vec<(&'a str, Vec<&'a str>)>) {
@@ -1889,10 +1870,8 @@ mod tests {
                 .unwrap(),
             "first request"
         );
-        assert!(
-            !AcceptedAgentDraft::new("project-a", "conversation-a", "stale request")
-                .clear_from(&mut drafts)
-        );
+        let project_a = AgentDraftKey::new("project-a", "conversation-a");
+        assert!(!project_a.clear_if_unchanged(&mut drafts, "stale request"));
         assert_eq!(drafts.len(), 3);
         assert_eq!(
             drafts
@@ -1901,10 +1880,7 @@ mod tests {
             "other project draft",
             "a rejected/stale project-a acceptance cannot clear project-b text"
         );
-        assert!(
-            AcceptedAgentDraft::new("project-a", "conversation-a", "first request")
-                .clear_from(&mut drafts)
-        );
+        assert!(project_a.clear_if_unchanged(&mut drafts, "first request"));
         assert_eq!(
             drafts
                 .get(&AgentDraftKey::new("project-b", "conversation-a"))

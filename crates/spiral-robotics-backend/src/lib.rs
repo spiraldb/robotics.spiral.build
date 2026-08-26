@@ -12,6 +12,7 @@ mod data;
 mod error;
 mod http;
 mod recording;
+mod recording_session;
 mod robotics;
 mod robots;
 mod rollout;

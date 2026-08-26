@@ -1065,7 +1065,7 @@ impl RestoredRolloutSnapshot for ContractRolloutSnapshot {
 enum PolicyAdmission {
     Admitted,
     Stopped,
-    Replaced(HardwareState),
+    Replaced(Box<HardwareState>),
 }
 
 struct PolicyAdmissionWait<'a> {
@@ -1117,7 +1117,9 @@ impl<'a> PolicyAdmissionWait<'a> {
                     }
                 }
                 _ = tokio::time::sleep_until(deadline) => {
-                    return Ok(PolicyAdmission::Replaced(self.hardware.borrow().clone()));
+                    return Ok(PolicyAdmission::Replaced(Box::new(
+                        self.hardware.borrow().clone(),
+                    )));
                 }
             }
         }

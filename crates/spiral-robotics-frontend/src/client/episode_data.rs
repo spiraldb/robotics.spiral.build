@@ -15,7 +15,6 @@ use spiral_robotics_api::recording::{
 };
 use spiral_robotics_viewport::SO101_JOINTS;
 
-use crate::activities::data::state::{DataController, EpisodeDataState};
 use crate::client::http as api;
 use crate::client::http::EpisodeApiPath;
 use crate::panels::timeline::panel::{
@@ -195,7 +194,6 @@ pub(crate) struct EpisodePreviewSignals {
     state: Signal<Option<RecordedSource<EpisodePreview>>>,
     revision: Signal<u64>,
     cache: Signal<EpisodeInspectionCache>,
-    data: Option<DataController>,
 }
 
 impl EpisodePreviewSignals {
@@ -208,13 +206,7 @@ impl EpisodePreviewSignals {
             state,
             revision,
             cache,
-            data: None,
         }
-    }
-
-    pub(crate) const fn with_data(mut self, data: DataController) -> Self {
-        self.data = Some(data);
-        self
     }
 
     pub(crate) const fn into_signals(
@@ -244,34 +236,7 @@ impl Studio {
             mut state,
             mut revision,
             mut cache,
-            data,
         } = signals;
-        // A completed episode selected in Data owns its full data. Sampling
-        // always reads that attached object; the workspace cache below exists
-        // only for recorded sources outside the Data catalog lifecycle.
-        if let Some(selected_data) = data.and_then(|data| data.selected_episode_data_for(&episode))
-        {
-            let ticket = revision.peek().wrapping_add(1);
-            revision.set(ticket);
-            let next = match selected_data {
-                EpisodeDataState::Ready(data) => match data.preview_at(seconds) {
-                    Ok(preview) => LoadState::Ready(preview),
-                    Err(reason) => LoadState::Failed {
-                        reason,
-                        previous: None,
-                    },
-                },
-                EpisodeDataState::Failed(reason) => LoadState::Failed {
-                    reason,
-                    previous: None,
-                },
-                EpisodeDataState::Unloaded | EpisodeDataState::Loading => {
-                    LoadState::Loading { previous: None }
-                }
-            };
-            state.set(Some(RecordedSource::new(episode, seconds, next)));
-            return;
-        }
         // A controller clock may advance while the one snapshot request is in
         // flight. Record the newest requested time without starting another read;
         // the completion below samples that newest time from the loaded snapshot.

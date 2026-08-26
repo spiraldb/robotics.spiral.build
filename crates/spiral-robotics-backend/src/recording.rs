@@ -711,10 +711,6 @@ mod tests {
                 .catalog
                 .try_acquire(CatalogLeaseOwner::Recording)
                 .expect("test recording lease");
-            assert!(
-                self.catalog
-                    .bind_recording(token, "episode_000001".to_owned())
-            );
             *self.recording_token.lock().unwrap() = Some(token);
         }
     }
@@ -732,13 +728,12 @@ mod tests {
                 .flatten())
         }
 
-        fn bind_recording_lease(&self, token: CatalogLeaseToken, episode: String) {
-            assert!(self.catalog.bind_recording(token, episode));
+        fn bind_recording_lease(&self, token: CatalogLeaseToken, _episode: String) {
             *self.recording_token.lock().unwrap() = Some(token);
         }
 
         fn claim_recording_lease(&self) -> Result<Option<CatalogLeaseToken>, OperationError> {
-            Ok(self.catalog.claim_recording().map(|claim| claim.token()))
+            Ok(self.recording_token.lock().unwrap().take())
         }
 
         fn release_recording_lease(&self, token: CatalogLeaseToken) {

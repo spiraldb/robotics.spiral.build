@@ -3,8 +3,7 @@
 //! Recording and calibration can mutate the same catalog.
 //! A boolean cannot express who owns that exclusion, so an unrelated stop can
 //! accidentally release somebody else's mutation. This lease uses an opaque
-//! generation token: only the exact acquisition may bind, claim, or release
-//! its slot.
+//! generation token: only the exact acquisition may release its slot.
 
 use std::sync::Mutex;
 
@@ -30,30 +29,8 @@ pub(crate) struct CatalogLeaseToken {
     generation: u64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ClaimedRecordingLease {
-    token: CatalogLeaseToken,
-    episode: String,
-}
-
-impl ClaimedRecordingLease {
-    fn new(token: CatalogLeaseToken, episode: String) -> Self {
-        Self { token, episode }
-    }
-
-    pub(crate) fn token(&self) -> CatalogLeaseToken {
-        self.token
-    }
-
-    pub(crate) fn episode(&self) -> &str {
-        &self.episode
-    }
-}
-
 struct LeaseHolder {
     token: CatalogLeaseToken,
-    recording_episode: Option<String>,
-    claimed: bool,
 }
 
 #[derive(Default)]
@@ -78,60 +55,8 @@ impl CatalogMutationLease {
             owner,
             generation: state.generation,
         };
-        state.holder = Some(LeaseHolder {
-            token,
-            recording_episode: None,
-            claimed: false,
-        });
+        state.holder = Some(LeaseHolder { token });
         Some(token)
-    }
-
-    /// Associate the identity allocated by a successful recording start with
-    /// its still-held catalog lease.
-    pub(crate) fn bind_recording(&self, token: CatalogLeaseToken, episode: String) -> bool {
-        let mut state = self.state.recover_lock();
-        let Some(holder) = state.holder.as_mut() else {
-            return false;
-        };
-        if holder.token != token
-            || token.owner != CatalogLeaseOwner::Recording
-            || holder.claimed
-            || holder.recording_episode.is_some()
-        {
-            return false;
-        }
-        holder.recording_episode = Some(episode);
-        true
-    }
-
-    /// Claim finalization exactly once while keeping the exclusion held until
-    /// durable commit calls [`release`](Self::release).
-    pub(crate) fn claim_recording(&self) -> Option<ClaimedRecordingLease> {
-        let mut state = self.state.recover_lock();
-        let holder = state.holder.as_mut()?;
-        if holder.token.owner != CatalogLeaseOwner::Recording || holder.claimed {
-            return None;
-        }
-        let episode = holder.recording_episode.clone()?;
-        holder.claimed = true;
-        Some(ClaimedRecordingLease::new(holder.token, episode))
-    }
-
-    pub(crate) fn recording_episode(&self) -> Option<String> {
-        let state = self.state.recover_lock();
-        let holder = state.holder.as_ref()?;
-        (holder.token.owner == CatalogLeaseOwner::Recording && !holder.claimed)
-            .then(|| holder.recording_episode.clone())
-            .flatten()
-    }
-
-    pub(crate) fn recording_is_opening(&self) -> bool {
-        let state = self.state.recover_lock();
-        state.holder.as_ref().is_some_and(|holder| {
-            holder.token.owner == CatalogLeaseOwner::Recording
-                && holder.recording_episode.is_none()
-                && !holder.claimed
-        })
     }
 
     #[cfg(test)]
@@ -183,28 +108,6 @@ mod tests {
         assert!(lease.is_held());
         assert!(lease.release(dataset));
         assert!(!lease.is_held());
-    }
-
-    #[test]
-    fn a_camera_less_recording_can_be_claimed_and_released_exactly_once() {
-        let lease = CatalogMutationLease::default();
-        let token = lease
-            .try_acquire(CatalogLeaseOwner::Recording)
-            .expect("recording lease");
-        assert!(lease.bind_recording(token, "episode_000001".to_owned()));
-        assert_eq!(lease.recording_episode().as_deref(), Some("episode_000001"));
-
-        let claimed = lease
-            .claim_recording()
-            .expect("automatic stop claims even without a media capture");
-        assert_eq!(claimed.episode, "episode_000001");
-        assert!(
-            lease.claim_recording().is_none(),
-            "finalization is exact once"
-        );
-        assert!(lease.is_held(), "claim retains exclusion through commit");
-        assert!(lease.release(claimed.token));
-        assert!(!lease.release(claimed.token));
     }
 
     #[test]

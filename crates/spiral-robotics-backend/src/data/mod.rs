@@ -2,6 +2,7 @@
 
 pub(crate) mod catalog;
 pub(crate) mod catalog_lease;
+pub(crate) mod connection;
 pub(crate) mod episode_arms;
 pub(crate) mod queries;
 pub(crate) mod seek;

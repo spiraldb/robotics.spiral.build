@@ -336,113 +336,17 @@ pub(super) struct DataHttpAdapter<'a> {
 
 impl DataCatalogPort for DataHttpAdapter<'_> {
     fn settings(&self) -> DataSettingsSnapshot {
-        let configured_endpoint = self.state.backend_state().spiral_endpoint();
-        let configured_spfs_endpoint = self.state.backend_state().spiral_spfs_endpoint();
-        let configured_project = self.state.backend_state().project_id();
-        let configured_client_id = self.state.backend_state().client_id();
-        let credentials_configured = self.state.backend_state().credentials().is_some();
-        DataSettingsOverrides::new(
-            configured_endpoint.as_deref(),
-            configured_spfs_endpoint.as_deref(),
-        )
-        .with_identity(
-            configured_project.as_deref(),
-            (!configured_client_id.is_empty()).then_some(configured_client_id.as_str()),
-        )
-        .with_credentials(credentials_configured)
-        .apply(
-            self.state
-                .storage()
-                .data_settings(&self.state.preferences().get()),
-        )
+        self.state.connection().settings()
     }
 
     fn update_settings(
         &self,
         command: UpdateDataSettingsCommand,
     ) -> Result<DataSettingsSnapshot, OperationError> {
-        let catalog_was_available = self.state.bootstrap().current().catalog_available();
-        let endpoint_changed = self.state.storage().spiral_endpoint() != command.spiral_endpoint()
-            || self.state.storage().spiral_spfs_endpoint() != command.spiral_spfs_endpoint();
-        let project_changed = self.state.storage().project_id() != command.project_id();
-        let current_credentials = self.state.backend_state().credentials();
-        let credentials = match command.client_secret() {
-            Some("") => None,
-            Some(secret) => Some(spiral_robotics_storage::SpiralCredentials::new(
-                command.client_id().to_owned(),
-                secret.to_owned(),
-            )),
-            None if command.client_id().is_empty() => None,
-            None => current_credentials
-                .clone()
-                .filter(|credentials| credentials.client_id() == command.client_id())
-                .ok_or_else(|| {
-                    OperationError::InvalidInput(
-                        "Enter the client secret when changing the Spiral client ID".to_owned(),
-                    )
-                })
-                .map(Some)?,
-        };
-        let credentials_changed = current_credentials != credentials;
-        if (endpoint_changed || project_changed || credentials_changed)
-            && self.state.workflow().state().snapshot().phase().active()
-        {
-            return Err(OperationError::Conflict(
-                "Cancel the active Workflow run before changing the Spiral destination or credentials."
-                    .to_owned(),
-            ));
-        }
-        let staged = self
-            .state
-            .preferences()
-            .stage_update(
-                spiral_robotics_api::settings::TrainingRuntimeSettings::new(
-                    command.training_endpoint(),
-                ),
-                VideoSettings::new(command.video_enabled()),
-            )
-            .map_err(OperationError::InvalidInput)?;
-        let connection = spiral_robotics_storage::SpiralConnectionSettings::new(
-            command.spiral_endpoint().to_owned(),
-            command.spiral_spfs_endpoint().to_owned(),
+        self.state.connection().update(
+            command,
+            self.state.bootstrap().current().catalog_available(),
         )
-        .and_then(|settings| settings.with_project(command.project_id()))
-        .map(|settings| settings.with_credentials(credentials.clone()))
-        .map_err(OperationError::InvalidInput)?;
-        self.state
-            .backend_state()
-            .save_connection(&connection)
-            .map_err(OperationError::Internal)?;
-        if endpoint_changed || project_changed || credentials_changed {
-            self.state
-                .storage()
-                .configure_connection(connection)
-                .map_err(OperationError::InvalidInput)?;
-        }
-        self.state
-            .storage()
-            .save_studio_preferences(&staged)
-            .map_err(OperationError::External)?;
-        if endpoint_changed || project_changed || credentials_changed || !catalog_was_available {
-            self.state
-                .training()
-                .reload_from_storage()
-                .map_err(OperationError::External)?;
-            self.state
-                .rollout()
-                .reload_from_storage()
-                .map_err(OperationError::External)?;
-            self.state
-                .workflow()
-                .reload_from_storage()
-                .map_err(OperationError::External)?;
-            self.state
-                .workflow_agent()
-                .reload_from_storage()
-                .map_err(OperationError::External)?;
-        }
-        self.state.preferences().replace(staged);
-        Ok(self.settings())
     }
 
     async fn refresh_training_readiness(&self) {
@@ -464,6 +368,7 @@ impl DataCatalogPort for DataHttpAdapter<'_> {
     }
 }
 
+#[cfg(test)]
 pub(super) struct DataSettingsOverrides<'a> {
     endpoint: Option<&'a str>,
     spfs_endpoint: Option<&'a str>,
@@ -472,6 +377,7 @@ pub(super) struct DataSettingsOverrides<'a> {
     credentials_configured: bool,
 }
 
+#[cfg(test)]
 impl<'a> DataSettingsOverrides<'a> {
     pub(super) fn new(endpoint: Option<&'a str>, spfs_endpoint: Option<&'a str>) -> Self {
         Self {
@@ -747,12 +653,14 @@ impl AppState {
             )
             .map(spiral_robotics_storage::ServiceEndpoint::into_string)
             .map_err(Failure::bad_request)?;
-        let endpoint_changed = state.storage().spiral_endpoint() != requested_endpoint
-            || state.storage().spiral_spfs_endpoint() != requested_spfs_endpoint;
-        let project_changed = state.storage().project_id() != request.project_id().trim();
+        let current_connection = state.connection().settings();
+        let endpoint_changed = current_connection.spiral().endpoint() != requested_endpoint
+            || current_connection.spiral().spfs_endpoint() != requested_spfs_endpoint;
+        let project_changed =
+            current_connection.spiral().project_id() != request.project_id().trim();
         let credentials_change_requested = request.clear_client_secret()
             || !request.client_secret().trim().is_empty()
-            || state.backend_state().client_id() != request.client_id();
+            || current_connection.spiral().client_id() != request.client_id();
         let training_endpoint_changed =
             state.preferences().get().training().endpoint() != requested_training_endpoint;
         let training_is_active = state

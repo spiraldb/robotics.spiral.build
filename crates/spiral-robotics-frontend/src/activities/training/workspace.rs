@@ -547,6 +547,7 @@ fn TrainingRunControl(
 fn TrainingHistory(history: Vec<TrainingRun>) -> Element {
     let controller = training_controller();
     let selected_run = controller.selected_run();
+    let confirming_delete = use_signal(|| None::<String>);
     rsx! {
         section { class: "training-history-panel studio-workbench-scroll",
             if history.is_empty() {
@@ -558,6 +559,7 @@ fn TrainingHistory(history: Vec<TrainingRun>) -> Element {
             for run in history {
                 TrainingHistoryRow {
                     selected: selected_run.as_deref() == Some(run.id()),
+                    confirming_delete,
                     run,
                 }
             }
@@ -566,13 +568,17 @@ fn TrainingHistory(history: Vec<TrainingRun>) -> Element {
 }
 
 #[component]
-fn TrainingHistoryRow(run: TrainingRun, selected: bool) -> Element {
+fn TrainingHistoryRow(
+    run: TrainingRun,
+    selected: bool,
+    mut confirming_delete: Signal<Option<String>>,
+) -> Element {
     let studio = studio();
     let controller = training_controller();
     let deleting_run = controller.deleting();
     let deleting = deleting_run.as_deref() == Some(run.id());
     let delete_disabled = run.phase().active() || deleting_run.is_some();
-    let confirming = controller.confirming_delete().as_deref() == Some(run.id());
+    let confirming = confirming_delete.read().as_deref() == Some(run.id());
     let checkpoint_word = if run.checkpoints().len() == 1 {
         "checkpoint"
     } else {
@@ -614,7 +620,11 @@ fn TrainingHistoryRow(run: TrainingRun, selected: bool) -> Element {
                 aria_label: "Delete run {run.config().run_name()}",
                 onclick: {
                     let id = run.id().to_owned();
-                    move |_| controller.confirm_delete(id.clone())
+                    move |_| {
+                        if controller.deleting().is_none() {
+                            confirming_delete.set(Some(id.clone()));
+                        }
+                    }
                 },
                 DeleteIcon {}
             }
@@ -638,13 +648,14 @@ fn TrainingHistoryRow(run: TrainingRun, selected: bool) -> Element {
                             let id = run.id().to_owned();
                             let name = run.config().run_name().to_owned();
                             move |_| {
+                                confirming_delete.set(None);
                                 controller.delete(
                                     studio,
                                     super::state::TrainingRunIdentity::new(id.clone(), name.clone()),
                                 )
                             }
                         },
-                        move |_| controller.cancel_delete(),
+                        move |_| confirming_delete.set(None),
                     ),
                     dismissal: ConfirmationDismissal::new(format!("delete-run-{}", run.id()))
                         .with_pending(deleting),

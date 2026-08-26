@@ -41,7 +41,6 @@ struct TrainingCommandSignals {
     starting: Signal<bool>,
     stopping: Signal<Option<String>>,
     deleting: Signal<Option<String>>,
-    confirming_delete: Signal<Option<String>>,
 }
 
 pub(crate) fn use_training_controller(namespace: &str, dataset_id: &str) -> TrainingController {
@@ -65,7 +64,6 @@ pub(crate) fn use_training_controller(namespace: &str, dataset_id: &str) -> Trai
             starting: use_signal(|| false),
             stopping: use_signal(|| None),
             deleting: use_signal(|| None),
-            confirming_delete: use_signal(|| None),
         },
     };
     let namespace_dependency = namespace.to_owned();
@@ -166,22 +164,7 @@ impl TrainingController {
         self.commands.deleting.read().to_owned()
     }
 
-    pub(crate) fn confirming_delete(&self) -> Option<String> {
-        self.commands.confirming_delete.read().to_owned()
-    }
-
-    pub(crate) fn confirm_delete(mut self, id: String) {
-        if self.commands.deleting.peek().is_none() {
-            self.commands.confirming_delete.set(Some(id));
-        }
-    }
-
-    pub(crate) fn cancel_delete(mut self) {
-        self.commands.confirming_delete.set(None);
-    }
-
     pub(crate) fn open_run(mut self, id: String) {
-        self.commands.confirming_delete.set(None);
         if !self.history.opened_runs.peek().contains(&id) {
             self.history.opened_runs.write().push(id.clone());
         }
@@ -189,12 +172,10 @@ impl TrainingController {
     }
 
     pub(crate) fn select_run(mut self, id: String) {
-        self.commands.confirming_delete.set(None);
         self.history.selected_run.set(Some(id));
     }
 
     pub(crate) fn close_run(mut self, id: String) {
-        self.commands.confirming_delete.set(None);
         let selected = self.history.selected_run.peek().to_owned();
         let next_selected = {
             let mut opened = self.history.opened_runs.write();
@@ -274,14 +255,12 @@ impl TrainingController {
         let path = format!("/api/training/runs/{}", run.id);
         let deleted_id = run.id.clone();
         let mut deleting = self.commands.deleting;
-        let mut confirming_delete = self.commands.confirming_delete;
         let mut selected_run = self.history.selected_run;
         let mut opened_runs = self.history.opened_runs;
         studio.run_utility(format!("Deleted run {}.", run.name), async move {
             let result = api::Http::send::<()>(Method::DELETE, &path, None).await;
             deleting.set(None);
             if result.is_ok() {
-                confirming_delete.set(None);
                 let selected = selected_run.peek().to_owned();
                 let next_selected = opened_runs
                     .write()

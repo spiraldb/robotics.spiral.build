@@ -153,9 +153,7 @@ pub(crate) fn use_data_controller(namespace: &str, dataset_id: &str) -> DataCont
                 })
         });
         async move {
-            let Some((episode, expected_frames, cached)) = source else {
-                return None;
-            };
+            let (episode, expected_frames, cached) = source?;
             let result = match cached {
                 Some(data) => Ok(data),
                 None => EpisodeData::load(&episode).await,
@@ -305,12 +303,6 @@ impl DataController {
             Ok(data) => EpisodeDataState::Ready(Arc::clone(data)),
             Err(error) => EpisodeDataState::Failed(error.clone()),
         })
-    }
-
-    pub(crate) fn selected_episode_data_for(&self, episode: &str) -> Option<EpisodeDataState> {
-        (self.selected_episode.read().as_deref() == Some(episode))
-            .then(|| self.selected_episode_data())
-            .flatten()
     }
 
     pub(crate) fn reload_selected_episode_data(mut self, episode: &str) {

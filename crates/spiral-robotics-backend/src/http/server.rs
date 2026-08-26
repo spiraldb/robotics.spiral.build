@@ -310,6 +310,21 @@ impl ServerStartup {
             RolloutHardwareResources::new(hardware.clone(), cameras.clone(), workspace.clone()),
             preferences.clone(),
         );
+        let connection = Arc::new(crate::data::connection::SpiralConnectionController::new(
+            crate::data::connection::SpiralConnectionStores::new(
+                backend_state,
+                storage.clone(),
+                preferences.clone(),
+            ),
+            crate::data::connection::ProjectStateManagers::new(
+                training.clone(),
+                rollout.clone(),
+                crate::data::connection::WorkflowStateManagers::new(
+                    workflow.clone(),
+                    workflow_agent.clone(),
+                ),
+            ),
+        ));
 
         // Without permission a camera still enumerates and its stream still opens;
         // it just never delivers a frame. Say so instead of showing a blank box.
@@ -318,9 +333,11 @@ impl ServerStartup {
         }
 
         let catalog = AppCatalogResources::new(workspace.clone(), episodes.clone(), storage)
-            .with_lease(catalog_lease);
+            .with_lease(catalog_lease.clone());
         let video = AppVideoResources::new(
-            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(crate::recording_session::RecordingSessionManager::new(
+                catalog_lease.clone(),
+            )),
             VideoEncoderSettings::new(
                 arguments.video.ffmpeg.clone(),
                 arguments.video.video_codec.clone(),
@@ -330,7 +347,7 @@ impl ServerStartup {
         let workflow_managers = AppWorkflowManagers::new(workflow.clone(), workflow_agent.clone());
         let activities =
             AppActivityManagers::new(training.clone(), rollout.clone(), workflow_managers);
-        let platform = AppPlatformResources::new(backend_state, preferences, BootstrapState::new());
+        let platform = AppPlatformResources::new(connection, preferences, BootstrapState::new());
         let state = AppState::new(
             catalog,
             robotics,

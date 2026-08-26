@@ -49,7 +49,7 @@ impl Viewport {
     /// Bind to a canvas, compiling the shader program.
     pub fn new(canvas: HtmlCanvasElement) -> Result<Self, ViewportError> {
         let renderer = Renderer::new(&canvas).map_err(ViewportError::Rendering)?;
-        let model = crate::urdf::so101().clone();
+        let model = crate::urdf::Urdf::so101();
         let scene = RobotScene::compose(&model, &Frame::default());
         Ok(Self {
             canvas,
@@ -85,12 +85,14 @@ impl Viewport {
 
     /// Begin direct manipulation at a client-space pointer position.
     pub fn begin_drag(&mut self, client_position: (f64, f64), panning: bool) {
-        self.drag = point_is_finite(client_position).then(|| Drag::new(client_position, panning));
+        self.drag = client_position
+            .is_finite()
+            .then(|| Drag::new(client_position, panning));
     }
 
     /// Move an active drag and report whether there was one to move.
     pub fn drag_to(&mut self, client_position: (f64, f64)) -> bool {
-        if !point_is_finite(client_position) {
+        if !client_position.is_finite() {
             return false;
         }
         let height = self.height();
@@ -203,8 +205,14 @@ impl Viewport {
     }
 }
 
-fn point_is_finite((x, y): (f64, f64)) -> bool {
-    x.is_finite() && y.is_finite()
+trait FinitePoint {
+    fn is_finite(&self) -> bool;
+}
+
+impl FinitePoint for (f64, f64) {
+    fn is_finite(&self) -> bool {
+        self.0.is_finite() && self.1.is_finite()
+    }
 }
 
 /// A sphere that contains the primitive, for a first-pass ray test.

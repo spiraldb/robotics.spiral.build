@@ -773,6 +773,47 @@ fn studio_has_one_spiral_persistence_boundary() {
 }
 
 #[test]
+fn recording_and_spiral_connection_lifecycles_have_single_owners() {
+    let backend = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let routes = fs::read_to_string(backend.join("src/http/routes.rs")).expect("HTTP state source");
+    let recordings =
+        fs::read_to_string(backend.join("src/recording_session.rs")).expect("recording session");
+    let lease = fs::read_to_string(backend.join("src/data/catalog_lease.rs"))
+        .expect("catalog lease source");
+    let data_routes =
+        fs::read_to_string(backend.join("src/http/routes/data.rs")).expect("data routes");
+    let connection =
+        fs::read_to_string(backend.join("src/data/connection.rs")).expect("connection controller");
+
+    assert!(!routes.contains("recording_video:"));
+    assert!(!lease.contains("recording_episode"));
+    for owned in [
+        "RecordingSessionPhase",
+        "catalog_lease: Arc<CatalogMutationLease>",
+        "media: tokio::sync::Mutex<Option<VideoCapture>>",
+    ] {
+        assert!(
+            recordings.contains(owned),
+            "recording owner is missing {owned:?}"
+        );
+    }
+
+    assert!(!data_routes.contains("backend_state()"));
+    assert!(!data_routes.contains("configure_connection("));
+    assert!(data_routes.contains("self.state.connection().update("));
+    for owned in [
+        "struct SpiralConnectionController",
+        "current: Mutex<SpiralConnectionSettings>",
+        "fn reload_project_state",
+    ] {
+        assert!(
+            connection.contains(owned),
+            "connection owner is missing {owned:?}"
+        );
+    }
+}
+
+#[test]
 fn robot_mutations_invalidate_pooled_read_snapshots() {
     let backend = Path::new(env!("CARGO_MANIFEST_DIR"));
     let workspace = fs::read_to_string(backend.join("src/robots/workspace.rs"))
