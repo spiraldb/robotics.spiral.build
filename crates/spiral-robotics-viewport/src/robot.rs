@@ -10,14 +10,15 @@
 //! and reach exist in the URDF file and nowhere else, including not here.
 
 use std::collections::BTreeMap;
+use std::fmt;
 
-use crate::arm::JointAngles;
+use crate::arm::{ArmPose, Joint};
 use crate::scene::{Condition, Entity, EntityKey, EntityShape, Interaction, Scene};
 use crate::urdf::{Geometry, Urdf};
 use glam::{EulerRot, Mat4, Quat, Vec3};
 
 /// How far apart two arms stand on the bench, in metres.
-pub const BENCH_SPACING: f32 = 0.34;
+pub(crate) const BENCH_SPACING: f32 = 0.34;
 
 /// The link angles that make a centered calibration recognizable on screen.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -44,22 +45,20 @@ const SO101_REST_POSE: RestPose = RestPose {
 /// The studio maps these onto its own selection type. They are stated here
 /// because this is the layer that creates them, and a table the renderer cannot
 /// see is what keeps the renderer from growing opinions about joints.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum RobotEntity {
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum Target {
     /// One actuated joint, and every shell that moves with it.
     Joint { robot: String, joint: String },
     /// Structure ahead of the first joint — the base an arm stands on.
-    Structure { robot: String },
+    Robot { robot: String },
     /// A camera mounted on this robot, drawn as the volume it can see.
     Camera { robot: String, role: String },
 }
 
-impl RobotEntity {
+impl Target {
     pub fn robot(&self) -> &str {
         match self {
-            Self::Joint { robot, .. } | Self::Structure { robot } | Self::Camera { robot, .. } => {
-                robot
-            }
+            Self::Joint { robot, .. } | Self::Robot { robot } | Self::Camera { robot, .. } => robot,
         }
     }
 }
@@ -71,7 +70,7 @@ impl RobotEntity {
 /// Nothing is drawn for a camera without a mount: an unmounted camera has no
 /// position, and drawing it at the origin would state one it does not have.
 #[derive(Clone, Debug, PartialEq)]
-pub struct CameraMount {
+struct CameraMount {
     role: String,
     attachment: CameraAttachment,
     /// Horizontal field of view, in degrees.
@@ -79,7 +78,7 @@ pub struct CameraMount {
 }
 
 impl CameraMount {
-    pub fn new(
+    fn new(
         role: impl Into<String>,
         attachment: CameraAttachment,
         field_of_view_degrees: f32,
@@ -117,7 +116,7 @@ impl CameraMount {
 
 /// A camera's rigid attachment to an optional robot link.
 #[derive(Clone, Debug, PartialEq)]
-pub struct CameraAttachment {
+struct CameraAttachment {
     /// Link the camera rides, or `None` for one fixed to the world.
     frame: Option<String>,
     /// Offset from that frame, in metres.
@@ -127,7 +126,7 @@ pub struct CameraAttachment {
 }
 
 impl CameraAttachment {
-    pub fn new(frame: Option<String>, translation: [f32; 3], roll_pitch_yaw: [f32; 3]) -> Self {
+    fn new(frame: Option<String>, translation: [f32; 3], roll_pitch_yaw: [f32; 3]) -> Self {
         Self {
             frame,
             translation,
@@ -145,39 +144,37 @@ const FRUSTUM_DEPTH: f32 = 0.28;
 
 /// One arm, ready to be turned into shapes.
 #[derive(Clone, Debug)]
-pub struct ArmPlacement {
+struct ArmPlacement {
     id: String,
     accent: [f32; 4],
-    pose: ArmPose,
+    pose: PoseState,
     cameras: Vec<CameraMount>,
-    bench_position: BenchPosition,
 }
 
 impl ArmPlacement {
-    /// Start an offline arm at rest in its assigned bench position.
-    pub fn new(id: impl Into<String>, accent: [f32; 4], bench_position: BenchPosition) -> Self {
+    /// Start an offline arm at rest.
+    fn new(id: impl Into<String>, accent: [f32; 4]) -> Self {
         Self {
             id: id.into(),
             accent,
-            pose: ArmPose::default(),
+            pose: PoseState::default(),
             cameras: Vec::new(),
-            bench_position,
         }
     }
 
-    pub fn with_live_pose(mut self, angles: JointAngles) -> Self {
-        self.pose = ArmPose { live: true, angles };
-        self
-    }
-
-    pub fn with_cameras(mut self, cameras: Vec<CameraMount>) -> Self {
-        self.cameras = cameras;
+    fn with_live_pose(mut self, angles: ArmPose) -> Self {
+        self.pose = PoseState { live: true, angles };
         self
     }
 
     /// Where this arm stands, centred with the others on the origin.
-    fn base_transform(&self) -> Mat4 {
-        Mat4::from_translation(self.bench_position.translation())
+    fn base_transform(index: usize, count: usize) -> Mat4 {
+        debug_assert!(count > 0 && index < count);
+        Mat4::from_translation(Vec3::new(
+            0.0,
+            (index as f32 - count.saturating_sub(1) as f32 / 2.0) * BENCH_SPACING,
+            0.0,
+        ))
     }
 
     fn display_color(&self, color: [f32; 4]) -> [f32; 4] {
@@ -197,115 +194,322 @@ impl ArmPlacement {
 }
 
 #[derive(Clone, Debug, Default)]
-struct ArmPose {
+struct PoseState {
     live: bool,
-    angles: JointAngles,
+    angles: ArmPose,
 }
 
-/// An arm's validated position in the centered row on the bench.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct BenchPosition {
-    index: usize,
-    count: usize,
+/// One complete, validated set of inputs for a viewport draw.
+///
+/// Arms are centered on the bench in insertion order. Configuration methods
+/// reject malformed stable data; telemetry poses themselves stay permissive.
+#[derive(Clone, Debug, Default)]
+pub struct Frame {
+    grid_enabled: bool,
+    placements: Vec<ArmPlacement>,
+    interactions: BTreeMap<Target, Interaction>,
+    conditions: BTreeMap<Target, Condition>,
 }
 
-impl BenchPosition {
-    pub fn new(index: usize, count: usize) -> Self {
-        let count = count.max(1);
+impl Frame {
+    pub fn new(grid_enabled: bool) -> Self {
         Self {
-            index: index.min(count - 1),
-            count,
+            grid_enabled,
+            ..Self::default()
         }
     }
 
-    fn translation(self) -> Vec3 {
-        Vec3::new(
-            0.0,
-            (self.index as f32 - self.count.saturating_sub(1) as f32 / 2.0) * BENCH_SPACING,
-            0.0,
-        )
+    /// Add one arm. `None` means the arm has no usable live pose and should be
+    /// shown at the muted presentation rest pose.
+    pub fn add_arm(
+        &mut self,
+        id: impl Into<String>,
+        accent: [f32; 4],
+        pose: Option<ArmPose>,
+    ) -> Result<&mut Self, FrameError> {
+        let id = id.into();
+        if id.trim().is_empty() {
+            return Err(FrameError::EmptyRobotId);
+        }
+        if self.placements.iter().any(|arm| arm.id == id) {
+            return Err(FrameError::DuplicateRobot(id));
+        }
+        if !accent
+            .into_iter()
+            .all(|component| component.is_finite() && (0.0..=1.0).contains(&component))
+        {
+            return Err(FrameError::InvalidAccent(id));
+        }
+
+        let placement = match pose {
+            Some(pose) => ArmPlacement::new(id, accent).with_live_pose(pose),
+            None => ArmPlacement::new(id, accent),
+        };
+        self.placements.push(placement);
+        Ok(self)
+    }
+
+    /// Attach a configured camera to an arm already in this frame.
+    #[allow(clippy::too_many_arguments)]
+    pub fn mount_camera(
+        &mut self,
+        robot: &str,
+        role: impl Into<String>,
+        frame: Option<&str>,
+        translation: [f64; 3],
+        roll_pitch_yaw: [f64; 3],
+        field_of_view_degrees: f64,
+    ) -> Result<&mut Self, FrameError> {
+        let Some(placement) = self.placements.iter_mut().find(|arm| arm.id == robot) else {
+            return Err(FrameError::UnknownRobot(robot.to_owned()));
+        };
+        let role = role.into();
+        if role.trim().is_empty() {
+            return Err(FrameError::EmptyCameraRole {
+                robot: robot.to_owned(),
+            });
+        }
+        if placement.cameras.iter().any(|camera| camera.role == role) {
+            return Err(FrameError::DuplicateCamera {
+                robot: robot.to_owned(),
+                role,
+            });
+        }
+        if let Some(frame) = frame
+            && crate::urdf::so101().link_index(frame).is_none()
+        {
+            return Err(FrameError::UnknownCameraFrame {
+                robot: robot.to_owned(),
+                role,
+                frame: frame.to_owned(),
+            });
+        }
+        let translation =
+            finite_vector(translation).ok_or_else(|| FrameError::InvalidCameraTransform {
+                robot: robot.to_owned(),
+                role: role.clone(),
+            })?;
+        let roll_pitch_yaw =
+            finite_vector(roll_pitch_yaw).ok_or_else(|| FrameError::InvalidCameraTransform {
+                robot: robot.to_owned(),
+                role: role.clone(),
+            })?;
+        let field_of_view_degrees = field_of_view_degrees as f32;
+        if !field_of_view_degrees.is_finite() || !(0.0..180.0).contains(&field_of_view_degrees) {
+            return Err(FrameError::InvalidFieldOfView {
+                robot: robot.to_owned(),
+                role,
+            });
+        }
+
+        placement.cameras.push(CameraMount::new(
+            role,
+            CameraAttachment::new(frame.map(str::to_owned), translation, roll_pitch_yaw),
+            field_of_view_degrees,
+        ));
+        Ok(self)
+    }
+
+    /// Apply interaction to a target present in this frame.
+    ///
+    /// A robot target scopes the state to the whole arm; an exact joint or
+    /// camera state is combined with that scope, with `Selected` winning over
+    /// `Hovered`.
+    pub fn set_interaction(&mut self, target: Target, interaction: Interaction) -> bool {
+        if !self.contains(&target) {
+            return false;
+        }
+        if interaction == Interaction::Resting {
+            self.interactions.remove(&target);
+        } else {
+            self.interactions.insert(target, interaction);
+        }
+        true
+    }
+
+    /// Apply a hardware condition to a target present in this frame.
+    pub fn set_condition(&mut self, target: Target, condition: Condition) -> bool {
+        if !self.contains(&target) {
+            return false;
+        }
+        if condition == Condition::Nominal {
+            self.conditions.remove(&target);
+        } else {
+            self.conditions.insert(target, condition);
+        }
+        true
+    }
+
+    fn contains(&self, target: &Target) -> bool {
+        let Some(placement) = self
+            .placements
+            .iter()
+            .find(|placement| placement.id == target.robot())
+        else {
+            return false;
+        };
+        match target {
+            Target::Robot { .. } => true,
+            Target::Joint { joint, .. } => Joint::named(joint).is_some(),
+            Target::Camera { role, .. } => {
+                placement.cameras.iter().any(|camera| camera.role == *role)
+            }
+        }
+    }
+
+    fn state_for(&self, target: &Target) -> (Interaction, Condition) {
+        let robot = Target::Robot {
+            robot: target.robot().to_owned(),
+        };
+        let interaction = self
+            .interactions
+            .get(&robot)
+            .into_iter()
+            .chain(self.interactions.get(target))
+            .copied()
+            .max()
+            .unwrap_or_default();
+        let condition = self
+            .conditions
+            .get(&robot)
+            .into_iter()
+            .chain(self.conditions.get(target))
+            .copied()
+            .max()
+            .unwrap_or_default();
+        (interaction, condition)
     }
 }
 
+fn finite_vector(values: [f64; 3]) -> Option<[f32; 3]> {
+    let converted = values.map(|value| value as f32);
+    converted
+        .into_iter()
+        .all(f32::is_finite)
+        .then_some(converted)
+}
+
+/// Why stable scene configuration was rejected.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FrameError {
+    EmptyRobotId,
+    DuplicateRobot(String),
+    InvalidAccent(String),
+    UnknownRobot(String),
+    EmptyCameraRole {
+        robot: String,
+    },
+    DuplicateCamera {
+        robot: String,
+        role: String,
+    },
+    UnknownCameraFrame {
+        robot: String,
+        role: String,
+        frame: String,
+    },
+    InvalidCameraTransform {
+        robot: String,
+        role: String,
+    },
+    InvalidFieldOfView {
+        robot: String,
+        role: String,
+    },
+}
+
+impl fmt::Display for FrameError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyRobotId => f.write_str("a viewport robot must have an id"),
+            Self::DuplicateRobot(robot) => write!(f, "viewport robot {robot:?} appears twice"),
+            Self::InvalidAccent(robot) => {
+                write!(f, "viewport robot {robot:?} has an invalid accent colour")
+            }
+            Self::UnknownRobot(robot) => write!(f, "viewport robot {robot:?} was not added"),
+            Self::EmptyCameraRole { robot } => {
+                write!(f, "a camera on viewport robot {robot:?} has no role")
+            }
+            Self::DuplicateCamera { robot, role } => {
+                write!(f, "viewport camera {robot:?}/{role:?} appears twice")
+            }
+            Self::UnknownCameraFrame { robot, role, frame } => write!(
+                f,
+                "viewport camera {robot:?}/{role:?} names unknown frame {frame:?}"
+            ),
+            Self::InvalidCameraTransform { robot, role } => write!(
+                f,
+                "viewport camera {robot:?}/{role:?} has a non-finite transform"
+            ),
+            Self::InvalidFieldOfView { robot, role } => write!(
+                f,
+                "viewport camera {robot:?}/{role:?} needs a field of view between 0 and 180 degrees"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for FrameError {}
+
 /// A scene and the table that says what is in it.
-pub struct RobotScene {
+#[derive(Default)]
+pub(crate) struct RobotScene {
     scene: Scene,
     /// Indexed by [`EntityKey`], so a pick is one lookup.
-    entities: Vec<RobotEntity>,
+    entities: Vec<Target>,
+    robot_origins: BTreeMap<String, Vec3>,
 }
 
 impl RobotScene {
     /// What a picked key refers to.
-    pub fn entity(&self, key: EntityKey) -> Option<&RobotEntity> {
+    pub(crate) fn target(&self, key: EntityKey) -> Option<&Target> {
         self.entities.get(key.index())
     }
 
-    pub fn scene(&self) -> &Scene {
+    pub(crate) fn scene(&self) -> &Scene {
         &self.scene
     }
-}
 
-/// How application state should decorate the otherwise neutral robot scene.
-pub struct SceneAppearance<InteractionFn, ConditionFn> {
-    grid_enabled: bool,
-    interaction_for: InteractionFn,
-    condition_for: ConditionFn,
-}
+    pub(crate) fn key(&self, target: &Target) -> Option<EntityKey> {
+        self.entities
+            .iter()
+            .position(|candidate| candidate == target)
+            .map(EntityKey::from_index)
+    }
 
-impl<InteractionFn, ConditionFn> SceneAppearance<InteractionFn, ConditionFn> {
-    pub fn new(
-        grid_enabled: bool,
-        interaction_for: InteractionFn,
-        condition_for: ConditionFn,
-    ) -> Self {
-        Self {
-            grid_enabled,
-            interaction_for,
-            condition_for,
-        }
+    pub(crate) fn robot_origin(&self, robot: &str) -> Option<Vec3> {
+        self.robot_origins.get(robot).copied()
     }
 }
 
-/// Build the bench from the description and what the arms are doing.
-///
-/// `interaction` and `condition` are asked about each entity rather than stored
-/// on it: what is hovered changes every pointer move and what is hot changes
-/// twenty times a second, and neither is something this crate should be told
-/// twice.
 impl RobotScene {
-    pub fn compose<InteractionFn, ConditionFn>(
-        urdf: &Urdf,
-        placements: &[ArmPlacement],
-        mut appearance: SceneAppearance<InteractionFn, ConditionFn>,
-    ) -> Self
-    where
-        InteractionFn: FnMut(&RobotEntity) -> Interaction,
-        ConditionFn: FnMut(&RobotEntity) -> Condition,
-    {
+    pub(crate) fn compose(urdf: &Urdf, frame: &Frame) -> Self {
         let mut entity_catalog = EntityCatalog::default();
-        let mut scene = Scene::new(appearance.grid_enabled);
+        let mut scene = Scene::new(frame.grid_enabled);
+        let mut robot_origins = BTreeMap::new();
 
-        for placement in placements {
-            let base_transform = placement.base_transform();
+        for (placement_index, placement) in frame.placements.iter().enumerate() {
+            let base_transform =
+                ArmPlacement::base_transform(placement_index, frame.placements.len());
+            robot_origins.insert(
+                placement.id.clone(),
+                base_transform.transform_point3(Vec3::ZERO),
+            );
             let joint_positions = urdf.so101_joint_positions(&placement.pose.angles);
             let link_transforms = urdf.pose(&joint_positions);
 
             for (link_index, link) in urdf.links().iter().enumerate() {
-                let robot_entity = match urdf.controlling_joint(link_index) {
-                    Some(joint) => RobotEntity::Joint {
+                let target = match urdf.controlling_joint(link_index) {
+                    Some(joint) => Target::Joint {
                         robot: placement.id.clone(),
                         joint,
                     },
-                    None => RobotEntity::Structure {
+                    None => Target::Robot {
                         robot: placement.id.clone(),
                     },
                 };
-                let key = entity_catalog.key_for(robot_entity);
-                let robot_entity = entity_catalog.entity(key);
-                let state = (
-                    (appearance.interaction_for)(robot_entity),
-                    (appearance.condition_for)(robot_entity),
-                );
+                let key = entity_catalog.key_for(target);
+                let state = frame.state_for(entity_catalog.target(key));
 
                 for visual in link.visuals() {
                     let color = match visual.material() {
@@ -328,16 +532,12 @@ impl RobotScene {
                 let Some(camera_transform) = camera_mount.transform(urdf, &link_transforms) else {
                     continue;
                 };
-                let robot_entity = RobotEntity::Camera {
+                let target = Target::Camera {
                     robot: placement.id.clone(),
                     role: camera_mount.role.clone(),
                 };
-                let key = entity_catalog.key_for(robot_entity);
-                let robot_entity = entity_catalog.entity(key);
-                let state = (
-                    (appearance.interaction_for)(robot_entity),
-                    (appearance.condition_for)(robot_entity),
-                );
+                let key = entity_catalog.key_for(target);
+                let state = frame.state_for(entity_catalog.target(key));
                 let frustum_radius =
                     (camera_mount.field_of_view_degrees.to_radians() * 0.5).tan() * FRUSTUM_DEPTH;
 
@@ -365,6 +565,7 @@ impl RobotScene {
         Self {
             scene,
             entities: entity_catalog.entities,
+            robot_origins,
         }
     }
 }
@@ -375,32 +576,32 @@ impl RobotScene {
 /// any of them select the joint without the renderer knowing what a joint is.
 #[derive(Default)]
 struct EntityCatalog {
-    entities: Vec<RobotEntity>,
+    entities: Vec<Target>,
 }
 
 impl EntityCatalog {
-    fn key_for(&mut self, robot_entity: RobotEntity) -> EntityKey {
+    fn key_for(&mut self, target: Target) -> EntityKey {
         match self
             .entities
             .iter()
-            .position(|existing_entity| *existing_entity == robot_entity)
+            .position(|existing_target| *existing_target == target)
         {
             Some(index) => EntityKey::from_index(index),
             None => {
-                self.entities.push(robot_entity);
+                self.entities.push(target);
                 EntityKey::from_index(self.entities.len() - 1)
             }
         }
     }
 
-    fn entity(&self, key: EntityKey) -> &RobotEntity {
+    fn target(&self, key: EntityKey) -> &Target {
         &self.entities[key.index()]
     }
 }
 
 impl Urdf {
     /// Place this description's joints from measured SO-101 angles.
-    fn so101_joint_positions(&self, angles: &JointAngles) -> BTreeMap<String, f32> {
+    fn so101_joint_positions(&self, angles: &ArmPose) -> BTreeMap<String, f32> {
         let rest_pose = SO101_REST_POSE;
         let maximum_gripper_position = self
             .joint("gripper")
@@ -451,7 +652,7 @@ impl Urdf {
     }
 
     /// Where the gripper tip sits, in millimetres from the arm's base.
-    pub fn so101_tool_position(&self, angles: &JointAngles) -> Option<Vec3> {
+    pub(crate) fn so101_tool_position(&self, angles: &ArmPose) -> Option<Vec3> {
         let tool_link_index = self.link_index("tool_link")?;
         let link_transforms = self.pose(&self.so101_joint_positions(angles));
         Some(
@@ -473,7 +674,7 @@ mod tests {
     #[test]
     fn every_shell_of_one_joint_shares_its_key() {
         let mut entity_catalog = EntityCatalog::default();
-        let joint = |name: &str| RobotEntity::Joint {
+        let joint = |name: &str| Target::Joint {
             robot: "follower".to_owned(),
             joint: name.to_owned(),
         };
@@ -489,22 +690,11 @@ mod tests {
 
     #[test]
     fn arms_stand_in_a_row_centred_on_the_origin() {
-        let placement = |index, count| {
-            ArmPlacement::new("arm", [0.0; 4], BenchPosition::new(index, count))
-                .with_live_pose(JointAngles::default())
-        };
-
-        let alone = placement(0, 1)
-            .base_transform()
-            .transform_point3(Vec3::ZERO);
+        let alone = ArmPlacement::base_transform(0, 1).transform_point3(Vec3::ZERO);
         assert_eq!(alone, Vec3::ZERO);
 
-        let left = placement(0, 2)
-            .base_transform()
-            .transform_point3(Vec3::ZERO);
-        let right = placement(1, 2)
-            .base_transform()
-            .transform_point3(Vec3::ZERO);
+        let left = ArmPlacement::base_transform(0, 2).transform_point3(Vec3::ZERO);
+        let right = ArmPlacement::base_transform(1, 2).transform_point3(Vec3::ZERO);
         assert!(
             (left.y + right.y).abs() < 1e-6,
             "a pair straddles the origin"
@@ -512,8 +702,100 @@ mod tests {
         assert!((right.y - left.y - BENCH_SPACING).abs() < 1e-6);
     }
 
+    #[test]
+    fn frame_rejects_malformed_stable_configuration() {
+        let mut frame = Frame::new(true);
+        assert_eq!(
+            frame.add_arm("", [0.2, 0.3, 0.4, 1.0], None).unwrap_err(),
+            FrameError::EmptyRobotId
+        );
+        frame
+            .add_arm("follower", [0.2, 0.3, 0.4, 1.0], None)
+            .unwrap();
+        assert_eq!(
+            frame
+                .add_arm("follower", [0.2, 0.3, 0.4, 1.0], None)
+                .unwrap_err(),
+            FrameError::DuplicateRobot("follower".to_owned())
+        );
+        assert!(matches!(
+            frame.mount_camera(
+                "follower",
+                "wrist",
+                Some("not_a_link"),
+                [0.0; 3],
+                [0.0; 3],
+                62.0,
+            ),
+            Err(FrameError::UnknownCameraFrame { .. })
+        ));
+        assert!(matches!(
+            frame.mount_camera(
+                "follower",
+                "wrist",
+                None,
+                [f64::NAN, 0.0, 0.0],
+                [0.0; 3],
+                62.0,
+            ),
+            Err(FrameError::InvalidCameraTransform { .. })
+        ));
+        assert!(matches!(
+            frame.mount_camera("follower", "wrist", None, [0.0; 3], [0.0; 3], 180.0,),
+            Err(FrameError::InvalidFieldOfView { .. })
+        ));
+    }
+
+    #[test]
+    fn frame_only_records_appearance_for_targets_it_contains() {
+        let mut frame = Frame::new(false);
+        frame
+            .add_arm("follower", [0.2, 0.3, 0.4, 1.0], None)
+            .unwrap();
+        let robot = Target::Robot {
+            robot: "follower".to_owned(),
+        };
+        let elbow = Target::Joint {
+            robot: "follower".to_owned(),
+            joint: "elbow_flex".to_owned(),
+        };
+        let unknown = Target::Joint {
+            robot: "follower".to_owned(),
+            joint: "made_up".to_owned(),
+        };
+
+        assert!(frame.set_interaction(robot, Interaction::Selected));
+        assert!(frame.set_interaction(elbow.clone(), Interaction::Hovered));
+        assert!(frame.set_condition(elbow.clone(), Condition::Fault));
+        assert!(!frame.set_condition(unknown, Condition::Fault));
+        assert_eq!(
+            frame.state_for(&elbow),
+            (Interaction::Selected, Condition::Fault),
+            "whole-arm selection scopes over the exact hovered joint"
+        );
+    }
+
+    #[test]
+    fn every_composed_shape_resolves_to_a_semantic_target() {
+        let mut frame = Frame::new(false);
+        frame
+            .add_arm("follower", [0.2, 0.3, 0.4, 1.0], Some(ArmPose::default()))
+            .unwrap();
+        let scene = RobotScene::compose(crate::urdf::so101(), &frame);
+
+        assert!(scene.scene().entities().next().is_some());
+        for entity in scene.scene().entities() {
+            let target = scene
+                .target(entity.key())
+                .expect("every drawn shape must have a target");
+            assert_eq!(scene.key(target), Some(entity.key()));
+            assert!(scene.scene().anchor_point(entity.key()).is_some());
+        }
+        assert_eq!(scene.robot_origin("follower"), Some(Vec3::ZERO));
+    }
+
     /// Where each pivot of the shipped description lands for `angles`.
-    fn pivots(angles: &JointAngles) -> BTreeMap<&'static str, Vec3> {
+    fn pivots(angles: &ArmPose) -> BTreeMap<&'static str, Vec3> {
         let urdf = Urdf::parse(SO101_URDF).unwrap();
         let transforms = urdf.pose(&urdf.so101_joint_positions(angles));
         [
@@ -532,7 +814,7 @@ mod tests {
 
     #[test]
     fn a_centered_arm_rests_in_a_reaching_pose() {
-        let at = pivots(&JointAngles::default());
+        let at = pivots(&ArmPose::default());
 
         assert!((at["wrist_link"].z - at["forearm_link"].z).abs() < 1e-6);
         assert!(at["forearm_link"].x > at["upper_arm_link"].x);
@@ -542,16 +824,16 @@ mod tests {
 
     #[test]
     fn lifting_the_shoulder_raises_the_tool() {
-        let lowered = pivots(&JointAngles::default().with_lift_degrees(20.0));
-        let raised = pivots(&JointAngles::default().with_lift_degrees(-20.0));
+        let lowered = pivots(&ArmPose::default().with_lift_degrees(20.0));
+        let raised = pivots(&ArmPose::default().with_lift_degrees(-20.0));
 
         assert!(raised["forearm_link"].z > lowered["forearm_link"].z);
     }
 
     #[test]
     fn panning_swings_the_arm_about_the_vertical_axis() {
-        let ahead = pivots(&JointAngles::default());
-        let turned = pivots(&JointAngles::default().with_pan_degrees(90.0));
+        let ahead = pivots(&ArmPose::default());
+        let turned = pivots(&ArmPose::default().with_pan_degrees(90.0));
 
         assert!(turned["gripper_link"].x.abs() < 1e-6);
         assert!((turned["gripper_link"].y - ahead["gripper_link"].x).abs() < 1e-6);
@@ -561,9 +843,9 @@ mod tests {
     #[test]
     fn link_lengths_come_from_the_description_for_every_pose() {
         let urdf = Urdf::parse(SO101_URDF).unwrap();
-        let reference = pivots(&JointAngles::default());
+        let reference = pivots(&ArmPose::default());
         let bent = pivots(
-            &JointAngles::default()
+            &ArmPose::default()
                 .with_pan_degrees(45.0)
                 .with_lift_degrees(-35.0)
                 .with_elbow_degrees(80.0)
@@ -598,7 +880,7 @@ mod tests {
         let (_, open) = urdf.joint("gripper").unwrap().limit().unwrap();
         let jaw = |gripper_opening: f64| {
             urdf.so101_joint_positions(
-                &JointAngles::default().with_gripper_normalized(1.0 - 2.0 * gripper_opening),
+                &ArmPose::default().with_gripper_normalized(1.0 - 2.0 * gripper_opening),
             )["gripper"]
         };
 
@@ -612,7 +894,7 @@ mod tests {
     #[test]
     fn every_motor_places_a_joint_of_the_description() {
         let urdf = Urdf::parse(SO101_URDF).unwrap();
-        let positions = urdf.so101_joint_positions(&JointAngles::default());
+        let positions = urdf.so101_joint_positions(&ArmPose::default());
 
         for joint in SO101_JOINTS {
             assert!(

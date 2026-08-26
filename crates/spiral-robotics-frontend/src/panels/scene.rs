@@ -21,13 +21,10 @@ use dioxus::prelude::*;
 use dioxus_elements::geometry::WheelDelta;
 use dioxus_elements::input_data::MouseButton;
 use spiral_robotics_api::robots::{MotorCondition, RobotSummary};
-use spiral_robotics_viewport::glam::Vec3;
 use spiral_robotics_viewport::{
-    ArmPlacement, BENCH_SPACING, BenchPosition, Camera, CameraAttachment, CameraMount, Condition,
-    Drag, DragUpdate, Gesture, Interaction, PickRequest, RobotEntity, RobotScene, SceneAppearance,
-    SceneFrame, Viewport as Bench,
+    ArmPose, Command, Condition, Frame as BenchFrame, FrameError, Interaction, Joint, Target,
+    Viewport as Bench,
 };
-use spiral_robotics_viewport::{JointAngles, JointDefinition};
 #[cfg(feature = "web")]
 use wasm_bindgen::JsCast;
 #[cfg(feature = "web")]
@@ -71,24 +68,10 @@ impl ScenePalette {
     }
 }
 
-trait BenchCanvas {
-    /// The canvas height in CSS pixels, which is what turns a drag into metres.
-    fn canvas_height(&self) -> f32;
-}
-
-impl BenchCanvas for Rc<RefCell<Option<Bench>>> {
-    fn canvas_height(&self) -> f32 {
-        self.try_borrow()
-            .ok()
-            .and_then(|slot| slot.as_ref().map(Bench::height))
-            .unwrap_or(1.0)
-    }
-}
-
 /// What the pointer is over, and where to put a note about it.
 #[derive(Clone, PartialEq)]
 struct Hover {
-    entity: RobotEntity,
+    entity: Target,
     /// Where the callout points, in client pixels.
     at: (f64, f64),
 }
@@ -147,12 +130,12 @@ pub(crate) fn Viewport(
         resize_revision,
     } = presentation;
     let studio = studio();
-    let urdf = crate::shell::state::description();
     let bench = use_hook(|| Rc::new(RefCell::new(Option::<Bench>::None)));
-    let mut camera = use_signal(Camera::default);
-    let mut drag = use_signal(|| Option::<Drag>::None);
+    let mut view_revision = use_signal(|| 0_u64);
+    let mut dragging = use_signal(|| false);
     let mut trouble = use_signal(|| Option::<String>::None);
     let mut hover = use_signal(|| Option::<Hover>::None);
+    let mut condition_marks = use_signal(Vec::<Mark>::new);
     // On by default: the bench is a physical workspace and the 20cm rhythm is
     // how an operator reads reach and clearance off the screen. It stays a
     // control, so a scene that only needs the arms can still shed it.
@@ -173,7 +156,6 @@ pub(crate) fn Viewport(
     });
 
     let draw_bench = bench.clone();
-    let draw_urdf = urdf.clone();
     use_effect(use_reactive(
         (&resize_revision, &source, &visible_robot),
         move |(_resize_revision, draw_source, visible_robot)| {
@@ -183,21 +165,31 @@ pub(crate) fn Viewport(
             // stretching the previous frame until the next telemetry or camera
             // interaction.
             let _ = resized();
-            let camera = camera();
+            let _ = view_revision();
             let grid = show_grid();
             let hovered = hover();
-            let Ok(urdf) = draw_urdf.as_ref() else {
-                return;
+            let conditions = if draw_source.is_live() {
+                studio.motor_conditions()
+            } else {
+                BTreeMap::new()
             };
-            let scene = SceneBuildRequest {
-                urdf,
+            let frame = match (SceneBuildRequest {
                 studio: &studio,
                 grid,
                 source: &draw_source,
                 hovered: hovered.as_ref().map(|it| &it.entity),
                 visible_robot: visible_robot.as_deref(),
-            }
-            .build();
+                conditions: &conditions,
+            })
+            .build()
+            {
+                Ok(frame) => frame,
+                Err(error) => {
+                    trouble.set(Some(error.to_string()));
+                    condition_marks.set(Vec::new());
+                    return;
+                }
+            };
 
             let Some(canvas) = ViewportDom::canvas() else {
                 return;
@@ -207,7 +199,7 @@ pub(crate) fn Viewport(
                 match Bench::new(canvas) {
                     Ok(ready) => *slot = Some(ready),
                     Err(error) => {
-                        trouble.set(Some(error));
+                        trouble.set(Some(error.to_string()));
                         return;
                     }
                 }
@@ -216,7 +208,15 @@ pub(crate) fn Viewport(
                 return;
             };
             let ratio = web_sys::window().map_or(1.0, |window| window.device_pixel_ratio());
-            bench.draw(SceneFrame::new(&camera, scene.scene(), ratio));
+            bench.draw(&frame, ratio);
+            condition_marks.set(if draw_source.is_live() {
+                marks_for(bench, &conditions)
+            } else {
+                Vec::new()
+            });
+            if trouble.peek().is_some() {
+                trouble.set(None);
+            }
         },
     ));
 
@@ -232,26 +232,11 @@ pub(crate) fn Viewport(
         })
         .cloned()
         .collect::<Vec<_>>();
-    let failure = match urdf.as_ref() {
-        Err(error) => Some(format!("The robot description could not be read: {error}")),
-        Ok(_) => trouble(),
-    };
+    let failure = trouble();
     // Where each unwell motor sits on the canvas right now. Computed from the
     // scene the crate just drew, so a mark cannot drift away from the part it
     // is about as the camera moves.
-    let marks = if source.is_live() {
-        ConditionMarksRequest {
-            urdf: &urdf,
-            studio: &studio,
-            bench: &bench,
-            camera: camera(),
-            grid: show_grid(),
-            visible_robot: visible_robot.as_deref(),
-        }
-        .marks()
-    } else {
-        Vec::new()
-    };
+    let marks = condition_marks();
     let historical_active = !source.is_live();
     let recorded_status = source.recorded_status();
 
@@ -260,7 +245,7 @@ pub(crate) fn Viewport(
             canvas {
                 id: CANVAS_ID,
                 class: "h-full w-full select-none",
-                class: if drag().is_some() {
+                class: if dragging() {
                     "cursor-grabbing"
                 } else if hover().is_some() {
                     "cursor-pointer"
@@ -270,120 +255,140 @@ pub(crate) fn Viewport(
                 role: "application",
                 tabindex: "0",
                 "aria-label": "Interactive 3D robot viewer. Click a motor or camera to select it and see its readings in the inspector. Drag to orbit, shift-drag to pan, scroll to zoom, and press F to frame the selection.",
-                onpointerdown: move |event| {
-                    ViewportDom::capture_pointer(&event);
-                    // The middle and right buttons pan, matching every other 3D
-                    // viewer; shift with the left button does the same for a
-                    // one-button mouse.
-                    let panning = event.modifiers().shift()
-                        || matches!(
-                            event.trigger_button(),
-                            Some(MouseButton::Secondary | MouseButton::Auxiliary)
-                        );
-                    drag.set(Some(Drag::new(event.client_point(), panning)));
+                onpointerdown: {
+                    let bench = bench.clone();
+                    move |event| {
+                        ViewportDom::capture_pointer(&event);
+                        // The middle and right buttons pan, matching every other 3D
+                        // viewer; shift with the left button does the same for a
+                        // one-button mouse.
+                        let panning = event.modifiers().shift()
+                            || matches!(
+                                event.trigger_button(),
+                                Some(MouseButton::Secondary | MouseButton::Auxiliary)
+                            );
+                        if let Ok(mut slot) = bench.try_borrow_mut()
+                            && let Some(bench) = slot.as_mut()
+                        {
+                            bench.begin_drag(event.client_point(), panning);
+                            dragging.set(true);
+                        }
+                    }
                 },
                 onpointermove: {
                     let bench = bench.clone();
-                    let urdf = urdf.clone();
-                    let source = source.clone();
-                    let visible_robot = visible_robot.clone();
                     move |event| {
                         let position = event.client_point();
-                        if let Some(mut active) = drag() {
-                            active.advance(
-                                &mut camera.write(),
-                                DragUpdate::new(position, bench.canvas_height()),
-                            );
-                            drag.set(Some(active));
+                        if dragging() {
+                            if let Ok(mut slot) = bench.try_borrow_mut()
+                                && slot.as_mut().is_some_and(|bench| bench.drag_to(position))
+                            {
+                                bump(&mut view_revision);
+                            }
                             return;
                         }
                         // Only while nothing is being dragged: an orbit is not
                         // a tour of everything the pointer sweeps past.
-                        hover.set(
-                            HoverRequest {
-                                urdf: &urdf,
-                                studio: &studio,
-                                bench: &bench,
-                                camera: camera(),
-                                grid: show_grid(),
-                                pick: PickContext {
-                                source: &source,
-                                visible_robot: visible_robot.as_deref(),
-                                at: position,
-                            },
-                            }
-                            .pick(),
-                        );
+                        hover.set(HoverRequest { bench: &bench, at: position }.pick());
                     }
                 },
                 onpointerup: {
                     let bench = bench.clone();
-                    let urdf = urdf.clone();
-                    let source = source.clone();
-                    let visible_robot = visible_robot.clone();
                     move |event| {
-                        if drag().is_some_and(|active| !active.moved()) {
-                            let position = event.client_point();
-                            let picked = HoverRequest {
-                                urdf: &urdf,
-                                studio: &studio,
-                                bench: &bench,
-                                camera: camera(),
-                                grid: show_grid(),
-                                pick: PickContext {
-                                    source: &source,
-                                    visible_robot: visible_robot.as_deref(),
-                                    at: position,
-                                },
-                            }
-                            .pick();
+                        let position = event.client_point();
+                        let (was_click, picked) = bench
+                            .try_borrow_mut()
+                            .ok()
+                            .and_then(|mut slot| {
+                                let bench = slot.as_mut()?;
+                                let was_click = !bench.drag_moved();
+                                let picked = was_click.then(|| bench.pick(position)).flatten();
+                                bench.end_drag();
+                                Some((was_click, picked))
+                            })
+                            .unwrap_or_default();
+                        if was_click {
                             // Clicking bare bench clears the selection, the way
                             // clicking empty space does everywhere else.
-                            on_select.call(picked.map(|hit| Selection::from(&hit.entity)));
+                            on_select.call(picked.as_ref().map(Selection::from));
                         }
-                        drag.set(None);
+                        dragging.set(false);
                     }
                 },
-                onpointercancel: move |_| {
-                    drag.set(None);
+                onpointercancel: {
+                    let bench = bench.clone();
+                    move |_| {
+                        if let Ok(mut slot) = bench.try_borrow_mut()
+                            && let Some(bench) = slot.as_mut()
+                        {
+                            bench.end_drag();
+                        }
+                        dragging.set(false);
+                    }
                 },
-                onpointerleave: move |_| {
-                    drag.set(None);
-                    hover.set(None);
+                onpointerleave: {
+                    let bench = bench.clone();
+                    move |_| {
+                        if let Ok(mut slot) = bench.try_borrow_mut()
+                            && let Some(bench) = slot.as_mut()
+                        {
+                            bench.end_drag();
+                        }
+                        dragging.set(false);
+                        hover.set(None);
+                    }
                 },
                 oncontextmenu: move |event| event.prevent_default(),
-                onwheel: move |event| {
-                    let notches = match event.delta() {
-                        WheelDelta::Pixels(delta) => delta.y / 120.0,
-                        WheelDelta::Lines(delta) => delta.y / 3.0,
-                        WheelDelta::Pages(delta) => delta.y,
-                    };
-                    Gesture::Wheel(notches).apply(&mut camera.write());
+                onwheel: {
+                    let bench = bench.clone();
+                    move |event| {
+                        let notches = match event.delta() {
+                            WheelDelta::Pixels(delta) => delta.y / 120.0,
+                            WheelDelta::Lines(delta) => delta.y / 3.0,
+                            WheelDelta::Pages(delta) => delta.y,
+                        };
+                        if let Ok(mut slot) = bench.try_borrow_mut()
+                            && let Some(bench) = slot.as_mut()
+                        {
+                            bench.command(Command::Wheel(notches));
+                            bump(&mut view_revision);
+                        }
+                    }
                 },
-                onkeydown: move |event| {
-                    let gesture = match event.key() {
-                        Key::ArrowLeft => Some(Gesture::OrbitLeft),
-                        Key::ArrowRight => Some(Gesture::OrbitRight),
-                        Key::ArrowUp => Some(Gesture::OrbitUp),
-                        Key::ArrowDown => Some(Gesture::OrbitDown),
+                onkeydown: {
+                    let bench = bench.clone();
+                    move |event| {
+                        let command = match event.key() {
+                        Key::ArrowLeft => Some(Command::OrbitLeft),
+                        Key::ArrowRight => Some(Command::OrbitRight),
+                        Key::ArrowUp => Some(Command::OrbitUp),
+                        Key::ArrowDown => Some(Command::OrbitDown),
                         Key::Character(value) if value == "+" || value == "=" => {
-                            Some(Gesture::ZoomIn)
+                            Some(Command::ZoomIn)
                         }
                         Key::Character(value) if value == "-" || value == "_" => {
-                            Some(Gesture::ZoomOut)
+                            Some(Command::ZoomOut)
                         }
-                        Key::Character(value) if value == "0" => {
-                            camera.set(Camera::default());
-                            None
-                        }
+                        Key::Character(value) if value == "0" => Some(Command::Home),
                         Key::Character(value) if value.eq_ignore_ascii_case("f") => {
-                            studio.frame_selection(&mut camera, visible_robot.as_deref());
+                            let robot = studio.framed_robot(visible_robot.as_deref());
+                            if let Ok(mut slot) = bench.try_borrow_mut()
+                                && let Some(bench) = slot.as_mut()
+                                && bench.frame_robot(robot.as_deref())
+                            {
+                                bump(&mut view_revision);
+                            }
                             None
                         }
                         _ => None,
-                    };
-                    if let Some(gesture) = gesture {
-                        gesture.apply(&mut camera.write());
+                        };
+                        if let Some(command) = command
+                            && let Ok(mut slot) = bench.try_borrow_mut()
+                            && let Some(bench) = slot.as_mut()
+                        {
+                            bench.command(command);
+                            bump(&mut view_revision);
+                        }
                     }
                 },
             }
@@ -446,12 +451,34 @@ pub(crate) fn Viewport(
                     Action {
                         purpose: ActionPurpose::Apply,
                         class: "viewport-action",
-                        onclick: move |_| camera.set(Camera::default()),
+                        onclick: {
+                            let bench = bench.clone();
+                            move |_| {
+                                if let Ok(mut slot) = bench.try_borrow_mut()
+                                    && let Some(bench) = slot.as_mut()
+                                {
+                                    bench.command(Command::Home);
+                                    bump(&mut view_revision);
+                                }
+                            }
+                        },
                         title: "Restore the default camera (0)",
                         "Home"
                     }
                 }
-                ViewCube { camera }
+                ViewCube {
+                    on_command: {
+                        let bench = bench.clone();
+                        move |command| {
+                            if let Ok(mut slot) = bench.try_borrow_mut()
+                                && let Some(bench) = slot.as_mut()
+                            {
+                                bench.command(command);
+                                bump(&mut view_revision);
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -482,26 +509,25 @@ fn HoverNote(hover: Hover, historical: bool) -> Element {
 }
 
 /// What to call an entity, and the reading worth showing beside its name.
-trait RobotEntityPresentation {
+trait TargetPresentation {
     fn describe(
         &self,
         studio: &crate::shell::state::Studio,
         historical: bool,
     ) -> (String, Option<String>);
-    fn matches_selection(&self, selection: Option<&Selection>) -> bool;
 }
 
-impl RobotEntityPresentation for RobotEntity {
+impl TargetPresentation for Target {
     fn describe(
         &self,
         studio: &crate::shell::state::Studio,
         historical: bool,
     ) -> (String, Option<String>) {
         match self {
-            RobotEntity::Structure { robot } => (robot.clone(), None),
-            RobotEntity::Camera { robot, role } => (format!("{role} camera"), Some(robot.clone())),
-            RobotEntity::Joint { robot, joint } => {
-                let label = JointDefinition::so101(joint)
+            Target::Robot { robot } => (robot.clone(), None),
+            Target::Camera { robot, role } => (format!("{role} camera"), Some(robot.clone())),
+            Target::Joint { robot, joint } => {
+                let label = Joint::named(joint)
                     .map_or_else(|| joint.clone(), |joint| joint.label().to_owned());
                 let telemetry = studio.robot_telemetry(robot);
                 let detail = (!historical)
@@ -520,33 +546,18 @@ impl RobotEntityPresentation for RobotEntity {
             }
         }
     }
-
-    fn matches_selection(&self, selection: Option<&Selection>) -> bool {
-        match selection {
-            Some(Selection::Robot(robot)) => self.robot() == robot,
-            Some(Selection::Joint { robot, joint }) => matches!(
-                self,
-                Self::Joint { robot: on, joint: named } if on == robot && named == joint
-            ),
-            Some(Selection::Camera { robot, role }) => matches!(
-                self,
-                Self::Camera { robot: on, role: named } if on == robot && named == role
-            ),
-            None => false,
-        }
-    }
 }
 
 /// Turn a scene entity into the studio's own idea of what is selected.
-impl From<&RobotEntity> for Selection {
-    fn from(entity: &RobotEntity) -> Self {
-        match entity {
-            RobotEntity::Joint { robot, joint } => Selection::Joint {
+impl From<&Target> for Selection {
+    fn from(target: &Target) -> Self {
+        match target {
+            Target::Joint { robot, joint } => Selection::Joint {
                 robot: robot.clone(),
                 joint: joint.clone(),
             },
-            RobotEntity::Structure { robot } => Selection::Robot(robot.clone()),
-            RobotEntity::Camera { robot, role } => Selection::Camera {
+            Target::Robot { robot } => Selection::Robot(robot.clone()),
+            Target::Camera { robot, role } => Selection::Camera {
                 robot: robot.clone(),
                 role: role.clone(),
             },
@@ -554,64 +565,64 @@ impl From<&RobotEntity> for Selection {
     }
 }
 
-/// Whether `entity` is one of the things `selection` refers to.
-///
-/// Selecting a whole arm selects all of it. The legend row names the robot, not
-/// the plinth it stands on, so lighting only the base would answer a different
-/// question than the one the operator asked.
 /// Build the bench from what the studio currently knows.
 ///
-/// The two closures are where the studio's state meets the scene: one says what
-/// the operator is doing with a thing, the other what its hardware is saying
-/// about itself. Neither is stored in the scene, because both change far more
-/// often than the geometry does.
+/// Selection, hover, and hardware verdicts remain application policy; the
+/// viewport only receives their presentation states for semantic targets.
 struct SceneBuildRequest<'a> {
-    urdf: &'a spiral_robotics_viewport::Urdf,
     studio: &'a crate::shell::state::Studio,
     grid: bool,
     source: &'a SceneSource,
-    hovered: Option<&'a RobotEntity>,
+    hovered: Option<&'a Target>,
     visible_robot: Option<&'a str>,
+    conditions: &'a BTreeMap<(String, String), Condition>,
 }
 
 impl SceneBuildRequest<'_> {
-    fn build(&self) -> RobotScene {
+    fn build(&self) -> Result<BenchFrame, FrameError> {
         let selected = self.studio.selection().read().to_owned();
         // Hovering a joint row in the inspector lights the motor on the bench, the
         // same way hovering the motor lights the row: one object, seen twice.
         let pointed = self.studio.pointed_selection().read().to_owned();
-        let hovered = self.hovered.cloned();
-        let conditions = if self.source.is_live() {
-            self.studio.motor_conditions()
-        } else {
-            Default::default()
-        };
+        let mut frame = BenchFrame::new(self.grid);
+        self.studio
+            .add_arms(&mut frame, self.source, self.visible_robot)?;
 
-        RobotScene::compose(
-            self.urdf,
-            &self.studio.placements(self.source, self.visible_robot),
-            SceneAppearance::new(
-                self.grid,
-                |entity: &RobotEntity| {
-                    if entity.matches_selection(selected.as_ref()) {
-                        Interaction::Selected
-                    } else if hovered.as_ref() == Some(entity)
-                        || entity.matches_selection(pointed.as_ref())
-                    {
-                        Interaction::Hovered
-                    } else {
-                        Interaction::Resting
-                    }
+        if let Some(selected) = selected.as_ref().map(target_of) {
+            frame.set_interaction(selected, Interaction::Selected);
+        }
+        if let Some(pointed) = pointed.as_ref().map(target_of) {
+            frame.set_interaction(pointed, Interaction::Hovered);
+        }
+        if let Some(hovered) = self.hovered {
+            frame.set_interaction(hovered.clone(), Interaction::Hovered);
+        }
+        for ((robot, joint), condition) in self.conditions {
+            frame.set_condition(
+                Target::Joint {
+                    robot: robot.clone(),
+                    joint: joint.clone(),
                 },
-                |entity: &RobotEntity| match entity {
-                    RobotEntity::Joint { robot, joint } => conditions
-                        .get(&(robot.clone(), joint.clone()))
-                        .copied()
-                        .unwrap_or_default(),
-                    _ => Condition::Nominal,
-                },
-            ),
-        )
+                *condition,
+            );
+        }
+        Ok(frame)
+    }
+}
+
+fn target_of(selection: &Selection) -> Target {
+    match selection {
+        Selection::Robot(robot) => Target::Robot {
+            robot: robot.clone(),
+        },
+        Selection::Joint { robot, joint } => Target::Joint {
+            robot: robot.clone(),
+            joint: joint.clone(),
+        },
+        Selection::Camera { robot, role } => Target::Camera {
+            robot: robot.clone(),
+            role: role.clone(),
+        },
     }
 }
 
@@ -641,103 +652,51 @@ impl crate::shell::state::Studio {
 /// caution — one entry per motor currently reporting trouble.
 type Mark = (String, f64, f64, bool);
 
-struct ConditionMarksRequest<'a> {
-    urdf: &'a crate::shell::state::Description,
-    studio: &'a crate::shell::state::Studio,
-    bench: &'a Rc<RefCell<Option<Bench>>>,
-    camera: Camera,
-    grid: bool,
-    visible_robot: Option<&'a str>,
-}
-
-impl ConditionMarksRequest<'_> {
-    fn marks(&self) -> Vec<Mark> {
-        let Ok(urdf) = self.urdf.as_ref().as_ref() else {
-            return Vec::new();
-        };
-        let Ok(slot) = self.bench.try_borrow() else {
-            return Vec::new();
-        };
-        let Some(bench) = slot.as_ref() else {
-            return Vec::new();
-        };
-        let scene = SceneBuildRequest {
-            urdf,
-            studio: self.studio,
-            grid: self.grid,
-            source: &SceneSource::Live,
-            hovered: None,
-            visible_robot: self.visible_robot,
-        }
-        .build();
-        let rect = ViewportDom::canvas().map(|canvas| canvas.get_bounding_client_rect());
-        let (left, top) = rect.map_or((0.0, 0.0), |rect| (rect.left(), rect.top()));
-
-        scene
-            .scene()
-            .entities()
-            .filter(|entity| entity.condition() != Condition::Nominal)
-            .map(|entity| entity.key())
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .filter_map(|key| {
-                let entity = scene.entity(key)?;
-                let RobotEntity::Joint { robot, joint } = entity else {
-                    return None;
-                };
-                let at = bench.anchor(&self.camera, scene.scene().anchor_point(key)?)?;
-                let fault = scene
-                    .scene()
-                    .entity(key)
-                    .is_some_and(|entity| entity.condition() == Condition::Fault);
-                Some((format!("{robot}/{joint}"), at.0 - left, at.1 - top, fault))
-            })
-            .collect()
-    }
-}
-
-/// What the pointer is over, and where the note about it belongs.
-struct PickContext<'a> {
-    source: &'a SceneSource,
-    visible_robot: Option<&'a str>,
-    at: (f64, f64),
+fn marks_for(bench: &Bench, conditions: &BTreeMap<(String, String), Condition>) -> Vec<Mark> {
+    conditions
+        .iter()
+        .filter_map(|((robot, joint), condition)| {
+            let target = Target::Joint {
+                robot: robot.clone(),
+                joint: joint.clone(),
+            };
+            let (x, y) = bench.anchor(&target)?;
+            Some((
+                format!("{robot}/{joint}"),
+                x,
+                y,
+                *condition == Condition::Fault,
+            ))
+        })
+        .collect()
 }
 
 struct HoverRequest<'a> {
-    urdf: &'a crate::shell::state::Description,
-    studio: &'a crate::shell::state::Studio,
     bench: &'a Rc<RefCell<Option<Bench>>>,
-    camera: Camera,
-    grid: bool,
-    pick: PickContext<'a>,
+    at: (f64, f64),
 }
 
 impl HoverRequest<'_> {
     fn pick(&self) -> Option<Hover> {
-        let urdf = self.urdf.as_ref().as_ref().ok()?;
         let slot = self.bench.try_borrow().ok()?;
         let bench = slot.as_ref()?;
-        let scene = SceneBuildRequest {
-            urdf,
-            studio: self.studio,
-            grid: self.grid,
-            source: self.pick.source,
-            hovered: None,
-            visible_robot: self.pick.visible_robot,
-        }
-        .build();
-        let key = bench.pick(PickRequest::new(&self.camera, scene.scene(), self.pick.at))?;
+        let target = bench.pick(self.at)?;
         let rect = ViewportDom::canvas()?.get_bounding_client_rect();
         Some(Hover {
-            entity: scene.entity(key)?.clone(),
-            at: (self.pick.at.0 - rect.left(), self.pick.at.1 - rect.top()),
+            entity: target,
+            at: (self.at.0 - rect.left(), self.at.1 - rect.top()),
         })
     }
 }
 
 /// Every arm on the bench, posed from what it is currently reporting.
 impl crate::shell::state::Studio {
-    fn placements(self, source: &SceneSource, visible_robot: Option<&str>) -> Vec<ArmPlacement> {
+    fn add_arms(
+        self,
+        frame: &mut BenchFrame,
+        source: &SceneSource,
+        visible_robot: Option<&str>,
+    ) -> Result<(), FrameError> {
         let arms = self
             .snapshot()
             .read()
@@ -746,54 +705,44 @@ impl crate::shell::state::Studio {
             .filter(|arm| visible_robot.is_none_or(|visible| arm.id() == visible))
             .cloned()
             .collect::<Vec<_>>();
-        let count = arms.len();
-        arms.iter()
-            .enumerate()
-            .map(|(index, arm)| {
-                // An arm that is offline or uncalibrated has no angles worth
-                // drawing, so it stands at its rest pose and is faded rather than
-                // left out — an empty bench says less than a greyed-out one.
-                let historical_angles = source
-                    .sample()
-                    .and_then(|sample| sample.arms().iter().find(|sample| sample.arm() == arm.id()))
-                    .and_then(HistoricalRobotPose::historical_angles);
-                let telemetry = source
-                    .is_live()
-                    .then(|| self.robot_telemetry(arm.id()).filter(|_| arm.calibrated()))
-                    .flatten();
-                let angles = historical_angles.or_else(|| {
-                    telemetry.as_ref().map(|robot| {
-                        use crate::activities::live::control::MeasuredJointTelemetry;
-                        robot.joints().measured_angles()
-                    })
-                });
-                let placement = ArmPlacement::new(
-                    arm.id().to_owned(),
-                    ACCENTS[self.position_of(arm.id()) % ACCENTS.len()].0,
-                    BenchPosition::new(index, count),
-                )
-                .with_cameras(
-                    arm.cameras()
-                        .iter()
-                        .filter_map(CameraBindingPresentation::camera_mount)
-                        .collect(),
-                );
-                match angles {
-                    Some(angles) => placement.with_live_pose(angles),
-                    None => placement,
-                }
-            })
-            .collect()
+        for arm in &arms {
+            // An arm that is offline or uncalibrated has no angles worth
+            // drawing, so it stands at its rest pose and is faded rather than
+            // left out — an empty bench says less than a greyed-out one.
+            let historical_angles = source
+                .sample()
+                .and_then(|sample| sample.arms().iter().find(|sample| sample.arm() == arm.id()))
+                .and_then(HistoricalRobotPose::historical_angles);
+            let telemetry = source
+                .is_live()
+                .then(|| self.robot_telemetry(arm.id()).filter(|_| arm.calibrated()))
+                .flatten();
+            let angles = historical_angles.or_else(|| {
+                telemetry.as_ref().map(|robot| {
+                    use crate::activities::live::control::MeasuredJointTelemetry;
+                    robot.joints().measured_angles()
+                })
+            });
+            frame.add_arm(
+                arm.id().to_owned(),
+                ACCENTS[self.position_of(arm.id()) % ACCENTS.len()].0,
+                angles,
+            )?;
+            for camera in arm.cameras() {
+                camera.add_to(frame, arm.id())?;
+            }
+        }
+        Ok(())
     }
 }
 
 /// Render the current-calibration degrees projected by the backend.
 trait HistoricalRobotPose {
-    fn historical_angles(&self) -> Option<JointAngles>;
+    fn historical_angles(&self) -> Option<ArmPose>;
 }
 
 impl HistoricalRobotPose for TimelineArmSample {
-    fn historical_angles(&self) -> Option<JointAngles> {
+    fn historical_angles(&self) -> Option<ArmPose> {
         let degrees = self
             .degrees()
             .iter()
@@ -805,9 +754,8 @@ impl HistoricalRobotPose for TimelineArmSample {
             .copied()
             .flatten()
             .filter(|value| value.is_finite());
-        (!degrees.is_empty() || gripper.is_some()).then(|| {
-            JointAngles::from(&degrees).with_gripper_normalized(gripper.unwrap_or_default())
-        })
+        (!degrees.is_empty() || gripper.is_some())
+            .then(|| ArmPose::from_degrees(&degrees, gripper.unwrap_or_default()))
     }
 }
 
@@ -825,22 +773,25 @@ impl HistoricalTimePresentation for f64 {
 
 /// Where a bound camera sits, for the ones whose file says.
 trait CameraBindingPresentation {
-    fn camera_mount(&self) -> Option<CameraMount>;
+    fn add_to(&self, frame: &mut BenchFrame, robot: &str) -> Result<(), FrameError>;
 }
 
 impl CameraBindingPresentation for spiral_robotics_api::robots::CameraBinding {
-    fn camera_mount(&self) -> Option<CameraMount> {
+    fn add_to(&self, frame: &mut BenchFrame, robot: &str) -> Result<(), FrameError> {
         let camera_mount = self.mount();
-        let mount = camera_mount.as_ref()?;
-        Some(CameraMount::new(
-            self.name().to_owned(),
-            CameraAttachment::new(
-                mount.frame().map(str::to_owned),
-                mount.xyz().map(|value| value as f32),
-                mount.rpy().map(|value| value as f32),
-            ),
-            mount.fov_degrees() as f32,
-        ))
+        let Some(mount) = camera_mount.as_ref() else {
+            return Ok(());
+        };
+        frame
+            .mount_camera(
+                robot,
+                self.name().to_owned(),
+                mount.frame(),
+                mount.xyz(),
+                mount.rpy(),
+                mount.fov_degrees(),
+            )
+            .map(|_| ())
     }
 }
 
@@ -882,13 +833,13 @@ fn Legend(arms: Vec<RobotSummary>, on_select: EventHandler<Option<Selection>>) -
 
 /// A visible camera-state control: its faces both describe and change the view.
 #[component]
-fn ViewCube(mut camera: Signal<Camera>) -> Element {
+fn ViewCube(on_command: EventHandler<Command>) -> Element {
     rsx! {
         div { class: "view-cube", role: "group", "aria-label": "Camera orientation",
             Action {
                 purpose: ActionPurpose::Apply,
                 title: "Top view", aria_label: "Top view",
-                onclick: move |_| camera.set(camera().oriented(-0.65, 1.42)),
+                onclick: move |_| on_command.call(Command::Top),
                 "Top"
             }
             // Spelled out rather than abbreviated: `F` really is a keyboard
@@ -899,13 +850,13 @@ fn ViewCube(mut camera: Signal<Camera>) -> Element {
                 Action {
                     purpose: ActionPurpose::Apply,
                     title: "Front view", aria_label: "Front view",
-                    onclick: move |_| camera.set(camera().oriented(-std::f32::consts::FRAC_PI_2, 0.08)),
+                    onclick: move |_| on_command.call(Command::Front),
                     "Front"
                 }
                 Action {
                     purpose: ActionPurpose::Apply,
                     title: "Right side view", aria_label: "Right side view",
-                    onclick: move |_| camera.set(camera().oriented(0.0, 0.08)),
+                    onclick: move |_| on_command.call(Command::Right),
                     "Right"
                 }
             }
@@ -921,35 +872,20 @@ fn ViewCube(mut camera: Signal<Camera>) -> Element {
 }
 
 impl crate::shell::state::Studio {
-    fn frame_selection(&self, camera: &mut Signal<Camera>, visible_robot: Option<&str>) {
-        let robot = visible_robot.map(str::to_owned).or_else(|| {
+    fn framed_robot(&self, visible_robot: Option<&str>) -> Option<String> {
+        visible_robot.map(str::to_owned).or_else(|| {
             self.selection()
                 .read()
                 .as_ref()
                 .map(|selection| selection.robot_id().to_owned())
                 .or_else(|| self.focused().map(|robot| robot.id().to_owned()))
-        });
-        let Some(robot) = robot else {
-            camera.set(Camera::default());
-            return;
-        };
-        let count = if visible_robot.is_some() {
-            1
-        } else {
-            self.snapshot().read().robots().len()
-        };
-        let index = if visible_robot.is_some() {
-            0
-        } else {
-            self.position_of(&robot)
-        };
-        let base = Vec3::new(
-            0.0,
-            (index as f32 - count.saturating_sub(1) as f32 / 2.0) * BENCH_SPACING,
-            0.0,
-        );
-        camera.set(camera().focused_on(base + Vec3::new(0.03, 0.0, 0.17), 0.68));
+        })
     }
+}
+
+fn bump(revision: &mut Signal<u64>) {
+    let next = revision.peek().wrapping_add(1);
+    revision.set(next);
 }
 
 trait PointerPosition {
@@ -1042,7 +978,7 @@ mod tests {
         );
 
         let pose = sample.historical_angles().expect("historical pose");
-        assert_eq!(pose.pan_degrees(), 90.0);
+        assert_eq!(pose.degrees(Joint::ShoulderPan), Some(90.0));
     }
 
     #[test]

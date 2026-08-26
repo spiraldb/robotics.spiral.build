@@ -17,7 +17,7 @@ use crate::urdf::Geometry;
 /// joint does — and picking any of them returns that one key, so grouping falls
 /// out of the numbering rather than out of a rule written in here.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct EntityKey(u32);
+pub(crate) struct EntityKey(u32);
 
 impl EntityKey {
     pub(crate) fn from_index(index: usize) -> Self {
@@ -30,7 +30,7 @@ impl EntityKey {
 }
 
 /// What the operator is doing with an entity.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub enum Interaction {
     #[default]
     Resting,
@@ -52,7 +52,7 @@ pub enum Condition {
 
 /// One shape to draw, already placed in the world.
 #[derive(Clone, Debug)]
-pub struct Entity {
+pub(crate) struct Entity {
     key: EntityKey,
     shape: EntityShape,
     state: EntityState,
@@ -86,16 +86,16 @@ impl Entity {
         }
     }
 
-    pub fn key(&self) -> EntityKey {
+    pub(crate) fn key(&self) -> EntityKey {
         self.key
     }
 
-    pub fn condition(&self) -> Condition {
+    pub(crate) fn condition(&self) -> Condition {
         self.state.condition
     }
 
     /// The entity's origin in world space, which is where a label anchors.
-    pub fn origin(&self) -> Vec3 {
+    pub(crate) fn origin(&self) -> Vec3 {
         self.shape.transform.transform_point3(Vec3::ZERO)
     }
 
@@ -155,7 +155,7 @@ impl EntityShape {
 
 /// Everything to draw this frame.
 #[derive(Clone, Debug, Default)]
-pub struct Scene {
+pub(crate) struct Scene {
     entities: Vec<Entity>,
     grid_enabled: bool,
 }
@@ -172,17 +172,12 @@ impl Scene {
         self.entities.push(entity);
     }
 
-    pub fn entities(&self) -> impl Iterator<Item = &Entity> {
+    pub(crate) fn entities(&self) -> impl Iterator<Item = &Entity> {
         self.entities.iter()
     }
 
     pub(crate) fn grid_enabled(&self) -> bool {
         self.grid_enabled
-    }
-
-    /// The first entity carrying `key`, which is where its label anchors.
-    pub fn entity(&self, key: EntityKey) -> Option<&Entity> {
-        self.entities.iter().find(|entity| entity.key() == key)
     }
 
     /// Where a key's label belongs, in world space.
@@ -191,7 +186,7 @@ impl Scene {
     /// origin: a joint is several shells, and anchoring to whichever the
     /// description happened to list first would put the label on the edge of
     /// the part instead of on the part.
-    pub fn anchor_point(&self, key: EntityKey) -> Option<Vec3> {
+    pub(crate) fn anchor_point(&self, key: EntityKey) -> Option<Vec3> {
         let mut sum = Vec3::ZERO;
         let mut count = 0.0;
         for entity in self.entities.iter().filter(|entity| entity.key() == key) {

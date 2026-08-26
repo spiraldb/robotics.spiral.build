@@ -40,8 +40,13 @@ the intended source of truth.
   [`spiral-robotics-hardware`](../../crates/spiral-robotics-hardware/)
 - Hardware values do not depend on API DTOs. The backend projects native
   hardware state into the wire contract.
-- Display joint order, labels, pose values, and robot geometry:
+- Display joint vocabulary, order, labels, tolerant pose values, validated
+  viewport frames, semantic picking, and robot geometry:
   [`spiral-robotics-viewport`](../../crates/spiral-robotics-viewport/)
+- The frontend adapts live or recorded telemetry, selection, native motor
+  conditions, accent assignment, and configured camera mounts into one
+  viewport frame. Viewport internals do not depend on API DTOs or frontend
+  state.
 - Robot configuration codecs and capability policy:
   [`backend/robots`](../../crates/spiral-robotics-backend/src/robots/)
 - SpiralDB robot storage:

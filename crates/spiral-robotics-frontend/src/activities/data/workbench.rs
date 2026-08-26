@@ -19,8 +19,8 @@ use spiral_robotics_api::datasets::{
     HuggingFaceDatasetInspection, HuggingFaceDatasetRequest,
 };
 use spiral_robotics_api::recording::EpisodeSummary;
+use spiral_robotics_api::relations::RelationCatalog;
 use spiral_robotics_api::relations::{QueryColumn, SpiralQueryResponse};
-use spiral_robotics_api::workflow::WorkflowRelationsResponse;
 
 use crate::activities::data::state::data_controller;
 use crate::client::http as api;
@@ -704,9 +704,9 @@ pub(crate) fn QueryPanel(namespace: String, dataset_id: String, query_available:
         let _generation = controller.relation_generation();
         async move {
             if query_available {
-                api::Http::get::<WorkflowRelationsResponse>("/api/spiral/relations").await
+                api::Http::get::<RelationCatalog>("/api/spiral/relations").await
             } else {
-                Ok(WorkflowRelationsResponse::default())
+                Ok(RelationCatalog::default())
             }
         }
     });
@@ -1194,7 +1194,7 @@ impl SchemaRelationSummary {
     fn for_dataset(
         namespace: &str,
         dataset_id: &str,
-        response: Option<&WorkflowRelationsResponse>,
+        response: Option<&RelationCatalog>,
     ) -> Vec<Self> {
         let Some(response) = response else {
             return Table::ALL

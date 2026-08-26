@@ -1,7 +1,6 @@
 //! Application state shared by every Studio feature.
 
 use std::future::Future;
-use std::rc::Rc;
 
 use dioxus::prelude::*;
 use spiral_robotics_api::recording::{
@@ -12,7 +11,6 @@ use spiral_robotics_api::rollout::RolloutSnapshot;
 use spiral_robotics_api::status::StudioSnapshot;
 use spiral_robotics_api::training::TrainingSnapshot;
 use spiral_robotics_api::workflow::{WorkflowAgentStateResponse, WorkflowStateResponse};
-use spiral_robotics_viewport::{SO101_URDF, Urdf, UrdfError};
 
 use crate::client::http as api;
 #[cfg(all(feature = "web", target_arch = "wasm32"))]
@@ -21,24 +19,6 @@ use crate::panels::timeline::signals::SignalStore;
 use crate::shell::notifications::{
     MessageAction, MessageNotice, MessageSeverity, MessageSource, NotificationCenterState,
 };
-
-/// The robot description the studio poses, draws, and measures from.
-///
-/// Parsed once for the page and shared, so the picture in the viewport and the
-/// numbers beside it can never come from two different readings of the file.
-/// A failure is carried rather than unwrapped: the description ships with the
-/// build, so a bad one is worth showing plainly instead of blanking the page.
-pub(crate) type Description = Rc<Result<Urdf, UrdfError>>;
-
-/// Parse the description and publish it to every panel.
-pub(crate) fn use_description() -> Description {
-    use_context_provider(|| Rc::new(Urdf::parse(SO101_URDF)))
-}
-
-/// Read the shared robot description from context.
-pub(crate) fn description() -> Description {
-    use_context::<Description>()
-}
 
 /// The one selection shared by the hierarchy, viewport, cameras, and inspector.
 #[derive(Clone, Debug, PartialEq, Eq)]

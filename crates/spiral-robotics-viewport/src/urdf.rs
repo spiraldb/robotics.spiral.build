@@ -19,12 +19,24 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::OnceLock;
 
 use glam::{Mat4, Quat, Vec3};
 use roxmltree::{Document, Node};
 
 /// The SO-ARM101 description the studio ships with.
-pub const SO101_URDF: &str = include_str!("../assets/so101.urdf");
+pub(crate) const SO101_URDF: &str = include_str!("../assets/so101.urdf");
+
+/// The validated description shipped with the crate.
+///
+/// Its validity is a crate invariant covered by tests, not a runtime choice a
+/// caller should have to make for every viewport or pose readout.
+pub(crate) fn so101() -> &'static Urdf {
+    static DESCRIPTION: OnceLock<Urdf> = OnceLock::new();
+    DESCRIPTION.get_or_init(|| {
+        Urdf::parse(SO101_URDF).expect("the viewport's bundled SO-101 description must be valid")
+    })
+}
 
 /// A rigid transform, as written in a URDF `<origin>` element.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -209,7 +221,7 @@ impl Joint {
 
 /// A parsed robot description.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Urdf {
+pub(crate) struct Urdf {
     name: String,
     links: Vec<Link>,
     joints: Vec<Joint>,
@@ -221,7 +233,7 @@ pub struct Urdf {
 
 impl Urdf {
     /// Parse a URDF document.
-    pub fn parse(text: &str) -> Result<Self, UrdfError> {
+    pub(crate) fn parse(text: &str) -> Result<Self, UrdfError> {
         UrdfParser::parse(text)
     }
 
@@ -308,7 +320,7 @@ impl Urdf {
 
 /// Why a description could not be read.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum UrdfError {
+pub(crate) enum UrdfError {
     Xml(String),
     NotRobot(String),
     MissingAttribute {

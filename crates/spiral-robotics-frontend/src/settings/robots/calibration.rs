@@ -214,7 +214,7 @@ pub(super) fn CalibrationSection(
                 for joint in progress.joints().to_owned() {
                     li { key: "{joint.name()}", class: "flex min-h-5 items-center gap-1.5",
                         span { class: "w-16 shrink-0 truncate text-[11px]",
-                            {arm::JointDefinition::so101(joint.name()).map_or_else(|| joint.name().to_owned(), |known| known.label().to_owned())}
+                            {arm::Joint::named(joint.name()).map_or_else(|| joint.name().to_owned(), |known| known.label().to_owned())}
                         }
                         SweepBar { joint: joint.clone() }
                         span {

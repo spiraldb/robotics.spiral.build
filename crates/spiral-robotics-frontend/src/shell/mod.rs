@@ -19,7 +19,6 @@ use self::state::Studio;
 #[component]
 pub fn App() -> Element {
     Studio::use_studio();
-    state::use_description();
     rsx! {
         UiStyles {}
         StudioRouter {}

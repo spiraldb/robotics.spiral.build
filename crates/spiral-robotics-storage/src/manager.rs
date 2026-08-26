@@ -23,14 +23,12 @@ use serde::de::DeserializeOwned;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use sha2::{Digest as _, Sha256};
 use spiral_robotics_api::recording::DatasetSummary;
+use spiral_robotics_api::relations::{CatalogRelation, RelationCatalog};
 use spiral_robotics_api::relations::{
     ProjectDataRelation, ProjectDataRelationsResponse, QueryColumn, SpiralQueryResponse,
 };
 use spiral_robotics_api::settings::{ConnectionTestResponse, DataSettings, SpiralSettings};
 use spiral_robotics_api::sql::QualifiedRelation;
-use spiral_robotics_api::workflow::{
-    WorkflowDocument, WorkflowRelation, WorkflowRelationsResponse,
-};
 
 use crate::adbc::{ProjectStore, StorageConnection};
 use crate::bundle;
@@ -300,7 +298,7 @@ impl StorageManager {
 
     pub fn load_training_snapshot<T>(&self) -> Result<T, String>
     where
-        T: DeserializeOwned + Default,
+        T: DeserializeOwned + Default + Serialize,
     {
         if !self.is_configured() {
             return Ok(T::default());
@@ -332,14 +330,17 @@ impl StorageManager {
         )
     }
 
-    pub fn load_workflow_document(&self) -> Result<WorkflowDocument, String> {
+    pub fn load_workflow_document<T>(&self) -> Result<T, String>
+    where
+        T: DeserializeOwned + Default + Serialize,
+    {
         if !self.is_configured() {
-            return Ok(WorkflowDocument::default());
+            return Ok(T::default());
         }
         self.load_json_document_resetting_incompatible(Table::WorkflowRuns, "default")
     }
 
-    pub fn save_workflow_document(&self, value: &WorkflowDocument) -> Result<(), String> {
+    pub fn save_workflow_document<T: Serialize>(&self, value: &T) -> Result<(), String> {
         self.save_json_document(JsonDocumentKey::new(Table::WorkflowRuns, "default"), value)
     }
 
@@ -795,13 +796,13 @@ impl StorageManager {
             .await
     }
 
-    pub async fn workflow_relations(&self) -> Result<WorkflowRelationsResponse, String> {
+    pub async fn workflow_relations(&self) -> Result<RelationCatalog, String> {
         let project = self.project_store.project_id();
         if project.is_empty() {
             return Ok(
-                WorkflowRelationsResponse::new(String::new(), Vec::new(), false).with_limitation(
-                    Some("Choose a Spiral project in Settings to discover relations.".to_owned()),
-                ),
+                RelationCatalog::new(Vec::new(), false).with_limitation(Some(
+                    "Choose a Spiral project in Settings to discover relations.".to_owned(),
+                )),
             );
         }
         self.project_store
@@ -840,7 +841,7 @@ impl StorageManager {
                             ));
                         }
                     };
-                    relations.push(WorkflowRelation::new(
+                    relations.push(CatalogRelation::new(
                         relation_name,
                         relation_type,
                         schema
@@ -872,11 +873,7 @@ impl StorageManager {
                         "Row counts are omitted; {skipped} catalog entries without a qualified name or Arrow schema were not returned."
                     ))
                 };
-                Ok(WorkflowRelationsResponse::new(
-                    String::new(),
-                    relations,
-                    skipped == 0,
-                )
+                Ok(RelationCatalog::new(relations, skipped == 0)
                 .with_limitation(limitation))
             })
             .await

@@ -68,6 +68,101 @@ impl QueryColumn {
     }
 }
 
+/// Schema-only catalog used by relation consumers such as Data and Workflow.
+/// Scope is attached by the activity manager so an asynchronous catalog read
+/// cannot be reconciled into a different Spiral project.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RelationCatalog {
+    #[serde(default)]
+    scope_id: String,
+    relations: Vec<CatalogRelation>,
+    complete: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    limitation: Option<String>,
+}
+
+impl RelationCatalog {
+    pub fn new(relations: Vec<CatalogRelation>, complete: bool) -> Self {
+        Self {
+            scope_id: String::new(),
+            relations,
+            complete,
+            limitation: None,
+        }
+    }
+
+    pub fn with_scope(mut self, scope_id: impl Into<String>) -> Self {
+        self.scope_id = scope_id.into();
+        self
+    }
+
+    pub fn with_limitation(mut self, limitation: Option<String>) -> Self {
+        self.limitation = limitation;
+        self
+    }
+
+    pub fn scope_id(&self) -> &str {
+        &self.scope_id
+    }
+
+    pub fn relations(&self) -> &[CatalogRelation] {
+        &self.relations
+    }
+
+    pub const fn complete(&self) -> bool {
+        self.complete
+    }
+
+    pub fn limitation(&self) -> Option<&str> {
+        self.limitation.as_deref()
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CatalogRelation {
+    name: String,
+    relation_type: String,
+    columns: Vec<QueryColumn>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    row_count: Option<u64>,
+}
+
+impl CatalogRelation {
+    pub fn new(
+        name: impl Into<String>,
+        relation_type: impl Into<String>,
+        columns: Vec<QueryColumn>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            relation_type: relation_type.into(),
+            columns,
+            row_count: None,
+        }
+    }
+
+    pub const fn with_row_count(mut self, row_count: Option<u64>) -> Self {
+        self.row_count = row_count;
+        self
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn relation_type(&self) -> &str {
+        &self.relation_type
+    }
+
+    pub fn columns(&self) -> &[QueryColumn] {
+        &self.columns
+    }
+
+    pub const fn row_count(&self) -> Option<u64> {
+        self.row_count
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct SpiralQueryResponse {
     columns: Vec<QueryColumn>,

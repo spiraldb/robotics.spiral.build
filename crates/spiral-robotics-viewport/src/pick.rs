@@ -8,79 +8,134 @@
 //! out of those two answers and nothing else.
 
 use glam::{Mat4, Vec3};
+use std::fmt;
 
 use crate::urdf::Geometry;
 use web_sys::HtmlCanvasElement;
 
 use crate::camera::Camera;
+use crate::gesture::{Command, Drag, DragUpdate};
 use crate::render::{RenderFrame, Renderer};
-use crate::scene::{EntityKey, Scene};
+use crate::robot::{Frame, RobotScene, Target};
+use crate::urdf::Urdf;
 
-/// Everything that varies between two rendered frames.
-pub struct SceneFrame<'a> {
-    camera: &'a Camera,
-    scene: &'a Scene,
-    pixel_ratio: f64,
+/// Why a canvas could not become a viewport.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ViewportError {
+    Rendering(String),
 }
 
-impl<'a> SceneFrame<'a> {
-    pub fn new(camera: &'a Camera, scene: &'a Scene, pixel_ratio: f64) -> Self {
-        Self {
-            camera,
-            scene,
-            pixel_ratio,
+impl fmt::Display for ViewportError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Rendering(detail) => f.write_str(detail),
         }
     }
 }
 
-/// The scene and screen position used by one picking query.
-pub struct PickRequest<'a> {
-    camera: &'a Camera,
-    scene: &'a Scene,
-    client_position: (f64, f64),
-}
-
-impl<'a> PickRequest<'a> {
-    pub fn new(camera: &'a Camera, scene: &'a Scene, client_position: (f64, f64)) -> Self {
-        Self {
-            camera,
-            scene,
-            client_position,
-        }
-    }
-}
+impl std::error::Error for ViewportError {}
 
 /// A canvas, the renderer bound to it, and the geometry to read against it.
 pub struct Viewport {
     canvas: HtmlCanvasElement,
     renderer: Renderer,
+    model: Urdf,
+    camera: Camera,
+    scene: RobotScene,
+    drag: Option<Drag>,
 }
 
 impl Viewport {
     /// Bind to a canvas, compiling the shader program.
-    pub fn new(canvas: HtmlCanvasElement) -> Result<Self, String> {
-        let renderer = Renderer::new(&canvas)?;
-        Ok(Self { canvas, renderer })
+    pub fn new(canvas: HtmlCanvasElement) -> Result<Self, ViewportError> {
+        let renderer = Renderer::new(&canvas).map_err(ViewportError::Rendering)?;
+        let model = crate::urdf::so101().clone();
+        let scene = RobotScene::compose(&model, &Frame::default());
+        Ok(Self {
+            canvas,
+            renderer,
+            model,
+            camera: Camera::default(),
+            scene,
+            drag: None,
+        })
     }
 
-    /// Draw the scene, resizing the drawing buffer to the canvas first.
-    pub fn draw(&mut self, frame: SceneFrame<'_>) {
-        if let Some(aspect_ratio) = self.renderer.resize(&self.canvas, frame.pixel_ratio) {
-            self.renderer
-                .draw(RenderFrame::new(frame.camera, aspect_ratio, frame.scene));
+    /// Replace and draw the current frame.
+    ///
+    /// Picking and anchors subsequently read this exact composed scene, so an
+    /// overlay can never be calculated from a separately rebuilt pose.
+    pub fn draw(&mut self, frame: &Frame, pixel_ratio: f64) -> bool {
+        self.scene = RobotScene::compose(&self.model, frame);
+        if let Some(aspect_ratio) = self.renderer.resize(&self.canvas, pixel_ratio) {
+            self.renderer.draw(RenderFrame::new(
+                &self.camera,
+                aspect_ratio,
+                self.scene.scene(),
+            ));
+            true
+        } else {
+            false
         }
     }
 
-    /// The canvas height in CSS pixels, which is what turns a drag into metres.
-    pub fn height(&self) -> f32 {
+    fn height(&self) -> f32 {
         self.canvas.client_height().max(1) as f32
     }
 
+    /// Begin direct manipulation at a client-space pointer position.
+    pub fn begin_drag(&mut self, client_position: (f64, f64), panning: bool) {
+        self.drag = point_is_finite(client_position).then(|| Drag::new(client_position, panning));
+    }
+
+    /// Move an active drag and report whether there was one to move.
+    pub fn drag_to(&mut self, client_position: (f64, f64)) -> bool {
+        if !point_is_finite(client_position) {
+            return false;
+        }
+        let height = self.height();
+        let Some(drag) = self.drag.as_mut() else {
+            return false;
+        };
+        drag.advance(&mut self.camera, DragUpdate::new(client_position, height));
+        true
+    }
+
+    /// Whether the active pointer sequence has crossed the click slop.
+    pub fn drag_moved(&self) -> bool {
+        self.drag.is_some_and(|drag| drag.moved())
+    }
+
+    pub fn end_drag(&mut self) {
+        self.drag = None;
+    }
+
+    /// Apply one discrete navigation command.
+    pub fn command(&mut self, command: Command) {
+        command.apply(&mut self.camera);
+    }
+
+    /// Frame one arm in the current scene, or restore home when no arm is named.
+    pub fn frame_robot(&mut self, robot: Option<&str>) -> bool {
+        let Some(robot) = robot else {
+            self.camera = Camera::default();
+            return true;
+        };
+        let Some(base) = self.scene.robot_origin(robot) else {
+            return false;
+        };
+        self.camera = self
+            .camera
+            .focused_on(base + Vec3::new(0.03, 0.0, 0.17), 0.68);
+        true
+    }
+
     /// The nearest pickable entity under a client-space point.
-    pub fn pick(&self, request: PickRequest<'_>) -> Option<EntityKey> {
-        let (ray_origin, ray_direction) = self.ray(request.camera, request.client_position)?;
-        request
+    pub fn pick(&self, client_position: (f64, f64)) -> Option<Target> {
+        let (ray_origin, ray_direction) = self.ray(client_position)?;
+        let key = self
             .scene
+            .scene()
             .entities()
             .filter(|entity| entity.is_pickable())
             .filter_map(|entity| {
@@ -101,20 +156,23 @@ impl Viewport {
                 ))
             })
             .min_by(|(left, _), (right, _)| left.total_cmp(right))
-            .map(|(_, key)| key)
+            .map(|(_, key)| key)?;
+        self.scene.target(key).cloned()
     }
 
-    /// Where a world point lands on the canvas, in client pixels.
+    /// Where a target in the current frame lands inside the canvas, in CSS pixels.
     ///
     /// `None` behind the camera, so a label for something that has orbited out
     /// of view is not drawn folded onto the opposite edge of the screen.
-    pub fn anchor(&self, camera: &Camera, world_position: Vec3) -> Option<(f64, f64)> {
+    pub fn anchor(&self, target: &Target) -> Option<(f64, f64)> {
+        let key = self.scene.key(target)?;
+        let world_position = self.scene.scene().anchor_point(key)?;
         let rect = self.canvas.get_bounding_client_rect();
         if rect.width() <= 0.0 || rect.height() <= 0.0 {
             return None;
         }
         let aspect = (rect.width() / rect.height()) as f32;
-        let clip = camera.view_projection(aspect) * world_position.extend(1.0);
+        let clip = self.camera.view_projection(aspect) * world_position.extend(1.0);
         if clip.w <= 0.0 {
             return None;
         }
@@ -123,13 +181,13 @@ impl Viewport {
             return None;
         }
         Some((
-            rect.left() + (ndc.x as f64 * 0.5 + 0.5) * rect.width(),
-            rect.top() + (0.5 - ndc.y as f64 * 0.5) * rect.height(),
+            (ndc.x as f64 * 0.5 + 0.5) * rect.width(),
+            (0.5 - ndc.y as f64 * 0.5) * rect.height(),
         ))
     }
 
     /// The world-space ray through a client-space point.
-    fn ray(&self, camera: &Camera, client_position: (f64, f64)) -> Option<(Vec3, Vec3)> {
+    fn ray(&self, client_position: (f64, f64)) -> Option<(Vec3, Vec3)> {
         let rect = self.canvas.get_bounding_client_rect();
         if rect.width() <= 0.0 || rect.height() <= 0.0 {
             return None;
@@ -137,12 +195,16 @@ impl Viewport {
         let normalized_x = ((client_position.0 - rect.left()) / rect.width() * 2.0 - 1.0) as f32;
         let normalized_y = (1.0 - (client_position.1 - rect.top()) / rect.height() * 2.0) as f32;
         let aspect = (rect.width() / rect.height()) as f32;
-        let inverse_projection: Mat4 = camera.view_projection(aspect).inverse();
+        let inverse_projection: Mat4 = self.camera.view_projection(aspect).inverse();
         let ray_origin =
             inverse_projection.project_point3(Vec3::new(normalized_x, normalized_y, -1.0));
         let ray_end = inverse_projection.project_point3(Vec3::new(normalized_x, normalized_y, 1.0));
         Some((ray_origin, (ray_end - ray_origin).normalize_or(Vec3::X)))
     }
+}
+
+fn point_is_finite((x, y): (f64, f64)) -> bool {
+    x.is_finite() && y.is_finite()
 }
 
 /// A sphere that contains the primitive, for a first-pass ray test.

@@ -65,7 +65,7 @@ impl AppState {
 impl AppState {
     async fn spiral_relations(
         State(state): State<Self>,
-    ) -> Result<Json<spiral_robotics_api::workflow::WorkflowRelationsResponse>, Failure> {
+    ) -> Result<Json<spiral_robotics_api::relations::RelationCatalog>, Failure> {
         state
             .storage()
             .workflow_relations()

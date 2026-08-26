@@ -12,7 +12,7 @@ use gloo_net::http::Method;
 use spiral_robotics_api::robots::{
     GoalRequest, JointTelemetry, MotorCondition, MotorLimits, RobotSummary, RobotTelemetry,
 };
-use spiral_robotics_viewport::{self as arm, JointAngles};
+use spiral_robotics_viewport::{self as arm, ArmPose};
 
 use crate::client::http as api;
 use crate::shell::state::{Selection, studio};
@@ -86,17 +86,11 @@ pub(crate) fn JointPanel(
 /// Where the arm is holding its gripper, solved from the robot description.
 #[component]
 fn ToolReadout(telemetry: Option<RobotTelemetry>, calibrated: bool) -> Element {
-    let description = crate::shell::state::description();
-    let Ok(urdf) = description.as_ref() else {
-        return rsx! {};
-    };
     let angles = telemetry
         .as_ref()
         .filter(|_| calibrated)
         .map(|robot| robot.joints().measured_angles());
-    let tip = angles
-        .as_ref()
-        .and_then(|angles| urdf.so101_tool_position(angles));
+    let tip = angles.as_ref().and_then(arm::tool_position);
     let tracking_error = telemetry.as_ref().and_then(|robot| {
         robot
             .joints()
@@ -113,12 +107,12 @@ fn ToolReadout(telemetry: Option<RobotTelemetry>, calibrated: bool) -> Element {
         dl { class: "live-summary-readouts grid gap-1.5 px-3 pb-1 pt-2",
             Readout {
                 label: "Reach",
-                value: tip.map(|tip| format!("{:.0}", tip.truncate().length())),
+                value: tip.map(|[x, y, _]| format!("{:.0}", x.hypot(y))),
                 details: ReadoutDetails::new("mm"),
             }
             Readout {
                 label: "Height",
-                value: tip.map(|tip| format!("{:.0}", tip.z)),
+                value: tip.map(|[_, _, z]| format!("{z:.0}")),
                 details: ReadoutDetails::new("mm"),
             }
             // A bare percentage does not say which end is which, and reading it
@@ -288,8 +282,8 @@ fn MotorDetail(robot: RobotSummary, telemetry: Option<RobotTelemetry>) -> Elemen
         return rsx! {};
     };
 
-    let label = arm::JointDefinition::so101(joint.name())
-        .map_or(joint.name().to_owned(), |j| j.label().to_owned());
+    let label =
+        arm::Joint::named(joint.name()).map_or(joint.name().to_owned(), |j| j.label().to_owned());
     let model = robot
         .motors()
         .iter()
@@ -423,11 +417,11 @@ fn Readout(label: String, value: Option<String>, details: ReadoutDetails) -> Ele
 
 /// Collect an arm's calibrated joint angles out of its telemetry.
 pub(crate) trait MeasuredJointTelemetry {
-    fn measured_angles(&self) -> JointAngles;
+    fn measured_angles(&self) -> ArmPose;
 }
 
 impl MeasuredJointTelemetry for [JointTelemetry] {
-    fn measured_angles(&self) -> JointAngles {
+    fn measured_angles(&self) -> ArmPose {
         let degrees = self
             .iter()
             .filter_map(|joint| Some((joint.name().to_owned(), joint.degrees()?)))
@@ -437,7 +431,7 @@ impl MeasuredJointTelemetry for [JointTelemetry] {
             .find(|joint| joint.name() == "gripper")
             .and_then(|joint| joint.normalized())
             .unwrap_or(0.0);
-        JointAngles::from(&degrees).with_gripper_normalized(gripper)
+        ArmPose::from_degrees(&degrees, gripper)
     }
 }
 
@@ -665,8 +659,8 @@ struct JointRowActions {
 
 #[component]
 fn JointRow(joint: JointTelemetry, state: JointRowState, actions: JointRowActions) -> Element {
-    let label = arm::JointDefinition::so101(joint.name())
-        .map_or(joint.name().to_owned(), |j| j.label().to_owned());
+    let label =
+        arm::Joint::named(joint.name()).map_or(joint.name().to_owned(), |j| j.label().to_owned());
     let measured = joint.normalized().unwrap_or(0.0);
     let shown = state.value.unwrap_or(measured);
     let interactive = state.drivable && joint.range().is_some();

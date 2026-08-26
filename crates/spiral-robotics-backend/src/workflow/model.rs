@@ -33,10 +33,12 @@ use spiral_robotics_api::sql::{
 };
 use spiral_robotics_api::workflow::{
     MAX_SIGLIP_CONCEPT_LENGTH, MAX_WORKFLOW_FEATURE_DESCRIPTION_LENGTH,
-    MAX_WORKFLOW_FEATURE_STREAMS, SIGLIP_BASE_MODEL_ID, SIGLIP_BASE_REPOSITORY,
-    SIGLIP_BASE_REVISION, WORKFLOW_FEATURE_REGISTRY_RELATION as FEATURE_REGISTRY_RELATION,
-    WorkflowFeatureDefinition, WorkflowModelExecution, WorkflowModelIdentity, WorkflowModelMetrics,
-    WorkflowModelRunMetadata, WorkflowNodeProgress, WorkflowQuarantineSummary,
+    MAX_WORKFLOW_FEATURE_STREAMS, WorkflowFeatureDefinition, WorkflowModelRunMetadata,
+    WorkflowNodeProgress, WorkflowQuarantineSummary,
+};
+use spiral_robotics_storage::bundle::{
+    SIGLIP_BASE_MODEL_ID, SIGLIP_BASE_REPOSITORY, SIGLIP_BASE_REVISION,
+    WORKFLOW_FEATURE_REGISTRY_RELATION as FEATURE_REGISTRY_RELATION,
 };
 use tokenizers::Tokenizer;
 use tokenizers::utils::padding::{PaddingDirection, PaddingParams, PaddingStrategy};
@@ -257,20 +259,13 @@ impl ModelRunContext {
                 computed_feature_cells: 0,
                 reused_feature_cells: requested_cells as u64,
                 quarantine: WorkflowQuarantineSummary::default(),
-                metadata: WorkflowModelRunMetadata::new(
-                    WorkflowModelIdentity::new(
-                        SIGLIP_BASE_MODEL_ID,
-                        SIGLIP_BASE_REVISION,
-                        request.feature_cache_relation,
-                    )
-                    .with_fingerprint(scan.fingerprint),
-                    WorkflowModelExecution::new(
-                        request.features,
-                        false,
-                        "not loaded (empty applicable cohort)",
-                    ),
-                    WorkflowModelMetrics::new(scan.keys.len() as u64, cache.rows.len() as u64, 0),
-                ),
+                metadata: WorkflowModelRunMetadata::new(SIGLIP_BASE_MODEL_ID, SIGLIP_BASE_REVISION)
+                    .with_cache_relation(request.feature_cache_relation)
+                    .with_features(request.features)
+                    .with_device("not loaded (empty applicable cohort)")
+                    .with_fingerprint(scan.fingerprint)
+                    .with_row_counts(scan.keys.len() as u64, cache.rows.len() as u64)
+                    .with_timings(0, 0),
                 warnings: Vec::new(),
             });
         }
@@ -411,21 +406,13 @@ impl ModelRunContext {
             computed_feature_cells: missing_cells.saturating_sub(remaining_cells) as u64,
             reused_feature_cells: requested_cells.saturating_sub(missing_cells) as u64,
             quarantine,
-            metadata: WorkflowModelRunMetadata::new(
-                WorkflowModelIdentity::new(
-                    SIGLIP_BASE_MODEL_ID,
-                    SIGLIP_BASE_REVISION,
-                    request.feature_cache_relation,
-                )
-                .with_fingerprint(scan.fingerprint),
-                WorkflowModelExecution::new(request.features, false, device_name),
-                WorkflowModelMetrics::new(
-                    scan.keys.len() as u64,
-                    cache.rows.len() as u64,
-                    decode_ms,
-                )
-                .with_inference_ms(inference_ms),
-            ),
+            metadata: WorkflowModelRunMetadata::new(SIGLIP_BASE_MODEL_ID, SIGLIP_BASE_REVISION)
+                .with_cache_relation(request.feature_cache_relation)
+                .with_features(request.features)
+                .with_device(device_name)
+                .with_fingerprint(scan.fingerprint)
+                .with_row_counts(scan.keys.len() as u64, cache.rows.len() as u64)
+                .with_timings(decode_ms, inference_ms),
             warnings,
         })
     }
@@ -461,20 +448,14 @@ impl FeatureCacheHit {
             computed_feature_cells: 0,
             reused_feature_cells: self.requested_cells as u64,
             quarantine: WorkflowQuarantineSummary::default(),
-            metadata: WorkflowModelRunMetadata::new(
-                WorkflowModelIdentity::new(
-                    SIGLIP_BASE_MODEL_ID,
-                    SIGLIP_BASE_REVISION,
-                    self.request.feature_cache_relation,
-                )
-                .with_fingerprint(self.scan.fingerprint),
-                WorkflowModelExecution::new(
-                    self.request.features,
-                    true,
-                    "not loaded (feature cache hit)",
-                ),
-                WorkflowModelMetrics::new(self.scan.keys.len() as u64, self.cache_rows as u64, 0),
-            ),
+            metadata: WorkflowModelRunMetadata::new(SIGLIP_BASE_MODEL_ID, SIGLIP_BASE_REVISION)
+                .with_cache_relation(self.request.feature_cache_relation)
+                .with_features(self.request.features)
+                .with_device("not loaded (feature cache hit)")
+                .with_fingerprint(self.scan.fingerprint)
+                .with_reused(true)
+                .with_row_counts(self.scan.keys.len() as u64, self.cache_rows as u64)
+                .with_timings(0, 0),
             warnings: Vec::new(),
         }
     }

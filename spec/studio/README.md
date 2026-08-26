@@ -63,6 +63,19 @@ allowing visualization panels to be arranged spatially.
 - **STUDIO-017** Robot geometry, axes, and limits must come from URDF.
 - **STUDIO-018** The current URDF may be fixed to SO-ARM101 while the renderer
   remains description-driven.
+- **STUDIO-068** The viewport crate boundary must be a complete-frame and
+  semantic-target API. It must not expose URDF, camera, drag, scene, render,
+  entity-key, bench-position, or per-operation request types for the frontend
+  to assemble.
+- **STUDIO-069** Picking and overlay projection must read the exact scene most
+  recently composed by the viewport. The frontend must not independently
+  rebuild geometry for picking or condition marks.
+- **STUDIO-070** Stable viewport configuration must reject empty or duplicate
+  robot and camera identities, invalid colours, unknown attachment frames,
+  non-finite transforms, and invalid fields of view before drawing. Measured
+  telemetry remains tolerant: missing, unknown, or non-finite observations
+  must produce a bounded neutral display pose rather than configuration or
+  motion authority.
 - **STUDIO-019** Controls must look interactive and telemetry must not look
   draggable.
 - **STUDIO-020** Repeated labels and implementation explanations must be removed
@@ -84,6 +97,45 @@ allowing visualization panels to be arranged spatially.
   relation in the active project; export must include the full project rather
   than only the selected dataset, including the validated Workflow feature
   registry and all cache relations it declares.
+
+### Viewport crate boundary
+
+The viewport's job is to turn an ordered frame of supported arms into an
+interactive 3D bench. It owns the bundled presentation model and its URDF
+parser, pose construction, camera and drag state, scene composition, WebGL
+resources, picking, and world-to-canvas projection. It does not own Studio
+selection, live-versus-recorded source choice, motor-health policy, camera
+configuration, user-facing callouts, or panel state.
+
+The minimal draw input is one `Frame`: grid visibility; each arm's stable ID,
+accent, optional observed `ArmPose`, and zero or more configured camera mounts;
+and semantic `Interaction`/`Condition` decoration for targets present in that
+frame. Runtime steering is sent directly to the long-lived `Viewport` as drag
+samples or named `Command`s. The frontend receives only semantic `Target`s and
+canvas-local anchors, never renderer keys or geometry.
+
+`Frame` is an incrementally composed, always-valid value. Its mutators validate
+stable configuration at the point it enters the crate and return `FrameError`;
+appearance for a target absent from the frame is not recorded. Arm ordering
+derives centered bench positions, so an out-of-range position cannot be
+represented. `ArmPose` has private storage and neutralizes unusable telemetry
+in its constructor. The bundled description is a crate invariant validated by
+tests rather than a runtime choice repeated by every caller.
+
+After composition, every drawable shape must resolve to one semantic target;
+all shells controlled by the same joint must share it. A successful draw makes
+that composed scene authoritative for subsequent pick, anchor, and framing
+queries. Unit tests cover input rejection, bounded telemetry, camera commands,
+scene-to-target round trips, centered placement, URDF parsing/posing, and tool
+position. Browser verification remains responsible for WebGL initialization,
+resizing, pointer integration, and visible overlays.
+
+The Rust API favors a stateful controller plus a validated frame builder over
+public data bags. Presentation joints and commands are enums; pose and frame
+fields remain private. Value types implement the comparison, hashing, default,
+conversion, display, and error traits their roles require, while renderer-only
+types stay crate-private.
+
 - **STUDIO-051** Studio must bind its backend listener before external-service
   probes, camera discovery, project hydration, or saved-robot connection. Its
   backend state contract must distinguish Bootstrapping, Ready, and Degraded;

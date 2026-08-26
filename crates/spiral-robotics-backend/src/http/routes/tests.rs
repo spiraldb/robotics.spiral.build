@@ -85,16 +85,11 @@ fn feature_routers_preserve_every_public_path_exactly_once() {
         "/training/runs/{id}/stop",
         "/rollout",
         "/rollout/stop",
-        "/workflow/capabilities",
         "/workflow/relations",
         "/workflow",
-        "/workflow/run",
-        "/workflow/cancel",
+        "/workflow/command",
         "/workflow/agent",
-        "/workflow/agent/conversations",
-        "/workflow/agent/conversations/active",
-        "/workflow/agent/turn",
-        "/workflow/agent/cancel",
+        "/workflow/agent/command",
     ];
     for path in paths {
         assert_eq!(

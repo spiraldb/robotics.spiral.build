@@ -13,14 +13,13 @@ use crate::sync::MutexRecovery;
 use crate::workflow::service::{
     WorkflowCancellationAdmission, WorkflowRunAdmission, WorkflowSaveAdmission,
 };
-use spiral_robotics_api::relations::SpiralQueryResponse;
+use serde::{Deserialize, Serialize};
+use spiral_robotics_api::relations::{RelationCatalog, SpiralQueryResponse};
 use spiral_robotics_api::sql::{QualifiedRelation, WorkflowSql};
 use spiral_robotics_api::workflow::{
-    CancelWorkflowRequest, RunWorkflowRequest, SaveWorkflowRequest, WorkflowCapabilities,
-    WorkflowDocument, WorkflowNodeArtifacts, WorkflowNodeConfig, WorkflowNodeOutcome,
-    WorkflowNodePhase, WorkflowNodeSnapshot, WorkflowNodeStatus, WorkflowQuarantineSummary,
-    WorkflowRunExecution, WorkflowRunIdentity, WorkflowRunPhase, WorkflowRunSnapshot,
-    WorkflowRunTiming, WorkflowSpec, WorkflowStateResponse,
+    WorkflowCommand, WorkflowNodeConfig, WorkflowNodePhase, WorkflowNodeSnapshot,
+    WorkflowQuarantineSummary, WorkflowRunPhase, WorkflowRunSnapshot, WorkflowSpec,
+    WorkflowStateResponse,
 };
 use tokio::sync::broadcast;
 
@@ -28,6 +27,51 @@ use crate::workflow::model::{
     ModelRunContext, ModelRunEvent, ModelRunFailure, ModelRunRequest, ModelRunResult,
 };
 use spiral_robotics_storage::StorageManager;
+
+/// Persistence is a backend implementation detail. The shared API exposes the
+/// graph and observation, while the manager decides that they commit together.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+struct WorkflowDocument {
+    workflow: WorkflowSpec,
+    snapshot: WorkflowRunSnapshot,
+}
+
+impl Default for WorkflowDocument {
+    fn default() -> Self {
+        let workflow = WorkflowSpec::default();
+        let snapshot = WorkflowRunSnapshot::idle_for(&workflow);
+        Self { workflow, snapshot }
+    }
+}
+
+impl WorkflowDocument {
+    fn new(workflow: WorkflowSpec, snapshot: WorkflowRunSnapshot) -> Self {
+        Self { workflow, snapshot }
+    }
+
+    const fn workflow(&self) -> &WorkflowSpec {
+        &self.workflow
+    }
+
+    #[cfg(test)]
+    fn workflow_mut(&mut self) -> &mut WorkflowSpec {
+        &mut self.workflow
+    }
+
+    const fn snapshot(&self) -> &WorkflowRunSnapshot {
+        &self.snapshot
+    }
+
+    fn snapshot_mut(&mut self) -> &mut WorkflowRunSnapshot {
+        &mut self.snapshot
+    }
+}
+
+struct WorkflowSave {
+    scope_id: String,
+    expected_revision: u64,
+    workflow: WorkflowSpec,
+}
 
 #[derive(Clone)]
 pub(crate) struct WorkflowManager {
@@ -308,19 +352,16 @@ impl WorkflowManager {
         self.inner.identity.scope_id.recover_lock().clone()
     }
 
-    pub(crate) async fn relations(
-        &self,
-    ) -> Result<spiral_robotics_api::workflow::WorkflowRelationsResponse, String> {
+    pub(crate) async fn relations(&self) -> Result<RelationCatalog, String> {
         let scope_id = self.scope_id();
-        let mut response = self.inner.storage.workflow_relations().await?;
+        let response = self.inner.storage.workflow_relations().await?;
         if self.scope_id() != scope_id {
             return Err(
                 "The Spiral project changed while Workflow relations were loading. Reload them."
                     .to_owned(),
             );
         }
-        response.set_scope_id(scope_id);
-        Ok(response)
+        Ok(response.with_scope(scope_id))
     }
 
     pub(crate) fn is_active(&self) -> bool {
@@ -330,10 +371,6 @@ impl WorkflowManager {
             .snapshot()
             .phase()
             .active()
-    }
-
-    pub(crate) fn capabilities(&self) -> WorkflowCapabilities {
-        WorkflowCapabilities::default()
     }
 
     /// Resolve server-owned Model outputs and validate an agent-authored graph
@@ -373,24 +410,51 @@ impl WorkflowManager {
         (self.state_response(&document), updates)
     }
 
-    pub(crate) fn save(
+    pub(crate) fn command(
         &self,
-        request: SaveWorkflowRequest,
+        command: WorkflowCommand,
     ) -> Result<WorkflowStateResponse, OperationError> {
-        self.require_scope(request.scope_id())?;
+        match command {
+            WorkflowCommand::Apply {
+                scope_id,
+                expected_revision,
+                workflow,
+            } => self.save(WorkflowSave {
+                scope_id,
+                expected_revision,
+                workflow,
+            }),
+            WorkflowCommand::Run { scope_id, revision } => {
+                self.start(&scope_id, revision)?;
+                Ok(self.state())
+            }
+            WorkflowCommand::Cancel { scope_id } => {
+                self.cancel(&scope_id)?;
+                Ok(self.state())
+            }
+        }
+    }
+
+    fn save(&self, request: WorkflowSave) -> Result<WorkflowStateResponse, OperationError> {
+        let WorkflowSave {
+            scope_id,
+            expected_revision,
+            workflow: requested_workflow,
+        } = request;
+        self.require_scope(&scope_id)?;
         let mut current = self.inner.document.recover_lock();
-        if request.workflow().id() != current.workflow().id() {
+        if requested_workflow.id() != current.workflow().id() {
             return Err(OperationError::InvalidInput(format!(
                 "Workflow identity {:?} does not match the server-owned identity {:?}",
-                request.workflow().id(),
+                requested_workflow.id(),
                 current.workflow().id()
             )));
         }
         let next_revision =
-            WorkflowSaveAdmission::new(request.expected_revision(), current.workflow().revision())
+            WorkflowSaveAdmission::new(expected_revision, current.workflow().revision())
                 .with_run_active(current.snapshot().phase().active())
                 .next_revision()?;
-        let mut workflow = request.workflow().clone();
+        let mut workflow = requested_workflow;
         workflow.set_revision(next_revision);
         workflow.derive_model_outputs();
         let validation = workflow.validate();
@@ -429,17 +493,14 @@ impl WorkflowManager {
         Ok(response)
     }
 
-    pub(crate) fn start(
-        &self,
-        request: RunWorkflowRequest,
-    ) -> Result<WorkflowRunSnapshot, OperationError> {
-        self.require_scope(request.scope_id())?;
+    fn start(&self, scope_id: &str, revision: u64) -> Result<WorkflowRunSnapshot, OperationError> {
+        self.require_scope(scope_id)?;
         // When both locks are required, active-run admission always precedes
         // the document. Cancel and terminal publication use the same order.
         let mut active = self.inner.active.recover_lock();
         let mut document = self.inner.document.recover_lock();
         let validation = document.workflow().validate();
-        WorkflowRunAdmission::new(request.revision(), document.workflow().revision())
+        WorkflowRunAdmission::new(revision, document.workflow().revision())
             .with_state(
                 active.is_some() || document.snapshot().phase().active(),
                 validation.valid(),
@@ -501,11 +562,8 @@ impl WorkflowManager {
         }
     }
 
-    pub(crate) fn cancel(
-        &self,
-        request: CancelWorkflowRequest,
-    ) -> Result<WorkflowRunSnapshot, OperationError> {
-        self.require_scope(request.scope_id())?;
+    fn cancel(&self, scope_id: &str) -> Result<WorkflowRunSnapshot, OperationError> {
+        self.require_scope(scope_id)?;
         // Keep admission and Cancelling publication in one active -> document
         // critical section. Otherwise execution could publish Cancelled and
         // clear `active` between these steps, only for this request to regress
@@ -731,11 +789,7 @@ impl WorkflowManager {
                         .with_rows(Some(rows)),
                     );
                 }
-                WorkflowNodeConfig::Model {
-                    features,
-                    feature_cache_relation,
-                    ..
-                } => {
+                WorkflowNodeConfig::Model { features } => {
                     let source = workflow
                         .edges()
                         .iter()
@@ -757,7 +811,7 @@ impl WorkflowManager {
                         );
                         return;
                     };
-                    let Some(output_relation) = feature_cache_relation.clone() else {
+                    let Some(output_relation) = node.config().model_output_relation() else {
                         self.finish_failed(
                             WorkflowFailure::new(
                                 &run_id,
@@ -1336,20 +1390,13 @@ impl WorkflowOutputs for WorkflowSpec {
             .collect::<BTreeMap<_, _>>();
         for node in self.nodes_mut() {
             let node_id = node.id().to_owned();
-            if let WorkflowNodeConfig::Model {
-                features,
-                feature_cache_relation,
-                ..
-            } = node.config_mut()
-            {
+            if let WorkflowNodeConfig::Model { features } = node.config_mut() {
                 let source = source_relations.get(&node_id).cloned().flatten();
                 if let Some(source) = source.as_deref() {
                     for feature in features {
                         feature.set_source_relation(source.to_owned());
                     }
                 }
-                *feature_cache_relation =
-                    source.map(|source| spiral_robotics_api::workflow::WorkflowFeatureApplicability::derived_cache_relation(&source));
             }
         }
     }
@@ -1410,28 +1457,26 @@ impl WorkflowOutputs for WorkflowSpec {
                     .iter()
                     .find(|snapshot| snapshot.node_id() == node.id());
                 WorkflowNodeSnapshot::new(
-                    WorkflowNodeStatus::new(
-                        node.id(),
-                        if had_result {
-                            WorkflowNodePhase::Stale
-                        } else {
-                            WorkflowNodePhase::Pending
-                        },
-                        if had_result {
-                            "Saved graph changed; run again".to_owned()
-                        } else {
-                            "Not run".to_owned()
-                        },
-                    ),
-                    WorkflowNodeOutcome::default().with_quarantine(
-                        prior
-                            .map(|snapshot| snapshot.quarantine().clone())
-                            .unwrap_or_default(),
-                    ),
-                    WorkflowNodeArtifacts::new(
-                        prior.and_then(|snapshot| snapshot.model().cloned()),
-                        Vec::new(),
-                    ),
+                    node.id(),
+                    if had_result {
+                        WorkflowNodePhase::Stale
+                    } else {
+                        WorkflowNodePhase::Pending
+                    },
+                    if had_result {
+                        "Saved graph changed; run again".to_owned()
+                    } else {
+                        "Not run".to_owned()
+                    },
+                )
+                .with_quarantine(
+                    prior
+                        .map(|snapshot| snapshot.quarantine().clone())
+                        .unwrap_or_default(),
+                )
+                .with_artifacts(
+                    prior.and_then(|snapshot| snapshot.model().cloned()),
+                    Vec::new(),
                 )
             })
             .collect()
@@ -1451,26 +1496,24 @@ impl WorkflowOutputs for WorkflowSpec {
                     .nodes()
                     .iter()
                     .find(|snapshot| snapshot.node_id() == node.id());
-                WorkflowNodeSnapshot::new(
-                    WorkflowNodeStatus::new(node.id(), WorkflowNodePhase::Pending, "Pending"),
-                    WorkflowNodeOutcome::default().with_quarantine(
+                WorkflowNodeSnapshot::new(node.id(), WorkflowNodePhase::Pending, "Pending")
+                    .with_quarantine(
                         prior
                             .map(|snapshot| snapshot.quarantine().clone())
                             .unwrap_or_default(),
-                    ),
-                    WorkflowNodeArtifacts::new(
+                    )
+                    .with_artifacts(
                         prior.and_then(|snapshot| snapshot.model().cloned()),
                         Vec::new(),
-                    ),
-                )
+                    )
             })
             .collect();
-        WorkflowRunSnapshot::new(
-            WorkflowRunIdentity::new(self.id(), self.revision()).with_run_id(Some(run_id)),
-            WorkflowRunExecution::new(WorkflowRunPhase::Validating, nodes)
-                .with_result(previous.result().cloned(), previous.result().is_some()),
-            WorkflowRunTiming::new(started_ms, 0, started_ms),
-        )
+        let mut snapshot = WorkflowRunSnapshot::started(self, run_id)
+            .with_nodes(nodes)
+            .with_started_ms(started_ms);
+        snapshot.set_result(previous.result().cloned());
+        snapshot.set_result_stale(previous.result().is_some());
+        snapshot
     }
 
     fn save_allowed(&self, validation_valid: bool) -> bool {
@@ -1488,9 +1531,7 @@ mod tests {
     use spiral_robotics_api::relations::SpiralQueryResponse;
     use spiral_robotics_api::workflow::{
         WorkflowEdgeSpec, WorkflowFeatureApplicability, WorkflowFeatureDefinition,
-        WorkflowModelExecution, WorkflowModelIdentity, WorkflowModelMetrics,
-        WorkflowModelRunMetadata, WorkflowNodeArtifacts, WorkflowNodeConfig, WorkflowNodeOutcome,
-        WorkflowNodeSpec, WorkflowNodeStatus, WorkflowRunPhase,
+        WorkflowModelRunMetadata, WorkflowNodeConfig, WorkflowNodeSpec, WorkflowRunPhase,
     };
 
     use crate::robotics::video::VideoAsset;
@@ -1558,21 +1599,17 @@ mod tests {
     fn model_output_is_one_shared_server_owned_feature_cache() {
         let mut workflow = siglip_video_workflow("media.manifest", "model");
         workflow.derive_model_outputs();
-        let WorkflowNodeConfig::Model {
-            feature_cache_relation,
-            ..
-        } = &workflow
+        let config = workflow
             .nodes()
             .iter()
             .find(|node| node.id() == "model")
             .unwrap()
-            .config()
-        else {
-            unreachable!()
-        };
+            .config();
         assert_eq!(
-            feature_cache_relation.as_deref(),
-            Some(spiral_robotics_api::workflow::WorkflowFeatureApplicability::derived_cache_relation("media.manifest").as_str())
+            config.model_output_relation(),
+            Some(WorkflowFeatureApplicability::derived_cache_relation(
+                "media.manifest"
+            ))
         );
     }
 
@@ -1594,22 +1631,14 @@ mod tests {
     fn cancellation_after_model_publication_preserves_the_completed_model_truth() {
         let mut nodes = [
             WorkflowNodeSnapshot::new(
-                WorkflowNodeStatus::new(
-                    "model",
-                    WorkflowNodePhase::Complete,
-                    "Backfilled 4 feature cells",
-                ),
-                WorkflowNodeOutcome::default(),
-                WorkflowNodeArtifacts::default(),
+                "model",
+                WorkflowNodePhase::Complete,
+                "Backfilled 4 feature cells",
             ),
             WorkflowNodeSnapshot::new(
-                WorkflowNodeStatus::new(
-                    "query",
-                    WorkflowNodePhase::Running,
-                    "Running read-only query",
-                ),
-                WorkflowNodeOutcome::default(),
-                WorkflowNodeArtifacts::default(),
+                "query",
+                WorkflowNodePhase::Running,
+                "Running read-only query",
             ),
         ];
         nodes.mark_inflight_cancelled();
@@ -1680,7 +1709,7 @@ mod tests {
             .recover_lock()
             .extend([Ok(()), Ok(())]);
         let recovered = manager
-            .cancel(CancelWorkflowRequest::new(manager.scope_id()))
+            .cancel(&manager.scope_id())
             .expect("Cancel must retry the durable terminal transition");
         assert_eq!(recovered.phase(), WorkflowRunPhase::Cancelled);
         assert!(recovered.error().is_none());
@@ -1720,7 +1749,7 @@ mod tests {
         assert_ne!(state_b.scope_id(), scope_a);
         assert_eq!(state_b.workflow().revision(), 1);
         assert!(matches!(
-            manager.save(SaveWorkflowRequest::new(
+            manager.command(WorkflowCommand::apply(
                 scope_a,
                 state_b.workflow().revision(),
                 state_b.workflow().clone(),
@@ -1734,18 +1763,15 @@ mod tests {
         let mut workflow = siglip_video_workflow("media.manifest", "model");
         workflow.derive_model_outputs();
         let mut previous = WorkflowRunSnapshot::idle_for(&workflow);
-        let metadata = WorkflowModelRunMetadata::new(
-            WorkflowModelIdentity::new(
-                "siglip-base",
-                "revision",
-                spiral_robotics_api::workflow::WorkflowFeatureApplicability::derived_cache_relation(
-                    "media.manifest",
-                ),
-            )
-            .with_fingerprint("fingerprint"),
-            WorkflowModelExecution::new(Vec::new(), false, "Metal"),
-            WorkflowModelMetrics::new(2, 2, 1).with_inference_ms(1),
-        );
+        let metadata = WorkflowModelRunMetadata::new("siglip-base", "revision")
+            .with_cache_relation(WorkflowFeatureApplicability::derived_cache_relation(
+                "media.manifest",
+            ))
+            .with_features(Vec::new())
+            .with_device("Metal")
+            .with_fingerprint("fingerprint")
+            .with_row_counts(2, 2)
+            .with_timings(1, 1);
         previous
             .nodes_mut()
             .iter_mut()
@@ -1774,37 +1800,19 @@ mod tests {
     }
 
     #[test]
-    fn model_cache_identity_ignores_hostile_persisted_output_text() {
-        let mut current = siglip_video_workflow("media.manifest", "model");
-        let WorkflowNodeConfig::Model {
-            feature_cache_relation,
-            ..
-        } = current
-            .nodes_mut()
-            .iter_mut()
-            .find(|node| node.id() == "model")
-            .unwrap()
-            .config_mut()
-        else {
-            unreachable!()
-        };
-        *feature_cache_relation = Some("training.episodes".to_owned());
-        current.derive_model_outputs();
-        let WorkflowNodeConfig::Model {
-            feature_cache_relation,
-            ..
-        } = current
+    fn model_cache_identity_has_no_caller_controlled_field() {
+        let current = siglip_video_workflow("media.manifest", "model");
+        let config = current
             .nodes()
             .iter()
             .find(|node| node.id() == "model")
             .unwrap()
-            .config()
-        else {
-            unreachable!()
-        };
+            .config();
         assert_eq!(
-            feature_cache_relation.as_deref(),
-            Some(spiral_robotics_api::workflow::WorkflowFeatureApplicability::derived_cache_relation("media.manifest").as_str())
+            config.model_output_relation(),
+            Some(WorkflowFeatureApplicability::derived_cache_relation(
+                "media.manifest"
+            ))
         );
     }
 
@@ -1822,22 +1830,20 @@ mod tests {
         };
         features[0].set_source_relation("provider.chosen");
         workflow.derive_model_outputs();
-        let WorkflowNodeConfig::Model {
-            feature_cache_relation,
-            features,
-            ..
-        } = workflow
+        let config = workflow
             .nodes()
             .iter()
             .find(|node| node.id() == "score-node")
             .unwrap()
-            .config()
-        else {
+            .config();
+        let WorkflowNodeConfig::Model { features } = config else {
             unreachable!()
         };
         assert_eq!(
-            feature_cache_relation.as_deref(),
-            Some(spiral_robotics_api::workflow::WorkflowFeatureApplicability::derived_cache_relation("pick_place.camera_frames").as_str())
+            config.model_output_relation(),
+            Some(WorkflowFeatureApplicability::derived_cache_relation(
+                "pick_place.camera_frames"
+            ))
         );
         assert_eq!(
             features[0].applicability().source_relation(),
@@ -1922,15 +1928,16 @@ mod tests {
         };
         *relation = seed_relation;
         let saved = manager
-            .save(SaveWorkflowRequest::new(manager.scope_id(), 0, workflow))
+            .command(WorkflowCommand::apply(manager.scope_id(), 0, workflow))
             .expect("the valid SQL workflow must save");
-        let request = RunWorkflowRequest::new(manager.scope_id(), saved.workflow().revision());
+        let scope_id = manager.scope_id().to_owned();
+        let revision = saved.workflow().revision();
         manager
-            .start(request.clone())
+            .start(&scope_id, revision)
             .expect("the first run must start");
         assert!(
             matches!(
-                manager.start(request.clone()),
+                manager.start(&scope_id, revision),
                 Err(OperationError::Conflict(_))
             ),
             "one workflow cannot have two active runs"
@@ -1956,13 +1963,10 @@ mod tests {
         assert_eq!(reloaded.state().snapshot().result(), completed.result());
 
         reloaded
-            .start(RunWorkflowRequest::new(
-                reloaded.scope_id(),
-                request.revision(),
-            ))
+            .start(&reloaded.scope_id(), revision)
             .expect("the persisted workflow must run again");
         let cancelling = reloaded
-            .cancel(CancelWorkflowRequest::new(reloaded.scope_id()))
+            .cancel(&reloaded.scope_id())
             .expect("the active run must cancel");
         assert_eq!(cancelling.phase(), WorkflowRunPhase::Cancelling);
         let cancelled = wait_for_terminal(&reloaded).await;
@@ -2028,13 +2032,7 @@ mod tests {
         let output_relation = workflow
             .nodes()
             .iter()
-            .find_map(|node| match node.config() {
-                WorkflowNodeConfig::Model {
-                    feature_cache_relation: Some(relation),
-                    ..
-                } => Some(relation.clone()),
-                _ => None,
-            })
+            .find_map(|node| node.config().model_output_relation())
             .expect("the server derivation must produce a Model output relation");
         let empty_output_relation =
             spiral_robotics_api::workflow::WorkflowFeatureApplicability::derived_cache_relation(
@@ -2087,12 +2085,13 @@ mod tests {
             .await
             .expect("an empty Workflow document must hydrate");
         let saved = manager
-            .save(SaveWorkflowRequest::new(manager.scope_id(), 0, workflow))
+            .command(WorkflowCommand::apply(manager.scope_id(), 0, workflow))
             .expect("the SigLIP video workflow must save");
 
-        let request = RunWorkflowRequest::new(manager.scope_id(), saved.workflow().revision());
+        let scope_id = manager.scope_id().to_owned();
+        let revision = saved.workflow().revision();
         manager
-            .start(request.clone())
+            .start(&scope_id, revision)
             .expect("the SigLIP video run must start");
         let completed = wait_for_model_terminal(&manager).await;
         assert_eq!(
@@ -2136,7 +2135,7 @@ mod tests {
             2_000.0 / metadata.decode_ms() as f64,
         );
         manager
-            .start(request.clone())
+            .start(&scope_id, revision)
             .expect("an unchanged run must start for reuse");
         let reused = wait_for_model_terminal(&manager).await;
         assert!(
@@ -2169,17 +2168,14 @@ mod tests {
         let mut empty_workflow = siglip_video_workflow(&empty_relation, &model_node_id);
         set_video_candidate_sql(&mut empty_workflow, &media_relation);
         let empty_saved = reloaded
-            .save(SaveWorkflowRequest::new(
+            .command(WorkflowCommand::apply(
                 reloaded.scope_id(),
                 saved.workflow().revision(),
                 empty_workflow,
             ))
             .expect("the empty manifest workflow must save");
         reloaded
-            .start(RunWorkflowRequest::new(
-                reloaded.scope_id(),
-                empty_saved.workflow().revision(),
-            ))
+            .start(&reloaded.scope_id(), empty_saved.workflow().revision())
             .expect("the zero-row replacement run must start");
         let empty = wait_for_model_terminal(&reloaded).await;
         assert_eq!(empty.phase(), WorkflowRunPhase::Completed);
@@ -2199,20 +2195,17 @@ mod tests {
         let mut restored_workflow = siglip_video_workflow(&manifest_relation, &model_node_id);
         set_video_candidate_sql(&mut restored_workflow, &media_relation);
         let changed_saved = reloaded
-            .save(SaveWorkflowRequest::new(
+            .command(WorkflowCommand::apply(
                 reloaded.scope_id(),
                 empty_saved.workflow().revision(),
                 restored_workflow,
             ))
             .expect("restoring the media workflow must save");
         reloaded
-            .start(RunWorkflowRequest::new(
-                reloaded.scope_id(),
-                changed_saved.workflow().revision(),
-            ))
+            .start(&reloaded.scope_id(), changed_saved.workflow().revision())
             .expect("the cancellable model run must start");
         let cancelling = reloaded
-            .cancel(CancelWorkflowRequest::new(reloaded.scope_id()))
+            .cancel(&reloaded.scope_id())
             .expect("the active Model run must cancel");
         assert_eq!(cancelling.phase(), WorkflowRunPhase::Cancelling);
         assert_eq!(
@@ -2243,7 +2236,7 @@ mod tests {
         };
         *sql = "SELECT * FROM {{node:table}} ORDER BY episode_id".to_owned();
         let removed = reloaded
-            .save(SaveWorkflowRequest::new(
+            .command(WorkflowCommand::apply(
                 reloaded.scope_id(),
                 without_model.revision(),
                 without_model,
@@ -2265,7 +2258,7 @@ mod tests {
         let mut renamed = removed.workflow().clone();
         renamed.set_name("Post-cleanup write");
         let renamed = reloaded
-            .save(SaveWorkflowRequest::new(
+            .command(WorkflowCommand::apply(
                 reloaded.scope_id(),
                 renamed.revision(),
                 renamed,
@@ -2311,7 +2304,6 @@ mod tests {
                     model_node_id,
                     "Backfill visual features",
                     WorkflowNodeConfig::Model {
-                        model_id: "siglip-base".to_owned(),
                         features: vec![
                             feature_definition(
                                 relation,
@@ -2324,7 +2316,6 @@ mod tests {
                                 "white square",
                             ),
                         ],
-                        feature_cache_relation: None,
                     },
                 ),
                 WorkflowNodeSpec::new(

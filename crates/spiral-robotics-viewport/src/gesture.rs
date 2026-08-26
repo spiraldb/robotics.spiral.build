@@ -18,7 +18,7 @@ const CLICK_SLOP: f64 = 3.0;
 
 /// The state of a drag in progress.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Drag {
+pub(crate) struct Drag {
     /// Pointer position at the beginning, to separate clicking from orbiting.
     start: (f64, f64),
     /// Pointer position when this drag was last sampled, in client pixels.
@@ -29,13 +29,13 @@ pub struct Drag {
 
 /// One sampled pointer position and the canvas height it was measured over.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct DragUpdate {
+pub(crate) struct DragUpdate {
     pointer_position: (f64, f64),
     viewport_height: f32,
 }
 
 impl DragUpdate {
-    pub fn new(pointer_position: (f64, f64), viewport_height: f32) -> Self {
+    pub(crate) fn new(pointer_position: (f64, f64), viewport_height: f32) -> Self {
         Self {
             pointer_position,
             viewport_height,
@@ -45,7 +45,7 @@ impl DragUpdate {
 
 impl Drag {
     /// Begin a drag. `panning` slides the target instead of turning about it.
-    pub fn new(pointer_position: (f64, f64), panning: bool) -> Self {
+    pub(crate) fn new(pointer_position: (f64, f64), panning: bool) -> Self {
         Self {
             start: pointer_position,
             last: pointer_position,
@@ -55,7 +55,7 @@ impl Drag {
     }
 
     /// True once the pointer has travelled far enough to mean it.
-    pub fn moved(&self) -> bool {
+    pub(crate) fn moved(&self) -> bool {
         self.moved
     }
 
@@ -65,7 +65,7 @@ impl Drag {
     /// camera. Dragging down tips the arm's top toward the viewer — the same
     /// way dragging down a globe brings its north pole around — which puts the
     /// camera up.
-    pub fn advance(&mut self, camera: &mut Camera, update: DragUpdate) {
+    pub(crate) fn advance(&mut self, camera: &mut Camera, update: DragUpdate) {
         let pointer_position = update.pointer_position;
         let (delta_x, delta_y) = (
             pointer_position.0 - self.last.0,
@@ -96,22 +96,27 @@ impl Drag {
 /// Named rather than expressed as raw numbers so a keyboard step and a wheel
 /// notch cannot drift apart from the drag they are meant to match.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Gesture {
+pub enum Command {
     OrbitLeft,
     OrbitRight,
     OrbitUp,
     OrbitDown,
     ZoomIn,
     ZoomOut,
+    /// Restore the default three-quarter view.
+    Home,
+    Top,
+    Front,
+    Right,
     /// Mouse notches or normalized trackpad pixels.
     Wheel(f64),
 }
 
-impl Gesture {
+impl Command {
     /// Radians one key press turns the bench.
     const KEY_ORBIT: f32 = 0.08;
 
-    pub fn apply(self, camera: &mut Camera) {
+    pub(crate) fn apply(self, camera: &mut Camera) {
         match self {
             Self::OrbitLeft => camera.orbit(Self::KEY_ORBIT, 0.0),
             Self::OrbitRight => camera.orbit(-Self::KEY_ORBIT, 0.0),
@@ -119,10 +124,19 @@ impl Gesture {
             Self::OrbitDown => camera.orbit(0.0, Self::KEY_ORBIT),
             Self::ZoomIn => camera.zoom(0.88),
             Self::ZoomOut => camera.zoom(1.14),
+            Self::Home => *camera = Camera::default(),
+            Self::Top => *camera = camera.oriented(-0.65, 1.42),
+            Self::Front => {
+                *camera = camera.oriented(-std::f32::consts::FRAC_PI_2, 0.08);
+            }
+            Self::Right => *camera = camera.oriented(0.0, 0.08),
             // Mice report notches and trackpads report pixels; both arrive
             // normalized so one notch zooms by about a sixth, which is small
             // enough that a trackpad flick does not overshoot.
-            Self::Wheel(notches) => camera.zoom((notches.clamp(-4.0, 4.0) as f32 * 0.15).exp()),
+            Self::Wheel(notches) if notches.is_finite() => {
+                camera.zoom((notches.clamp(-4.0, 4.0) as f32 * 0.15).exp());
+            }
+            Self::Wheel(_) => {}
         }
     }
 }
@@ -160,5 +174,15 @@ mod tests {
         let moved_near = (near.target() - initial_targets.0).length();
         let moved_far = (far.target() - initial_targets.1).length();
         assert!(moved_far > moved_near * 5.0, "{moved_far} vs {moved_near}");
+    }
+
+    #[test]
+    fn unusable_wheel_input_cannot_corrupt_the_camera() {
+        let mut camera = Camera::default();
+        let before = camera;
+
+        Command::Wheel(f64::NAN).apply(&mut camera);
+
+        assert_eq!(camera, before);
     }
 }

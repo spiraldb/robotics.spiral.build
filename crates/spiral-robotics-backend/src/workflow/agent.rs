@@ -15,16 +15,10 @@ use spiral_robotics_api::workflow::{
     DEFAULT_WORKFLOW_ID, MAX_WORKFLOW_AGENT_CONVERSATION_TITLE_CHARS,
     MAX_WORKFLOW_AGENT_CONVERSATIONS, MAX_WORKFLOW_AGENT_INPUT_CHARS,
     MAX_WORKFLOW_AGENT_MESSAGES_PER_CONVERSATION, MAX_WORKFLOW_AGENT_QUERY_ROWS,
-    RunWorkflowRequest, SaveWorkflowRequest, WorkflowAgentActivateConversationRequest,
-    WorkflowAgentActivity, WorkflowAgentArtifactKind, WorkflowAgentArtifactReceipt,
-    WorkflowAgentCancelRequest, WorkflowAgentConversationSummary,
-    WorkflowAgentCreateConversationRequest, WorkflowAgentMessage, WorkflowAgentMessageContent,
-    WorkflowAgentMessageIdentity, WorkflowAgentMessagePhase, WorkflowAgentPhase,
-    WorkflowAgentReadiness, WorkflowAgentReadinessStatus, WorkflowAgentRole, WorkflowAgentSession,
-    WorkflowAgentSessionIdentity, WorkflowAgentStateIdentity, WorkflowAgentStateResponse,
-    WorkflowAgentToolPhase, WorkflowAgentToolSummary, WorkflowAgentTurnAccepted,
-    WorkflowAgentTurnRequest, WorkflowAgentUpdate, WorkflowNodeConfig, WorkflowRunPhase,
-    WorkflowSpec,
+    WorkflowAgentArtifactReceipt, WorkflowAgentCommand, WorkflowAgentConversationSummary,
+    WorkflowAgentMessage, WorkflowAgentMessagePhase, WorkflowAgentPhase, WorkflowAgentReadiness,
+    WorkflowAgentRole, WorkflowAgentSession, WorkflowAgentStateResponse, WorkflowAgentToolPhase,
+    WorkflowAgentToolSummary, WorkflowCommand, WorkflowNodeConfig, WorkflowRunPhase, WorkflowSpec,
 };
 use tokio::sync::broadcast;
 
@@ -60,7 +54,7 @@ struct WorkflowAgentInner {
     scope_id: Mutex<String>,
     document: Mutex<AgentDocument>,
     active: Mutex<Option<ActiveTurn>>,
-    updates: broadcast::Sender<WorkflowAgentUpdate>,
+    updates: broadcast::Sender<()>,
 }
 
 struct WorkflowAgentServices {
@@ -113,11 +107,8 @@ impl AgentConversation {
             title: "New conversation".to_owned(),
             created_ms: now_ms,
             updated_ms: now_ms,
-            session: WorkflowAgentSession::new(
-                WorkflowAgentSessionIdentity::new(DEFAULT_WORKFLOW_ID, conversation_id, 0),
-                WorkflowAgentActivity::new(WorkflowAgentPhase::Idle, Vec::new()),
-                now_ms,
-            ),
+            session: WorkflowAgentSession::new(DEFAULT_WORKFLOW_ID, conversation_id)
+                .with_updated_ms(now_ms),
             provider_messages: Vec::new(),
             owned_run_id: None,
         }
@@ -474,19 +465,11 @@ struct ProviderReadiness;
 
 impl ProviderReadiness {
     fn public(ready: bool) -> WorkflowAgentReadiness {
-        WorkflowAgentReadiness::new(
-            ready,
-            if ready {
-                WorkflowAgentReadinessStatus::Ready
-            } else {
-                WorkflowAgentReadinessStatus::Error
-            },
-            if ready {
-                ASSISTANT_READY_DETAIL.to_owned()
-            } else {
-                ASSISTANT_UNAVAILABLE_DETAIL.to_owned()
-            },
-        )
+        if ready {
+            WorkflowAgentReadiness::ready(ASSISTANT_READY_DETAIL)
+        } else {
+            WorkflowAgentReadiness::error(ASSISTANT_UNAVAILABLE_DETAIL)
+        }
     }
 }
 
@@ -648,6 +631,25 @@ struct ConversationChange<'a> {
     turn_active: bool,
     scope_id: &'a str,
     expected_revision: u64,
+}
+
+struct ConversationSelection {
+    scope_id: String,
+    conversation_id: String,
+    expected_revision: u64,
+}
+
+struct TurnStart {
+    scope_id: String,
+    conversation_id: String,
+    text: String,
+    expected_revision: u64,
+}
+
+struct TurnCancellation {
+    scope_id: String,
+    conversation_id: String,
+    turn_id: String,
 }
 
 impl<'a> ConversationChange<'a> {
@@ -985,30 +987,66 @@ impl WorkflowAgentManager {
         self.inner.active.recover_lock().is_some()
     }
 
-    pub(crate) fn subscription(
-        &self,
-    ) -> (
-        WorkflowAgentStateResponse,
-        broadcast::Receiver<WorkflowAgentUpdate>,
-    ) {
+    pub(crate) fn subscription(&self) -> (WorkflowAgentStateResponse, broadcast::Receiver<()>) {
         let document = self.inner.document.recover_lock();
         let updates = self.inner.updates.subscribe();
         (self.state_for(&document), updates)
     }
 
-    pub(crate) fn create_conversation(
+    pub(crate) async fn command(
         &self,
-        request: WorkflowAgentCreateConversationRequest,
+        command: WorkflowAgentCommand,
+    ) -> Result<WorkflowAgentStateResponse, OperationError> {
+        match command {
+            WorkflowAgentCommand::CreateConversation {
+                scope_id,
+                expected_revision,
+            } => self.create_conversation(&scope_id, expected_revision),
+            WorkflowAgentCommand::ActivateConversation {
+                scope_id,
+                conversation_id,
+                expected_revision,
+            } => self.activate_conversation(ConversationSelection {
+                scope_id,
+                conversation_id,
+                expected_revision,
+            }),
+            WorkflowAgentCommand::Turn {
+                scope_id,
+                conversation_id,
+                text,
+                expected_revision,
+            } => self.start_turn(TurnStart {
+                scope_id,
+                conversation_id,
+                text,
+                expected_revision,
+            }),
+            WorkflowAgentCommand::Cancel {
+                scope_id,
+                conversation_id,
+                turn_id,
+            } => {
+                self.cancel(TurnCancellation {
+                    scope_id,
+                    conversation_id,
+                    turn_id,
+                })
+                .await
+            }
+        }
+    }
+
+    fn create_conversation(
+        &self,
+        scope_id: &str,
+        expected_revision: u64,
     ) -> Result<WorkflowAgentStateResponse, OperationError> {
         let active = self.inner.active.recover_lock();
         let mut document = self.inner.document.recover_lock();
         self.admit_conversation_change(
             &document,
-            ConversationChange::new(
-                active.is_some(),
-                request.scope_id(),
-                request.expected_revision(),
-            ),
+            ConversationChange::new(active.is_some(), scope_id, expected_revision),
         )?;
         let Some(candidate) = document
             .with_new_conversation(AgentClock::now_millis())
@@ -1026,28 +1064,29 @@ impl WorkflowAgentManager {
         Ok(state)
     }
 
-    pub(crate) fn activate_conversation(
+    fn activate_conversation(
         &self,
-        request: WorkflowAgentActivateConversationRequest,
+        selection: ConversationSelection,
     ) -> Result<WorkflowAgentStateResponse, OperationError> {
+        let ConversationSelection {
+            scope_id,
+            conversation_id,
+            expected_revision,
+        } = selection;
         let active = self.inner.active.recover_lock();
         let mut document = self.inner.document.recover_lock();
         self.admit_conversation_change(
             &document,
-            ConversationChange::new(
-                active.is_some(),
-                request.scope_id(),
-                request.expected_revision(),
-            ),
+            ConversationChange::new(active.is_some(), &scope_id, expected_revision),
         )?;
-        if document.conversation(request.conversation_id()).is_none() {
+        if document.conversation(&conversation_id).is_none() {
             return Err(OperationError::InvalidInput(
                 "That Assistant conversation no longer exists. Reload the conversation list."
                     .to_owned(),
             ));
         }
         let Some(candidate) = document
-            .activated_conversation(request.conversation_id())
+            .activated_conversation(&conversation_id)
             .map_err(OperationError::External)?
         else {
             return Ok(self.state_for(&document));
@@ -1115,11 +1154,14 @@ impl WorkflowAgentManager {
         Ok(())
     }
 
-    pub(crate) fn start_turn(
-        &self,
-        request: WorkflowAgentTurnRequest,
-    ) -> Result<WorkflowAgentTurnAccepted, OperationError> {
-        let text = request.text().trim();
+    fn start_turn(&self, request: TurnStart) -> Result<WorkflowAgentStateResponse, OperationError> {
+        let TurnStart {
+            scope_id,
+            conversation_id,
+            text,
+            expected_revision,
+        } = request;
+        let text = text.trim();
         if text.is_empty() {
             return Err(OperationError::InvalidInput(
                 "Describe the Workflow change or result you want.".to_owned(),
@@ -1170,15 +1212,15 @@ impl WorkflowAgentManager {
                 ));
             }
             let mut document = self.inner.document.recover_lock();
-            if request.scope_id() != *self.inner.scope_id.recover_lock()
-                || request.conversation_id() != document.active_conversation_id
+            if scope_id != *self.inner.scope_id.recover_lock()
+                || conversation_id != document.active_conversation_id
             {
                 return Err(OperationError::Conflict(
                     "The active Assistant conversation changed. Reload it before sending."
                         .to_owned(),
                 ));
             }
-            if request.expected_revision() != document.revision {
+            if expected_revision != document.revision {
                 return Err(OperationError::Conflict(
                     "Assistant history changed in another session. Reload it before sending."
                         .to_owned(),
@@ -1211,39 +1253,19 @@ impl WorkflowAgentManager {
                 conversation.title = AgentConversation::title_from_user_text(text);
             }
             let user_sequence = conversation.session.next_message_sequence();
-            conversation
-                .session
-                .messages_mut()
-                .push(WorkflowAgentMessage::new(
-                    WorkflowAgentMessageIdentity::new(
-                        user_id,
-                        user_sequence,
-                        WorkflowAgentRole::User,
-                    )
+            conversation.session.messages_mut().push(
+                WorkflowAgentMessage::new(user_id, WorkflowAgentRole::User)
+                    .with_sequence(user_sequence)
+                    .with_phase(WorkflowAgentMessagePhase::Complete)
+                    .with_text(text)
                     .with_created_ms(created_ms),
-                    WorkflowAgentMessageContent::new(
-                        WorkflowAgentMessagePhase::Complete,
-                        text,
-                        Vec::new(),
-                    ),
-                ));
+            );
             let assistant_sequence = conversation.session.next_message_sequence();
-            conversation
-                .session
-                .messages_mut()
-                .push(WorkflowAgentMessage::new(
-                    WorkflowAgentMessageIdentity::new(
-                        assistant_id,
-                        assistant_sequence,
-                        WorkflowAgentRole::Assistant,
-                    )
+            conversation.session.messages_mut().push(
+                WorkflowAgentMessage::new(assistant_id, WorkflowAgentRole::Assistant)
+                    .with_sequence(assistant_sequence)
                     .with_created_ms(created_ms),
-                    WorkflowAgentMessageContent::new(
-                        WorkflowAgentMessagePhase::Streaming,
-                        String::new(),
-                        Vec::new(),
-                    ),
-                ));
+            );
             conversation
                 .provider_messages
                 .push(ProviderMessage::text("user", text));
@@ -1271,8 +1293,7 @@ impl WorkflowAgentManager {
                 owned_run_id: owned_run_id.clone(),
                 task: None,
             });
-            let response =
-                WorkflowAgentTurnAccepted::new(turn_id.clone(), self.state_for(&document));
+            let response = self.state_for(&document);
             drop(document);
             drop(active);
             self.publish();
@@ -1299,11 +1320,16 @@ impl WorkflowAgentManager {
         admitted
     }
 
-    pub(crate) async fn cancel(
+    async fn cancel(
         &self,
-        request: WorkflowAgentCancelRequest,
+        cancellation: TurnCancellation,
     ) -> Result<WorkflowAgentStateResponse, OperationError> {
-        if request.scope_id() != *self.inner.scope_id.recover_lock() {
+        let TurnCancellation {
+            scope_id,
+            conversation_id: requested_conversation_id,
+            turn_id: requested_turn_id,
+        } = cancellation;
+        if scope_id != *self.inner.scope_id.recover_lock() {
             return Err(OperationError::Conflict(
                 "The active Spiral project changed. Reload Assistant conversations.".to_owned(),
             ));
@@ -1313,8 +1339,8 @@ impl WorkflowAgentManager {
             let active = active.as_mut().ok_or_else(|| {
                 OperationError::Conflict("No Assistant turn is active.".to_owned())
             })?;
-            if active.conversation_id != request.conversation_id()
-                || active.turn_id != request.turn_id()
+            if active.conversation_id != requested_conversation_id
+                || active.turn_id != requested_turn_id
             {
                 return Err(OperationError::Conflict(
                     "The active Assistant turn changed. Reload it before stopping.".to_owned(),
@@ -1367,11 +1393,13 @@ impl WorkflowAgentManager {
             && self.inner.services.workflow.state().snapshot().run_id() == Some(run_id.as_str())
             && self.inner.services.workflow.is_active()
         {
-            let _ = self.inner.services.workflow.cancel(
-                spiral_robotics_api::workflow::CancelWorkflowRequest::new(
+            let _ = self
+                .inner
+                .services
+                .workflow
+                .command(WorkflowCommand::cancel(
                     self.inner.services.workflow.scope_id(),
-                ),
-            );
+                ));
         }
     }
 
@@ -1613,10 +1641,15 @@ impl WorkflowAgentManager {
                 Ok(serde_json::to_string(&json!({"relations": relations}))
                     .map_err(|error| error.to_string())?)
             }
-            "list_model_capabilities" => {
-                serde_json::to_string(&self.inner.services.workflow.capabilities())
-                    .map_err(|error| error.to_string())
-            }
+            "list_model_capabilities" => Ok(json!({
+                "models": [{
+                    "id": "siglip-base",
+                    "label": "SigLIP base",
+                    "max_features": 32,
+                    "device_policy": "Metal when available; CPU fallback"
+                }]
+            })
+            .to_string()),
             "set_workflow" => {
                 let mut workflow_value = args
                     .get("workflow")
@@ -1662,7 +1695,7 @@ impl WorkflowAgentManager {
                     .inner
                     .services
                     .workflow
-                    .save(SaveWorkflowRequest::new(
+                    .command(WorkflowCommand::apply(
                         self.inner.services.workflow.scope_id(),
                         context.workflow_revision,
                         resolved,
@@ -1694,45 +1727,51 @@ impl WorkflowAgentManager {
                     .inner
                     .services
                     .workflow
-                    .start(RunWorkflowRequest::new(
+                    .command(WorkflowCommand::run(
                         self.inner.services.workflow.scope_id(),
                         context.workflow_revision,
                     ))
                     .map_err(|error| error.to_string());
                 let released = self.inner.services.catalog_lease.release(lease);
                 debug_assert!(released, "agent Workflow start releases its lease once");
-                let snapshot = result?;
+                let state = result?;
+                let snapshot = state.snapshot();
                 let run_id = snapshot
                     .run_id()
-                    .ok_or_else(|| "Workflow start returned no run identity.".to_owned())?;
+                    .ok_or_else(|| "Workflow start returned no run identity.".to_owned())?
+                    .to_owned();
                 let cancelled = context
                     .owned_run_id
-                    .record_and_is_cancelled(&cancel, run_id);
+                    .record_and_is_cancelled(&cancel, &run_id);
                 if let Err(error) =
-                    self.record_conversation_owned_run(&context.conversation_id, run_id)
+                    self.record_conversation_owned_run(&context.conversation_id, &run_id)
                 {
-                    if self.inner.services.workflow.state().snapshot().run_id() == Some(run_id)
+                    if self.inner.services.workflow.state().snapshot().run_id() == Some(&run_id)
                         && self.inner.services.workflow.is_active()
                     {
-                        let _ = self.inner.services.workflow.cancel(
-                            spiral_robotics_api::workflow::CancelWorkflowRequest::new(
+                        let _ = self
+                            .inner
+                            .services
+                            .workflow
+                            .command(WorkflowCommand::cancel(
                                 self.inner.services.workflow.scope_id(),
-                            ),
-                        );
+                            ));
                     }
                     return Err(format!(
                         "Could not persist Assistant ownership of the Workflow run: {error}"
                     ));
                 }
                 if cancelled {
-                    if self.inner.services.workflow.state().snapshot().run_id() == Some(run_id)
+                    if self.inner.services.workflow.state().snapshot().run_id() == Some(&run_id)
                         && self.inner.services.workflow.is_active()
                     {
-                        let _ = self.inner.services.workflow.cancel(
-                            spiral_robotics_api::workflow::CancelWorkflowRequest::new(
+                        let _ = self
+                            .inner
+                            .services
+                            .workflow
+                            .command(WorkflowCommand::cancel(
                                 self.inner.services.workflow.scope_id(),
-                            ),
-                        );
+                            ));
                     }
                     return Err(
                         "Agent turn was cancelled after starting the Workflow run.".to_owned()
@@ -2133,50 +2172,36 @@ impl WorkflowAgentManager {
             format!("[Backend Workflow completion]\n{summary}"),
         ));
         let sequence = conversation.session.next_message_sequence();
-        conversation
-            .session
-            .messages_mut()
-            .push(WorkflowAgentMessage::new(
-                WorkflowAgentMessageIdentity::new(
-                    AgentIdentifier::next("agent-run"),
-                    sequence,
-                    WorkflowAgentRole::Synthetic,
+        conversation.session.messages_mut().push(
+            WorkflowAgentMessage::new(
+                AgentIdentifier::next("agent-run"),
+                WorkflowAgentRole::Synthetic,
+            )
+            .with_sequence(sequence)
+            .with_phase(WorkflowAgentMessagePhase::Complete)
+            .with_text(format!(
+                "Workflow {} is {}.",
+                snapshot.run_id().unwrap_or("run"),
+                WorkflowRunPresentation::phase(
+                    &serde_json::to_value(snapshot.phase())
+                        .ok()
+                        .and_then(|value| value.as_str().map(str::to_owned))
+                        .unwrap_or_else(|| "updated".to_owned())
                 )
-                .with_created_ms(AgentClock::now_millis()),
-                WorkflowAgentMessageContent::new(
-                    WorkflowAgentMessagePhase::Complete,
-                    format!(
-                        "Workflow {} is {}.",
-                        snapshot.run_id().unwrap_or("run"),
-                        WorkflowRunPresentation::phase(
-                            &serde_json::to_value(snapshot.phase())
-                                .ok()
-                                .and_then(|value| value.as_str().map(str::to_owned))
-                                .unwrap_or_else(|| "updated".to_owned())
-                        )
-                    ),
-                    Vec::new(),
-                )
-                .with_run_id(snapshot.run_id().map(str::to_owned)),
-            ));
+            ))
+            .with_created_ms(AgentClock::now_millis())
+            .with_run_id(snapshot.run_id().map(str::to_owned)),
+        );
         let sequence = conversation.session.next_message_sequence();
-        conversation
-            .session
-            .messages_mut()
-            .push(WorkflowAgentMessage::new(
-                WorkflowAgentMessageIdentity::new(
-                    AgentIdentifier::next("agent-assistant"),
-                    sequence,
-                    WorkflowAgentRole::Assistant,
-                )
-                .with_created_ms(AgentClock::now_millis()),
-                WorkflowAgentMessageContent::new(
-                    WorkflowAgentMessagePhase::Streaming,
-                    String::new(),
-                    Vec::new(),
-                )
-                .with_run_id(snapshot.run_id().map(str::to_owned)),
-            ));
+        conversation.session.messages_mut().push(
+            WorkflowAgentMessage::new(
+                AgentIdentifier::next("agent-assistant"),
+                WorkflowAgentRole::Assistant,
+            )
+            .with_sequence(sequence)
+            .with_created_ms(AgentClock::now_millis())
+            .with_run_id(snapshot.run_id().map(str::to_owned)),
+        );
         conversation
             .session
             .set_phase(WorkflowAgentPhase::Responding);
@@ -2200,51 +2225,40 @@ impl WorkflowAgentManager {
         let readiness = history_error
             .as_ref()
             .map(|error| {
-                WorkflowAgentReadiness::new(
-                    false,
-                    WorkflowAgentReadinessStatus::Error,
-                    format!(
-                        "Assistant history is unavailable for this project: {}",
-                        error
-                    ),
-                )
-                .with_provider(
-                    self.inner.readiness.provider(),
-                    self.inner.readiness.model(),
-                )
+                WorkflowAgentReadiness::error(format!(
+                    "Assistant history is unavailable for this project: {}",
+                    error
+                ))
             })
             .unwrap_or_else(|| self.inner.readiness.clone());
-        WorkflowAgentStateResponse::new(
-            readiness,
-            WorkflowAgentStateIdentity::new(
-                history_error.is_none(),
+        WorkflowAgentStateResponse::new(readiness, session)
+            .with_history_available(history_error.is_none())
+            .with_scope(
                 self.inner.scope_id.recover_lock().clone(),
                 document.revision,
             )
-            .with_conversation(
+            .with_active_conversation(
                 document.active_conversation_id.clone(),
                 MAX_WORKFLOW_AGENT_CONVERSATIONS,
-            ),
-            session,
-        )
-        .with_conversations(
-            document
-                .conversations
-                .iter()
-                .map(|conversation| {
-                    WorkflowAgentConversationSummary::new(
-                        conversation.conversation_id.clone(),
-                        conversation.title.clone(),
-                        conversation.created_ms,
-                    )
-                    .with_activity(
-                        conversation.updated_ms,
-                        conversation.session.messages().len(),
-                    )
-                    .with_owned_run_id(conversation.owned_run_id.clone())
-                })
-                .collect(),
-        )
+            )
+            .with_conversations(
+                document
+                    .conversations
+                    .iter()
+                    .map(|conversation| {
+                        WorkflowAgentConversationSummary::new(
+                            conversation.conversation_id.clone(),
+                            conversation.title.clone(),
+                            conversation.created_ms,
+                        )
+                        .with_activity(
+                            conversation.updated_ms,
+                            conversation.session.messages().len(),
+                        )
+                        .with_owned_run_id(conversation.owned_run_id.clone())
+                    })
+                    .collect(),
+            )
     }
 
     fn persist_document(&self, document: &AgentDocument) -> Result<(), String> {
@@ -2271,8 +2285,7 @@ impl WorkflowAgentManager {
     }
 
     fn publish(&self) {
-        let state = self.state();
-        let _ = self.inner.updates.send(WorkflowAgentUpdate::new(state));
+        let _ = self.inner.updates.send(());
     }
 }
 
@@ -2465,15 +2478,10 @@ impl WorkflowSpecAgentExt for WorkflowSpec {
         self.nodes()
             .iter()
             .filter_map(|node| match &node.config() {
-                WorkflowNodeConfig::Model {
-                    model_id,
-                    feature_cache_relation,
-                    features,
-                    ..
-                } => Some(json!({
+                WorkflowNodeConfig::Model { features } => Some(json!({
                     "node_id": node.id(),
-                    "model_id": model_id,
-                    "feature_cache_relation": feature_cache_relation,
+                    "model_id": "siglip-base",
+                    "feature_cache_relation": node.config().model_output_relation(),
                     "features": features,
                 })),
                 _ => None,
@@ -2727,13 +2735,9 @@ impl ToolCompletion {
                     revision.map_or_else(String::new, |revision| format!(" · r{revision}"));
                 ToolCompletion {
                     summary: format!("Saved {name}{suffix}"),
-                    receipt: Some(
-                        WorkflowAgentArtifactReceipt::new(
-                            WorkflowAgentArtifactKind::Graph,
-                            "View graph",
-                        )
-                        .with_revision(revision),
-                    ),
+                    receipt: revision.map(|revision| {
+                        WorkflowAgentArtifactReceipt::graph("View graph", revision)
+                    }),
                 }
             }
             "run_workflow" => {
@@ -2749,13 +2753,9 @@ impl ToolCompletion {
                         || format!("Workflow {phase}"),
                         |run_id| format!("Started {run_id} · {phase}"),
                     ),
-                    receipt: Some(
-                        WorkflowAgentArtifactReceipt::new(
-                            WorkflowAgentArtifactKind::Run,
-                            "View run",
-                        )
-                        .with_run_id(run_id),
-                    ),
+                    receipt: run_id
+                        .clone()
+                        .map(|run_id| WorkflowAgentArtifactReceipt::run("View run", run_id)),
                 }
             }
             "wait_for_run" => Self::wait(&value),
@@ -2834,25 +2834,14 @@ impl ToolCompletion {
                 |run_id| format!("{run_id} · {phase}"),
             )
         };
-        Self {
-            summary,
-            receipt: Some(
-                WorkflowAgentArtifactReceipt::new(
-                    if terminal_with_results {
-                        WorkflowAgentArtifactKind::Results
-                    } else {
-                        WorkflowAgentArtifactKind::Run
-                    },
-                    if terminal_with_results {
-                        "View results"
-                    } else {
-                        "View run"
-                    },
-                )
-                .with_run_id(run_id)
-                .with_row_count(row_count),
-            ),
-        }
+        let receipt = run_id.map(|run_id| {
+            if terminal_with_results {
+                WorkflowAgentArtifactReceipt::results("View results", run_id, row_count)
+            } else {
+                WorkflowAgentArtifactReceipt::run("View run", run_id)
+            }
+        });
+        Self { summary, receipt }
     }
 }
 
@@ -2937,9 +2926,6 @@ impl ToolPublicText {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spiral_robotics_api::workflow::{
-        WorkflowRunExecution, WorkflowRunIdentity, WorkflowRunTiming,
-    };
 
     #[test]
     fn media_and_long_cells_never_enter_prompt_payloads() {
@@ -3059,7 +3045,10 @@ mod tests {
         );
         assert_eq!(saved.summary, "Saved Holding evidence · r7");
         let receipt = saved.receipt.expect("saved graph receipt");
-        assert_eq!(receipt.kind(), WorkflowAgentArtifactKind::Graph);
+        assert!(matches!(
+            &receipt,
+            WorkflowAgentArtifactReceipt::Graph { .. }
+        ));
         assert_eq!(receipt.revision(), Some(7));
         assert!(!serde_json::to_string(&receipt).unwrap().contains("secret"));
 
@@ -3076,7 +3065,10 @@ mod tests {
         );
         assert_eq!(waited.summary, "Completed run-42 · 0 rows");
         let receipt = waited.receipt.expect("terminal result receipt");
-        assert_eq!(receipt.kind(), WorkflowAgentArtifactKind::Results);
+        assert!(matches!(
+            &receipt,
+            WorkflowAgentArtifactReceipt::Results { .. }
+        ));
         assert_eq!(receipt.run_id(), Some("run-42"));
         assert_eq!(receipt.row_count(), Some(0));
 
@@ -3109,30 +3101,24 @@ mod tests {
                 format!("{run_id} is still running"),
             );
             summary.set_phase(WorkflowAgentToolPhase::Complete);
-            summary.set_receipt(Some(
-                WorkflowAgentArtifactReceipt::new(WorkflowAgentArtifactKind::Run, "View run")
-                    .with_run_id(Some(run_id.to_owned())),
-            ));
+            summary.set_receipt(Some(WorkflowAgentArtifactReceipt::run("View run", run_id)));
             summary
         };
-        let mut messages = [WorkflowAgentMessage::new(
-            WorkflowAgentMessageIdentity::new("assistant-1", 1, WorkflowAgentRole::Assistant)
-                .with_created_ms(1),
-            WorkflowAgentMessageContent::new(
-                WorkflowAgentMessagePhase::Complete,
-                "",
-                vec![wait("old", "run-old"), wait("current", "run-42")],
-            )
-            .with_run_id(Some("run-42".to_owned())),
-        )];
-        let snapshot = spiral_robotics_api::workflow::WorkflowRunSnapshot::new(
-            WorkflowRunIdentity::new("workflow", 0).with_run_id(Some("run-42".to_owned())),
-            WorkflowRunExecution::new(WorkflowRunPhase::Completed, Vec::new()).with_result(
-                Some(SpiralQueryResponse::new(Vec::new(), Vec::new(), false).with_elapsed_ms(2)),
-                false,
-            ),
-            WorkflowRunTiming::default(),
-        );
+        let mut messages = [
+            WorkflowAgentMessage::new("assistant-1", WorkflowAgentRole::Assistant)
+                .with_sequence(1)
+                .with_phase(WorkflowAgentMessagePhase::Complete)
+                .with_tools(vec![wait("old", "run-old"), wait("current", "run-42")])
+                .with_created_ms(1)
+                .with_run_id(Some("run-42".to_owned())),
+        ];
+        let workflow = WorkflowSpec::new("workflow", "Test workflow");
+        let mut snapshot =
+            spiral_robotics_api::workflow::WorkflowRunSnapshot::started(&workflow, "run-42");
+        snapshot.set_phase(WorkflowRunPhase::Completed);
+        snapshot.set_result(Some(
+            SpiralQueryResponse::new(Vec::new(), Vec::new(), false).with_elapsed_ms(2),
+        ));
         let summary = snapshot.agent_summary().to_string();
         messages.refresh_deferred_wait_receipt(&snapshot, &summary);
 
@@ -3141,12 +3127,10 @@ mod tests {
             messages[0].tools()[1].summary(),
             "Completed run-42 · 0 rows"
         );
-        assert_eq!(
-            messages[0].tools()[1]
-                .receipt()
-                .map(WorkflowAgentArtifactReceipt::kind),
-            Some(WorkflowAgentArtifactKind::Results)
-        );
+        assert!(matches!(
+            messages[0].tools()[1].receipt(),
+            Some(WorkflowAgentArtifactReceipt::Results { .. })
+        ));
     }
 
     #[test]
@@ -3287,17 +3271,15 @@ mod tests {
     fn public_provider_readiness_is_operator_facing_and_provider_agnostic() {
         let ready = ProviderReadiness::public(true);
         assert!(ready.configured());
-        assert_eq!(ready.status(), WorkflowAgentReadinessStatus::Ready);
+        assert!(matches!(ready, WorkflowAgentReadiness::Ready { .. }));
         assert_eq!(ready.detail(), ASSISTANT_READY_DETAIL);
 
         let unavailable = ProviderReadiness::public(false);
         assert!(!unavailable.configured());
-        assert_eq!(unavailable.status(), WorkflowAgentReadinessStatus::Error);
+        assert!(matches!(unavailable, WorkflowAgentReadiness::Error { .. }));
         assert_eq!(unavailable.detail(), ASSISTANT_UNAVAILABLE_DETAIL);
 
         for readiness in [ready, unavailable] {
-            assert!(readiness.provider().is_empty());
-            assert!(readiness.model().is_empty());
             let encoded = serde_json::to_string(&readiness).unwrap();
             for forbidden in [
                 "LLM_",
@@ -3375,18 +3357,15 @@ mod tests {
         let mut foreign_workflow = AgentDocument::default();
         let conversation = foreign_workflow.active_mut().unwrap();
         let session = &conversation.session;
-        conversation.session = WorkflowAgentSession::new(
-            WorkflowAgentSessionIdentity::new(
-                "other",
-                session.conversation_id(),
-                session.revision(),
-            ),
-            WorkflowAgentActivity::new(session.phase(), session.messages().to_vec()).with_turns(
-                session.active_turn_id().map(str::to_owned),
-                session.deferred_run_id().map(str::to_owned),
-            ),
-            session.updated_ms(),
-        );
+        let mut foreign_session = WorkflowAgentSession::new("other", session.conversation_id())
+            .with_revision(session.revision())
+            .with_messages(session.messages().to_vec())
+            .with_updated_ms(session.updated_ms());
+        foreign_session.set_phase(session.phase());
+        foreign_session.set_active_turn_id(session.active_turn_id().map(str::to_owned));
+        foreign_session.set_deferred_run_id(session.deferred_run_id().map(str::to_owned));
+        foreign_session.set_error(session.error().map(str::to_owned));
+        conversation.session = foreign_session;
         assert!(
             foreign_workflow
                 .restored("restart")
@@ -3532,22 +3511,13 @@ mod tests {
         let conversation = document.active_mut().unwrap();
         conversation.title = "Existing conversation".to_owned();
         conversation.session.set_revision(1);
-        conversation
-            .session
-            .messages_mut()
-            .push(WorkflowAgentMessage::new(
-                WorkflowAgentMessageIdentity::new(
-                    "existing-user-message",
-                    1,
-                    WorkflowAgentRole::User,
-                )
+        conversation.session.messages_mut().push(
+            WorkflowAgentMessage::new("existing-user-message", WorkflowAgentRole::User)
+                .with_sequence(1)
+                .with_phase(WorkflowAgentMessagePhase::Complete)
+                .with_text("Inspect the workflow")
                 .with_created_ms(1),
-                WorkflowAgentMessageContent::new(
-                    WorkflowAgentMessagePhase::Complete,
-                    "Inspect the workflow",
-                    Vec::new(),
-                ),
-            ));
+        );
         conversation
             .provider_messages
             .push(ProviderMessage::text("user", "Inspect the workflow"));
@@ -3665,19 +3635,12 @@ mod tests {
         conversation
             .session
             .set_deferred_run_id(Some("run-1".to_owned()));
-        conversation
-            .session
-            .messages_mut()
-            .push(WorkflowAgentMessage::new(
-                WorkflowAgentMessageIdentity::new("assistant-1", 1, WorkflowAgentRole::Assistant)
-                    .with_created_ms(1),
-                WorkflowAgentMessageContent::new(
-                    WorkflowAgentMessagePhase::Streaming,
-                    "",
-                    Vec::new(),
-                )
+        conversation.session.messages_mut().push(
+            WorkflowAgentMessage::new("assistant-1", WorkflowAgentRole::Assistant)
+                .with_sequence(1)
+                .with_created_ms(1)
                 .with_run_id(Some("run-1".to_owned())),
-            ));
+        );
         let (document, changed) = document.restored("Restarted").unwrap();
         assert!(changed);
         let conversation = document.conversation(&conversation_id).unwrap();
@@ -3742,19 +3705,13 @@ mod tests {
                 .unwrap()
                 .session
                 .messages_mut()
-                .push(WorkflowAgentMessage::new(
-                    WorkflowAgentMessageIdentity::new(
-                        format!("message-{index}"),
-                        index as u64,
-                        WorkflowAgentRole::User,
-                    )
-                    .with_created_ms(index as u64),
-                    WorkflowAgentMessageContent::new(
-                        WorkflowAgentMessagePhase::Complete,
-                        "bounded",
-                        Vec::new(),
-                    ),
-                ));
+                .push(
+                    WorkflowAgentMessage::new(format!("message-{index}"), WorkflowAgentRole::User)
+                        .with_sequence(index as u64)
+                        .with_phase(WorkflowAgentMessagePhase::Complete)
+                        .with_text("bounded")
+                        .with_created_ms(index as u64),
+                );
             document
                 .conversation_mut(&conversation_id)
                 .unwrap()

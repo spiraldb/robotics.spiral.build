@@ -19,10 +19,9 @@ use spiral_robotics_api::sql::{QualifiedRelation, UnquotedSqlIdentifier};
 use spiral_robotics_api::workflow::{
     DEFAULT_WORKFLOW_ID, MAX_SIGLIP_CONCEPT_LENGTH, MAX_WORKFLOW_AGENT_CONVERSATION_TITLE_CHARS,
     MAX_WORKFLOW_AGENT_CONVERSATIONS, MAX_WORKFLOW_AGENT_MESSAGES_PER_CONVERSATION,
-    MAX_WORKFLOW_FEATURE_DESCRIPTION_LENGTH, MAX_WORKFLOW_FEATURE_STREAMS, SIGLIP_BASE_MODEL_ID,
-    SIGLIP_BASE_REPOSITORY, SIGLIP_BASE_REVISION, WORKFLOW_FEATURE_REGISTRY_RELATION,
-    WorkflowAgentArtifactKind, WorkflowAgentMessagePhase, WorkflowAgentPhase, WorkflowAgentRole,
-    WorkflowAgentToolPhase, WorkflowFeatureApplicability, WorkflowFeatureDefinition,
+    MAX_WORKFLOW_FEATURE_DESCRIPTION_LENGTH, MAX_WORKFLOW_FEATURE_STREAMS,
+    WorkflowAgentMessagePhase, WorkflowAgentPhase, WorkflowAgentRole, WorkflowAgentToolPhase,
+    WorkflowFeatureApplicability, WorkflowFeatureDefinition,
 };
 
 use crate::adbc::StorageConnection;
@@ -39,6 +38,10 @@ const MAX_ENTRY_NAME_BYTES: usize = 256;
 const MAX_FEATURE_REGISTRY_ROWS: usize = 4_096;
 const MAX_FEATURE_CACHE_ROWS: usize = 1_000_000;
 const MAX_FEATURE_CACHE_COLUMNS: usize = 256;
+pub const SIGLIP_BASE_MODEL_ID: &str = "siglip-base";
+pub const SIGLIP_BASE_REPOSITORY: &str = "google/siglip-base-patch16-224";
+pub const SIGLIP_BASE_REVISION: &str = "7fd15f0689c79d79e38b1c2e2e2370a7bf2761ed";
+pub const WORKFLOW_FEATURE_REGISTRY_RELATION: &str = "workflow.feature_registry";
 const MAX_ARROW_MESSAGE_METADATA_BYTES: usize = MAX_MANIFEST_BYTES;
 const MAX_ARROW_DECODED_BYTES: usize = ProjectBundle::MAX_BYTES;
 const MAX_ARROW_RECORD_BATCH_ROWS: usize = MAX_FEATURE_CACHE_ROWS;
@@ -177,16 +180,22 @@ struct BundleAgentToolSummary {
 
 #[allow(dead_code)]
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct BundleAgentArtifactReceipt {
-    kind: WorkflowAgentArtifactKind,
-    label: String,
-    #[serde(default)]
-    revision: Option<u64>,
-    #[serde(default)]
-    run_id: Option<String>,
-    #[serde(default)]
-    row_count: Option<usize>,
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum BundleAgentArtifactReceipt {
+    Graph {
+        label: String,
+        revision: u64,
+    },
+    Run {
+        label: String,
+        run_id: String,
+    },
+    Results {
+        label: String,
+        run_id: String,
+        #[serde(default)]
+        row_count: Option<usize>,
+    },
 }
 
 #[allow(dead_code)]

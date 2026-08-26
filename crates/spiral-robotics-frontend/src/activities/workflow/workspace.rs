@@ -18,8 +18,8 @@ use spiral_robotics_api::workflow::{
 
 use crate::activities::data::workbench::{QueryExecutionPresentation, QueryState};
 use crate::activities::workflow::state::{
-    ASSISTANT_PANEL_ID, AcceptedAgentDraft, AgentDraftKey, CANVAS_PANEL_ID, ModelFeatureTarget,
-    NODE_PANEL_ID, RESULTS_PANEL_ID, WorkflowAgentCommand, WorkflowCommand, WorkflowNodeData,
+    ASSISTANT_PANEL_ID, AcceptedAgentDraft, AgentDraftKey, AgentPendingCommand, CANVAS_PANEL_ID,
+    ModelFeatureTarget, NODE_PANEL_ID, RESULTS_PANEL_ID, WorkflowNodeData, WorkflowPendingCommand,
     workflow_controller,
 };
 use crate::components::icons::{
@@ -265,7 +265,7 @@ fn WorkflowAssistant() -> Element {
                             disabled: new_conversation_reason.is_some(),
                             title: new_conversation_reason.clone().unwrap_or_else(|| "Start a new Assistant conversation".to_owned()),
                             onclick: move |_| controller.create_agent_conversation(studio),
-                            if command == Some(WorkflowAgentCommand::CreatingConversation) { "Creating…" } else { "New" }
+                            if command == Some(AgentPendingCommand::CreatingConversation) { "Creating…" } else { "New" }
                         }
                     }
                     if let Some(reason) = conversation_reason.as_ref().or(new_conversation_reason.as_ref()) {
@@ -450,9 +450,9 @@ fn WorkflowAssistant() -> Element {
                             purpose: ActionPurpose::Stop,
                             variant: ActionVariant::Outline,
                             disabled: command.is_some(),
-                            aria_busy: command == Some(WorkflowAgentCommand::Cancelling),
+                            aria_busy: command == Some(AgentPendingCommand::Cancelling),
                             onclick: move |_| controller.cancel_agent(studio),
-                            if command == Some(WorkflowAgentCommand::Cancelling) { "Stopping…" } else { "Stop" }
+                            if command == Some(AgentPendingCommand::Cancelling) { "Stopping…" } else { "Stop" }
                         }
                     } else {
                         Action {
@@ -460,7 +460,7 @@ fn WorkflowAssistant() -> Element {
                             variant: ActionVariant::Solid,
                             class: "workflow-assistant-send-action",
                             disabled: !can_send,
-                            aria_busy: command == Some(WorkflowAgentCommand::Sending),
+                            aria_busy: command == Some(AgentPendingCommand::Sending),
                             title: if !catalog_available { "Reconnect Spiral before sending a message" } else if !configured { "Assistant is temporarily unavailable" } else if workflow_active { "Wait for the active Workflow run to finish before sending a message" } else { "Send this message to the Workflow Assistant" },
                             onclick: move |_| {
                                 if can_send {
@@ -468,7 +468,7 @@ fn WorkflowAssistant() -> Element {
                                     controller.send_agent(text, studio);
                                 }
                             },
-                            if command == Some(WorkflowAgentCommand::Sending) { "Sending…" } else { "Send" }
+                            if command == Some(AgentPendingCommand::Sending) { "Sending…" } else { "Send" }
                         }
                     }
                 }
@@ -549,7 +549,7 @@ struct AssistantAvailability {
 
 struct AssistantActivity {
     active: bool,
-    command: Option<WorkflowAgentCommand>,
+    command: Option<AgentPendingCommand>,
     workflow_active: bool,
     draft_empty: bool,
 }
@@ -787,7 +787,6 @@ fn WorkflowNodeInspector() -> Element {
     let controller = workflow_controller();
     let selected = controller.selected_node_data();
     let relations = controller.relations();
-    let capabilities = controller.capabilities();
     let snapshot_active = controller.snapshot().phase().active();
     let command_pending = controller.command().is_some();
     let active = snapshot_active || command_pending;
@@ -934,10 +933,8 @@ fn WorkflowNodeInspector() -> Element {
                             select {
                                 class: "field",
                                 disabled: true,
-                                value: data.model_id().unwrap_or_default(),
-                                for model in &capabilities.models() {
-                                    option { value: "{model.id()}", "{model.label()}" }
-                                }
+                                value: "siglip-base",
+                                option { value: "siglip-base", "SigLIP base" }
                             }
                         }
                         p { class: "workflow-inspector-help",
@@ -1298,30 +1295,30 @@ fn WorkflowCanvas() -> Element {
                     purpose: ActionPurpose::Apply,
                     variant: ActionVariant::Outline,
                     disabled: apply_reason.is_some(),
-                    aria_busy: command == Some(WorkflowCommand::Applying),
+                    aria_busy: command == Some(WorkflowPendingCommand::Applying),
                     title: apply_reason.clone().unwrap_or_else(|| "Apply graph changes".to_owned()),
                     onclick: move |_| controller.apply(studio),
-                    if command == Some(WorkflowCommand::Applying) { "Applying…" } else { "Apply" }
+                    if command == Some(WorkflowPendingCommand::Applying) { "Applying…" } else { "Apply" }
                 }
                 if active {
                     Action {
                         purpose: ActionPurpose::Cancel,
                         variant: ActionVariant::Outline,
                         disabled: command.is_some() || snapshot.phase() == WorkflowRunPhase::Cancelling,
-                        aria_busy: command == Some(WorkflowCommand::Cancelling),
+                        aria_busy: command == Some(WorkflowPendingCommand::Cancelling),
                         title: "Cancel after the current Spiral operation",
                         onclick: move |_| controller.cancel(studio),
-                        if snapshot.phase() == WorkflowRunPhase::Cancelling || command == Some(WorkflowCommand::Cancelling) { "Cancelling…" } else { "Cancel" }
+                        if snapshot.phase() == WorkflowRunPhase::Cancelling || command == Some(WorkflowPendingCommand::Cancelling) { "Cancelling…" } else { "Cancel" }
                     }
                 } else {
                     Action {
                         purpose: ActionPurpose::Start,
                         variant: ActionVariant::Solid,
                         disabled: run_reason.is_some(),
-                        aria_busy: command == Some(WorkflowCommand::Starting),
+                        aria_busy: command == Some(WorkflowPendingCommand::Starting),
                         title: run_reason.clone().unwrap_or_else(|| "Run this saved workflow".to_owned()),
                         onclick: move |_| controller.run(studio),
-                        if command == Some(WorkflowCommand::Starting) { "Starting…" } else { "Run workflow" }
+                        if command == Some(WorkflowPendingCommand::Starting) { "Starting…" } else { "Run workflow" }
                     }
                 }
             }

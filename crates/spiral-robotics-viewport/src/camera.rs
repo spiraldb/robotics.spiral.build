@@ -13,7 +13,7 @@ use glam::{Mat4, Vec3};
 /// The camera orbits a target rather than flying freely, which is what makes
 /// dragging feel like turning the robot around instead of steering past it.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Camera {
+pub(crate) struct Camera {
     /// Rotation about the vertical axis, radians.
     yaw: f32,
     /// Elevation above the horizon, radians.
@@ -44,14 +44,14 @@ const MAX_DISTANCE: f32 = 3.0;
 
 impl Camera {
     /// Return this camera with a different viewing direction.
-    pub fn oriented(mut self, yaw: f32, pitch: f32) -> Self {
+    pub(crate) fn oriented(mut self, yaw: f32, pitch: f32) -> Self {
         self.yaw = yaw;
         self.pitch = pitch.clamp(-PITCH_LIMIT, PITCH_LIMIT);
         self
     }
 
     /// Return this camera framed on `target` from `distance` metres away.
-    pub fn focused_on(mut self, target: Vec3, distance: f32) -> Self {
+    pub(crate) fn focused_on(mut self, target: Vec3, distance: f32) -> Self {
         self.target = target;
         self.distance = distance.clamp(MIN_DISTANCE, MAX_DISTANCE);
         self
