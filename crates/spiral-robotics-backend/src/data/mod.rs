@@ -117,26 +117,6 @@ pub(crate) struct QueryCommand {
     max_rows: usize,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct StartSpiralReplayCommand {
-    episode: String,
-    robot: String,
-    stream: String,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ReplayTrajectory {
-    sample_hz: f64,
-    frames: Vec<BTreeMap<String, f64>>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct VideoAssetQuery {
-    episode: String,
-    stream: String,
-    segment: Option<u32>,
-}
-
 impl SpiralDestinationSettings {
     pub(crate) fn new(
         endpoint: impl Into<String>,
@@ -357,63 +337,6 @@ impl QueryCommand {
     }
 }
 
-impl StartSpiralReplayCommand {
-    pub(crate) fn new(
-        episode: impl Into<String>,
-        robot: impl Into<String>,
-        stream: impl Into<String>,
-    ) -> Self {
-        Self {
-            episode: episode.into(),
-            robot: robot.into(),
-            stream: stream.into(),
-        }
-    }
-
-    pub(crate) fn into_parts(self) -> (String, String, String) {
-        (self.episode, self.robot, self.stream)
-    }
-}
-
-impl ReplayTrajectory {
-    pub(crate) fn new(sample_hz: f64, frames: Vec<BTreeMap<String, f64>>) -> Self {
-        Self { sample_hz, frames }
-    }
-
-    pub(crate) fn into_parts(self) -> (f64, Vec<BTreeMap<String, f64>>) {
-        (self.sample_hz, self.frames)
-    }
-}
-
-impl VideoAssetQuery {
-    pub(crate) fn new(
-        episode: impl Into<String>,
-        stream: impl Into<String>,
-        segment: Option<u32>,
-    ) -> Self {
-        Self {
-            episode: episode.into(),
-            stream: stream.into(),
-            segment,
-        }
-    }
-
-    pub(crate) fn into_parts(self) -> (String, String, Option<u32>) {
-        (self.episode, self.stream, self.segment)
-    }
-
-    fn validate(&self) -> Result<(), OperationError> {
-        for (label, value) in [("episode", &self.episode), ("stream", &self.stream)] {
-            if value.trim().is_empty() || value.trim() != value || value.contains('\0') {
-                return Err(OperationError::invalid_input(format!(
-                    "{label} must be non-empty, contain no surrounding whitespace, and contain no NUL bytes"
-                )));
-            }
-        }
-        Ok(())
-    }
-}
-
 /// Data-catalog consequences expressed only in capability-owned models.
 pub(crate) trait DataCatalogPort: Send + Sync {
     fn settings(&self) -> DataSettingsSnapshot;
@@ -425,32 +348,6 @@ pub(crate) trait DataCatalogPort: Send + Sync {
 
     async fn test_connection(&self) -> ConnectionCheck;
     async fn query(&self, command: QueryCommand) -> Result<QueryResult, OperationError>;
-    async fn load_replay_trajectory(
-        &self,
-        episode: &str,
-        stream: &str,
-    ) -> Result<ReplayTrajectory, OperationError>;
-    async fn video_asset(&self, query: VideoAssetQuery) -> Result<Vec<u8>, OperationError>;
-}
-
-impl VideoAssetQuery {
-    pub(crate) async fn load<P: DataCatalogPort + ?Sized>(
-        self,
-        port: &P,
-    ) -> Result<Vec<u8>, OperationError> {
-        self.validate()?;
-        port.video_asset(self).await
-    }
-}
-
-/// Control consequence for a trajectory already admitted and loaded by the
-/// data-catalog action.
-pub(crate) trait SpiralReplayPort: Send + Sync {
-    async fn start_spiral_replay(
-        &self,
-        command: StartSpiralReplayCommand,
-        trajectory: ReplayTrajectory,
-    ) -> Result<(), OperationError>;
 }
 
 impl UpdateDataSettingsCommand {
@@ -477,60 +374,6 @@ impl QueryCommand {
             .map_err(|error| OperationError::InvalidInput(error.to_string()))?;
         self.max_rows = self.max_rows.clamp(1, MAX_QUERY_ROWS);
         port.query(self).await
-    }
-}
-
-impl StartSpiralReplayCommand {
-    pub(crate) async fn start<D, R>(self, data: &D, replay: &R) -> Result<(), OperationError>
-    where
-        D: DataCatalogPort + ?Sized,
-        R: SpiralReplayPort + ?Sized,
-    {
-        self.validate()?;
-        let trajectory = data
-            .load_replay_trajectory(&self.episode, &self.stream)
-            .await?;
-        trajectory.validate()?;
-        replay.start_spiral_replay(self, trajectory).await
-    }
-
-    fn validate(&self) -> Result<(), OperationError> {
-        for (label, value) in [
-            ("episode", self.episode.as_str()),
-            ("robot", self.robot.as_str()),
-            ("stream", self.stream.as_str()),
-        ] {
-            if value.trim().is_empty() {
-                return Err(OperationError::InvalidInput(format!(
-                    "Spiral replay requires a non-empty {label}"
-                )));
-            }
-        }
-        Ok(())
-    }
-}
-
-impl ReplayTrajectory {
-    fn validate(&self) -> Result<(), OperationError> {
-        if !self.sample_hz.is_finite() || self.sample_hz <= 0.0 {
-            return Err(OperationError::External(
-                "Spiral returned an invalid replay sample rate".to_owned(),
-            ));
-        }
-        if self.frames.is_empty()
-            || self.frames.iter().any(|frame| {
-                frame.is_empty()
-                    || frame
-                        .values()
-                        .any(|value| !value.is_finite() || !(-1.0..=1.0).contains(value))
-            })
-        {
-            return Err(OperationError::External(
-                "Spiral returned an empty replay trajectory or a position outside normalized [-1, 1]"
-                    .to_owned(),
-            ));
-        }
-        Ok(())
     }
 }
 
@@ -585,9 +428,6 @@ mod tests {
         events: Mutex<Vec<String>>,
         update_error: Option<OperationError>,
         query_error: Option<OperationError>,
-        trajectory_error: Option<OperationError>,
-        trajectory: ReplayTrajectory,
-        video: Result<Vec<u8>, OperationError>,
     }
 
     impl FakeData {
@@ -596,12 +436,6 @@ mod tests {
                 events: Mutex::new(Vec::new()),
                 update_error: None,
                 query_error: None,
-                trajectory_error: None,
-                trajectory: ReplayTrajectory {
-                    sample_hz: 60.0,
-                    frames: vec![BTreeMap::from([("joint".to_owned(), 0.25)])],
-                },
-                video: Ok(vec![1, 2, 3]),
             }
         }
     }
@@ -657,59 +491,6 @@ mod tests {
             )
         }
 
-        async fn load_replay_trajectory(
-            &self,
-            episode: &str,
-            stream: &str,
-        ) -> Result<ReplayTrajectory, OperationError> {
-            self.events
-                .lock()
-                .unwrap()
-                .push(format!("load:{episode}:{stream}"));
-            if let Some(error) = &self.trajectory_error {
-                return Err(error.clone());
-            }
-            Ok(self.trajectory.clone())
-        }
-
-        async fn video_asset(&self, query: VideoAssetQuery) -> Result<Vec<u8>, OperationError> {
-            self.events.lock().unwrap().push(format!(
-                "video:{}:{}:{:?}",
-                query.episode, query.stream, query.segment
-            ));
-            self.video.clone()
-        }
-    }
-
-    #[tokio::test]
-    async fn video_query_validates_identity_before_delegating_once() {
-        let data = FakeData::new();
-        assert_eq!(
-            VideoAssetQuery {
-                episode: "episode_000001".to_owned(),
-                stream: "wrist".to_owned(),
-                segment: Some(2),
-            }
-            .load(&data)
-            .await
-            .unwrap(),
-            vec![1, 2, 3]
-        );
-        assert_eq!(
-            data.events.lock().unwrap().as_slice(),
-            ["video:episode_000001:wrist:Some(2)"]
-        );
-
-        let error = VideoAssetQuery {
-            episode: " episode_000001".to_owned(),
-            stream: "wrist".to_owned(),
-            segment: None,
-        }
-        .load(&data)
-        .await
-        .unwrap_err();
-        assert!(matches!(error, OperationError::InvalidInput(_)));
-        assert_eq!(data.events.lock().unwrap().len(), 1);
     }
 
     fn settings_view(project: &str) -> DataSettingsSnapshot {
@@ -728,28 +509,6 @@ mod tests {
         }
     }
 
-    struct FakeReplay {
-        events: Mutex<Vec<String>>,
-        error: Option<OperationError>,
-    }
-
-    impl SpiralReplayPort for FakeReplay {
-        async fn start_spiral_replay(
-            &self,
-            command: StartSpiralReplayCommand,
-            trajectory: ReplayTrajectory,
-        ) -> Result<(), OperationError> {
-            self.events.lock().unwrap().push(format!(
-                "start:{}:{}:{}:{}",
-                command.robot,
-                command.episode,
-                trajectory.sample_hz,
-                trajectory.frames.len()
-            ));
-            self.error.clone().map_or(Ok(()), Err)
-        }
-    }
-
     fn settings() -> UpdateDataSettingsCommand {
         UpdateDataSettingsCommand {
             spiral_endpoint: " https://api.spiraldb.dev/ ".to_owned(),
@@ -759,14 +518,6 @@ mod tests {
             client_secret: None,
             training_endpoint: " http://127.0.0.1:50051 ".to_owned(),
             video_enabled: true,
-        }
-    }
-
-    fn replay() -> StartSpiralReplayCommand {
-        StartSpiralReplayCommand {
-            episode: "episode-1".to_owned(),
-            robot: "follower".to_owned(),
-            stream: "leader".to_owned(),
         }
     }
 
@@ -858,70 +609,4 @@ mod tests {
         assert!(data.events.lock().unwrap().is_empty());
     }
 
-    #[tokio::test]
-    async fn replay_loads_before_control_and_stops_on_external_failure() {
-        let mut data = FakeData::new();
-        data.trajectory_error = Some(OperationError::External("catalog offline".to_owned()));
-        let control = FakeReplay {
-            events: Mutex::new(Vec::new()),
-            error: None,
-        };
-        assert_eq!(
-            replay().start(&data, &control).await,
-            Err(OperationError::External("catalog offline".to_owned()))
-        );
-        assert_eq!(*data.events.lock().unwrap(), ["load:episode-1:leader"]);
-        assert!(control.events.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn replay_delegates_the_loaded_trajectory_and_preserves_control_conflicts() {
-        let data = FakeData::new();
-        let control = FakeReplay {
-            events: Mutex::new(Vec::new()),
-            error: Some(OperationError::Conflict("robot busy".to_owned())),
-        };
-        assert_eq!(
-            replay().start(&data, &control).await,
-            Err(OperationError::Conflict("robot busy".to_owned()))
-        );
-        assert_eq!(*data.events.lock().unwrap(), ["load:episode-1:leader"]);
-        assert_eq!(
-            *control.events.lock().unwrap(),
-            ["start:follower:episode-1:60:1"]
-        );
-    }
-
-    #[tokio::test]
-    async fn replay_rejects_empty_identity_and_invalid_trajectory_before_control() {
-        let data = FakeData::new();
-        let control = FakeReplay {
-            events: Mutex::new(Vec::new()),
-            error: None,
-        };
-        let mut command = replay();
-        command.robot = "  ".to_owned();
-        assert!(matches!(
-            command.start(&data, &control).await,
-            Err(OperationError::InvalidInput(_))
-        ));
-        assert!(data.events.lock().unwrap().is_empty());
-
-        let mut data = FakeData::new();
-        data.trajectory.sample_hz = f64::NAN;
-        assert!(matches!(
-            replay().start(&data, &control).await,
-            Err(OperationError::External(_))
-        ));
-        assert_eq!(*data.events.lock().unwrap(), ["load:episode-1:leader"]);
-        assert!(control.events.lock().unwrap().is_empty());
-
-        let mut data = FakeData::new();
-        data.trajectory.frames[0].insert("joint".to_owned(), 1.01);
-        assert!(matches!(
-            replay().start(&data, &control).await,
-            Err(OperationError::External(_))
-        ));
-        assert!(control.events.lock().unwrap().is_empty());
-    }
 }

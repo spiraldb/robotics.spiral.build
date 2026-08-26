@@ -112,46 +112,16 @@ impl<'a, B: Serialize> AbortableJsonRequest<'a, B> {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
-pub(crate) struct TimelineMetadata {
-    samples: u64,
-    first_seconds: Option<f64>,
-    last_seconds: Option<f64>,
-}
-
-impl TimelineMetadata {
-    pub(crate) const fn new(
-        samples: u64,
-        first_seconds: Option<f64>,
-        last_seconds: Option<f64>,
-    ) -> Self {
-        Self {
-            samples,
-            first_seconds,
-            last_seconds,
-        }
-    }
-}
-
 /// Episode detail used to align timeline samples and recorded media.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub(crate) struct EpisodeTimelineResponse {
     episode: EpisodeSummary,
-    samples: TimelineMetadata,
     videos: Vec<VideoAssetMetadata>,
 }
 
 impl EpisodeTimelineResponse {
-    pub(crate) const fn new(
-        episode: EpisodeSummary,
-        samples: TimelineMetadata,
-        videos: Vec<VideoAssetMetadata>,
-    ) -> Self {
-        Self {
-            episode,
-            samples,
-            videos,
-        }
+    pub(crate) const fn new(episode: EpisodeSummary, videos: Vec<VideoAssetMetadata>) -> Self {
+        Self { episode, videos }
     }
 
     pub(crate) const fn episode(&self) -> &EpisodeSummary {

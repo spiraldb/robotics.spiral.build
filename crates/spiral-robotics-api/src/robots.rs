@@ -1324,6 +1324,11 @@ impl IdentifyPortResponse {
     pub fn port(&self) -> Option<&str> {
         self.port.as_deref()
     }
+    /// Every port that disappeared, for the ambiguous case.
+    pub fn removed(&self) -> &[String] {
+        &self.removed
+    }
+
     pub fn message(&self) -> &str {
         &self.message
     }

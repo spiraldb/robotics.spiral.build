@@ -18,7 +18,6 @@ use spiral_robotics_api::recording::{
 use spiral_robotics_api::robots::MotorLimits;
 pub use spiral_robotics_core::MAX_EPISODE_FRAMES;
 use spiral_robotics_core::OperationError;
-use spiral_robotics_core::arm::SO101_JOINTS;
 use spiral_robotics_core::calibration::Calibration;
 use spiral_robotics_core::identity::EpisodeId;
 use spiral_robotics_hardware::RecordingCompletion;
@@ -37,6 +36,16 @@ const NO_SAMPLE_TIMESTAMP_BITS: u64 = u64::MAX;
 
 type NormalizedPose = BTreeMap<String, f64>;
 pub type TimelineJointValues = BTreeMap<String, Option<f64>>;
+
+/// Every owned value of one arm at a timeline sample, in declaration order.
+pub type TimelineArmSampleParts = (
+    String,
+    TimelineJointValues,
+    BTreeMap<String, i64>,
+    Option<TimelineJointValues>,
+    Option<TimelineJointValues>,
+    Option<TimelineJointValues>,
+);
 
 #[derive(Debug)]
 pub struct ReplayTrajectory {
@@ -378,6 +387,26 @@ pub struct ReappliedEpisodePositions {
 }
 
 impl ReappliedEpisodePositions {
+    pub fn new(
+        updated_episode_ids: Vec<String>,
+        frames_updated: u64,
+        episodes_unchanged: u64,
+    ) -> Self {
+        Self {
+            updated_episode_ids,
+            frames_updated,
+            episodes_unchanged,
+            episodes_skipped: 0,
+            warnings: Vec::new(),
+        }
+    }
+
+    pub fn with_skipped(mut self, episodes_skipped: u64, warnings: Vec<String>) -> Self {
+        self.episodes_skipped = episodes_skipped;
+        self.warnings = warnings;
+        self
+    }
+
     pub const fn frames_updated(&self) -> u64 {
         self.frames_updated
     }
@@ -402,32 +431,6 @@ impl ReappliedEpisodePositions {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct TimelineMetadata {
-    samples: u64,
-    first_seconds: Option<f64>,
-    last_seconds: Option<f64>,
-}
-
-impl TimelineMetadata {
-    pub const fn new(samples: u64, first_seconds: Option<f64>, last_seconds: Option<f64>) -> Self {
-        Self {
-            samples,
-            first_seconds,
-            last_seconds,
-        }
-    }
-    pub const fn samples(&self) -> u64 {
-        self.samples
-    }
-    pub const fn first_seconds(&self) -> Option<f64> {
-        self.first_seconds
-    }
-    pub const fn last_seconds(&self) -> Option<f64> {
-        self.last_seconds
-    }
-}
-
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct TimelineArmSample {
     arm: String,
     normalized: TimelineJointValues,
@@ -435,38 +438,6 @@ pub struct TimelineArmSample {
     velocity: Option<TimelineJointValues>,
     effort: Option<TimelineJointValues>,
     action: Option<TimelineJointValues>,
-}
-
-/// Owned position values from one arm at a timeline sample.
-pub struct TimelineArmPose {
-    arm: String,
-    normalized: TimelineJointValues,
-    raw: BTreeMap<String, i64>,
-}
-
-impl TimelineArmPose {
-    pub fn into_parts(self) -> (String, TimelineJointValues, BTreeMap<String, i64>) {
-        (self.arm, self.normalized, self.raw)
-    }
-}
-
-/// Owned optional dynamics and action values from one arm sample.
-pub struct TimelineArmSignals {
-    velocity: Option<TimelineJointValues>,
-    effort: Option<TimelineJointValues>,
-    action: Option<TimelineJointValues>,
-}
-
-impl TimelineArmSignals {
-    pub fn into_parts(
-        self,
-    ) -> (
-        Option<TimelineJointValues>,
-        Option<TimelineJointValues>,
-        Option<TimelineJointValues>,
-    ) {
-        (self.velocity, self.effort, self.action)
-    }
 }
 
 impl TimelineArmSample {
@@ -512,18 +483,14 @@ impl TimelineArmSample {
     pub fn action(&self) -> Option<&BTreeMap<String, Option<f64>>> {
         self.action.as_ref()
     }
-    pub fn into_groups(self) -> (TimelineArmPose, TimelineArmSignals) {
+    pub fn into_parts(self) -> TimelineArmSampleParts {
         (
-            TimelineArmPose {
-                arm: self.arm,
-                normalized: self.normalized,
-                raw: self.raw,
-            },
-            TimelineArmSignals {
-                velocity: self.velocity,
-                effort: self.effort,
-                action: self.action,
-            },
+            self.arm,
+            self.normalized,
+            self.raw,
+            self.velocity,
+            self.effort,
+            self.action,
         )
     }
 }
@@ -572,172 +539,6 @@ impl TimelineSample {
             self.follow_error_degrees,
             self.arms,
         )
-    }
-}
-
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct TimelineTraces {
-    episode: String,
-    samples: u64,
-    buckets: usize,
-    start_seconds: Option<f64>,
-    end_seconds: Option<f64>,
-    lanes: Vec<TimelineTraceLane>,
-}
-
-impl TimelineTraces {
-    pub fn new(episode: String, samples: u64, buckets: usize) -> Self {
-        Self {
-            episode,
-            samples,
-            buckets,
-            ..Self::default()
-        }
-    }
-    pub fn with_range(mut self, start_seconds: Option<f64>, end_seconds: Option<f64>) -> Self {
-        self.start_seconds = start_seconds;
-        self.end_seconds = end_seconds;
-        self
-    }
-    pub fn with_lanes(mut self, lanes: Vec<TimelineTraceLane>) -> Self {
-        self.lanes = lanes;
-        self
-    }
-    pub fn episode(&self) -> &str {
-        &self.episode
-    }
-    pub const fn samples(&self) -> u64 {
-        self.samples
-    }
-    pub const fn buckets(&self) -> usize {
-        self.buckets
-    }
-    pub const fn start_seconds(&self) -> Option<f64> {
-        self.start_seconds
-    }
-    pub fn into_parts(
-        self,
-    ) -> (
-        String,
-        u64,
-        usize,
-        Option<f64>,
-        Option<f64>,
-        Vec<TimelineTraceLane>,
-    ) {
-        (
-            self.episode,
-            self.samples,
-            self.buckets,
-            self.start_seconds,
-            self.end_seconds,
-            self.lanes,
-        )
-    }
-}
-
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct TimelineTraceLane {
-    joint: String,
-    series: Vec<TimelineTraceSeries>,
-}
-
-impl TimelineTraceLane {
-    pub fn new(joint: String, series: Vec<TimelineTraceSeries>) -> Self {
-        Self { joint, series }
-    }
-    pub fn joint(&self) -> &str {
-        &self.joint
-    }
-    pub fn series(&self) -> &[TimelineTraceSeries] {
-        &self.series
-    }
-    pub fn into_parts(self) -> (String, Vec<TimelineTraceSeries>) {
-        (self.joint, self.series)
-    }
-}
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct TimelineTraceSeries {
-    arm: String,
-    points: Vec<TimelineTracePoint>,
-}
-
-impl TimelineTraceSeries {
-    pub fn new(arm: String, points: Vec<TimelineTracePoint>) -> Self {
-        Self { arm, points }
-    }
-    pub fn arm(&self) -> &str {
-        &self.arm
-    }
-    pub fn points(&self) -> &[TimelineTracePoint] {
-        &self.points
-    }
-    pub fn into_parts(self) -> (String, Vec<TimelineTracePoint>) {
-        (self.arm, self.points)
-    }
-}
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct TimelineTracePoint {
-    seconds: f64,
-    value: Option<f64>,
-}
-
-impl TimelineTracePoint {
-    pub const fn new(seconds: f64, value: Option<f64>) -> Self {
-        Self { seconds, value }
-    }
-    pub const fn seconds(&self) -> f64 {
-        self.seconds
-    }
-    pub const fn value(&self) -> Option<f64> {
-        self.value
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-struct TraceBucket {
-    minimum: Option<(f64, f64)>,
-    maximum: Option<(f64, f64)>,
-    first_missing: Option<f64>,
-}
-
-impl TraceBucket {
-    fn observe(&mut self, seconds: f64, value: Option<f64>) {
-        let Some(value) = value.filter(|value| value.is_finite()) else {
-            self.first_missing.get_or_insert(seconds);
-            return;
-        };
-        if self.minimum.is_none_or(|(_, minimum)| value < minimum) {
-            self.minimum = Some((seconds, value));
-        }
-        if self.maximum.is_none_or(|(_, maximum)| value > maximum) {
-            self.maximum = Some((seconds, value));
-        }
-    }
-    fn into_points(self) -> Vec<TimelineTracePoint> {
-        let mut points = Vec::with_capacity(3);
-        if let Some((seconds, value)) = self.minimum {
-            points.push(TimelineTracePoint {
-                seconds,
-                value: Some(value),
-            });
-        }
-        if let Some((seconds, value)) = self.maximum
-            && self.minimum != self.maximum
-        {
-            points.push(TimelineTracePoint {
-                seconds,
-                value: Some(value),
-            });
-        }
-        if let Some(seconds) = self.first_missing {
-            points.push(TimelineTracePoint {
-                seconds,
-                value: None,
-            });
-        }
-        points.sort_by(|left, right| left.seconds.total_cmp(&right.seconds));
-        points
     }
 }
 
@@ -876,13 +677,6 @@ impl EpisodeStore {
         EpisodeWriter::start(start, self.project_store.clone())
     }
 
-    pub fn judge(&self, id: &str, discarded: bool) -> Result<EpisodeSummary, EpisodeError> {
-        let mut episode = self.completed(id)?;
-        episode.completion.discarded = discarded;
-        self.replace_completion(&episode)?;
-        self.get(id)
-    }
-
     pub fn delete(&self, id: &str) -> Result<(), EpisodeError> {
         self.get(id)?;
         let id = id.to_owned();
@@ -1009,15 +803,6 @@ impl EpisodeStore {
         })
     }
 
-    pub fn timeline_metadata(&self, id: &str) -> Result<TimelineMetadata, EpisodeError> {
-        let episode = self.completed(id)?;
-        Ok(TimelineMetadata {
-            samples: episode.samples.len() as u64,
-            first_seconds: episode.samples.first().map(|sample| sample.seconds()),
-            last_seconds: episode.samples.last().map(|sample| sample.seconds()),
-        })
-    }
-
     pub fn sample_at(&self, id: &str, seconds: f64) -> Result<TimelineSample, EpisodeError> {
         if !seconds.is_finite() {
             return Err(EpisodeError::Invalid(
@@ -1054,90 +839,6 @@ impl EpisodeStore {
     }
     pub async fn lock_seek(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.seek_gate.lock().await
-    }
-
-    pub fn trace(&self, id: &str, buckets: usize) -> Result<Vec<Option<f64>>, EpisodeError> {
-        let episode = self.completed(id)?;
-        if episode.samples.is_empty() {
-            return Ok(Vec::new());
-        }
-        let width = episode
-            .samples
-            .len()
-            .div_ceil(buckets.clamp(1, 2_048))
-            .max(1);
-        Ok(episode
-            .samples
-            .chunks(width)
-            .map(|chunk| {
-                chunk
-                    .iter()
-                    .filter_map(|sample| sample.follow_error_degrees())
-                    .filter(|value| value.is_finite())
-                    .reduce(f64::max)
-            })
-            .collect())
-    }
-
-    pub fn timeline_traces(
-        &self,
-        id: &str,
-        buckets: usize,
-    ) -> Result<TimelineTraces, EpisodeError> {
-        let episode = self.completed(id)?;
-        let sample_count = episode.samples.len();
-        let bucket_count = buckets.clamp(1, 512).min(sample_count);
-        let start_seconds = episode.samples.first().map(|sample| sample.seconds());
-        let end_seconds = episode.samples.last().map(|sample| sample.seconds());
-        let trace_range = TraceRange {
-            start_seconds: start_seconds.unwrap_or_default(),
-            end_seconds: end_seconds.or(start_seconds).unwrap_or_default(),
-            buckets: bucket_count,
-        };
-        let mut lanes = Vec::new();
-        for joint in SO101_JOINTS {
-            let mut series = Vec::new();
-            for (arm_index, arm) in episode.start.arms().iter().enumerate() {
-                let Some(joint_index) = arm.joints().iter().position(|name| name == joint.name())
-                else {
-                    continue;
-                };
-                let mut reduced = vec![TraceBucket::default(); bucket_count];
-                if bucket_count > 0 {
-                    for sample in &episode.samples {
-                        let bucket = trace_range.bucket(sample.seconds());
-                        reduced[bucket].observe(
-                            sample.seconds(),
-                            sample.normalized()[arm_index][joint_index],
-                        );
-                    }
-                }
-                series.push(TimelineTraceSeries {
-                    arm: arm.id().to_owned(),
-                    points: reduced
-                        .into_iter()
-                        .flat_map(TraceBucket::into_points)
-                        .collect(),
-                });
-            }
-            lanes.push(TimelineTraceLane {
-                joint: joint.name().to_owned(),
-                series,
-            });
-        }
-        Ok(TimelineTraces {
-            episode: id.to_owned(),
-            samples: sample_count as u64,
-            buckets: bucket_count,
-            start_seconds,
-            end_seconds,
-            lanes,
-        })
-    }
-
-    pub fn video_metadata(&self, id: &str) -> Result<Vec<VideoAssetMetadata>, EpisodeError> {
-        self.get(id)?;
-        self.video_metadata_for_existing(id)
     }
 
     fn video_metadata_for_existing(
@@ -1178,27 +879,6 @@ impl EpisodeStore {
                     .into_iter()
                     .map(|row| row.episode_summary())
                     .collect()
-            })
-            .map_err(EpisodeError::Invalid)
-    }
-
-    fn replace_completion(&self, episode: &CompletedEpisode) -> Result<(), EpisodeError> {
-        let episode = episode.clone();
-        let namespace = self.project_store.namespace().to_owned();
-        self.project_store
-            .run_blocking(move |connection| {
-                let relation = Table::Episodes.qualified_name(&namespace);
-                connection.execute_update_sql(&SpiralSql::delete_episode(
-                    &relation,
-                    episode.start.id(),
-                ))?;
-                connection.ingest_batch(
-                    &relation,
-                    episode
-                        .completion
-                        .episode_batch(&episode.start, episode.samples.len() as u64)
-                        .map_err(|error| error.to_string())?,
-                )
             })
             .map_err(EpisodeError::Invalid)
     }
@@ -1841,26 +1521,6 @@ impl EpisodeJsonRow for JsonMap<String, JsonValue> {
     }
 }
 
-#[derive(Clone, Copy)]
-struct TraceRange {
-    start_seconds: f64,
-    end_seconds: f64,
-    buckets: usize,
-}
-
-impl TraceRange {
-    fn bucket(self, seconds: f64) -> usize {
-        if self.buckets <= 1 || self.end_seconds <= self.start_seconds {
-            0
-        } else {
-            ((((seconds - self.start_seconds) / (self.end_seconds - self.start_seconds))
-                .clamp(0.0, 1.0)
-                * self.buckets as f64)
-                .floor() as usize)
-                .min(self.buckets - 1)
-        }
-    }
-}
 pub trait EpisodeArmCollection: Sized {
     fn from_joint_lists(arms: &[(String, Vec<String>)]) -> Result<Vec<Self>, EpisodeError>;
 }

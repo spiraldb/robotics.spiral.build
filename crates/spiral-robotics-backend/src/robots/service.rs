@@ -94,11 +94,6 @@ pub(crate) struct SavedRobot {
     id: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ExportedRobotDocument {
-    bytes: Vec<u8>,
-}
-
 impl SerialPortConfiguration {
     pub(crate) fn new(path: impl Into<String>, baud_rate: u32) -> Self {
         Self {
@@ -234,15 +229,6 @@ impl SavedRobot {
     }
 }
 
-impl ExportedRobotDocument {
-    pub(crate) fn new(bytes: Vec<u8>) -> Self {
-        Self { bytes }
-    }
-    pub(crate) fn into_bytes(self) -> Vec<u8> {
-        self.bytes
-    }
-}
-
 /// Persistence operations needed by robot-configuration actions.
 ///
 /// Camera patches are adapter-minted capabilities consumed by the same
@@ -253,8 +239,6 @@ pub(crate) trait RobotStore {
     fn create(&self, robot: NewRobot) -> Result<SavedRobot, OperationError>;
 
     fn import_configuration(&self) -> Result<SavedRobot, OperationError>;
-
-    fn export_configuration(&self, robot: &str) -> Result<ExportedRobotDocument, OperationError>;
 
     fn camera_configuration(
         &self,
@@ -346,12 +330,6 @@ impl<'a, R: RobotStore + ?Sized> RobotCatalogActions<'a, R> {
         Ok(SavedRobot::new(robot))
     }
 
-    pub(crate) fn export_configuration(
-        &self,
-        robot: &str,
-    ) -> Result<ExportedRobotDocument, OperationError> {
-        self.store.export_configuration(robot)
-    }
 }
 
 pub(crate) struct RobotActions<'a, R: RobotStore + ?Sized, C: RobotConnectionPort + ?Sized> {
@@ -544,16 +522,6 @@ mod tests {
             self.events.lock().unwrap().push("import".to_owned());
             Ok(SavedRobot {
                 id: "imported".to_owned(),
-            })
-        }
-
-        fn export_configuration(
-            &self,
-            robot: &str,
-        ) -> Result<ExportedRobotDocument, OperationError> {
-            self.events.lock().unwrap().push(format!("export:{robot}"));
-            Ok(ExportedRobotDocument {
-                bytes: format!("configuration:{robot}").into_bytes(),
             })
         }
 
@@ -884,16 +852,8 @@ mod tests {
             }
         );
         assert_eq!(
-            RobotCatalogActions::new(&store)
-                .export_configuration("arm")
-                .unwrap(),
-            ExportedRobotDocument {
-                bytes: b"configuration:arm".to_vec()
-            }
-        );
-        assert_eq!(
             *events.lock().unwrap(),
-            ["create:arm:none", "import", "export:arm"]
+            ["create:arm:none", "import"]
         );
     }
 

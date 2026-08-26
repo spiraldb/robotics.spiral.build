@@ -25,7 +25,6 @@ impl AppState {
                 "/workflow",
                 get(Self::workflow_state).put(Self::save_workflow),
             )
-            .route("/workflow/snapshot", get(Self::workflow_snapshot))
             .route("/workflow/run", post(Self::run_workflow))
             .route("/workflow/cancel", post(Self::cancel_workflow))
             .route("/workflow/agent", get(Self::workflow_agent_state))
@@ -75,10 +74,6 @@ impl AppState {
 
     async fn workflow_state(State(state): State<Self>) -> Json<WorkflowStateResponse> {
         Json(state.workflow().state())
-    }
-
-    async fn workflow_snapshot(State(state): State<Self>) -> Json<WorkflowRunSnapshot> {
-        Json(state.workflow().state().snapshot().clone())
     }
 
     async fn save_workflow(

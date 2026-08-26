@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use spiral_robotics_api::rollout::RolloutSnapshot as ContractRolloutSnapshot;
 use spiral_robotics_core::operation::RolloutDuration;
 
 use super::policy::{ControlOwner, ExpectedPolicyOwner, PolicyOwnership};
@@ -82,9 +83,12 @@ pub(crate) trait RolloutEventPort: Send + Sync {
 /// The runtime may use Tokio, model libraries, cameras, and hardware drivers,
 /// but only semantic rollout state crosses this boundary.
 pub(crate) trait RolloutSessionPort: Send + Sync {
-    fn snapshot(&self) -> RolloutSnapshot;
+    fn snapshot(&self) -> ContractRolloutSnapshot;
 
-    async fn start(&self, request: RolloutRequest) -> Result<RolloutSnapshot, OperationError>;
+    async fn start(
+        &self,
+        request: RolloutRequest,
+    ) -> Result<ContractRolloutSnapshot, OperationError>;
 
     async fn stop(&self) -> Result<(), OperationError>;
 }
@@ -98,14 +102,14 @@ impl<'a, P: RolloutSessionPort + ?Sized> RolloutActions<'a, P> {
         Self { port }
     }
 
-    pub(crate) fn snapshot(&self) -> RolloutSnapshot {
+    pub(crate) fn snapshot(&self) -> ContractRolloutSnapshot {
         self.port.snapshot()
     }
 
     pub(crate) async fn start(
         &self,
         request: RolloutRequest,
-    ) -> Result<RolloutSnapshot, OperationError> {
+    ) -> Result<ContractRolloutSnapshot, OperationError> {
         self.port.start(request).await
     }
 
@@ -137,35 +141,6 @@ pub(crate) struct RolloutMetrics {
 }
 
 impl RolloutMetrics {
-    pub(crate) fn new(inference_count: u64, command_count: u64, missed_deadlines: u64) -> Self {
-        Self {
-            inference_count,
-            command_count,
-            missed_deadlines,
-            ..Self::default()
-        }
-    }
-
-    pub(crate) fn with_latest_timings(
-        mut self,
-        last_latency_ms: Option<f64>,
-        last_model_ms: Option<f64>,
-    ) -> Self {
-        self.last_latency_ms = last_latency_ms;
-        self.last_model_ms = last_model_ms;
-        self
-    }
-
-    pub(crate) fn with_latency_summary(
-        mut self,
-        mean_latency_ms: Option<f64>,
-        max_latency_ms: Option<f64>,
-    ) -> Self {
-        self.mean_latency_ms = mean_latency_ms;
-        self.max_latency_ms = max_latency_ms;
-        self
-    }
-
     pub(crate) fn inference_count(&self) -> u64 {
         self.inference_count
     }
@@ -211,32 +186,6 @@ pub(crate) struct RolloutIdentity {
     duration_seconds: Option<u32>,
 }
 
-impl RolloutIdentity {
-    pub(crate) fn new(
-        session_id: Option<String>,
-        run_id: Option<String>,
-        checkpoint_step: Option<u64>,
-    ) -> Self {
-        Self {
-            session_id,
-            run_id,
-            checkpoint_step,
-            robot: None,
-            duration_seconds: None,
-        }
-    }
-
-    pub(crate) fn with_target(
-        mut self,
-        robot: Option<String>,
-        duration_seconds: Option<u32>,
-    ) -> Self {
-        self.robot = robot;
-        self.duration_seconds = duration_seconds;
-        self
-    }
-}
-
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct RolloutLifecycle {
     phase: RolloutPhase,
@@ -246,44 +195,7 @@ pub(crate) struct RolloutLifecycle {
     warning: Option<String>,
 }
 
-impl RolloutLifecycle {
-    pub(crate) fn new(
-        phase: RolloutPhase,
-        started_ms: Option<i64>,
-        finished_ms: Option<i64>,
-    ) -> Self {
-        Self {
-            phase,
-            started_ms,
-            finished_ms,
-            message: None,
-            warning: None,
-        }
-    }
-
-    pub(crate) fn with_messages(
-        mut self,
-        message: Option<String>,
-        warning: Option<String>,
-    ) -> Self {
-        self.message = message;
-        self.warning = warning;
-        self
-    }
-}
-
 impl RolloutSnapshot {
-    pub(crate) fn new(
-        identity: RolloutIdentity,
-        lifecycle: RolloutLifecycle,
-        metrics: RolloutMetrics,
-    ) -> Self {
-        Self {
-            identity,
-            lifecycle,
-            metrics,
-        }
-    }
     pub(crate) fn phase(&self) -> RolloutPhase {
         self.lifecycle.phase
     }

@@ -1014,7 +1014,7 @@ impl Studio {
 mod tests {
     use super::*;
     use crate::client::http::{
-        EpisodeTimelineResponse, TimelineMetadata, TimelineSample, VideoAssetMetadata,
+        EpisodeTimelineResponse, TimelineSample, VideoAssetMetadata,
     };
     use spiral_robotics_api::recording::{
         EpisodeAssessment, EpisodeIdentity, EpisodeSummary, EpisodeTimeline, EpisodeVideoFormat,
@@ -1033,11 +1033,7 @@ mod tests {
     fn preview(at: f64, videos: Vec<VideoAssetMetadata>) -> HistoricalPreview {
         HistoricalPreview::fixture(
             "take-1".to_owned(),
-            Arc::new(EpisodeTimelineResponse::new(
-                episode_summary(),
-                TimelineMetadata::default(),
-                videos,
-            )),
+            Arc::new(EpisodeTimelineResponse::new(episode_summary(), videos)),
             (
                 TimelineSample::new(0, at),
                 Arc::new(RecordedTimelineTraces::default().signal_lanes()),

@@ -46,18 +46,14 @@ fn feature_routers_preserve_every_public_path_exactly_once() {
     ]
     .join("\n");
     let paths = [
-        "/state",
         "/events",
         "/ports",
         "/ports/identify",
-        "/cameras",
         "/cameras/refresh",
         "/cameras/stream.mjpeg",
-        "/cameras/snapshot.jpg",
         "/robots",
         "/robots/import",
         "/robots/{id}",
-        "/robots/{id}/configuration",
         "/robots/{id}/connect",
         "/robots/{id}/disconnect",
         "/robots/{id}/hold",
@@ -74,22 +70,14 @@ fn feature_routers_preserve_every_public_path_exactly_once() {
         "/episodes/record/stop",
         "/episodes/replay",
         "/episodes/replay/pause",
-        "/episodes/export",
         "/episodes/import",
         "/episodes/{id}",
         "/episodes/{id}/inspection",
-        "/episodes/{id}/judge",
-        "/episodes/{id}/trace",
-        "/episodes/{id}/timeline",
-        "/episodes/{id}/timeline/traces",
-        "/episodes/{id}/timeline/sample",
         "/episodes/{id}/seek",
         "/episodes/{id}/videos/{stream}",
         "/settings/data",
         "/settings/data/test/spiral",
         "/spiral/query",
-        "/spiral/replay",
-        "/spiral/video.mp4",
         "/project/export",
         "/project/import",
         "/training/runs",
@@ -100,7 +88,6 @@ fn feature_routers_preserve_every_public_path_exactly_once() {
         "/workflow/capabilities",
         "/workflow/relations",
         "/workflow",
-        "/workflow/snapshot",
         "/workflow/run",
         "/workflow/cancel",
         "/workflow/agent",
@@ -373,54 +360,3 @@ fn data_presenters_round_trip_transport_values_without_leaking_them_to_policy() 
     );
 }
 
-#[test]
-fn training_and_rollout_presenters_round_trip_semantic_state() {
-    let metric = spiral_robotics_api::training::TrainingMetricPoint::new(
-        spiral_robotics_api::training::TrainingMetricProgress::new(4, 0.0, 0.0),
-        spiral_robotics_api::training::TrainingResourceMetrics::default(),
-        spiral_robotics_api::training::TrainingStageTimings::new(
-            Some(790.0),
-            Some(24.0),
-            Some(2_960.0),
-        )
-        .with_runtime(Some(6.0), Some(149.0)),
-    );
-    let run = TrainingRun::new(
-        spiral_robotics_api::training::TrainingRunIdentity::new(
-            "run-1",
-            StartTrainingRequest::default(),
-            spiral_robotics_api::training::TrainingSource::new("default"),
-        ),
-        spiral_robotics_api::training::TrainingRunLifecycle::new(
-            spiral_robotics_api::training::TrainingRunPhase::Running,
-            4,
-            1,
-        )
-        .with_completion(None, Some("running".to_owned())),
-        spiral_robotics_api::training::TrainingRunHistory::new(
-            vec![metric],
-            Vec::new(),
-            vec!["ready".to_owned()],
-        ),
-    );
-    let capability_run = CapabilityTrainingRun::from(run.clone());
-    assert_eq!(TrainingRun::from(capability_run), run);
-
-    let rollout = RolloutSnapshot::new(
-        spiral_robotics_api::rollout::RolloutIdentity::new(
-            Some("session-1".to_owned()),
-            Some("run-1".to_owned()),
-            Some("arm".to_owned()),
-        )
-        .with_checkpoint(Some(4))
-        .with_duration(Some(30)),
-        spiral_robotics_api::rollout::RolloutLifecycle::new(
-            spiral_robotics_api::rollout::RolloutPhase::Running,
-            Some(1),
-        )
-        .with_messages(None, Some("clamped wrist".to_owned())),
-        spiral_robotics_api::rollout::RolloutMetrics::new(2, 1, 0),
-    );
-    let capability_rollout = CapabilityRolloutSnapshot::from(rollout.clone());
-    assert_eq!(RolloutSnapshot::from(capability_rollout), rollout);
-}

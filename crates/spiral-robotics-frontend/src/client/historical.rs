@@ -108,11 +108,6 @@ impl CachedInspection {
         snapshot.validate()?;
         let timeline = Arc::new(api::EpisodeTimelineResponse::new(
             snapshot.episode().to_owned(),
-            api::TimelineMetadata::new(
-                snapshot.sample_times_seconds().len() as u64,
-                snapshot.sample_times_seconds().first().copied(),
-                snapshot.sample_times_seconds().last().copied(),
-            ),
             snapshot.videos().to_owned(),
         ));
         let signal_lanes = Arc::new(snapshot.signal_lanes(TRACE_BUCKETS));

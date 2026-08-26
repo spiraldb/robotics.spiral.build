@@ -1,16 +1,14 @@
 use super::*;
 use crate::data::catalog_lease::{CatalogLeaseOwner, CatalogLeaseToken, CatalogMutationLease};
-use spiral_robotics_api::robots::{CameraStreamFormat, CameraStreamState};
+use spiral_robotics_storage::episodes::ReappliedEpisodePositions;
 
 /// Camera discovery and preview do not depend on SpiralDB, so they remain
 /// useful while catalog bootstrap is still running or needs repair.
 impl AppState {
     pub(super) fn device_bootstrap_router() -> Router<Self> {
         Router::new()
-            .route("/cameras", get(Self::list_cameras))
             .route("/cameras/refresh", post(Self::refresh_cameras))
             .route("/cameras/stream.mjpeg", get(Self::camera_stream))
-            .route("/cameras/snapshot.jpg", get(Self::camera_snapshot))
     }
 
     pub(super) fn device_catalog_router() -> Router<Self> {
@@ -27,10 +25,6 @@ impl AppState {
                 get(Self::get_robot)
                     .patch(Self::update_robot)
                     .delete(Self::delete_robot),
-            )
-            .route(
-                "/robots/{id}/configuration",
-                get(Self::export_robot_configuration),
             )
             .route("/robots/{id}/connect", post(Self::connect_robot))
             .route("/robots/{id}/disconnect", post(Self::disconnect_robot))
@@ -80,7 +74,7 @@ struct SerialPortQueryAdapter<'a> {
 }
 
 impl SerialPortQueryPort for SerialPortQueryAdapter<'_> {
-    async fn serial_ports(&self) -> Result<Vec<SerialPortDescriptor>, OperationError> {
+    async fn serial_ports(&self) -> Result<Vec<SerialPortSummary>, OperationError> {
         let ports = tokio::task::spawn_blocking(SerialPortCatalog::discover)
             .await
             .map_err(|error| OperationError::Internal(error.to_string()))?
@@ -105,7 +99,7 @@ impl SerialPortQueryPort for SerialPortQueryAdapter<'_> {
             .into_ports()
             .into_iter()
             .map(|port| {
-                SerialPortDescriptor::new(
+                SerialPortSummary::new(
                     port.port_name.clone(),
                     port.port_type.kind(),
                     port.port_type.description(),
@@ -126,28 +120,16 @@ impl CameraDiscoveryAdapter {
 }
 
 impl CameraDiscoveryPort for CameraDiscoveryAdapter {
-    fn cameras(&self) -> Vec<DiscoveredCamera> {
-        self.0.statuses().into_iter().map(Into::into).collect()
+    fn cameras(&self) -> Vec<CameraStatus> {
+        self.0.statuses()
     }
 
-    async fn refresh_cameras(&self) -> Result<Vec<DiscoveredCamera>, OperationError> {
+    async fn refresh_cameras(&self) -> Result<Vec<CameraStatus>, OperationError> {
         let cameras = self.0.clone();
         tokio::task::spawn_blocking(move || cameras.refresh_blocking())
             .await
             .map_err(|error| OperationError::Internal(error.to_string()))?;
-        Ok(self.0.statuses().into_iter().map(Into::into).collect())
-    }
-}
-
-impl From<CameraStatus> for DiscoveredCamera {
-    fn from(camera: CameraStatus) -> Self {
-        let format = CameraDiscoveryFormat::new(camera.width(), camera.height(), camera.fps());
-        let status = CameraDiscoveryStatus::new(
-            camera.streaming(),
-            camera.frames(),
-            camera.error().map(str::to_owned),
-        );
-        Self::new(camera.id(), camera.name(), format).with_status(status)
+        Ok(self.0.statuses())
     }
 }
 
@@ -229,20 +211,6 @@ impl RobotStore for RobotHttpAdapter<'_> {
             .import_configuration(configuration)
             .map_err(OperationError::from)?;
         Ok(SavedRobot::new(record.id()))
-    }
-
-    fn export_configuration(&self, robot: &str) -> Result<ExportedRobotDocument, OperationError> {
-        self.state
-            .workspace()
-            .get(robot)
-            .and_then(|record| {
-                record
-                    .config()
-                    .to_pretty_json()
-                    .map_err(WorkspaceError::from)
-            })
-            .map(|document| ExportedRobotDocument::new(document.into_bytes()))
-            .map_err(OperationError::from)
     }
 
     fn camera_configuration(
@@ -453,19 +421,12 @@ impl CalibrationHistoryPort for CalibrationHistoryHttpAdapter<'_> {
         &self,
         robot: String,
         calibration: Calibration,
-    ) -> Result<ReappliedPositions, OperationError> {
+    ) -> Result<ReappliedEpisodePositions, OperationError> {
         let episodes = self.state.episodes().clone();
-        let result =
-            tokio::task::spawn_blocking(move || episodes.reapply_calibration(&robot, &calibration))
-                .await
-                .map_err(|error| OperationError::Internal(error.to_string()))?
-                .map_err(OperationError::from)?;
-        let (updated_episode_ids, frames_updated, episodes_unchanged, episodes_skipped, warnings) =
-            result.into_parts();
-        Ok(
-            ReappliedPositions::new(updated_episode_ids, frames_updated, episodes_unchanged)
-                .with_skipped(episodes_skipped, warnings),
-        )
+        tokio::task::spawn_blocking(move || episodes.reapply_calibration(&robot, &calibration))
+            .await
+            .map_err(|error| OperationError::Internal(error.to_string()))?
+            .map_err(OperationError::from)
     }
 }
 
@@ -528,47 +489,18 @@ impl AppState {
         State(state): State<Self>,
     ) -> Result<Json<Vec<SerialPortSummary>>, Failure> {
         Ok(Json(
-            SerialPortQueryAdapter { state: &state }
-                .serial_ports()
-                .await?
-                .into_iter()
-                .map(|port| {
-                    let (path, kind, description, used_by) = port.into_parts();
-                    SerialPortSummary::new(path, kind, description).with_owner(used_by)
-                })
-                .collect(),
+            SerialPortQueryAdapter { state: &state }.serial_ports().await?,
         ))
     }
 
     async fn identify_port(
         Json(request): Json<IdentifyPortRequest>,
     ) -> Result<Json<IdentifyPortResponse>, Failure> {
-        let result = IdentifySerialPortCommand::new(request.before().to_vec())
-            .execute(&SystemSerialPortInventory)
-            .await?;
-        let (port, removed, guidance) = result.into_parts();
-        Ok(Json(IdentifyPortResponse::new(port, removed, guidance)))
-    }
-
-    async fn list_cameras(State(state): State<Self>) -> Json<Vec<CameraStatus>> {
-        Json(
-            CameraDiscoveryAdapter::new(state.cameras().clone())
-                .cameras()
-                .into_iter()
-                .map(|camera| {
-                    CameraStatus::new(
-                        camera.id(),
-                        camera.name(),
-                        CameraStreamFormat::new(camera.width(), camera.height(), camera.fps()),
-                    )
-                    .with_state(CameraStreamState::new(
-                        camera.streaming(),
-                        camera.frames(),
-                        camera.error().map(str::to_owned),
-                    ))
-                })
-                .collect(),
-        )
+        Ok(Json(
+            IdentifySerialPortCommand::new(request.before().to_vec())
+                .execute(&SystemSerialPortInventory)
+                .await?,
+        ))
     }
 
     async fn refresh_cameras(
@@ -577,21 +509,7 @@ impl AppState {
         Ok(Json(
             CameraDiscoveryAdapter::new(state.cameras().clone())
                 .refresh_cameras()
-                .await?
-                .into_iter()
-                .map(|camera| {
-                    CameraStatus::new(
-                        camera.id(),
-                        camera.name(),
-                        CameraStreamFormat::new(camera.width(), camera.height(), camera.fps()),
-                    )
-                    .with_state(CameraStreamState::new(
-                        camera.streaming(),
-                        camera.frames(),
-                        camera.error().map(str::to_owned),
-                    ))
-                })
-                .collect(),
+                .await?,
         ))
     }
 }
@@ -636,41 +554,6 @@ impl AppState {
             .expect("a valid MJPEG response"))
     }
 
-    async fn camera_snapshot(
-        State(state): State<Self>,
-        Query(query): Query<CameraQuery>,
-    ) -> Result<Response, Failure> {
-        let mut receiver = state
-            .cameras()
-            .subscribe(&query.id)
-            .map_err(|error| Failure(StatusCode::NOT_FOUND, error))?;
-
-        // The stream may have just started, so wait briefly for the first frame.
-        let available = receiver.borrow_and_update().clone();
-        let frame = match available {
-            Some(frame) => Some(frame),
-            None => tokio::time::timeout(Duration::from_secs(5), async {
-                receiver.changed().await.ok()?;
-                receiver.borrow_and_update().clone()
-            })
-            .await
-            .ok()
-            .flatten(),
-        };
-
-        let frame = frame.ok_or_else(|| {
-            Failure(
-                StatusCode::SERVICE_UNAVAILABLE,
-                format!("camera {:?} has not produced a frame yet", query.id),
-            )
-        })?;
-
-        Ok(Response::builder()
-            .header(header::CONTENT_TYPE, "image/jpeg")
-            .header(header::CACHE_CONTROL, "no-store")
-            .body(Body::from(frame.bytes().clone()))
-            .expect("a valid JPEG response"))
-    }
 }
 
 impl Frame {
@@ -756,24 +639,6 @@ impl AppState {
             .await
             .log();
         Ok((StatusCode::CREATED, Json(state.present_saved_robot(robot)?)))
-    }
-
-    /// Download the complete canonical JSON document for one robot.
-    async fn export_robot_configuration(
-        State(state): State<Self>,
-        Path(id): Path<String>,
-    ) -> Result<Response, Failure> {
-        let adapter = RobotHttpAdapter::new(&state);
-        let document = RobotCatalogActions::new(&adapter).export_configuration(&id)?;
-        Ok(Response::builder()
-            .header(header::CONTENT_TYPE, "application/json; charset=utf-8")
-            .header(header::CACHE_CONTROL, "no-store")
-            .header(
-                header::CONTENT_DISPOSITION,
-                format!("attachment; filename=\"{id}.json\""),
-            )
-            .body(Body::from(document.into_bytes()))
-            .expect("static robot configuration response headers are valid"))
     }
 
     async fn get_robot(
@@ -1001,17 +866,10 @@ impl AppState {
         State(state): State<Self>,
         Path(id): Path<String>,
     ) -> Result<Json<CalibrationReapplyResponse>, Failure> {
-        let output =
+        Ok(Json(
             CalibrationHistoryActions::new(&CalibrationHistoryHttpAdapter { state: &state })
                 .reapply(&id)
-                .await?;
-        Ok(Json(
-            CalibrationReapplyResponse::new(
-                output.episodes_updated(),
-                output.frames_updated(),
-                output.episodes_unchanged(),
-            )
-            .with_skipped(output.episodes_skipped(), output.warnings().to_vec()),
+                .await?,
         ))
     }
 

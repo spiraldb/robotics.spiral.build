@@ -16,18 +16,7 @@ impl AppState {
                 "/episodes/{id}",
                 axum::routing::delete(Self::delete_episode),
             )
-            .route("/episodes/{id}/judge", post(Self::judge_episode))
-            .route("/episodes/{id}/trace", get(Self::episode_trace))
             .route("/episodes/{id}/inspection", get(Self::episode_inspection))
-            .route("/episodes/{id}/timeline", get(Self::episode_timeline))
-            .route(
-                "/episodes/{id}/timeline/traces",
-                get(Self::episode_timeline_traces),
-            )
-            .route(
-                "/episodes/{id}/timeline/sample",
-                get(Self::episode_timeline_sample),
-            )
             .route("/episodes/{id}/seek", post(Self::seek_episode))
             .route("/episodes/{id}/videos/{stream}", get(Self::episode_video))
     }
@@ -448,19 +437,6 @@ impl EpisodeCatalogPort for EpisodeHttpAdapter<'_> {
         )
     }
 
-    async fn judge_episode(
-        &self,
-        episode: String,
-        discarded: bool,
-    ) -> Result<EpisodeMutationResult, OperationError> {
-        let episodes = self.state.episodes().clone();
-        let summary = tokio::task::spawn_blocking(move || episodes.judge(&episode, discarded))
-            .await
-            .map_err(|error| OperationError::Internal(error.to_string()))?
-            .map_err(OperationError::from)?;
-        Ok(EpisodeMutationResult::new(summary.id()))
-    }
-
     async fn delete_episode(&self, episode: String) -> Result<(), OperationError> {
         let episodes = self.state.episodes().clone();
         tokio::task::spawn_blocking(move || episodes.delete(&episode))
@@ -473,14 +449,8 @@ impl EpisodeCatalogPort for EpisodeHttpAdapter<'_> {
 }
 
 impl EpisodeQueryPort for EpisodeHttpAdapter<'_> {
-    fn episodes(&self) -> Vec<EpisodeRecord> {
-        self.state
-            .episodes()
-            .list()
-            .iter()
-            .cloned()
-            .map(Into::into)
-            .collect()
+    fn episodes(&self) -> Vec<EpisodeSummary> {
+        self.state.episodes().list().to_vec()
     }
 
     fn ensure_episode_exists(&self, episode: &str) -> Result<(), OperationError> {
@@ -491,189 +461,28 @@ impl EpisodeQueryPort for EpisodeHttpAdapter<'_> {
             .map_err(OperationError::from)
     }
 
-    fn follow_error_trace(
-        &self,
-        query: EpisodeTraceQuery,
-    ) -> Result<Vec<Option<f64>>, OperationError> {
-        let episode = query.episode().to_owned();
-        let buckets = query.buckets();
-        self.state
-            .episodes()
-            .trace(&episode, buckets)
-            .map_err(OperationError::from)
-    }
-
-    fn timeline_traces(
-        &self,
-        query: EpisodeTraceQuery,
-    ) -> Result<TimelineTraceCollection, OperationError> {
-        let episode = query.episode().to_owned();
-        let buckets = query.buckets();
-        self.state
-            .episodes()
-            .timeline_traces(&episode, buckets)
-            .map(Into::into)
-            .map_err(OperationError::from)
-    }
-
-    fn timeline(&self, episode: String) -> Result<EpisodeTimelineRecord, OperationError> {
-        let samples = self
-            .state
-            .episodes()
-            .timeline_metadata(&episode)
-            .map_err(OperationError::from)?;
-        // Metadata refreshes a stale partial entry. Read the summary after it
-        // so both projections describe the same durable episode.
-        let summary = self
-            .state
-            .episodes()
-            .get(&episode)
-            .map_err(OperationError::from)?;
-        let videos = self
-            .state
-            .episodes()
-            .video_metadata(&episode)
-            .map_err(OperationError::from)?
-            .iter()
-            .cloned()
-            .map(Into::into)
-            .collect();
-        Ok(EpisodeTimelineRecord::new(
-            summary.into(),
-            TimelineMetadataRecord::new(
-                samples.samples(),
-                samples.first_seconds(),
-                samples.last_seconds(),
-            ),
-            videos,
-        ))
-    }
-
-    fn inspection(&self, episode: String) -> Result<EpisodeInspectionRecord, OperationError> {
+    fn inspection(&self, episode: String) -> Result<EpisodeInspectionSnapshot, OperationError> {
         self.state
             .episodes()
             .inspection(&episode)
-            .map(Into::into)
+            .map(InspectionProjection::into_snapshot)
             .map_err(OperationError::from)
     }
 
-    fn timeline_sample(
-        &self,
-        episode: String,
-        seconds: f64,
-    ) -> Result<TimelineSampleRecord, OperationError> {
-        self.state
-            .episodes()
-            .sample_at(&episode, seconds)
-            .map(Into::into)
-            .map_err(OperationError::from)
-    }
 }
 
-impl From<EpisodeSummary> for EpisodeRecord {
-    fn from(episode: EpisodeSummary) -> Self {
-        let identity =
-            EpisodeRecordIdentity::new(episode.id(), episode.dataset_id(), episode.source())
-                .started_at(episode.started_ms());
-        let capture = EpisodeCaptureSummary::new(
-            episode
-                .arms()
-                .iter()
-                .map(|arm| {
-                    EpisodeArmRecord::new(
-                        arm.id(),
-                        arm.robot_type().map(str::to_owned),
-                        arm.joints().to_vec(),
-                    )
-                })
-                .collect(),
-            episode.frames(),
-            episode.duration_seconds(),
-        )
-        .with_timing(
-            episode
-                .recording_gaps()
-                .iter()
-                .map(|gap| RecordingGapRecord::new(gap.after_seconds(), gap.duration_seconds()))
-                .collect(),
-            episode.sample_hz(),
-        )
-        .with_maximum_follow_error(episode.max_follow_error_degrees());
-        Self::new(
-            identity,
-            capture,
-            EpisodeDisposition::new(episode.discarded(), episode.problem().map(str::to_owned)),
-        )
-    }
+/// Projects a stored inspection into the wire snapshot.
+///
+/// Both types are foreign to this crate, so the row-major to frame-major
+/// transposition hangs off the stored value as a local extension trait rather
+/// than a `From` impl.
+trait InspectionProjection {
+    fn into_snapshot(self) -> EpisodeInspectionSnapshot;
 }
 
-impl From<EpisodeRecord> for EpisodeSummary {
-    fn from(episode: EpisodeRecord) -> Self {
-        let identity = EpisodeIdentity::new(
-            episode.id(),
-            episode.dataset_id(),
-            episode
-                .arms()
-                .iter()
-                .map(|arm| {
-                    spiral_robotics_api::recording::EpisodeArm::new(
-                        arm.id(),
-                        arm.robot_type().map(str::to_owned),
-                        arm.joints().to_vec(),
-                    )
-                })
-                .collect(),
-        )
-        .with_source(episode.source());
-        let timeline = EpisodeTimeline::new(
-            episode.frames(),
-            episode.duration_seconds(),
-            episode.sample_hz(),
-        )
-        .with_recording_gaps(
-            episode
-                .recording_gaps()
-                .iter()
-                .map(|gap| {
-                    spiral_robotics_api::recording::RecordingGap::new(
-                        gap.after_seconds(),
-                        gap.duration_seconds(),
-                    )
-                })
-                .collect(),
-        )
-        .with_started_ms(episode.started_ms());
-        Self::new(
-            identity,
-            timeline,
-            EpisodeAssessment::new(
-                episode.discarded(),
-                episode.max_follow_error_degrees(),
-                episode.problem().map(str::to_owned),
-            ),
-        )
-    }
-}
-
-impl From<VideoAssetMetadata> for VideoAssetRecord {
-    fn from(video: VideoAssetMetadata) -> Self {
-        let size = video.size();
-        let timing = video.timing();
-        let segment = video.segment();
-        Self::new(
-            VideoAssetIdentity::new(video.stream_id(), video.camera_id(), segment.index()),
-            VideoAssetFormat::new(size.width(), size.height(), timing.fps()),
-            VideoAssetTimeline::new(
-                timing.frames(),
-                video.duration_seconds(),
-                segment.timeline_offset_seconds(),
-            ),
-        )
-    }
-}
-
-impl From<EpisodeInspection> for EpisodeInspectionRecord {
-    fn from(inspection: EpisodeInspection) -> Self {
+impl InspectionProjection for EpisodeInspection {
+    fn into_snapshot(self) -> EpisodeInspectionSnapshot {
+        let inspection = self;
         let (episode, summary, videos) = inspection.into_parts();
         let samples = episode.samples();
         let arms = episode
@@ -713,24 +522,46 @@ impl From<EpisodeInspection> for EpisodeInspectionRecord {
                         .map(Vec::as_slice)
                 })
                 .for_arm(arm_index);
-                EpisodeInspectionArmRecord::new(arm.id(), arm.joints().to_vec(), normalized)
-                    .with_raw(raw)
-                    .with_dynamics(velocity, effort)
-                    .with_action(action)
+                EpisodeInspectionArm::new(
+                    arm.id(),
+                    arm.joints().to_vec(),
+                    EpisodeArmScalarSamples::new(normalized, raw),
+                )
+                .with_optional_channels(EpisodeArmOptionalChannels::new(velocity, effort, action))
             })
             .collect();
-        Self::new(
-            summary.into(),
+        EpisodeInspectionSnapshot::new(
+            summary,
             samples.iter().map(|sample| sample.seconds()).collect(),
-            arms,
-        )
-        .with_follow_error(
             samples
                 .iter()
                 .map(|sample| sample.follow_error_degrees())
                 .collect(),
         )
-        .with_videos(videos.into_iter().map(Into::into).collect())
+        .with_arms(arms)
+        .with_videos(
+            videos
+                .into_iter()
+                .map(|video| {
+                    let size = video.size();
+                    let timing = video.timing();
+                    let segment = video.segment();
+                    EpisodeVideoAssetMetadata::new(
+                        EpisodeVideoIdentity::new(
+                            video.stream_id(),
+                            video.camera_id(),
+                            segment.index(),
+                        ),
+                        EpisodeVideoFormat::new(size.width(), size.height(), timing.fps()),
+                        EpisodeVideoTimeline::new(
+                            timing.frames(),
+                            video.duration_seconds(),
+                            segment.timeline_offset_seconds(),
+                        ),
+                    )
+                })
+                .collect(),
+        )
     }
 }
 
@@ -759,7 +590,7 @@ where
         }
     }
 
-    fn for_arm(self, arm_index: usize) -> OptionalFrameMatrixRecord {
+    fn for_arm(self, arm_index: usize) -> EpisodeOptionalFrameMatrix {
         let mut present = Vec::with_capacity(self.samples.len());
         let mut values = Vec::with_capacity(self.samples.len().saturating_mul(self.joint_count));
         for sample in self.samples {
@@ -775,179 +606,7 @@ where
                 }
             }
         }
-        OptionalFrameMatrixRecord::new(present, values)
-    }
-}
-
-impl From<VideoAssetRecord> for VideoAssetMetadata {
-    fn from(video: VideoAssetRecord) -> Self {
-        Self::new(
-            video.stream_id().to_owned(),
-            video.camera_id().to_owned(),
-            video.duration_seconds(),
-        )
-        .with_size(VideoSize::new(video.width(), video.height()))
-        .with_timing(VideoTiming::new(video.fps(), video.frames()))
-        .with_segment(VideoSegment::new(
-            video.segment_index(),
-            video.timeline_offset_seconds(),
-        ))
-    }
-}
-
-impl From<EpisodeInspectionRecord> for EpisodeInspectionSnapshot {
-    fn from(inspection: EpisodeInspectionRecord) -> Self {
-        let (episode, sample_times_seconds, follow_error_degrees, arm_records, video_records) =
-            inspection.into_parts();
-        let arms = arm_records
-            .into_iter()
-            .map(|arm| {
-                let (arm, joints, normalized, raw, velocity, effort, action) = arm.into_parts();
-                EpisodeInspectionArm::new(
-                    arm,
-                    joints,
-                    EpisodeArmScalarSamples::new(normalized, raw),
-                )
-                .with_optional_channels(EpisodeArmOptionalChannels::new(
-                    velocity.into(),
-                    effort.into(),
-                    action.into(),
-                ))
-            })
-            .collect();
-        let videos = video_records
-            .into_iter()
-            .map(|video| {
-                EpisodeVideoAssetMetadata::new(
-                    EpisodeVideoIdentity::new(
-                        video.stream_id(),
-                        video.camera_id(),
-                        video.segment_index(),
-                    ),
-                    EpisodeVideoFormat::new(video.width(), video.height(), video.fps()),
-                    EpisodeVideoTimeline::new(
-                        video.frames(),
-                        video.duration_seconds(),
-                        video.timeline_offset_seconds(),
-                    ),
-                )
-            })
-            .collect();
-        Self::new(episode.into(), sample_times_seconds, follow_error_degrees)
-            .with_arms(arms)
-            .with_videos(videos)
-    }
-}
-
-impl From<OptionalFrameMatrixRecord> for EpisodeOptionalFrameMatrix {
-    fn from(matrix: OptionalFrameMatrixRecord) -> Self {
-        let (present, values) = matrix.into_parts();
-        Self::new(present, values)
-    }
-}
-
-impl From<TimelineSample> for TimelineSampleRecord {
-    fn from(sample: TimelineSample) -> Self {
-        let (frame, seconds, follow_error_degrees, arms) = sample.into_parts();
-        let arms = arms
-            .into_iter()
-            .map(|arm| {
-                let (pose, signals) = arm.into_groups();
-                let (arm, normalized, raw) = pose.into_parts();
-                let (velocity, effort, action) = signals.into_parts();
-                TimelineArmSampleRecord::new(arm, normalized, raw)
-                    .with_dynamics(velocity, effort)
-                    .with_action(action)
-            })
-            .collect();
-        Self::new(frame, seconds, arms).with_follow_error(follow_error_degrees)
-    }
-}
-
-impl From<TimelineSampleRecord> for TimelineSample {
-    fn from(sample: TimelineSampleRecord) -> Self {
-        let (frame, seconds, follow_error_degrees, arms) = sample.into_parts();
-        Self::new(frame, seconds)
-            .with_follow_error_degrees(follow_error_degrees)
-            .with_arms(
-                arms.into_iter()
-                    .map(|arm| {
-                        let (arm, normalized, raw, velocity, effort, action) = arm.into_parts();
-                        spiral_robotics_storage::episodes::TimelineArmSample::new(
-                            arm, normalized, raw,
-                        )
-                        .with_velocity(velocity)
-                        .with_effort(effort)
-                        .with_action(action)
-                    })
-                    .collect(),
-            )
-    }
-}
-
-impl From<TimelineTraces> for TimelineTraceCollection {
-    fn from(traces: TimelineTraces) -> Self {
-        let (episode, samples, buckets, start_seconds, end_seconds, lanes) = traces.into_parts();
-        let lanes = lanes
-            .into_iter()
-            .map(|lane| {
-                let (joint, series) = lane.into_parts();
-                let series = series
-                    .into_iter()
-                    .map(|series| {
-                        let (arm, points) = series.into_parts();
-                        let points = points
-                            .iter()
-                            .map(|point| {
-                                TimelineTracePointRecord::new(point.seconds(), point.value())
-                            })
-                            .collect();
-                        TimelineTraceSeriesRecord::new(arm, points)
-                    })
-                    .collect();
-                TimelineTraceLaneRecord::new(joint, series)
-            })
-            .collect();
-        Self::new(episode, samples, buckets)
-            .with_range(start_seconds, end_seconds)
-            .with_lanes(lanes)
-    }
-}
-
-impl From<TimelineTraceCollection> for TimelineTraces {
-    fn from(traces: TimelineTraceCollection) -> Self {
-        let (episode, samples, buckets, start_seconds, end_seconds, lanes) = traces.into_parts();
-        Self::new(episode, samples, buckets)
-            .with_range(start_seconds, end_seconds)
-            .with_lanes(
-                lanes
-                    .into_iter()
-                    .map(|lane| {
-                        let (joint, series) = lane.into_parts();
-                        spiral_robotics_storage::episodes::TimelineTraceLane::new(
-                            joint,
-                            series
-                                .into_iter()
-                                .map(|series| {
-                                    let (arm, points) = series.into_parts();
-                                    spiral_robotics_storage::episodes::TimelineTraceSeries::new(
-                                arm,
-                                points
-                                    .into_iter()
-                                    .map(|point| {
-                                        spiral_robotics_storage::episodes::TimelineTracePoint::new(
-                                            point.seconds(),
-                                            point.value(),
-                                        )
-                                    })
-                                    .collect(),
-                            )
-                                })
-                                .collect(),
-                        )
-                    })
-                    .collect(),
-            )
+        EpisodeOptionalFrameMatrix::new(present, values)
     }
 }
 
@@ -1032,8 +691,7 @@ impl PhysicalSeekPort for SeekHttpAdapter<'_> {
                     frame,
                     arms.into_iter()
                         .map(|arm| {
-                            let (pose, _) = arm.into_groups();
-                            let (id, normalized, _) = pose.into_parts();
+                            let (id, normalized, ..) = arm.into_parts();
                             SampledArm::new(id, normalized)
                         })
                         .collect(),
@@ -1076,7 +734,6 @@ impl AppState {
             .list()
             .into_iter()
             .filter(|episode| Some(episode.id()) != recording.as_deref())
-            .map(Into::into)
             .collect();
         let mut issues = state.episodes().issues();
         let datasets = match state.storage().datasets().await {
@@ -1307,18 +964,6 @@ impl AppState {
         Ok(StatusCode::NO_CONTENT)
     }
 
-    async fn judge_episode(
-        State(state): State<Self>,
-        Path(id): Path<String>,
-        Json(request): Json<JudgeEpisodeRequest>,
-    ) -> Result<Json<EpisodeSummary>, Failure> {
-        let catalog = EpisodeHttpAdapter::catalog(&state);
-        let result = EpisodeCatalogActions::new(&catalog)
-            .judge(JudgeEpisodeCommand::new(id, request.discarded()))
-            .await?;
-        Ok(Json(state.episodes().get(result.episode())?))
-    }
-
     async fn delete_episode(
         State(state): State<Self>,
         Path(id): Path<String>,
@@ -1331,57 +976,13 @@ impl AppState {
     }
 }
 
-/// How many points a trace is reduced to before it is sent.
-#[derive(Debug, Deserialize)]
-struct TraceQuery {
-    #[serde(default = "TraceQuery::default_buckets")]
-    buckets: usize,
-}
-
-impl TraceQuery {
-    fn default_buckets() -> usize {
-        240
-    }
-}
-
 impl AppState {
-    async fn episode_trace(
-        State(state): State<Self>,
-        Path(id): Path<String>,
-        Query(query): Query<TraceQuery>,
-    ) -> Result<Json<Vec<Option<f64>>>, Failure> {
-        let trace = tokio::task::spawn_blocking(move || {
-            EpisodeQueries::new(&EpisodeHttpAdapter::catalog(&state))
-                .follow_error_trace(EpisodeTraceQuery::new(id, query.buckets))
-        })
-        .await
-        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
-        Ok(Json(trace))
-    }
-
-    async fn episode_timeline_traces(
-        State(state): State<Self>,
-        Path(id): Path<String>,
-        Query(query): Query<TraceQuery>,
-    ) -> Result<Json<TimelineTraces>, Failure> {
-        let traces = tokio::task::spawn_blocking(move || {
-            EpisodeQueries::new(&EpisodeHttpAdapter::catalog(&state))
-                .timeline_traces(EpisodeTraceQuery::new(id, query.buckets))
-                .map(Into::into)
-        })
-        .await
-        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
-        Ok(Json(traces))
-    }
-
     async fn episode_inspection(
         State(state): State<Self>,
         Path(id): Path<String>,
     ) -> Result<Json<EpisodeInspectionSnapshot>, Failure> {
         let inspection = tokio::task::spawn_blocking(move || {
-            EpisodeQueries::new(&EpisodeHttpAdapter::catalog(&state))
-                .inspection(id)
-                .map(Into::into)
+            EpisodeQueries::new(&EpisodeHttpAdapter::catalog(&state)).inspection(id)
         })
         .await
         .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
@@ -1389,58 +990,10 @@ impl AppState {
     }
 }
 
-#[derive(Debug, Serialize)]
-struct EpisodeTimelineResponse {
-    episode: EpisodeSummary,
-    samples: TimelineMetadata,
-    videos: Vec<VideoAssetMetadata>,
+impl AppState {
 }
 
 impl AppState {
-    async fn episode_timeline(
-        State(state): State<Self>,
-        Path(id): Path<String>,
-    ) -> Result<Json<EpisodeTimelineResponse>, Failure> {
-        let result = tokio::task::spawn_blocking(move || {
-            let timeline =
-                EpisodeQueries::new(&EpisodeHttpAdapter::catalog(&state)).timeline(id)?;
-            let (episode, samples, videos) = timeline.into_parts();
-            Ok::<_, Failure>(EpisodeTimelineResponse {
-                episode: episode.into(),
-                samples: TimelineMetadata::new(
-                    samples.samples(),
-                    samples.first_seconds(),
-                    samples.last_seconds(),
-                ),
-                videos: videos.into_iter().map(Into::into).collect(),
-            })
-        })
-        .await
-        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
-        Ok(Json(result))
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct TimelineSampleQuery {
-    at: f64,
-}
-
-impl AppState {
-    async fn episode_timeline_sample(
-        State(state): State<Self>,
-        Path(id): Path<String>,
-        Query(query): Query<TimelineSampleQuery>,
-    ) -> Result<Json<TimelineSample>, Failure> {
-        let sample = tokio::task::spawn_blocking(move || {
-            EpisodeQueries::new(&EpisodeHttpAdapter::catalog(&state))
-                .timeline_sample(id, query.at)
-                .map(Into::into)
-        })
-        .await
-        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
-        Ok(Json(sample))
-    }
 }
 
 #[derive(Debug, Deserialize)]

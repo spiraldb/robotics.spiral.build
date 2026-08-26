@@ -41,8 +41,6 @@ impl AppState {
                 "/spiral/project-relations",
                 get(Self::project_data_relations),
             )
-            .route("/spiral/replay", post(Self::start_spiral_replay))
-            .route("/spiral/video.mp4", get(Self::spiral_video))
             .route(
                 "/datasets/huggingface/import",
                 post(Self::import_huggingface_dataset),
@@ -54,7 +52,6 @@ impl AppState {
                     spiral_robotics_storage::bundle::ProjectBundle::MAX_BYTES,
                 )),
             )
-            .route("/episodes/export", get(Self::export_episodes))
             .route(
                 "/episodes/import",
                 post(Self::import_episodes).layer(DefaultBodyLimit::max(
@@ -230,38 +227,6 @@ impl AppState {
         Ok(Json(summary))
     }
 
-    async fn export_episodes(
-        State(state): State<Self>,
-        Query(query): Query<EpisodeTransferQuery>,
-    ) -> Result<Response, Failure> {
-        if !spiral_robotics_storage::StorageSchema::is_dataset_id(&query.dataset_id) {
-            return Err(Failure::bad_request(
-                "dataset ID must contain 1–96 letters, numbers, '.', '_' or '-'",
-            ));
-        }
-        let dataset_id = query.dataset_id;
-        let filename = format!("{dataset_id}.spiral-episodes");
-        let storage = state.storage().clone();
-        let bytes = tokio::task::spawn_blocking(move || storage.export_episode_bundle(&dataset_id))
-            .await
-            .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
-            .map_err(Failure::bad_request)?;
-        Response::builder()
-            .status(StatusCode::OK)
-            .header(
-                header::CONTENT_TYPE,
-                "application/vnd.spiral-robotics.episodes",
-            )
-            .header(
-                header::CONTENT_DISPOSITION,
-                format!("attachment; filename=\"{filename}\""),
-            )
-            .header(header::CONTENT_LENGTH, bytes.len())
-            .header(header::CACHE_CONTROL, "private, no-store")
-            .body(Body::from(bytes))
-            .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
-    }
-
     async fn import_episodes(
         State(state): State<Self>,
         Query(query): Query<EpisodeTransferQuery>,
@@ -335,17 +300,12 @@ impl AppState {
                 .runs()
                 .iter()
                 .any(|run| run.phase().active())
-            || matches!(
-                RolloutActions::new(&super::training_rollout::RolloutHttpAdapter::new(
-                    self.rollout().clone(),
-                ))
-                .snapshot()
-                .phase(),
-                CapabilityRolloutPhase::Loading
-                    | CapabilityRolloutPhase::WarmingUp
-                    | CapabilityRolloutPhase::Running
-                    | CapabilityRolloutPhase::Stopping
-            )
+            || RolloutActions::new(&super::training_rollout::RolloutHttpAdapter::new(
+                self.rollout().clone(),
+            ))
+            .snapshot()
+            .phase()
+            .active()
             || self.workflow().is_active()
             || self.workflow_agent().is_active()
     }
@@ -502,30 +462,6 @@ impl DataCatalogPort for DataHttpAdapter<'_> {
             .map_err(OperationError::External)
     }
 
-    async fn load_replay_trajectory(
-        &self,
-        episode: &str,
-        stream: &str,
-    ) -> Result<SpiralReplayTrajectory, OperationError> {
-        let (sample_hz, frames) = self
-            .state
-            .storage()
-            .trajectory(episode, stream)
-            .await
-            .map_err(OperationError::External)?;
-        Ok(SpiralReplayTrajectory::new(sample_hz, frames))
-    }
-
-    async fn video_asset(&self, query: VideoAssetQuery) -> Result<Vec<u8>, OperationError> {
-        let (episode, stream, segment) = query.into_parts();
-        self.state
-            .storage()
-            .video_asset(spiral_robotics_storage::video::VideoAssetKey::new(
-                episode, stream, segment,
-            ))
-            .await
-            .map_err(OperationError::External)
-    }
 }
 
 pub(super) struct DataSettingsOverrides<'a> {
@@ -720,12 +656,6 @@ impl From<UpdateDataSettingsRequest> for UpdateDataSettingsCommand {
     }
 }
 
-impl From<StartSpiralReplayRequest> for StartSpiralReplayCommand {
-    fn from(request: StartSpiralReplayRequest) -> Self {
-        Self::new(request.episode(), request.robot(), request.stream())
-    }
-}
-
 impl AppState {
     async fn get_data_settings(State(state): State<Self>) -> Json<DataSettings> {
         Json(DataHttpAdapter { state: &state }.settings().into())
@@ -855,17 +785,13 @@ impl AppState {
                 ));
             }
             let hardware = state.hardware().state();
-            let rollout_is_active = matches!(
+            let rollout_is_active =
                 RolloutActions::new(&super::training_rollout::RolloutHttpAdapter::new(
                     state.rollout().clone(),
                 ))
                 .snapshot()
-                .phase(),
-                CapabilityRolloutPhase::Loading
-                    | CapabilityRolloutPhase::WarmingUp
-                    | CapabilityRolloutPhase::Running
-                    | CapabilityRolloutPhase::Stopping
-            );
+                .phase()
+                .active();
             let current_robot_ids = state.workspace().try_list().ok().map(|records| {
                 records
                     .into_iter()
@@ -931,47 +857,9 @@ impl AppState {
         Ok(Json(result.into()))
     }
 
-    async fn start_spiral_replay(
-        State(state): State<Self>,
-        Json(request): Json<StartSpiralReplayRequest>,
-    ) -> Result<StatusCode, Failure> {
-        StartSpiralReplayCommand::from(request)
-            .start(
-                &DataHttpAdapter { state: &state },
-                state.hardware().as_ref(),
-            )
-            .await?;
-        Ok(StatusCode::NO_CONTENT)
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct SpiralVideoQuery {
-    episode: String,
-    stream: String,
-    segment: Option<u32>,
 }
 
 impl AppState {
-    async fn spiral_video(
-        State(state): State<Self>,
-        Query(query): Query<SpiralVideoQuery>,
-    ) -> Result<Response, Failure> {
-        let bytes = VideoAssetQuery::new(query.episode, query.stream, query.segment)
-            .load(&DataHttpAdapter { state: &state })
-            .await
-            .map_err(Failure::from)?;
-        let mut response = Body::from(bytes).into_response();
-        response.headers_mut().insert(
-            header::CONTENT_TYPE,
-            header::HeaderValue::from_static("video/mp4"),
-        );
-        response.headers_mut().insert(
-            header::CACHE_CONTROL,
-            header::HeaderValue::from_static("private, no-store"),
-        );
-        Ok(response)
-    }
 }
 
 #[cfg(test)]

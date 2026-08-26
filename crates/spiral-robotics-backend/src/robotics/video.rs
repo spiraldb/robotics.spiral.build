@@ -4,7 +4,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub(crate) use spiral_robotics_storage::video::{VideoAsset, VideoAssetMetadata};
+pub(crate) use spiral_robotics_storage::video::VideoAsset;
 use spiral_robotics_storage::video::{VideoSegment, VideoSize, VideoTiming};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::watch;

@@ -545,7 +545,6 @@ fn read_controllers_delegate_selection_and_admission_to_backend_capabilities() {
     let devices = fs::read_to_string(root.join("routes/devices.rs")).expect("device routes");
     for seam in [
         ".serial_ports()",
-        ".cameras()",
         "RobotCatalogActions::new(&adapter)",
         "RobotCatalogActions::new(&RobotHttpAdapter::new(&state)).get(id)",
     ] {
@@ -559,10 +558,6 @@ fn read_controllers_delegate_selection_and_admission_to_backend_capabilities() {
         fs::read_to_string(root.join("routes/recordings.rs")).expect("recording routes");
     for seam in [
         "EpisodeQueries::new",
-        ".follow_error_trace(",
-        ".timeline_traces(",
-        ".timeline(id)",
-        ".timeline_sample(",
         ".authorize_asset(",
     ] {
         assert!(
@@ -570,12 +565,6 @@ fn read_controllers_delegate_selection_and_admission_to_backend_capabilities() {
             "episode read controller bypasses {seam}"
         );
     }
-
-    let data = fs::read_to_string(root.join("routes/data.rs")).expect("data routes");
-    assert!(
-        data.contains(".load(&DataHttpAdapter"),
-        "remote video identity and selection bypass the Data capability"
-    );
 }
 
 #[test]

@@ -3,25 +3,15 @@ use super::*;
 impl AppState {
     pub(super) fn training_rollout_router() -> Router<Self> {
         Router::new()
-            .route(
-                "/training/runs",
-                get(Self::list_training_runs).post(Self::start_training_run),
-            )
+            .route("/training/runs", post(Self::start_training_run))
             .route("/training/runs/{id}", delete(Self::delete_training_run))
             .route("/training/runs/{id}/stop", post(Self::stop_training_run))
-            .route(
-                "/rollout",
-                get(Self::rollout_state).post(Self::start_rollout),
-            )
+            .route("/rollout", post(Self::start_rollout))
             .route("/rollout/stop", post(Self::stop_rollout))
     }
 }
 
 impl TrainingPort for TrainingManager {
-    fn training_snapshot(&self) -> CapabilityTrainingSnapshot {
-        TrainingManager::snapshot(self).into()
-    }
-
     fn training_run_status(&self, run_id: &str) -> Option<TrainingRunStatus> {
         let snapshot = TrainingManager::snapshot(self);
         snapshot
@@ -46,11 +36,10 @@ impl TrainingPort for TrainingManager {
 
     async fn start_training(
         &self,
-        command: StartTrainingCommand,
-    ) -> Result<CapabilityTrainingRun, OperationError> {
-        TrainingManager::start(self, command.into())
+        command: StartTrainingRequest,
+    ) -> Result<TrainingRun, OperationError> {
+        TrainingManager::start(self, command)
             .await
-            .map(Into::into)
             .map_err(OperationError::conflict)
     }
 
@@ -74,17 +63,16 @@ impl RolloutHttpAdapter {
 }
 
 impl RolloutSessionPort for RolloutHttpAdapter {
-    fn snapshot(&self) -> CapabilityRolloutSnapshot {
-        RolloutManager::snapshot(self.0.as_ref()).into()
+    fn snapshot(&self) -> RolloutSnapshot {
+        RolloutManager::snapshot(self.0.as_ref())
     }
 
     async fn start(
         &self,
         command: RolloutRequest,
-    ) -> Result<CapabilityRolloutSnapshot, OperationError> {
+    ) -> Result<RolloutSnapshot, OperationError> {
         RolloutManager::start(&self.0, command.into())
             .await
-            .map(Into::into)
             .map_err(OperationError::conflict)
     }
 
@@ -114,56 +102,6 @@ impl From<RolloutRequest> for StartRolloutRequest {
             command.robot().to_owned(),
         )
         .with_duration(command.duration_seconds())
-    }
-}
-
-impl From<RolloutSnapshot> for CapabilityRolloutSnapshot {
-    fn from(snapshot: RolloutSnapshot) -> Self {
-        let phase = match snapshot.phase() {
-            spiral_robotics_api::rollout::RolloutPhase::Idle => CapabilityRolloutPhase::Idle,
-            spiral_robotics_api::rollout::RolloutPhase::Loading => CapabilityRolloutPhase::Loading,
-            spiral_robotics_api::rollout::RolloutPhase::WarmingUp => {
-                CapabilityRolloutPhase::WarmingUp
-            }
-            spiral_robotics_api::rollout::RolloutPhase::Running => CapabilityRolloutPhase::Running,
-            spiral_robotics_api::rollout::RolloutPhase::Stopping => {
-                CapabilityRolloutPhase::Stopping
-            }
-            spiral_robotics_api::rollout::RolloutPhase::Failed => CapabilityRolloutPhase::Failed,
-        };
-        Self::new(
-            crate::rollout::service::RolloutIdentity::new(
-                snapshot.session_id().map(str::to_owned),
-                snapshot.run_id().map(str::to_owned),
-                snapshot.checkpoint_step(),
-            )
-            .with_target(
-                snapshot.robot().map(str::to_owned),
-                snapshot.duration_seconds(),
-            ),
-            crate::rollout::service::RolloutLifecycle::new(
-                phase,
-                snapshot.started_ms(),
-                snapshot.finished_ms(),
-            )
-            .with_messages(
-                snapshot.message().map(str::to_owned),
-                snapshot.warning().map(str::to_owned),
-            ),
-            CapabilityRolloutMetrics::new(
-                snapshot.metrics().inference_count(),
-                snapshot.metrics().command_count(),
-                snapshot.metrics().missed_deadlines(),
-            )
-            .with_latest_timings(
-                snapshot.metrics().last_latency_ms(),
-                snapshot.metrics().last_model_ms(),
-            )
-            .with_latency_summary(
-                snapshot.metrics().mean_latency_ms(),
-                snapshot.metrics().max_latency_ms(),
-            ),
-        )
     }
 }
 
@@ -213,22 +151,14 @@ impl From<CapabilityRolloutSnapshot> for RolloutSnapshot {
 }
 
 impl AppState {
-    async fn list_training_runs(State(state): State<Self>) -> Json<TrainingSnapshot> {
-        Json(
-            TrainingActions::new(state.training().as_ref())
-                .list()
-                .into(),
-        )
-    }
-
     async fn start_training_run(
         State(state): State<Self>,
         Json(request): Json<StartTrainingRequest>,
     ) -> Result<(StatusCode, Json<TrainingRun>), Failure> {
         let run = TrainingActions::new(state.training().as_ref())
-            .start(request.into())
+            .start(request)
             .await?;
-        Ok((StatusCode::CREATED, Json(run.into())))
+        Ok((StatusCode::CREATED, Json(run)))
     }
 
     async fn stop_training_run(
@@ -258,11 +188,6 @@ impl AppState {
         Ok(StatusCode::NO_CONTENT)
     }
 
-    async fn rollout_state(State(state): State<Self>) -> Json<RolloutSnapshot> {
-        let adapter = RolloutHttpAdapter::new(state.rollout().clone());
-        Json(RolloutActions::new(&adapter).snapshot().into())
-    }
-
     async fn start_rollout(
         State(state): State<Self>,
         Json(request): Json<StartRolloutRequest>,
@@ -271,7 +196,7 @@ impl AppState {
             TrainingActions::new(state.training().as_ref()).admit_rollout(request.into())?;
         let adapter = RolloutHttpAdapter::new(state.rollout().clone());
         let snapshot = RolloutActions::new(&adapter).start(request).await?;
-        Ok((StatusCode::ACCEPTED, Json(snapshot.into())))
+        Ok((StatusCode::ACCEPTED, Json(snapshot)))
     }
 
     async fn stop_rollout(State(state): State<Self>) -> Result<StatusCode, Failure> {

@@ -5,35 +5,11 @@ use std::collections::BTreeMap;
 use spiral_robotics_api::robots::ModeSelection;
 use spiral_robotics_core::OperationError;
 use spiral_robotics_core::calibration::{Calibration, CalibrationInput, NormalizedPosition};
-use spiral_robotics_hardware::{
-    HardwareHandle, ReplayRequest, ReplayTrajectory as HardwareReplayTrajectory,
-};
+use spiral_robotics_hardware::HardwareHandle;
 
-use crate::data::{ReplayTrajectory, SpiralReplayPort, StartSpiralReplayCommand};
 use crate::robots::calibration::CalibrationControlPort;
 use crate::robots::control::RobotControlPort;
 use crate::robots::mode::{ModeControlPort, OperatorMode};
-
-impl SpiralReplayPort for HardwareHandle {
-    async fn start_spiral_replay(
-        &self,
-        command: StartSpiralReplayCommand,
-        trajectory: ReplayTrajectory,
-    ) -> Result<(), OperationError> {
-        let (_sample_hz, frames) = trajectory.into_parts();
-        let (episode, robot, _stream) = command.into_parts();
-        HardwareHandle::start_replay(
-            self,
-            ReplayRequest::timeline(
-                robot,
-                episode,
-                HardwareReplayTrajectory::new(frames, _sample_hz),
-            ),
-        )
-        .await
-        .map_err(OperationError::conflict)
-    }
-}
 
 impl RobotControlPort for HardwareHandle {
     async fn hold(&self, robot: &str) -> Result<(), String> {

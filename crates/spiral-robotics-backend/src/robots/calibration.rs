@@ -2,7 +2,9 @@
 
 use std::collections::BTreeMap;
 
+use spiral_robotics_api::robots::CalibrationReapplyResponse;
 use spiral_robotics_core::calibration::{Calibration, CalibrationInput, MotorSpec};
+use spiral_robotics_storage::episodes::ReappliedEpisodePositions;
 
 use crate::data::catalog_lease::CatalogLeaseToken;
 use spiral_robotics_core::OperationError;
@@ -66,26 +68,6 @@ pub(crate) struct CalibrationHistoryActivity {
     training_active: bool,
 }
 
-/// Changes committed directly to the historical rows in SpiralDB.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct ReappliedPositions {
-    updated_episode_ids: Vec<String>,
-    frames_updated: u64,
-    episodes_unchanged: u64,
-    episodes_skipped: u64,
-    warnings: Vec<String>,
-}
-
-/// Result presented to the delivery layer after SpiralDB is durable.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct ReapplyCalibrationOutput {
-    episodes_updated: u64,
-    frames_updated: u64,
-    episodes_unchanged: u64,
-    episodes_skipped: u64,
-    warnings: Vec<String>,
-}
-
 impl CalibrationHistoryActivity {
     pub(crate) fn new(
         recording: Option<String>,
@@ -100,45 +82,6 @@ impl CalibrationHistoryActivity {
     }
 }
 
-impl ReappliedPositions {
-    pub(crate) fn new(
-        updated_episode_ids: Vec<String>,
-        frames_updated: u64,
-        episodes_unchanged: u64,
-    ) -> Self {
-        Self {
-            updated_episode_ids,
-            frames_updated,
-            episodes_unchanged,
-            episodes_skipped: 0,
-            warnings: Vec::new(),
-        }
-    }
-    pub(crate) fn with_skipped(mut self, episodes_skipped: u64, warnings: Vec<String>) -> Self {
-        self.episodes_skipped = episodes_skipped;
-        self.warnings = warnings;
-        self
-    }
-}
-
-impl ReapplyCalibrationOutput {
-    pub(crate) const fn episodes_updated(&self) -> u64 {
-        self.episodes_updated
-    }
-    pub(crate) const fn frames_updated(&self) -> u64 {
-        self.frames_updated
-    }
-    pub(crate) const fn episodes_unchanged(&self) -> u64 {
-        self.episodes_unchanged
-    }
-    pub(crate) const fn episodes_skipped(&self) -> u64 {
-        self.episodes_skipped
-    }
-    pub(crate) fn warnings(&self) -> &[String] {
-        &self.warnings
-    }
-}
-
 /// Historical episode boundary for applying a robot's current calibration.
 pub(crate) trait CalibrationHistoryPort {
     fn reserve_catalog_mutation(&self) -> Result<Option<CatalogLeaseToken>, OperationError>;
@@ -150,7 +93,7 @@ pub(crate) trait CalibrationHistoryPort {
         &self,
         robot: String,
         calibration: Calibration,
-    ) -> Result<ReappliedPositions, OperationError>;
+    ) -> Result<ReappliedEpisodePositions, OperationError>;
 }
 
 struct CalibrationHistoryReservation<'a, P: CalibrationHistoryPort + ?Sized> {
@@ -276,7 +219,7 @@ impl<'a, P: CalibrationHistoryPort + ?Sized> CalibrationHistoryActions<'a, P> {
     pub(crate) async fn reapply(
         &self,
         robot: &str,
-    ) -> Result<ReapplyCalibrationOutput, OperationError> {
+    ) -> Result<CalibrationReapplyResponse, OperationError> {
         let Some(token) = self.port.reserve_catalog_mutation()? else {
             return Err(OperationError::Conflict(
                 "another recording or dataset mutation is active; wait for it to finish".to_owned(),
@@ -308,17 +251,19 @@ impl<'a, P: CalibrationHistoryPort + ?Sized> CalibrationHistoryActions<'a, P> {
                 "robot {robot:?} must have a saved calibration before positions can be reapplied"
             ))
         })?;
-        let updated = self
-            .port
-            .reapply_positions(robot.to_owned(), calibration)
-            .await?;
-        Ok(ReapplyCalibrationOutput {
-            episodes_updated: updated.updated_episode_ids.len() as u64,
-            frames_updated: updated.frames_updated,
-            episodes_unchanged: updated.episodes_unchanged,
-            episodes_skipped: updated.episodes_skipped,
-            warnings: updated.warnings,
-        })
+        let (updated_episode_ids, frames_updated, episodes_unchanged, episodes_skipped, warnings) =
+            self.port
+                .reapply_positions(robot.to_owned(), calibration)
+                .await?
+                .into_parts();
+        Ok(
+            CalibrationReapplyResponse::new(
+                updated_episode_ids.len() as u64,
+                frames_updated,
+                episodes_unchanged,
+            )
+            .with_skipped(episodes_skipped, warnings),
+        )
     }
 }
 
@@ -517,7 +462,7 @@ mod tests {
         lease: CatalogMutationLease,
         activity: CalibrationHistoryActivity,
         calibration: Option<Calibration>,
-        updated: ReappliedPositions,
+        updated: ReappliedEpisodePositions,
     }
 
     impl CalibrationHistoryPort for History {
@@ -543,7 +488,7 @@ mod tests {
             &self,
             _robot: String,
             _calibration: Calibration,
-        ) -> Result<ReappliedPositions, OperationError> {
+        ) -> Result<ReappliedEpisodePositions, OperationError> {
             Ok(self.updated.clone())
         }
     }
@@ -554,13 +499,12 @@ mod tests {
             lease: CatalogMutationLease::default(),
             activity: CalibrationHistoryActivity::default(),
             calibration: Some(calibration),
-            updated: ReappliedPositions {
-                updated_episode_ids: vec!["episode_000001".to_owned(), "episode_000002".to_owned()],
-                frames_updated: 120,
-                episodes_unchanged: 3,
-                episodes_skipped: 1,
-                warnings: vec!["one old take was incomplete".to_owned()],
-            },
+            updated: ReappliedEpisodePositions::new(
+                vec!["episode_000001".to_owned(), "episode_000002".to_owned()],
+                120,
+                3,
+            )
+            .with_skipped(1, vec!["one old take was incomplete".to_owned()]),
         }
     }
 
@@ -572,10 +516,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(output.episodes_updated, 2);
-        assert_eq!(output.frames_updated, 120);
-        assert_eq!(output.episodes_unchanged, 3);
-        assert_eq!(output.episodes_skipped, 1);
+        assert_eq!(output.episodes_updated(), 2);
+        assert_eq!(output.frames_updated(), 120);
+        assert_eq!(output.episodes_unchanged(), 3);
+        assert_eq!(output.episodes_skipped(), 1);
         assert!(!history.lease.is_held());
     }
 

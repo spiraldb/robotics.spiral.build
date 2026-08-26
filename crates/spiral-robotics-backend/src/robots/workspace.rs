@@ -186,9 +186,6 @@ impl RobotRecord {
         &self.id
     }
 
-    pub(crate) const fn config(&self) -> &RobotConfig {
-        &self.config
-    }
 }
 
 impl RobotRecord {

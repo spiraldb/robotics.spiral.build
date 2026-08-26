@@ -23,32 +23,6 @@ impl EpisodeActivity {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct JudgeEpisodeCommand {
-    episode: String,
-    discarded: bool,
-}
-
-impl JudgeEpisodeCommand {
-    pub(crate) fn new(episode: impl Into<String>, discarded: bool) -> Self {
-        Self {
-            episode: episode.into(),
-            discarded,
-        }
-    }
-
-    fn validated(mut self) -> Result<Self, OperationError> {
-        self.episode = EpisodeId::try_from(self.episode.as_str())
-            .map(String::from)
-            .map_err(|_| {
-                OperationError::invalid_input(
-                    "an episode ID must be 1 to 64 characters of letters, digits, '-' or '_'",
-                )
-            })?;
-        Ok(self)
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DeleteEpisodeCommand {
     episode: String,
 }
@@ -72,33 +46,10 @@ impl DeleteEpisodeCommand {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct EpisodeMutationResult {
-    episode: String,
-}
-
-impl EpisodeMutationResult {
-    pub(crate) fn new(episode: impl Into<String>) -> Self {
-        Self {
-            episode: episode.into(),
-        }
-    }
-
-    pub(crate) fn episode(&self) -> &str {
-        &self.episode
-    }
-}
-
 /// Consequences required by episode catalog actions.
 ///
 pub(crate) trait EpisodeCatalogPort {
     fn activity(&self) -> EpisodeActivity;
-    async fn judge_episode(
-        &self,
-        episode: String,
-        discarded: bool,
-    ) -> Result<EpisodeMutationResult, OperationError>;
-
     async fn delete_episode(&self, episode: String) -> Result<(), OperationError>;
 }
 
@@ -109,16 +60,6 @@ pub(crate) struct EpisodeCatalogActions<'a, P: ?Sized> {
 impl<'a, P: EpisodeCatalogPort + ?Sized> EpisodeCatalogActions<'a, P> {
     pub(crate) fn new(port: &'a P) -> Self {
         Self { port }
-    }
-
-    pub(crate) async fn judge(
-        &self,
-        command: JudgeEpisodeCommand,
-    ) -> Result<EpisodeMutationResult, OperationError> {
-        let command = command.validated()?;
-        self.port
-            .judge_episode(command.episode, command.discarded)
-            .await
     }
 
     pub(crate) async fn delete(&self, command: DeleteEpisodeCommand) -> Result<(), OperationError> {
@@ -147,25 +88,12 @@ mod tests {
     #[derive(Default)]
     struct FakeCatalog {
         activity: EpisodeActivity,
-        judged: Mutex<Vec<(String, bool)>>,
         deleted: Mutex<Vec<String>>,
     }
 
     impl EpisodeCatalogPort for FakeCatalog {
         fn activity(&self) -> EpisodeActivity {
             self.activity.clone()
-        }
-
-        async fn judge_episode(
-            &self,
-            episode: String,
-            discarded: bool,
-        ) -> Result<EpisodeMutationResult, OperationError> {
-            self.judged
-                .lock()
-                .expect("judgement calls")
-                .push((episode.clone(), discarded));
-            Ok(EpisodeMutationResult { episode })
         }
 
         async fn delete_episode(&self, episode: String) -> Result<(), OperationError> {
@@ -233,21 +161,4 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn judging_returns_the_adapter_output() {
-        let catalog = FakeCatalog::default();
-        let output = EpisodeCatalogActions::new(&catalog)
-            .judge(JudgeEpisodeCommand {
-                episode: "episode_000004".to_owned(),
-                discarded: true,
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(output.episode, "episode_000004");
-        assert_eq!(
-            catalog.judged.lock().unwrap().as_slice(),
-            [("episode_000004".to_owned(), true)]
-        );
-    }
 }

@@ -4,9 +4,9 @@
 //! remote job. This module owns effect ordering and compensation around those
 //! boundaries; runtime execution and checkpoint writes belong to the worker.
 
-use crate::training::service::{
-    StartTrainingCommand, TrainingReadiness, TrainingRun, TrainingRunHistory,
-    TrainingRunIdentity as StoredTrainingRunIdentity, TrainingRunPhase, TrainingRunState,
+use spiral_robotics_api::training::{
+    StartTrainingRequest, TrainingReadiness, TrainingRun, TrainingRunHistory,
+    TrainingRunIdentity as StoredTrainingRunIdentity, TrainingRunLifecycle, TrainingRunPhase,
     TrainingSource,
 };
 use spiral_robotics_core::OperationError;
@@ -23,7 +23,7 @@ pub(crate) struct TrainingRunIdentity {
 /// Immutable input handed to the remote-job adapter after admission.
 pub(crate) struct TrainingLaunch {
     run_id: String,
-    command: StartTrainingCommand,
+    command: StartTrainingRequest,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -34,7 +34,7 @@ pub(crate) struct RunStateChange {
 }
 
 impl TrainingLaunch {
-    pub(crate) fn new(run_id: impl Into<String>, command: StartTrainingCommand) -> Self {
+    pub(crate) fn new(run_id: impl Into<String>, command: StartTrainingRequest) -> Self {
         Self {
             run_id: run_id.into(),
             command,
@@ -45,7 +45,7 @@ impl TrainingLaunch {
         &self.run_id
     }
 
-    pub(crate) fn into_parts(self) -> (String, StartTrainingCommand) {
+    pub(crate) fn into_parts(self) -> (String, StartTrainingRequest) {
         (self.run_id, self.command)
     }
 }
@@ -120,7 +120,7 @@ pub(crate) trait TrainingCoordinatorPort: TrainingRunPort {
     fn resolve_training_source(&self, dataset_id: &str) -> Result<TrainingSource, OperationError>;
     async fn validate_training_query(
         &self,
-        command: &StartTrainingCommand,
+        command: &StartTrainingRequest,
     ) -> Result<(), OperationError>;
     fn next_training_identity(&self) -> TrainingRunIdentity;
     fn admit_training_run(&self, run: TrainingRun) -> Result<(), OperationError>;
@@ -128,7 +128,7 @@ pub(crate) trait TrainingCoordinatorPort: TrainingRunPort {
 
     async fn coordinate_training_start(
         &self,
-        command: StartTrainingCommand,
+        command: StartTrainingRequest,
     ) -> Result<TrainingRun, OperationError> {
         let readiness = self.refresh_training_readiness().await;
         if !readiness.ready() {
@@ -139,8 +139,8 @@ pub(crate) trait TrainingCoordinatorPort: TrainingRunPort {
         let identity = self.next_training_identity();
         let run = TrainingRun::new(
             StoredTrainingRunIdentity::new(identity.id.clone(), command.clone(), source),
-            TrainingRunState::new(TrainingRunPhase::Starting, 0, identity.created_ms)
-                .finished(None, Some(STARTING_MESSAGE.to_owned())),
+            TrainingRunLifecycle::new(TrainingRunPhase::Starting, 0, identity.created_ms)
+                .with_completion(None, Some(STARTING_MESSAGE.to_owned())),
             TrainingRunHistory::default(),
         );
         self.admit_training_run(run.clone())?;
@@ -159,13 +159,6 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use crate::training::service::{
-        ActTrainingInputSettings, ActTrainingLayerSettings, ActTrainingModelSettings,
-        ActTrainingSettings, TrainingCheckpointSettings, TrainingCommandIdentity,
-        TrainingDataSettings, TrainingExecutionSettings, TrainingOptimizerSettings, TrainingPolicy,
-        TrainingProgressSettings,
-    };
-
     struct FakePort {
         events: Mutex<Vec<String>>,
         readiness: TrainingReadiness,
@@ -239,7 +232,7 @@ mod tests {
         }
         async fn validate_training_query(
             &self,
-            _command: &StartTrainingCommand,
+            _command: &StartTrainingRequest,
         ) -> Result<(), OperationError> {
             self.push("validate");
             if self.fail == Some("validate") {
@@ -267,21 +260,32 @@ mod tests {
         }
     }
 
-    fn command() -> StartTrainingCommand {
-        let act = ActTrainingSettings::new(
-            ActTrainingInputSettings::new(vec!["front".to_owned()], (32, 32), "auto"),
-            ActTrainingModelSettings::new(64, 4, 1).with_feedforward(64, 1.0),
-            ActTrainingLayerSettings::new(1, 1, 1),
+    fn command() -> StartTrainingRequest {
+        let mut request =
+            StartTrainingRequest::for_dataset("run", "dataset", "SELECT * FROM episodes");
+        request.set_state_column("state");
+        request.set_action_column("action");
+        request.set_device("cpu");
+        request.set_steps(10);
+        request.set_batch_size(1);
+        request.set_validation_split(0.1);
+        request.set_learning_rate(0.001);
+        request.set_checkpoint_every(5);
+        request.set_chunk_size(4);
+        *request.act_mut() = spiral_robotics_api::training::ActTrainingConfig::new(
+            spiral_robotics_api::training::ActInputConfig::new(
+                vec!["front".to_owned()],
+                (32, 32),
+                "auto",
+            ),
+            spiral_robotics_api::training::ActArchitectureConfig::new(
+                64,
+                1,
+                spiral_robotics_api::training::ActLayerCounts::new(1, 1, 1),
+            ),
+            spiral_robotics_api::training::ActAttentionConfig::new(4, 64, 1.0),
         );
-        StartTrainingCommand::new(
-            TrainingCommandIdentity::new("run", "dataset", TrainingPolicy::Act),
-            TrainingDataSettings::new("SELECT * FROM episodes", "state", "action"),
-            TrainingExecutionSettings::new("cpu", TrainingProgressSettings::new(10, 1, 0.1), act)
-                .with_schedule(
-                    TrainingOptimizerSettings::new(0.001, 1),
-                    TrainingCheckpointSettings::new(5, 4),
-                ),
-        )
+        request
     }
 
     #[tokio::test]

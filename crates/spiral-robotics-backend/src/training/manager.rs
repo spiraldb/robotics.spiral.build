@@ -7,10 +7,9 @@ use std::time::Duration;
 
 use spiral_robotics_api::settings::ConnectionTestResponse;
 use spiral_robotics_api::training::{
-    ActArchitectureConfig, ActAttentionConfig, ActInputConfig, MAX_TRAINING_HISTORY_RUNS,
+    MAX_TRAINING_HISTORY_RUNS,
     StartTrainingRequest, TrainingCheckpoint, TrainingMetricPoint, TrainingMetricProgress,
-    TrainingReadiness, TrainingResourceMetrics, TrainingRun, TrainingRunHistory as ApiRunHistory,
-    TrainingRunIdentity as ApiRunIdentity, TrainingRunLifecycle, TrainingRunPhase,
+    TrainingReadiness, TrainingResourceMetrics, TrainingRun, TrainingRunPhase,
     TrainingRuntimeInfo, TrainingSnapshot, TrainingSource, TrainingStageTimings, TrainingUpdate,
 };
 use spiral_robotics_training::{
@@ -30,26 +29,6 @@ use crate::training::execution::{
     RunStateChange, TrainingCoordinatorPort, TrainingLaunch, TrainingRunIdentity, TrainingRunPort,
 };
 use crate::training::runs::{RunPhase as CapabilityRunPhase, RunRecord, TrainingRunRegistry};
-use crate::training::service::{
-    ActTrainingInputSettings as CapabilityActInputSettings,
-    ActTrainingLayerSettings as CapabilityActLayerSettings,
-    ActTrainingModelSettings as CapabilityActModelSettings,
-    ActTrainingSettings as CapabilityActTrainingSettings,
-    StartTrainingCommand as CapabilityStartTrainingCommand,
-    TrainingCheckpoint as CapabilityTrainingCheckpoint,
-    TrainingCheckpointSettings as CapabilityCheckpointSettings,
-    TrainingCommandIdentity as CapabilityCommandIdentity,
-    TrainingDataSettings as CapabilityDataSettings,
-    TrainingExecutionSettings as CapabilityExecutionSettings,
-    TrainingMetric as CapabilityTrainingMetric,
-    TrainingOptimizerSettings as CapabilityOptimizerSettings,
-    TrainingPolicy as CapabilityTrainingPolicy,
-    TrainingProgressSettings as CapabilityProgressSettings,
-    TrainingReadiness as CapabilityTrainingReadiness, TrainingRun as CapabilityTrainingRun,
-    TrainingRunHistory as CapabilityRunHistory, TrainingRunIdentity as CapabilityRunIdentity,
-    TrainingRunPhase as CapabilityTrainingRunPhase, TrainingRunState as CapabilityRunState,
-    TrainingSnapshot as CapabilityTrainingSnapshot, TrainingSource as CapabilityTrainingSource,
-};
 use spiral_robotics_core::OperationError;
 use spiral_robotics_storage::StorageManager;
 use spiral_robotics_storage::checkpoints::CheckpointStore;
@@ -256,7 +235,7 @@ impl TrainingManager {
             tokio::spawn(async move {
                 manager
                     .run_backend(
-                        TrainingLaunch::new(run.id(), run.config().clone().into()),
+                        TrainingLaunch::new(run.id(), run.config().clone()),
                         cancel,
                     )
                     .await;
@@ -311,9 +290,8 @@ impl TrainingManager {
     }
 
     pub(crate) async fn start(&self, request: StartTrainingRequest) -> Result<TrainingRun, String> {
-        self.coordinate_training_start(request.into())
+        self.coordinate_training_start(request)
             .await
-            .map(Into::into)
             .map_err(|error| error.to_string())
     }
 
@@ -386,8 +364,7 @@ impl TrainingManager {
     }
 
     async fn run_backend(&self, launch: TrainingLaunch, cancel: Arc<AtomicBool>) {
-        let (run_id, command) = launch.into_parts();
-        let request = StartTrainingRequest::from(command);
+        let (run_id, request) = launch.into_parts();
         let credentials = self.inner.storage.spiral_credentials();
         let spiral = SpiralJobConnection::new(
             SpiralServiceEndpoints::new(
@@ -619,10 +596,10 @@ impl TrainingManager {
         if !replay.configured
             && let Some(resolved) = snapshot.resolved()
         {
-            let resolved_request = StartTrainingRequest::from(
-                CapabilityStartTrainingCommand::from(request.clone())
-                    .with_camera_streams(resolved.camera_streams().to_vec()),
-            );
+            let mut resolved_request = request.clone();
+            resolved_request
+                .act_mut()
+                .set_camera_streams(resolved.camera_streams().to_vec());
             self.apply_update(
                 TrainingUpdate::RunConfigured {
                     run_id: run_id.to_owned(),
@@ -842,20 +819,20 @@ impl TrainingRunPort for TrainingManager {
 }
 
 impl TrainingCoordinatorPort for TrainingManager {
-    async fn refresh_training_readiness(&self) -> CapabilityTrainingReadiness {
-        self.refresh_readiness().await.into()
+    async fn refresh_training_readiness(&self) -> TrainingReadiness {
+        self.refresh_readiness().await
     }
 
     fn resolve_training_source(
         &self,
         dataset_id: &str,
-    ) -> Result<CapabilityTrainingSource, OperationError> {
-        Ok(CapabilityTrainingSource::new(dataset_id))
+    ) -> Result<TrainingSource, OperationError> {
+        Ok(TrainingSource::new(dataset_id))
     }
 
     async fn validate_training_query(
         &self,
-        _command: &CapabilityStartTrainingCommand,
+        _command: &StartTrainingRequest,
     ) -> Result<(), OperationError> {
         // The worker owns the Spiral connection and validates the immutable
         // query while resolving its data contract. Studio does not execute the
@@ -872,12 +849,12 @@ impl TrainingCoordinatorPort for TrainingManager {
         TrainingRunIdentity::new(id, created_ms)
     }
 
-    fn admit_training_run(&self, run: CapabilityTrainingRun) -> Result<(), OperationError> {
+    fn admit_training_run(&self, run: TrainingRun) -> Result<(), OperationError> {
         // Registry admission, durable snapshot replacement, and event delivery
         // share one lock, so concurrent starts cannot both become active.
         let mut snapshot = self.inner.snapshot.recover_lock();
         let (candidate, update) = self
-            .admitted_snapshot(&snapshot, run.into())
+            .admitted_snapshot(&snapshot, run)
             .map_err(OperationError::conflict)?;
         *snapshot = candidate;
         let _ = self.inner.updates.send(update);
@@ -996,306 +973,6 @@ impl RemotePollBackoff {
         }
         let exponent = consecutive_failures.saturating_sub(1).min(5) as u32;
         Duration::from_secs(1_u64 << exponent).min(Duration::from_secs(30))
-    }
-}
-
-impl From<StartTrainingRequest> for CapabilityStartTrainingCommand {
-    fn from(request: StartTrainingRequest) -> Self {
-        let identity = CapabilityCommandIdentity::new(
-            request.run_name(),
-            request.dataset_id(),
-            match request.policy() {
-                spiral_robotics_api::training::TrainingPolicy::Act => CapabilityTrainingPolicy::Act,
-            },
-        );
-        let data = CapabilityDataSettings::new(
-            request.sql(),
-            request.state_column(),
-            request.action_column(),
-        );
-        let act = CapabilityActTrainingSettings::new(
-            CapabilityActInputSettings::new(
-                request.act().camera_streams().to_vec(),
-                (request.act().image_width(), request.act().image_height()),
-                request.act().video_decoder(),
-            )
-            .with_pretrained_backbone(request.act().pretrained_backbone()),
-            CapabilityActModelSettings::new(
-                request.act().hidden_dim(),
-                request.act().latent_dim(),
-                request.act().attention_heads(),
-            )
-            .with_feedforward(request.act().feedforward_dim(), request.act().kl_weight()),
-            CapabilityActLayerSettings::new(
-                request.act().encoder_layers(),
-                request.act().vae_encoder_layers(),
-                request.act().decoder_layers(),
-            ),
-        );
-        let execution = CapabilityExecutionSettings::new(
-            request.device(),
-            CapabilityProgressSettings::new(
-                request.steps(),
-                request.batch_size(),
-                request.validation_split(),
-            ),
-            act,
-        )
-        .with_schedule(
-            CapabilityOptimizerSettings::new(request.learning_rate(), request.seed()),
-            CapabilityCheckpointSettings::new(request.checkpoint_every(), request.chunk_size()),
-        );
-        Self::new(identity, data, execution)
-    }
-}
-
-impl From<CapabilityStartTrainingCommand> for StartTrainingRequest {
-    fn from(command: CapabilityStartTrainingCommand) -> Self {
-        let selection = spiral_robotics_api::training::TrainingDataSelection::new(
-            command.run_name(),
-            command.dataset_id(),
-            command.query(),
-        )
-        .with_policy(match command.policy() {
-            CapabilityTrainingPolicy::Act => spiral_robotics_api::training::TrainingPolicy::Act,
-        })
-        .with_columns(command.state_column(), command.action_column())
-        .with_device(command.device());
-        let optimization = spiral_robotics_api::training::TrainingOptimizationConfig::new(
-            command.steps(),
-            command.batch_size(),
-            command.learning_rate(),
-        )
-        .with_validation_split(command.validation_split())
-        .with_checkpoint_schedule(command.checkpoint_every(), command.chunk_size())
-        .with_seed(command.seed());
-        let act = spiral_robotics_api::training::ActTrainingConfig::new(
-            ActInputConfig::new(
-                command.act().camera_streams().to_vec(),
-                (command.act().image_width(), command.act().image_height()),
-                command.act().video_decoder(),
-            )
-            .with_pretrained_backbone(command.act().pretrained_backbone()),
-            ActArchitectureConfig::new(
-                command.act().hidden_dim(),
-                command.act().latent_dim(),
-                spiral_robotics_api::training::ActLayerCounts::new(
-                    command.act().encoder_layers(),
-                    command.act().vae_encoder_layers(),
-                    command.act().decoder_layers(),
-                ),
-            ),
-            ActAttentionConfig::new(
-                command.act().attention_heads(),
-                command.act().feedforward_dim(),
-                command.act().kl_weight(),
-            ),
-        );
-        Self::new(selection, optimization, act)
-    }
-}
-
-impl From<CapabilityTrainingSource> for TrainingSource {
-    fn from(source: CapabilityTrainingSource) -> Self {
-        Self::new(source.dataset_id())
-    }
-}
-
-impl From<TrainingSource> for CapabilityTrainingSource {
-    fn from(source: TrainingSource) -> Self {
-        Self::new(source.dataset_id())
-    }
-}
-
-impl From<CapabilityTrainingRunPhase> for TrainingRunPhase {
-    fn from(phase: CapabilityTrainingRunPhase) -> Self {
-        match phase {
-            CapabilityTrainingRunPhase::Starting => Self::Starting,
-            CapabilityTrainingRunPhase::Running => Self::Running,
-            CapabilityTrainingRunPhase::Stopping => Self::Stopping,
-            CapabilityTrainingRunPhase::Completed => Self::Completed,
-            CapabilityTrainingRunPhase::Stopped => Self::Stopped,
-            CapabilityTrainingRunPhase::Failed => Self::Failed,
-        }
-    }
-}
-
-impl From<TrainingRunPhase> for CapabilityTrainingRunPhase {
-    fn from(phase: TrainingRunPhase) -> Self {
-        match phase {
-            TrainingRunPhase::Starting => Self::Starting,
-            TrainingRunPhase::Running => Self::Running,
-            TrainingRunPhase::Stopping => Self::Stopping,
-            TrainingRunPhase::Completed => Self::Completed,
-            TrainingRunPhase::Stopped => Self::Stopped,
-            TrainingRunPhase::Failed => Self::Failed,
-        }
-    }
-}
-
-impl From<TrainingReadiness> for CapabilityTrainingReadiness {
-    fn from(readiness: TrainingReadiness) -> Self {
-        Self::new(
-            readiness.ready(),
-            readiness.spiral_ready(),
-            readiness.summary(),
-        )
-        .with_runtime(readiness.runtime().map(|runtime| {
-            crate::training::service::TrainingRuntimeInfo::new(
-                runtime.id(),
-                runtime.display_name(),
-                runtime.runtime(),
-            )
-            .with_devices(runtime.devices().to_vec())
-        }))
-    }
-}
-
-impl From<CapabilityTrainingReadiness> for TrainingReadiness {
-    fn from(readiness: CapabilityTrainingReadiness) -> Self {
-        Self::new(
-            readiness.ready(),
-            readiness.spiral_ready(),
-            readiness.summary(),
-        )
-        .with_runtime(readiness.runtime().map(|runtime| {
-            TrainingRuntimeInfo::new(
-                runtime.id().to_owned(),
-                runtime.display_name().to_owned(),
-                runtime.runtime().to_owned(),
-            )
-            .with_devices(runtime.devices().to_vec())
-        }))
-    }
-}
-
-impl From<TrainingMetricPoint> for CapabilityTrainingMetric {
-    fn from(metric: TrainingMetricPoint) -> Self {
-        let progress = crate::training::service::TrainingMetricProgress::new(
-            metric.step(),
-            metric.train_loss(),
-            metric.validation_loss(),
-        )
-        .with_event(metric.learning_rate(), metric.event().map(str::to_owned));
-        let throughput = crate::training::service::TrainingMetricThroughput::new(
-            metric.transfer_bytes_per_second(),
-            metric.examples_per_second(),
-        );
-        let resources = crate::training::service::TrainingMetricResources::new(
-            metric.cpu_percent(),
-            metric.gpu_percent(),
-            metric.memory_bytes(),
-        );
-        let timings = crate::training::service::TrainingMetricTimings::new(
-            metric.loader_ms(),
-            metric.arrow_encode_ms(),
-            metric.upload_ms(),
-        )
-        .with_execution(metric.device_copy_ms(), metric.model_ms())
-        .elapsed(metric.elapsed_seconds());
-        Self::new(progress, throughput, resources).with_timings(timings)
-    }
-}
-
-impl From<CapabilityTrainingMetric> for TrainingMetricPoint {
-    fn from(metric: CapabilityTrainingMetric) -> Self {
-        Self::new(
-            TrainingMetricProgress::new(metric.step(), metric.train_loss(), metric.learning_rate())
-                .with_validation_loss(metric.validation_loss())
-                .with_timeline(metric.elapsed_seconds(), metric.event().map(str::to_owned)),
-            TrainingResourceMetrics::new(
-                metric.transfer_bytes_per_second(),
-                metric.examples_per_second(),
-            )
-            .with_utilization(metric.cpu_percent(), metric.gpu_percent())
-            .with_memory_bytes(metric.memory_bytes()),
-            TrainingStageTimings::new(
-                metric.loader_ms(),
-                metric.batch_encode_ms(),
-                metric.upload_ms(),
-            )
-            .with_runtime(metric.device_copy_ms(), metric.model_ms()),
-        )
-    }
-}
-
-impl From<CapabilityTrainingCheckpoint> for TrainingCheckpoint {
-    fn from(checkpoint: CapabilityTrainingCheckpoint) -> Self {
-        Self::new(checkpoint.step(), checkpoint.created_ms())
-            .with_validation_loss(checkpoint.validation_loss())
-            .with_artifact(checkpoint.byte_size(), checkpoint.inference_ready())
-            .with_rollout(
-                checkpoint.recommended_action_steps(),
-                checkpoint.sample_hz(),
-            )
-    }
-}
-
-impl From<TrainingCheckpoint> for CapabilityTrainingCheckpoint {
-    fn from(checkpoint: TrainingCheckpoint) -> Self {
-        Self::new(checkpoint.step(), checkpoint.created_ms())
-            .with_validation_loss(checkpoint.validation_loss())
-            .with_artifact(checkpoint.byte_size(), checkpoint.inference_ready())
-            .with_rollout(
-                checkpoint.recommended_action_steps(),
-                checkpoint.sample_hz(),
-            )
-    }
-}
-
-impl From<CapabilityTrainingRun> for TrainingRun {
-    fn from(run: CapabilityTrainingRun) -> Self {
-        Self::new(
-            ApiRunIdentity::new(
-                run.id(),
-                run.config().clone().into(),
-                run.source().clone().into(),
-            ),
-            TrainingRunLifecycle::new(run.phase().into(), run.current_step(), run.started_ms())
-                .with_completion(run.finished_ms(), run.message().map(str::to_owned)),
-            ApiRunHistory::new(
-                run.metrics().iter().cloned().map(Into::into).collect(),
-                run.checkpoints().iter().cloned().map(Into::into).collect(),
-                run.logs().to_vec(),
-            ),
-        )
-    }
-}
-
-impl From<TrainingRun> for CapabilityTrainingRun {
-    fn from(run: TrainingRun) -> Self {
-        Self::new(
-            CapabilityRunIdentity::new(
-                run.id(),
-                run.config().clone().into(),
-                run.source().clone().into(),
-            ),
-            CapabilityRunState::new(run.phase().into(), run.current_step(), run.started_ms())
-                .finished(run.finished_ms(), run.message().map(str::to_owned)),
-            CapabilityRunHistory::new(
-                run.metrics().iter().cloned().map(Into::into).collect(),
-                run.checkpoints().iter().cloned().map(Into::into).collect(),
-                run.logs().to_vec(),
-            ),
-        )
-    }
-}
-
-impl From<TrainingSnapshot> for CapabilityTrainingSnapshot {
-    fn from(snapshot: TrainingSnapshot) -> Self {
-        Self::new(
-            snapshot.readiness().clone().into(),
-            snapshot.runs().iter().cloned().map(Into::into).collect(),
-        )
-    }
-}
-
-impl From<CapabilityTrainingSnapshot> for TrainingSnapshot {
-    fn from(snapshot: CapabilityTrainingSnapshot) -> Self {
-        Self::new(
-            snapshot.readiness().clone().into(),
-            snapshot.runs().iter().cloned().map(Into::into).collect(),
-        )
     }
 }
 
