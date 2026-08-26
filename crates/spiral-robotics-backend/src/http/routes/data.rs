@@ -121,10 +121,10 @@ impl AppState {
             token,
         };
         state.require_import_idle("a dataset")?;
-        let storage = state.storage().clone();
-        tokio::task::spawn_blocking(move || storage.import_huggingface_dataset(inspection))
+        state
+            .storage()
+            .import_huggingface_dataset(inspection)
             .await
-            .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
             .map(Json)
             .map_err(Failure::import)
     }
@@ -150,10 +150,10 @@ struct EpisodeTransferQuery {
 
 impl AppState {
     async fn export_project(State(state): State<Self>) -> Result<Response, Failure> {
-        let storage = state.storage().clone();
-        let bytes = tokio::task::spawn_blocking(move || storage.export_project_bundle())
+        let bytes = state
+            .storage()
+            .export_project_bundle()
             .await
-            .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
             .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error))?;
         Response::builder()
             .status(StatusCode::OK)
@@ -196,34 +196,39 @@ impl AppState {
         }
         state.require_project_import_idle()?;
         state.disconnect_all_robots().await?;
-        let storage = state.storage().clone();
-        let summary = tokio::task::spawn_blocking(move || storage.import_project_bundle(&body))
+        let summary = state
+            .storage()
+            .import_project_bundle(&body)
             .await
-            .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
             .map_err(Failure::import)?;
         state.auto_connect_saved_robots().await;
         state.preferences().replace(
             state
                 .storage()
                 .load_studio_preferences()
+                .await
                 .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error))?,
         );
         state
             .training()
             .reload_from_storage()
+            .await
             .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error))?;
         state.training().refresh_readiness().await;
         state
             .rollout()
             .reload_from_storage()
+            .await
             .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error))?;
         state
             .workflow()
             .reload_from_storage()
+            .await
             .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error))?;
         state
             .workflow_agent()
             .reload_from_storage()
+            .await
             .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error))?;
         Ok(Json(summary))
     }
@@ -256,13 +261,12 @@ impl AppState {
                 "choose a .spiral-episodes file to import",
             ));
         }
-        let storage = state.storage().clone();
         let dataset_id = query.dataset_id;
-        let summary =
-            tokio::task::spawn_blocking(move || storage.import_episode_bundle(&dataset_id, &body))
-                .await
-                .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
-                .map_err(Failure::import)?;
+        let summary = state
+            .storage()
+            .import_episode_bundle(&dataset_id, &body)
+            .await
+            .map_err(Failure::import)?;
         Ok(Json(summary))
     }
 }
@@ -702,7 +706,7 @@ impl AppState {
             .snapshot()
             .phase()
             .active();
-            let current_robot_ids = state.workspace().try_list().ok().map(|records| {
+            let current_robot_ids = state.workspace().try_list().await.ok().map(|records| {
                 records
                     .into_iter()
                     .map(|record| record.id().to_owned())

@@ -8,13 +8,12 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use crate::schema::{self as spiral, Table, column as db};
 use arrow_array::{
     Array as _, ArrayRef, BinaryArray, BinaryViewArray, FixedSizeListArray, Int32Array, Int64Array,
-    LargeBinaryArray, LargeListArray, LargeStringArray, ListArray, RecordBatch,
-    RecordBatchIterator, StringArray, StringViewArray, StructArray, UInt8Array, UInt32Array,
-    UInt64Array,
+    LargeBinaryArray, LargeListArray, LargeStringArray, ListArray, RecordBatch, StringArray,
+    StringViewArray, StructArray, UInt8Array, UInt32Array, UInt64Array,
 };
 use arrow_json::writer::{JsonArray, WriterBuilder};
 use arrow_schema::extension::EXTENSION_TYPE_NAME_KEY;
-use arrow_schema::{ArrowError, DataType, Field, Fields, Schema};
+use arrow_schema::{DataType, Field, Fields, Schema};
 use base64::Engine as _;
 use futures::StreamExt as _;
 use image::codecs::jpeg::JpegEncoder;
@@ -38,7 +37,7 @@ use crate::episode_schema::{
     JointSampleRows, SpiralEpisodeEncoder, VideoStreamProperties, VideoStreamRow, VideoStreamRows,
 };
 use crate::episodes::FullEpisode;
-use crate::project_store::{ProjectStore, StorageConnection};
+use crate::project_store::{ProjectConnection, ProjectStore};
 use crate::settings::{SpiralConnectionSettings, StoredStudioPreferences};
 use crate::sql::{ReadOnlyQueryMode, SpiralSql};
 use crate::video::{VideoAsset, VideoAssetKey, VideoByteRange};
@@ -177,15 +176,17 @@ impl JsonDocumentWrite {
         Self { target, json }
     }
 
-    fn save(self, connection: &mut StorageConnection) -> Result<(), String> {
+    async fn save(self, connection: &mut ProjectConnection) -> Result<(), String> {
         let Self { target, json } = self;
-        if connection.table_exists(&target.relation)? {
-            connection.execute_delete_sql(&format!(
-                "DELETE FROM {} WHERE {} = {}",
-                target.relation,
-                db::RUN_ID,
-                SpiralSql::string_literal(&target.key)
-            ))?;
+        if connection.table_exists(&target.relation).await? {
+            connection
+                .execute_delete_sql(&format!(
+                    "DELETE FROM {} WHERE {} = {}",
+                    target.relation,
+                    db::RUN_ID,
+                    SpiralSql::string_literal(&target.key)
+                ))
+                .await?;
         }
         let schema = Arc::new(Schema::new(vec![
             Field::new(db::RUN_ID, DataType::Utf8, false),
@@ -201,7 +202,7 @@ impl JsonDocumentWrite {
             ],
         )
         .map_err(|error| format!("building {} snapshot batch: {error}", target.table))?;
-        connection.ingest_batch(&target.relation, batch)
+        connection.ingest_batch(&target.relation, batch).await
     }
 }
 
@@ -328,18 +329,19 @@ impl StorageManager {
     /// Commit a complete episode transaction directly to SpiralDB. This is
     /// also used once more when finalized camera segments arrive after the
     /// joint writer has inserted the episode's initial catalog row.
-    pub fn commit_episode_blocking(
+    pub async fn commit_episode(
         &self,
         episode: &FullEpisode,
         videos: &[VideoAsset],
     ) -> Result<(), String> {
         let namespace = self.project_store.namespace().to_owned();
-        self.project_store.run_blocking(|connection| {
-            EpisodeReplacement::new(&namespace, episode, videos).save(connection)
-        })
+        let mut connection = self.project_store.connect().await?;
+        EpisodeReplacement::new(&namespace, episode, videos)
+            .save(&mut connection)
+            .await
     }
 
-    pub fn load_training_snapshot<T>(&self) -> Result<T, String>
+    pub async fn load_training_snapshot<T>(&self) -> Result<T, String>
     where
         T: DeserializeOwned + Default + Serialize,
     {
@@ -347,16 +349,18 @@ impl StorageManager {
             return Ok(T::default());
         }
         self.load_json_document(Table::TrainingRuns, "training_history")
+            .await
     }
 
-    pub fn save_training_snapshot<T: Serialize>(&self, value: &T) -> Result<(), String> {
+    pub async fn save_training_snapshot<T: Serialize>(&self, value: &T) -> Result<(), String> {
         self.save_json_document(
             JsonDocumentKey::new(Table::TrainingRuns, "training_history"),
             value,
         )
+        .await
     }
 
-    pub fn load_rollout_snapshot<T>(&self) -> Result<T, String>
+    pub async fn load_rollout_snapshot<T>(&self) -> Result<T, String>
     where
         T: DeserializeOwned + Default,
     {
@@ -364,16 +368,18 @@ impl StorageManager {
             return Ok(T::default());
         }
         self.load_json_document(Table::RolloutRuns, "rollout_history")
+            .await
     }
 
-    pub fn save_rollout_snapshot<T: Serialize>(&self, value: &T) -> Result<(), String> {
+    pub async fn save_rollout_snapshot<T: Serialize>(&self, value: &T) -> Result<(), String> {
         self.save_json_document(
             JsonDocumentKey::new(Table::RolloutRuns, "rollout_history"),
             value,
         )
+        .await
     }
 
-    pub fn load_workflow_document<T>(&self) -> Result<T, String>
+    pub async fn load_workflow_document<T>(&self) -> Result<T, String>
     where
         T: DeserializeOwned + Default + Serialize,
     {
@@ -381,72 +387,75 @@ impl StorageManager {
             return Ok(T::default());
         }
         self.load_json_document_resetting_incompatible(Table::WorkflowRuns, "default")
+            .await
     }
 
-    pub fn save_workflow_document<T: Serialize>(&self, value: &T) -> Result<(), String> {
+    pub async fn save_workflow_document<T: Serialize>(&self, value: &T) -> Result<(), String> {
         self.save_json_document(JsonDocumentKey::new(Table::WorkflowRuns, "default"), value)
+            .await
     }
 
-    pub fn load_workflow_agent_snapshot_json(&self) -> Result<Option<String>, String> {
+    pub async fn load_workflow_agent_snapshot_json(&self) -> Result<Option<String>, String> {
         if !self.is_configured() {
             return Ok(None);
         }
         self.load_json_document_raw_optional(Table::WorkflowRuns, "agent:default")
+            .await
     }
 
-    pub fn save_workflow_agent_document<T: Serialize>(&self, value: &T) -> Result<(), String> {
+    pub async fn save_workflow_agent_document<T: Serialize>(
+        &self,
+        value: &T,
+    ) -> Result<(), String> {
         let namespace = self.project_store.namespace().to_owned();
         let relation = Table::WorkflowRuns.qualified_name(&namespace);
         let json = serde_json::to_string(value)
             .map_err(|error| format!("encoding Workflow runs snapshot: {error}"))?;
-        self.project_store
-            .run_exclusive_blocking(move |connection| {
-                connection.ensure_dataset_namespace(&namespace)?;
-                connection.set_autocommit(false)?;
-                let mutation = JsonDocumentWrite::new(
-                    JsonDocumentTarget::new(Table::WorkflowRuns, &relation, "agent:default"),
-                    json,
-                )
-                .save(connection)
-                .and_then(|()| connection.commit());
-                match mutation {
-                    Ok(()) => match connection.set_autocommit(true) {
-                        Ok(()) => Ok(()),
-                        Err(_) => {
-                            // The document is committed. Discard the connection so
-                            // manual-commit state can never leak into the pool, but
-                            // do not tell the manager that durable state is old.
-                            connection.discard();
-                            Ok(())
-                        }
-                    },
-                    Err(error) => {
-                        let rollback = connection.rollback();
-                        let restore = connection.set_autocommit(true);
-                        let mut detail = error;
-                        if let Err(rollback) = rollback {
-                            detail.push_str(&format!(
-                                "; rolling back Assistant history failed: {rollback}"
-                            ));
-                        }
-                        if let Err(restore) = restore {
-                            detail.push_str(&format!(
-                                "; restoring database autocommit failed: {restore}"
-                            ));
-                        }
-                        // Returning an error prevents run_exclusive_blocking from
-                        // checking this uncertain connection back into the pool.
-                        Err(detail)
-                    }
+        let mut connection = self.project_store.connect_exclusive().await?;
+        connection.ensure_dataset_namespace(&namespace).await?;
+        connection.set_autocommit(false).await?;
+        let mutation = match JsonDocumentWrite::new(
+            JsonDocumentTarget::new(Table::WorkflowRuns, &relation, "agent:default"),
+            json,
+        )
+        .save(&mut connection)
+        .await
+        {
+            Ok(()) => connection.commit().await,
+            Err(error) => Err(error),
+        };
+        match mutation {
+            Ok(()) => match connection.set_autocommit(true).await {
+                Ok(()) => Ok(()),
+                Err(_) => {
+                    connection.discard();
+                    Ok(())
                 }
-            })
+            },
+            Err(error) => {
+                let rollback = connection.rollback().await;
+                let restore = connection.set_autocommit(true).await;
+                let mut detail = error;
+                if let Err(rollback) = rollback {
+                    detail.push_str(&format!(
+                        "; rolling back Assistant history failed: {rollback}"
+                    ));
+                }
+                if let Err(restore) = restore {
+                    detail.push_str(&format!(
+                        "; restoring database autocommit failed: {restore}"
+                    ));
+                }
+                Err(detail)
+            }
+        }
     }
 
     /// Replace an incompatible prototype Assistant document only when the
     /// durable raw snapshot is still exactly the one Studio inspected. The
     /// compare and replacement share one catalog transaction, so a newer
     /// document from another Studio cannot be overwritten.
-    pub fn reset_workflow_agent_document<T: Serialize>(
+    pub async fn reset_workflow_agent_document<T: Serialize>(
         &self,
         expected_raw_snapshot: &str,
         value: &T,
@@ -456,61 +465,63 @@ impl StorageManager {
         let expected_digest = Sha256::digest(expected_raw_snapshot.as_bytes()).to_vec();
         let json = serde_json::to_string(value)
             .map_err(|error| format!("encoding reset Assistant history: {error}"))?;
-        self.project_store.run_exclusive_blocking(move |connection| {
-            connection.set_autocommit(false)?;
-            let mutation = (|| {
-                let current = connection
-                    .load_json_document_raw_optional(&relation, "agent:default")?
-                .ok_or_else(|| {
-                    "Assistant history changed before reset. Reload the current project."
-                        .to_owned()
-                })?;
-                if Sha256::digest(current.as_bytes()).as_slice() != expected_digest.as_slice() {
-                    return Err(
-                        "Assistant history changed before reset. Reload the current project."
-                            .to_owned(),
-                    );
-                }
-                JsonDocumentWrite::new(
-                    JsonDocumentTarget::new(
-                    Table::WorkflowRuns,
-                    &relation,
-                    "agent:default",
-                    ),
+        let mut connection = self.project_store.connect_exclusive().await?;
+        connection.set_autocommit(false).await?;
+        let mutation = match connection
+            .load_json_document_raw_optional(&relation, "agent:default")
+            .await?
+        {
+            Some(current)
+                if Sha256::digest(current.as_bytes()).as_slice() == expected_digest.as_slice() =>
+            {
+                match JsonDocumentWrite::new(
+                    JsonDocumentTarget::new(Table::WorkflowRuns, &relation, "agent:default"),
                     json,
                 )
-                .save(connection)?;
-                connection.commit()
-            })();
-            let rollback = mutation.is_err().then(|| connection.rollback());
-            if rollback.as_ref().is_some_and(Result::is_err) {
-                connection.discard();
+                .save(&mut connection)
+                .await
+                {
+                    Ok(()) => connection.commit().await,
+                    Err(error) => Err(error),
+                }
             }
-            let restore = connection.set_autocommit(true);
-            if restore.is_err() {
-                connection.discard();
-            }
-            match (mutation, rollback, restore) {
-                (Ok(()), None, Ok(())) | (Ok(()), None, Err(_)) => Ok(()),
-                (Err(error), Some(Ok(())), Ok(())) => Err(error),
-                (Err(error), Some(rollback), restore) => Err(format!(
-                    "{error}; Assistant reset cleanup was uncertain (rollback: {rollback:?}, autocommit: {restore:?})"
-                )),
-                _ => unreachable!("recovery rollback follows the mutation outcome"),
-            }
-        })
+            _ => Err(
+                "Assistant history changed before reset. Reload the current project.".to_owned(),
+            ),
+        };
+        let rollback = if mutation.is_err() {
+            Some(connection.rollback().await)
+        } else {
+            None
+        };
+        if rollback.as_ref().is_some_and(Result::is_err) {
+            connection.discard();
+        }
+        let restore = connection.set_autocommit(true).await;
+        if restore.is_err() {
+            connection.discard();
+        }
+        match (mutation, rollback, restore) {
+            (Ok(()), None, Ok(())) | (Ok(()), None, Err(_)) => Ok(()),
+            (Err(error), Some(Ok(())), Ok(())) => Err(error),
+            (Err(error), Some(rollback), restore) => Err(format!(
+                "{error}; Assistant reset cleanup was uncertain (rollback: {rollback:?}, autocommit: {restore:?})"
+            )),
+            _ => unreachable!("recovery rollback follows the mutation outcome"),
+        }
     }
 
-    pub fn load_studio_preferences(&self) -> Result<StoredStudioPreferences, String> {
+    pub async fn load_studio_preferences(&self) -> Result<StoredStudioPreferences, String> {
         if !self.is_configured() {
             return Ok(StoredStudioPreferences::default());
         }
         let relation = Table::StudioSettings.qualified_name(self.project_store.namespace());
-        self.project_store.run_blocking(move |connection| {
-            if !connection.table_exists(&relation)? {
-                return Ok(StoredStudioPreferences::default());
-            }
-            let result = connection.run_query(
+        let mut connection = self.project_store.connect().await?;
+        if !connection.table_exists(&relation).await? {
+            return Ok(StoredStudioPreferences::default());
+        }
+        let result = connection
+            .run_query(
                 &format!(
                     "SELECT {} FROM {relation} WHERE {} = 'preferences' ORDER BY {} DESC LIMIT 1",
                     db::VALUE_JSON,
@@ -518,21 +529,20 @@ impl StorageManager {
                     db::UPDATED_MS,
                 ),
                 1,
-            )?;
-            let Some(value) = result
-                .rows()
-                .first()
-                .and_then(|row| row.get(db::VALUE_JSON))
-                .and_then(JsonValue::as_str)
-            else {
-                return Ok(StoredStudioPreferences::default());
-            };
-            serde_json::from_str(value)
-                .map_err(|error| format!("decoding Studio preferences: {error}"))
-        })
+            )
+            .await?;
+        let Some(value) = result
+            .rows()
+            .first()
+            .and_then(|row| row.get(db::VALUE_JSON))
+            .and_then(JsonValue::as_str)
+        else {
+            return Ok(StoredStudioPreferences::default());
+        };
+        serde_json::from_str(value).map_err(|error| format!("decoding Studio preferences: {error}"))
     }
 
-    pub fn save_studio_preferences(
+    pub async fn save_studio_preferences(
         &self,
         preferences: &StoredStudioPreferences,
     ) -> Result<(), String> {
@@ -540,95 +550,99 @@ impl StorageManager {
         let relation = Table::StudioSettings.qualified_name(&namespace);
         let json = serde_json::to_string(preferences)
             .map_err(|error| format!("encoding Studio preferences: {error}"))?;
-        self.project_store.run_blocking(move |connection| {
-            connection.ensure_dataset_namespace(&namespace)?;
-            connection.ensure_video_assets_blob_relation(&namespace)?;
-            if connection.table_exists(&relation)? {
-                connection.execute_delete_sql(&format!(
+        let mut connection = self.project_store.connect().await?;
+        connection.ensure_dataset_namespace(&namespace).await?;
+        connection
+            .ensure_video_assets_blob_relation(&namespace)
+            .await?;
+        if connection.table_exists(&relation).await? {
+            connection
+                .execute_delete_sql(&format!(
                     "DELETE FROM {relation} WHERE {} = 'preferences'",
                     db::KEY
-                ))?;
-            }
-            let schema = Arc::new(Schema::new(vec![
-                Field::new(db::KEY, DataType::Utf8, false),
-                Field::new(db::VALUE_JSON, DataType::Utf8, false),
-                Field::new(db::UPDATED_MS, DataType::Int64, false),
-            ]));
-            let batch = RecordBatch::try_new(
-                schema,
-                vec![
-                    Arc::new(StringArray::from(vec!["preferences"])) as ArrayRef,
-                    Arc::new(StringArray::from(vec![json])) as ArrayRef,
-                    Arc::new(Int64Array::from(vec![StorageClock::unix_millis()])) as ArrayRef,
-                ],
-            )
-            .map_err(|error| format!("building Studio preferences batch: {error}"))?;
-            connection.ingest_batch(&relation, batch)
-        })
+                ))
+                .await?;
+        }
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(db::KEY, DataType::Utf8, false),
+            Field::new(db::VALUE_JSON, DataType::Utf8, false),
+            Field::new(db::UPDATED_MS, DataType::Int64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["preferences"])) as ArrayRef,
+                Arc::new(StringArray::from(vec![json])) as ArrayRef,
+                Arc::new(Int64Array::from(vec![StorageClock::unix_millis()])) as ArrayRef,
+            ],
+        )
+        .map_err(|error| format!("building Studio preferences batch: {error}"))?;
+        connection.ingest_batch(&relation, batch).await
     }
 
-    pub fn export_project_bundle(&self) -> Result<Vec<u8>, String> {
+    pub async fn export_project_bundle(&self) -> Result<Vec<u8>, String> {
         let namespace = self.project_store.namespace().to_owned();
-        self.project_store
-            .run_exclusive_blocking(move |connection| {
-                bundle::ProjectBundle.export(connection, &namespace)
-            })
+        let mut connection = self.project_store.connect_exclusive().await?;
+        bundle::ProjectBundle
+            .export(&mut connection, &namespace)
+            .await
     }
 
-    pub fn import_project_bundle(
+    pub async fn import_project_bundle(
         &self,
         bytes: &[u8],
     ) -> Result<spiral_robotics_api::datasets::ProjectImportSummary, String> {
         let namespace = self.project_store.namespace().to_owned();
-        self.project_store
-            .run_exclusive_blocking(move |connection| {
-                bundle::ProjectBundle
-                    .import(connection, bundle::BundleSource::new(&namespace, bytes))
-            })
+        let mut connection = self.project_store.connect_exclusive().await?;
+        bundle::ProjectBundle
+            .import(
+                &mut connection,
+                bundle::BundleSource::new(&namespace, bytes),
+            )
+            .await
     }
 
-    pub fn export_episode_bundle(&self, dataset_id: &str) -> Result<Vec<u8>, String> {
+    pub async fn export_episode_bundle(&self, dataset_id: &str) -> Result<Vec<u8>, String> {
         let namespace = self.project_store.namespace().to_owned();
-        let dataset_id = dataset_id.to_owned();
-        self.project_store
-            .run_exclusive_blocking(move |connection| {
-                bundle::EpisodeBundle.export(
-                    connection,
-                    bundle::EpisodeBundleSelection::new(&namespace, &dataset_id),
-                )
-            })
+        let mut connection = self.project_store.connect_exclusive().await?;
+        bundle::EpisodeBundle
+            .export(
+                &mut connection,
+                bundle::EpisodeBundleSelection::new(&namespace, dataset_id),
+            )
+            .await
     }
 
-    pub fn import_episode_bundle(
+    pub async fn import_episode_bundle(
         &self,
         dataset_id: &str,
         bytes: &[u8],
     ) -> Result<spiral_robotics_api::datasets::EpisodeImportSummary, String> {
         let namespace = self.project_store.namespace().to_owned();
-        let dataset_id = dataset_id.to_owned();
-        self.project_store
-            .run_exclusive_blocking(move |connection| {
-                bundle::EpisodeBundle.import(
-                    connection,
-                    bundle::EpisodeBundleImport::new(
-                        bundle::EpisodeBundleSelection::new(&namespace, &dataset_id),
-                        bytes,
-                    ),
-                )
-            })
+        let mut connection = self.project_store.connect_exclusive().await?;
+        bundle::EpisodeBundle
+            .import(
+                &mut connection,
+                bundle::EpisodeBundleImport::new(
+                    bundle::EpisodeBundleSelection::new(&namespace, dataset_id),
+                    bytes,
+                ),
+            )
+            .await
     }
 
-    fn load_json_document<T>(&self, table: Table, key: &str) -> Result<T, String>
+    async fn load_json_document<T>(&self, table: Table, key: &str) -> Result<T, String>
     where
         T: DeserializeOwned + Default,
     {
         let relation = table.qualified_name(self.project_store.namespace());
         let key = SpiralSql::string_literal(key);
-        self.project_store.run_blocking(move |connection| {
-            if !connection.table_exists(&relation)? {
-                return Ok(T::default());
-            }
-            let result = connection.run_query(
+        let mut connection = self.project_store.connect().await?;
+        if !connection.table_exists(&relation).await? {
+            return Ok(T::default());
+        }
+        let result = connection
+            .run_query(
                 &format!(
                     "SELECT {} FROM {relation} WHERE {} = {key} ORDER BY {} DESC LIMIT 1",
                     db::SNAPSHOT_JSON,
@@ -636,36 +650,36 @@ impl StorageManager {
                     db::UPDATED_MS,
                 ),
                 1,
-            )?;
-            let Some(value) = result
-                .rows()
-                .first()
-                .and_then(|row| row.get(db::SNAPSHOT_JSON))
-                .and_then(JsonValue::as_str)
-            else {
-                return Ok(T::default());
-            };
-            serde_json::from_str(value)
-                .map_err(|error| format!("decoding {table} snapshot: {error}"))
-        })
+            )
+            .await?;
+        let Some(value) = result
+            .rows()
+            .first()
+            .and_then(|row| row.get(db::SNAPSHOT_JSON))
+            .and_then(JsonValue::as_str)
+        else {
+            return Ok(T::default());
+        };
+        serde_json::from_str(value).map_err(|error| format!("decoding {table} snapshot: {error}"))
     }
 
-    fn load_json_document_raw_optional(
+    async fn load_json_document_raw_optional(
         &self,
         table: Table,
         key: &str,
     ) -> Result<Option<String>, String> {
         let relation = table.qualified_name(self.project_store.namespace());
         let key = key.to_owned();
-        self.project_store.run_blocking(move |connection| {
-            connection.load_json_document_raw_optional(&relation, &key)
-        })
+        let mut connection = self.project_store.connect().await?;
+        connection
+            .load_json_document_raw_optional(&relation, &key)
+            .await
     }
 
     /// Workflow wire shapes are prototype-owned rather than a compatibility
     /// surface. Replace an obsolete snapshot with the current empty document
     /// in one transaction so every later hydration sees the same truth.
-    fn load_json_document_resetting_incompatible<T>(
+    async fn load_json_document_resetting_incompatible<T>(
         &self,
         table: Table,
         key: &str,
@@ -675,11 +689,13 @@ impl StorageManager {
     {
         let relation = table.qualified_name(self.project_store.namespace());
         let key = key.to_owned();
-        self.project_store.run_exclusive_blocking(move |connection| {
-            if !connection.table_exists(&relation)? {
-                return Ok(T::default());
-            }
-            let result = connection.run_query(&format!(
+        let mut connection = self.project_store.connect_exclusive().await?;
+        if !connection.table_exists(&relation).await? {
+            return Ok(T::default());
+        }
+        let result = connection
+            .run_query(
+                &format!(
                     "SELECT {} FROM {relation} WHERE {} = {} ORDER BY {} DESC LIMIT 1",
                     db::SNAPSHOT_JSON,
                     db::RUN_ID,
@@ -687,50 +703,50 @@ impl StorageManager {
                     db::UPDATED_MS,
                 ),
                 1,
-            )?;
-            let Some(value) = result
-                .rows()
-                .first()
-                .and_then(|row| row.get(db::SNAPSHOT_JSON))
-                .and_then(JsonValue::as_str)
-            else {
-                return Ok(T::default());
-            };
-            let (document, incompatible) = value.decode_json_or_default();
-            if !incompatible {
-                return Ok(document);
-            }
+            )
+            .await?;
+        let Some(value) = result
+            .rows()
+            .first()
+            .and_then(|row| row.get(db::SNAPSHOT_JSON))
+            .and_then(JsonValue::as_str)
+        else {
+            return Ok(T::default());
+        };
+        let (document, incompatible) = value.decode_json_or_default();
+        if !incompatible {
+            return Ok(document);
+        }
 
-            let json = serde_json::to_string(&document)
-                .map_err(|error| format!("encoding reset {table} snapshot: {error}"))?;
-            connection.set_autocommit(false)?;
-            let mutation = (|| {
-                JsonDocumentWrite::new(
-                    JsonDocumentTarget::new(table, &relation, key),
-                    json,
-                )
-                .save(connection)?;
-                connection.commit()
-            })();
-            if mutation.is_err() {
-                let _ = connection.rollback();
+        let json = serde_json::to_string(&document)
+            .map_err(|error| format!("encoding reset {table} snapshot: {error}"))?;
+        connection.set_autocommit(false).await?;
+        let mutation =
+            match JsonDocumentWrite::new(JsonDocumentTarget::new(table, &relation, key), json)
+                .save(&mut connection)
+                .await
+            {
+                Ok(()) => connection.commit().await,
+                Err(error) => Err(error),
+            };
+        if mutation.is_err() {
+            let _ = connection.rollback().await;
+        }
+        let restore = connection.set_autocommit(true).await;
+        match (mutation, restore) {
+            (Ok(()), Ok(())) => Ok(document),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(()), Err(_)) => {
+                connection.discard();
+                Ok(document)
             }
-            let restore = connection.set_autocommit(true);
-            match (mutation, restore) {
-                (Ok(()), Ok(())) => Ok(document),
-                (Err(error), Ok(())) => Err(error),
-                (Ok(()), Err(_)) => {
-                    connection.discard();
-                    Ok(document)
-                }
-                (Err(error), Err(restore)) => Err(format!(
-                    "{error}; restoring database autocommit after resetting obsolete Workflow history also failed: {restore}"
-                )),
-            }
-        })
+            (Err(error), Err(restore)) => Err(format!(
+                "{error}; restoring database autocommit after resetting obsolete Workflow history also failed: {restore}"
+            )),
+        }
     }
 
-    fn save_json_document<T: Serialize>(
+    async fn save_json_document<T: Serialize>(
         &self,
         document: JsonDocumentKey<'_>,
         value: &T,
@@ -743,10 +759,11 @@ impl StorageManager {
         );
         let json = serde_json::to_string(value)
             .map_err(|error| format!("encoding {} snapshot: {error}", document.table))?;
-        self.project_store.run_blocking(move |connection| {
-            connection.ensure_dataset_namespace(&namespace)?;
-            JsonDocumentWrite::new(target, json).save(connection)
-        })
+        let mut connection = self.project_store.connect().await?;
+        connection.ensure_dataset_namespace(&namespace).await?;
+        JsonDocumentWrite::new(target, json)
+            .save(&mut connection)
+            .await
     }
 
     pub async fn test_spiral(&self) -> ConnectionTestResponse {
@@ -787,7 +804,7 @@ impl StorageManager {
             sql,
             QueryLimits::new(max_rows.clamp(1, MAX_QUERY_ROWS), MAX_QUERY_RESPONSE_BYTES),
         )
-        .run_async(&mut *connection)
+        .run_async(&mut connection)
         .await
     }
 
@@ -814,7 +831,7 @@ impl StorageManager {
             &sql,
             QueryLimits::new(100_000, MAX_INTERNAL_QUERY_RESPONSE_BYTES),
         )
-        .run_async(&mut *connection)
+        .run_async(&mut connection)
         .await?;
         if result.truncated() {
             return Err("Spiral dataset catalog exceeds 100,000 rows".to_owned());
@@ -976,7 +993,7 @@ impl StorageManager {
             };
             let relation_name = relation_name.into_string();
             let row_count = match self
-                .async_relation_row_count(&mut *connection, &relation_name)
+                .async_relation_row_count(&mut connection, &relation_name)
                 .await
             {
                 Ok(row_count) => Some(row_count),
@@ -1075,7 +1092,7 @@ impl StorageManager {
             &sql,
             QueryLimits::new(MAX_REPLAY_ROWS, MAX_INTERNAL_QUERY_RESPONSE_BYTES),
         )
-        .run_async(&mut *connection)
+        .run_async(&mut connection)
         .await?;
         if result.truncated() {
             return Err(format!(
@@ -1231,25 +1248,27 @@ impl StorageManager {
     }
 }
 
-impl StorageConnection {
-    fn load_json_document_raw_optional(
+impl ProjectConnection {
+    async fn load_json_document_raw_optional(
         &mut self,
         relation: &str,
         key: &str,
     ) -> Result<Option<String>, String> {
-        if !self.table_exists(relation)? {
+        if !self.table_exists(relation).await? {
             return Ok(None);
         }
-        let result = self.run_query(
-            &format!(
-                "SELECT {} FROM {relation} WHERE {} = {} ORDER BY {} DESC LIMIT 1",
-                db::SNAPSHOT_JSON,
-                db::RUN_ID,
-                SpiralSql::string_literal(key),
-                db::UPDATED_MS,
-            ),
-            1,
-        )?;
+        let result = self
+            .run_query(
+                &format!(
+                    "SELECT {} FROM {relation} WHERE {} = {} ORDER BY {} DESC LIMIT 1",
+                    db::SNAPSHOT_JSON,
+                    db::RUN_ID,
+                    SpiralSql::string_literal(key),
+                    db::UPDATED_MS,
+                ),
+                1,
+            )
+            .await?;
         Ok(result
             .rows()
             .first()
@@ -1401,25 +1420,29 @@ impl<'a> EpisodeReplacement<'a> {
         }
     }
 
-    pub(crate) fn save(self, connection: &mut StorageConnection) -> Result<(), String> {
+    pub(crate) async fn save(self, connection: &mut ProjectConnection) -> Result<(), String> {
         let Self {
             namespace,
             episode,
             videos,
         } = self;
-        connection.ensure_dataset_namespace(namespace)?;
+        connection.ensure_dataset_namespace(namespace).await?;
         if !videos.is_empty() {
-            connection.ensure_video_assets_blob_relation(namespace)?;
+            connection
+                .ensure_video_assets_blob_relation(namespace)
+                .await?;
         }
-        let had_video = connection.episode_has_video_assets(namespace, episode.start().id())?;
+        let had_video = connection
+            .episode_has_video_assets(namespace, episode.start().id())
+            .await?;
         let video_rows_changed = had_video || !videos.is_empty();
         let dataset_exists = if video_rows_changed {
-            connection.video_dataset_exists(namespace)?
+            connection.video_dataset_exists(namespace).await?
         } else {
             false
         };
         let previous_video_episodes = if video_rows_changed {
-            connection.stored_video_episode_ids(namespace)?
+            connection.stored_video_episode_ids(namespace).await?
         } else {
             BTreeSet::new()
         };
@@ -1428,29 +1451,40 @@ impl<'a> EpisodeReplacement<'a> {
                 .iter()
                 .any(|episode_id| episode_id != episode.start().id());
         if !dataset_exists && !previous_video_episodes.is_empty() && has_video_rows {
-            connection.retarget_stored_video_media_relations(namespace)?;
+            connection
+                .retarget_stored_video_media_relations(namespace)
+                .await?;
         }
         // Replacement is idempotent. Clear any earlier complete row and partial
         // children before writing, so a retry after a process or network failure
         // can finish without duplicating already-landed rows.
-        connection.clear_episode_rows_only(namespace, episode.start().id())?;
+        connection
+            .clear_episode_rows_only(namespace, episode.start().id())
+            .await?;
         let datasets = Table::Datasets.qualified_name(namespace);
-        if !connection.table_has_dataset(&datasets, episode.start().dataset_id())? {
-            connection.ingest_batch(
-                &datasets,
+        if !connection
+            .table_has_dataset(&datasets, episode.start().dataset_id())
+            .await?
+        {
+            connection
+                .ingest_batch(
+                    &datasets,
+                    episode
+                        .start()
+                        .dataset_batch()
+                        .map_err(|error| error.to_string())?,
+                )
+                .await?;
+        }
+        connection
+            .ingest_batch(
+                &Table::EpisodeStreams.qualified_name(namespace),
                 episode
                     .start()
-                    .dataset_batch()
+                    .streams_batch()
                     .map_err(|error| error.to_string())?,
-            )?;
-        }
-        connection.ingest_batch(
-            &Table::EpisodeStreams.qualified_name(namespace),
-            episode
-                .start()
-                .streams_batch()
-                .map_err(|error| error.to_string())?,
-        )?;
+            )
+            .await?;
         if !videos.is_empty() {
             let streams = videos
                 .iter()
@@ -1471,10 +1505,12 @@ impl<'a> EpisodeReplacement<'a> {
                 .collect::<BTreeMap<_, _>>()
                 .into_values()
                 .collect::<Vec<_>>();
-            connection.ingest_batch(
-                &Table::EpisodeStreams.qualified_name(namespace),
-                streams.batch().map_err(|error| error.to_string())?,
-            )?;
+            connection
+                .ingest_batch(
+                    &Table::EpisodeStreams.qualified_name(namespace),
+                    streams.batch().map_err(|error| error.to_string())?,
+                )
+                .await?;
         }
         let mut encoder = SpiralEpisodeEncoder::new(episode.start().clone())
             .map_err(|error| error.to_string())?;
@@ -1483,36 +1519,46 @@ impl<'a> EpisodeReplacement<'a> {
             rows.extend(encoder.encode(sample).map_err(|error| error.to_string())?);
             if rows.len() >= JOINT_BATCH_ROWS {
                 let batch = rows.batch().map_err(|error| error.to_string())?;
-                connection.ingest_batch(&Table::JointSamples.qualified_name(namespace), batch)?;
+                connection
+                    .ingest_batch(&Table::JointSamples.qualified_name(namespace), batch)
+                    .await?;
                 rows.clear();
             }
         }
         if !rows.is_empty() {
             let batch = rows.batch().map_err(|error| error.to_string())?;
-            connection.ingest_batch(&Table::JointSamples.qualified_name(namespace), batch)?;
+            connection
+                .ingest_batch(&Table::JointSamples.qualified_name(namespace), batch)
+                .await?;
         }
         if !videos.is_empty() {
             let media_relation = SpiralSql::video_dataset_output(namespace);
             let batch =
                 VideoAsset::publication_batch(episode.start().id(), videos, &media_relation)?;
-            connection.ingest_batch(&Table::VideoAssets.qualified_name(namespace), batch)?;
+            connection
+                .ingest_batch(&Table::VideoAssets.qualified_name(namespace), batch)
+                .await?;
         }
         if video_rows_changed {
             if has_video_rows {
-                connection.rebuild_video_dataset(namespace, dataset_exists)?;
+                connection
+                    .rebuild_video_dataset(namespace, dataset_exists)
+                    .await?;
             } else {
-                connection.drop_video_dataset(namespace)?;
+                connection.drop_video_dataset(namespace).await?;
             }
         }
         // Inserted last: readers never see an episode whose streams or media only
         // partially arrived.
-        connection.ingest_batch(
-            &Table::Episodes.qualified_name(namespace),
-            episode
-                .completion()
-                .episode_batch(episode.start(), encoder.frames())
-                .map_err(|error| error.to_string())?,
-        )?;
+        connection
+            .ingest_batch(
+                &Table::Episodes.qualified_name(namespace),
+                episode
+                    .completion()
+                    .episode_batch(episode.start(), encoder.frames())
+                    .map_err(|error| error.to_string())?,
+            )
+            .await?;
         Ok(())
     }
 }
@@ -1523,8 +1569,8 @@ impl<'a> EpisodeReplacement<'a> {
 /// Project import replaces those source rows in place, so merely observing an
 /// existing output does not prove that its video index matches the imported
 /// payloads.
-impl StorageConnection {
-    pub fn rebuild_video_dataset(
+impl ProjectConnection {
+    pub async fn rebuild_video_dataset(
         &mut self,
         namespace: &str,
         dataset_exists: bool,
@@ -1538,21 +1584,27 @@ impl StorageConnection {
         let dataset = SpiralSql::video_dataset_relation(namespace);
         connection
             .execute_update_sql(&SpiralSql::create_video_sources(&sources, &assets))
+            .await
             .map_err(|error| format!("creating Spiral video source view: {error}"))?;
         if !dataset_exists {
             connection
                 .execute_update_sql(&SpiralSql::create_video_dataset(&dataset, &sources))
+                .await
                 .map_err(|error| format!("creating Spiral MP4 dataset: {error}"))?;
         }
         connection
             .execute_update_sql(&SpiralSql::refresh_dataset(&dataset))
+            .await
             .map_err(|error| format!("refreshing Spiral MP4 dataset: {error}"))
     }
 
-    pub(crate) fn video_dataset_exists(&mut self, namespace: &str) -> Result<bool, String> {
+    pub(crate) async fn video_dataset_exists(&mut self, namespace: &str) -> Result<bool, String> {
         let connection = self;
         let dataset = SpiralSql::video_dataset_relation(namespace);
-        match connection.run_query(&format!("DESCRIBE {dataset}"), 1) {
+        match connection
+            .run_query(&format!("DESCRIBE {dataset}"), 1)
+            .await
+        {
             Ok(_) => Ok(true),
             Err(error)
                 if error.contains("unknown resource")
@@ -1565,18 +1617,20 @@ impl StorageConnection {
         }
     }
 
-    pub(crate) fn drop_video_dataset(&mut self, namespace: &str) -> Result<(), String> {
+    pub(crate) async fn drop_video_dataset(&mut self, namespace: &str) -> Result<(), String> {
         let connection = self;
         let dataset = SpiralSql::video_dataset_relation(namespace);
         QualifiedRelation::try_from(dataset.as_str())
             .map_err(|error| format!("refusing to drop an invalid Spiral MP4 Dataset: {error}"))?;
         connection
             .execute_update_sql(&SpiralSql::drop_video_dataset(&dataset))
+            .await
             .map_err(|error| format!("dropping Spiral MP4 dataset with CASCADE: {error}"))?;
         connection
             .execute_update_sql(&SpiralSql::drop_video_sources(
                 &SpiralSql::video_sources_relation(namespace),
             ))
+            .await
             .map_err(|error| format!("dropping Spiral video source view: {error}"))
     }
 
@@ -1584,9 +1638,9 @@ impl StorageConnection {
     /// be created after a live `spiral_robotics` parent exists. Until the catalog exposes
     /// a standalone namespace resource, a tiny durable root table is the parent
     /// container for every Spiral Robotics table, view, and managed Dataset.
-    pub fn ensure_dataset_namespace(&mut self, dataset: &str) -> Result<(), String> {
+    pub async fn ensure_dataset_namespace(&mut self, dataset: &str) -> Result<(), String> {
         let connection = self;
-        match connection.table_schema(dataset) {
+        match connection.relation_schema(dataset).await {
             Ok(Some(schema))
                 if schema
                     .field_with_name(spiral::DATASET_NAMESPACE_MARKER)
@@ -1606,52 +1660,64 @@ impl StorageConnection {
         }
         connection
             .execute_update_sql(&SpiralSql::create_dataset_namespace(dataset))
+            .await
             .map_err(|error| format!("creating SpiralDB namespace {dataset}: {error}"))
     }
 
-    pub(crate) fn clear_episode_rows(
+    pub(crate) async fn clear_episode_rows(
         &mut self,
         namespace: &str,
         episode_id: &str,
     ) -> Result<(), String> {
         let connection = self;
-        let previous_video_episodes = connection.stored_video_episode_ids(namespace)?;
+        let previous_video_episodes = connection.stored_video_episode_ids(namespace).await?;
         let had_video = previous_video_episodes.contains(episode_id);
         let dataset_exists = if had_video {
-            connection.video_dataset_exists(namespace)?
+            connection.video_dataset_exists(namespace).await?
         } else {
             false
         };
         if had_video && !dataset_exists && previous_video_episodes.len() > 1 {
-            connection.retarget_stored_video_media_relations(namespace)?;
+            connection
+                .retarget_stored_video_media_relations(namespace)
+                .await?;
         }
-        connection.clear_episode_rows_only(namespace, episode_id)?;
+        connection
+            .clear_episode_rows_only(namespace, episode_id)
+            .await?;
         if !had_video {
             return Ok(());
         }
         if previous_video_episodes.len() == 1 {
-            connection.drop_video_dataset(namespace)?;
+            connection.drop_video_dataset(namespace).await?;
         } else {
-            connection.rebuild_video_dataset(namespace, dataset_exists)?;
+            connection
+                .rebuild_video_dataset(namespace, dataset_exists)
+                .await?;
         }
         Ok(())
     }
 
-    fn clear_episode_rows_only(&mut self, namespace: &str, episode_id: &str) -> Result<(), String> {
+    async fn clear_episode_rows_only(
+        &mut self,
+        namespace: &str,
+        episode_id: &str,
+    ) -> Result<(), String> {
         let connection = self;
         for table in Table::EPISODE_RELATIONS {
             let target = table.qualified_name(namespace);
-            if !connection.table_exists(&target)? {
+            if !connection.table_exists(&target).await? {
                 continue;
             }
             connection
                 .execute_delete_sql(&SpiralSql::delete_episode(&target, episode_id))
+                .await
                 .map_err(|error| format!("clearing prior Spiral rows in {target}: {error}"))?;
         }
         Ok(())
     }
 
-    pub(crate) fn stored_video_episode_ids(
+    pub(crate) async fn stored_video_episode_ids(
         &mut self,
         namespace: &str,
     ) -> Result<BTreeSet<String>, String> {
@@ -1659,16 +1725,18 @@ impl StorageConnection {
         const MAX_VIDEO_EPISODES: usize = 100_000;
 
         let assets = Table::VideoAssets.qualified_name(namespace);
-        if !connection.table_exists(&assets)? {
+        if !connection.table_exists(&assets).await? {
             return Ok(BTreeSet::new());
         }
-        let result = connection.run_query(
-            &format!(
-                "SELECT DISTINCT {episode_id} FROM {assets}",
-                episode_id = db::EPISODE_ID
-            ),
-            MAX_VIDEO_EPISODES,
-        )?;
+        let result = connection
+            .run_query(
+                &format!(
+                    "SELECT DISTINCT {episode_id} FROM {assets}",
+                    episode_id = db::EPISODE_ID
+                ),
+                MAX_VIDEO_EPISODES,
+            )
+            .await?;
         if result.truncated() {
             return Err(format!(
                 "project has more than {MAX_VIDEO_EPISODES} video episodes; refusing incomplete video-resource reconciliation"
@@ -1686,14 +1754,14 @@ impl StorageConnection {
             .collect()
     }
 
-    fn episode_has_video_assets(
+    async fn episode_has_video_assets(
         &mut self,
         namespace: &str,
         episode_id: &str,
     ) -> Result<bool, String> {
         let connection = self;
         let assets = Table::VideoAssets.qualified_name(namespace);
-        if !connection.table_exists(&assets)? {
+        if !connection.table_exists(&assets).await? {
             return Ok(false);
         }
         let result = connection.run_query(
@@ -1703,11 +1771,11 @@ impl StorageConnection {
             episode_id = SpiralSql::string_literal(episode_id),
         ),
         1,
-    )?;
+    ).await?;
         Ok(!result.rows().is_empty())
     }
 
-    pub(crate) fn retarget_stored_video_media_relations(
+    pub(crate) async fn retarget_stored_video_media_relations(
         &mut self,
         namespace: &str,
     ) -> Result<(), String> {
@@ -1720,39 +1788,46 @@ impl StorageConnection {
                 media_relation = db::MEDIA_RELATION,
                 output = SpiralSql::string_literal(&output),
             ))
+            .await
             .map_err(|error| format!("retargeting stored video media relations: {error}"))
     }
 
-    fn table_has_dataset(&mut self, target: &str, dataset_id: &str) -> Result<bool, String> {
+    async fn table_has_dataset(&mut self, target: &str, dataset_id: &str) -> Result<bool, String> {
         let connection = self;
-        if !connection.table_exists(target)? {
+        if !connection.table_exists(target).await? {
             return Ok(false);
         }
-        let result = connection.run_query(&SpiralSql::dataset_exists(target, dataset_id), 1)?;
+        let result = connection
+            .run_query(&SpiralSql::dataset_exists(target, dataset_id), 1)
+            .await?;
         Ok(!result.rows().is_empty())
     }
 }
 
-impl StorageConnection {
-    pub fn ingest_batch(&mut self, target: &str, batch: RecordBatch) -> Result<(), String> {
-        self.ingest_batches(target, vec![batch])
+impl ProjectConnection {
+    pub async fn ingest_batch(&mut self, target: &str, batch: RecordBatch) -> Result<(), String> {
+        self.ingest_batches(target, vec![batch]).await
     }
 
-    pub(crate) fn ingest_batches(
+    pub(crate) async fn ingest_batches(
         &mut self,
         target: &str,
         batches: Vec<RecordBatch>,
     ) -> Result<(), String> {
-        BatchWrite::new(target, batches, BatchWriteMode::Append).save(self)
+        BatchWrite::new(target, batches, BatchWriteMode::Append)
+            .save(self)
+            .await
     }
 
     /// Atomically replace one complete Arbor relation from a single Arrow stream.
-    pub fn replace_batches(
+    pub async fn replace_batches(
         &mut self,
         target: &str,
         batches: Vec<RecordBatch>,
     ) -> Result<(), String> {
-        BatchWrite::new(target, batches, BatchWriteMode::Replace).save(self)
+        BatchWrite::new(target, batches, BatchWriteMode::Replace)
+            .save(self)
+            .await
     }
 }
 
@@ -1777,45 +1852,42 @@ impl<'a> BatchWrite<'a> {
         }
     }
 
-    fn save(self, connection: &mut StorageConnection) -> Result<(), String> {
+    async fn save(self, connection: &mut ProjectConnection) -> Result<(), String> {
         let Some(schema) = self.batches.first().map(RecordBatch::schema) else {
             return Ok(());
         };
-        let mut statement = connection
-            .new_statement()
-            .map_err(|error| format!("opening native ingest for {}: {error}", self.target))?;
-        if matches!(self.mode, BatchWriteMode::Replace) {
-            statement.configure_replace(self.target).map_err(|error| {
-                format!(
-                    "configuring native replacement for {}: {error}",
-                    self.target
-                )
-            })?;
+        let relation = RelationName::parse(self.target)
+            .map_err(|error| format!("configuring native ingest for {}: {error}", self.target))?;
+        let mode = if matches!(self.mode, BatchWriteMode::Replace) {
+            crate::IngestMode::Replace
         } else {
-            statement.configure_ingest(self.target).map_err(|error| {
-                format!("configuring native ingest for {}: {error}", self.target)
+            crate::IngestMode::CreateOrAppend
+        };
+        let batches = futures::stream::iter(self.batches.into_iter().map(Ok)).boxed();
+        let command = DatabaseCommand::ingest(crate::BatchIngestion::new(
+            relation,
+            mode,
+            crate::RecordBatchStream::new(schema, batches),
+        ));
+        connection
+            .execute(command)
+            .await
+            .and_then(crate::DatabaseOutput::into_summary)
+            .map_err(|error| {
+                if matches!(self.mode, BatchWriteMode::Replace) {
+                    format!("replacing Spiral table {}: {error}", self.target)
+                } else {
+                    format!("ingesting Spiral table {}: {error}", self.target)
+                }
             })?;
-        }
-        statement
-            .bind_stream(Box::new(RecordBatchIterator::new(
-                self.batches.into_iter().map(Ok::<_, ArrowError>),
-                schema,
-            )))
-            .map_err(|error| format!("binding Spiral table {}: {error}", self.target))?;
-        statement.execute_update().map_err(|error| {
-            if matches!(self.mode, BatchWriteMode::Replace) {
-                format!("replacing Spiral table {}: {error}", self.target)
-            } else {
-                format!("ingesting Spiral table {}: {error}", self.target)
-            }
-        })?;
         Ok(())
     }
 }
 
-impl StorageConnection {
-    pub fn table_exists(&mut self, target: &str) -> Result<bool, String> {
-        self.table_schema(target)
+impl ProjectConnection {
+    pub async fn table_exists(&mut self, target: &str) -> Result<bool, String> {
+        self.relation_schema(target)
+            .await
             .map(|schema| schema.is_some())
             .map_err(|error| format!("checking Spiral table {target}: {error}"))
     }
@@ -1840,31 +1912,28 @@ impl TrainingCheckpointStorage {
     }
 }
 
-impl StorageConnection {
-    pub fn execute_update_sql(&mut self, sql: &str) -> Result<(), String> {
-        let mut statement = self
-            .new_statement()
-            .map_err(|error| format!("opening Spiral SQL statement: {error}"))?;
-        statement
-            .set_sql_query(sql)
-            .and_then(|()| statement.execute_update())
+impl ProjectConnection {
+    pub async fn execute_update_sql(&mut self, sql: &str) -> Result<(), String> {
+        self.execute(DatabaseCommand::statement(sql))
+            .await
+            .and_then(crate::DatabaseOutput::into_summary)
             .map(|_| ())
             .map_err(|error| error.to_string())
     }
 
     /// Finish a Spiral transaction, rebasing its optimistic project mutation when
     /// a concurrently published managed artifact advances the project head.
-    pub(crate) fn commit_catalog_transaction(&mut self) -> Result<(), String> {
+    pub(crate) async fn commit_catalog_transaction(&mut self) -> Result<(), String> {
         const MAX_COMMIT_ATTEMPTS: usize = 16;
 
         for attempt in 1..=MAX_COMMIT_ATTEMPTS {
-            match self.commit() {
+            match self.commit().await {
                 Ok(()) => return Ok(()),
                 Err(error)
                     if error.contains("project namespace compare-and-swap conflict")
                         && attempt < MAX_COMMIT_ATTEMPTS =>
                 {
-                    std::thread::yield_now();
+                    tokio::task::yield_now().await;
                 }
                 Err(error) => return Err(error),
             }
@@ -1874,8 +1943,8 @@ impl StorageConnection {
 
     /// Spiral reports a no-op DELETE as an execution error. Replacement and
     /// cleanup callers intentionally treat that driver-specific result as success.
-    pub fn execute_delete_sql(&mut self, sql: &str) -> Result<(), String> {
-        match self.execute_update_sql(sql) {
+    pub async fn execute_delete_sql(&mut self, sql: &str) -> Result<(), String> {
+        match self.execute_update_sql(sql).await {
             Err(error) if error.contains("without any affected rows") => Ok(()),
             result => result,
         }
@@ -2095,14 +2164,14 @@ impl VideoAssetRecordBatch for RecordBatch {
     }
 }
 
-impl StorageConnection {
-    pub(crate) fn ensure_video_assets_blob_relation(
+impl ProjectConnection {
+    pub(crate) async fn ensure_video_assets_blob_relation(
         &mut self,
         namespace: &str,
     ) -> Result<(), String> {
         let connection = self;
         let assets = Table::VideoAssets.qualified_name(namespace);
-        let Some(schema) = connection.table_schema(&assets)? else {
+        let Some(schema) = connection.relation_schema(&assets).await? else {
             return Ok(());
         };
         let payload = schema
@@ -2127,17 +2196,23 @@ impl StorageConnection {
         }
         connection
             .execute_update_sql(&SpiralSql::migrate_video_assets_to_blob(&assets))
+            .await
             .map_err(|error| format!("migrating video assets from Binary to Blob: {error}"))
     }
 }
 
-impl StorageConnection {
-    pub fn run_query(&mut self, sql: &str, max_rows: usize) -> Result<SpiralQueryResponse, String> {
+impl ProjectConnection {
+    pub async fn run_query(
+        &mut self,
+        sql: &str,
+        max_rows: usize,
+    ) -> Result<SpiralQueryResponse, String> {
         QueryExecution::new(
             sql,
             QueryLimits::new(max_rows, MAX_INTERNAL_QUERY_RESPONSE_BYTES),
         )
-        .run(self)
+        .run_async(self)
+        .await
     }
 }
 
@@ -2195,86 +2270,6 @@ impl QueryExecution<'_> {
         let mut inspected = 0_usize;
         let mut truncated = false;
         'result: while let Some(batch) = records.next().await {
-            let batch = batch.map_err(|error| format!("reading Spiral result: {error}"))?;
-            let mut offset = 0_usize;
-            while offset < batch.num_rows() && inspected < fetch {
-                let count = chunk_rows
-                    .min(batch.num_rows() - offset)
-                    .min(fetch - inspected);
-                let chunk = batch.slice(offset, count);
-                let preview = chunk.query_preview()?;
-                for row in preview.to_json_rows()? {
-                    inspected += 1;
-                    if rows.values.len() >= self.limits.rows {
-                        truncated = true;
-                        break 'result;
-                    }
-                    if !rows.push(row)? {
-                        truncated = true;
-                        break 'result;
-                    }
-                }
-                offset += count;
-            }
-        }
-        Ok(
-            SpiralQueryResponse::new(columns, rows.into_values(), truncated)
-                .with_elapsed_ms(started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)),
-        )
-    }
-
-    fn run(self, connection: &mut StorageConnection) -> Result<SpiralQueryResponse, String> {
-        let sql = self.sql.trim();
-        if sql.is_empty() {
-            return Err("Spiral query cannot be empty".to_owned());
-        }
-        if sql.len() > 64 * 1024 {
-            return Err("Spiral query is too large".to_owned());
-        }
-        let started = Instant::now();
-        let mut statement = connection
-            .new_statement()
-            .map_err(|error| format!("opening Spiral query: {error}"))?;
-        statement
-            .set_sql_query(sql)
-            .map_err(|error| format!("binding Spiral query: {error}"))?;
-        let mut reader = statement
-            .execute()
-            .map_err(|error| format!("executing Spiral query: {error}"))?;
-        let schema = reader.schema();
-        let columns = schema
-            .fields()
-            .iter()
-            .map(|field| {
-                QueryColumn::new(
-                    field.name().clone(),
-                    field.data_type().to_string(),
-                    field.is_nullable(),
-                )
-                .with_semantic_type(field.metadata().get(EXTENSION_TYPE_NAME_KEY).cloned())
-            })
-            .collect();
-        let chunk_rows = if schema.fields().iter().any(|field| {
-            matches!(
-                field
-                    .metadata()
-                    .get(EXTENSION_TYPE_NAME_KEY)
-                    .map(String::as_str),
-                Some(IMAGE_EXTENSION_NAME | VARIABLE_TENSOR_EXTENSION_NAME)
-            )
-        }) {
-            1
-        } else {
-            QUERY_JSON_CHUNK_ROWS
-        };
-        let fetch = self.limits.rows.saturating_add(1);
-        let mut rows = QueryRows::with_capacity(
-            self.limits.rows.min(QUERY_JSON_CHUNK_ROWS),
-            self.limits.bytes,
-        );
-        let mut inspected = 0_usize;
-        let mut truncated = false;
-        'result: for batch in &mut reader {
             let batch = batch.map_err(|error| format!("reading Spiral result: {error}"))?;
             let mut offset = 0_usize;
             while offset < batch.num_rows() && inspected < fetch {
@@ -2575,19 +2570,11 @@ impl QueryImage<'_> {
     }
 }
 
-impl StorageConnection {
+impl ProjectConnection {
     #[cfg(test)]
-    pub(crate) fn run_binary_query(&mut self, sql: &str) -> Result<Vec<u8>, String> {
-        let mut statement = self
-            .new_statement()
-            .map_err(|error| format!("opening Spiral video query: {error}"))?;
-        statement
-            .set_sql_query(sql)
-            .map_err(|error| format!("binding Spiral video query: {error}"))?;
-        let reader = statement
-            .execute()
-            .map_err(|error| format!("executing Spiral video query: {error}"))?;
-        for batch in reader {
+    pub(crate) async fn run_binary_query(&mut self, sql: &str) -> Result<Vec<u8>, String> {
+        let mut records = self.execute_query(sql).await?;
+        while let Some(batch) = records.next().await {
             let batch = batch.map_err(|error| format!("reading Spiral video: {error}"))?;
             if batch.num_rows() == 0 {
                 continue;

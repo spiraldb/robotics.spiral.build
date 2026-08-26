@@ -236,28 +236,28 @@ impl SavedRobot {
 pub(crate) trait RobotStore {
     type CameraConfiguration;
 
-    fn create(&self, robot: NewRobot) -> Result<SavedRobot, OperationError>;
+    async fn create(&self, robot: NewRobot) -> Result<SavedRobot, OperationError>;
 
-    fn import_configuration(&self) -> Result<SavedRobot, OperationError>;
+    async fn import_configuration(&self) -> Result<SavedRobot, OperationError>;
 
-    fn camera_configuration(
+    async fn camera_configuration(
         &self,
         robot: &str,
         assignments: &[CameraAssignment],
     ) -> Result<Self::CameraConfiguration, OperationError>;
 
-    fn update(
+    async fn update(
         &self,
         command: RobotUpdate<Self::CameraConfiguration>,
     ) -> Result<SavedRobot, OperationError>;
 
-    fn ensure_exists(&self, robot: &str) -> Result<(), OperationError>;
+    async fn ensure_exists(&self, robot: &str) -> Result<(), OperationError>;
 
-    fn delete(&self, robot: &str) -> Result<(), OperationError>;
+    async fn delete(&self, robot: &str) -> Result<(), OperationError>;
 
-    fn saved_robot_ids(&self) -> Vec<String>;
+    async fn saved_robot_ids(&self) -> Vec<String>;
 
-    fn connection_spec(&self, robot: &str) -> Result<RobotConnectionSpec, OperationError>;
+    async fn connection_spec(&self, robot: &str) -> Result<RobotConnectionSpec, OperationError>;
 }
 
 /// Live hardware operations needed by robot-configuration actions.
@@ -281,7 +281,7 @@ impl<'a, R: RobotStore + ?Sized> RobotCatalogActions<'a, R> {
         Self { store }
     }
 
-    pub(crate) fn create(
+    pub(crate) async fn create(
         &self,
         mut command: CreateRobotCommand,
     ) -> Result<SavedRobot, OperationError> {
@@ -303,30 +303,33 @@ impl<'a, R: RobotStore + ?Sized> RobotCatalogActions<'a, R> {
                 baud_rate.unwrap_or(DEFAULT_ROBOT_BAUD_RATE),
             )?),
         };
-        self.store.create(NewRobot {
-            id: command.id,
-            robot_type: command.robot_type,
-            port,
-        })
+        self.store
+            .create(NewRobot {
+                id: command.id,
+                robot_type: command.robot_type,
+                port,
+            })
+            .await
     }
 
-    pub(crate) fn import_configuration(&self) -> Result<SavedRobot, OperationError> {
-        self.store.import_configuration()
+    pub(crate) async fn import_configuration(&self) -> Result<SavedRobot, OperationError> {
+        self.store.import_configuration().await
     }
 
     /// Select saved robot identities for a read presenter.
-    pub(crate) fn list(&self) -> Vec<SavedRobot> {
+    pub(crate) async fn list(&self) -> Vec<SavedRobot> {
         self.store
             .saved_robot_ids()
+            .await
             .into_iter()
             .map(SavedRobot::new)
             .collect()
     }
 
     /// Admit one saved identity before an outer presenter hydrates its view.
-    pub(crate) fn get(&self, robot: String) -> Result<SavedRobot, OperationError> {
+    pub(crate) async fn get(&self, robot: String) -> Result<SavedRobot, OperationError> {
         let robot = PlainName::parse("robot id", robot, MAX_ROBOT_ID_LENGTH)?.into_string();
-        self.store.ensure_exists(&robot)?;
+        self.store.ensure_exists(&robot).await?;
         Ok(SavedRobot::new(robot))
     }
 }
@@ -345,7 +348,7 @@ where
         Self { store, control }
     }
 
-    pub(crate) fn update(
+    pub(crate) async fn update(
         &self,
         mut command: UpdateRobotCommand,
     ) -> Result<SavedRobot, OperationError> {
@@ -385,16 +388,22 @@ where
                         )));
                     }
                 }
-                Some(self.store.camera_configuration(&command.id, &assignments)?)
+                Some(
+                    self.store
+                        .camera_configuration(&command.id, &assignments)
+                        .await?,
+                )
             }
             None => None,
         };
-        self.store.update(RobotUpdate {
-            id: command.id,
-            robot_type: command.robot_type,
-            port: command.port,
-            cameras,
-        })
+        self.store
+            .update(RobotUpdate {
+                id: command.id,
+                robot_type: command.robot_type,
+                port: command.port,
+                cameras,
+            })
+            .await
     }
 
     /// Forget live hardware before removing its durable configuration.
@@ -404,20 +413,20 @@ where
     /// saved-but-disconnected robot: deleting the SpiralDB row first could leave a
     /// live bus that no configuration or UI card can identify and stop.
     pub(crate) async fn delete(&self, robot: &str) -> Result<(), OperationError> {
-        self.store.ensure_exists(robot)?;
+        self.store.ensure_exists(robot).await?;
         self.control.forget(robot).await?;
-        self.store.delete(robot)
+        self.store.delete(robot).await
     }
 
     pub(crate) async fn connect(&self, robot: &str) -> Result<(), OperationError> {
-        let specification = self.store.connection_spec(robot)?;
+        let specification = self.store.connection_spec(robot).await?;
         self.control.connect(specification).await
     }
 
     /// Try one saved robot without turning an unavailable or incomplete arm into
     /// a failure for the persistence action that introduced it.
     pub(crate) async fn auto_connect_robot(&self, robot: String) -> AutoConnectOutcome {
-        let specification = match self.store.connection_spec(&robot) {
+        let specification = match self.store.connection_spec(&robot).await {
             Ok(specification) => specification,
             Err(error) => {
                 return AutoConnectOutcome {
@@ -437,7 +446,7 @@ where
     /// prevent other usable arms or the Studio itself from starting.
     pub(crate) async fn auto_connect(&self) -> Vec<AutoConnectOutcome> {
         let mut outcomes = Vec::new();
-        for robot in self.store.saved_robot_ids() {
+        for robot in self.store.saved_robot_ids().await {
             outcomes.push(self.auto_connect_robot(robot).await);
         }
         outcomes
@@ -505,7 +514,7 @@ mod tests {
     impl RobotStore for Store {
         type CameraConfiguration = Vec<String>;
 
-        fn create(&self, robot: NewRobot) -> Result<SavedRobot, OperationError> {
+        async fn create(&self, robot: NewRobot) -> Result<SavedRobot, OperationError> {
             let port = robot
                 .port
                 .map(|port| format!("{}@{}", port.path, port.baud_rate))
@@ -517,14 +526,14 @@ mod tests {
             Ok(SavedRobot { id: robot.id })
         }
 
-        fn import_configuration(&self) -> Result<SavedRobot, OperationError> {
+        async fn import_configuration(&self) -> Result<SavedRobot, OperationError> {
             self.events.lock().unwrap().push("import".to_owned());
             Ok(SavedRobot {
                 id: "imported".to_owned(),
             })
         }
 
-        fn camera_configuration(
+        async fn camera_configuration(
             &self,
             robot: &str,
             assignments: &[CameraAssignment],
@@ -543,7 +552,10 @@ mod tests {
                 .collect())
         }
 
-        fn update(&self, command: RobotUpdate<Vec<String>>) -> Result<SavedRobot, OperationError> {
+        async fn update(
+            &self,
+            command: RobotUpdate<Vec<String>>,
+        ) -> Result<SavedRobot, OperationError> {
             self.events
                 .lock()
                 .unwrap()
@@ -551,12 +563,12 @@ mod tests {
             Ok(SavedRobot { id: command.id })
         }
 
-        fn ensure_exists(&self, robot: &str) -> Result<(), OperationError> {
+        async fn ensure_exists(&self, robot: &str) -> Result<(), OperationError> {
             self.events.lock().unwrap().push(format!("exists:{robot}"));
             Ok(())
         }
 
-        fn delete(&self, robot: &str) -> Result<(), OperationError> {
+        async fn delete(&self, robot: &str) -> Result<(), OperationError> {
             self.events.lock().unwrap().push(format!("delete:{robot}"));
             if self.fail_delete {
                 Err(OperationError::Internal(
@@ -567,11 +579,14 @@ mod tests {
             }
         }
 
-        fn saved_robot_ids(&self) -> Vec<String> {
+        async fn saved_robot_ids(&self) -> Vec<String> {
             self.ids.clone()
         }
 
-        fn connection_spec(&self, robot: &str) -> Result<RobotConnectionSpec, OperationError> {
+        async fn connection_spec(
+            &self,
+            robot: &str,
+        ) -> Result<RobotConnectionSpec, OperationError> {
             self.events.lock().unwrap().push(format!("spec:{robot}"));
             if self.invalid.as_deref() == Some(robot) {
                 Err(OperationError::InvalidInput("missing port".to_owned()))
@@ -688,8 +703,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn changing_a_live_port_is_refused_before_persistence() {
+    #[tokio::test]
+    async fn changing_a_live_port_is_refused_before_persistence() {
         let (store, mut control, events) = setup();
         control.connected = true;
         let error = RobotActions::new(&store, &control)
@@ -702,14 +717,15 @@ mod tests {
                 }),
                 cameras: None,
             })
+            .await
             .unwrap_err();
 
         assert!(matches!(error, OperationError::Conflict(_)));
         assert!(events.lock().unwrap().is_empty());
     }
 
-    #[test]
-    fn malformed_port_updates_never_check_connection_or_persist() {
+    #[tokio::test]
+    async fn malformed_port_updates_never_check_connection_or_persist() {
         for port in [
             SerialPortConfiguration {
                 path: "  ".to_owned(),
@@ -722,12 +738,14 @@ mod tests {
         ] {
             let (store, control, events) = setup();
             assert!(matches!(
-                RobotActions::new(&store, &control).update(UpdateRobotCommand {
-                    id: "arm".to_owned(),
-                    robot_type: None,
-                    port: Some(port),
-                    cameras: None,
-                }),
+                RobotActions::new(&store, &control)
+                    .update(UpdateRobotCommand {
+                        id: "arm".to_owned(),
+                        robot_type: None,
+                        port: Some(port),
+                        cameras: None,
+                    })
+                    .await,
                 Err(OperationError::InvalidInput(_))
             ));
             assert!(events.lock().unwrap().is_empty());
@@ -795,8 +813,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn update_persists_plain_changes_when_the_robot_is_disconnected() {
+    #[tokio::test]
+    async fn update_persists_plain_changes_when_the_robot_is_disconnected() {
         let (store, control, events) = setup();
 
         let robot = RobotActions::new(&store, &control)
@@ -812,6 +830,7 @@ mod tests {
                     device_id: " camera-1 ".to_owned(),
                 }]),
             })
+            .await
             .unwrap();
 
         assert_eq!(
@@ -826,8 +845,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn simple_configuration_actions_delegate_without_learning_serialization_or_storage() {
+    #[tokio::test]
+    async fn simple_configuration_actions_delegate_without_learning_serialization_or_storage() {
         let (store, _control, events) = setup();
         assert_eq!(
             RobotCatalogActions::new(&store)
@@ -837,6 +856,7 @@ mod tests {
                     port: None,
                     baud_rate: None,
                 })
+                .await
                 .unwrap(),
             SavedRobot {
                 id: "arm".to_owned()
@@ -845,6 +865,7 @@ mod tests {
         assert_eq!(
             RobotCatalogActions::new(&store)
                 .import_configuration()
+                .await
                 .unwrap(),
             SavedRobot {
                 id: "imported".to_owned()
@@ -853,8 +874,8 @@ mod tests {
         assert_eq!(*events.lock().unwrap(), ["create:arm:none", "import"]);
     }
 
-    #[test]
-    fn creation_normalizes_identity_and_applies_the_default_baud() {
+    #[tokio::test]
+    async fn creation_normalizes_identity_and_applies_the_default_baud() {
         let (store, _control, events) = setup();
         let robot = RobotCatalogActions::new(&store)
             .create(CreateRobotCommand {
@@ -863,6 +884,7 @@ mod tests {
                 port: Some(" /dev/robot ".to_owned()),
                 baud_rate: None,
             })
+            .await
             .unwrap();
         assert_eq!(
             robot,
@@ -873,8 +895,8 @@ mod tests {
         assert_eq!(*events.lock().unwrap(), ["create:arm_1:/dev/robot@1000000"]);
     }
 
-    #[test]
-    fn invalid_creation_input_never_reaches_persistence() {
+    #[tokio::test]
+    async fn invalid_creation_input_never_reaches_persistence() {
         for command in [
             CreateRobotCommand {
                 id: "../arm".to_owned(),
@@ -897,15 +919,15 @@ mod tests {
         ] {
             let (store, _control, events) = setup();
             assert!(matches!(
-                RobotCatalogActions::new(&store).create(command),
+                RobotCatalogActions::new(&store).create(command).await,
                 Err(OperationError::InvalidInput(_))
             ));
             assert!(events.lock().unwrap().is_empty());
         }
     }
 
-    #[test]
-    fn invalid_camera_assignments_never_assemble_json_or_persist() {
+    #[tokio::test]
+    async fn invalid_camera_assignments_never_assemble_json_or_persist() {
         for cameras in [
             vec![CameraAssignment {
                 role: "bad role".to_owned(),
@@ -928,12 +950,14 @@ mod tests {
         ] {
             let (store, control, events) = setup();
             assert!(matches!(
-                RobotActions::new(&store, &control).update(UpdateRobotCommand {
-                    id: "arm".to_owned(),
-                    robot_type: None,
-                    port: None,
-                    cameras: Some(cameras),
-                }),
+                RobotActions::new(&store, &control)
+                    .update(UpdateRobotCommand {
+                        id: "arm".to_owned(),
+                        robot_type: None,
+                        port: None,
+                        cameras: Some(cameras),
+                    })
+                    .await,
                 Err(OperationError::InvalidInput(_))
             ));
             assert!(events.lock().unwrap().is_empty());

@@ -5,9 +5,12 @@ use spiral_robotics_api::identity::EpisodeId;
 use spiral_robotics_api::recording::{EpisodeInfo, EpisodeInspectionSnapshot};
 
 pub(crate) trait EpisodeQueryPort: Send + Sync {
-    fn episodes(&self) -> Vec<EpisodeInfo>;
-    fn ensure_episode_exists(&self, episode: &str) -> Result<(), OperationError>;
-    fn inspection(&self, episode: String) -> Result<EpisodeInspectionSnapshot, OperationError>;
+    async fn episodes(&self) -> Vec<EpisodeInfo>;
+    async fn ensure_episode_exists(&self, episode: &str) -> Result<(), OperationError>;
+    async fn inspection(
+        &self,
+        episode: String,
+    ) -> Result<EpisodeInspectionSnapshot, OperationError>;
 }
 
 pub(crate) struct EpisodeQueries<'a, P: ?Sized> {
@@ -19,7 +22,7 @@ impl<'a, P: EpisodeQueryPort + ?Sized> EpisodeQueries<'a, P> {
         Self { port }
     }
 
-    pub(crate) fn authorize_asset(&self, episode: String) -> Result<(), OperationError> {
+    pub(crate) async fn authorize_asset(&self, episode: String) -> Result<(), OperationError> {
         let episode = EpisodeId::try_from(episode.as_str())
             .map(String::from)
             .map_err(|_| {
@@ -27,14 +30,14 @@ impl<'a, P: EpisodeQueryPort + ?Sized> EpisodeQueries<'a, P> {
                     "an episode ID must be 1 to 64 characters of letters, digits, '-' or '_'",
                 )
             })?;
-        self.port.ensure_episode_exists(&episode)
+        self.port.ensure_episode_exists(&episode).await
     }
 
-    pub(crate) fn list(&self) -> Vec<EpisodeInfo> {
-        self.port.episodes()
+    pub(crate) async fn list(&self) -> Vec<EpisodeInfo> {
+        self.port.episodes().await
     }
 
-    pub(crate) fn inspection(
+    pub(crate) async fn inspection(
         &self,
         episode: String,
     ) -> Result<EpisodeInspectionSnapshot, OperationError> {
@@ -45,7 +48,7 @@ impl<'a, P: EpisodeQueryPort + ?Sized> EpisodeQueries<'a, P> {
                     "an episode ID must be 1 to 64 characters of letters, digits, '-' or '_'",
                 )
             })?;
-        self.port.inspection(episode)
+        self.port.inspection(episode).await
     }
 }
 
@@ -61,17 +64,20 @@ mod tests {
     }
 
     impl EpisodeQueryPort for Queries {
-        fn episodes(&self) -> Vec<EpisodeInfo> {
+        async fn episodes(&self) -> Vec<EpisodeInfo> {
             self.calls.lock().unwrap().push("list".to_owned());
             Vec::new()
         }
 
-        fn ensure_episode_exists(&self, episode: &str) -> Result<(), OperationError> {
+        async fn ensure_episode_exists(&self, episode: &str) -> Result<(), OperationError> {
             self.calls.lock().unwrap().push(format!("exists:{episode}"));
             Ok(())
         }
 
-        fn inspection(&self, episode: String) -> Result<EpisodeInspectionSnapshot, OperationError> {
+        async fn inspection(
+            &self,
+            episode: String,
+        ) -> Result<EpisodeInspectionSnapshot, OperationError> {
             self.calls
                 .lock()
                 .unwrap()
@@ -80,27 +86,36 @@ mod tests {
         }
     }
 
-    #[test]
-    fn read_queries_validate_and_bound_selection_before_exactly_one_port_call() {
+    #[tokio::test]
+    async fn read_queries_validate_and_bound_selection_before_exactly_one_port_call() {
         let queries = Queries::default();
         let episode_queries = EpisodeQueries::new(&queries);
         assert!(
             episode_queries
                 .inspection("episode_000001".to_owned())
+                .await
                 .is_err()
         );
-        assert!(episode_queries.inspection("../episode".to_owned()).is_err());
+        assert!(
+            episode_queries
+                .inspection("../episode".to_owned())
+                .await
+                .is_err()
+        );
         episode_queries
             .authorize_asset("episode_000001".to_owned())
+            .await
             .unwrap();
         assert!(
             episode_queries
                 .authorize_asset("../episode".to_owned())
+                .await
                 .is_err()
         );
         assert!(
             episode_queries
                 .authorize_asset(" episode".to_owned())
+                .await
                 .is_err()
         );
         assert_eq!(

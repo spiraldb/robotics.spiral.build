@@ -4,20 +4,18 @@
 //! the same async database boundary. Nothing below this module falls back to
 //! a filesystem or a second database.
 
-use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use arrow_array::RecordBatchReader;
-use arrow_schema::{ArrowError, Schema};
-use futures::StreamExt as _;
+use arrow_schema::Schema;
+use futures::FutureExt as _;
 
 use crate::database::{
-    BatchIngestion, Database, DatabaseCommand, DatabaseConnection, DatabaseOutput,
-    DatabaseTransaction, IngestMode, RecordBatchStream, RelationName,
+    Database, DatabaseCommand, DatabaseConnection, DatabaseError, DatabaseFuture, DatabaseOutput,
+    DatabaseSession, DatabaseTransaction, RecordBatchStream, RelationName,
 };
 use crate::settings::{SpiralConnectionSettings, SpiralCredentials};
 use crate::spiral_database::SpiralDatabase;
-use tokio::sync::OwnedRwLockReadGuard;
+use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard};
 
 const SPIRAL_UNAVAILABLE_PREFIX: &str = "SpiralDB is unavailable at ";
 const TRANSPORT_FAILURE_MARKERS: [&str; 5] = [
@@ -28,19 +26,25 @@ const TRANSPORT_FAILURE_MARKERS: [&str; 5] = [
     "dns error",
 ];
 
-/// The only connection type visible to Studio code.
+/// One async, project-scoped logical connection.
 ///
-/// It deliberately exposes storage operations rather than the native Spiral
-/// connection. The boxed trait object is a `Send` proxy to the local executor.
-pub struct StorageConnection {
+/// The boxed state is always a `Send` proxy. The native Spiral connection stays
+/// on its `LocalSet` owner for the complete lifetime of this value.
+pub struct ProjectConnection {
     database: Arc<dyn Database>,
-    state: StorageConnectionState,
+    state: ProjectConnectionState,
+    _operation: ProjectOperationLease,
 }
 
-enum StorageConnectionState {
+enum ProjectConnectionState {
     Autocommit(Box<dyn DatabaseConnection>),
     Transaction(Box<dyn DatabaseTransaction>),
     Transitioning,
+}
+
+enum ProjectOperationLease {
+    Shared { _lease: OwnedRwLockReadGuard<()> },
+    Exclusive { _lease: OwnedRwLockWriteGuard<()> },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -58,65 +62,40 @@ impl CatalogRelation {
     }
 }
 
-impl StorageConnection {
-    fn open(database: Arc<dyn Database>) -> Result<Self, String> {
-        let connection =
-            futures::executor::block_on(database.connect()).map_err(|error| error.to_string())?;
+impl ProjectConnection {
+    async fn open(
+        database: Arc<dyn Database>,
+        operation: ProjectOperationLease,
+    ) -> Result<Self, String> {
+        let connection = database
+            .connect()
+            .await
+            .map_err(|error| error.to_string())?;
         Ok(Self {
             database,
-            state: StorageConnectionState::Autocommit(connection),
+            state: ProjectConnectionState::Autocommit(connection),
+            _operation: operation,
         })
     }
 
-    /// Close the current logical connection instead of attempting reuse.
     pub fn discard(&mut self) {
-        self.state = StorageConnectionState::Transitioning;
+        self.state = ProjectConnectionState::Transitioning;
     }
 
-    pub(crate) fn new_statement(&mut self) -> Result<StorageStatement<'_>, String> {
-        Ok(StorageStatement::new(self))
-    }
-
-    fn execute_command(&mut self, command: DatabaseCommand) -> Result<DatabaseOutput, String> {
-        let result = match &mut self.state {
-            StorageConnectionState::Autocommit(connection) => {
-                futures::executor::block_on(connection.execute(command))
-            }
-            StorageConnectionState::Transaction(transaction) => {
-                futures::executor::block_on(transaction.execute(command))
-            }
-            StorageConnectionState::Transitioning => {
-                return Err("database connection is transitioning or closed".to_owned());
-            }
-        };
-        result.map_err(|error| error.to_string())
-    }
-
-    /// Execute one read query without exposing the mutable database statement
-    /// lifecycle outside the storage crate.
-    pub fn execute_query(
+    pub async fn execute_query(
         &mut self,
         sql: impl AsRef<str>,
-    ) -> Result<Box<dyn RecordBatchReader + Send + 'static>, String> {
-        let output = self.execute_command(DatabaseCommand::statement(sql.as_ref()))?;
-        let batches = output.into_records().map_err(|error| error.to_string())?;
-        Ok(Box::new(BlockingRecordBatchReader::new(batches)))
+    ) -> Result<RecordBatchStream, String> {
+        self.execute(DatabaseCommand::statement(sql.as_ref()))
+            .await
+            .and_then(DatabaseOutput::into_records)
+            .map_err(|error| error.to_string())
     }
 
-    pub fn table_schema(&mut self, table: &str) -> Result<Option<Schema>, String> {
+    pub async fn relation_schema(&mut self, table: &str) -> Result<Option<Schema>, String> {
         let relation = RelationName::parse(table).map_err(|error| error.to_string())?;
-        let result = match &mut self.state {
-            StorageConnectionState::Autocommit(connection) => {
-                futures::executor::block_on(connection.table_schema(relation))
-            }
-            StorageConnectionState::Transaction(transaction) => {
-                futures::executor::block_on(transaction.table_schema(relation))
-            }
-            StorageConnectionState::Transitioning => {
-                return Err("database connection is transitioning or closed".to_owned());
-            }
-        };
-        result
+        self.table_schema(relation)
+            .await
             .map(|schema| schema.map(|schema| schema.as_ref().clone()))
             .map_err(|error| error.to_string())
     }
@@ -124,22 +103,13 @@ impl StorageConnection {
     /// Enumerate the durable relations advertised by the active Spiral
     /// project. Temporary query-session relations are intentionally absent
     /// from the native project's catalog.
-    pub(crate) fn list_catalog_relations(
+    pub(crate) async fn list_catalog_relations(
         &mut self,
         _project: &str,
     ) -> Result<Vec<CatalogRelation>, String> {
-        let result = match &mut self.state {
-            StorageConnectionState::Autocommit(connection) => {
-                futures::executor::block_on(connection.relations())
-            }
-            StorageConnectionState::Transaction(transaction) => {
-                futures::executor::block_on(transaction.relations())
-            }
-            StorageConnectionState::Transitioning => {
-                return Err("database connection is transitioning or closed".to_owned());
-            }
-        };
-        let mut relations = result
+        let mut relations = self
+            .relations()
+            .await
             .map_err(|error| error.to_string())?
             .into_iter()
             .map(|metadata| {
@@ -154,8 +124,8 @@ impl StorageConnection {
 
     /// List durable relation names without exposing the driver's catalog
     /// representation across the storage boundary.
-    pub fn catalog_relation_names(&mut self, project: &str) -> Result<Vec<String>, String> {
-        self.list_catalog_relations(project).map(|relations| {
+    pub async fn catalog_relation_names(&mut self, project: &str) -> Result<Vec<String>, String> {
+        self.list_catalog_relations(project).await.map(|relations| {
             relations
                 .into_iter()
                 .map(|relation| relation.name)
@@ -163,165 +133,97 @@ impl StorageConnection {
         })
     }
 
-    pub fn set_autocommit(&mut self, enabled: bool) -> Result<(), String> {
+    pub async fn set_autocommit(&mut self, enabled: bool) -> Result<(), String> {
         if enabled {
             return Ok(());
         }
-        let state = std::mem::replace(&mut self.state, StorageConnectionState::Transitioning);
-        let StorageConnectionState::Autocommit(connection) = state else {
+        let state = std::mem::replace(&mut self.state, ProjectConnectionState::Transitioning);
+        let ProjectConnectionState::Autocommit(connection) = state else {
             self.state = state;
             return Err("database connection is already in a transaction".to_owned());
         };
-        self.state = StorageConnectionState::Transaction(
-            futures::executor::block_on(connection.begin()).map_err(|error| error.to_string())?,
+        self.state = ProjectConnectionState::Transaction(
+            connection
+                .begin()
+                .await
+                .map_err(|error| error.to_string())?,
         );
         Ok(())
     }
 
-    pub fn commit(&mut self) -> Result<(), String> {
-        self.complete_transaction(true)
+    pub async fn commit(&mut self) -> Result<(), String> {
+        self.complete_transaction(true).await
     }
 
-    pub fn rollback(&mut self) -> Result<(), String> {
-        self.complete_transaction(false)
+    pub async fn rollback(&mut self) -> Result<(), String> {
+        self.complete_transaction(false).await
     }
 
-    fn complete_transaction(&mut self, commit: bool) -> Result<(), String> {
-        let state = std::mem::replace(&mut self.state, StorageConnectionState::Transitioning);
-        let StorageConnectionState::Transaction(transaction) = state else {
+    async fn complete_transaction(&mut self, commit: bool) -> Result<(), String> {
+        let state = std::mem::replace(&mut self.state, ProjectConnectionState::Transitioning);
+        let ProjectConnectionState::Transaction(transaction) = state else {
             self.state = state;
             return Err("database connection has no active transaction".to_owned());
         };
         if commit {
-            futures::executor::block_on(transaction.commit()).map_err(|error| error.to_string())?;
+            transaction
+                .commit()
+                .await
+                .map_err(|error| error.to_string())?;
         } else {
-            futures::executor::block_on(transaction.rollback())
+            transaction
+                .rollback()
+                .await
                 .map_err(|error| error.to_string())?;
         }
-        let connection = futures::executor::block_on(self.database.connect())
+        let connection = self
+            .database
+            .connect()
+            .await
             .map_err(|error| error.to_string())?;
-        self.state = StorageConnectionState::Autocommit(connection);
+        self.state = ProjectConnectionState::Autocommit(connection);
         Ok(())
     }
 }
 
-struct BlockingRecordBatchReader {
-    schema: Arc<Schema>,
-    batches: RecordBatchStream,
-}
-
-impl BlockingRecordBatchReader {
-    fn new(batches: RecordBatchStream) -> Self {
-        Self {
-            schema: Arc::clone(batches.schema()),
-            batches,
-        }
-    }
-}
-
-impl Iterator for BlockingRecordBatchReader {
-    type Item = Result<arrow_array::RecordBatch, ArrowError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        futures::executor::block_on(self.batches.next())
-            .map(|result| result.map_err(|error| ArrowError::ExternalError(Box::new(error))))
-    }
-}
-
-impl RecordBatchReader for BlockingRecordBatchReader {
-    fn schema(&self) -> Arc<Schema> {
-        Arc::clone(&self.schema)
-    }
-}
-
-/// Synchronous compatibility wrapper used only by storage work that is
-/// inherently hosted on a synchronous recording, import, or model worker.
-pub(crate) struct StorageStatement<'a> {
-    connection: &'a mut StorageConnection,
-    sql: Option<String>,
-    ingestion: Option<(RelationName, IngestMode)>,
-    batches: Option<RecordBatchStream>,
-}
-
-impl<'a> StorageStatement<'a> {
-    fn new(connection: &'a mut StorageConnection) -> Self {
-        Self {
-            connection,
-            sql: None,
-            ingestion: None,
-            batches: None,
+impl DatabaseSession for ProjectConnection {
+    fn execute(&mut self, command: DatabaseCommand) -> DatabaseFuture<'_, DatabaseOutput> {
+        match &mut self.state {
+            ProjectConnectionState::Autocommit(connection) => connection.execute(command),
+            ProjectConnectionState::Transaction(transaction) => transaction.execute(command),
+            ProjectConnectionState::Transitioning => async {
+                Err(DatabaseError::invalid_state(
+                    "database connection is transitioning or closed",
+                ))
+            }
+            .boxed(),
         }
     }
 
-    pub(crate) fn set_sql_query(&mut self, sql: impl AsRef<str>) -> Result<(), String> {
-        self.sql = Some(sql.as_ref().to_owned());
-        Ok(())
+    fn table_schema(&mut self, relation: RelationName) -> DatabaseFuture<'_, Option<Arc<Schema>>> {
+        match &mut self.state {
+            ProjectConnectionState::Autocommit(connection) => connection.table_schema(relation),
+            ProjectConnectionState::Transaction(transaction) => transaction.table_schema(relation),
+            ProjectConnectionState::Transitioning => async {
+                Err(DatabaseError::invalid_state(
+                    "database connection is transitioning or closed",
+                ))
+            }
+            .boxed(),
+        }
     }
 
-    pub(crate) fn configure_ingest(&mut self, target: &str) -> Result<(), String> {
-        self.configure_ingest_mode(target, IngestMode::CreateOrAppend)
-    }
-
-    pub(crate) fn configure_replace(&mut self, target: &str) -> Result<(), String> {
-        self.configure_ingest_mode(target, IngestMode::Replace)
-    }
-
-    fn configure_ingest_mode(&mut self, target: &str, mode: IngestMode) -> Result<(), String> {
-        self.ingestion = Some((
-            RelationName::parse(target).map_err(|error| error.to_string())?,
-            mode,
-        ));
-        Ok(())
-    }
-
-    pub(crate) fn bind_stream(
-        &mut self,
-        reader: Box<dyn RecordBatchReader + Send>,
-    ) -> Result<(), String> {
-        let schema = reader.schema();
-        let batches = futures::stream::iter(reader.map(|result| {
-            result.map_err(|error| crate::DatabaseError::internal(error.to_string()))
-        }))
-        .boxed();
-        self.batches = Some(RecordBatchStream::new(schema, batches));
-        Ok(())
-    }
-
-    pub(crate) fn execute(
-        &mut self,
-    ) -> Result<Box<dyn RecordBatchReader + Send + 'static>, String> {
-        let sql = self
-            .sql
-            .take()
-            .ok_or_else(|| "database statement has no SQL text".to_owned())?;
-        self.connection.execute_query(sql)
-    }
-
-    pub(crate) fn execute_update(&mut self) -> Result<Option<i64>, String> {
-        let output = if let Some((relation, mode)) = self.ingestion.take() {
-            let batches = self
-                .batches
-                .take()
-                .ok_or_else(|| "batch ingestion has no bound Arrow stream".to_owned())?;
-            self.connection
-                .execute_command(DatabaseCommand::ingest(BatchIngestion::new(
-                    relation, mode, batches,
-                )))?
-        } else {
-            let sql = self
-                .sql
-                .take()
-                .ok_or_else(|| "database statement has no SQL text".to_owned())?;
-            self.connection
-                .execute_command(DatabaseCommand::statement(sql))?
-        };
-        let summary = output.into_summary().map_err(|error| error.to_string())?;
-        summary
-            .affected_rows()
-            .map(|rows| {
-                i64::try_from(rows).map_err(|_| "affected row count exceeds i64".to_owned())
-            })
-            .transpose()
+    fn relations(&mut self) -> DatabaseFuture<'_, Vec<crate::RelationMetadata>> {
+        match &mut self.state {
+            ProjectConnectionState::Autocommit(connection) => connection.relations(),
+            ProjectConnectionState::Transaction(transaction) => transaction.relations(),
+            ProjectConnectionState::Transitioning => async {
+                Err(DatabaseError::invalid_state(
+                    "database connection is transitioning or closed",
+                ))
+            }
+            .boxed(),
+        }
     }
 }
 
@@ -329,7 +231,6 @@ pub struct ProjectStore {
     connection_settings: Arc<RwLock<SpiralConnectionSettings>>,
     namespace: String,
     database: ProjectDatabase,
-    operation_gate: Arc<RwLock<()>>,
     async_operation_gate: Arc<tokio::sync::RwLock<()>>,
 }
 
@@ -355,25 +256,6 @@ impl ProjectDatabase {
 
     fn interface(&self) -> Arc<dyn Database> {
         Arc::clone(&self.interface)
-    }
-}
-
-pub(crate) struct ProjectConnection {
-    connection: Box<dyn DatabaseConnection>,
-    _operation: OwnedRwLockReadGuard<()>,
-}
-
-impl Deref for ProjectConnection {
-    type Target = dyn DatabaseConnection;
-
-    fn deref(&self) -> &Self::Target {
-        self.connection.as_ref()
-    }
-}
-
-impl DerefMut for ProjectConnection {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.connection.as_mut()
     }
 }
 
@@ -416,7 +298,6 @@ impl ProjectStore {
             connection_settings: Arc::new(RwLock::new(connection_settings)),
             namespace,
             database,
-            operation_gate: Arc::new(RwLock::new(())),
             async_operation_gate: Arc::new(tokio::sync::RwLock::new(())),
         })
     }
@@ -485,7 +366,6 @@ impl ProjectStore {
             .clone()
             .with_project(project_id)?;
         self.database.configure(settings.clone()).await?;
-        let _operation = self.operation_gate.write_unpoisoned();
         *self.connection_settings.write_unpoisoned() = settings;
         Ok(())
     }
@@ -501,7 +381,6 @@ impl ProjectStore {
     ) -> Result<(), String> {
         let _async_operation = self.async_operation_gate.write().await;
         self.database.configure(connection_settings.clone()).await?;
-        let _operation = self.operation_gate.write_unpoisoned();
         *self.connection_settings.write_unpoisoned() = connection_settings;
         Ok(())
     }
@@ -510,10 +389,23 @@ impl ProjectStore {
         &self.namespace
     }
 
-    pub(crate) async fn connect(&self) -> Result<ProjectConnection, String> {
+    pub async fn connect(&self) -> Result<ProjectConnection, String> {
         let operation = self.async_operation_gate.clone().read_owned().await;
+        self.open_connection(ProjectOperationLease::Shared { _lease: operation })
+            .await
+    }
+
+    pub async fn connect_exclusive(&self) -> Result<ProjectConnection, String> {
+        let operation = self.async_operation_gate.clone().write_owned().await;
+        self.open_connection(ProjectOperationLease::Exclusive { _lease: operation })
+            .await
+    }
+
+    async fn open_connection(
+        &self,
+        operation: ProjectOperationLease,
+    ) -> Result<ProjectConnection, String> {
         let endpoint = {
-            let _synchronous_operation = self.operation_gate.read_unpoisoned();
             let settings = self.connection_settings.read_unpoisoned();
             settings.project_id().ok_or_else(|| {
                 "Spiral project is not configured. Choose a project in Settings → SpiralDB."
@@ -521,78 +413,10 @@ impl ProjectStore {
             })?;
             settings.endpoint().to_owned()
         };
-        let connection = self
-            .database
-            .interface()
-            .connect()
+        let database = self.database.interface();
+        ProjectConnection::open(database, operation)
             .await
-            .map_err(|error| Self::present_error(&endpoint, error.to_string()))?;
-        Ok(ProjectConnection {
-            connection,
-            _operation: operation,
-        })
-    }
-
-    /// Synchronous access for recording, import, and model workers. Async
-    /// feature paths use [`ProjectStore::connect`] instead.
-    pub fn run_blocking<T>(
-        &self,
-        operation: impl FnOnce(&mut StorageConnection) -> Result<T, String>,
-    ) -> Result<T, String> {
-        let _async_operation =
-            futures::executor::block_on(self.async_operation_gate.clone().read_owned());
-        let _operation = self.operation_gate.read_unpoisoned();
-        let settings = self.connection_settings.read_unpoisoned();
-        settings.project_id().ok_or_else(|| {
-            "Spiral project is not configured. Choose a project in Settings → SpiralDB.".to_owned()
-        })?;
-        let endpoint = settings.endpoint().to_owned();
-        drop(settings);
-        let database = self.database.interface();
-        let mut connection = StorageConnection::open(database)
-            .map_err(|error| Self::present_error(&endpoint, error))?;
-        operation(&mut connection).map_err(|error| Self::present_error(&endpoint, error))
-    }
-
-    /// Run a durable mutation after draining async and synchronous project
-    /// readers. Its native connection is request-scoped, so the next read
-    /// observes a newly opened logical connection.
-    pub fn run_invalidating_blocking<T>(
-        &self,
-        operation: impl FnOnce(&mut StorageConnection) -> Result<T, String>,
-    ) -> Result<T, String> {
-        let _async_operation =
-            futures::executor::block_on(self.async_operation_gate.clone().write_owned());
-        let _operation = self.operation_gate.write_unpoisoned();
-        self.run_with_gate_held(operation)
-    }
-
-    /// Run a namespace replacement without allowing another project_store call to
-    /// observe its intermediate state.
-    pub fn run_exclusive_blocking<T>(
-        &self,
-        operation: impl FnOnce(&mut StorageConnection) -> Result<T, String>,
-    ) -> Result<T, String> {
-        let _async_operation =
-            futures::executor::block_on(self.async_operation_gate.clone().write_owned());
-        let _operation = self.operation_gate.write_unpoisoned();
-        self.run_with_gate_held(operation)
-    }
-
-    fn run_with_gate_held<T>(
-        &self,
-        operation: impl FnOnce(&mut StorageConnection) -> Result<T, String>,
-    ) -> Result<T, String> {
-        let settings = self.connection_settings.read_unpoisoned();
-        settings.project_id().ok_or_else(|| {
-            "Spiral project is not configured. Choose a project in Settings → SpiralDB.".to_owned()
-        })?;
-        let endpoint = settings.endpoint().to_owned();
-        drop(settings);
-        let database = self.database.interface();
-        let mut connection = StorageConnection::open(database)
-            .map_err(|error| Self::present_error(&endpoint, error))?;
-        operation(&mut connection).map_err(|error| Self::present_error(&endpoint, error))
+            .map_err(|error| Self::present_error(&endpoint, error))
     }
 }
 
@@ -646,12 +470,8 @@ mod tests {
             .unwrap();
 
             assert!(!project_store.is_configured());
-            assert!(
-                project_store
-                    .run_blocking(|_| Ok(()))
-                    .unwrap_err()
-                    .contains("Settings")
-            );
+            let error = project_store.connect().await.err().unwrap();
+            assert!(error.contains("Settings"));
             project_store
                 .configure_project(" project-123 ")
                 .await

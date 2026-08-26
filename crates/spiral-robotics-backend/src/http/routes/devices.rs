@@ -122,6 +122,7 @@ impl SerialPortQueryPort for SerialPortQueryAdapter<'_> {
             .state
             .workspace()
             .list()
+            .await
             .into_iter()
             .filter(|record| {
                 hardware
@@ -187,11 +188,11 @@ impl<'a> RobotHttpAdapter<'a> {
         }
     }
 
-    pub(super) fn prefetched(state: &'a AppState) -> Self {
+    pub(super) async fn prefetched(state: &'a AppState) -> Self {
         Self {
             state,
             import_document: None,
-            saved_records: Some(state.workspace().list()),
+            saved_records: Some(state.workspace().list().await),
         }
     }
 
@@ -203,7 +204,7 @@ impl<'a> RobotHttpAdapter<'a> {
         }
     }
 
-    pub(super) fn summary(
+    pub(super) async fn summary(
         &self,
         robot: &str,
         connection: ConnectionStatus,
@@ -214,7 +215,7 @@ impl<'a> RobotHttpAdapter<'a> {
                 .find(|record| record.id() == robot)
                 .cloned()
                 .ok_or_else(|| WorkspaceError::NotFound(robot.to_owned()))?,
-            None => self.state.workspace().get(robot)?,
+            None => self.state.workspace().get(robot).await?,
         };
         Ok(record.summary(connection))
     }
@@ -223,7 +224,7 @@ impl<'a> RobotHttpAdapter<'a> {
 impl RobotStore for RobotHttpAdapter<'_> {
     type CameraConfiguration = Map<String, Value>;
 
-    fn create(&self, robot: NewRobot) -> Result<SavedRobot, OperationError> {
+    async fn create(&self, robot: NewRobot) -> Result<SavedRobot, OperationError> {
         let (id, robot_type, port) = robot.into_parts();
         let port = port.map(|port| PortSettings::new(port.path(), port.baud_rate()));
         let record = self
@@ -232,11 +233,12 @@ impl RobotStore for RobotHttpAdapter<'_> {
             .create(
                 crate::robots::workspace::RobotWorkspaceCreate::new(id, robot_type).with_port(port),
             )
+            .await
             .map_err(OperationError::from)?;
         Ok(SavedRobot::new(record.id()))
     }
 
-    fn import_configuration(&self) -> Result<SavedRobot, OperationError> {
+    async fn import_configuration(&self) -> Result<SavedRobot, OperationError> {
         let configuration = self
             .import_document
             .as_ref()
@@ -245,11 +247,12 @@ impl RobotStore for RobotHttpAdapter<'_> {
             .state
             .workspace()
             .import_configuration(configuration)
+            .await
             .map_err(OperationError::from)?;
         Ok(SavedRobot::new(record.id()))
     }
 
-    fn camera_configuration(
+    async fn camera_configuration(
         &self,
         robot: &str,
         assignments: &[CameraAssignment],
@@ -258,13 +261,14 @@ impl RobotStore for RobotHttpAdapter<'_> {
             .state
             .workspace()
             .get(robot)
+            .await
             .map_err(OperationError::from)?;
         Ok(record
             .camera_object()
             .with_camera_assignments(assignments, &self.state.cameras().statuses()))
     }
 
-    fn update(
+    async fn update(
         &self,
         command: RobotUpdate<Map<String, Value>>,
     ) -> Result<SavedRobot, OperationError> {
@@ -278,26 +282,29 @@ impl RobotStore for RobotHttpAdapter<'_> {
                     .with_port(port)
                     .with_cameras(cameras),
             )
+            .await
             .map_err(OperationError::from)?;
         Ok(SavedRobot::new(record.id()))
     }
 
-    fn ensure_exists(&self, robot: &str) -> Result<(), OperationError> {
+    async fn ensure_exists(&self, robot: &str) -> Result<(), OperationError> {
         self.state
             .workspace()
             .get(robot)
+            .await
             .map(|_| ())
             .map_err(OperationError::from)
     }
 
-    fn delete(&self, robot: &str) -> Result<(), OperationError> {
+    async fn delete(&self, robot: &str) -> Result<(), OperationError> {
         self.state
             .workspace()
             .delete(robot)
+            .await
             .map_err(OperationError::from)
     }
 
-    fn saved_robot_ids(&self) -> Vec<String> {
+    async fn saved_robot_ids(&self) -> Vec<String> {
         match &self.saved_records {
             Some(records) => records
                 .iter()
@@ -307,17 +314,19 @@ impl RobotStore for RobotHttpAdapter<'_> {
                 .state
                 .workspace()
                 .list()
+                .await
                 .into_iter()
                 .map(|record| record.id().to_owned())
                 .collect(),
         }
     }
 
-    fn connection_spec(&self, robot: &str) -> Result<RobotConnectionSpec, OperationError> {
+    async fn connection_spec(&self, robot: &str) -> Result<RobotConnectionSpec, OperationError> {
         let record = self
             .state
             .workspace()
             .get(robot)
+            .await
             .map_err(OperationError::from)?;
         let port = record.port().ok_or_else(|| {
             OperationError::InvalidInput(format!(
@@ -383,18 +392,23 @@ impl RobotConnectionPort for RobotHttpAdapter<'_> {
 }
 
 impl RobotCalibrationStore for RobotWorkspace {
-    fn motor_specs(&self, robot: &str) -> Result<BTreeMap<String, MotorSpec>, OperationError> {
+    async fn motor_specs(
+        &self,
+        robot: &str,
+    ) -> Result<BTreeMap<String, MotorSpec>, OperationError> {
         self.get(robot)
+            .await
             .and_then(|record| record.motors())
             .map_err(OperationError::from)
     }
 
-    fn save_calibration(
+    async fn save_calibration(
         &self,
         robot: &str,
         update: CalibrationUpdate<'_>,
     ) -> Result<(), OperationError> {
         RobotWorkspace::save_calibration(self, robot, update)
+            .await
             .map(|_| ())
             .map_err(OperationError::from)
     }
@@ -439,11 +453,15 @@ impl CalibrationHistoryPort for CalibrationHistoryHttpAdapter<'_> {
         )
     }
 
-    fn current_calibration(&self, robot: &str) -> Result<Option<Calibration>, OperationError> {
+    async fn current_calibration(
+        &self,
+        robot: &str,
+    ) -> Result<Option<Calibration>, OperationError> {
         let record = self
             .state
             .workspace()
             .get(robot)
+            .await
             .map_err(OperationError::from)?;
         let motors = record.motors().map_err(OperationError::from)?;
         let calibration = record.calibration().map_err(OperationError::from)?;
@@ -464,10 +482,10 @@ impl CalibrationHistoryPort for CalibrationHistoryHttpAdapter<'_> {
         robot: String,
         calibration: Calibration,
     ) -> Result<ReappliedEpisodePositions, OperationError> {
-        let episodes = self.state.episodes().clone();
-        tokio::task::spawn_blocking(move || episodes.reapply_calibration(&robot, &calibration))
+        self.state
+            .episodes()
+            .reapply_calibration(&robot, &calibration)
             .await
-            .map_err(|error| OperationError::Internal(error.to_string()))?
             .map_err(OperationError::from)
     }
 }
@@ -616,25 +634,26 @@ impl Frame {
 
 impl AppState {
     async fn list_robots(State(state): State<Self>) -> Json<Vec<RobotSummary>> {
-        let adapter = RobotHttpAdapter::prefetched(&state);
+        let adapter = RobotHttpAdapter::prefetched(&state).await;
         let hardware = state.hardware().state();
-        Json(
-            RobotCatalogActions::new(&adapter)
-                .list()
-                .into_iter()
-                .filter_map(|robot| {
-                    let connection = hardware
-                        .connections()
-                        .get(robot.id())
-                        .cloned()
-                        .unwrap_or_default();
-                    adapter.summary(robot.id(), connection.to_api()).ok()
-                })
-                .collect(),
-        )
+        let mut summaries = Vec::new();
+        for robot in RobotCatalogActions::new(&adapter).list().await {
+            let connection = hardware
+                .connections()
+                .get(robot.id())
+                .cloned()
+                .unwrap_or_default();
+            if let Ok(summary) = adapter.summary(robot.id(), connection.to_api()).await {
+                summaries.push(summary);
+            }
+        }
+        Json(summaries)
     }
 
-    pub(super) fn present_saved_robot(&self, robot: SavedRobot) -> Result<RobotSummary, Failure> {
+    pub(super) async fn present_saved_robot(
+        &self,
+        robot: SavedRobot,
+    ) -> Result<RobotSummary, Failure> {
         let connection = self
             .hardware()
             .state()
@@ -644,7 +663,8 @@ impl AppState {
             .unwrap_or_default();
         Ok(self
             .workspace()
-            .get(robot.id())?
+            .get(robot.id())
+            .await?
             .summary(connection.to_api()))
     }
 
@@ -653,19 +673,24 @@ impl AppState {
         Json(request): Json<CreateRobotRequest>,
     ) -> Result<(StatusCode, Json<RobotSummary>), Failure> {
         let adapter = RobotHttpAdapter::new(&state);
-        let robot = RobotCatalogActions::new(&adapter).create(
-            CreateRobotCommand::new(
-                request.id(),
-                request.robot_type().map(str::to_owned),
-                request.port().map(str::to_owned),
+        let robot = RobotCatalogActions::new(&adapter)
+            .create(
+                CreateRobotCommand::new(
+                    request.id(),
+                    request.robot_type().map(str::to_owned),
+                    request.port().map(str::to_owned),
+                )
+                .with_baud_rate(request.baud_rate()),
             )
-            .with_baud_rate(request.baud_rate()),
-        )?;
+            .await?;
         RobotActions::new(&adapter, &adapter)
             .auto_connect_robot(robot.id().to_owned())
             .await
             .log();
-        Ok((StatusCode::CREATED, Json(state.present_saved_robot(robot)?)))
+        Ok((
+            StatusCode::CREATED,
+            Json(state.present_saved_robot(robot).await?),
+        ))
     }
 
     /// Add a complete unified robot JSON document as a new workspace instance.
@@ -679,19 +704,26 @@ impl AppState {
             ));
         }
         let adapter = RobotHttpAdapter::import(&state, body);
-        let robot = RobotCatalogActions::new(&adapter).import_configuration()?;
+        let robot = RobotCatalogActions::new(&adapter)
+            .import_configuration()
+            .await?;
         RobotActions::new(&adapter, &adapter)
             .auto_connect_robot(robot.id().to_owned())
             .await
             .log();
-        Ok((StatusCode::CREATED, Json(state.present_saved_robot(robot)?)))
+        Ok((
+            StatusCode::CREATED,
+            Json(state.present_saved_robot(robot).await?),
+        ))
     }
 
     async fn get_robot(
         State(state): State<Self>,
         Path(id): Path<String>,
     ) -> Result<Json<RobotSummary>, Failure> {
-        let robot = RobotCatalogActions::new(&RobotHttpAdapter::new(&state)).get(id)?;
+        let robot = RobotCatalogActions::new(&RobotHttpAdapter::new(&state))
+            .get(id)
+            .await?;
         let connection = state
             .hardware()
             .state()
@@ -702,7 +734,8 @@ impl AppState {
         Ok(Json(
             state
                 .workspace()
-                .get(robot.id())?
+                .get(robot.id())
+                .await?
                 .summary(connection.to_api()),
         ))
     }
@@ -714,28 +747,30 @@ impl AppState {
     ) -> Result<Json<RobotSummary>, Failure> {
         let adapter = RobotHttpAdapter::new(&state);
         let should_auto_connect = request.port().is_some();
-        let robot = RobotActions::new(&adapter, &adapter).update(
-            UpdateRobotCommand::new(
-                id.clone(),
-                request.robot_type().map(str::to_owned),
-                request
-                    .port()
-                    .map(|port| SerialPortConfiguration::new(port.path(), port.baud_rate())),
+        let robot = RobotActions::new(&adapter, &adapter)
+            .update(
+                UpdateRobotCommand::new(
+                    id.clone(),
+                    request.robot_type().map(str::to_owned),
+                    request
+                        .port()
+                        .map(|port| SerialPortConfiguration::new(port.path(), port.baud_rate())),
+                )
+                .with_cameras(request.cameras().map(|bindings| {
+                    bindings
+                        .iter()
+                        .map(|binding| CameraAssignment::new(binding.name(), binding.id()))
+                        .collect()
+                })),
             )
-            .with_cameras(request.cameras().map(|bindings| {
-                bindings
-                    .iter()
-                    .map(|binding| CameraAssignment::new(binding.name(), binding.id()))
-                    .collect()
-            })),
-        )?;
+            .await?;
         if should_auto_connect {
             RobotActions::new(&adapter, &adapter)
                 .auto_connect_robot(robot.id().to_owned())
                 .await
                 .log();
         }
-        Ok(Json(state.present_saved_robot(robot)?))
+        Ok(Json(state.present_saved_robot(robot).await?))
     }
 }
 
@@ -892,7 +927,7 @@ impl AppState {
             tracing::warn!(robot = %id, "saved calibration but live refresh was incomplete: {warning}");
         }
 
-        let record = state.workspace().get(&id)?;
+        let record = state.workspace().get(&id).await?;
         let connection = state
             .hardware()
             .state()

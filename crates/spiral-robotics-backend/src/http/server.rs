@@ -498,18 +498,13 @@ impl AppState {
         let preferences = {
             let state = self.clone();
             async move {
-                let preferences_storage = state.storage().clone();
-                let loaded = tokio::task::spawn_blocking(move || {
-                    preferences_storage.load_studio_preferences()
-                })
-                .await;
+                let loaded = state.storage().load_studio_preferences().await;
                 let issue = match loaded {
-                    Ok(Ok(preferences)) => {
+                    Ok(preferences) => {
                         state.preferences().replace(preferences);
                         None
                     }
-                    Ok(Err(error)) => Some(format!("could not load Studio preferences: {error}")),
-                    Err(error) => Some(format!("Studio preferences task stopped: {error}")),
+                    Err(error) => Some(format!("could not load Studio preferences: {error}")),
                 };
                 // Runtime selection lives in project preferences. Start both
                 // readiness probes as soon as those preferences resolve, while
@@ -521,10 +516,7 @@ impl AppState {
         let training = self.training().hydrate_from_storage();
         let workflow = self.workflow().hydrate_from_storage();
         let workflow_agent = self.workflow_agent().hydrate_from_storage();
-        let rollout = {
-            let rollout = self.rollout().clone();
-            tokio::task::spawn_blocking(move || rollout.reload_from_storage())
-        };
+        let rollout = self.rollout().reload_from_storage();
         let (preferences, training, workflow, workflow_agent, rollout) =
             tokio::join!(preferences, training, workflow, workflow_agent, rollout);
 
@@ -544,9 +536,8 @@ impl AppState {
             ));
         }
         match rollout {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => issues.push(format!("could not load rollout history: {error}")),
-            Err(error) => issues.push(format!("rollout history task stopped: {error}")),
+            Ok(()) => {}
+            Err(error) => issues.push(format!("could not load rollout history: {error}")),
         }
         if issues.is_empty() {
             self.bootstrap().ready();

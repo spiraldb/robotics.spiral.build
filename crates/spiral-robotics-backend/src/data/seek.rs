@@ -286,8 +286,8 @@ impl RecordedSeekResult {
 
 pub(crate) trait PhysicalSeekPort {
     fn activity(&self) -> SeekActivity;
-    fn target(&self, robot: &str) -> Result<Option<SeekTarget>, OperationError>;
-    fn episode(&self, episode: &str) -> Result<SeekableEpisode, OperationError>;
+    async fn target(&self, robot: &str) -> Result<Option<SeekTarget>, OperationError>;
+    async fn episode(&self, episode: &str) -> Result<SeekableEpisode, OperationError>;
     fn reserve_seek(&self, robot: &str) -> u64;
 
     async fn sample_at(
@@ -343,7 +343,7 @@ impl<'a, P: PhysicalSeekPort + ?Sized> PhysicalSeekActions<'a, P> {
             ));
         }
 
-        let target = port.target(&command.robot)?.ok_or_else(|| {
+        let target = port.target(&command.robot).await?.ok_or_else(|| {
             OperationError::InvalidInput(format!("no robot named {:?}", command.robot))
         })?;
         if !target.is_follower() {
@@ -371,7 +371,7 @@ impl<'a, P: PhysicalSeekPort + ?Sized> PhysicalSeekActions<'a, P> {
             )));
         }
 
-        let episode = port.episode(&command.episode)?;
+        let episode = port.episode(&command.episode).await?;
         if let Some(problem) = &episode.problem {
             let paused_live_partial =
                 paused_current && episode.unfinished && problem == "recording did not finish";

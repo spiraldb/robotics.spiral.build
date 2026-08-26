@@ -59,6 +59,7 @@ impl AppState {
             return state
                 .workflow()
                 .command(command)
+                .await
                 .map(Json)
                 .map_err(Into::into);
         }
@@ -83,6 +84,7 @@ impl AppState {
         let result = state
             .workflow()
             .command(command)
+            .await
             .map(Json)
             .map_err(Into::into);
         let released = state.catalog_lease().release(token);

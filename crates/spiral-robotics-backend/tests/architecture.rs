@@ -560,7 +560,8 @@ fn read_controllers_delegate_selection_and_admission_to_backend_capabilities() {
     for seam in [
         ".serial_ports()",
         "RobotCatalogActions::new(&adapter)",
-        "RobotCatalogActions::new(&RobotHttpAdapter::new(&state)).get(id)",
+        "RobotCatalogActions::new(&RobotHttpAdapter::new(&state))",
+        ".get(id)\n            .await",
     ] {
         assert!(
             devices.contains(seam),
@@ -828,13 +829,13 @@ fn recording_and_spiral_connection_lifecycles_have_single_owners() {
 }
 
 #[test]
-fn robot_mutations_are_serialized_with_project_reads() {
+fn robot_mutations_are_serialized_with_project_reads_without_blocking_bridges() {
     let backend = Path::new(env!("CARGO_MANIFEST_DIR"));
     let workspace = fs::read_to_string(backend.join("src/robots/workspace.rs"))
         .expect("robot workspace source");
     for (operation, next) in [
-        ("pub(crate) fn delete", "fn try_list"),
-        ("fn persist", "\n}\n\ntrait PortConfigurationValue"),
+        ("pub(crate) async fn delete", "pub(crate) async fn try_list"),
+        ("async fn persist", "\n}\n\ntrait PortConfigurationValue"),
     ] {
         let implementation = workspace
             .split_once(operation)
@@ -842,7 +843,9 @@ fn robot_mutations_are_serialized_with_project_reads() {
             .map(|(implementation, _)| implementation)
             .unwrap_or_else(|| panic!("robot workspace must define {operation}"));
         assert!(
-            implementation.contains("run_invalidating_blocking"),
+            implementation.contains("connect_exclusive()")
+                && implementation.contains(".await")
+                && !implementation.contains("block_on"),
             "robot {operation} must make the next Studio snapshot read fresh state"
         );
     }
@@ -853,16 +856,16 @@ fn robot_mutations_are_serialized_with_project_reads() {
         .join("spiral-robotics-storage");
     let project_store = fs::read_to_string(storage.join("src/project_store.rs"))
         .expect("Spiral project-store source");
-    let invalidating = project_store
-        .split_once("pub fn run_invalidating_blocking")
-        .and_then(|(_, source)| source.split_once("/// Run a namespace replacement"))
-        .map(|(implementation, _)| implementation)
-        .expect("invalidating project-store mutation implementation");
+    let production_project_store = project_store
+        .rsplit_once("#[cfg(test)]\nmod tests")
+        .map_or(project_store.as_str(), |(production, _)| production);
     assert!(
-        invalidating.contains("self.operation_gate.write_unpoisoned()")
-            && invalidating.contains("self.run_with_gate_held(operation)")
-            && !invalidating.contains("ConnectionPool"),
-        "a robot write must drain project readers before opening its request-scoped native connection"
+        production_project_store.contains("async_operation_gate: Arc<tokio::sync::RwLock<()>>")
+            && production_project_store.contains("write_owned().await")
+            && production_project_store.contains("read_owned().await")
+            && !production_project_store.contains("run_blocking")
+            && !production_project_store.contains("block_on"),
+        "a robot write must asynchronously drain project readers before opening its request-scoped native connection"
     );
 }
 

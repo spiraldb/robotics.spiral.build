@@ -23,7 +23,7 @@ pub use database::{
     RelationMetadata, RelationName, SqlStatement,
 };
 pub use manager::StorageManager;
-pub use project_store::{ProjectStore, StorageConnection};
+pub use project_store::{ProjectConnection, ProjectStore};
 pub use schema::{
     ROBOT_CONFIGURATION_COLUMN, ROBOT_IDENTIFIER_COLUMN, ROBOT_UPDATED_MILLIS_COLUMN,
     SCHEMA_VERSION, StorageSchema,

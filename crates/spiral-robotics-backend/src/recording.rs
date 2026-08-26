@@ -160,12 +160,12 @@ pub(crate) trait RecordingPort {
     fn claim_recording_lease(&self) -> Result<Option<CatalogLeaseToken>, OperationError>;
     fn release_recording_lease(&self, token: CatalogLeaseToken);
     fn recording_active(&self) -> bool;
-    fn default_teleoperation_pair(&self) -> Option<TeleoperationPair>;
+    async fn default_teleoperation_pair(&self) -> Option<TeleoperationPair>;
     fn recording_context(&self) -> RecordingContext;
 
     async fn enter_teleoperation(&self, pair: &TeleoperationPair) -> Result<(), OperationError>;
     async fn enter_idle(&self) -> Result<(), OperationError>;
-    fn create_recording_draft(
+    async fn create_recording_draft(
         &self,
         request: RecordingDraftRequest,
     ) -> Result<Self::RecordingDraft, OperationError>;
@@ -190,7 +190,7 @@ pub(crate) trait RecordingPort {
     ) -> Result<RecordingResult, OperationError>;
     async fn finish_recording_media(&self, capture: Self::MediaCapture) -> Self::MediaOutput;
     fn empty_media_output(&self) -> Self::MediaOutput;
-    fn commit_recording(
+    async fn commit_recording(
         &self,
         episode: String,
         media: Self::MediaOutput,
@@ -295,7 +295,7 @@ impl<'a, P: RecordingPort + ?Sized> RecordingActions<'a, P> {
             .filter(|note| !note.is_empty())
             .map(str::to_owned);
 
-        let pair = port.default_teleoperation_pair().ok_or_else(|| {
+        let pair = port.default_teleoperation_pair().await.ok_or_else(|| {
             OperationError::InvalidInput(
                 "connect and calibrate two compatible arms before recording".to_owned(),
             )
@@ -340,7 +340,7 @@ impl<'a, P: RecordingPort + ?Sized> RecordingActions<'a, P> {
         let open = async {
             let request = RecordingDraftRequest::new(command, source)
                 .with_capture(arms.clone(), context.sample_hz);
-            let draft = port.create_recording_draft(request)?;
+            let draft = port.create_recording_draft(request).await?;
             let episode = port.draft_episode(&draft);
             let media = port.start_recording_media(&episode, &arms).await?;
             match port.begin_recording(draft).await {
@@ -396,24 +396,25 @@ impl<'a, P: RecordingPort + ?Sized> RecordingActions<'a, P> {
 
         match (recording, idle) {
             (Ok(summary), Ok(())) => {
-                port.commit_recording(summary.episode.clone(), media)?;
+                port.commit_recording(summary.episode.clone(), media)
+                    .await?;
                 Ok(summary)
             }
             (Ok(summary), Err(mode_error)) => {
-                port.commit_recording(summary.episode, media)?;
+                port.commit_recording(summary.episode, media).await?;
                 Err(OperationError::Conflict(format!(
                     "the recording ended, but teleoperation could not stop: {mode_error}"
                 )))
             }
             (Err(recording_error), Ok(())) => {
                 if let Some(episode) = capture_episode {
-                    port.commit_recording(episode, media)?;
+                    port.commit_recording(episode, media).await?;
                 }
                 Err(recording_error)
             }
             (Err(recording_error), Err(mode_error)) => {
                 if let Some(episode) = capture_episode {
-                    port.commit_recording(episode, media)?;
+                    port.commit_recording(episode, media).await?;
                 }
                 Err(OperationError::Conflict(format!(
                     "{recording_error}; teleoperation also could not stop: {mode_error}"
@@ -542,7 +543,7 @@ impl ReplayPlan {
 }
 
 pub(crate) trait ReplayPort {
-    fn replay_episode(&self, episode: &str) -> Result<ReplayEpisode, OperationError>;
+    async fn replay_episode(&self, episode: &str) -> Result<ReplayEpisode, OperationError>;
     async fn load_trajectory(
         &self,
         request: ReplayTrajectoryRequest<'_>,
@@ -600,7 +601,7 @@ impl<'a, P: ReplayPort + ?Sized> ReplayActions<'a, P> {
                 "replay start time must be a finite, non-negative number of seconds".to_owned(),
             ));
         }
-        let summary = self.port.replay_episode(&command.episode)?;
+        let summary = self.port.replay_episode(&command.episode).await?;
         let source = RecordedArms::new(&summary.id, &summary.arms, &command.robot)
             .select(command.source_arm.as_deref())?;
         let trajectory = self
@@ -746,7 +747,7 @@ mod tests {
             self.active
         }
 
-        fn default_teleoperation_pair(&self) -> Option<TeleoperationPair> {
+        async fn default_teleoperation_pair(&self) -> Option<TeleoperationPair> {
             self.pair.clone()
         }
 
@@ -771,7 +772,7 @@ mod tests {
             self.idle_error.clone().map_or(Ok(()), Err)
         }
 
-        fn create_recording_draft(
+        async fn create_recording_draft(
             &self,
             request: RecordingDraftRequest,
         ) -> Result<Self::RecordingDraft, OperationError> {
@@ -853,7 +854,7 @@ mod tests {
             Vec::new()
         }
 
-        fn commit_recording(
+        async fn commit_recording(
             &self,
             _episode: String,
             _media: Self::MediaOutput,
@@ -887,7 +888,7 @@ mod tests {
     }
 
     impl ReplayPort for FakePort {
-        fn replay_episode(&self, _episode: &str) -> Result<ReplayEpisode, OperationError> {
+        async fn replay_episode(&self, _episode: &str) -> Result<ReplayEpisode, OperationError> {
             self.events.lock().unwrap().push("episode".to_owned());
             Ok(self.episode.clone())
         }

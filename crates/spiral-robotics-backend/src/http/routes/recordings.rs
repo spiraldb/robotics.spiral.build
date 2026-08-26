@@ -100,9 +100,10 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
         self.state.hardware().state().recording().is_some()
     }
 
-    fn default_teleoperation_pair(&self) -> Option<TeleoperationPair> {
+    async fn default_teleoperation_pair(&self) -> Option<TeleoperationPair> {
         self.state
             .snapshot()
+            .await
             .default_teleoperation_pair()
             .map(|(leader, follower)| TeleoperationPair::new(leader, follower))
     }
@@ -148,11 +149,11 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
             .map_err(OperationError::conflict)
     }
 
-    fn create_recording_draft(
+    async fn create_recording_draft(
         &self,
         request: RecordingDraftRequest,
     ) -> Result<RecordingDraft, OperationError> {
-        self.state.create_recording_draft(request)
+        self.state.create_recording_draft(request).await
     }
 
     fn draft_episode(&self, draft: &Self::RecordingDraft) -> String {
@@ -212,7 +213,8 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
         let summary = self
             .state
             .episodes()
-            .get(completion.episode())
+            .completed_episode(completion.episode())
+            .map(|episode| episode.summary())
             .map_err(OperationError::from)?;
         let result = RecordingResult::new(completion.episode());
         *self.presented_recording.lock().map_err(|_| {
@@ -229,7 +231,7 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
         Vec::new()
     }
 
-    fn commit_recording(
+    async fn commit_recording(
         &self,
         episode: String,
         media: Self::MediaOutput,
@@ -237,12 +239,15 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
         let full_episode = self
             .state
             .episodes()
-            .full_episode(&episode)
+            .completed_episode(&episode)
             .map_err(OperationError::from)?;
         self.state
             .storage()
-            .commit_episode_blocking(&full_episode, &media)
-            .map_err(OperationError::Internal)
+            .commit_episode(&full_episode, &media)
+            .await
+            .map_err(OperationError::Internal)?;
+        self.state.episodes().forget_completed(&episode);
+        Ok(())
     }
 
     async fn request_media_pause(&self) {
@@ -273,16 +278,19 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
         let Some((episode, media)) = checkpoint else {
             return;
         };
-        let episodes = self.state.episodes().clone();
-        let storage = self.state.storage().clone();
-        let outcome = tokio::task::spawn_blocking(move || {
-            let full_episode = episodes
+        let outcome = async {
+            let full_episode = self
+                .state
+                .episodes()
                 .full_episode(&episode)
+                .await
                 .map_err(|error| error.to_string())?;
-            storage.commit_episode_blocking(&full_episode, &media)
-        })
-        .await
-        .unwrap_or_else(|error| Err(format!("video checkpoint task stopped: {error}")));
+            self.state
+                .storage()
+                .commit_episode(&full_episode, &media)
+                .await
+        }
+        .await;
         if let Err(error) = outcome {
             self.state.cameras().note_issue(format!(
                 "paused episode video was not saved to SpiralDB: {error}"
@@ -305,10 +313,11 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
 }
 
 impl ReplayPort for RecordingHttpAdapter<'_> {
-    fn replay_episode(&self, episode: &str) -> Result<ReplayEpisode, OperationError> {
+    async fn replay_episode(&self, episode: &str) -> Result<ReplayEpisode, OperationError> {
         self.state
             .episodes()
             .get(episode)
+            .await
             .map(|summary| {
                 ReplayEpisode::new(
                     summary.id(),
@@ -327,25 +336,23 @@ impl ReplayPort for RecordingHttpAdapter<'_> {
         &self,
         request: ReplayTrajectoryRequest<'_>,
     ) -> Result<ReplayTrajectory, OperationError> {
-        let episodes = self.state.episodes().clone();
         let episode = request.episode().to_owned();
         let source_arm = request.source_arm().to_owned();
         let start_seconds = request.start_seconds();
-        tokio::task::spawn_blocking(move || {
-            episodes.trajectory_at(
+        self.state
+            .episodes()
+            .trajectory_at(
                 &episode,
                 RobotPlaybackRequest::new(&source_arm, start_seconds),
             )
-        })
-        .await
-        .map_err(|error| OperationError::Internal(error.to_string()))?
-        .map(|trajectory| {
-            let start_frame = trajectory.start_frame();
-            let resolved_start_seconds = trajectory.resolved_start_seconds();
-            ReplayTrajectory::new(trajectory.into_frames(), start_frame)
-                .starting_at(resolved_start_seconds)
-        })
-        .map_err(OperationError::from)
+            .await
+            .map(|trajectory| {
+                let start_frame = trajectory.start_frame();
+                let resolved_start_seconds = trajectory.resolved_start_seconds();
+                ReplayTrajectory::new(trajectory.into_frames(), start_frame)
+                    .starting_at(resolved_start_seconds)
+            })
+            .map_err(OperationError::from)
     }
 
     async fn start_replay(&self, plan: ReplayPlan) -> Result<(), OperationError> {
@@ -400,10 +407,10 @@ impl EpisodeCatalogPort for EpisodeHttpAdapter<'_> {
     }
 
     async fn delete_episode(&self, episode: String) -> Result<(), OperationError> {
-        let episodes = self.state.episodes().clone();
-        tokio::task::spawn_blocking(move || episodes.delete(&episode))
+        self.state
+            .episodes()
+            .delete(&episode)
             .await
-            .map_err(|error| OperationError::Internal(error.to_string()))?
             .map_err(OperationError::from)?;
 
         Ok(())
@@ -411,24 +418,30 @@ impl EpisodeCatalogPort for EpisodeHttpAdapter<'_> {
 }
 
 impl EpisodeQueryPort for EpisodeHttpAdapter<'_> {
-    fn episodes(&self) -> Vec<EpisodeInfo> {
-        self.state.episodes().list().to_vec()
+    async fn episodes(&self) -> Vec<EpisodeInfo> {
+        self.state.episodes().list().await
     }
 
-    fn ensure_episode_exists(&self, episode: &str) -> Result<(), OperationError> {
+    async fn ensure_episode_exists(&self, episode: &str) -> Result<(), OperationError> {
         self.state
             .episodes()
             .get(episode)
+            .await
             .map(|_| ())
             .map_err(OperationError::from)
     }
 
-    fn inspection(&self, episode: String) -> Result<EpisodeInspectionSnapshot, OperationError> {
-        self.state
+    async fn inspection(
+        &self,
+        episode: String,
+    ) -> Result<EpisodeInspectionSnapshot, OperationError> {
+        let inspection = self
+            .state
             .episodes()
             .inspection(&episode)
-            .map(|inspection| inspection.into_snapshot(self.state.workspace()))
-            .map_err(OperationError::from)
+            .await
+            .map_err(OperationError::from)?;
+        Ok(inspection.into_snapshot(self.state.workspace()).await)
     }
 }
 
@@ -438,14 +451,15 @@ impl EpisodeQueryPort for EpisodeHttpAdapter<'_> {
 /// transposition hangs off the stored value as a local extension trait rather
 /// than a `From` impl.
 trait InspectionProjection {
-    fn into_snapshot(self, workspace: &RobotWorkspace) -> EpisodeInspectionSnapshot;
+    async fn into_snapshot(self, workspace: &RobotWorkspace) -> EpisodeInspectionSnapshot;
 }
 
 impl InspectionProjection for EpisodeInspection {
-    fn into_snapshot(self, workspace: &RobotWorkspace) -> EpisodeInspectionSnapshot {
+    async fn into_snapshot(self, workspace: &RobotWorkspace) -> EpisodeInspectionSnapshot {
         let inspection = self;
         let (episode, summary, videos) = inspection.into_parts();
         let samples = episode.samples();
+        let saved_robots = workspace.list().await;
         let arms = episode
             .start()
             .arms()
@@ -453,9 +467,10 @@ impl InspectionProjection for EpisodeInspection {
             .enumerate()
             .map(|(arm_index, arm)| {
                 let joint_count = arm.joints().len();
-                let calibration = workspace
-                    .get(arm.id())
-                    .ok()
+                let calibration = saved_robots
+                    .iter()
+                    .find(|robot| robot.id() == arm.id())
+                    .cloned()
                     .and_then(|record| record.calibration().ok().flatten());
                 let normalized = samples
                     .iter()
@@ -612,10 +627,11 @@ impl PhysicalSeekPort for SeekHttpAdapter<'_> {
         )
     }
 
-    fn target(&self, robot: &str) -> Result<Option<SeekTarget>, OperationError> {
+    async fn target(&self, robot: &str) -> Result<Option<SeekTarget>, OperationError> {
         Ok(self
             .state
             .snapshot()
+            .await
             .robots()
             .iter()
             .find(|candidate| candidate.id() == robot)
@@ -629,10 +645,11 @@ impl PhysicalSeekPort for SeekHttpAdapter<'_> {
             }))
     }
 
-    fn episode(&self, episode: &str) -> Result<SeekableEpisode, OperationError> {
+    async fn episode(&self, episode: &str) -> Result<SeekableEpisode, OperationError> {
         self.state
             .episodes()
             .get(episode)
+            .await
             .map(|summary| {
                 SeekableEpisode::new(
                     summary.id(),
@@ -657,11 +674,10 @@ impl PhysicalSeekPort for SeekHttpAdapter<'_> {
         episode: &str,
         seconds: f64,
     ) -> Result<RecordedSample, OperationError> {
-        let episodes = self.state.episodes().clone();
-        let episode = episode.to_owned();
-        tokio::task::spawn_blocking(move || episodes.sample_at(&episode, seconds))
+        self.state
+            .episodes()
+            .sample_at(episode, seconds)
             .await
-            .map_err(|error| OperationError::Internal(error.to_string()))?
             .map(|sample| {
                 let (frame, seconds, _, arms) = sample.into_parts();
                 RecordedSample::new(
@@ -711,6 +727,7 @@ impl AppState {
             .map(|progress| progress.episode().to_owned());
         let episodes = EpisodeQueries::new(&EpisodeHttpAdapter::catalog(&state))
             .list()
+            .await
             .into_iter()
             .filter(|episode| Some(episode.id()) != recording.as_deref())
             .collect();
@@ -751,7 +768,7 @@ impl AppState {
     /// Eligibility, sample-rate admission, consequential ordering, and cleanup
     /// belong to the capability action. This adapter only translates live backend
     /// structures into the episode writer's concrete representation.
-    fn create_recording_draft(
+    async fn create_recording_draft(
         &self,
         request: RecordingDraftRequest,
     ) -> Result<RecordingDraft, OperationError> {
@@ -790,14 +807,15 @@ impl AppState {
                 ))
             })
             .collect::<Result<Vec<_>, OperationError>>()?;
+        let saved_robots = self.workspace().list().await;
         let arms = spiral_robotics_api::recording::EpisodeArm::from_joint_lists(&arms)
             .map_err(OperationError::from)?
             .into_iter()
             .map(|arm| {
-                let robot_type = self
-                    .workspace()
-                    .get(arm.id())
-                    .ok()
+                let robot_type = saved_robots
+                    .iter()
+                    .find(|robot| robot.id() == arm.id())
+                    .cloned()
                     .and_then(|robot| robot.robot_type());
                 spiral_robotics_api::recording::EpisodeArm::new(
                     arm.id(),
@@ -853,6 +871,7 @@ impl AppState {
                     .with_note(note)
                     .with_arms(arms.clone(), condition),
             )
+            .await
             .map_err(OperationError::from)?;
         let id = writer.id().to_owned();
         let started_ms = writer.started_ms();
@@ -876,7 +895,7 @@ impl AppState {
     ) -> Result<Option<VideoCapture>, OperationError> {
         let video_settings = self.preferences().get().video().clone();
         if video_settings.enabled() {
-            let snapshot = self.snapshot();
+            let snapshot = self.snapshot().await;
             let camera_status = snapshot
                 .cameras()
                 .iter()
@@ -960,11 +979,9 @@ impl AppState {
         State(state): State<Self>,
         Path(id): Path<String>,
     ) -> Result<Json<EpisodeInspectionSnapshot>, Failure> {
-        let inspection = tokio::task::spawn_blocking(move || {
-            EpisodeQueries::new(&EpisodeHttpAdapter::catalog(&state)).inspection(id)
-        })
-        .await
-        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
+        let inspection = EpisodeQueries::new(&EpisodeHttpAdapter::catalog(&state))
+            .inspection(id)
+            .await?;
         Ok(Json(inspection))
     }
 }
@@ -1099,7 +1116,9 @@ impl AppState {
     ) -> Result<Response, Failure> {
         // Looking up the episode first prevents an orphaned media row from becoming
         // an independent serving namespace.
-        EpisodeQueries::new(&EpisodeHttpAdapter::catalog(&state)).authorize_asset(id.clone())?;
+        EpisodeQueries::new(&EpisodeHttpAdapter::catalog(&state))
+            .authorize_asset(id.clone())
+            .await?;
         let asset = VideoAssetKey::new(id, stream, query.segment);
         let length = state
             .storage()

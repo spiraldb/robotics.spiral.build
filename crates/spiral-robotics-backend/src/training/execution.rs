@@ -73,39 +73,44 @@ impl RunStateChange {
 
 pub(crate) trait TrainingRunPort: Send + Sync {
     fn runtime_is_active(&self, run_id: &str) -> bool;
-    fn transition_run(&self, run_id: &str, change: RunStateChange) -> Result<(), String>;
+    async fn transition_run(&self, run_id: &str, change: RunStateChange) -> Result<(), String>;
     fn signal_runtime_stop(&self, run_id: &str);
     fn mark_persistence_failure(&self, run_id: &str, error: &str);
     fn cleanup_runtime(&self, run_id: &str);
     fn now_ms(&self) -> i64;
 
-    fn fail_run(&self, run_id: &str, message: String) {
-        if let Err(error) = self.transition_run(
-            run_id,
-            RunStateChange {
-                phase: TrainingRunPhase::Failed,
-                finished_ms: Some(self.now_ms()),
-                message: Some(message),
-            },
-        ) {
+    async fn fail_run(&self, run_id: &str, message: String) {
+        if let Err(error) = self
+            .transition_run(
+                run_id,
+                RunStateChange {
+                    phase: TrainingRunPhase::Failed,
+                    finished_ms: Some(self.now_ms()),
+                    message: Some(message),
+                },
+            )
+            .await
+        {
             self.mark_persistence_failure(run_id, &error);
         }
     }
 
-    fn coordinate_training_stop(&self, run_id: &str) -> Result<(), OperationError> {
+    async fn coordinate_training_stop(&self, run_id: &str) -> Result<(), OperationError> {
         if !self.runtime_is_active(run_id) {
             return Err(OperationError::Conflict(format!(
                 "training run {run_id:?} is not active"
             )));
         }
-        let transition = self.transition_run(
-            run_id,
-            RunStateChange {
-                phase: TrainingRunPhase::Stopping,
-                finished_ms: None,
-                message: Some(STOPPING_MESSAGE.to_owned()),
-            },
-        );
+        let transition = self
+            .transition_run(
+                run_id,
+                RunStateChange {
+                    phase: TrainingRunPhase::Stopping,
+                    finished_ms: None,
+                    message: Some(STOPPING_MESSAGE.to_owned()),
+                },
+            )
+            .await;
         self.signal_runtime_stop(run_id);
         if let Err(error) = transition {
             self.mark_persistence_failure(run_id, &error);
@@ -123,7 +128,7 @@ pub(crate) trait TrainingCoordinatorPort: TrainingRunPort {
         command: &StartTrainingRequest,
     ) -> Result<(), OperationError>;
     fn next_training_identity(&self) -> TrainingRunIdentity;
-    fn admit_training_run(&self, run: TrainingRun) -> Result<(), OperationError>;
+    async fn admit_training_run(&self, run: TrainingRun) -> Result<(), OperationError>;
     fn launch_training_runtime(&self, launch: TrainingLaunch) -> Result<(), OperationError>;
 
     async fn coordinate_training_start(
@@ -143,10 +148,10 @@ pub(crate) trait TrainingCoordinatorPort: TrainingRunPort {
                 .with_completion(None, Some(STARTING_MESSAGE.to_owned())),
             TrainingRunHistory::default(),
         );
-        self.admit_training_run(run.clone())?;
+        self.admit_training_run(run.clone()).await?;
         let launch = TrainingLaunch::new(run.id(), command);
         if let Err(error) = self.launch_training_runtime(launch) {
-            self.fail_run(run.id(), error.message().to_owned());
+            self.fail_run(run.id(), error.message().to_owned()).await;
             self.cleanup_runtime(run.id());
             return Err(error);
         }
@@ -197,7 +202,7 @@ mod tests {
             self.push(format!("active:{run_id}"));
             self.active
         }
-        fn transition_run(&self, run_id: &str, change: RunStateChange) -> Result<(), String> {
+        async fn transition_run(&self, run_id: &str, change: RunStateChange) -> Result<(), String> {
             self.push(format!("transition:{run_id}:{:?}", change.phase));
             if self.fail == Some("transition") {
                 return Err("transition failed".to_owned());
@@ -244,7 +249,7 @@ mod tests {
             self.push("identity");
             TrainingRunIdentity::new("run-1", 7)
         }
-        fn admit_training_run(&self, run: TrainingRun) -> Result<(), OperationError> {
+        async fn admit_training_run(&self, run: TrainingRun) -> Result<(), OperationError> {
             self.push(format!("admit:{}", run.id()));
             if self.fail == Some("admit") {
                 return Err(OperationError::Conflict("admission failed".to_owned()));
@@ -333,10 +338,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn stop_signals_runtime_even_when_state_persistence_fails() {
+    #[tokio::test]
+    async fn stop_signals_runtime_even_when_state_persistence_fails() {
         let port = FakePort::with_failure("transition");
-        assert!(port.coordinate_training_stop("run-1").is_err());
+        assert!(port.coordinate_training_stop("run-1").await.is_err());
         assert_eq!(
             port.events(),
             [
@@ -348,13 +353,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn inactive_stop_has_no_transition_or_cancel_effect() {
+    #[tokio::test]
+    async fn inactive_stop_has_no_transition_or_cancel_effect() {
         let port = FakePort {
             active: false,
             ..FakePort::ready()
         };
-        assert!(port.coordinate_training_stop("run-1").is_err());
+        assert!(port.coordinate_training_stop("run-1").await.is_err());
         assert_eq!(port.events(), ["active:run-1"]);
     }
 }

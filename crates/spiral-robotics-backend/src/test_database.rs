@@ -1,4 +1,4 @@
-//! Test-only owner for a native database service used by synchronous E2E helpers.
+//! Test-only owner for a native database service used by async E2E helpers.
 
 use std::sync::Arc;
 

@@ -471,14 +471,7 @@ impl RolloutManager {
         tokio::spawn(async move {
             while changes.changed().await.is_ok() {
                 let snapshot = changes.borrow_and_update().clone();
-                let storage = persistence_storage.clone();
-                if let Err(error) =
-                    tokio::task::spawn_blocking(move || storage.save_rollout_snapshot(&snapshot))
-                        .await
-                        .unwrap_or_else(|error| {
-                            Err(format!("rollout persistence task stopped: {error}"))
-                        })
-                {
+                if let Err(error) = persistence_storage.save_rollout_snapshot(&snapshot).await {
                     tracing::error!("could not persist rollout state: {error}");
                 }
             }
@@ -503,8 +496,8 @@ impl RolloutManager {
         })
     }
 
-    pub(crate) fn reload_from_storage(&self) -> Result<(), String> {
-        let snapshot: ContractRolloutSnapshot = self.storage.load_rollout_snapshot()?;
+    pub(crate) async fn reload_from_storage(&self) -> Result<(), String> {
+        let snapshot: ContractRolloutSnapshot = self.storage.load_rollout_snapshot().await?;
         self.lifecycle
             .state
             .send_replace(snapshot.restored_after_restart());
@@ -651,6 +644,7 @@ impl RolloutManager {
             .hardware
             .workspace
             .get(request.robot())
+            .await
             .map_err(|error| error.to_string())?;
         let connection = hardware_state
             .connections()

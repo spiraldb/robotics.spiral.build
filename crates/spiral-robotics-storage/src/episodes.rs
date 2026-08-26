@@ -372,6 +372,11 @@ impl FullEpisode {
         &self.samples
     }
 
+    pub fn summary(&self) -> EpisodeInfo {
+        self.start
+            .summary(&self.completion, self.samples.len() as u64)
+    }
+
     pub(crate) const fn completion(&self) -> &EpisodeCompletion {
         &self.completion
     }
@@ -557,6 +562,7 @@ impl TimelineSample {
 
 pub struct EpisodeStore {
     project_store: Arc<ProjectStore>,
+    completed: Arc<Mutex<BTreeMap<String, FullEpisode>>>,
     last_issue: Mutex<Option<String>>,
     seek_sequence: AtomicU64,
     latest_seek: Mutex<BTreeMap<String, u64>>,
@@ -567,6 +573,7 @@ impl EpisodeStore {
     pub fn new(project_store: Arc<ProjectStore>) -> Self {
         Self {
             project_store,
+            completed: Arc::new(Mutex::new(BTreeMap::new())),
             last_issue: Mutex::new(None),
             seek_sequence: AtomicU64::new(0),
             latest_seek: Mutex::new(BTreeMap::new()),
@@ -574,8 +581,8 @@ impl EpisodeStore {
         }
     }
 
-    pub fn list(&self) -> Vec<EpisodeInfo> {
-        match self.try_list() {
+    pub async fn list(&self) -> Vec<EpisodeInfo> {
+        match self.try_list().await {
             Ok(episodes) => {
                 *self.last_issue.lock_unpoisoned() = None;
                 episodes
@@ -589,69 +596,88 @@ impl EpisodeStore {
     pub fn issues(&self) -> Vec<String> {
         self.last_issue.lock_unpoisoned().iter().cloned().collect()
     }
-    pub fn get(&self, id: &str) -> Result<EpisodeInfo, EpisodeError> {
+    pub async fn get(&self, id: &str) -> Result<EpisodeInfo, EpisodeError> {
         EpisodeId::try_from(id).map_err(|_| EpisodeError::InvalidId(id.to_owned()))?;
-        self.try_list()?
+        self.try_list()
+            .await?
             .into_iter()
             .find(|episode| episode.id() == id)
             .ok_or_else(|| EpisodeError::NotFound(id.to_owned()))
     }
 
-    pub fn full_episode(&self, id: &str) -> Result<FullEpisode, EpisodeError> {
+    pub async fn full_episode(&self, id: &str) -> Result<FullEpisode, EpisodeError> {
         EpisodeId::try_from(id).map_err(|_| EpisodeError::InvalidId(id.to_owned()))?;
         let episodes = Table::Episodes.qualified_name(self.project_store.namespace());
         let samples = Table::JointSamples.qualified_name(self.project_store.namespace());
         let episode_value = SpiralSql::string_literal(id);
         let sample_query = SpiralSql::episode_samples(self.project_store.namespace(), id);
-        self.project_store
-            .run_blocking(move |connection| {
-                if !connection.table_exists(&episodes)? {
-                    return Err(EpisodeError::NotFound(id.to_owned()).to_string());
-                }
-                let metadata = connection.run_query(
-                    &format!(
-                        "SELECT {} FROM {episodes} WHERE {} = {episode_value} LIMIT 1",
-                        db::METADATA_JSON,
-                        db::EPISODE_ID
-                    ),
-                    1,
-                )?;
-                let row = metadata
-                    .rows()
-                    .first()
-                    .ok_or_else(|| EpisodeError::NotFound(id.to_owned()).to_string())?;
-                let metadata = row
-                    .get(db::METADATA_JSON)
-                    .and_then(JsonValue::as_str)
-                    .ok_or_else(|| format!("episode {id:?} has no metadata"))?;
-                let (start, completion): (EpisodeStart, EpisodeCompletion) =
-                    serde_json::from_str(metadata)
-                        .map_err(|error| format!("episode {id:?} metadata is invalid: {error}"))?;
-                let rows = if connection.table_exists(&samples)? {
-                    let result = connection.run_query(&sample_query, MAX_EPISODE_ROWS)?;
-                    if result.truncated() {
-                        return Err(format!("episode {id:?} exceeds the supported row limit"));
-                    }
-                    result.into_rows()
-                } else {
-                    Vec::new()
-                };
-                let decoded = start.decode_samples(rows)?;
-                Ok(FullEpisode {
-                    start,
-                    samples: decoded,
-                    completion,
-                })
-            })
-            .map_err(EpisodeError::Invalid)
+        let mut connection = self
+            .project_store
+            .connect()
+            .await
+            .map_err(EpisodeError::Invalid)?;
+        if !connection
+            .table_exists(&episodes)
+            .await
+            .map_err(EpisodeError::Invalid)?
+        {
+            return Err(EpisodeError::NotFound(id.to_owned()));
+        }
+        let metadata = connection
+            .run_query(
+                &format!(
+                    "SELECT {} FROM {episodes} WHERE {} = {episode_value} LIMIT 1",
+                    db::METADATA_JSON,
+                    db::EPISODE_ID
+                ),
+                1,
+            )
+            .await
+            .map_err(EpisodeError::Invalid)?;
+        let row = metadata
+            .rows()
+            .first()
+            .ok_or_else(|| EpisodeError::NotFound(id.to_owned()))?;
+        let metadata = row
+            .get(db::METADATA_JSON)
+            .and_then(JsonValue::as_str)
+            .ok_or_else(|| EpisodeError::Invalid(format!("episode {id:?} has no metadata")))?;
+        let (start, completion): (EpisodeStart, EpisodeCompletion) = serde_json::from_str(metadata)
+            .map_err(|error| {
+                EpisodeError::Invalid(format!("episode {id:?} metadata is invalid: {error}"))
+            })?;
+        let rows = if connection
+            .table_exists(&samples)
+            .await
+            .map_err(EpisodeError::Invalid)?
+        {
+            let result = connection
+                .run_query(&sample_query, MAX_EPISODE_ROWS)
+                .await
+                .map_err(EpisodeError::Invalid)?;
+            if result.truncated() {
+                return Err(EpisodeError::Invalid(format!(
+                    "episode {id:?} exceeds the supported row limit"
+                )));
+            }
+            result.into_rows()
+        } else {
+            Vec::new()
+        };
+        let decoded = start.decode_samples(rows).map_err(EpisodeError::Invalid)?;
+        Ok(FullEpisode {
+            start,
+            samples: decoded,
+            completion,
+        })
     }
 
-    pub fn inspection(&self, id: &str) -> Result<EpisodeInspection, EpisodeError> {
-        let episode = self.full_episode(id)?;
+    pub async fn inspection(&self, id: &str) -> Result<EpisodeInspection, EpisodeError> {
+        let episode = self.full_episode(id).await?;
         let summary = episode
             .start
             .summary(&episode.completion, episode.samples.len() as u64);
-        let videos = self.video_metadata_for_existing(id)?;
+        let videos = self.video_metadata_for_existing(id).await?;
         Ok(EpisodeInspection {
             episode,
             summary,
@@ -659,9 +685,10 @@ impl EpisodeStore {
         })
     }
 
-    pub fn next_id(&self) -> Result<String, EpisodeError> {
+    pub async fn next_id(&self) -> Result<String, EpisodeError> {
         let highest = self
-            .try_list()?
+            .try_list()
+            .await?
             .iter()
             .filter_map(|episode| {
                 EpisodeId::try_from(episode.id())
@@ -673,7 +700,7 @@ impl EpisodeStore {
         Ok(format!("episode_{:06}", highest + 1))
     }
 
-    pub fn begin_in_dataset(
+    pub async fn begin_in_dataset(
         &self,
         request: EpisodeRecordingRequest,
     ) -> Result<EpisodeWriter, EpisodeError> {
@@ -682,30 +709,40 @@ impl EpisodeStore {
                 "a take needs at least one connected arm to sample".to_owned(),
             ));
         }
-        let start = EpisodeStart::new(self.next_id()?, request.dataset_id)
+        let start = EpisodeStart::new(self.next_id().await?, request.dataset_id)
             .with_current_timing(request.sample_hz)
             .with_source(request.source, request.note)
             .with_arms(request.arms, request.condition);
         SpiralEpisodeEncoder::new(start.clone())?;
-        EpisodeWriter::start(start, self.project_store.clone())
+        EpisodeWriter::start(
+            start,
+            self.project_store.clone(),
+            Arc::clone(&self.completed),
+        )
     }
 
-    pub fn delete(&self, id: &str) -> Result<(), EpisodeError> {
-        self.get(id)?;
+    pub async fn delete(&self, id: &str) -> Result<(), EpisodeError> {
+        self.get(id).await?;
         let id = id.to_owned();
         let namespace = self.project_store.namespace().to_owned();
-        self.project_store
-            .run_blocking(move |connection| connection.clear_episode_rows(&namespace, &id))
+        let mut connection = self
+            .project_store
+            .connect_exclusive()
+            .await
+            .map_err(EpisodeError::Invalid)?;
+        connection
+            .clear_episode_rows(&namespace, &id)
+            .await
             .map_err(EpisodeError::Invalid)
     }
 
-    pub fn reapply_calibration(
+    pub async fn reapply_calibration(
         &self,
         robot: &str,
         calibration: &Calibration,
     ) -> Result<ReappliedEpisodePositions, EpisodeError> {
         let mut result = ReappliedEpisodePositions::default();
-        for summary in self.try_list()? {
+        for summary in self.try_list().await? {
             let Some(arm_index) = summary.arms().iter().position(|arm| arm.id() == robot) else {
                 continue;
             };
@@ -724,7 +761,7 @@ impl EpisodeStore {
                 ));
                 continue;
             }
-            let mut episode = self.full_episode(summary.id())?;
+            let mut episode = self.full_episode(summary.id()).await?;
             let mut changed = false;
             for sample in &mut episode.samples {
                 let normalized = joints.iter().enumerate().map(|(joint_index, joint)| {
@@ -740,7 +777,7 @@ impl EpisodeStore {
                 }
             }
             if changed {
-                self.replace_samples(&episode)?;
+                self.replace_samples(&episode).await?;
                 result.frames_updated = result.frames_updated.saturating_add(summary.frames());
                 result.updated_episode_ids.push(summary.id().to_owned());
             } else {
@@ -750,7 +787,7 @@ impl EpisodeStore {
         Ok(result)
     }
 
-    pub fn trajectory_at(
+    pub async fn trajectory_at(
         &self,
         id: &str,
         request: RobotPlaybackRequest<'_>,
@@ -762,7 +799,7 @@ impl EpisodeStore {
                 "replay start time must be finite and non-negative".to_owned(),
             ));
         }
-        let episode = self.full_episode(id)?;
+        let episode = self.full_episode(id).await?;
         let arm_index = episode
             .start
             .arms
@@ -816,13 +853,13 @@ impl EpisodeStore {
         })
     }
 
-    pub fn sample_at(&self, id: &str, seconds: f64) -> Result<TimelineSample, EpisodeError> {
+    pub async fn sample_at(&self, id: &str, seconds: f64) -> Result<TimelineSample, EpisodeError> {
         if !seconds.is_finite() {
             return Err(EpisodeError::Invalid(
                 "timeline time must be finite".to_owned(),
             ));
         }
-        let episode = self.full_episode(id)?;
+        let episode = self.full_episode(id).await?;
         let (frame, sample) = episode
             .samples
             .iter()
@@ -854,91 +891,129 @@ impl EpisodeStore {
         self.seek_gate.lock().await
     }
 
-    fn video_metadata_for_existing(
+    async fn video_metadata_for_existing(
         &self,
         id: &str,
     ) -> Result<Vec<VideoAssetMetadata>, EpisodeError> {
         let relation = Table::VideoAssets.qualified_name(self.project_store.namespace());
         let id = SpiralSql::string_literal(id);
-        self.project_store.run_blocking(move |connection| {
-            if !connection.table_exists(&relation)? { return Ok(Vec::new()); }
-            let result = connection.run_query(&format!("SELECT {}, {}, {}, {}, {}, {}, {}, {} FROM {relation} WHERE {} = {id} ORDER BY {}, {}", db::STREAM_ID, db::CAMERA_ID, db::WIDTH, db::HEIGHT, db::FPS, db::FRAMES, db::SEGMENT_INDEX, db::TIMELINE_OFFSET_NS, db::EPISODE_ID, db::STREAM_ID, db::SEGMENT_INDEX), 10_000)?;
-            result
-                .into_rows()
-                .into_iter()
-                .map(|row| row.video_metadata())
-                .collect()
-        }).map_err(EpisodeError::Invalid)
+        let mut connection = self
+            .project_store
+            .connect()
+            .await
+            .map_err(EpisodeError::Invalid)?;
+        if !connection
+            .table_exists(&relation)
+            .await
+            .map_err(EpisodeError::Invalid)?
+        {
+            return Ok(Vec::new());
+        }
+        let result = connection.run_query(&format!("SELECT {}, {}, {}, {}, {}, {}, {}, {} FROM {relation} WHERE {} = {id} ORDER BY {}, {}", db::STREAM_ID, db::CAMERA_ID, db::WIDTH, db::HEIGHT, db::FPS, db::FRAMES, db::SEGMENT_INDEX, db::TIMELINE_OFFSET_NS, db::EPISODE_ID, db::STREAM_ID, db::SEGMENT_INDEX), 10_000).await.map_err(EpisodeError::Invalid)?;
+        result
+            .into_rows()
+            .into_iter()
+            .map(|row| row.video_metadata().map_err(EpisodeError::Invalid))
+            .collect()
     }
 
-    fn try_list(&self) -> Result<Vec<EpisodeInfo>, EpisodeError> {
+    async fn try_list(&self) -> Result<Vec<EpisodeInfo>, EpisodeError> {
         let relation = Table::Episodes.qualified_name(self.project_store.namespace());
-        self.project_store
-            .run_blocking(move |connection| {
-                if !connection.table_exists(&relation)? {
-                    return Ok(Vec::new());
-                }
-                let result = connection.run_query(
-                    &format!(
-                        "SELECT {}, {} FROM {relation} ORDER BY {}",
-                        db::METADATA_JSON,
-                        db::FRAMES,
-                        db::STARTED_MS
-                    ),
-                    100_000,
-                )?;
-                result
-                    .into_rows()
-                    .into_iter()
-                    .map(|row| row.episode_summary())
-                    .collect()
-            })
-            .map_err(EpisodeError::Invalid)
+        let mut connection = self
+            .project_store
+            .connect()
+            .await
+            .map_err(EpisodeError::Invalid)?;
+        if !connection
+            .table_exists(&relation)
+            .await
+            .map_err(EpisodeError::Invalid)?
+        {
+            return Ok(Vec::new());
+        }
+        let result = connection
+            .run_query(
+                &format!(
+                    "SELECT {}, {} FROM {relation} ORDER BY {}",
+                    db::METADATA_JSON,
+                    db::FRAMES,
+                    db::STARTED_MS
+                ),
+                100_000,
+            )
+            .await
+            .map_err(EpisodeError::Invalid)?;
+        result
+            .into_rows()
+            .into_iter()
+            .map(|row| row.episode_summary().map_err(EpisodeError::Invalid))
+            .collect()
     }
 
-    fn replace_samples(&self, episode: &FullEpisode) -> Result<(), EpisodeError> {
+    async fn replace_samples(&self, episode: &FullEpisode) -> Result<(), EpisodeError> {
         let episode = episode.clone();
         let namespace = self.project_store.namespace().to_owned();
-        self.project_store
-            .run_blocking(move |connection| {
-                let sample_relation = Table::JointSamples.qualified_name(&namespace);
-                let episode_relation = Table::Episodes.qualified_name(&namespace);
-                connection.execute_update_sql(&SpiralSql::delete_episode(
-                    &sample_relation,
-                    episode.start.id(),
-                ))?;
-                connection.execute_update_sql(&SpiralSql::delete_episode(
-                    &episode_relation,
-                    episode.start.id(),
-                ))?;
-                let mut encoder = SpiralEpisodeEncoder::new(episode.start.clone())
-                    .map_err(|error| error.to_string())?;
-                let mut rows = Vec::new();
-                for sample in &episode.samples {
-                    rows.extend(encoder.encode(sample).map_err(|error| error.to_string())?);
-                    if rows.len() >= 512 {
-                        connection.ingest_batch(
-                            &sample_relation,
-                            rows.batch().map_err(|error| error.to_string())?,
-                        )?;
-                        rows.clear();
-                    }
-                }
-                if !rows.is_empty() {
-                    connection.ingest_batch(
-                        &sample_relation,
-                        rows.batch().map_err(|error| error.to_string())?,
-                    )?;
-                }
-                connection.ingest_batch(
-                    &episode_relation,
-                    episode
-                        .completion
-                        .episode_batch(&episode.start, encoder.frames())
-                        .map_err(|error| error.to_string())?,
-                )
-            })
+        let mut connection = self
+            .project_store
+            .connect_exclusive()
+            .await
+            .map_err(EpisodeError::Invalid)?;
+        let sample_relation = Table::JointSamples.qualified_name(&namespace);
+        let episode_relation = Table::Episodes.qualified_name(&namespace);
+        connection
+            .execute_update_sql(&SpiralSql::delete_episode(
+                &sample_relation,
+                episode.start.id(),
+            ))
+            .await
+            .map_err(EpisodeError::Invalid)?;
+        connection
+            .execute_update_sql(&SpiralSql::delete_episode(
+                &episode_relation,
+                episode.start.id(),
+            ))
+            .await
+            .map_err(EpisodeError::Invalid)?;
+        let mut encoder = SpiralEpisodeEncoder::new(episode.start.clone())?;
+        let mut rows = Vec::new();
+        for sample in &episode.samples {
+            rows.extend(encoder.encode(sample)?);
+            if rows.len() >= 512 {
+                connection
+                    .ingest_batch(&sample_relation, rows.batch()?)
+                    .await
+                    .map_err(EpisodeError::Invalid)?;
+                rows.clear();
+            }
+        }
+        if !rows.is_empty() {
+            connection
+                .ingest_batch(&sample_relation, rows.batch()?)
+                .await
+                .map_err(EpisodeError::Invalid)?;
+        }
+        connection
+            .ingest_batch(
+                &episode_relation,
+                episode
+                    .completion
+                    .episode_batch(&episode.start, encoder.frames())
+                    .map_err(|error| EpisodeError::Invalid(error.to_string()))?,
+            )
+            .await
             .map_err(EpisodeError::Invalid)
+    }
+
+    pub fn completed_episode(&self, id: &str) -> Result<FullEpisode, EpisodeError> {
+        self.completed
+            .lock_unpoisoned()
+            .get(id)
+            .cloned()
+            .ok_or_else(|| EpisodeError::NotFound(id.to_owned()))
+    }
+
+    pub fn forget_completed(&self, id: &str) {
+        self.completed.lock_unpoisoned().remove(id);
     }
 }
 
@@ -952,6 +1027,11 @@ enum WriterMessage {
         completion: EpisodeCompletion,
         complete: tokio::sync::oneshot::Sender<Result<(), String>>,
     },
+}
+
+struct EpisodeDatabaseWrite {
+    episode: FullEpisode,
+    complete: tokio::sync::oneshot::Sender<Result<(), String>>,
 }
 
 pub(crate) trait EpisodeWriteSession: Send {
@@ -972,21 +1052,26 @@ impl EpisodeWriter {
             session: Box::new(session),
         }
     }
-    fn start(start: EpisodeStart, project_store: Arc<ProjectStore>) -> Result<Self, EpisodeError> {
+    fn start(
+        start: EpisodeStart,
+        project_store: Arc<ProjectStore>,
+        completed: Arc<Mutex<BTreeMap<String, FullEpisode>>>,
+    ) -> Result<Self, EpisodeError> {
         let (sender, receiver) = mpsc::sync_channel(SAMPLE_QUEUE_DEPTH);
+        let (database_sender, database_receiver) = tokio::sync::mpsc::channel(4);
+        tokio::spawn(EpisodeDatabaseWriter::new(project_store).run(database_receiver));
         let shared = Arc::new(WriterShared {
             written: AtomicU64::new(0),
             failure: Mutex::new(None),
         });
         let worker_shared = shared.clone();
         let validation_start = start.clone();
-        let worker_repository = project_store.clone();
         let thread = std::thread::Builder::new()
             .name("spiral-episode-transaction".to_owned())
             .spawn(move || {
                 EpisodeDrain {
                     start: &validation_start,
-                    project_store: &worker_repository,
+                    database_sender,
                     shared: &worker_shared,
                 }
                 .run(receiver)
@@ -1000,7 +1085,7 @@ impl EpisodeWriter {
             start,
             sender: Some(sender),
             thread: Some(thread),
-            project_store,
+            completed,
             shared,
             last_queued_seconds: AtomicU64::new(NO_SAMPLE_TIMESTAMP_BITS),
         }))
@@ -1103,7 +1188,7 @@ struct SpiralEpisodeWriter {
     start: EpisodeStart,
     sender: Option<mpsc::SyncSender<WriterMessage>>,
     thread: Option<JoinHandle<Result<Vec<Sample>, String>>>,
-    project_store: Arc<ProjectStore>,
+    completed: Arc<Mutex<BTreeMap<String, FullEpisode>>>,
     shared: Arc<WriterShared>,
     last_queued_seconds: AtomicU64,
 }
@@ -1177,12 +1262,9 @@ impl EpisodeWriteSession for SpiralEpisodeWriter {
             samples,
             completion,
         };
-        let namespace = self.project_store.namespace().to_owned();
-        self.project_store
-            .run_blocking(|connection| {
-                EpisodeReplacement::new(&namespace, &full_episode, &[]).save(connection)
-            })
-            .map_err(EpisodeError::Invalid)?;
+        self.completed
+            .lock_unpoisoned()
+            .insert(full_episode.start.id().to_owned(), full_episode.clone());
         Ok(full_episode
             .start
             .summary(&full_episode.completion, full_episode.samples.len() as u64))
@@ -1210,7 +1292,7 @@ impl Drop for SpiralEpisodeWriter {
 
 struct EpisodeDrain<'a> {
     start: &'a EpisodeStart,
-    project_store: &'a ProjectStore,
+    database_sender: tokio::sync::mpsc::Sender<EpisodeDatabaseWrite>,
     shared: &'a WriterShared,
 }
 
@@ -1246,18 +1328,42 @@ impl EpisodeDrain<'_> {
                         samples: samples.clone(),
                         completion,
                     };
-                    let namespace = self.project_store.namespace().to_owned();
-                    let result = self.project_store.run_blocking(|connection| {
-                        EpisodeReplacement::new(&namespace, &full_episode, &[]).save(connection)
-                    });
-                    if let Err(error) = &result {
-                        *self.shared.failure.lock_unpoisoned() = Some(error.clone());
+                    if let Err(error) = self.database_sender.blocking_send(EpisodeDatabaseWrite {
+                        episode: full_episode,
+                        complete,
+                    }) {
+                        let detail = format!("episode database writer stopped: {error}");
+                        *self.shared.failure.lock_unpoisoned() = Some(detail);
                     }
-                    let _ = complete.send(result);
                 }
             }
         }
         Ok(samples)
+    }
+}
+
+struct EpisodeDatabaseWriter {
+    project_store: Arc<ProjectStore>,
+}
+
+impl EpisodeDatabaseWriter {
+    fn new(project_store: Arc<ProjectStore>) -> Self {
+        Self { project_store }
+    }
+
+    async fn run(self, mut receiver: tokio::sync::mpsc::Receiver<EpisodeDatabaseWrite>) {
+        while let Some(write) = receiver.recv().await {
+            let namespace = self.project_store.namespace().to_owned();
+            let result = match self.project_store.connect().await {
+                Ok(mut connection) => {
+                    EpisodeReplacement::new(&namespace, &write.episode, &[])
+                        .save(&mut connection)
+                        .await
+                }
+                Err(error) => Err(error),
+            };
+            let _ = write.complete.send(result);
+        }
     }
 }
 

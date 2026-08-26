@@ -57,12 +57,12 @@ impl PhysicalSeekPort for FakePort {
         self.activity.clone()
     }
 
-    fn target(&self, _robot: &str) -> Result<Option<SeekTarget>, OperationError> {
+    async fn target(&self, _robot: &str) -> Result<Option<SeekTarget>, OperationError> {
         self.events.lock().unwrap().push("target".to_owned());
         Ok(self.target.clone())
     }
 
-    fn episode(&self, _episode: &str) -> Result<SeekableEpisode, OperationError> {
+    async fn episode(&self, _episode: &str) -> Result<SeekableEpisode, OperationError> {
         self.events.lock().unwrap().push("episode".to_owned());
         Ok(self.episode.clone())
     }

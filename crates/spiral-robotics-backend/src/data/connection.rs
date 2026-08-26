@@ -174,6 +174,7 @@ impl SpiralConnectionController {
         self.stores
             .storage
             .save_studio_preferences(&staged_preferences)
+            .await
             .map_err(OperationError::External)?;
         if connection_changed {
             if let Err(error) = self
@@ -185,7 +186,8 @@ impl SpiralConnectionController {
                 let _ = self
                     .stores
                     .storage
-                    .save_studio_preferences(&previous_preferences);
+                    .save_studio_preferences(&previous_preferences)
+                    .await;
                 return Err(OperationError::InvalidInput(error));
             }
             if let Err(error) = self.stores.backend_state.save_connection(&next_connection) {
@@ -197,7 +199,8 @@ impl SpiralConnectionController {
                 let _ = self
                     .stores
                     .storage
-                    .save_studio_preferences(&previous_preferences);
+                    .save_studio_preferences(&previous_preferences)
+                    .await;
                 return Err(OperationError::Internal(error));
             }
             *self.current.recover_lock() = next_connection;
@@ -205,29 +208,33 @@ impl SpiralConnectionController {
         self.stores.preferences.replace(staged_preferences);
 
         if connection_changed || !catalog_was_available {
-            self.reload_project_state()?;
+            self.reload_project_state().await?;
         }
         Ok(self.settings())
     }
 
-    fn reload_project_state(&self) -> Result<(), OperationError> {
+    async fn reload_project_state(&self) -> Result<(), OperationError> {
         self.activities
             .training
             .reload_from_storage()
+            .await
             .map_err(OperationError::External)?;
         self.activities
             .rollout
             .reload_from_storage()
+            .await
             .map_err(OperationError::External)?;
         self.activities
             .workflow
             .workflow
             .reload_from_storage()
+            .await
             .map_err(OperationError::External)?;
         self.activities
             .workflow
             .workflow_agent
             .reload_from_storage()
+            .await
             .map_err(OperationError::External)
     }
 }

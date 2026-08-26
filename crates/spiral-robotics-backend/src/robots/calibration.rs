@@ -36,9 +36,10 @@ impl<'a> CalibrationUpdate<'a> {
 
 /// Saved robot configuration required by the calibration action.
 pub(crate) trait RobotCalibrationStore {
-    fn motor_specs(&self, robot: &str) -> Result<BTreeMap<String, MotorSpec>, OperationError>;
+    async fn motor_specs(&self, robot: &str)
+    -> Result<BTreeMap<String, MotorSpec>, OperationError>;
 
-    fn save_calibration(
+    async fn save_calibration(
         &self,
         robot: &str,
         update: CalibrationUpdate<'_>,
@@ -87,7 +88,8 @@ pub(crate) trait CalibrationHistoryPort {
     fn reserve_catalog_mutation(&self) -> Result<Option<CatalogLeaseToken>, OperationError>;
     fn release_catalog_mutation(&self, token: CatalogLeaseToken);
     fn activity(&self) -> CalibrationHistoryActivity;
-    fn current_calibration(&self, robot: &str) -> Result<Option<Calibration>, OperationError>;
+    async fn current_calibration(&self, robot: &str)
+    -> Result<Option<Calibration>, OperationError>;
 
     async fn reapply_positions(
         &self,
@@ -168,13 +170,14 @@ where
         &self,
         robot: &str,
     ) -> Result<FinishCalibrationOutput, OperationError> {
-        let motors = self.store.motor_specs(robot)?;
+        let motors = self.store.motor_specs(robot).await?;
         let input = self.control.calibration_input(robot).await?;
         let calibration = input
             .build(&motors)
             .map_err(|error| OperationError::InvalidInput(error.to_string()))?;
         self.store
-            .save_calibration(robot, CalibrationUpdate::new(&motors, &calibration))?;
+            .save_calibration(robot, CalibrationUpdate::new(&motors, &calibration))
+            .await?;
 
         let cancel_warning = self
             .control
@@ -246,7 +249,7 @@ impl<'a, P: CalibrationHistoryPort + ?Sized> CalibrationHistoryActions<'a, P> {
                     .to_owned(),
             ));
         }
-        let calibration = self.port.current_calibration(robot)?.ok_or_else(|| {
+        let calibration = self.port.current_calibration(robot).await?.ok_or_else(|| {
             OperationError::InvalidInput(format!(
                 "robot {robot:?} must have a saved calibration before positions can be reapplied"
             ))
@@ -293,12 +296,15 @@ mod tests {
     }
 
     impl RobotCalibrationStore for Store {
-        fn motor_specs(&self, _robot: &str) -> Result<BTreeMap<String, MotorSpec>, OperationError> {
+        async fn motor_specs(
+            &self,
+            _robot: &str,
+        ) -> Result<BTreeMap<String, MotorSpec>, OperationError> {
             self.events.lock().unwrap().push("specs");
             Ok(motors())
         }
 
-        fn save_calibration(
+        async fn save_calibration(
             &self,
             _robot: &str,
             _update: CalibrationUpdate<'_>,
@@ -478,7 +484,10 @@ mod tests {
             self.activity.clone()
         }
 
-        fn current_calibration(&self, _robot: &str) -> Result<Option<Calibration>, OperationError> {
+        async fn current_calibration(
+            &self,
+            _robot: &str,
+        ) -> Result<Option<Calibration>, OperationError> {
             Ok(self.calibration.clone())
         }
 

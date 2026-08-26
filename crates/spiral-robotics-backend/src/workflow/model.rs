@@ -1,15 +1,12 @@
-//! Blocking SigLIP worker for relation-first Workflow Model nodes.
+//! Async database orchestration for relation-first Workflow Model nodes.
 //!
-//! The async manager owns run admission and snapshots. This module owns the
-//! pinned artifacts, device, bounded Arrow/image pipeline, and derived Spiral
-//! relation. All identifiers arrive prevalidated and server-derived.
+//! The manager and Spiral access remain async. CPU-bound artifact loading,
+//! image decoding, and inference are isolated on Tokio's blocking pool.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, SyncSender};
-use std::sync::{Arc, Mutex};
-use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use arrow_array::builder::{ListBuilder, StringBuilder};
@@ -23,6 +20,7 @@ use arrow_select::take::take;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::{clip, siglip};
+use futures::StreamExt as _;
 use hf_hub::api::sync::ApiBuilder;
 use hf_hub::{Repo, RepoType};
 use image::imageops::FilterType;
@@ -43,6 +41,7 @@ use spiral_robotics_storage::bundle::{
 use tokenizers::Tokenizer;
 use tokenizers::utils::padding::{PaddingDirection, PaddingParams, PaddingStrategy};
 use tokenizers::utils::truncation::TruncationParams;
+use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
 use spiral_robotics_storage::ProjectStore;
 
@@ -157,7 +156,7 @@ pub(crate) struct ModelRunContext {
     project_store: Arc<ProjectStore>,
     request: ModelRunRequest,
     cancel: Arc<AtomicBool>,
-    publication_gate: Arc<Mutex<()>>,
+    publication_gate: Arc<AsyncMutex<()>>,
 }
 
 impl ModelRunContext {
@@ -170,20 +169,20 @@ impl ModelRunContext {
             project_store,
             request,
             cancel,
-            publication_gate: Arc::new(Mutex::new(())),
+            publication_gate: Arc::new(AsyncMutex::new(())),
         }
     }
 
-    pub(crate) fn with_publication_gate(mut self, gate: Arc<Mutex<()>>) -> Self {
+    pub(crate) fn with_publication_gate(mut self, gate: Arc<AsyncMutex<()>>) -> Self {
         self.publication_gate = gate;
         self
     }
 }
 
 impl ModelRunContext {
-    pub(crate) fn run(
+    pub(crate) async fn run(
         self,
-        mut publish: impl FnMut(ModelRunEvent),
+        events: mpsc::UnboundedSender<ModelRunEvent>,
     ) -> Result<ModelRunResult, ModelRunFailure> {
         let ModelRunContext {
             project_store,
@@ -198,19 +197,20 @@ impl ModelRunContext {
                     .to_string()
                     .replace("Training SQL", "Workflow candidate SQL")
             })?;
-        publish(ModelRunEvent::Validating(
+        let _ = events.send(ModelRunEvent::Validating(
             "Inspecting candidate keys and feature cache".to_owned(),
         ));
         let scan = CandidateScanRequest::new(&request.candidate_sql, &request.features, &cancel)
-            .scan(&project_store)?;
-        let mut registry = FeatureRegistry::load(&project_store)?;
+            .scan(&project_store)
+            .await?;
+        let mut registry = FeatureRegistry::load(&project_store).await?;
         let registry_changed = registry.register(FeatureRegistration::new(
             &request.feature_cache_relation,
             &request.features,
             FeatureRegistryTimestamps::now_millis(),
         ))?;
         let mut cache =
-            FeatureCache::load(&project_store, &request.feature_cache_relation, &registry)?;
+            FeatureCache::load(&project_store, &request.feature_cache_relation, &registry).await?;
         let (requested_indices, cache_schema_changed) = cache.merge_requested(&request.features)?;
         cache.ensure_merged_row_bound(&scan.keys, MAX_FEATURE_CACHE_ROWS)?;
         for key in &scan.keys {
@@ -246,13 +246,15 @@ impl ModelRunContext {
         }
 
         if missing_cells == 0 {
-            publish(ModelRunEvent::Materializing(
+            let _ = events.send(ModelRunEvent::Materializing(
                 "Publishing feature definitions and cache schema".to_owned(),
             ));
-            FeaturePublication::new(&request.feature_cache_relation, &cache, &registry).publish(
-                &project_store,
-                PublicationGuard::new(&cancel, &publication_gate),
-            )?;
+            FeaturePublication::new(&request.feature_cache_relation, &cache, &registry)
+                .publish(
+                    &project_store,
+                    PublicationGuard::new(&cancel, &publication_gate),
+                )
+                .await?;
             return Ok(ModelRunResult {
                 rows: cache.rows.len(),
                 requested_feature_cells: requested_cells as u64,
@@ -270,114 +272,128 @@ impl ModelRunContext {
             });
         }
 
-        publish(ModelRunEvent::Loading(format!(
+        let _ = events.send(ModelRunEvent::Loading(format!(
             "Loading pinned {} artifacts",
             SIGLIP_BASE_MODEL_ID
         )));
-        let artifacts = SiglipArtifacts::resolve()?;
-        cancel.ensure_model_active()?;
         let concepts = request
             .features
             .iter()
-            .map(WorkflowFeatureDefinition::concept)
+            .map(|feature| feature.concept().to_owned())
             .collect::<Vec<_>>();
-        let (engine, fallback_warning) = SiglipEngine::load_preferred(&artifacts, &concepts)?;
+        let (engine, fallback_warning) = tokio::task::spawn_blocking(move || {
+            let artifacts = SiglipArtifacts::resolve()?;
+            let concepts = concepts.iter().map(String::as_str).collect::<Vec<_>>();
+            SiglipEngine::load_preferred(&artifacts, &concepts)
+        })
+        .await
+        .map_err(|error| format!("Workflow model loader stopped: {error}"))??;
         cancel.ensure_model_active()?;
         let device_name = engine.device_name.clone();
         let chunk_rows = engine.processor.chunk_rows();
-        publish(ModelRunEvent::Running {
+        let _ = events.send(ModelRunEvent::Running {
             detail: format!("Backfilling {missing_cells} feature cells on {device_name}"),
             progress: WorkflowNodeProgress::new(0, missing_cells as u64, "feature cells"),
         });
 
-        let (sender, receiver) = mpsc::sync_channel(INPUT_PREFETCH_CHUNKS);
+        let (sender, mut receiver) = mpsc::channel(INPUT_PREFETCH_CHUNKS);
         let producer_store = project_store.clone();
         let producer_sql = request.candidate_sql.clone();
         let producer_cancel = cancel.clone();
-        let producer = thread::Builder::new()
-            .name("workflow-model-candidates".to_owned())
-            .spawn(move || {
-                CandidateBatchProducer::new(&producer_sql, chunk_rows, &producer_cancel)
-                    .with_sender(sender)
-                    .produce(&producer_store)
-            })
-            .map_err(|error| format!("starting the Workflow candidate prefetch worker: {error}"))?;
+        let producer = tokio::spawn(async move {
+            CandidateBatchProducer::new(producer_sql, chunk_rows, producer_cancel)
+                .with_sender(sender)
+                .produce(producer_store)
+                .await
+        });
 
-        let mut seen = BTreeSet::new();
-        let mut completed_cells = 0_u64;
-        let mut rows_needing_features = 0_u64;
-        let mut decode_ms = 0_u64;
-        let mut inference_ms = 0_u64;
-        let mut quarantine = WorkflowQuarantineSummary::default();
-        let mut quarantined_keys = BTreeSet::new();
-        let mut pipeline_error = None;
-        for item in &receiver {
-            if cancel.is_model_cancelled() {
-                pipeline_error = Some(MODEL_RUN_CANCELLED.to_owned());
-                break;
+        let computation_cancel = cancel.clone();
+        let computation_events = events.clone();
+        let computation_features = request.features.clone();
+        let computation_keys = scan.keys.clone();
+        let computation_requested_indices = requested_indices.clone();
+        let computation = tokio::task::spawn_blocking(move || {
+            let mut cache = cache;
+            let mut seen = BTreeSet::new();
+            let mut completed_cells = 0_u64;
+            let mut rows_needing_features = 0_u64;
+            let mut decode_ms = 0_u64;
+            let mut inference_ms = 0_u64;
+            let mut quarantine = WorkflowQuarantineSummary::default();
+            let mut quarantined_keys = BTreeSet::new();
+            while let Some(item) = receiver.blocking_recv() {
+                computation_cancel.ensure_model_active()?;
+                let batch = item?;
+                let model = BackfillModel::new(
+                    &engine,
+                    &computation_requested_indices,
+                    &computation_features,
+                );
+                let cache_state = BackfillCache::new(&mut cache, &computation_keys, &mut seen);
+                let progress =
+                    BackfillProgress::new(&mut completed_cells, &mut rows_needing_features)
+                        .with_timings(&mut decode_ms, &mut inference_ms);
+                let quarantine_state =
+                    BackfillQuarantine::new(&mut quarantine, &mut quarantined_keys);
+                CandidateBackfill::new(model, &batch, cache_state)
+                    .with_progress(progress)
+                    .with_quarantine(quarantine_state)
+                    .run()?;
+                let _ = computation_events.send(ModelRunEvent::Running {
+                    detail: format!(
+                        "Backfilled {completed_cells} of {missing_cells} feature cells"
+                    ),
+                    progress: WorkflowNodeProgress::new(
+                        completed_cells.min(missing_cells as u64),
+                        missing_cells as u64,
+                        "feature cells",
+                    ),
+                });
             }
-            let batch = match item {
-                Ok(batch) => batch,
-                Err(error) => {
-                    pipeline_error = Some(error);
-                    break;
-                }
-            };
-            let model = BackfillModel::new(&engine, &requested_indices, &request.features);
-            let cache_state = BackfillCache::new(&mut cache, &scan.keys, &mut seen);
-            let progress = BackfillProgress::new(&mut completed_cells, &mut rows_needing_features)
-                .with_timings(&mut decode_ms, &mut inference_ms);
-            let quarantine_state = BackfillQuarantine::new(&mut quarantine, &mut quarantined_keys);
-            if let Err(error) = CandidateBackfill::new(model, &batch, cache_state)
-                .with_progress(progress)
-                .with_quarantine(quarantine_state)
-                .run()
-            {
-                pipeline_error = Some(error);
-                break;
+            computation_cancel.ensure_model_active()?;
+            if seen != computation_keys {
+                return Err(
+                    "Workflow candidate cohort changed between validation and feature backfill. Run again."
+                        .to_owned(),
+                );
             }
-            publish(ModelRunEvent::Running {
-                detail: format!("Backfilled {completed_cells} of {missing_cells} feature cells"),
-                progress: WorkflowNodeProgress::new(
-                    completed_cells.min(missing_cells as u64),
-                    missing_cells as u64,
-                    "feature cells",
-                ),
-            });
-        }
-        drop(receiver);
-        let producer_result = producer
-            .join()
-            .map_err(|_| "Workflow candidate prefetch worker panicked.".to_owned())?;
-        if pipeline_error.is_none() {
-            pipeline_error = producer_result.err();
-        }
-        if cancel.is_model_cancelled() {
-            pipeline_error = Some(MODEL_RUN_CANCELLED.to_owned());
-        }
-        if pipeline_error.is_none() && seen != scan.keys {
-            pipeline_error = Some(
-            "Workflow candidate cohort changed between validation and feature backfill. Run again."
-                .to_owned(),
-        );
-        }
-        if quarantine.count().saturating_mul(2) > rows_needing_features {
-            pipeline_error = Some(format!(
-                "{} of {rows_needing_features} candidate rows needing features could not be decoded; more than half were quarantined.",
-                quarantine.count()
-            ));
-        }
-        if let Some(error) = pipeline_error {
-            return Err(error.into());
-        }
+            if quarantine.count().saturating_mul(2) > rows_needing_features {
+                return Err(format!(
+                    "{} of {rows_needing_features} candidate rows needing features could not be decoded; more than half were quarantined.",
+                    quarantine.count()
+                ));
+            }
+            Ok(ModelBackfillOutput {
+                cache,
+                decode_ms,
+                inference_ms,
+                quarantine,
+            })
+        });
+        let computation = computation
+            .await
+            .map_err(|error| format!("Workflow model computation stopped: {error}"));
+        let production = producer
+            .await
+            .map_err(|error| format!("Workflow candidate producer stopped: {error}"));
+        production??;
+        let backfill = computation??;
+        let ModelBackfillOutput {
+            cache,
+            decode_ms,
+            inference_ms,
+            quarantine,
+        } = backfill;
         cancel.ensure_model_active()?;
-        publish(ModelRunEvent::Materializing(
+        let _ = events.send(ModelRunEvent::Materializing(
             "Atomically replacing the complete feature cache".to_owned(),
         ));
-        FeaturePublication::new(&request.feature_cache_relation, &cache, &registry).publish(
-            &project_store,
-            PublicationGuard::new(&cancel, &publication_gate),
-        )?;
+        FeaturePublication::new(&request.feature_cache_relation, &cache, &registry)
+            .publish(
+                &project_store,
+                PublicationGuard::new(&cancel, &publication_gate),
+            )
+            .await?;
 
         let mut warnings = Vec::new();
         if let Some(warning) = fallback_warning {
@@ -837,21 +853,21 @@ impl<'a> CandidateScanRequest<'a> {
         }
     }
 
-    fn scan(self, project_store: &ProjectStore) -> Result<CandidateScan, String> {
+    async fn scan(self, project_store: &ProjectStore) -> Result<CandidateScan, String> {
         let sql = self.sql.to_owned();
         let media_fields = self
             .features
             .iter()
             .map(|feature| feature.applicability().media_field().to_owned())
             .collect::<BTreeSet<_>>();
-        let mut keys = project_store.run_blocking(|connection| {
-        let mut reader = connection.execute_query(&sql)?;
-            reader
-                .schema()
-                .as_ref()
-                .validate_workflow_candidate(&media_fields)?;
+        let mut connection = project_store.connect().await?;
+        let mut reader = connection.execute_query(&sql).await?;
+        reader
+            .schema()
+            .as_ref()
+            .validate_workflow_candidate(&media_fields)?;
         let mut keys = BTreeSet::new();
-        for batch in &mut reader {
+        while let Some(batch) = reader.next().await {
             self.cancel.ensure_model_active()?;
             let batch = batch.map_err(|error| format!("reading Workflow candidates: {error}"))?;
             for row in 0..batch.num_rows() {
@@ -869,8 +885,6 @@ impl<'a> CandidateScanRequest<'a> {
                 }
             }
         }
-        Ok(keys)
-    })?;
         let mut digest = Sha256::new();
         digest.update(b"spiral-workflow-feature-cache\0v1");
         for definition in self.features {
@@ -927,87 +941,87 @@ impl CandidateSchemaValidation for Schema {
 }
 
 impl FeatureRegistry {
-    fn load(project_store: &ProjectStore) -> Result<Self, String> {
-        project_store.run_blocking(|connection| {
-            let Some(schema) = connection.table_schema(FEATURE_REGISTRY_RELATION)? else {
-                return Ok(FeatureRegistry::default());
-            };
-            Self::validate_schema(&schema)?;
-            let mut reader =
-                connection.execute_query(format!("SELECT * FROM {FEATURE_REGISTRY_RELATION}"))?;
-            let mut registry = FeatureRegistry::default();
-            for batch in &mut reader {
-                let batch =
-                    batch.map_err(|error| format!("reading Workflow feature registry: {error}"))?;
-                for row in 0..batch.num_rows() {
-                    let required_text =
-                        |name: &str| {
-                            batch
+    async fn load(project_store: &ProjectStore) -> Result<Self, String> {
+        let mut connection = project_store.connect().await?;
+        let Some(schema) = connection
+            .relation_schema(FEATURE_REGISTRY_RELATION)
+            .await?
+        else {
+            return Ok(FeatureRegistry::default());
+        };
+        Self::validate_schema(&schema)?;
+        let mut reader = connection
+            .execute_query(format!("SELECT * FROM {FEATURE_REGISTRY_RELATION}"))
+            .await?;
+        let mut registry = FeatureRegistry::default();
+        while let Some(batch) = reader.next().await {
+            let batch =
+                batch.map_err(|error| format!("reading Workflow feature registry: {error}"))?;
+            for row in 0..batch.num_rows() {
+                let required_text = |name: &str| {
+                    batch
                         .column_by_name(name)
                         .and_then(|column| column.as_ref().string_value(row))
                         .map(str::to_owned)
                         .ok_or_else(|| {
                             format!("Workflow feature registry field {name:?} is null or invalid.")
                         })
-                        };
-                    let source_relation = required_text("source_relation")?;
-                    let feature_name = required_text("feature_name")?;
-                    let entry = FeatureRegistryEntry {
-                        definition: WorkflowFeatureDefinition::new(
-                            feature_name.clone(),
-                            required_text("description")?,
-                            required_text("concept")?,
+                };
+                let source_relation = required_text("source_relation")?;
+                let feature_name = required_text("feature_name")?;
+                let entry = FeatureRegistryEntry {
+                    definition: WorkflowFeatureDefinition::new(
+                        feature_name.clone(),
+                        required_text("description")?,
+                        required_text("concept")?,
+                    )
+                    .with_applicability(
+                        spiral_robotics_api::workflow::WorkflowFeatureApplicability::new(
+                            source_relation.clone(),
+                            required_text("media_field")?,
                         )
-                        .with_applicability(
-                            spiral_robotics_api::workflow::WorkflowFeatureApplicability::new(
-                                source_relation.clone(),
-                                required_text("media_field")?,
-                            )
-                            .with_stream_ids(
-                                FeatureRegistryEntry::stream_ids_from_batch(&batch, row)?,
-                            ),
-                        ),
-                        cache_relation: required_text("cache_relation")?,
-                        producer: FeatureProducer {
-                            model_id: required_text("producer_model_id")?,
-                            repository: required_text("producer_repository")?,
-                            artifact_revision: required_text("artifact_revision")?,
-                            value_semantics: required_text("value_semantics")?,
-                            definition_version: u32::try_from(
-                                batch
-                                    .column_by_name("definition_version")
-                                    .and_then(|column| column.as_ref().u64_value(row))
-                                    .ok_or_else(|| {
-                                        "Workflow feature registry definition_version is invalid."
-                                            .to_owned()
-                                    })?,
-                            )
-                            .map_err(|_| {
-                                "Workflow feature registry definition_version overflowed UInt32."
-                                    .to_owned()
+                        .with_stream_ids(FeatureRegistryEntry::stream_ids_from_batch(&batch, row)?),
+                    ),
+                    cache_relation: required_text("cache_relation")?,
+                    producer: FeatureProducer {
+                        model_id: required_text("producer_model_id")?,
+                        repository: required_text("producer_repository")?,
+                        artifact_revision: required_text("artifact_revision")?,
+                        value_semantics: required_text("value_semantics")?,
+                        definition_version: u32::try_from(
+                            batch
+                                .column_by_name("definition_version")
+                                .and_then(|column| column.as_ref().u64_value(row))
+                                .ok_or_else(|| {
+                                    "Workflow feature registry definition_version is invalid."
+                                        .to_owned()
+                                })?,
+                        )
+                        .map_err(|_| {
+                            "Workflow feature registry definition_version overflowed UInt32."
+                                .to_owned()
+                        })?,
+                    },
+                    timestamps: FeatureRegistryTimestamps::new(
+                        batch
+                            .column_by_name("created_at_ms")
+                            .and_then(|column| column.as_ref().u64_value(row))
+                            .ok_or_else(|| {
+                                "Workflow feature registry created_at_ms is invalid.".to_owned()
                             })?,
-                        },
-                        timestamps: FeatureRegistryTimestamps::new(
-                            batch
-                                .column_by_name("created_at_ms")
-                                .and_then(|column| column.as_ref().u64_value(row))
-                                .ok_or_else(|| {
-                                    "Workflow feature registry created_at_ms is invalid.".to_owned()
-                                })?,
-                            batch
-                                .column_by_name("updated_at_ms")
-                                .and_then(|column| column.as_ref().u64_value(row))
-                                .ok_or_else(|| {
-                                    "Workflow feature registry updated_at_ms is invalid.".to_owned()
-                                })?,
-                        ),
-                    };
-                    LoadedFeatureRegistryEntry::new(source_relation, feature_name, entry)
-                        .insert_into(&mut registry)?;
-                }
+                        batch
+                            .column_by_name("updated_at_ms")
+                            .and_then(|column| column.as_ref().u64_value(row))
+                            .ok_or_else(|| {
+                                "Workflow feature registry updated_at_ms is invalid.".to_owned()
+                            })?,
+                    ),
+                };
+                LoadedFeatureRegistryEntry::new(source_relation, feature_name, entry)
+                    .insert_into(&mut registry)?;
             }
-            Ok(registry)
-        })
+        }
+        Ok(registry)
     }
 }
 
@@ -1232,22 +1246,25 @@ impl FeatureRegistry {
 }
 
 impl FeatureCache {
-    fn load(
+    async fn load(
         project_store: &ProjectStore,
         relation: &str,
         registry: &FeatureRegistry,
     ) -> Result<Self, String> {
         let relation = relation.to_owned();
         let registered = registry.cache_features(&relation);
-        project_store.run_blocking(move |connection| {
-        let Some(schema) = connection.table_schema(&relation)? else {
+        let mut connection = project_store.connect().await?;
+        let Some(schema) = connection.relation_schema(&relation).await? else {
             return Ok(FeatureCache::default());
         };
         let features = Self::validate_schema(&schema, &registered)?;
-        let mut reader = connection.execute_query(format!("SELECT * FROM {relation}"))?;
+        let mut reader = connection
+            .execute_query(format!("SELECT * FROM {relation}"))
+            .await?;
         let mut rows = BTreeMap::new();
-        for batch in &mut reader {
-            let batch = batch.map_err(|error| format!("reading Workflow feature cache: {error}"))?;
+        while let Some(batch) = reader.next().await {
+            let batch =
+                batch.map_err(|error| format!("reading Workflow feature cache: {error}"))?;
             for row in 0..batch.num_rows() {
                 let key = FrameKey::from_batch_row(&batch, row)?;
                 let values = features
@@ -1286,7 +1303,6 @@ impl FeatureCache {
             }
         }
         Ok(FeatureCache { features, rows })
-    })
     }
 
     fn validate_schema(
@@ -1341,15 +1357,22 @@ impl FeatureCache {
     }
 }
 
-struct CandidateBatchProducer<'a> {
-    sql: &'a str,
+struct CandidateBatchProducer {
+    sql: String,
     chunk_rows: usize,
-    cancel: &'a AtomicBool,
-    sender: Option<SyncSender<Result<RecordBatch, String>>>,
+    cancel: Arc<AtomicBool>,
+    sender: Option<mpsc::Sender<Result<RecordBatch, String>>>,
 }
 
-impl<'a> CandidateBatchProducer<'a> {
-    fn new(sql: &'a str, chunk_rows: usize, cancel: &'a AtomicBool) -> Self {
+struct ModelBackfillOutput {
+    cache: FeatureCache,
+    decode_ms: u64,
+    inference_ms: u64,
+    quarantine: WorkflowQuarantineSummary,
+}
+
+impl CandidateBatchProducer {
+    fn new(sql: String, chunk_rows: usize, cancel: Arc<AtomicBool>) -> Self {
         Self {
             sql,
             chunk_rows,
@@ -1358,34 +1381,32 @@ impl<'a> CandidateBatchProducer<'a> {
         }
     }
 
-    fn with_sender(mut self, sender: SyncSender<Result<RecordBatch, String>>) -> Self {
+    fn with_sender(mut self, sender: mpsc::Sender<Result<RecordBatch, String>>) -> Self {
         self.sender = Some(sender);
         self
     }
 
-    fn produce(self, project_store: &ProjectStore) -> Result<(), String> {
-        let sql = self.sql.to_owned();
+    async fn produce(self, project_store: Arc<ProjectStore>) -> Result<(), String> {
+        let sql = self.sql;
         let sender = self.sender.expect("candidate batch sender is configured");
-        project_store.run_blocking(move |connection| {
-            let mut reader = connection.execute_query(sql)?;
-            for batch in &mut reader {
-                if self.cancel.is_model_cancelled() {
+        let mut connection = project_store.connect().await?;
+        let mut reader = connection.execute_query(sql).await?;
+        while let Some(batch) = reader.next().await {
+            if self.cancel.is_model_cancelled() {
+                return Ok(());
+            }
+            let batch = batch.map_err(|error| format!("reading Workflow candidates: {error}"))?;
+            let mut offset = 0;
+            while offset < batch.num_rows() {
+                let rows = self.chunk_rows.min(batch.num_rows() - offset);
+                let compact = batch.compact_rows(offset, rows)?;
+                if sender.send(Ok(compact)).await.is_err() {
                     return Ok(());
                 }
-                let batch =
-                    batch.map_err(|error| format!("reading Workflow candidates: {error}"))?;
-                let mut offset = 0;
-                while offset < batch.num_rows() {
-                    let rows = self.chunk_rows.min(batch.num_rows() - offset);
-                    let compact = batch.compact_rows(offset, rows)?;
-                    if sender.send(Ok(compact)).is_err() {
-                        return Ok(());
-                    }
-                    offset += rows;
-                }
+                offset += rows;
             }
-            Ok(())
-        })
+        }
+        Ok(())
     }
 }
 
@@ -1640,24 +1661,65 @@ impl<'a> FeaturePublication<'a> {
         }
     }
 
-    fn replace(self, project_store: &ProjectStore) -> Result<(), String> {
+    async fn replace(self, project_store: &ProjectStore) -> Result<(), String> {
         let relation = self.relation.to_owned();
         let batches = self.cache.record_batches()?;
         let registry_batch = self.registry.record_batch()?;
-        project_store.run_exclusive_blocking(move |connection| {
-            let namespace = relation
-                .split_once('.')
-                .map(|(namespace, _)| namespace)
-                .ok_or_else(|| "Workflow feature cache relation was not qualified.".to_owned())?;
-            connection.ensure_dataset_namespace(namespace)?;
-            connection.run_publication(|connection| {
-                connection.replace_batches(&relation, batches)?;
-                connection.replace_batches(FEATURE_REGISTRY_RELATION, vec![registry_batch])
-            })
-        })
+        let namespace = relation
+            .split_once('.')
+            .map(|(namespace, _)| namespace)
+            .ok_or_else(|| "Workflow feature cache relation was not qualified.".to_owned())?;
+        let mut connection = project_store.connect_exclusive().await?;
+        connection.ensure_dataset_namespace(namespace).await?;
+        if let Err(error) = connection.set_autocommit(false).await {
+            connection.discard();
+            return Err(format!(
+                "starting feature publication transaction failed and its connection was discarded: {error}"
+            ));
+        }
+
+        let mutation = match connection.replace_batches(&relation, batches).await {
+            Ok(()) => {
+                connection
+                    .replace_batches(FEATURE_REGISTRY_RELATION, vec![registry_batch])
+                    .await
+            }
+            Err(error) => Err(error),
+        };
+        let Err(error) = mutation else {
+            if let Err(commit) = connection.commit().await {
+                connection.discard();
+                return Err(format!(
+                    "committing feature publication failed with an uncertain outcome; connection discarded: {commit}"
+                ));
+            }
+            if connection.set_autocommit(true).await.is_err() {
+                connection.discard();
+            }
+            return Ok(());
+        };
+
+        let rollback = connection.rollback().await;
+        let restore = connection.set_autocommit(true).await;
+        if rollback.is_err() || restore.is_err() {
+            connection.discard();
+        }
+        match (rollback, restore) {
+            (Ok(()), Ok(())) => Err(error),
+            (Err(rollback), Ok(())) => {
+                Err(FeaturePublicationError::new(error).with_rollback(Err(rollback)))
+            }
+            (Ok(()), Err(restore)) => Err(format!(
+                "{error}; restoring database autocommit after feature publication also failed: {restore}"
+            )),
+            (Err(rollback), Err(restore)) => Err(format!(
+                "{}; restoring database autocommit after feature publication also failed: {restore}",
+                FeaturePublicationError::new(error).with_rollback(Err(rollback))
+            )),
+        }
     }
 
-    fn publish(
+    async fn publish(
         self,
         project_store: &ProjectStore,
         guard: PublicationGuard<'_>,
@@ -1670,21 +1732,19 @@ impl<'a> FeaturePublication<'a> {
         // side acquires it first owns the publication boundary: cancellation that
         // wins prevents the transaction, while a completed transaction remains a
         // truthful predecessor of any later cancellation request.
-        let _publication = publication_gate
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _publication = publication_gate.lock().await;
         cancel.ensure_model_active()?;
-        self.replace(project_store)
+        self.replace(project_store).await
     }
 }
 
 struct PublicationGuard<'a> {
     cancel: &'a AtomicBool,
-    publication_gate: &'a Mutex<()>,
+    publication_gate: &'a AsyncMutex<()>,
 }
 
 impl<'a> PublicationGuard<'a> {
-    fn new(cancel: &'a AtomicBool, publication_gate: &'a Mutex<()>) -> Self {
+    fn new(cancel: &'a AtomicBool, publication_gate: &'a AsyncMutex<()>) -> Self {
         Self {
             cancel,
             publication_gate,
@@ -1692,6 +1752,7 @@ impl<'a> PublicationGuard<'a> {
     }
 }
 
+#[cfg(test)]
 trait FeaturePublicationTransaction {
     fn begin(&mut self) -> Result<(), String>;
     fn commit_publication(&mut self) -> Result<(), String>;
@@ -1728,28 +1789,6 @@ trait FeaturePublicationTransaction {
                 unreachable!("rollback state follows feature publication outcome")
             }
         }
-    }
-}
-
-impl FeaturePublicationTransaction for spiral_robotics_storage::StorageConnection {
-    fn begin(&mut self) -> Result<(), String> {
-        self.set_autocommit(false)
-    }
-
-    fn commit_publication(&mut self) -> Result<(), String> {
-        self.commit()
-    }
-
-    fn rollback_publication(&mut self) -> Result<(), String> {
-        self.rollback()
-    }
-
-    fn restore_autocommit(&mut self) -> Result<(), String> {
-        self.set_autocommit(true)
-    }
-
-    fn discard_publication_connection(&mut self) {
-        self.discard();
     }
 }
 
@@ -3098,29 +3137,29 @@ mod tests {
         assert!(uncertain.discarded);
     }
 
-    #[test]
-    fn publication_gate_linearizes_commit_before_or_cancellation_before_publication() {
-        let gate = Arc::new(Mutex::new(()));
+    #[tokio::test]
+    async fn publication_gate_linearizes_commit_before_or_cancellation_before_publication() {
+        let gate = Arc::new(AsyncMutex::new(()));
         let cancel = Arc::new(AtomicBool::new(false));
-        let publication = gate.lock().unwrap();
+        let publication = gate.lock().await;
         let cancel_gate = gate.clone();
         let cancel_token = cancel.clone();
-        let (started_tx, started_rx) = std::sync::mpsc::channel();
-        let cancelling = std::thread::spawn(move || {
-            started_tx.send(()).unwrap();
-            let _gate = cancel_gate.lock().unwrap();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let cancelling = tokio::spawn(async move {
+            let _ = started_tx.send(());
+            let _gate = cancel_gate.lock().await;
             cancel_token.store(true, Ordering::SeqCst);
         });
-        started_rx.recv().unwrap();
+        started_rx.await.unwrap();
         assert!(
             !cancel.load(Ordering::SeqCst),
             "a cancellation cannot cross a publication that already owns the gate"
         );
         drop(publication);
-        cancelling.join().unwrap();
+        cancelling.await.unwrap();
         assert!(cancel.load(Ordering::SeqCst));
 
-        let cancelled_gate = gate.lock().unwrap();
+        let cancelled_gate = gate.lock().await;
         assert!(cancel.ensure_model_active().is_err());
         drop(cancelled_gate);
     }
@@ -3174,9 +3213,9 @@ mod tests {
         assert_eq!(cache.rows[&nonapplicable][0], None);
     }
 
-    #[test]
+    #[tokio::test]
     #[ignore = "requires a disposable real Spiral project"]
-    fn feature_cache_and_registry_round_trip_in_one_spiral_transaction() {
+    async fn feature_cache_and_registry_round_trip_in_one_spiral_transaction() {
         let stored = BackendStateStore::open_default().ok();
         let project = std::env::var("SPIRAL_PROJECT_ID")
             .ok()
@@ -3199,10 +3238,17 @@ mod tests {
         let database_runtime =
             crate::test_database::LocalProjectStore::start(connection, "workflow".to_owned());
         let project_store = database_runtime.store();
-        let registry_existed = project_store
-            .run_blocking(|connection| connection.table_exists(FEATURE_REGISTRY_RELATION))
+        let mut connection = project_store
+            .connect()
+            .await
+            .expect("the Workflow registry must connect");
+        let registry_existed = connection
+            .table_exists(FEATURE_REGISTRY_RELATION)
+            .await
             .expect("the Workflow registry catalog check must succeed");
+        drop(connection);
         let previous_registry = FeatureRegistry::load(&project_store)
+            .await
             .expect("the existing Workflow registry must be readable");
         let source_relation = format!(
             "workflow_registry_test_{}_{}.frames",
@@ -3243,11 +3289,14 @@ mod tests {
 
         FeaturePublication::new(&cache_relation, &cache, &registry)
             .replace(&project_store)
+            .await
             .expect("cache and registry must commit together");
-        let reloaded_registry =
-            FeatureRegistry::load(&project_store).expect("the committed registry must round trip");
+        let reloaded_registry = FeatureRegistry::load(&project_store)
+            .await
+            .expect("the committed registry must round trip");
         let reloaded_cache =
             FeatureCache::load(&project_store, &cache_relation, &reloaded_registry)
+                .await
                 .expect("the committed cache must round trip");
         assert_eq!(reloaded_cache.rows[&key(7)][0], Some(0.625));
         assert_eq!(
@@ -3261,14 +3310,22 @@ mod tests {
         );
         cleanup
             .cleanup_now()
+            .await
             .expect("the registry round trip must restore the prior project state");
+        let mut connection = project_store
+            .connect()
+            .await
+            .expect("the cleaned Workflow registry must connect");
         assert!(
-            !project_store
-                .run_blocking(|connection| connection.table_exists(&cache_relation))
+            !connection
+                .table_exists(&cache_relation)
+                .await
                 .expect("the cleaned cache catalog check must succeed"),
             "the registry round trip must remove its exact derived cache"
         );
+        drop(connection);
         let restored_registry = FeatureRegistry::load(&project_store)
+            .await
             .expect("the prior Workflow registry must remain readable after cleanup");
         assert_eq!(
             restored_registry.entries, expected_registry_after_cleanup.entries,
@@ -3399,9 +3456,9 @@ mod tests {
     /// with Transformers 4.55.4 `SiglipModel` + `SiglipImageProcessor` at the
     /// exact artifact revision (0.48523283 / 0.00243547). Kept ignored because
     /// the pinned weights are large.
-    #[test]
+    #[tokio::test]
     #[ignore = "requires cached/downloadable SigLIP artifacts and disposable real Spiral project access"]
-    fn siglip_image_golden_scores_progress_and_quarantine() {
+    async fn siglip_image_golden_scores_progress_and_quarantine() {
         let stored = BackendStateStore::open_default().ok();
         let project = std::env::var("SPIRAL_PROJECT_ID")
             .ok()
@@ -3431,7 +3488,7 @@ mod tests {
         let database_runtime =
             crate::test_database::LocalProjectStore::start(connection, namespace.clone());
         let project_store = database_runtime.store();
-        let _cleanup = GoldenRelations {
+        let cleanup = GoldenRelations {
             project_store: project_store.clone(),
             relations: vec![input_relation.clone(), output_relation.clone()],
             namespace: namespace.clone(),
@@ -3485,18 +3542,25 @@ mod tests {
         .expect("the golden image fixture must match its schema");
         let seed_relation = input_relation.clone();
         let seed_namespace = namespace.clone();
-        project_store
-            .run_exclusive_blocking(move |connection| {
-                connection.ensure_dataset_namespace(&seed_namespace)?;
-                connection.ingest_batch(&seed_relation, batch)
-            })
+        let mut connection = project_store
+            .connect_exclusive()
+            .await
+            .expect("the golden image project must connect");
+        connection
+            .ensure_dataset_namespace(&seed_namespace)
+            .await
+            .expect("the golden image namespace must exist");
+        connection
+            .ingest_batch(&seed_relation, batch)
+            .await
             .expect("seeding the golden image relation must succeed");
+        drop(connection);
 
         let features = vec![
             feature("is_black_square_feature", "black square", &input_relation),
             feature("is_white_square_feature", "white square", &input_relation),
         ];
-        let mut events = Vec::new();
+        let (event_sender, mut event_receiver) = mpsc::unbounded_channel();
         let result = ModelRunContext::new(
             project_store.clone(),
             ModelRunRequest::new(
@@ -3506,9 +3570,14 @@ mod tests {
             ),
             Arc::new(AtomicBool::new(false)),
         )
-        .with_publication_gate(Arc::new(Mutex::new(())))
-        .run(|event| events.push(event))
+        .with_publication_gate(Arc::new(AsyncMutex::new(())))
+        .run(event_sender)
+        .await
         .expect("the golden SigLIP run must complete with a warning");
+        let mut events = Vec::new();
+        while let Ok(event) = event_receiver.try_recv() {
+            events.push(event);
+        }
         assert_eq!(result.metadata.input_rows(), 2);
         assert_eq!(result.metadata.output_rows(), 2);
         assert_eq!(result.quarantine.count(), 1);
@@ -3528,16 +3597,20 @@ mod tests {
         )));
 
         let scored_relation = output_relation.clone();
-        let scored = project_store
-            .run_blocking(move |connection| {
-                connection.run_query(
+        let mut connection = project_store
+            .connect()
+            .await
+            .expect("the golden score relation must connect");
+        let scored = connection
+            .run_query(
                     &format!(
                         "SELECT is_black_square_feature, is_white_square_feature FROM {scored_relation} WHERE frame_index = 0"
                     ),
                     1,
                 )
-            })
+            .await
             .expect("the golden score relation must be queryable");
+        drop(connection);
         assert_eq!(scored.rows().len(), 1);
         let black = scored.rows()[0]
             .get("is_black_square_feature")
@@ -3563,6 +3636,10 @@ mod tests {
             result.metadata.decode_ms(),
             result.metadata.inference_ms(),
         );
+        cleanup
+            .cleanup_now()
+            .await
+            .expect("the golden relations must clean up");
     }
 
     struct RegistryRoundTripCleanup {
@@ -3574,57 +3651,54 @@ mod tests {
     }
 
     impl RegistryRoundTripCleanup {
-        fn cleanup_now(&mut self) -> Result<(), String> {
+        async fn cleanup_now(&mut self) -> Result<(), String> {
             if self.cleaned {
                 return Ok(());
             }
             let cache_relation = self.cache_relation.clone();
             let registry_existed = self.registry_existed;
             let registry_batch = self.previous_registry.record_batch()?;
-            self.project_store.run_exclusive_blocking(move |connection| {
-                connection.set_autocommit(false)?;
-                let mutation = (|| {
-                    connection.execute_update_sql(
-                        &format!("DROP TABLE IF EXISTS {cache_relation}"),
-                    )?;
-                    if registry_existed {
-                        connection.replace_batches(
-                            FEATURE_REGISTRY_RELATION,
-                            vec![registry_batch],
-                        )?;
-                    } else {
-                        connection.execute_update_sql(
-                            &format!("DROP TABLE IF EXISTS {FEATURE_REGISTRY_RELATION}"),
-                        )?;
-                    }
-                    connection.commit()
-                })();
-                if mutation.is_err() {
-                    let _ = connection.rollback();
+            let mut connection = self.project_store.connect_exclusive().await?;
+            connection.set_autocommit(false).await?;
+            let mutation = match connection
+                .execute_update_sql(&format!("DROP TABLE IF EXISTS {cache_relation}"))
+                .await
+            {
+                Ok(()) if registry_existed => {
+                    connection
+                        .replace_batches(FEATURE_REGISTRY_RELATION, vec![registry_batch])
+                        .await
                 }
-                let restore = connection.set_autocommit(true);
-                match (mutation, restore) {
-                    (Ok(()), Ok(())) => Ok(()),
-                    (Err(error), Ok(())) => Err(error),
-                    (Ok(()), Err(_)) => {
-                        connection.discard();
-                        Ok(())
-                    }
-                    (Err(error), Err(restore)) => Err(format!(
+                Ok(()) => {
+                    connection
+                        .execute_update_sql(&format!(
+                            "DROP TABLE IF EXISTS {FEATURE_REGISTRY_RELATION}"
+                        ))
+                        .await
+                }
+                Err(error) => Err(error),
+            };
+            let mutation = match mutation {
+                Ok(()) => connection.commit().await,
+                Err(error) => Err(error),
+            };
+            if mutation.is_err() {
+                let _ = connection.rollback().await;
+            }
+            let restore = connection.set_autocommit(true).await;
+            match (mutation, restore) {
+                (Ok(()), Ok(())) => {}
+                (Err(error), Ok(())) => return Err(error),
+                (Ok(()), Err(_)) => connection.discard(),
+                (Err(error), Err(restore)) => {
+                    connection.discard();
+                    return Err(format!(
                         "{error}; restoring database autocommit after registry cleanup also failed: {restore}"
-                    )),
+                    ));
                 }
-            })?;
+            }
             self.cleaned = true;
             Ok(())
-        }
-    }
-
-    impl Drop for RegistryRoundTripCleanup {
-        fn drop(&mut self) {
-            if let Err(error) = self.cleanup_now() {
-                eprintln!("Workflow registry round-trip cleanup failed: {error}");
-            }
         }
     }
 
@@ -3634,23 +3708,24 @@ mod tests {
         namespace: String,
     }
 
-    impl Drop for GoldenRelations {
-        fn drop(&mut self) {
+    impl GoldenRelations {
+        async fn cleanup_now(&self) -> Result<(), String> {
             let relations = self.relations.clone();
             let namespace = self.namespace.clone();
-            let _ = self
-                .project_store
-                .run_exclusive_blocking(move |connection| {
-                    for relation in relations {
-                        if connection.table_exists(&relation)? {
-                            connection.execute_update_sql(&format!("DROP TABLE {relation}"))?;
-                        }
-                    }
-                    if connection.table_exists(&namespace)? {
-                        connection.execute_update_sql(&format!("DROP TABLE {namespace}"))?;
-                    }
-                    Ok(())
-                });
+            let mut connection = self.project_store.connect_exclusive().await?;
+            for relation in relations {
+                if connection.table_exists(&relation).await? {
+                    connection
+                        .execute_update_sql(&format!("DROP TABLE {relation}"))
+                        .await?;
+                }
+            }
+            if connection.table_exists(&namespace).await? {
+                connection
+                    .execute_update_sql(&format!("DROP TABLE {namespace}"))
+                    .await?;
+            }
+            Ok(())
         }
     }
 }

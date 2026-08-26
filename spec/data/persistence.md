@@ -159,9 +159,14 @@ flowchart TD
   proxies must communicate with those tasks through bounded channels. Axum,
   the local connection owners, and Vortex execution must share the server's
   Tokio runtime, while Vortex CPU work may use that runtime's worker pool.
-  Async backend paths must await the database trait directly and must not pass
-  through a blocking worker. Genuinely synchronous recording, import, and model
-  workers may use the project store's blocking compatibility wrapper. Native
+  Every backend persistence path, including recording finalization, import,
+  project transfer, Workflow publication, Training, Rollout, and robot
+  configuration, must await the database trait directly. The project store
+  must not expose an async-to-sync compatibility wrapper or run database
+  futures through `block_on` or a blocking worker. CPU-bound model inference,
+  media encoding, hardware I/O, and synchronous external SDK calls may use
+  dedicated threads or Tokio's blocking pool, but database access before and
+  after that work remains async. Native
   logical connections must not be constrained by an arbitrary application
   semaphore; each connection owner serializes only its own stateful operations.
   Spiral and Vortex crates must resolve to revisions already pinned in
@@ -237,8 +242,10 @@ flowchart TD
   Vortex implementation types occur only in the native storage adapter, that
   the backend has no Rust ADBC dependency, that the server installs the local
   connection task set on its Tokio runtime, and that async callers use the
-  database trait directly. A connection test must prove multiple logical
-  connections can be opened without a fixed application capacity gate.
+  database trait directly. They must reject a production project-store
+  `block_on` or blocking compatibility method. A connection test must prove
+  multiple logical connections can be opened without a fixed application
+  capacity gate.
 
 ## Implementation ownership
 

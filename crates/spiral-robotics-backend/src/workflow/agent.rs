@@ -53,8 +53,13 @@ struct WorkflowAgentInner {
     history_error: Mutex<Option<String>>,
     scope_id: Mutex<String>,
     document: Mutex<AgentDocument>,
-    active: Mutex<Option<ActiveTurn>>,
+    turn: AgentTurnState,
     updates: broadcast::Sender<()>,
+}
+
+struct AgentTurnState {
+    active: Mutex<Option<ActiveTurn>>,
+    mutation: tokio::sync::Mutex<()>,
 }
 
 struct WorkflowAgentServices {
@@ -881,18 +886,22 @@ impl WorkflowAgentManager {
                 history_error: Mutex::new(None),
                 scope_id: Mutex::new(AgentIdentifier::next("agent-scope")),
                 document: Mutex::new(AgentDocument::default()),
-                active: Mutex::new(None),
+                turn: AgentTurnState {
+                    active: Mutex::new(None),
+                    mutation: tokio::sync::Mutex::new(()),
+                },
                 updates,
             }),
         }
     }
 
     pub(crate) async fn hydrate_from_storage(&self) -> Result<(), String> {
-        let storage = self.inner.services.storage.clone();
-        let loaded: Result<Option<String>, String> =
-            tokio::task::spawn_blocking(move || storage.load_workflow_agent_snapshot_json())
-                .await
-                .map_err(|error| format!("Workflow agent history task stopped: {error}"))?;
+        let loaded = self
+            .inner
+            .services
+            .storage
+            .load_workflow_agent_snapshot_json()
+            .await;
         let raw_snapshot = match loaded {
             Ok(document) => document,
             Err(error) => {
@@ -900,10 +909,13 @@ impl WorkflowAgentManager {
                 return Err(error);
             }
         };
-        let document = match self.prepare_or_reset_document(
-            raw_snapshot.as_deref(),
-            "Studio restarted before this Assistant turn finished. Retry the turn.",
-        ) {
+        let document = match self
+            .prepare_or_reset_document(
+                raw_snapshot.as_deref(),
+                "Studio restarted before this Assistant turn finished. Retry the turn.",
+            )
+            .await
+        {
             Ok(document) => document,
             Err(error) => {
                 self.install_unavailable_scope(&error);
@@ -917,12 +929,13 @@ impl WorkflowAgentManager {
         Ok(())
     }
 
-    pub(crate) fn reload_from_storage(&self) -> Result<(), String> {
+    pub(crate) async fn reload_from_storage(&self) -> Result<(), String> {
         let raw_snapshot = match self
             .inner
             .services
             .storage
             .load_workflow_agent_snapshot_json()
+            .await
         {
             Ok(document) => document,
             Err(error) => {
@@ -930,10 +943,13 @@ impl WorkflowAgentManager {
                 return Err(error);
             }
         };
-        let document = match self.prepare_or_reset_document(
-            raw_snapshot.as_deref(),
-            "The active Spiral project changed during an Assistant turn. Retry the turn.",
-        ) {
+        let document = match self
+            .prepare_or_reset_document(
+                raw_snapshot.as_deref(),
+                "The active Spiral project changed during an Assistant turn. Retry the turn.",
+            )
+            .await
+        {
             Ok(document) => document,
             Err(error) => {
                 self.install_unavailable_scope(&error);
@@ -951,7 +967,7 @@ impl WorkflowAgentManager {
         Ok(())
     }
 
-    fn prepare_or_reset_document(
+    async fn prepare_or_reset_document(
         &self,
         raw_snapshot: Option<&str>,
         interruption_detail: &str,
@@ -959,7 +975,7 @@ impl WorkflowAgentManager {
         match AgentDocument::restored_snapshot(raw_snapshot, interruption_detail) {
             Ok((document, changed)) => {
                 if changed {
-                    self.persist_document(&document)?;
+                    self.persist_document(&document).await?;
                 }
                 Ok(document)
             }
@@ -969,9 +985,10 @@ impl WorkflowAgentManager {
                     self.inner
                         .services
                         .storage
-                        .reset_workflow_agent_document(raw_snapshot, &fresh)?;
+                        .reset_workflow_agent_document(raw_snapshot, &fresh)
+                        .await?;
                 } else {
-                    self.persist_document(&fresh)?;
+                    self.persist_document(&fresh).await?;
                 }
                 Ok(fresh)
             }
@@ -984,7 +1001,7 @@ impl WorkflowAgentManager {
     }
 
     pub(crate) fn is_active(&self) -> bool {
-        self.inner.active.recover_lock().is_some()
+        self.inner.turn.active.recover_lock().is_some()
     }
 
     pub(crate) fn subscription(&self) -> (WorkflowAgentStateResponse, broadcast::Receiver<()>) {
@@ -1001,27 +1018,33 @@ impl WorkflowAgentManager {
             WorkflowAgentCommand::CreateConversation {
                 scope_id,
                 expected_revision,
-            } => self.create_conversation(&scope_id, expected_revision),
+            } => self.create_conversation(&scope_id, expected_revision).await,
             WorkflowAgentCommand::ActivateConversation {
                 scope_id,
                 conversation_id,
                 expected_revision,
-            } => self.activate_conversation(ConversationSelection {
-                scope_id,
-                conversation_id,
-                expected_revision,
-            }),
+            } => {
+                self.activate_conversation(ConversationSelection {
+                    scope_id,
+                    conversation_id,
+                    expected_revision,
+                })
+                .await
+            }
             WorkflowAgentCommand::Turn {
                 scope_id,
                 conversation_id,
                 text,
                 expected_revision,
-            } => self.start_turn(TurnStart {
-                scope_id,
-                conversation_id,
-                text,
-                expected_revision,
-            }),
+            } => {
+                self.start_turn(TurnStart {
+                    scope_id,
+                    conversation_id,
+                    text,
+                    expected_revision,
+                })
+                .await
+            }
             WorkflowAgentCommand::Cancel {
                 scope_id,
                 conversation_id,
@@ -1037,34 +1060,37 @@ impl WorkflowAgentManager {
         }
     }
 
-    fn create_conversation(
+    async fn create_conversation(
         &self,
         scope_id: &str,
         expected_revision: u64,
     ) -> Result<WorkflowAgentStateResponse, OperationError> {
-        let active = self.inner.active.recover_lock();
-        let mut document = self.inner.document.recover_lock();
-        self.admit_conversation_change(
-            &document,
-            ConversationChange::new(active.is_some(), scope_id, expected_revision),
-        )?;
-        let Some(candidate) = document
-            .with_new_conversation(AgentClock::now_millis())
-            .map_err(OperationError::Conflict)?
-        else {
-            return Ok(self.state_for(&document));
+        let _mutation = self.inner.turn.mutation.lock().await;
+        let candidate = {
+            let active = self.inner.turn.active.recover_lock();
+            let document = self.inner.document.recover_lock();
+            self.admit_conversation_change(
+                &document,
+                ConversationChange::new(active.is_some(), scope_id, expected_revision),
+            )?;
+            let Some(candidate) = document
+                .with_new_conversation(AgentClock::now_millis())
+                .map_err(OperationError::Conflict)?
+            else {
+                return Ok(self.state_for(&document));
+            };
+            candidate
         };
         self.persist_document(&candidate)
+            .await
             .map_err(OperationError::External)?;
-        *document = candidate;
-        let state = self.state_for(&document);
-        drop(document);
-        drop(active);
+        let state = self.state_for(&candidate);
+        *self.inner.document.recover_lock() = candidate;
         self.publish();
         Ok(state)
     }
 
-    fn activate_conversation(
+    async fn activate_conversation(
         &self,
         selection: ConversationSelection,
     ) -> Result<WorkflowAgentStateResponse, OperationError> {
@@ -1073,30 +1099,33 @@ impl WorkflowAgentManager {
             conversation_id,
             expected_revision,
         } = selection;
-        let active = self.inner.active.recover_lock();
-        let mut document = self.inner.document.recover_lock();
-        self.admit_conversation_change(
-            &document,
-            ConversationChange::new(active.is_some(), &scope_id, expected_revision),
-        )?;
-        if document.conversation(&conversation_id).is_none() {
-            return Err(OperationError::InvalidInput(
-                "That Assistant conversation no longer exists. Reload the conversation list."
-                    .to_owned(),
-            ));
-        }
-        let Some(candidate) = document
-            .activated_conversation(&conversation_id)
-            .map_err(OperationError::External)?
-        else {
-            return Ok(self.state_for(&document));
+        let _mutation = self.inner.turn.mutation.lock().await;
+        let candidate = {
+            let active = self.inner.turn.active.recover_lock();
+            let document = self.inner.document.recover_lock();
+            self.admit_conversation_change(
+                &document,
+                ConversationChange::new(active.is_some(), &scope_id, expected_revision),
+            )?;
+            if document.conversation(&conversation_id).is_none() {
+                return Err(OperationError::InvalidInput(
+                    "That Assistant conversation no longer exists. Reload the conversation list."
+                        .to_owned(),
+                ));
+            }
+            let Some(candidate) = document
+                .activated_conversation(&conversation_id)
+                .map_err(OperationError::External)?
+            else {
+                return Ok(self.state_for(&document));
+            };
+            candidate
         };
         self.persist_document(&candidate)
+            .await
             .map_err(OperationError::External)?;
-        *document = candidate;
-        let state = self.state_for(&document);
-        drop(document);
-        drop(active);
+        let state = self.state_for(&candidate);
+        *self.inner.document.recover_lock() = candidate;
         self.publish();
         Ok(state)
     }
@@ -1154,7 +1183,10 @@ impl WorkflowAgentManager {
         Ok(())
     }
 
-    fn start_turn(&self, request: TurnStart) -> Result<WorkflowAgentStateResponse, OperationError> {
+    async fn start_turn(
+        &self,
+        request: TurnStart,
+    ) -> Result<WorkflowAgentStateResponse, OperationError> {
         let TurnStart {
             scope_id,
             conversation_id,
@@ -1198,9 +1230,9 @@ impl WorkflowAgentManager {
                         .to_owned(),
                 )
             })?;
-        let admitted = (|| {
-            let mut active = self.inner.active.recover_lock();
-            if active.is_some() {
+        let admitted = async {
+            let _mutation = self.inner.turn.mutation.lock().await;
+            if self.inner.turn.active.recover_lock().is_some() {
                 return Err(OperationError::Conflict(
                     "One Assistant turn is already active for this Workflow.".to_owned(),
                 ));
@@ -1211,35 +1243,36 @@ impl WorkflowAgentManager {
                         .to_owned(),
                 ));
             }
-            let mut document = self.inner.document.recover_lock();
-            if scope_id != *self.inner.scope_id.recover_lock()
-                || conversation_id != document.active_conversation_id
-            {
-                return Err(OperationError::Conflict(
-                    "The active Assistant conversation changed. Reload it before sending."
-                        .to_owned(),
-                ));
-            }
-            if expected_revision != document.revision {
-                return Err(OperationError::Conflict(
-                    "Assistant history changed in another session. Reload it before sending."
-                        .to_owned(),
-                ));
-            }
-            let conversation = document.active().ok_or_else(|| {
-                OperationError::External(
-                    "The selected Assistant conversation is unavailable.".to_owned(),
-                )
-            })?;
-            PublicMessageCapacity::new(conversation.session.messages().len())
-                .ensure_additional(2)
-                .map_err(OperationError::Conflict)?;
+            let (mut candidate, conversation_id) = {
+                let document = self.inner.document.recover_lock();
+                if scope_id != *self.inner.scope_id.recover_lock()
+                    || conversation_id != document.active_conversation_id
+                {
+                    return Err(OperationError::Conflict(
+                        "The active Assistant conversation changed. Reload it before sending."
+                            .to_owned(),
+                    ));
+                }
+                if expected_revision != document.revision {
+                    return Err(OperationError::Conflict(
+                        "Assistant history changed in another session. Reload it before sending."
+                            .to_owned(),
+                    ));
+                }
+                let conversation = document.active().ok_or_else(|| {
+                    OperationError::External(
+                        "The selected Assistant conversation is unavailable.".to_owned(),
+                    )
+                })?;
+                PublicMessageCapacity::new(conversation.session.messages().len())
+                    .ensure_additional(2)
+                    .map_err(OperationError::Conflict)?;
+                (document.clone(), document.active_conversation_id.clone())
+            };
             let turn_id = AgentIdentifier::next("agent-turn");
             let user_id = AgentIdentifier::next("agent-user");
             let assistant_id = AgentIdentifier::next("agent-assistant");
             let created_ms = AgentClock::now_millis();
-            let conversation_id = document.active_conversation_id.clone();
-            let mut candidate = document.clone();
             let conversation = candidate
                 .conversation_mut(&conversation_id)
                 .expect("the selected conversation was checked");
@@ -1282,20 +1315,19 @@ impl WorkflowAgentManager {
                 .map_err(OperationError::External)?;
             candidate.trim_provider_history(&conversation_id);
             self.persist_document(&candidate)
+                .await
                 .map_err(OperationError::External)?;
-            *document = candidate;
             let cancel = Arc::new(AtomicBool::new(false));
             let owned_run_id = Arc::new(Mutex::new(None));
-            *active = Some(ActiveTurn {
+            let response = self.state_for(&candidate);
+            *self.inner.document.recover_lock() = candidate;
+            *self.inner.turn.active.recover_lock() = Some(ActiveTurn {
                 conversation_id: conversation_id.clone(),
                 turn_id: turn_id.clone(),
                 cancel: cancel.clone(),
                 owned_run_id: owned_run_id.clone(),
                 task: None,
             });
-            let response = self.state_for(&document);
-            drop(document);
-            drop(active);
             self.publish();
             let manager = self.clone();
             let task_conversation_id = conversation_id.clone();
@@ -1305,7 +1337,7 @@ impl WorkflowAgentManager {
             let task = tokio::spawn(async move {
                 manager.run_turn(turn_task).await;
             });
-            if let Some(current) = self.inner.active.recover_lock().as_mut()
+            if let Some(current) = self.inner.turn.active.recover_lock().as_mut()
                 && current.turn_id == turn_id
                 && current.conversation_id == conversation_id
             {
@@ -1314,7 +1346,8 @@ impl WorkflowAgentManager {
                 task.abort();
             }
             Ok(response)
-        })();
+        }
+        .await;
         let released = self.inner.services.catalog_lease.release(lease);
         debug_assert!(released, "agent admission releases its catalog lease once");
         admitted
@@ -1335,7 +1368,7 @@ impl WorkflowAgentManager {
             ));
         }
         let (conversation_id, turn_id, owned_run_id, task) = {
-            let mut active = self.inner.active.recover_lock();
+            let mut active = self.inner.turn.active.recover_lock();
             let active = active.as_mut().ok_or_else(|| {
                 OperationError::Conflict("No Assistant turn is active.".to_owned())
             })?;
@@ -1355,8 +1388,8 @@ impl WorkflowAgentManager {
             )
         };
         {
-            let mut document = self.inner.document.recover_lock();
-            let mut candidate = document.clone();
+            let _mutation = self.inner.turn.mutation.lock().await;
+            let mut candidate = self.inner.document.recover_lock().clone();
             if let Some(conversation) = candidate.conversation_mut(&conversation_id)
                 && conversation.session.active_turn_id() == Some(turn_id.as_str())
             {
@@ -1365,29 +1398,30 @@ impl WorkflowAgentManager {
                     .set_phase(WorkflowAgentPhase::Cancelling);
                 conversation.session.set_error(None);
                 if candidate.bump_conversation(&conversation_id).is_ok()
-                    && self.persist_document(&candidate).is_ok()
+                    && self.persist_document(&candidate).await.is_ok()
                 {
-                    *document = candidate;
+                    *self.inner.document.recover_lock() = candidate;
                 }
             }
         }
         self.publish();
-        self.cancel_owned_run(&owned_run_id);
+        self.cancel_owned_run(&owned_run_id).await;
         if let Some(task) = task {
             let _ = task.await;
         }
         // `run_workflow` may have started after the first snapshot but before
         // observing the turn token. Re-read the synchronized ownership cell
         // after the task exits so Stop cannot orphan that run.
-        self.cancel_owned_run(&owned_run_id);
+        self.cancel_owned_run(&owned_run_id).await;
         self.finish_failed(
             TurnIdentity::new(&conversation_id, &turn_id),
             TurnFailureDetail::new("Agent turn cancelled.", true),
-        );
+        )
+        .await;
         Ok(self.state())
     }
 
-    fn cancel_owned_run(&self, owned_run_id: &Arc<Mutex<Option<String>>>) {
+    async fn cancel_owned_run(&self, owned_run_id: &Arc<Mutex<Option<String>>>) {
         let owned_run = owned_run_id.recover_lock().clone();
         if let Some(run_id) = owned_run
             && self.inner.services.workflow.state().snapshot().run_id() == Some(run_id.as_str())
@@ -1399,29 +1433,30 @@ impl WorkflowAgentManager {
                 .workflow
                 .command(WorkflowCommand::cancel(
                     self.inner.services.workflow.scope_id(),
-                ));
+                ))
+                .await;
         }
     }
 
-    fn record_conversation_owned_run(
+    async fn record_conversation_owned_run(
         &self,
         conversation_id: &str,
         run_id: &str,
     ) -> Result<(), String> {
-        let mut document = self.inner.document.recover_lock();
-        let mut candidate = document.clone();
+        let _mutation = self.inner.turn.mutation.lock().await;
+        let mut candidate = self.inner.document.recover_lock().clone();
         let conversation = candidate
             .conversation_mut(conversation_id)
             .ok_or_else(|| "Assistant conversation disappeared.".to_owned())?;
         conversation.owned_run_id = Some(run_id.to_owned());
         candidate.bump_conversation(conversation_id)?;
-        self.persist_document(&candidate)?;
-        *document = candidate;
+        self.persist_document(&candidate).await?;
+        *self.inner.document.recover_lock() = candidate;
         Ok(())
     }
 
     pub(crate) async fn shutdown(&self) {
-        let active = self.inner.active.recover_lock().take();
+        let active = self.inner.turn.active.recover_lock().take();
         if let Some(mut active) = active {
             active.cancel.store(true, Ordering::SeqCst);
             if let Some(task) = active.task.take() {
@@ -1459,7 +1494,8 @@ impl WorkflowAgentManager {
                 self.finish_failed(
                     TurnIdentity::new(&conversation_id, &turn_id),
                     TurnFailureDetail::new(&error, cancel.load(Ordering::SeqCst)),
-                );
+                )
+                .await;
                 return;
             }
             if context.deferred_run_id.is_none()
@@ -1470,16 +1506,19 @@ impl WorkflowAgentManager {
                 context.deferred_run_id = Some(run_id);
             }
             let Some(run_id) = context.deferred_run_id.take() else {
-                self.finish_complete(TurnIdentity::new(&conversation_id, &turn_id));
+                self.finish_complete(TurnIdentity::new(&conversation_id, &turn_id))
+                    .await;
                 return;
             };
-            if let Err(error) =
-                self.finish_waiting(TurnIdentity::new(&conversation_id, &turn_id), &run_id)
+            if let Err(error) = self
+                .finish_waiting(TurnIdentity::new(&conversation_id, &turn_id), &run_id)
+                .await
             {
                 self.finish_failed(
                     TurnIdentity::new(&conversation_id, &turn_id),
                     TurnFailureDetail::new(&error, false),
-                );
+                )
+                .await;
                 return;
             }
             let snapshot = self.wait_for_terminal(&run_id, cancel.clone()).await;
@@ -1490,23 +1529,27 @@ impl WorkflowAgentManager {
                         "The deferred Workflow wait was cancelled or interrupted.",
                         cancel.load(Ordering::SeqCst),
                     ),
-                );
+                )
+                .await;
                 return;
             };
             if cancel.load(Ordering::SeqCst) {
                 self.finish_failed(
                     TurnIdentity::new(&conversation_id, &turn_id),
                     TurnFailureDetail::new("Agent turn cancelled.", true),
-                );
+                )
+                .await;
                 return;
             }
-            if let Err(error) =
-                self.begin_auto_resume(TurnIdentity::new(&conversation_id, &turn_id), &snapshot)
+            if let Err(error) = self
+                .begin_auto_resume(TurnIdentity::new(&conversation_id, &turn_id), &snapshot)
+                .await
             {
                 self.finish_failed(
                     TurnIdentity::new(&conversation_id, &turn_id),
                     TurnFailureDetail::new(&error, false),
-                );
+                )
+                .await;
                 return;
             }
         }
@@ -1570,7 +1613,8 @@ impl WorkflowAgentManager {
             // tool-result messages in durable provider history.
             let provider_message = budget.admit_provider_response(&response)?;
             let identity = TurnIdentity::new(conversation_id, turn_id);
-            self.record_provider_response(identity, provider_message)?;
+            self.record_provider_response(identity, provider_message)
+                .await?;
             if response.tool_calls().is_empty() {
                 return Ok(());
             }
@@ -1582,7 +1626,8 @@ impl WorkflowAgentManager {
                             &response.tool_calls()[index..],
                             "Agent turn cancelled before this tool ran.",
                         ),
-                    )?;
+                    )
+                    .await?;
                     return Err("Agent turn cancelled.".to_owned());
                 }
                 self.tool_started(identity, call)?;
@@ -1597,8 +1642,10 @@ impl WorkflowAgentManager {
                 self.tool_finished(
                     identity,
                     ToolRunCompletion::new(call, transport_ok, &bounded),
-                )?;
-                self.record_tool_output(identity, ToolOutput::new(call.id(), bounded))?;
+                )
+                .await?;
+                self.record_tool_output(identity, ToolOutput::new(call.id(), bounded))
+                    .await?;
             }
             if context.deferred_run_id.is_some() {
                 return Ok(());
@@ -1700,6 +1747,7 @@ impl WorkflowAgentManager {
                         context.workflow_revision,
                         resolved,
                     ))
+                    .await
                     .map_err(|error| error.to_string());
                 let released = self.inner.services.catalog_lease.release(lease);
                 debug_assert!(released, "agent Workflow save releases its lease once");
@@ -1731,6 +1779,7 @@ impl WorkflowAgentManager {
                         self.inner.services.workflow.scope_id(),
                         context.workflow_revision,
                     ))
+                    .await
                     .map_err(|error| error.to_string());
                 let released = self.inner.services.catalog_lease.release(lease);
                 debug_assert!(released, "agent Workflow start releases its lease once");
@@ -1743,8 +1792,9 @@ impl WorkflowAgentManager {
                 let cancelled = context
                     .owned_run_id
                     .record_and_is_cancelled(&cancel, &run_id);
-                if let Err(error) =
-                    self.record_conversation_owned_run(&context.conversation_id, &run_id)
+                if let Err(error) = self
+                    .record_conversation_owned_run(&context.conversation_id, &run_id)
+                    .await
                 {
                     if self.inner.services.workflow.state().snapshot().run_id() == Some(&run_id)
                         && self.inner.services.workflow.is_active()
@@ -1755,7 +1805,8 @@ impl WorkflowAgentManager {
                             .workflow
                             .command(WorkflowCommand::cancel(
                                 self.inner.services.workflow.scope_id(),
-                            ));
+                            ))
+                            .await;
                     }
                     return Err(format!(
                         "Could not persist Assistant ownership of the Workflow run: {error}"
@@ -1771,7 +1822,8 @@ impl WorkflowAgentManager {
                             .workflow
                             .command(WorkflowCommand::cancel(
                                 self.inner.services.workflow.scope_id(),
-                            ));
+                            ))
+                            .await;
                     }
                     return Err(
                         "Agent turn was cancelled after starting the Workflow run.".to_owned()
@@ -1890,34 +1942,38 @@ impl WorkflowAgentManager {
         self.publish();
     }
 
-    fn record_provider_response(
+    async fn record_provider_response(
         &self,
         identity: TurnIdentity<'_>,
         message: ProviderMessage,
     ) -> Result<(), String> {
-        let mut document = self.inner.document.recover_lock();
-        let candidate = document.with_provider_message(identity, message)?;
-        self.persist_document(&candidate)?;
-        *document = candidate;
+        let _mutation = self.inner.turn.mutation.lock().await;
+        let candidate = self
+            .inner
+            .document
+            .recover_lock()
+            .with_provider_message(identity, message)?;
+        self.persist_document(&candidate).await?;
+        *self.inner.document.recover_lock() = candidate;
         Ok(())
     }
 
-    fn record_tool_output(
+    async fn record_tool_output(
         &self,
         identity: TurnIdentity<'_>,
         output: ToolOutput<'_>,
     ) -> Result<(), String> {
-        let mut document = self.inner.document.recover_lock();
-        let candidate = document.with_provider_message(
+        let _mutation = self.inner.turn.mutation.lock().await;
+        let candidate = self.inner.document.recover_lock().with_provider_message(
             identity,
             ProviderMessage::tool(output.call_id.to_owned(), output.output),
         )?;
-        self.persist_document(&candidate)?;
-        *document = candidate;
+        self.persist_document(&candidate).await?;
+        *self.inner.document.recover_lock() = candidate;
         Ok(())
     }
 
-    fn record_unexecuted_tool_outputs(
+    async fn record_unexecuted_tool_outputs(
         &self,
         identity: TurnIdentity<'_>,
         unexecuted: UnexecutedTools<'_>,
@@ -1926,17 +1982,17 @@ impl WorkflowAgentManager {
             conversation_id,
             turn_id,
         } = identity;
-        let mut document = self.inner.document.recover_lock();
-        document.ensure_turn(conversation_id, turn_id)?;
-        let mut candidate = document.clone();
+        let _mutation = self.inner.turn.mutation.lock().await;
+        let mut candidate = self.inner.document.recover_lock().clone();
+        candidate.ensure_turn(conversation_id, turn_id)?;
         candidate
             .conversation_mut(conversation_id)
             .expect("the active conversation was checked")
             .provider_messages
             .append_unexecuted_tool_outputs(unexecuted);
         candidate.trim_provider_history(conversation_id);
-        self.persist_document(&candidate)?;
-        *document = candidate;
+        self.persist_document(&candidate).await?;
+        *self.inner.document.recover_lock() = candidate;
         Ok(())
     }
 
@@ -1968,7 +2024,7 @@ impl WorkflowAgentManager {
         Ok(())
     }
 
-    fn tool_finished(
+    async fn tool_finished(
         &self,
         identity: TurnIdentity<'_>,
         completion: ToolRunCompletion<'_>,
@@ -1978,9 +2034,9 @@ impl WorkflowAgentManager {
             turn_id,
         } = identity;
         let ToolRunCompletion { call, ok, detail } = completion;
-        let mut document = self.inner.document.recover_lock();
-        document.ensure_turn(conversation_id, turn_id)?;
-        let mut candidate = document.clone();
+        let _mutation = self.inner.turn.mutation.lock().await;
+        let mut candidate = self.inner.document.recover_lock().clone();
+        candidate.ensure_turn(conversation_id, turn_id)?;
         let message = candidate
             .conversation_mut(conversation_id)
             .expect("the active conversation was checked")
@@ -2013,18 +2069,18 @@ impl WorkflowAgentManager {
         );
         summary.set_receipt(completion.receipt);
         candidate.bump_conversation(conversation_id)?;
-        self.persist_document(&candidate)?;
-        *document = candidate;
-        drop(document);
+        self.persist_document(&candidate).await?;
+        *self.inner.document.recover_lock() = candidate;
         self.publish();
         Ok(())
     }
 
-    fn finish_complete(&self, identity: TurnIdentity<'_>) {
-        self.finish(TurnFinish::new(identity, WorkflowAgentPhase::Idle));
+    async fn finish_complete(&self, identity: TurnIdentity<'_>) {
+        self.finish(TurnFinish::new(identity, WorkflowAgentPhase::Idle))
+            .await;
     }
 
-    fn finish_failed(&self, identity: TurnIdentity<'_>, failure: TurnFailureDetail<'_>) {
+    async fn finish_failed(&self, identity: TurnIdentity<'_>, failure: TurnFailureDetail<'_>) {
         self.finish(
             TurnFinish::new(
                 identity,
@@ -2038,10 +2094,11 @@ impl WorkflowAgentManager {
                 (!failure.cancelled).then(|| ToolPublicText::error(failure.error)),
                 failure.cancelled,
             ),
-        );
+        )
+        .await;
     }
 
-    fn finish(&self, finish: TurnFinish<'_>) {
+    async fn finish(&self, finish: TurnFinish<'_>) {
         let TurnFinish {
             identity:
                 TurnIdentity {
@@ -2052,14 +2109,20 @@ impl WorkflowAgentManager {
             error,
             cancelled,
         } = finish;
-        let mut active = self.inner.active.recover_lock();
-        if active.as_ref().is_none_or(|active| {
-            active.turn_id != turn_id || active.conversation_id != conversation_id
-        }) {
+        let _mutation = self.inner.turn.mutation.lock().await;
+        if self
+            .inner
+            .turn
+            .active
+            .recover_lock()
+            .as_ref()
+            .is_none_or(|active| {
+                active.turn_id != turn_id || active.conversation_id != conversation_id
+            })
+        {
             return;
         }
-        let mut document = self.inner.document.recover_lock();
-        let mut candidate = document.clone();
+        let mut candidate = self.inner.document.recover_lock().clone();
         let Some(conversation) = candidate.conversation_mut(conversation_id) else {
             return;
         };
@@ -2087,7 +2150,7 @@ impl WorkflowAgentManager {
             .provider_messages
             .remove_incomplete_tool_exchange();
         let _ = candidate.bump_conversation(conversation_id);
-        if let Err(persist_error) = self.persist_document(&candidate)
+        if let Err(persist_error) = self.persist_document(&candidate).await
             && let Some(conversation) = candidate.conversation_mut(conversation_id)
         {
             conversation.session.set_phase(WorkflowAgentPhase::Failed);
@@ -2099,20 +2162,18 @@ impl WorkflowAgentManager {
         // Even when durable storage is temporarily unavailable, install only
         // the structurally valid candidate. A later Retry can persist it; the
         // live document is never left with an inactive orphaned tool exchange.
-        *document = candidate;
-        *active = None;
-        drop(document);
-        drop(active);
+        *self.inner.document.recover_lock() = candidate;
+        *self.inner.turn.active.recover_lock() = None;
         self.publish();
     }
 
-    fn finish_waiting(&self, identity: TurnIdentity<'_>, run_id: &str) -> Result<(), String> {
+    async fn finish_waiting(&self, identity: TurnIdentity<'_>, run_id: &str) -> Result<(), String> {
         let TurnIdentity {
             conversation_id,
             turn_id,
         } = identity;
-        let mut document = self.inner.document.recover_lock();
-        let mut candidate = document.clone();
+        let _mutation = self.inner.turn.mutation.lock().await;
+        let mut candidate = self.inner.document.recover_lock().clone();
         let conversation = candidate
             .conversation_mut(conversation_id)
             .ok_or_else(|| "Assistant conversation disappeared.".to_owned())?;
@@ -2134,14 +2195,13 @@ impl WorkflowAgentManager {
             }
         }
         candidate.bump_conversation(conversation_id)?;
-        self.persist_document(&candidate)?;
-        *document = candidate;
-        drop(document);
+        self.persist_document(&candidate).await?;
+        *self.inner.document.recover_lock() = candidate;
         self.publish();
         Ok(())
     }
 
-    fn begin_auto_resume(
+    async fn begin_auto_resume(
         &self,
         identity: TurnIdentity<'_>,
         snapshot: &spiral_robotics_api::workflow::WorkflowRunSnapshot,
@@ -2150,7 +2210,8 @@ impl WorkflowAgentManager {
             conversation_id,
             turn_id,
         } = identity;
-        let mut document = self.inner.document.recover_lock();
+        let _mutation = self.inner.turn.mutation.lock().await;
+        let document = self.inner.document.recover_lock().clone();
         let conversation = document
             .conversation(conversation_id)
             .ok_or_else(|| "Assistant conversation disappeared.".to_owned())?;
@@ -2209,9 +2270,8 @@ impl WorkflowAgentManager {
         conversation.owned_run_id = None;
         candidate.bump_conversation(conversation_id)?;
         candidate.trim_provider_history(conversation_id);
-        self.persist_document(&candidate)?;
-        *document = candidate;
-        drop(document);
+        self.persist_document(&candidate).await?;
+        *self.inner.document.recover_lock() = candidate;
         self.publish();
         Ok(())
     }
@@ -2261,12 +2321,13 @@ impl WorkflowAgentManager {
             )
     }
 
-    fn persist_document(&self, document: &AgentDocument) -> Result<(), String> {
+    async fn persist_document(&self, document: &AgentDocument) -> Result<(), String> {
         document.validate()?;
         self.inner
             .services
             .storage
             .save_workflow_agent_document(document)
+            .await
     }
 
     fn install_unavailable_scope(&self, error: &str) {

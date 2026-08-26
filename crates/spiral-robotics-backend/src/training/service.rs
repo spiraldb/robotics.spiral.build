@@ -124,7 +124,7 @@ pub(crate) trait TrainingPort: Send + Sync {
         command: StartTrainingRequest,
     ) -> Result<ContractTrainingRun, OperationError>;
 
-    fn stop_training(&self, run_id: &str) -> Result<(), OperationError>;
+    async fn stop_training(&self, run_id: &str) -> Result<(), OperationError>;
 
     async fn delete_training(&self, run_id: String) -> Result<(), OperationError>;
 }
@@ -145,8 +145,8 @@ impl<'a, P: TrainingPort + ?Sized> TrainingActions<'a, P> {
         self.port.start_training(command.validated()?).await
     }
 
-    pub(crate) fn stop(&self, run_id: &str) -> Result<(), OperationError> {
-        self.port.stop_training(run_id)
+    pub(crate) async fn stop(&self, run_id: &str) -> Result<(), OperationError> {
+        self.port.stop_training(run_id).await
     }
 
     pub(crate) async fn delete(
@@ -511,7 +511,7 @@ mod tests {
             Ok(training_run(command))
         }
 
-        fn stop_training(&self, run_id: &str) -> Result<(), OperationError> {
+        async fn stop_training(&self, run_id: &str) -> Result<(), OperationError> {
             self.stops.lock().unwrap().push(run_id.to_owned());
             Ok(())
         }

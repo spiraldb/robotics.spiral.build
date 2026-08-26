@@ -21,7 +21,7 @@ use spiral_robotics_api::workflow::{
     WorkflowQuarantineSummary, WorkflowRunPhase, WorkflowRunSnapshot, WorkflowSpec,
     WorkflowStateResponse,
 };
-use tokio::sync::broadcast;
+use tokio::sync::{Mutex as AsyncMutex, broadcast, mpsc};
 
 use crate::workflow::model::{
     ModelRunContext, ModelRunEvent, ModelRunFailure, ModelRunRequest, ModelRunResult,
@@ -84,9 +84,25 @@ struct WorkflowManagerInner {
     document: Mutex<WorkflowDocument>,
     updates: broadcast::Sender<WorkflowStateResponse>,
     active: Mutex<Option<ActiveRun>>,
-    terminal_persistence_error: Mutex<Option<TerminalPersistenceError>>,
+    persistence: WorkflowPersistenceState,
+}
+
+struct WorkflowPersistenceState {
+    mutation: AsyncMutex<()>,
+    terminal_error: Mutex<Option<TerminalPersistenceError>>,
     #[cfg(test)]
-    persistence_outcomes: Mutex<VecDeque<Result<(), String>>>,
+    test_outcomes: Mutex<VecDeque<Result<(), String>>>,
+}
+
+impl WorkflowPersistenceState {
+    fn new() -> Self {
+        Self {
+            mutation: AsyncMutex::new(()),
+            terminal_error: Mutex::new(None),
+            #[cfg(test)]
+            test_outcomes: Mutex::new(VecDeque::new()),
+        }
+    }
 }
 
 struct WorkflowIdentity {
@@ -127,7 +143,7 @@ impl WorkflowIdentity {
 struct ActiveRun {
     run_id: String,
     cancel: Arc<AtomicBool>,
-    publication_gate: Arc<Mutex<()>>,
+    publication_gate: Arc<AsyncMutex<()>>,
     task: Option<tokio::task::JoinHandle<()>>,
     terminal_persistence_failed: bool,
 }
@@ -153,11 +169,11 @@ impl FailureCancellationPolicy {
 struct WorkflowExecution {
     run_id: String,
     cancel: Arc<AtomicBool>,
-    publication_gate: Arc<Mutex<()>>,
+    publication_gate: Arc<AsyncMutex<()>>,
 }
 
 impl WorkflowExecution {
-    fn new(run_id: String, cancel: Arc<AtomicBool>, publication_gate: Arc<Mutex<()>>) -> Self {
+    fn new(run_id: String, cancel: Arc<AtomicBool>, publication_gate: Arc<AsyncMutex<()>>) -> Self {
         Self {
             run_id,
             cancel,
@@ -289,9 +305,7 @@ impl WorkflowManager {
                 document: Mutex::new(WorkflowDocument::default()),
                 updates,
                 active: Mutex::new(None),
-                terminal_persistence_error: Mutex::new(None),
-                #[cfg(test)]
-                persistence_outcomes: Mutex::new(VecDeque::new()),
+                persistence: WorkflowPersistenceState::new(),
             }),
         }
     }
@@ -299,19 +313,19 @@ impl WorkflowManager {
     /// Restore the saved graph and latest snapshot. Local SQL execution is not
     /// resumable, so an in-flight snapshot becomes explicitly interrupted.
     pub(crate) async fn hydrate_from_storage(&self) -> Result<(), String> {
-        let storage = self.inner.storage.clone();
-        let document = tokio::task::spawn_blocking(move || storage.load_workflow_document())
-            .await
-            .map_err(|error| format!("Workflow history task stopped: {error}"))??;
-        self.install_hydrated_document(document)
+        let document = self.inner.storage.load_workflow_document().await?;
+        self.install_hydrated_document(document).await
     }
 
-    pub(crate) fn reload_from_storage(&self) -> Result<(), String> {
-        let document = self.inner.storage.load_workflow_document()?;
-        self.install_hydrated_document(document)
+    pub(crate) async fn reload_from_storage(&self) -> Result<(), String> {
+        let document = self.inner.storage.load_workflow_document().await?;
+        self.install_hydrated_document(document).await
     }
 
-    fn install_hydrated_document(&self, mut document: WorkflowDocument) -> Result<(), String> {
+    async fn install_hydrated_document(
+        &self,
+        mut document: WorkflowDocument,
+    ) -> Result<(), String> {
         if document.snapshot().phase().active() {
             let interruption =
                 "Studio restarted before this Workflow run finished. Run it again.".to_owned();
@@ -334,11 +348,11 @@ impl WorkflowManager {
                     node.set_error(Some(interruption.clone()));
                 }
             }
-            self.inner.storage.save_workflow_document(&document)?;
+            self.inner.storage.save_workflow_document(&document).await?;
         }
         *self.inner.document.recover_lock() = document;
         self.inner.identity.advance_scope();
-        *self.inner.terminal_persistence_error.recover_lock() = None;
+        *self.inner.persistence.terminal_error.recover_lock() = None;
         let _ = self.inner.updates.send(self.state());
         Ok(())
     }
@@ -410,7 +424,7 @@ impl WorkflowManager {
         (self.state_response(&document), updates)
     }
 
-    pub(crate) fn command(
+    pub(crate) async fn command(
         &self,
         command: WorkflowCommand,
     ) -> Result<WorkflowStateResponse, OperationError> {
@@ -419,30 +433,34 @@ impl WorkflowManager {
                 scope_id,
                 expected_revision,
                 workflow,
-            } => self.save(WorkflowSave {
-                scope_id,
-                expected_revision,
-                workflow,
-            }),
+            } => {
+                self.save(WorkflowSave {
+                    scope_id,
+                    expected_revision,
+                    workflow,
+                })
+                .await
+            }
             WorkflowCommand::Run { scope_id, revision } => {
-                self.start(&scope_id, revision)?;
+                self.start(&scope_id, revision).await?;
                 Ok(self.state())
             }
             WorkflowCommand::Cancel { scope_id } => {
-                self.cancel(&scope_id)?;
+                self.cancel(&scope_id).await?;
                 Ok(self.state())
             }
         }
     }
 
-    fn save(&self, request: WorkflowSave) -> Result<WorkflowStateResponse, OperationError> {
+    async fn save(&self, request: WorkflowSave) -> Result<WorkflowStateResponse, OperationError> {
         let WorkflowSave {
             scope_id,
             expected_revision,
             workflow: requested_workflow,
         } = request;
         self.require_scope(&scope_id)?;
-        let mut current = self.inner.document.recover_lock();
+        let _mutation = self.inner.persistence.mutation.lock().await;
+        let current = self.inner.document.recover_lock().clone();
         if requested_workflow.id() != current.workflow().id() {
             return Err(OperationError::InvalidInput(format!(
                 "Workflow identity {:?} does not match the server-owned identity {:?}",
@@ -486,30 +504,36 @@ impl WorkflowManager {
         self.inner
             .storage
             .save_workflow_document(&candidate)
+            .await
             .map_err(OperationError::External)?;
-        *current = candidate;
-        let response = self.state_response(&current);
+        let response = self.state_response(&candidate);
+        *self.inner.document.recover_lock() = candidate;
         let _ = self.inner.updates.send(response.clone());
         Ok(response)
     }
 
-    fn start(&self, scope_id: &str, revision: u64) -> Result<WorkflowRunSnapshot, OperationError> {
+    async fn start(
+        &self,
+        scope_id: &str,
+        revision: u64,
+    ) -> Result<WorkflowRunSnapshot, OperationError> {
         self.require_scope(scope_id)?;
+        let _mutation = self.inner.persistence.mutation.lock().await;
         // When both locks are required, active-run admission always precedes
         // the document. Cancel and terminal publication use the same order.
-        let mut active = self.inner.active.recover_lock();
-        let mut document = self.inner.document.recover_lock();
+        let active_exists = self.inner.active.recover_lock().is_some();
+        let document = self.inner.document.recover_lock().clone();
         let validation = document.workflow().validate();
         WorkflowRunAdmission::new(revision, document.workflow().revision())
             .with_state(
-                active.is_some() || document.snapshot().phase().active(),
+                active_exists || document.snapshot().phase().active(),
                 validation.valid(),
             )
             .validate()?;
 
         let run_id = self.inner.identity.next_run_id();
         let cancel = Arc::new(AtomicBool::new(false));
-        let publication_gate = Arc::new(Mutex::new(()));
+        let publication_gate = Arc::new(AsyncMutex::new(()));
         let snapshot = document
             .workflow()
             .starting_snapshot(document.snapshot(), run_id.clone());
@@ -517,18 +541,17 @@ impl WorkflowManager {
         self.inner
             .storage
             .save_workflow_document(&candidate)
+            .await
             .map_err(OperationError::External)?;
-        *document.snapshot_mut() = snapshot.clone();
-        *active = Some(ActiveRun {
+        *self.inner.document.recover_lock() = candidate;
+        *self.inner.active.recover_lock() = Some(ActiveRun {
             run_id: run_id.clone(),
             cancel: cancel.clone(),
             publication_gate: publication_gate.clone(),
             task: None,
             terminal_persistence_failed: false,
         });
-        let _ = self.inner.updates.send(self.state_response(&document));
-        drop(document);
-        drop(active);
+        let _ = self.inner.updates.send(self.state());
 
         let manager = self.clone();
         let task_run_id = run_id.clone();
@@ -549,34 +572,48 @@ impl WorkflowManager {
     }
 
     pub(crate) async fn shutdown(&self) {
-        let task = {
+        let control = {
             let mut active = self.inner.active.recover_lock();
-            active.as_mut().and_then(|run| {
-                let _publication = run.publication_gate.recover_lock();
-                run.cancel.store(true, Ordering::SeqCst);
-                run.task.take()
+            active.as_mut().map(|run| {
+                (
+                    run.publication_gate.clone(),
+                    run.cancel.clone(),
+                    run.task.take(),
+                )
             })
         };
-        if let Some(task) = task {
-            let _ = task.await;
+        if let Some((publication_gate, cancel, task)) = control {
+            let publication = publication_gate.lock().await;
+            cancel.store(true, Ordering::SeqCst);
+            drop(publication);
+            if let Some(task) = task {
+                let _ = task.await;
+            }
         }
     }
 
-    fn cancel(&self, scope_id: &str) -> Result<WorkflowRunSnapshot, OperationError> {
+    async fn cancel(&self, scope_id: &str) -> Result<WorkflowRunSnapshot, OperationError> {
         self.require_scope(scope_id)?;
+        let _mutation = self.inner.persistence.mutation.lock().await;
         // Keep admission and Cancelling publication in one active -> document
         // critical section. Otherwise execution could publish Cancelled and
         // clear `active` between these steps, only for this request to regress
         // the persisted snapshot back to Cancelling.
-        let active = self.inner.active.recover_lock();
-        WorkflowCancellationAdmission::new(active.is_some()).validate()?;
-        let control = active.as_ref().expect("admission requires an active run");
-        let recover_terminal_persistence = control.terminal_persistence_failed;
-        let run_id = control.run_id.clone();
-        let _publication = control.publication_gate.recover_lock();
-        control.cancel.store(true, Ordering::SeqCst);
-        let mut document = self.inner.document.recover_lock();
-        if document.snapshot().run_id() != Some(control.run_id.as_str()) {
+        let (recover_terminal_persistence, run_id, publication_gate, cancel) = {
+            let active = self.inner.active.recover_lock();
+            WorkflowCancellationAdmission::new(active.is_some()).validate()?;
+            let control = active.as_ref().expect("admission requires an active run");
+            (
+                control.terminal_persistence_failed,
+                control.run_id.clone(),
+                control.publication_gate.clone(),
+                control.cancel.clone(),
+            )
+        };
+        let publication = publication_gate.lock().await;
+        cancel.store(true, Ordering::SeqCst);
+        let document = self.inner.document.recover_lock().clone();
+        if document.snapshot().run_id() != Some(run_id.as_str()) {
             return Err(OperationError::Conflict(
                 "The active Workflow run changed before cancellation.".to_owned(),
             ));
@@ -600,15 +637,16 @@ impl WorkflowManager {
             }
         }
         self.save_document(&candidate)
+            .await
             .map_err(OperationError::External)?;
-        *document = candidate;
-        let snapshot = document.snapshot().clone();
-        let _ = self.inner.updates.send(self.state_response(&document));
-        drop(document);
-        drop(_publication);
-        drop(active);
+        let snapshot = candidate.snapshot().clone();
+        let response = self.state_response(&candidate);
+        *self.inner.document.recover_lock() = candidate;
+        let _ = self.inner.updates.send(response);
+        drop(publication);
         if recover_terminal_persistence {
-            self.finish_cancelled(&run_id);
+            drop(_mutation);
+            self.finish_cancelled(&run_id).await;
             return Ok(self.state().snapshot().clone());
         }
         Ok(snapshot)
@@ -624,7 +662,8 @@ impl WorkflowManager {
         let order = match workflow.topological_order() {
             Ok(order) => order,
             Err(error) => {
-                self.finish_failed(WorkflowFailure::new(&run_id, error));
+                self.finish_failed(WorkflowFailure::new(&run_id, error))
+                    .await;
                 return;
             }
         };
@@ -634,7 +673,8 @@ impl WorkflowManager {
                 self.finish_failed(
                     WorkflowFailure::new(&run_id, format!("Discovering Spiral relations: {error}"))
                         .at_node(workflow.first_table_id()),
-                );
+                )
+                .await;
                 return;
             }
         };
@@ -648,20 +688,21 @@ impl WorkflowManager {
         let mut terminal_result = None;
 
         if self.cancelled(&run_id, &cancel) {
-            self.finish_cancelled(&run_id);
+            self.finish_cancelled(&run_id).await;
             return;
         }
-        self.set_run_phase(&run_id, WorkflowRunPhase::Running);
+        self.set_run_phase(&run_id, WorkflowRunPhase::Running).await;
         for node_id in order {
             if self.cancelled(&run_id, &cancel) {
-                self.finish_cancelled(&run_id);
+                self.finish_cancelled(&run_id).await;
                 return;
             }
             let Some(node) = workflow.nodes().iter().find(|node| node.id() == node_id) else {
                 self.finish_failed(WorkflowFailure::new(
                     &run_id,
                     format!("Unknown node {node_id:?}"),
-                ));
+                ))
+                .await;
                 return;
             };
             let node_started = SystemTime::now().unix_millis();
@@ -671,7 +712,8 @@ impl WorkflowManager {
                         WorkflowNodeTarget::new(&run_id, node.id()),
                         WorkflowNodePhase::Validating,
                         "Resolving Spiral relation".to_owned(),
-                    ));
+                    ))
+                    .await;
                     let Some(field_count) = discovered.get(relation.as_str()) else {
                         self.finish_failed(
                             WorkflowFailure::new(
@@ -681,7 +723,8 @@ impl WorkflowManager {
                                 ),
                             )
                             .at_node(Some(node.id())),
-                        );
+                        )
+                        .await;
                         return;
                     };
                     outputs.insert(
@@ -692,7 +735,8 @@ impl WorkflowManager {
                         WorkflowNodeTarget::new(&run_id, node.id()),
                         node_started,
                         format!("Resolved {field_count} fields"),
-                    ));
+                    ))
+                    .await;
                 }
                 WorkflowNodeConfig::Query { sql, max_rows } => {
                     let substituted = match outputs.substitute_in(sql) {
@@ -701,7 +745,8 @@ impl WorkflowManager {
                             self.finish_failed(
                                 WorkflowFailure::new(&run_id, error.to_string())
                                     .at_node(Some(node.id())),
-                            );
+                            )
+                            .await;
                             return;
                         }
                     };
@@ -719,29 +764,32 @@ impl WorkflowManager {
                             WorkflowNodeTarget::new(&run_id, node.id()),
                             node_started,
                             "Resolved read-only candidate SQL".to_owned(),
-                        ));
+                        ))
+                        .await;
                         continue;
                     }
                     self.set_node_phase(WorkflowNodePhaseChange::new(
                         WorkflowNodeTarget::new(&run_id, node.id()),
                         WorkflowNodePhase::Running,
                         "Running bounded read-only SQL".to_owned(),
-                    ));
+                    ))
+                    .await;
                     let response = match self.inner.storage.query(&substituted, *max_rows).await {
                         Ok(response) => response,
                         Err(error) => {
                             if self.cancelled(&run_id, &cancel) {
-                                self.finish_cancelled(&run_id);
+                                self.finish_cancelled(&run_id).await;
                             } else {
                                 self.finish_failed(
                                     WorkflowFailure::new(&run_id, error).at_node(Some(node.id())),
-                                );
+                                )
+                                .await;
                             }
                             return;
                         }
                     };
                     if self.cancelled(&run_id, &cancel) {
-                        self.finish_cancelled(&run_id);
+                        self.finish_cancelled(&run_id).await;
                         return;
                     }
                     let rows = response.rows().len();
@@ -754,14 +802,16 @@ impl WorkflowManager {
                             format!("Returned {rows} rows"),
                         )
                         .with_rows(Some(rows)),
-                    );
+                    )
+                    .await;
                 }
                 WorkflowNodeConfig::Result => {
                     self.set_node_phase(WorkflowNodePhaseChange::new(
                         WorkflowNodeTarget::new(&run_id, node.id()),
                         WorkflowNodePhase::Running,
                         "Preparing result payload".to_owned(),
-                    ));
+                    ))
+                    .await;
                     let source = workflow
                         .edges()
                         .iter()
@@ -775,7 +825,8 @@ impl WorkflowManager {
                                 "Result has no completed Query payload.".to_owned(),
                             )
                             .at_node(Some(node.id())),
-                        );
+                        )
+                        .await;
                         return;
                     };
                     let rows = result.rows().len();
@@ -787,7 +838,8 @@ impl WorkflowManager {
                             format!("Ready · {rows} rows"),
                         )
                         .with_rows(Some(rows)),
-                    );
+                    )
+                    .await;
                 }
                 WorkflowNodeConfig::Model { features } => {
                     let source = workflow
@@ -808,7 +860,8 @@ impl WorkflowManager {
                                 "Model has no resolved upstream candidate Query.".to_owned(),
                             )
                             .at_node(Some(node.id())),
-                        );
+                        )
+                        .await;
                         return;
                     };
                     let Some(output_relation) = node.config().model_output_relation() else {
@@ -819,7 +872,8 @@ impl WorkflowManager {
                                     .to_owned(),
                             )
                             .at_node(Some(node.id())),
-                        );
+                        )
+                        .await;
                         return;
                     };
                     let request = ModelRunRequest::new(
@@ -828,43 +882,49 @@ impl WorkflowManager {
                         features.clone(),
                     );
                     let project_store = self.inner.storage.workflow_model_store();
+                    let (event_sender, mut events) = mpsc::unbounded_channel();
                     let event_manager = self.clone();
                     let event_run_id = run_id.clone();
                     let event_node_id = node.id().to_owned();
                     let worker_cancel = cancel.clone();
                     let worker_publication_gate = publication_gate.clone();
-                    let result = tokio::task::spawn_blocking(move || {
-                        ModelRunContext::new(project_store, request, worker_cancel)
-                            .with_publication_gate(worker_publication_gate)
-                            .run(|event| {
-                                event_manager.set_model_event(
+                    let event_task = tokio::spawn(async move {
+                        while let Some(event) = events.recv().await {
+                            event_manager
+                                .set_model_event(
                                     WorkflowNodeTarget::new(&event_run_id, &event_node_id),
                                     event,
-                                );
-                            })
-                    })
-                    .await;
+                                )
+                                .await;
+                        }
+                    });
+                    let result = ModelRunContext::new(project_store, request, worker_cancel)
+                        .with_publication_gate(worker_publication_gate)
+                        .run(event_sender)
+                        .await;
+                    if let Err(error) = event_task.await {
+                        self.finish_failed(
+                            WorkflowFailure::new(
+                                &run_id,
+                                format!("Workflow Model progress task stopped: {error}"),
+                            )
+                            .at_node(Some(node.id())),
+                        )
+                        .await;
+                        return;
+                    }
                     let result = match result {
-                        Ok(Ok(result)) => result,
-                        Ok(Err(ModelRunFailure::Cancelled)) => {
-                            self.finish_cancelled(&run_id);
+                        Ok(result) => result,
+                        Err(ModelRunFailure::Cancelled) => {
+                            self.finish_cancelled(&run_id).await;
                             return;
                         }
-                        Ok(Err(ModelRunFailure::Failed(error))) => {
+                        Err(ModelRunFailure::Failed(error)) => {
                             self.finish_model_failed(
                                 WorkflowNodeTarget::new(&run_id, node.id()),
                                 error,
-                            );
-                            return;
-                        }
-                        Err(error) => {
-                            self.finish_failed(
-                                WorkflowFailure::new(
-                                    &run_id,
-                                    format!("Workflow Model worker stopped: {error}"),
-                                )
-                                .at_node(Some(node.id())),
-                            );
+                            )
+                            .await;
                             return;
                         }
                     };
@@ -876,24 +936,26 @@ impl WorkflowManager {
                         WorkflowNodeTarget::new(&run_id, node.id()),
                         node_started,
                         result,
-                    ));
+                    ))
+                    .await;
                     if self.cancelled(&run_id, &cancel) {
                         // A successful worker result means the cache+registry
                         // transaction committed before cancellation acquired
                         // the publication gate. Preserve that Model truth, then
                         // stop before the next node.
-                        self.finish_cancelled(&run_id);
+                        self.finish_cancelled(&run_id).await;
                         return;
                     }
                 }
             }
         }
-        self.finish_completed(&run_id, terminal_result);
+        self.finish_completed(&run_id, terminal_result).await;
     }
 
-    fn set_model_event(&self, target: WorkflowNodeTarget<'_>, event: ModelRunEvent) {
+    async fn set_model_event(&self, target: WorkflowNodeTarget<'_>, event: ModelRunEvent) {
         let WorkflowNodeTarget { run_id, node_id } = target;
-        let mut document = self.inner.document.recover_lock();
+        let _mutation = self.inner.persistence.mutation.lock().await;
+        let mut document = self.inner.document.recover_lock().clone();
         if document.snapshot().run_id() != Some(run_id)
             || matches!(
                 document.snapshot().phase(),
@@ -939,19 +1001,21 @@ impl WorkflowManager {
             .snapshot_mut()
             .set_updated_ms(SystemTime::now().unix_millis());
         if phase_changed || materialization_invalidated {
-            self.persist_publish(&document);
+            self.persist_publish(document).await;
         } else {
             let _ = self.inner.updates.send(self.state_response(&document));
+            *self.inner.document.recover_lock() = document;
         }
     }
 
-    fn complete_model_node(&self, completion: ModelNodeCompletion<'_>) {
+    async fn complete_model_node(&self, completion: ModelNodeCompletion<'_>) {
         let ModelNodeCompletion {
             target: WorkflowNodeTarget { run_id, node_id },
             started_ms,
             result,
         } = completion;
-        let mut document = self.inner.document.recover_lock();
+        let _mutation = self.inner.persistence.mutation.lock().await;
+        let mut document = self.inner.document.recover_lock().clone();
         if document.snapshot().run_id() != Some(run_id) {
             return;
         }
@@ -1005,11 +1069,12 @@ impl WorkflowManager {
         document
             .snapshot_mut()
             .set_updated_ms(SystemTime::now().unix_millis());
-        self.persist_publish(&document);
+        self.persist_publish(document).await;
     }
 
-    fn set_run_phase(&self, run_id: &str, phase: WorkflowRunPhase) {
-        let mut document = self.inner.document.recover_lock();
+    async fn set_run_phase(&self, run_id: &str, phase: WorkflowRunPhase) {
+        let _mutation = self.inner.persistence.mutation.lock().await;
+        let mut document = self.inner.document.recover_lock().clone();
         if document.snapshot().run_id() != Some(run_id) {
             return;
         }
@@ -1017,17 +1082,18 @@ impl WorkflowManager {
         document
             .snapshot_mut()
             .set_updated_ms(SystemTime::now().unix_millis());
-        self.persist_publish(&document);
+        self.persist_publish(document).await;
     }
 
-    fn set_node_phase(&self, change: WorkflowNodePhaseChange<'_>) {
+    async fn set_node_phase(&self, change: WorkflowNodePhaseChange<'_>) {
         let WorkflowNodePhaseChange {
             target: WorkflowNodeTarget { run_id, node_id },
             phase,
             detail,
             error,
         } = change;
-        let mut document = self.inner.document.recover_lock();
+        let _mutation = self.inner.persistence.mutation.lock().await;
+        let mut document = self.inner.document.recover_lock().clone();
         if document.snapshot().run_id() != Some(run_id) {
             return;
         }
@@ -1044,17 +1110,18 @@ impl WorkflowManager {
         document
             .snapshot_mut()
             .set_updated_ms(SystemTime::now().unix_millis());
-        self.persist_publish(&document);
+        self.persist_publish(document).await;
     }
 
-    fn complete_node(&self, completion: WorkflowNodeCompletion<'_>) {
+    async fn complete_node(&self, completion: WorkflowNodeCompletion<'_>) {
         let WorkflowNodeCompletion {
             target: WorkflowNodeTarget { run_id, node_id },
             started_ms,
             detail,
             rows,
         } = completion;
-        let mut document = self.inner.document.recover_lock();
+        let _mutation = self.inner.persistence.mutation.lock().await;
+        let mut document = self.inner.document.recover_lock().clone();
         if document.snapshot().run_id() != Some(run_id) {
             return;
         }
@@ -1073,24 +1140,31 @@ impl WorkflowManager {
         document
             .snapshot_mut()
             .set_updated_ms(SystemTime::now().unix_millis());
-        self.persist_publish(&document);
+        self.persist_publish(document).await;
     }
 
-    fn finish_completed(&self, run_id: &str, result: Option<SpiralQueryResponse>) {
+    async fn finish_completed(&self, run_id: &str, result: Option<SpiralQueryResponse>) {
         // Linearize terminal publication against cancellation. Whichever
         // claims the active-run mutex first owns the final outcome; a cancel
         // that arrives first prevents the just-finished database payload from
         // replacing the previous stale result.
-        let mut active = self.inner.active.recover_lock();
-        let Some(control) = active.as_mut().filter(|active| active.run_id == run_id) else {
+        let mutation = self.inner.persistence.mutation.lock().await;
+        let Some(cancelled) = self
+            .inner
+            .active
+            .recover_lock()
+            .as_ref()
+            .filter(|active| active.run_id == run_id)
+            .map(|control| control.cancel.load(Ordering::SeqCst))
+        else {
             return;
         };
-        if control.cancel.load(Ordering::SeqCst) {
-            drop(active);
-            self.finish_cancelled(run_id);
+        if cancelled {
+            drop(mutation);
+            self.finish_cancelled(run_id).await;
             return;
         }
-        let mut document = self.inner.document.recover_lock();
+        let document = self.inner.document.recover_lock().clone();
         if document.snapshot().run_id() != Some(run_id) {
             return;
         }
@@ -1104,24 +1178,25 @@ impl WorkflowManager {
         candidate.snapshot_mut().set_error(None);
         candidate.snapshot_mut().set_result(result);
         candidate.snapshot_mut().set_result_stale(false);
-        if let Err(error) = self.save_document(&candidate) {
-            control.terminal_persistence_failed = true;
+        if let Err(error) = self.save_document(&candidate).await {
+            if let Some(control) = self.inner.active.recover_lock().as_mut() {
+                control.terminal_persistence_failed = true;
+            }
             self.report_terminal_persistence_failure(TerminalPersistenceFailure::new(
                 run_id, &document, error,
             ));
             return;
         }
-        *document = candidate;
-        self.publish_committed_terminal(&document);
-        drop(document);
-        *active = None;
+        self.publish_committed_terminal(&candidate);
+        *self.inner.document.recover_lock() = candidate;
+        *self.inner.active.recover_lock() = None;
     }
 
-    fn finish_failed(&self, failure: WorkflowFailure<'_>) {
-        self.finish_failed_with_policy(failure);
+    async fn finish_failed(&self, failure: WorkflowFailure<'_>) {
+        self.finish_failed_with_policy(failure).await;
     }
 
-    fn finish_model_failed(&self, target: WorkflowNodeTarget<'_>, error: String) {
+    async fn finish_model_failed(&self, target: WorkflowNodeTarget<'_>, error: String) {
         // `run_model` classifies cancellation while it still owns the
         // publication boundary. A typed Failed outcome—including an uncertain
         // rollback—must not be rewritten as Cancelled by a token set after
@@ -1130,26 +1205,34 @@ impl WorkflowManager {
             WorkflowFailure::new(target.run_id, error)
                 .at_node(Some(target.node_id))
                 .with_policy(FailureCancellationPolicy::FailureWins),
-        );
+        )
+        .await;
     }
 
-    fn finish_failed_with_policy(&self, failure: WorkflowFailure<'_>) {
+    async fn finish_failed_with_policy(&self, failure: WorkflowFailure<'_>) {
         let WorkflowFailure {
             run_id,
             node_id,
             error,
             policy,
         } = failure;
-        let mut active = self.inner.active.recover_lock();
-        let Some(control) = active.as_mut().filter(|active| active.run_id == run_id) else {
+        let mutation = self.inner.persistence.mutation.lock().await;
+        let Some(cancelled) = self
+            .inner
+            .active
+            .recover_lock()
+            .as_ref()
+            .filter(|active| active.run_id == run_id)
+            .map(|control| control.cancel.load(Ordering::SeqCst))
+        else {
             return;
         };
-        if policy.supersedes_failure(control.cancel.load(Ordering::SeqCst)) {
-            drop(active);
-            self.finish_cancelled(run_id);
+        if policy.supersedes_failure(cancelled) {
+            drop(mutation);
+            self.finish_cancelled(run_id).await;
             return;
         }
-        let mut document = self.inner.document.recover_lock();
+        let document = self.inner.document.recover_lock().clone();
         if document.snapshot().run_id() != Some(run_id) {
             return;
         }
@@ -1170,25 +1253,32 @@ impl WorkflowManager {
         candidate.snapshot_mut().set_finished_ms(finished);
         candidate.snapshot_mut().set_updated_ms(finished);
         candidate.snapshot_mut().set_error(Some(error));
-        if let Err(error) = self.save_document(&candidate) {
-            control.terminal_persistence_failed = true;
+        if let Err(error) = self.save_document(&candidate).await {
+            if let Some(control) = self.inner.active.recover_lock().as_mut() {
+                control.terminal_persistence_failed = true;
+            }
             self.report_terminal_persistence_failure(TerminalPersistenceFailure::new(
                 run_id, &document, error,
             ));
             return;
         }
-        *document = candidate;
-        self.publish_committed_terminal(&document);
-        drop(document);
-        *active = None;
+        self.publish_committed_terminal(&candidate);
+        *self.inner.document.recover_lock() = candidate;
+        *self.inner.active.recover_lock() = None;
     }
 
-    fn finish_cancelled(&self, run_id: &str) {
-        let mut active = self.inner.active.recover_lock();
-        let Some(control) = active.as_mut().filter(|active| active.run_id == run_id) else {
+    async fn finish_cancelled(&self, run_id: &str) {
+        let _mutation = self.inner.persistence.mutation.lock().await;
+        if self
+            .inner
+            .active
+            .recover_lock()
+            .as_ref()
+            .is_none_or(|active| active.run_id != run_id)
+        {
             return;
-        };
-        let mut document = self.inner.document.recover_lock();
+        }
+        let document = self.inner.document.recover_lock().clone();
         if document.snapshot().run_id() != Some(run_id) {
             return;
         }
@@ -1204,17 +1294,18 @@ impl WorkflowManager {
         candidate.snapshot_mut().set_finished_ms(finished);
         candidate.snapshot_mut().set_updated_ms(finished);
         candidate.snapshot_mut().set_error(None);
-        if let Err(error) = self.save_document(&candidate) {
-            control.terminal_persistence_failed = true;
+        if let Err(error) = self.save_document(&candidate).await {
+            if let Some(control) = self.inner.active.recover_lock().as_mut() {
+                control.terminal_persistence_failed = true;
+            }
             self.report_terminal_persistence_failure(TerminalPersistenceFailure::new(
                 run_id, &document, error,
             ));
             return;
         }
-        *document = candidate;
-        self.publish_committed_terminal(&document);
-        drop(document);
-        *active = None;
+        self.publish_committed_terminal(&candidate);
+        *self.inner.document.recover_lock() = candidate;
+        *self.inner.active.recover_lock() = None;
     }
 
     fn cancelled(&self, run_id: &str, cancel: &AtomicBool) -> bool {
@@ -1227,19 +1318,26 @@ impl WorkflowManager {
                 .is_none_or(|active| active.run_id != run_id)
     }
 
-    fn persist_publish(&self, document: &WorkflowDocument) {
-        if let Err(error) = self.save_document(document) {
+    async fn persist_publish(&self, document: WorkflowDocument) {
+        if let Err(error) = self.save_document(&document).await {
             tracing::error!(%error, "persisting Workflow snapshot");
         }
-        let _ = self.inner.updates.send(self.state_response(document));
+        let _ = self.inner.updates.send(self.state_response(&document));
+        *self.inner.document.recover_lock() = document;
     }
 
-    fn save_document(&self, document: &WorkflowDocument) -> Result<(), String> {
+    async fn save_document(&self, document: &WorkflowDocument) -> Result<(), String> {
         #[cfg(test)]
-        if let Some(outcome) = self.inner.persistence_outcomes.recover_lock().pop_front() {
+        if let Some(outcome) = self
+            .inner
+            .persistence
+            .test_outcomes
+            .recover_lock()
+            .pop_front()
+        {
             return outcome;
         }
-        self.inner.storage.save_workflow_document(document)
+        self.inner.storage.save_workflow_document(document).await
     }
 
     fn require_scope(&self, requested_scope_id: &str) -> Result<(), OperationError> {
@@ -1262,7 +1360,7 @@ impl WorkflowManager {
             "Could not durably finalize this Workflow run: {error} The run remains active; choose Cancel to retry durable finalization."
         );
         tracing::error!(%error, %run_id, "persisting terminal Workflow snapshot");
-        *self.inner.terminal_persistence_error.recover_lock() = Some(TerminalPersistenceError {
+        *self.inner.persistence.terminal_error.recover_lock() = Some(TerminalPersistenceError {
             run_id: run_id.to_owned(),
             detail,
         });
@@ -1270,7 +1368,7 @@ impl WorkflowManager {
     }
 
     fn publish_committed_terminal(&self, document: &WorkflowDocument) {
-        *self.inner.terminal_persistence_error.recover_lock() = None;
+        *self.inner.persistence.terminal_error.recover_lock() = None;
         let _ = self.inner.updates.send(self.state_response(document));
     }
 
@@ -1279,7 +1377,8 @@ impl WorkflowManager {
         response.set_scope_id(self.scope_id());
         if let Some(error) = self
             .inner
-            .terminal_persistence_error
+            .persistence
+            .terminal_error
             .recover_lock()
             .as_ref()
             && response.snapshot().run_id() == Some(error.run_id.as_str())
@@ -1543,13 +1642,17 @@ mod tests {
     struct LocalDatabaseTest;
 
     impl LocalDatabaseTest {
-        fn run(assertions: impl FnOnce()) {
+        fn run<Assertions, AssertionsFuture>(assertions: Assertions)
+        where
+            Assertions: FnOnce() -> AssertionsFuture,
+            AssertionsFuture: std::future::Future<Output = ()>,
+        {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap();
             let database_tasks = tokio::task::LocalSet::new();
-            runtime.block_on(database_tasks.run_until(async move { assertions() }));
+            runtime.block_on(database_tasks.run_until(assertions()));
         }
     }
 
@@ -1671,7 +1774,7 @@ mod tests {
 
     #[test]
     fn terminal_save_failure_keeps_the_run_active_and_cancel_can_retry_finalization() {
-        LocalDatabaseTest::run(|| {
+        LocalDatabaseTest::run(|| async {
             let project_store = Arc::new(
                 ProjectStore::new(
                     SpiralConnectionSettings::new(
@@ -1693,18 +1796,19 @@ mod tests {
             *manager.inner.active.recover_lock() = Some(ActiveRun {
                 run_id: run_id.clone(),
                 cancel: Arc::new(AtomicBool::new(false)),
-                publication_gate: Arc::new(Mutex::new(())),
+                publication_gate: Arc::new(AsyncMutex::new(())),
                 task: None,
                 terminal_persistence_failed: false,
             });
             let (_, mut updates) = manager.subscription();
             manager
                 .inner
-                .persistence_outcomes
+                .persistence
+                .test_outcomes
                 .recover_lock()
                 .push_back(Err("injected terminal write failure".to_owned()));
 
-            manager.finish_completed(&run_id, None);
+            manager.finish_completed(&run_id, None).await;
 
             let state = manager.state();
             assert_eq!(state.snapshot().phase(), WorkflowRunPhase::Running);
@@ -1719,11 +1823,13 @@ mod tests {
 
             manager
                 .inner
-                .persistence_outcomes
+                .persistence
+                .test_outcomes
                 .recover_lock()
                 .extend([Ok(()), Ok(())]);
             let recovered = manager
                 .cancel(&manager.scope_id())
+                .await
                 .expect("Cancel must retry the durable terminal transition");
             assert_eq!(recovered.phase(), WorkflowRunPhase::Cancelled);
             assert!(recovered.error().is_none());
@@ -1733,7 +1839,7 @@ mod tests {
 
     #[test]
     fn authoritative_project_reload_gets_a_new_scope_for_a_lower_revision() {
-        LocalDatabaseTest::run(|| {
+        LocalDatabaseTest::run(|| async {
             let project_store = Arc::new(
                 ProjectStore::new(
                     SpiralConnectionSettings::new(
@@ -1751,6 +1857,7 @@ mod tests {
             project_a.snapshot_mut().set_workflow_revision(9);
             manager
                 .install_hydrated_document(project_a)
+                .await
                 .expect("the first project installs");
             let scope_a = manager.state().scope_id().to_owned();
 
@@ -1759,17 +1866,20 @@ mod tests {
             project_b.snapshot_mut().set_workflow_revision(1);
             manager
                 .install_hydrated_document(project_b)
+                .await
                 .expect("the replacement project installs");
             let state_b = manager.state();
 
             assert_ne!(state_b.scope_id(), scope_a);
             assert_eq!(state_b.workflow().revision(), 1);
             assert!(matches!(
-                manager.command(WorkflowCommand::apply(
-                    scope_a,
-                    state_b.workflow().revision(),
-                    state_b.workflow().clone(),
-                )),
+                manager
+                    .command(WorkflowCommand::apply(
+                        scope_a,
+                        state_b.workflow().revision(),
+                        state_b.workflow().clone(),
+                    ))
+                    .await,
                 Err(OperationError::Conflict(_))
             ));
         });
@@ -1924,12 +2034,19 @@ mod tests {
         .expect("the seed batch must match its schema");
         let target = seed_relation.clone();
         let dataset = namespace.clone();
-        project_store
-            .run_exclusive_blocking(move |connection| {
-                connection.ensure_dataset_namespace(&dataset)?;
-                connection.ingest_batch(&target, batch)
-            })
+        let mut connection = project_store
+            .connect_exclusive()
+            .await
+            .expect("the Workflow seed project must connect");
+        connection
+            .ensure_dataset_namespace(&dataset)
+            .await
+            .expect("the Workflow seed namespace must exist");
+        connection
+            .ingest_batch(&target, batch)
+            .await
             .expect("seeding the Workflow relation must succeed");
+        drop(connection);
 
         let storage = Arc::new(StorageManager::new(project_store.clone()));
         let manager = WorkflowManager::new(storage.clone());
@@ -1944,15 +2061,17 @@ mod tests {
         *relation = seed_relation;
         let saved = manager
             .command(WorkflowCommand::apply(manager.scope_id(), 0, workflow))
+            .await
             .expect("the valid SQL workflow must save");
         let scope_id = manager.scope_id().to_owned();
         let revision = saved.workflow().revision();
         manager
             .start(&scope_id, revision)
+            .await
             .expect("the first run must start");
         assert!(
             matches!(
-                manager.start(&scope_id, revision),
+                manager.start(&scope_id, revision).await,
                 Err(OperationError::Conflict(_))
             ),
             "one workflow cannot have two active runs"
@@ -1979,9 +2098,11 @@ mod tests {
 
         reloaded
             .start(&reloaded.scope_id(), revision)
+            .await
             .expect("the persisted workflow must run again");
         let cancelling = reloaded
             .cancel(&reloaded.scope_id())
+            .await
             .expect("the active run must cancel");
         assert_eq!(cancelling.phase(), WorkflowRunPhase::Cancelling);
         let cancelled = wait_for_terminal(&reloaded).await;
@@ -1992,9 +2113,11 @@ mod tests {
         manager.shutdown().await;
         cleanup
             .cleanup_now()
-            .expect("the SQL E2E namespace must clean up synchronously");
+            .await
+            .expect("the SQL E2E namespace must clean up");
         cleanup
             .assert_absent()
+            .await
             .expect("the SQL E2E must leave no catalog resources behind");
     }
 
@@ -2081,14 +2204,27 @@ mod tests {
         let media_target = manifest_relation.clone();
         let empty_target = empty_relation.clone();
         let dataset = namespace.clone();
-        project_store
-            .run_exclusive_blocking(move |connection| {
-                connection.ensure_dataset_namespace(&dataset)?;
-                connection.ingest_batch(&media_target, media_batch)?;
-                connection.replace_batches(&empty_target, vec![empty_batch])?;
-                connection.rebuild_video_dataset(&dataset, false)
-            })
+        let mut connection = project_store
+            .connect_exclusive()
+            .await
+            .expect("the video Workflow project must connect");
+        connection
+            .ensure_dataset_namespace(&dataset)
+            .await
+            .expect("the video Workflow namespace must exist");
+        connection
+            .ingest_batch(&media_target, media_batch)
+            .await
+            .expect("the video manifest must save");
+        connection
+            .replace_batches(&empty_target, vec![empty_batch])
+            .await
+            .expect("the empty video manifest must save");
+        connection
+            .rebuild_video_dataset(&dataset, false)
+            .await
             .expect("seeding the video manifest relations must succeed");
+        drop(connection);
 
         let storage = Arc::new(StorageManager::new(project_store.clone()));
         let manager = WorkflowManager::new(storage.clone());
@@ -2098,12 +2234,14 @@ mod tests {
             .expect("an empty Workflow document must hydrate");
         let saved = manager
             .command(WorkflowCommand::apply(manager.scope_id(), 0, workflow))
+            .await
             .expect("the SigLIP video workflow must save");
 
         let scope_id = manager.scope_id().to_owned();
         let revision = saved.workflow().revision();
         manager
             .start(&scope_id, revision)
+            .await
             .expect("the SigLIP video run must start");
         let completed = wait_for_model_terminal(&manager).await;
         assert_eq!(
@@ -2148,6 +2286,7 @@ mod tests {
         );
         manager
             .start(&scope_id, revision)
+            .await
             .expect("an unchanged run must start for reuse");
         let reused = wait_for_model_terminal(&manager).await;
         assert!(
@@ -2185,9 +2324,11 @@ mod tests {
                 saved.workflow().revision(),
                 empty_workflow,
             ))
+            .await
             .expect("the empty manifest workflow must save");
         reloaded
             .start(&reloaded.scope_id(), empty_saved.workflow().revision())
+            .await
             .expect("the zero-row replacement run must start");
         let empty = wait_for_model_terminal(&reloaded).await;
         assert_eq!(empty.phase(), WorkflowRunPhase::Completed);
@@ -2212,12 +2353,15 @@ mod tests {
                 empty_saved.workflow().revision(),
                 restored_workflow,
             ))
+            .await
             .expect("restoring the media workflow must save");
         reloaded
             .start(&reloaded.scope_id(), changed_saved.workflow().revision())
+            .await
             .expect("the cancellable model run must start");
         let cancelling = reloaded
             .cancel(&reloaded.scope_id())
+            .await
             .expect("the active Model run must cancel");
         assert_eq!(cancelling.phase(), WorkflowRunPhase::Cancelling);
         assert_eq!(
@@ -2253,20 +2397,29 @@ mod tests {
                 without_model.revision(),
                 without_model,
             ))
+            .await
             .expect("removing the Model must save without deleting shared cache state");
         let manifest_check = manifest_relation.clone();
         let output_check = output_relation.clone();
-        project_store
-            .run_exclusive_blocking(move |connection| {
-                if !connection.table_exists(&manifest_check)? {
-                    return Err("hostile stored output text dropped the input manifest".to_owned());
-                }
-                if !connection.table_exists(&output_check)? {
-                    return Err("removing one Model deleted the shared feature cache".to_owned());
-                }
-                Ok(())
-            })
-            .expect("Model removal must preserve source and shared cache tables");
+        let mut connection = project_store
+            .connect()
+            .await
+            .expect("the post-Model-removal project must connect");
+        assert!(
+            connection
+                .table_exists(&manifest_check)
+                .await
+                .expect("the input manifest catalog lookup must succeed"),
+            "hostile stored output text dropped the input manifest"
+        );
+        assert!(
+            connection
+                .table_exists(&output_check)
+                .await
+                .expect("the feature cache catalog lookup must succeed"),
+            "removing one Model deleted the shared feature cache"
+        );
+        drop(connection);
         let mut renamed = removed.workflow().clone();
         renamed.set_name("Post-cleanup write");
         let renamed = reloaded
@@ -2275,9 +2428,11 @@ mod tests {
                 renamed.revision(),
                 renamed,
             ))
+            .await
             .expect("ordinary persistence must work after cleanup restores autocommit");
         reloaded
             .reload_from_storage()
+            .await
             .expect("the post-cleanup document must remain readable");
         assert_eq!(
             reloaded.state().workflow().name(),
@@ -2287,9 +2442,11 @@ mod tests {
         manager.shutdown().await;
         cleanup
             .cleanup_now()
-            .expect("the SigLIP E2E namespace must clean up synchronously");
+            .await
+            .expect("the SigLIP E2E namespace must clean up");
         cleanup
             .assert_absent()
+            .await
             .expect("the SigLIP E2E must leave no catalog resources behind");
     }
 
@@ -2458,60 +2615,45 @@ mod tests {
             }
         }
 
-        fn cleanup_now(&mut self) -> Result<(), String> {
+        async fn cleanup_now(&mut self) -> Result<(), String> {
             if self.cleaned {
                 return Ok(());
             }
             if self.video_dataset {
                 let dataset = format!("{}.video", self.namespace);
-                self.execute_cleanup_sql(&SpiralSql::drop_video_dataset(&dataset))?;
+                self.execute_cleanup_sql(&SpiralSql::drop_video_dataset(&dataset))
+                    .await?;
                 self.execute_cleanup_sql(&format!(
                     "DROP VIEW IF EXISTS {}_video_sources",
                     self.namespace
-                ))?;
+                ))
+                .await?;
             }
             for relation in self.relations.clone() {
-                self.drop_cleanup_table(&relation)?;
+                self.drop_cleanup_table(&relation).await?;
             }
-            self.drop_cleanup_table(&self.namespace)?;
+            self.drop_cleanup_table(&self.namespace).await?;
             self.cleaned = true;
             Ok(())
         }
 
-        fn execute_cleanup_sql(&self, sql: &str) -> Result<(), String> {
-            self.retry_cleanup(|connection| connection.execute_update_sql(sql))
-        }
-
-        fn drop_cleanup_table(&self, relation: &str) -> Result<(), String> {
-            self.retry_cleanup(|connection| {
-                if connection.table_exists(relation)? {
-                    connection.execute_update_sql(&format!("DROP TABLE {relation}"))?;
-                }
-                Ok(())
-            })
-        }
-
-        fn retry_cleanup(
-            &self,
-            operation: impl Fn(&mut spiral_robotics_storage::StorageConnection) -> Result<(), String>,
-        ) -> Result<(), String> {
+        async fn execute_cleanup_sql(&self, sql: &str) -> Result<(), String> {
             const MAX_ATTEMPTS: usize = 32;
             for attempt in 1..=MAX_ATTEMPTS {
-                match self.project_store.run_exclusive_blocking(|connection| {
-                    let result = operation(connection);
-                    if result.as_ref().is_err_and(|error| {
-                        error.contains("project namespace compare-and-swap conflict")
-                    }) {
-                        let _ = connection.rollback();
-                    }
-                    result
+                let mut connection = self.project_store.connect_exclusive().await?;
+                let result = connection.execute_update_sql(sql).await;
+                if result.as_ref().is_err_and(|error| {
+                    error.contains("project namespace compare-and-swap conflict")
                 }) {
+                    let _ = connection.rollback().await;
+                }
+                match result {
                     Ok(()) => return Ok(()),
                     Err(error)
                         if error.contains("project namespace compare-and-swap conflict")
                             && attempt < MAX_ATTEMPTS =>
                     {
-                        std::thread::sleep(Duration::from_millis(25));
+                        tokio::time::sleep(Duration::from_millis(25)).await;
                     }
                     Err(error) => return Err(error),
                 }
@@ -2519,36 +2661,61 @@ mod tests {
             unreachable!("the bounded cleanup loop returns on its final attempt")
         }
 
-        fn assert_absent(&self) -> Result<(), String> {
+        async fn drop_cleanup_table(&self, relation: &str) -> Result<(), String> {
+            const MAX_ATTEMPTS: usize = 32;
+            for attempt in 1..=MAX_ATTEMPTS {
+                let mut connection = self.project_store.connect_exclusive().await?;
+                let result = async {
+                    if connection.table_exists(relation).await? {
+                        connection
+                            .execute_update_sql(&format!("DROP TABLE {relation}"))
+                            .await?;
+                    }
+                    Ok(())
+                }
+                .await;
+                if result.as_ref().is_err_and(|error: &String| {
+                    error.contains("project namespace compare-and-swap conflict")
+                }) {
+                    let _ = connection.rollback().await;
+                }
+                match result {
+                    Ok(()) => return Ok(()),
+                    Err(error)
+                        if error.contains("project namespace compare-and-swap conflict")
+                            && attempt < MAX_ATTEMPTS =>
+                    {
+                        tokio::time::sleep(Duration::from_millis(25)).await;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            unreachable!("the bounded cleanup loop returns on its final attempt")
+        }
+
+        async fn assert_absent(&self) -> Result<(), String> {
             let namespace = self.namespace.clone();
             let relations = self.relations.clone();
             let project = self.project_store.project_id();
-            self.project_store
-                .run_exclusive_blocking(move |connection| {
-                    let leaked = connection
-                        .catalog_relation_names(&project)?
-                        .into_iter()
-                        .filter(|relation_name| {
-                            relation_name == &namespace
-                                || relation_name.starts_with(&format!("{namespace}."))
-                                || relations.iter().any(|relation| relation == relation_name)
-                        })
-                        .collect::<Vec<_>>();
-                    if leaked.is_empty() {
-                        Ok(())
-                    } else {
-                        Err(format!(
-                            "Workflow test leaked catalog resources: {}",
-                            leaked.join(", ")
-                        ))
-                    }
+            let mut connection = self.project_store.connect_exclusive().await?;
+            let leaked = connection
+                .catalog_relation_names(&project)
+                .await?
+                .into_iter()
+                .filter(|relation_name| {
+                    relation_name == &namespace
+                        || relation_name.starts_with(&format!("{namespace}."))
+                        || relations.iter().any(|relation| relation == relation_name)
                 })
-        }
-    }
-
-    impl Drop for WorkflowTestNamespace {
-        fn drop(&mut self) {
-            let _ = self.cleanup_now();
+                .collect::<Vec<_>>();
+            if leaked.is_empty() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "Workflow test leaked catalog resources: {}",
+                    leaked.join(", ")
+                ))
+            }
         }
     }
 }

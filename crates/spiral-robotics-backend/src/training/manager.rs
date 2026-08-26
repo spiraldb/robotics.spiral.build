@@ -45,7 +45,12 @@ struct TrainingManagerInner {
     run_ids: StableIdSequence,
     snapshot: Mutex<TrainingSnapshot>,
     updates: broadcast::Sender<TrainingUpdate>,
+    runtime: TrainingRuntimeState,
+}
+
+struct TrainingRuntimeState {
     controls: Mutex<BTreeMap<String, Arc<AtomicBool>>>,
+    mutation: tokio::sync::Mutex<()>,
 }
 
 struct RemoteReplayState {
@@ -189,18 +194,17 @@ impl TrainingManager {
                 run_ids: StableIdSequence::new("train", 0),
                 snapshot: Mutex::new(TrainingSnapshot::default()),
                 updates,
-                controls: Mutex::new(BTreeMap::new()),
+                runtime: TrainingRuntimeState {
+                    controls: Mutex::new(BTreeMap::new()),
+                    mutation: tokio::sync::Mutex::new(()),
+                },
             }),
         }
     }
 
     /// Restore persisted history after the HTTP listener is already serving.
     pub(crate) async fn hydrate_from_storage(&self) -> Result<(), String> {
-        let storage = self.inner.storage.clone();
-        let mut snapshot: TrainingSnapshot =
-            tokio::task::spawn_blocking(move || storage.load_training_snapshot())
-                .await
-                .map_err(|error| format!("training history task stopped: {error}"))??;
+        let mut snapshot: TrainingSnapshot = self.inner.storage.load_training_snapshot().await?;
         let run_registry = snapshot.run_registry()?;
         let retained = run_registry
             .retained_ids()
@@ -228,6 +232,7 @@ impl TrainingManager {
             let run = run.clone();
             let cancel = Arc::new(AtomicBool::new(false));
             self.inner
+                .runtime
                 .controls
                 .recover_lock()
                 .insert(run.id().to_owned(), cancel.clone());
@@ -245,11 +250,11 @@ impl TrainingManager {
         self.inner.snapshot.recover_lock().clone()
     }
 
-    pub(crate) fn reload_from_storage(&self) -> Result<(), String> {
-        if !self.inner.controls.recover_lock().is_empty() {
+    pub(crate) async fn reload_from_storage(&self) -> Result<(), String> {
+        if !self.inner.runtime.controls.recover_lock().is_empty() {
             return Err("cannot reload training history while a run is active".to_owned());
         }
-        let snapshot: TrainingSnapshot = self.inner.storage.load_training_snapshot()?;
+        let snapshot: TrainingSnapshot = self.inner.storage.load_training_snapshot().await?;
         snapshot.run_registry()?;
         *self.inner.snapshot.recover_lock() = snapshot;
         Ok(())
@@ -267,12 +272,14 @@ impl TrainingManager {
     pub(crate) async fn refresh_readiness(&self) -> TrainingReadiness {
         let next = self.readiness().await;
         if self.inner.snapshot.recover_lock().readiness() != &next {
-            let _ = self.apply_update(
-                TrainingUpdate::Readiness {
-                    readiness: next.clone(),
-                },
-                false,
-            );
+            let _ = self
+                .apply_update(
+                    TrainingUpdate::Readiness {
+                        readiness: next.clone(),
+                    },
+                    false,
+                )
+                .await;
         }
         next
     }
@@ -292,8 +299,9 @@ impl TrainingManager {
             .map_err(|error| error.to_string())
     }
 
-    pub(crate) fn stop(&self, run_id: &str) -> Result<(), String> {
+    pub(crate) async fn stop(&self, run_id: &str) -> Result<(), String> {
         self.coordinate_training_stop(run_id)
+            .await
             .map_err(|error| error.to_string())
     }
 
@@ -301,7 +309,13 @@ impl TrainingManager {
     /// removal. A failed checkpoint deletion therefore leaves the complete run
     /// visible and retryable instead of hiding orphaned model artifacts.
     pub(crate) async fn delete(&self, run_id: &str) -> Result<(), String> {
-        if self.inner.controls.recover_lock().contains_key(run_id) {
+        if self
+            .inner
+            .runtime
+            .controls
+            .recover_lock()
+            .contains_key(run_id)
+        {
             return Err(format!(
                 "training run {run_id:?} is still active; stop it before deleting it"
             ));
@@ -326,7 +340,13 @@ impl TrainingManager {
             .delete_run_checkpoints(run_id.to_owned())
             .await?;
 
-        if self.inner.controls.recover_lock().contains_key(run_id) {
+        if self
+            .inner
+            .runtime
+            .controls
+            .recover_lock()
+            .contains_key(run_id)
+        {
             return Err(format!(
                 "training run {run_id:?} became active while deletion was in progress"
             ));
@@ -334,30 +354,36 @@ impl TrainingManager {
         let update = TrainingUpdate::RunRemoved {
             run_id: run_id.to_owned(),
         };
-        let mut snapshot = self.inner.snapshot.recover_lock();
-        let current = snapshot
-            .runs()
-            .iter()
-            .find(|candidate| candidate.id() == run_id)
-            .ok_or_else(|| format!("training run {run_id:?} is no longer available"))?;
-        if current.phase().active() {
-            return Err(format!(
-                "training run {run_id:?} became active while deletion was in progress"
-            ));
-        }
-        let mut candidate = snapshot.clone();
-        candidate.apply(update.clone());
-        self.inner.storage.save_training_snapshot(&candidate)?;
-        *snapshot = candidate;
+        let _mutation = self.inner.runtime.mutation.lock().await;
+        let candidate = {
+            let snapshot = self.inner.snapshot.recover_lock();
+            let current = snapshot
+                .runs()
+                .iter()
+                .find(|candidate| candidate.id() == run_id)
+                .ok_or_else(|| format!("training run {run_id:?} is no longer available"))?;
+            if current.phase().active() {
+                return Err(format!(
+                    "training run {run_id:?} became active while deletion was in progress"
+                ));
+            }
+            let mut candidate = snapshot.clone();
+            candidate.apply(update.clone());
+            candidate
+        };
+        self.inner
+            .storage
+            .save_training_snapshot(&candidate)
+            .await?;
+        *self.inner.snapshot.recover_lock() = candidate;
         let _ = self.inner.updates.send(update);
-        drop(snapshot);
         Ok(())
     }
 
     pub(crate) async fn shutdown(&self) {
         // A Studio shutdown only detaches the orchestration client. The remote worker owns
         // the job and must keep running so a restarted Studio process can reattach to it.
-        self.inner.controls.recover_lock().clear();
+        self.inner.runtime.controls.recover_lock().clear();
     }
 
     async fn run_backend(&self, launch: TrainingLaunch, cancel: Arc<AtomicBool>) {
@@ -449,14 +475,16 @@ impl TrainingManager {
                 self.finish_remote_job(
                     RemoteJobCompletion::new(run_id.clone(), TrainingJobPhase::Failed, 0)
                         .with_message(error.to_string()),
-                );
+                )
+                .await;
                 return;
             }
             Err(error) => {
                 self.finish_remote_job(
                     RemoteJobCompletion::new(run_id.clone(), TrainingJobPhase::Failed, 0)
                         .with_message(format!("training job launch task stopped: {error}")),
-                );
+                )
+                .await;
                 return;
             }
         };
@@ -498,10 +526,13 @@ impl TrainingManager {
         let mut stop_sent = false;
         let mut poll_failures = 0_u64;
         loop {
-            if let Err(error) = self.apply_remote_job_snapshot(
-                RemoteJobSnapshot::new(&run_id, &request, &snapshot),
-                &mut replay,
-            ) {
+            if let Err(error) = self
+                .apply_remote_job_snapshot(
+                    RemoteJobSnapshot::new(&run_id, &request, &snapshot),
+                    &mut replay,
+                )
+                .await
+            {
                 self.finish_remote_job(
                     RemoteJobCompletion::new(
                         run_id.clone(),
@@ -509,7 +540,8 @@ impl TrainingManager {
                         snapshot.current_step(),
                     )
                     .with_message(error),
-                );
+                )
+                .await;
                 return;
             }
             if snapshot.phase().is_terminal() {
@@ -520,7 +552,8 @@ impl TrainingManager {
                         snapshot.current_step(),
                     )
                     .with_message(snapshot.message().unwrap_or_default()),
-                );
+                )
+                .await;
                 return;
             }
             let backend = self.inner.training_backend.clone();
@@ -545,7 +578,8 @@ impl TrainingManager {
                         self.push_log(
                             &run_id,
                             "Reconnected to the remote training worker.".to_owned(),
-                        );
+                        )
+                        .await;
                     }
                     poll_failures = 0;
                     snapshot
@@ -558,7 +592,8 @@ impl TrainingManager {
                             format!(
                                 "Remote training worker is temporarily unavailable; retrying: {error}"
                             ),
-                        );
+                        )
+                        .await;
                     }
                     continue;
                 }
@@ -570,14 +605,15 @@ impl TrainingManager {
                             snapshot.current_step(),
                         )
                         .with_message(format!("training job poll task stopped: {error}")),
-                    );
+                    )
+                    .await;
                     return;
                 }
             };
         }
     }
 
-    fn apply_remote_job_snapshot(
+    async fn apply_remote_job_snapshot(
         &self,
         remote: RemoteJobSnapshot<'_>,
         replay: &mut RemoteReplayState,
@@ -603,7 +639,8 @@ impl TrainingManager {
                     config: Box::new(resolved_request),
                 },
                 true,
-            )?;
+            )
+            .await?;
             replay.configured = true;
         }
         if snapshot.phase() == TrainingJobPhase::Running
@@ -612,13 +649,15 @@ impl TrainingManager {
             self.set_phase(
                 TrainingPhaseUpdate::new(run_id.to_owned(), TrainingRunPhase::Running)
                     .with_completion(None, snapshot.message().map(str::to_owned)),
-            )?;
+            )
+            .await?;
         }
         if let Some(gap) = snapshot.history_gap() {
             self.push_log(
                 run_id,
                 format!("Training worker history was compacted: {gap}"),
-            );
+            )
+            .await;
         }
         let previous_metric_step = replay.metric_step;
         for metric in snapshot
@@ -645,7 +684,8 @@ impl TrainingManager {
                     )),
                 },
                 false,
-            )?;
+            )
+            .await?;
             replay.metric_step = metric.step();
         }
         let previous_checkpoint_step = replay.checkpoint_step;
@@ -666,18 +706,19 @@ impl TrainingManager {
                         ),
                 },
                 true,
-            )?;
+            )
+            .await?;
             replay.checkpoint_step = checkpoint.step();
         }
         for log in snapshot.logs() {
             if !replay.persisted_logs.contains(log.line()) {
-                self.push_log(run_id, log.line().to_owned());
+                self.push_log(run_id, log.line().to_owned()).await;
             }
         }
         Ok(())
     }
 
-    fn finish_remote_job(&self, completion: RemoteJobCompletion) {
+    async fn finish_remote_job(&self, completion: RemoteJobCompletion) {
         let phase = match completion.phase {
             TrainingJobPhase::Completed => TrainingRunPhase::Completed,
             TrainingJobPhase::Stopped => TrainingRunPhase::Stopped,
@@ -693,8 +734,9 @@ impl TrainingManager {
             finished_ms: (!phase.active()).then(|| self.inner.clock.now_ms()),
             message: (!completion.message.is_empty()).then_some(completion.message),
         };
-        let _ = self.apply_update(update, true);
+        let _ = self.apply_update(update, true).await;
         self.inner
+            .runtime
             .controls
             .recover_lock()
             .remove(&completion.run_id);
@@ -710,7 +752,7 @@ impl TrainingManager {
             .map(|run| run.phase())
     }
 
-    fn set_phase(&self, update: TrainingPhaseUpdate) -> Result<(), String> {
+    async fn set_phase(&self, update: TrainingPhaseUpdate) -> Result<(), String> {
         let TrainingPhaseUpdate {
             run_id,
             phase,
@@ -718,7 +760,7 @@ impl TrainingManager {
             message,
         } = update;
         let run_id = run_id.as_str();
-        let mut snapshot = self.inner.snapshot.recover_lock();
+        let snapshot = self.inner.snapshot.recover_lock().clone();
         let current_step = snapshot
             .runs()
             .iter()
@@ -726,23 +768,28 @@ impl TrainingManager {
             .map_or(0, |run| run.current_step());
         let mut registry = snapshot.run_registry()?;
         registry.transition(run_id, phase.into())?;
-        let update = TrainingUpdate::RunState {
-            run_id: run_id.to_owned(),
-            phase,
-            current_step,
-            finished_ms,
-            message,
-        };
-        let mut candidate = snapshot.clone();
-        candidate.apply(update.clone());
-        self.inner.storage.save_training_snapshot(&candidate)?;
-        *snapshot = candidate;
-        let _ = self.inner.updates.send(update);
-        Ok(())
+        self.apply_update(
+            TrainingUpdate::RunState {
+                run_id: run_id.to_owned(),
+                phase,
+                current_step,
+                finished_ms,
+                message,
+            },
+            true,
+        )
+        .await
     }
 
     fn mark_persistence_failure(&self, run_id: &str, error: &str) {
-        if let Some(cancel) = self.inner.controls.recover_lock().get(run_id).cloned() {
+        if let Some(cancel) = self
+            .inner
+            .runtime
+            .controls
+            .recover_lock()
+            .get(run_id)
+            .cloned()
+        {
             cancel.store(true, Ordering::Release);
         }
         let mut snapshot = self.inner.snapshot.recover_lock();
@@ -760,24 +807,29 @@ impl TrainingManager {
         let _ = self.inner.updates.send(state_update);
     }
 
-    fn push_log(&self, run_id: &str, line: String) {
-        let _ = self.apply_update(
-            TrainingUpdate::Log {
-                run_id: run_id.to_owned(),
-                line,
-            },
-            false,
-        );
+    async fn push_log(&self, run_id: &str, line: String) {
+        let _ = self
+            .apply_update(
+                TrainingUpdate::Log {
+                    run_id: run_id.to_owned(),
+                    line,
+                },
+                false,
+            )
+            .await;
     }
 
-    fn apply_update(&self, update: TrainingUpdate, persist: bool) -> Result<(), String> {
-        let mut snapshot = self.inner.snapshot.recover_lock();
-        let mut candidate = snapshot.clone();
+    async fn apply_update(&self, update: TrainingUpdate, persist: bool) -> Result<(), String> {
+        let _mutation = self.inner.runtime.mutation.lock().await;
+        let mut candidate = self.inner.snapshot.recover_lock().clone();
         candidate.apply(update.clone());
         if persist {
-            self.inner.storage.save_training_snapshot(&candidate)?;
+            self.inner
+                .storage
+                .save_training_snapshot(&candidate)
+                .await?;
         }
-        *snapshot = candidate;
+        *self.inner.snapshot.recover_lock() = candidate;
         let _ = self.inner.updates.send(update);
         Ok(())
     }
@@ -785,18 +837,30 @@ impl TrainingManager {
 
 impl TrainingRunPort for TrainingManager {
     fn runtime_is_active(&self, run_id: &str) -> bool {
-        self.inner.controls.recover_lock().contains_key(run_id)
+        self.inner
+            .runtime
+            .controls
+            .recover_lock()
+            .contains_key(run_id)
     }
 
-    fn transition_run(&self, run_id: &str, change: RunStateChange) -> Result<(), String> {
+    async fn transition_run(&self, run_id: &str, change: RunStateChange) -> Result<(), String> {
         self.set_phase(
             TrainingPhaseUpdate::new(run_id.to_owned(), change.phase())
                 .with_completion(change.finished_ms(), change.message().map(str::to_owned)),
         )
+        .await
     }
 
     fn signal_runtime_stop(&self, run_id: &str) {
-        if let Some(cancel) = self.inner.controls.recover_lock().get(run_id).cloned() {
+        if let Some(cancel) = self
+            .inner
+            .runtime
+            .controls
+            .recover_lock()
+            .get(run_id)
+            .cloned()
+        {
             cancel.store(true, Ordering::Release);
         }
     }
@@ -806,7 +870,7 @@ impl TrainingRunPort for TrainingManager {
     }
 
     fn cleanup_runtime(&self, run_id: &str) {
-        self.inner.controls.recover_lock().remove(run_id);
+        self.inner.runtime.controls.recover_lock().remove(run_id);
     }
 
     fn now_ms(&self) -> i64 {
@@ -842,14 +906,20 @@ impl TrainingCoordinatorPort for TrainingManager {
         TrainingRunIdentity::new(id, created_ms)
     }
 
-    fn admit_training_run(&self, run: TrainingRun) -> Result<(), OperationError> {
+    async fn admit_training_run(&self, run: TrainingRun) -> Result<(), OperationError> {
         // Registry admission, durable snapshot replacement, and event delivery
         // share one lock, so concurrent starts cannot both become active.
-        let mut snapshot = self.inner.snapshot.recover_lock();
+        let _mutation = self.inner.runtime.mutation.lock().await;
+        let snapshot = self.inner.snapshot.recover_lock().clone();
         let (candidate, update) = self
             .admitted_snapshot(&snapshot, run)
             .map_err(OperationError::conflict)?;
-        *snapshot = candidate;
+        self.inner
+            .storage
+            .save_training_snapshot(&candidate)
+            .await
+            .map_err(OperationError::External)?;
+        *self.inner.snapshot.recover_lock() = candidate;
         let _ = self.inner.updates.send(update);
         Ok(())
     }
@@ -857,7 +927,7 @@ impl TrainingCoordinatorPort for TrainingManager {
     fn launch_training_runtime(&self, launch: TrainingLaunch) -> Result<(), OperationError> {
         let cancel = Arc::new(AtomicBool::new(false));
         {
-            let mut controls = self.inner.controls.recover_lock();
+            let mut controls = self.inner.runtime.controls.recover_lock();
             if controls.contains_key(launch.run_id()) {
                 return Err(OperationError::Internal(format!(
                     "training runtime {:?} was already launched",
@@ -952,7 +1022,6 @@ impl TrainingManager {
         for run_id in removed {
             candidate.apply(TrainingUpdate::RunRemoved { run_id });
         }
-        self.inner.storage.save_training_snapshot(&candidate)?;
         Ok((candidate, update))
     }
 }

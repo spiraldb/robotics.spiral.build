@@ -43,8 +43,10 @@ impl TrainingPort for TrainingManager {
             .map_err(OperationError::conflict)
     }
 
-    fn stop_training(&self, run_id: &str) -> Result<(), OperationError> {
-        TrainingManager::stop(self, run_id).map_err(OperationError::conflict)
+    async fn stop_training(&self, run_id: &str) -> Result<(), OperationError> {
+        TrainingManager::stop(self, run_id)
+            .await
+            .map_err(OperationError::conflict)
     }
 
     async fn delete_training(&self, run_id: String) -> Result<(), OperationError> {
@@ -162,7 +164,9 @@ impl AppState {
         State(state): State<Self>,
         Path(id): Path<String>,
     ) -> Result<StatusCode, Failure> {
-        TrainingActions::new(state.training().as_ref()).stop(&id)?;
+        TrainingActions::new(state.training().as_ref())
+            .stop(&id)
+            .await?;
         Ok(StatusCode::ACCEPTED)
     }
 

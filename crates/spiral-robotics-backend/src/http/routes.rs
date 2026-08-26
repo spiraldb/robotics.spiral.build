@@ -456,19 +456,17 @@ impl AppState {
             None => Vec::new(),
         };
         if let Some(episode_id) = episode_id {
-            let episodes = self.episodes().clone();
-            let storage = self.storage().clone();
-            let committed = tokio::task::spawn_blocking(move || {
-                let episode = episodes
-                    .full_episode(&episode_id)
+            let committed = async {
+                let episode = self
+                    .episodes()
+                    .completed_episode(&episode_id)
                     .map_err(|error| error.to_string())?;
-                storage.commit_episode_blocking(&episode, &videos)
-            })
+                self.storage().commit_episode(&episode, &videos).await?;
+                self.episodes().forget_completed(&episode_id);
+                Ok::<_, String>(())
+            }
             .await;
-            if let Err(error) = committed
-                .map_err(|error| error.to_string())
-                .and_then(|result| result)
-            {
+            if let Err(error) = committed {
                 tracing::error!("could not commit automatically stopped episode media: {error}");
                 self.cameras().note_issue(format!(
                     "episode media could not be committed to SpiralDB: {error}"
@@ -610,43 +608,45 @@ impl AppState {
     }
 
     /// Assemble the current setup-level view of the studio.
-    pub(crate) fn snapshot(&self) -> StudioSnapshot {
+    pub(crate) async fn snapshot(&self) -> StudioSnapshot {
         let state = self;
         let hardware = state.hardware().state();
         let readiness = state.bootstrap().current();
         let robots = if readiness.catalog_available() {
-            let robot_adapter = devices::RobotHttpAdapter::prefetched(state);
-            RobotCatalogActions::new(&robot_adapter)
-                .list()
-                .into_iter()
-                .filter_map(|saved| {
-                    let connection = hardware
-                        .connections()
-                        .get(saved.id())
+            let robot_adapter = devices::RobotHttpAdapter::prefetched(state).await;
+            let mut summaries = Vec::new();
+            for saved in RobotCatalogActions::new(&robot_adapter).list().await {
+                let connection = hardware
+                    .connections()
+                    .get(saved.id())
+                    .cloned()
+                    .unwrap_or_default();
+                let summary = robot_adapter
+                    .summary(saved.id(), connection.to_api())
+                    .await
+                    .ok();
+                let Some(mut summary) = summary else {
+                    continue;
+                };
+                // Limits come from the motors, not the saved configuration, so they
+                // are folded in here after loading the SpiralDB row.
+                if let Some(limits) = hardware.limits().get(saved.id()) {
+                    let motors = summary
+                        .motors()
+                        .iter()
                         .cloned()
-                        .unwrap_or_default();
-                    let mut summary = robot_adapter
-                        .summary(saved.id(), connection.to_api())
-                        .ok()?;
-                    // Limits come from the motors, not the saved configuration, so they
-                    // are folded in here after loading the SpiralDB row.
-                    if let Some(limits) = hardware.limits().get(saved.id()) {
-                        let motors = summary
-                            .motors()
-                            .iter()
-                            .cloned()
-                            .map(|mut motor| {
-                                if let Some(limits) = limits.get(motor.name()) {
-                                    motor.set_limits(limits.to_api());
-                                }
-                                motor
-                            })
-                            .collect();
-                        summary = summary.with_motors(motors);
-                    }
-                    Some(summary)
-                })
-                .collect()
+                        .map(|mut motor| {
+                            if let Some(limits) = limits.get(motor.name()) {
+                                motor.set_limits(limits.to_api());
+                            }
+                            motor
+                        })
+                        .collect();
+                    summary = summary.with_motors(motors);
+                }
+                summaries.push(summary);
+            }
+            summaries
         } else {
             Vec::new()
         };
@@ -719,7 +719,7 @@ impl AppState {
             loop {
                 tokio::select! {
                     _ = snapshot_timer.tick() => {
-                        let snapshot = state.snapshot();
+                        let snapshot = state.snapshot().await;
                         if last_snapshot.as_ref() == Some(&snapshot) {
                             continue;
                         }
