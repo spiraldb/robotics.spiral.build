@@ -220,7 +220,7 @@ impl SpiralSql {
             .map_err(|error| error.to_string())
     }
 
-    /// Escape a value for the SQL string-literal grammar. ADBC parameters are not
+    /// Escape a value for the SQL string-literal grammar. Bound parameters are not
     /// uniformly implemented by the Spiral drivers currently supported here, so
     /// generated statements isolate this compatibility fallback in one function.
     pub fn string_literal(value: &str) -> String {

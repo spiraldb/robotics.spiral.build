@@ -16,6 +16,7 @@ use arrow_json::writer::{JsonArray, WriterBuilder};
 use arrow_schema::extension::EXTENSION_TYPE_NAME_KEY;
 use arrow_schema::{ArrowError, DataType, Field, Fields, Schema};
 use base64::Engine as _;
+use futures::StreamExt as _;
 use image::codecs::jpeg::JpegEncoder;
 use image::{DynamicImage, ImageFormat};
 use serde::Serialize;
@@ -30,13 +31,14 @@ use spiral_robotics_api::relations::{
 use spiral_robotics_api::settings::{ConnectionTestResponse, DataSettings, SpiralSettings};
 use spiral_robotics_api::sql::QualifiedRelation;
 
-use crate::adbc::{ProjectStore, StorageConnection};
 use crate::bundle;
 use crate::checkpoints::{CheckpointArtifact, CheckpointFuture, CheckpointKey, CheckpointStore};
+use crate::database::{DatabaseCommand, DatabaseSession, RelationKind, RelationName};
 use crate::episode_schema::{
     JointSampleRows, SpiralEpisodeEncoder, VideoStreamProperties, VideoStreamRow, VideoStreamRows,
 };
 use crate::episodes::FullEpisode;
+use crate::project_store::{ProjectStore, StorageConnection};
 use crate::settings::{SpiralConnectionSettings, StoredStudioPreferences};
 use crate::sql::{ReadOnlyQueryMode, SpiralSql};
 use crate::video::{VideoAsset, VideoAssetKey, VideoByteRange};
@@ -268,18 +270,55 @@ impl StorageManager {
 
     pub async fn prewarm(&self) -> Result<(), String> {
         self.project_store.prewarm().await?;
-        let namespace = self.project_store.namespace().to_owned();
-        self.project_store
-            .run(move |connection| connection.ensure_video_assets_blob_relation(&namespace))
+        self.ensure_async_video_assets_blob_relation().await
+    }
+
+    async fn ensure_async_video_assets_blob_relation(&self) -> Result<(), String> {
+        let assets = Table::VideoAssets.qualified_name(self.project_store.namespace());
+        let target = RelationName::parse(&assets).map_err(|error| error.to_string())?;
+        let mut connection = self.project_store.connect().await?;
+        let Some(schema) = connection
+            .table_schema(target)
             .await
+            .map_err(|error| error.to_string())?
+        else {
+            return Ok(());
+        };
+        let payload = schema
+            .field_with_name(db::PAYLOAD)
+            .map_err(|error| format!("stored video assets are missing {}: {error}", db::PAYLOAD))?;
+        if payload
+            .metadata()
+            .get(EXTENSION_TYPE_NAME_KEY)
+            .is_some_and(|name| name == BLOB_EXTENSION_NAME)
+        {
+            return Ok(());
+        }
+        if !matches!(
+            payload.data_type(),
+            DataType::Binary | DataType::LargeBinary | DataType::BinaryView
+        ) {
+            return Err(format!(
+                "stored video asset {} must be a Spiral Blob or Arrow binary, got {}",
+                db::PAYLOAD,
+                payload.data_type(),
+            ));
+        }
+        connection
+            .execute(DatabaseCommand::statement(
+                SpiralSql::migrate_video_assets_to_blob(&assets),
+            ))
+            .await
+            .and_then(crate::DatabaseOutput::into_summary)
+            .map(|_| ())
+            .map_err(|error| format!("migrating video assets from Binary to Blob: {error}"))
     }
 
-    pub fn configure_connection(&self, settings: SpiralConnectionSettings) -> Result<(), String> {
-        self.project_store.configure_connection(settings)
-    }
-
-    pub fn invalidate_idle_connections(&self) {
-        self.project_store.invalidate_idle_connections();
+    pub async fn configure_connection(
+        &self,
+        settings: SpiralConnectionSettings,
+    ) -> Result<(), String> {
+        self.project_store.configure_connection(settings).await
     }
 
     pub fn namespace(&self) -> &str {
@@ -392,7 +431,7 @@ impl StorageManager {
                         }
                         if let Err(restore) = restore {
                             detail.push_str(&format!(
-                                "; restoring ADBC autocommit failed: {restore}"
+                                "; restoring database autocommit failed: {restore}"
                             ));
                         }
                         // Returning an error prevents run_exclusive_blocking from
@@ -685,7 +724,7 @@ impl StorageManager {
                     Ok(document)
                 }
                 (Err(error), Err(restore)) => Err(format!(
-                    "{error}; restoring ADBC autocommit after resetting obsolete Workflow history also failed: {restore}"
+                    "{error}; restoring database autocommit after resetting obsolete Workflow history also failed: {restore}"
                 )),
             }
         })
@@ -721,83 +760,89 @@ impl StorageManager {
         }
         let catalog_project = project.clone();
         let table_filter = Table::Episodes.qualified_name(self.project_store.namespace());
-        if let Err(error) = self
-            .project_store
-            .run(move |connection| {
-                connection
-                    .check_catalog_table(&catalog_project, &table_filter)
-                    .map_err(|error| format!("checking the managed project catalog: {error}"))
-            })
-            .await
-        {
+        let catalog_check = async {
+            let mut connection = self.project_store.connect().await?;
+            let relation = RelationName::parse(table_filter).map_err(|error| error.to_string())?;
+            let _ = connection
+                .table_schema(relation)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok::<(), String>(())
+        }
+        .await;
+        if let Err(error) = catalog_check {
             return ConnectionTestResponse::new(false, error);
         }
 
         ConnectionTestResponse::new(
             true,
-            format!("ADBC connected to {endpoint} · project {project}"),
+            format!("Connected to {endpoint} · project {catalog_project}"),
         )
     }
 
     pub async fn query(&self, sql: &str, max_rows: usize) -> Result<SpiralQueryResponse, String> {
         SpiralSql::ensure_read_only(sql, ReadOnlyQueryMode::Preview)?;
-        let sql = sql.to_owned();
-        self.project_store
-            .run(move |connection| {
-                QueryExecution::new(
-                    &sql,
-                    QueryLimits::new(max_rows.clamp(1, MAX_QUERY_ROWS), MAX_QUERY_RESPONSE_BYTES),
-                )
-                .run(connection)
-            })
-            .await
+        let mut connection = self.project_store.connect().await?;
+        QueryExecution::new(
+            sql,
+            QueryLimits::new(max_rows.clamp(1, MAX_QUERY_ROWS), MAX_QUERY_RESPONSE_BYTES),
+        )
+        .run_async(&mut *connection)
+        .await
     }
 
     pub async fn datasets(&self) -> Result<Vec<DatasetSummary>, String> {
         let relation = Table::Datasets.qualified_name(self.project_store.namespace());
-        self.project_store
-            .run(move |connection| {
-                if !connection.table_exists(&relation)? {
-                    return Ok(Vec::new());
-                }
-                let result = connection.run_query(&format!(
-                        "SELECT {id}, {name}, {created}, {description} FROM {relation} ORDER BY {created}, {id}",
-                        id = db::DATASET_ID,
-                        name = db::NAME,
-                        created = db::CREATED_MS,
-                        description = db::DESCRIPTION,
-                    ),
-                    100_000,
-                )?;
-                if result.truncated() {
-                    return Err("Spiral dataset catalog exceeds 100,000 rows".to_owned());
-                }
-                result
-                    .into_rows()
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, row)| {
-                        let text = |column| {
-                            row.get(column).and_then(JsonValue::as_str).map(str::to_owned)
-                        };
-                        Ok(DatasetSummary::new(
-                            text(db::DATASET_ID).ok_or_else(|| {
-                                format!("dataset catalog row {index} has no dataset ID")
-                            })?,
-                            text(db::NAME).ok_or_else(|| {
-                                format!("dataset catalog row {index} has no name")
-                            })?,
-                            row.get(db::CREATED_MS)
-                                .and_then(JsonValue::as_i64)
-                                .ok_or_else(|| {
-                                    format!("dataset catalog row {index} has no creation time")
-                                })?,
-                        )
-                        .with_description(text(db::DESCRIPTION)))
-                    })
-                    .collect()
-            })
+        let mut connection = self.project_store.connect().await?;
+        let target = RelationName::parse(&relation).map_err(|error| error.to_string())?;
+        if connection
+            .table_schema(target)
             .await
+            .map_err(|error| error.to_string())?
+            .is_none()
+        {
+            return Ok(Vec::new());
+        }
+        let sql = format!(
+            "SELECT {id}, {name}, {created}, {description} FROM {relation} ORDER BY {created}, {id}",
+            id = db::DATASET_ID,
+            name = db::NAME,
+            created = db::CREATED_MS,
+            description = db::DESCRIPTION,
+        );
+        let result = QueryExecution::new(
+            &sql,
+            QueryLimits::new(100_000, MAX_INTERNAL_QUERY_RESPONSE_BYTES),
+        )
+        .run_async(&mut *connection)
+        .await?;
+        if result.truncated() {
+            return Err("Spiral dataset catalog exceeds 100,000 rows".to_owned());
+        }
+        result
+            .into_rows()
+            .into_iter()
+            .enumerate()
+            .map(|(index, row)| {
+                let text = |column| {
+                    row.get(column)
+                        .and_then(JsonValue::as_str)
+                        .map(str::to_owned)
+                };
+                Ok(DatasetSummary::new(
+                    text(db::DATASET_ID)
+                        .ok_or_else(|| format!("dataset catalog row {index} has no dataset ID"))?,
+                    text(db::NAME)
+                        .ok_or_else(|| format!("dataset catalog row {index} has no name"))?,
+                    row.get(db::CREATED_MS)
+                        .and_then(JsonValue::as_i64)
+                        .ok_or_else(|| {
+                            format!("dataset catalog row {index} has no creation time")
+                        })?,
+                )
+                .with_description(text(db::DESCRIPTION)))
+            })
+            .collect()
     }
 
     pub async fn workflow_relations(&self) -> Result<RelationCatalog, String> {
@@ -809,78 +854,69 @@ impl StorageManager {
                 )),
             );
         }
-        self.project_store
-            .run(move |connection| {
-                let catalog = connection.list_catalog_relations(&project)?;
-                let mut relations = Vec::with_capacity(catalog.len());
-                let mut skipped = 0_usize;
-                for entry in catalog {
-                    let (relation_name, relation_type) = entry.into_parts();
-                    if QualifiedRelation::try_from(relation_name.as_str()).is_err() {
-                        skipped += 1;
-                        continue;
-                    }
-                    let schema = match connection.table_schema(&relation_name) {
-                        Ok(Some(schema)) => schema,
-                        Ok(None) => {
-                            skipped += 1;
-                            continue;
-                        }
-                        Err(error)
-                            if error.contains(
-                                "extension type cannot be converted to Arrow without a plugin",
-                            ) =>
-                        {
-                            // A project may contain an extension type this
-                            // Studio build cannot decode. Discovery remains an
-                            // honest usable subset instead of making every
-                            // relation unavailable because of one entry.
-                            skipped += 1;
-                            continue;
-                        }
-                        Err(error) => {
-                            return Err(format!(
-                                "describing Spiral relation {:?}: {error}",
-                                relation_name
-                            ));
-                        }
-                    };
-                    relations.push(CatalogRelation::new(
-                        relation_name,
-                        relation_type,
-                        schema
-                            .fields()
-                            .iter()
-                            .map(|field| {
-                                QueryColumn::new(
-                                    field.name().clone(),
-                                    field.data_type().to_string(),
-                                    field.is_nullable(),
-                                )
-                                .with_semantic_type(
-                                    field
-                                    .metadata()
-                                    .get(EXTENSION_TYPE_NAME_KEY)
-                                    .cloned(),
-                                )
-                            })
-                            .collect(),
+        let mut connection = self.project_store.connect().await?;
+        let catalog = connection
+            .relations()
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut relations = Vec::with_capacity(catalog.len());
+        let mut skipped = 0_usize;
+        for entry in catalog {
+            let (relation_name, kind) = entry.into_parts();
+            if QualifiedRelation::try_from(relation_name.as_str()).is_err() {
+                skipped += 1;
+                continue;
+            }
+            let schema = match connection.table_schema(relation_name.clone()).await {
+                Ok(Some(schema)) => schema,
+                Ok(None) => {
+                    skipped += 1;
+                    continue;
+                }
+                Err(error)
+                    if error.message().contains(
+                        "extension type cannot be converted to Arrow without a plugin",
+                    ) =>
+                {
+                    skipped += 1;
+                    continue;
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "describing Spiral relation {:?}: {error}",
+                        relation_name.as_str()
                     ));
                 }
-                let limitation = if skipped == 0 {
-                    Some(
-                        "Row counts are omitted because the Spiral ADBC catalog does not expose bounded relation statistics."
-                            .to_owned(),
-                    )
-                } else {
-                    Some(format!(
-                        "Row counts are omitted; {skipped} catalog entries without a qualified name or Arrow schema were not returned."
-                    ))
-                };
-                Ok(RelationCatalog::new(relations, skipped == 0)
-                .with_limitation(limitation))
-            })
-            .await
+            };
+            let relation_type = match kind {
+                RelationKind::Table => "TABLE",
+                RelationKind::View => "VIEW",
+            };
+            relations.push(CatalogRelation::new(
+                relation_name.into_string(),
+                relation_type.to_owned(),
+                schema
+                    .fields()
+                    .iter()
+                    .map(|field| {
+                        QueryColumn::new(
+                            field.name().clone(),
+                            field.data_type().to_string(),
+                            field.is_nullable(),
+                        )
+                        .with_semantic_type(field.metadata().get(EXTENSION_TYPE_NAME_KEY).cloned())
+                    })
+                    .collect(),
+            ));
+        }
+        let limitation = if skipped == 0 {
+            Some("Row counts are omitted from Workflow relation discovery.".to_owned())
+        } else {
+            Some(format!(
+                "Row counts are omitted; {skipped} catalog entries without a qualified name or Arrow schema were not returned."
+            ))
+        };
+        Ok(RelationCatalog::new(relations, skipped == 0).with_limitation(limitation))
     }
 
     /// Describe the active project's user-facing data and add exact row
@@ -896,91 +932,97 @@ impl StorageManager {
                 )),
             );
         }
-        self.project_store
-            .run(move |connection| {
-                let catalog = connection.list_catalog_relations(&project)?;
-                let mut relations = Vec::with_capacity(catalog.len());
-                let mut skipped = 0_usize;
-                let mut uncounted = 0_usize;
-                for entry in catalog {
-                    let (relation_name, relation_type) = entry.into_parts();
-                    if !Self::is_user_project_relation(&relation_name, &namespace) {
-                        continue;
-                    }
-                    if QualifiedRelation::try_from(relation_name.as_str()).is_err() {
-                        skipped += 1;
-                        continue;
-                    }
-                    let schema = match connection.table_schema(&relation_name) {
-                        Ok(Some(schema)) => schema,
-                        Ok(None) => {
-                            skipped += 1;
-                            continue;
-                        }
-                        Err(error)
-                            if error.contains(
-                                "extension type cannot be converted to Arrow without a plugin",
-                            ) =>
-                        {
-                            skipped += 1;
-                            continue;
-                        }
-                        Err(error) => {
-                            return Err(format!(
-                                "describing Spiral relation {:?}: {error}",
-                                relation_name
-                            ));
-                        }
-                    };
-                    let row_count = connection.relation_row_count(&relation_name).map_or_else(
-                        |_| {
-                            uncounted += 1;
-                            None
-                        },
-                        Some,
-                    );
-                    relations.push(ProjectDataRelation::new(
-                        relation_name,
-                        relation_type,
-                        schema
-                            .fields()
-                            .iter()
-                            .map(|field| {
-                                QueryColumn::new(
-                                    field.name().clone(),
-                                    field.data_type().to_string(),
-                                    field.is_nullable(),
-                                )
-                                .with_semantic_type(
-                                    field
-                                    .metadata()
-                                    .get(EXTENSION_TYPE_NAME_KEY)
-                                    .cloned(),
-                                )
-                            })
-                            .collect(),
-                    )
-                    .with_row_count(row_count));
-                }
-                let limitation = match (skipped, uncounted) {
-                    (0, 0) => None,
-                    (skipped, 0) => Some(format!(
-                        "{skipped} project relations without a qualified name or readable Arrow schema were omitted."
-                    )),
-                    (0, uncounted) => Some(format!(
-                        "Exact row counts were unavailable for {uncounted} project relations."
-                    )),
-                    (skipped, uncounted) => Some(format!(
-                        "{skipped} project relations were omitted and exact row counts were unavailable for {uncounted} others."
-                    )),
-                };
-                Ok(ProjectDataRelationsResponse::new(
-                    relations,
-                    skipped == 0 && uncounted == 0,
-                )
-                .with_limitation(limitation))
-            })
+        let mut connection = self.project_store.connect().await?;
+        let catalog = connection
+            .relations()
             .await
+            .map_err(|error| error.to_string())?;
+        let mut relations = Vec::with_capacity(catalog.len());
+        let mut skipped = 0_usize;
+        let mut uncounted = 0_usize;
+        for entry in catalog {
+            let (relation_name, kind) = entry.into_parts();
+            if !Self::is_user_project_relation(relation_name.as_str(), &namespace) {
+                continue;
+            }
+            if QualifiedRelation::try_from(relation_name.as_str()).is_err() {
+                skipped += 1;
+                continue;
+            }
+            let schema = match connection.table_schema(relation_name.clone()).await {
+                Ok(Some(schema)) => schema,
+                Ok(None) => {
+                    skipped += 1;
+                    continue;
+                }
+                Err(error)
+                    if error.message().contains(
+                        "extension type cannot be converted to Arrow without a plugin",
+                    ) =>
+                {
+                    skipped += 1;
+                    continue;
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "describing Spiral relation {:?}: {error}",
+                        relation_name.as_str()
+                    ));
+                }
+            };
+            let relation_type = match kind {
+                RelationKind::Table => "TABLE",
+                RelationKind::View => "VIEW",
+            };
+            let relation_name = relation_name.into_string();
+            let row_count = match self
+                .async_relation_row_count(&mut *connection, &relation_name)
+                .await
+            {
+                Ok(row_count) => Some(row_count),
+                Err(_) => {
+                    uncounted += 1;
+                    None
+                }
+            };
+            relations.push(
+                ProjectDataRelation::new(
+                    relation_name,
+                    relation_type.to_owned(),
+                    schema
+                        .fields()
+                        .iter()
+                        .map(|field| {
+                            QueryColumn::new(
+                                field.name().clone(),
+                                field.data_type().to_string(),
+                                field.is_nullable(),
+                            )
+                            .with_semantic_type(
+                                field.metadata().get(EXTENSION_TYPE_NAME_KEY).cloned(),
+                            )
+                        })
+                        .collect(),
+                )
+                .with_row_count(row_count),
+            );
+        }
+        let limitation = match (skipped, uncounted) {
+            (0, 0) => None,
+            (skipped, 0) => Some(format!(
+                "{skipped} project relations without a qualified name or readable Arrow schema were omitted."
+            )),
+            (0, uncounted) => Some(format!(
+                "Exact row counts were unavailable for {uncounted} project relations."
+            )),
+            (skipped, uncounted) => Some(format!(
+                "{skipped} project relations were omitted and exact row counts were unavailable for {uncounted} others."
+            )),
+        };
+        Ok(
+            ProjectDataRelationsResponse::new(relations, skipped == 0 && uncounted == 0)
+                .with_limitation(limitation),
+        )
     }
 
     /// Resolve the query and its Arrow contract before starting the trainer.
@@ -995,27 +1037,31 @@ impl StorageManager {
             key.run_id(),
             key.step(),
         );
-        self.project_store
-            .run(move |connection| connection.run_training_checkpoint_query(&query))
-            .await
+        self.checkpoint_query(query).await
     }
 
     async fn delete_checkpoint_artifacts(&self, run_id: String) -> Result<(), String> {
         let target = Table::TrainingCheckpoints.qualified_name(self.project_store.namespace());
-        self.project_store
-            .run(move |connection| {
-                if !connection.table_exists(&target)? {
-                    return Ok(());
-                }
-                connection
-                    .execute_delete_sql(&SpiralSql::delete_training_run(&target, &run_id))
-                    .map_err(|error| {
-                        format!(
-                            "deleting training run {run_id:?} checkpoints from {target}: {error}"
-                        )
-                    })
-            })
+        let mut connection = self.project_store.connect().await?;
+        let relation = RelationName::parse(&target).map_err(|error| error.to_string())?;
+        if connection
+            .table_schema(relation)
             .await
+            .map_err(|error| error.to_string())?
+            .is_none()
+        {
+            return Ok(());
+        }
+        connection
+            .execute(DatabaseCommand::statement(SpiralSql::delete_training_run(
+                &target, &run_id,
+            )))
+            .await
+            .and_then(crate::DatabaseOutput::into_summary)
+            .map(|_| ())
+            .map_err(|error| {
+                format!("deleting training run {run_id:?} checkpoints from {target}: {error}")
+            })
     }
 
     pub async fn trajectory(
@@ -1024,10 +1070,13 @@ impl StorageManager {
         stream: &str,
     ) -> Result<(f64, Vec<BTreeMap<String, f64>>), String> {
         let sql = SpiralSql::trajectory(self.project_store.namespace(), episode, stream);
-        let result = self
-            .project_store
-            .run(move |connection| connection.run_query(&sql, MAX_REPLAY_ROWS))
-            .await?;
+        let mut connection = self.project_store.connect().await?;
+        let result = QueryExecution::new(
+            &sql,
+            QueryLimits::new(MAX_REPLAY_ROWS, MAX_INTERNAL_QUERY_RESPONSE_BYTES),
+        )
+        .run_async(&mut *connection)
+        .await?;
         if result.truncated() {
             return Err(format!(
                 "Spiral trajectory exceeds the replay safety limit of {MAX_REPLAY_ROWS} rows"
@@ -1039,9 +1088,7 @@ impl StorageManager {
     /// Read the authoritative MP4 size without materializing its bytes.
     pub async fn video_asset_size(&self, asset: &VideoAssetKey) -> Result<u64, String> {
         let sql = SpiralSql::video_asset_size(self.project_store.namespace(), asset);
-        self.project_store
-            .run(move |connection| connection.run_u64_query(&sql, db::BYTE_SIZE))
-            .await
+        self.u64_query(sql, db::BYTE_SIZE).await
     }
 
     /// Fetch exactly one browser-requested range from Spiral's managed Blob.
@@ -1055,9 +1102,7 @@ impl StorageManager {
         range: VideoByteRange,
     ) -> Result<Vec<u8>, String> {
         let sql = SpiralSql::video_asset_range(self.project_store.namespace(), asset, range);
-        self.project_store
-            .run(move |connection| connection.run_binary_query(&sql))
-            .await
+        self.binary_query(sql).await
     }
 
     pub async fn video_asset(&self, asset: VideoAssetKey) -> Result<Vec<u8>, String> {
@@ -1067,6 +1112,101 @@ impl StorageManager {
         }
         self.video_asset_range(&asset, VideoByteRange::new(0, size))
             .await
+    }
+
+    async fn record_batches(&self, sql: String) -> Result<crate::RecordBatchStream, String> {
+        let mut connection = self.project_store.connect().await?;
+        connection
+            .execute(DatabaseCommand::statement(sql))
+            .await
+            .map_err(|error| error.to_string())?
+            .into_records()
+            .map_err(|error| error.to_string())
+    }
+
+    async fn binary_query(&self, sql: String) -> Result<Vec<u8>, String> {
+        let mut records = self.record_batches(sql).await?;
+        while let Some(batch) = records.next().await {
+            let batch = batch.map_err(|error| format!("reading Spiral video: {error}"))?;
+            if batch.num_rows() == 0 {
+                continue;
+            }
+            let payload = batch
+                .column_by_name(db::PAYLOAD)
+                .ok_or_else(|| format!("Spiral video query returned no {} column", db::PAYLOAD))?;
+            if payload.is_null(0) {
+                return Err("Spiral video payload is null".to_owned());
+            }
+            if let Some(payload) = payload.as_any().downcast_ref::<BinaryArray>() {
+                return Ok(payload.value(0).to_vec());
+            }
+            if let Some(payload) = payload.as_any().downcast_ref::<LargeBinaryArray>() {
+                return Ok(payload.value(0).to_vec());
+            }
+            if let Some(payload) = payload.as_any().downcast_ref::<BinaryViewArray>() {
+                return Ok(payload.value(0).to_vec());
+            }
+            return Err(format!(
+                "Spiral video payload has unexpected type {}",
+                payload.data_type()
+            ));
+        }
+        Err("No video matched that episode and stream".to_owned())
+    }
+
+    async fn u64_query(&self, sql: String, column: &str) -> Result<u64, String> {
+        let mut records = self.record_batches(sql).await?;
+        while let Some(batch) = records.next().await {
+            let batch = batch.map_err(|error| format!("reading Spiral scalar result: {error}"))?;
+            if batch.num_rows() == 0 {
+                continue;
+            }
+            let values = batch
+                .column_by_name(column)
+                .and_then(|array| array.as_any().downcast_ref::<UInt64Array>())
+                .ok_or_else(|| format!("Spiral scalar query returned no UInt64 {column} column"))?;
+            if values.is_null(0) {
+                return Err(format!("Spiral scalar query returned null {column}"));
+            }
+            return Ok(values.value(0));
+        }
+        Err("Spiral scalar query returned no rows".to_owned())
+    }
+
+    async fn checkpoint_query(&self, sql: String) -> Result<CheckpointArtifact, String> {
+        let mut records = self.record_batches(sql).await?;
+        let mut artifact = None;
+        while let Some(batch) = records.next().await {
+            let batch = batch.map_err(|error| format!("reading Spiral checkpoint: {error}"))?;
+            for row in 0..batch.num_rows() {
+                if artifact.is_some() {
+                    return Err("Spiral returned duplicate rows for that checkpoint".to_owned());
+                }
+                artifact = Some(CheckpointArtifact::from_batch_row(&batch, row)?);
+            }
+        }
+        artifact.ok_or_else(|| "No checkpoint matched that training run and step".to_owned())
+    }
+
+    async fn async_relation_row_count(
+        &self,
+        connection: &mut dyn DatabaseSession,
+        relation: &str,
+    ) -> Result<u64, String> {
+        let sql = SpiralSql::count_rows(relation);
+        let result =
+            QueryExecution::new(&sql, QueryLimits::new(1, MAX_INTERNAL_QUERY_RESPONSE_BYTES))
+                .run_async(connection)
+                .await?;
+        let value = result
+            .rows()
+            .first()
+            .and_then(|row| row.get("rows"))
+            .ok_or_else(|| format!("Spiral returned no row count for {relation}"))?;
+        value
+            .as_u64()
+            .or_else(|| value.as_i64().and_then(|count| count.try_into().ok()))
+            .ok_or_else(|| format!("Spiral returned a non-integer row count for {relation}"))
     }
 
     fn is_user_project_relation(relation: &str, namespace: &str) -> bool {
@@ -1643,15 +1783,18 @@ impl<'a> BatchWrite<'a> {
         };
         let mut statement = connection
             .new_statement()
-            .map_err(|error| format!("opening ADBC ingest for {}: {error}", self.target))?;
+            .map_err(|error| format!("opening native ingest for {}: {error}", self.target))?;
         if matches!(self.mode, BatchWriteMode::Replace) {
             statement.configure_replace(self.target).map_err(|error| {
-                format!("configuring ADBC replacement for {}: {error}", self.target)
+                format!(
+                    "configuring native replacement for {}: {error}",
+                    self.target
+                )
             })?;
         } else {
-            statement
-                .configure_ingest(self.target)
-                .map_err(|error| format!("configuring ADBC ingest for {}: {error}", self.target))?;
+            statement.configure_ingest(self.target).map_err(|error| {
+                format!("configuring native ingest for {}: {error}", self.target)
+            })?;
         }
         statement
             .bind_stream(Box::new(RecordBatchIterator::new(
@@ -1671,7 +1814,7 @@ impl<'a> BatchWrite<'a> {
 }
 
 impl StorageConnection {
-    pub fn table_exists(&self, target: &str) -> Result<bool, String> {
+    pub fn table_exists(&mut self, target: &str) -> Result<bool, String> {
         self.table_schema(target)
             .map(|schema| schema.is_some())
             .map_err(|error| format!("checking Spiral table {target}: {error}"))
@@ -1998,22 +2141,88 @@ impl StorageConnection {
     }
 }
 
-impl StorageConnection {
-    fn relation_row_count(&mut self, relation: &str) -> Result<u64, String> {
-        let result = self.run_query(&SpiralSql::count_rows(relation), 1)?;
-        let value = result
-            .rows()
-            .first()
-            .and_then(|row| row.get("rows"))
-            .ok_or_else(|| format!("Spiral returned no row count for {relation}"))?;
-        value
-            .as_u64()
-            .or_else(|| value.as_i64().and_then(|count| count.try_into().ok()))
-            .ok_or_else(|| format!("Spiral returned a non-integer row count for {relation}"))
-    }
-}
-
 impl QueryExecution<'_> {
+    async fn run_async(
+        self,
+        connection: &mut dyn DatabaseSession,
+    ) -> Result<SpiralQueryResponse, String> {
+        let sql = self.sql.trim();
+        if sql.is_empty() {
+            return Err("Spiral query cannot be empty".to_owned());
+        }
+        if sql.len() > 64 * 1024 {
+            return Err("Spiral query is too large".to_owned());
+        }
+        let started = Instant::now();
+        let output = connection
+            .execute(DatabaseCommand::statement(sql))
+            .await
+            .map_err(|error| format!("executing Spiral query: {error}"))?;
+        let mut records = output
+            .into_records()
+            .map_err(|error| format!("executing Spiral query: {error}"))?;
+        let schema = Arc::clone(records.schema());
+        let columns = schema
+            .fields()
+            .iter()
+            .map(|field| {
+                QueryColumn::new(
+                    field.name().clone(),
+                    field.data_type().to_string(),
+                    field.is_nullable(),
+                )
+                .with_semantic_type(field.metadata().get(EXTENSION_TYPE_NAME_KEY).cloned())
+            })
+            .collect();
+        let chunk_rows = if schema.fields().iter().any(|field| {
+            matches!(
+                field
+                    .metadata()
+                    .get(EXTENSION_TYPE_NAME_KEY)
+                    .map(String::as_str),
+                Some(IMAGE_EXTENSION_NAME | VARIABLE_TENSOR_EXTENSION_NAME)
+            )
+        }) {
+            1
+        } else {
+            QUERY_JSON_CHUNK_ROWS
+        };
+        let fetch = self.limits.rows.saturating_add(1);
+        let mut rows = QueryRows::with_capacity(
+            self.limits.rows.min(QUERY_JSON_CHUNK_ROWS),
+            self.limits.bytes,
+        );
+        let mut inspected = 0_usize;
+        let mut truncated = false;
+        'result: while let Some(batch) = records.next().await {
+            let batch = batch.map_err(|error| format!("reading Spiral result: {error}"))?;
+            let mut offset = 0_usize;
+            while offset < batch.num_rows() && inspected < fetch {
+                let count = chunk_rows
+                    .min(batch.num_rows() - offset)
+                    .min(fetch - inspected);
+                let chunk = batch.slice(offset, count);
+                let preview = chunk.query_preview()?;
+                for row in preview.to_json_rows()? {
+                    inspected += 1;
+                    if rows.values.len() >= self.limits.rows {
+                        truncated = true;
+                        break 'result;
+                    }
+                    if !rows.push(row)? {
+                        truncated = true;
+                        break 'result;
+                    }
+                }
+                offset += count;
+            }
+        }
+        Ok(
+            SpiralQueryResponse::new(columns, rows.into_values(), truncated)
+                .with_elapsed_ms(started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)),
+        )
+    }
+
     fn run(self, connection: &mut StorageConnection) -> Result<SpiralQueryResponse, String> {
         let sql = self.sql.trim();
         if sql.is_empty() {
@@ -2025,7 +2234,7 @@ impl QueryExecution<'_> {
         let started = Instant::now();
         let mut statement = connection
             .new_statement()
-            .map_err(|error| format!("opening Spiral ADBC query: {error}"))?;
+            .map_err(|error| format!("opening Spiral query: {error}"))?;
         statement
             .set_sql_query(sql)
             .map_err(|error| format!("binding Spiral query: {error}"))?;
@@ -2367,10 +2576,11 @@ impl QueryImage<'_> {
 }
 
 impl StorageConnection {
+    #[cfg(test)]
     pub(crate) fn run_binary_query(&mut self, sql: &str) -> Result<Vec<u8>, String> {
         let mut statement = self
             .new_statement()
-            .map_err(|error| format!("opening Spiral ADBC video query: {error}"))?;
+            .map_err(|error| format!("opening Spiral video query: {error}"))?;
         statement
             .set_sql_query(sql)
             .map_err(|error| format!("binding Spiral video query: {error}"))?;
@@ -2404,108 +2614,49 @@ impl StorageConnection {
         }
         Err("No video matched that episode and stream".to_owned())
     }
+}
 
-    fn run_u64_query(&mut self, sql: &str, column: &str) -> Result<u64, String> {
-        let mut statement = self
-            .new_statement()
-            .map_err(|error| format!("opening Spiral scalar query: {error}"))?;
-        statement
-            .set_sql_query(sql)
-            .map_err(|error| format!("binding Spiral scalar query: {error}"))?;
-        let reader = statement
-            .execute()
-            .map_err(|error| format!("executing Spiral scalar query: {error}"))?;
-        for batch in reader {
-            let batch = batch.map_err(|error| format!("reading Spiral scalar result: {error}"))?;
-            if batch.num_rows() == 0 {
-                continue;
-            }
-            let values = batch
-                .column_by_name(column)
-                .and_then(|array| array.as_any().downcast_ref::<UInt64Array>())
-                .ok_or_else(|| format!("Spiral scalar query returned no UInt64 {column} column"))?;
-            if values.is_null(0) {
-                return Err(format!("Spiral scalar query returned null {column}"));
-            }
-            return Ok(values.value(0));
-        }
-        Err("No video matched that episode and stream".to_owned())
-    }
-
-    fn run_training_checkpoint_query(&mut self, sql: &str) -> Result<CheckpointArtifact, String> {
-        let mut statement = self
-            .new_statement()
-            .map_err(|error| format!("opening Spiral checkpoint query: {error}"))?;
-        statement
-            .set_sql_query(sql)
-            .map_err(|error| format!("binding Spiral checkpoint query: {error}"))?;
-        let reader = statement
-            .execute()
-            .map_err(|error| format!("executing Spiral checkpoint query: {error}"))?;
-        let mut artifact = None;
-        for batch in reader {
-            let batch = batch.map_err(|error| format!("reading Spiral checkpoint: {error}"))?;
-            for row in 0..batch.num_rows() {
-                if artifact.is_some() {
-                    return Err("Spiral returned duplicate rows for that checkpoint".to_owned());
-                }
-                let config = batch.column_by_name(db::CONFIG_JSON).ok_or_else(|| {
-                    format!(
-                        "Spiral checkpoint query returned no UTF-8 {} column",
-                        db::CONFIG_JSON
-                    )
-                })?;
-                let checkpoint = batch.column_by_name(db::CHECKPOINT).ok_or_else(|| {
-                    format!(
-                        "Spiral checkpoint query returned no {} column",
-                        db::CHECKPOINT
-                    )
-                })?;
-                let payload = if let Some(values) =
-                    checkpoint.as_any().downcast_ref::<BinaryArray>()
-                {
-                    let value = values.value(row);
-                    CheckpointArtifact::validate_size(0, value.len())?;
-                    value.to_vec()
-                } else if let Some(values) = checkpoint.as_any().downcast_ref::<LargeBinaryArray>()
-                {
-                    let value = values.value(row);
-                    CheckpointArtifact::validate_size(0, value.len())?;
-                    value.to_vec()
-                } else if let Some(values) = checkpoint.as_any().downcast_ref::<BinaryViewArray>() {
-                    let value = values.value(row);
-                    CheckpointArtifact::validate_size(0, value.len())?;
-                    value.to_vec()
-                } else {
-                    return Err(format!(
-                        "Spiral checkpoint payload has unexpected type {}",
-                        checkpoint.data_type()
-                    ));
-                };
-                let config_json = if let Some(values) =
-                    config.as_any().downcast_ref::<StringArray>()
-                {
-                    let value = values.value(row).as_bytes();
-                    CheckpointArtifact::validate_size(value.len(), payload.len())?;
-                    value.to_vec()
-                } else if let Some(values) = config.as_any().downcast_ref::<LargeStringArray>() {
-                    let value = values.value(row).as_bytes();
-                    CheckpointArtifact::validate_size(value.len(), payload.len())?;
-                    value.to_vec()
-                } else if let Some(values) = config.as_any().downcast_ref::<StringViewArray>() {
-                    let value = values.value(row).as_bytes();
-                    CheckpointArtifact::validate_size(value.len(), payload.len())?;
-                    value.to_vec()
-                } else {
-                    return Err(format!(
-                        "Spiral checkpoint config has unexpected type {}",
-                        config.data_type()
-                    ));
-                };
-                artifact = Some(CheckpointArtifact::new(config_json, payload)?);
-            }
-        }
-        artifact.ok_or_else(|| "No checkpoint matched that training run and step".to_owned())
+impl CheckpointArtifact {
+    fn from_batch_row(batch: &RecordBatch, row: usize) -> Result<Self, String> {
+        let config = batch.column_by_name(db::CONFIG_JSON).ok_or_else(|| {
+            format!(
+                "Spiral checkpoint query returned no UTF-8 {} column",
+                db::CONFIG_JSON
+            )
+        })?;
+        let checkpoint = batch.column_by_name(db::CHECKPOINT).ok_or_else(|| {
+            format!(
+                "Spiral checkpoint query returned no {} column",
+                db::CHECKPOINT
+            )
+        })?;
+        let payload = if let Some(values) = checkpoint.as_any().downcast_ref::<BinaryArray>() {
+            values.value(row).to_vec()
+        } else if let Some(values) = checkpoint.as_any().downcast_ref::<LargeBinaryArray>() {
+            values.value(row).to_vec()
+        } else if let Some(values) = checkpoint.as_any().downcast_ref::<BinaryViewArray>() {
+            values.value(row).to_vec()
+        } else {
+            return Err(format!(
+                "Spiral checkpoint payload has unexpected type {}",
+                checkpoint.data_type()
+            ));
+        };
+        Self::validate_size(0, payload.len())?;
+        let config_json = if let Some(values) = config.as_any().downcast_ref::<StringArray>() {
+            values.value(row).as_bytes().to_vec()
+        } else if let Some(values) = config.as_any().downcast_ref::<LargeStringArray>() {
+            values.value(row).as_bytes().to_vec()
+        } else if let Some(values) = config.as_any().downcast_ref::<StringViewArray>() {
+            values.value(row).as_bytes().to_vec()
+        } else {
+            return Err(format!(
+                "Spiral checkpoint config has unexpected type {}",
+                config.data_type()
+            ));
+        };
+        Self::validate_size(config_json.len(), payload.len())?;
+        Self::new(config_json, payload)
     }
 }
 

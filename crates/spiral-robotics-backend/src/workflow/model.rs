@@ -378,7 +378,6 @@ impl ModelRunContext {
             &project_store,
             PublicationGuard::new(&cancel, &publication_gate),
         )?;
-        project_store.invalidate_idle_connections();
 
         let mut warnings = Vec::new();
         if let Some(warning) = fallback_warning {
@@ -1722,7 +1721,7 @@ trait FeaturePublicationTransaction {
             }
             (Ok(()), None, Err(_)) => Ok(()),
             (Err(error), Some(rollback), Err(restore)) => Err(format!(
-                "{}; restoring ADBC autocommit after feature publication also failed: {restore}",
+                "{}; restoring database autocommit after feature publication also failed: {restore}",
                 FeaturePublicationError::new(error).with_rollback(rollback)
             )),
             (Ok(()), Some(_), _) | (Err(_), None, _) => {
@@ -3197,10 +3196,9 @@ mod tests {
         .and_then(|settings| settings.with_project(&project))
         .expect("the Workflow registry connection must be valid")
         .with_credentials(stored.as_ref().and_then(BackendStateStore::credentials));
-        let project_store = Arc::new(
-            ProjectStore::new(connection, "workflow".to_owned())
-                .expect("the Workflow registry project store must be valid"),
-        );
+        let database_runtime =
+            crate::test_database::LocalProjectStore::start(connection, "workflow".to_owned());
+        let project_store = database_runtime.store();
         let registry_existed = project_store
             .run_blocking(|connection| connection.table_exists(FEATURE_REGISTRY_RELATION))
             .expect("the Workflow registry catalog check must succeed");
@@ -3246,7 +3244,6 @@ mod tests {
         FeaturePublication::new(&cache_relation, &cache, &registry)
             .replace(&project_store)
             .expect("cache and registry must commit together");
-        project_store.invalidate_idle_connections();
         let reloaded_registry =
             FeatureRegistry::load(&project_store).expect("the committed registry must round trip");
         let reloaded_cache =
@@ -3431,10 +3428,9 @@ mod tests {
         .and_then(|settings| settings.with_project(&project))
         .expect("the Workflow golden connection must be valid")
         .with_credentials(stored.as_ref().and_then(BackendStateStore::credentials));
-        let project_store = Arc::new(
-            ProjectStore::new(connection, namespace.clone())
-                .expect("the Workflow golden project store must be valid"),
-        );
+        let database_runtime =
+            crate::test_database::LocalProjectStore::start(connection, namespace.clone());
+        let project_store = database_runtime.store();
         let _cleanup = GoldenRelations {
             project_store: project_store.clone(),
             relations: vec![input_relation.clone(), output_relation.clone()],
@@ -3495,7 +3491,6 @@ mod tests {
                 connection.ingest_batch(&seed_relation, batch)
             })
             .expect("seeding the golden image relation must succeed");
-        project_store.invalidate_idle_connections();
 
         let features = vec![
             feature("is_black_square_feature", "black square", &input_relation),
@@ -3616,11 +3611,10 @@ mod tests {
                         Ok(())
                     }
                     (Err(error), Err(restore)) => Err(format!(
-                        "{error}; restoring ADBC autocommit after registry cleanup also failed: {restore}"
+                        "{error}; restoring database autocommit after registry cleanup also failed: {restore}"
                     )),
                 }
             })?;
-            self.project_store.invalidate_idle_connections();
             self.cleaned = true;
             Ok(())
         }

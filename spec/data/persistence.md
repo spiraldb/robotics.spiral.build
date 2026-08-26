@@ -30,14 +30,14 @@ The product does not reconcile a second local source of truth.
 - **PERSIST-013** Studio must start when no Spiral project is selected. Settings
   must let the operator configure both the Spiral control-plane API endpoint
   and the SpFS endpoint, then select and test the active project. Project
-  switches must drain project-store work, discard stale pooled connections, and
+  switches must drain project-store work, retire the prior native session, and
   be refused while recording, replay, rollout, training, active motor control,
   or a catalog-visible robot connection is active. When the old catalog is
   unavailable, idle released hardware connections that cannot be represented
   in Settings must be disconnected during the cutover rather than trapping the
   operator on the unavailable destination. Endpoint, project, client ID, and
-  client-secret changes must create a new database with scoped ADBC options and
-  apply live after the old pool drains; they must not mutate process-global
+  client-secret changes must create a new native database session with scoped
+  client options and apply live after old work drains; they must not mutate process-global
   environment variables or require a Studio restart. The namespace remains
   process bootstrap configuration, and
   individual domain operations must not accept or reconstruct alternate
@@ -96,7 +96,7 @@ flowchart TD
   names, and exact ordered columns before replacing project data.
 - **PERSIST-028** Import must replace the active project in one exclusive
   transaction and roll back on failure. Each included relation must be installed
-  from its single Arrow stream with ADBC `Replace`; Studio must not clear an
+  from its single Arrow stream with native `Replace` ingestion; Studio must not clear an
   included relation with `DELETE` and then append its replacement rows.
   Incremental episode import and live recording remain create-append operations.
   Studio-owned relations absent from the file must be removed, and import must
@@ -112,7 +112,7 @@ flowchart TD
   explicit warning; it must never report the durable import as rolled back.
   If restoring autocommit after a successful commit fails, Studio must likewise
   return the committed summary with a warning and discard the uncertain
-  connection rather than returning it to the pool.
+  connection.
 - **PERSIST-029** Whole-project import must disconnect every connected robot
   before replacing project data and must stop without importing if a robot
   cannot be safely disconnected. After a successful replacement it must
@@ -124,7 +124,7 @@ flowchart TD
   request/response buffer, currently limited to 256 MiB; that buffer is not
   durable storage. HTTP import must move the received buffer into storage work
   without cloning the entire archive. Import must bind all Arrow record batches
-  for one relation as one ADBC stream rather than executing one ingest per IPC
+  for one relation as one native Arrow stream rather than executing one ingest per IPC
   batch. Before decoding, import must enforce that the cumulative declared
   decoded Arrow buffers fit the same bound, including compressed buffers at
   their declared decompressed sizes. It must not reject an otherwise bounded
@@ -150,29 +150,30 @@ flowchart TD
   project and never replace an existing episode.
 - **PERSIST-036** `.spiral-project` and `.spiral-episodes` must have distinct
   format identities and must not be accepted by the other's import path.
-- **PERSIST-037** The synchronous ADBC API must remain private to the shared
-  Spiral project-store adapter. During active co-development, the Studio backend
-  must link the native `adbc-driver-spiraldb` Rust crate from SpiralDB's
-  `develop` branch through Cargo's Git source at the revision pinned by
-  `Cargo.lock`. Standard CI must use selected-package dependency resolution to
-  exclude the native backend until a separate SpiralDB integration lane
-  exists; it must not fetch the private driver or connect to SpiralDB, SpFS, or
-  a disposable hosted project. Studio must construct the native driver
-  directly; it must not accept a driver-library
-  path, use an ADBC driver manager, or load the Spiral driver
-  dynamically. For each active project, the adapter must own one native
-  database/engine runtime, expose only project-store-owned connection and
-  statement operations, run asynchronous calls on bounded blocking workers,
-  and apply the same fixed connection limit to ordinary, long-lived,
-  exclusive, invalidating, and synchronous-worker checkouts. No domain or
-  delivery module may construct an ADBC database or bypass that capacity gate.
-  Non-Rust workers may continue to use the language-neutral ADBC shared library.
+- **PERSIST-037** The Studio backend must use SpiralDB's native asynchronous
+  Rust APIs through a storage-owned database trait. The trait must expose
+  logical connections, explicit transactions, schema/catalog inspection, one
+  unified SQL-or-Arrow command, record streams, update summaries, and typed
+  errors without exposing Spiral engine or Vortex types. Each non-`Send`
+  `ConnectionCtx` must be owned by its own task on a Tokio `LocalSet`; `Send`
+  proxies must communicate with those tasks through bounded channels. Axum,
+  the local connection owners, and Vortex execution must share the server's
+  Tokio runtime, while Vortex CPU work may use that runtime's worker pool.
+  Async backend paths must await the database trait directly and must not pass
+  through a blocking worker. Genuinely synchronous recording, import, and model
+  workers may use the project store's blocking compatibility wrapper. Native
+  logical connections must not be constrained by an arbitrary application
+  semaphore; each connection owner serializes only its own stateful operations.
+  Spiral and Vortex crates must resolve to revisions already pinned in
+  `Cargo.lock`; this change must not introduce another Spiral-related package.
+  The Rust backend must not depend on an ADBC crate or accept a driver-library
+  path. Non-Rust workers may continue to use the language-neutral ADBC shared
+  library.
 - **PERSIST-038** After the HTTP listener binds, Studio must prewarm the active
-  project's authenticated catalog through the same shared ADBC pool used by
-  ordinary project-store work. Only after that succeeds may it hydrate
+  project's authenticated catalog through the same native async database trait
+  used by ordinary project-store work. Only after that succeeds may it hydrate
   project-owned preferences and run history, and those independent loads must
-  run concurrently on bounded blocking workers rather than delaying listener
-  startup or occupying async executor threads.
+  run concurrently rather than delaying listener startup.
 - **PERSIST-039** The storage crate must own the current relational schema in a
   machine-readable version file beside its schema implementation and
   changelog. Rust consumers must generate their constant from that file.
@@ -210,10 +211,11 @@ flowchart TD
 ## Testability
 
 - **PERSIST-TEST-001** Persistent adapters must converge on one shared
-  `ProjectStore`; ADBC is the physical persistence boundary.
+  `ProjectStore`; the native Spiral adapter is the physical persistence
+  boundary and the async database trait is the application-facing boundary.
 - **PERSIST-TEST-002** Pure backend-capability tests may use capability fakes,
   but Studio must not ship a simulated persistence backend or an in-memory
-  ADBC destination mode.
+  persistence destination mode.
 - **PERSIST-TEST-003** SpiralDB integration tests must use the real adapter for
   relational and video behavior.
 - **PERSIST-TEST-004** A real-SpiralDB project-transfer test must export a
@@ -231,17 +233,19 @@ flowchart TD
   dataset, import it into an existing target dataset, prove the target's prior
   episodes survive and imported rows are retargeted, and prove a repeated
   import is refused rather than overwriting an episode.
-- **PERSIST-TEST-006** Architecture tests must prove that raw ADBC types occur
-  only in the storage crate's ADBC adapter, that Studio uses the native SpiralDB
-  driver crate rather than the driver manager, and that every project-store
-  checkout mode consumes its one capacity gate. A concurrency test must prove
-  a synchronous worker waits while the same gate is occupied asynchronously.
+- **PERSIST-TEST-006** Architecture tests must prove that Spiral engine and
+  Vortex implementation types occur only in the native storage adapter, that
+  the backend has no Rust ADBC dependency, that the server installs the local
+  connection task set on its Tokio runtime, and that async callers use the
+  database trait directly. A connection test must prove multiple logical
+  connections can be opened without a fixed application capacity gate.
 
 ## Implementation ownership
 
 - Stable relation names:
   [`spiral-robotics-storage/src/schema.rs`](../../crates/spiral-robotics-storage/src/schema.rs)
-- Shared ADBC project store, queries, ingestion, and transfer formats:
+- Async database boundary, native Spiral adapter, project store, queries,
+  ingestion, and transfer formats:
   [`spiral-robotics-storage`](../../crates/spiral-robotics-storage/src/)
 - Episode relation encoding:
   [`spiral-robotics-storage/src/episode_schema.rs`](../../crates/spiral-robotics-storage/src/episode_schema.rs)

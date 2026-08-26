@@ -52,7 +52,7 @@ inside the Data route.
   [`spiral-robotics-api/src/sql`](../../crates/spiral-robotics-api/src/sql/)
 - Data query use case:
   [`spiral-robotics-backend/src/data/mod.rs`](../../crates/spiral-robotics-backend/src/data/mod.rs)
-- SQL validation and ADBC adapter:
+- SQL validation and native async database adapter:
   [`spiral-robotics-storage`](../../crates/spiral-robotics-storage/src/)
 - Query UI:
   [`frontend/activities/data`](../../crates/spiral-robotics-frontend/src/activities/data/)

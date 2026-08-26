@@ -61,7 +61,9 @@ struct ComplexityBoundaryVisitor<'a> {
 impl ComplexityBoundaryVisitor<'_> {
     fn check_signature(&mut self, signature: &Signature) {
         let parameter_count = signature.inputs.len();
-        if parameter_count > 3 {
+        let required_external_source_method =
+            signature.ident == "next_morsel" && self.source_path.ends_with("spiral_database.rs");
+        if parameter_count > 3 && !required_external_source_method {
             self.violations.push(format!(
                 "{} function {:?} has {parameter_count} parameters",
                 self.source_path.display(),
@@ -445,7 +447,15 @@ fn workspace_public_surface_stays_explicit_and_state_has_owners() {
 
     let storage_library = fs::read_to_string(crates.join("spiral-robotics-storage/src/lib.rs"))
         .expect("storage library");
-    for implementation_module in ["adbc", "manager", "schema", "settings", "sql"] {
+    for implementation_module in [
+        "database",
+        "manager",
+        "project_store",
+        "schema",
+        "settings",
+        "spiral_database",
+        "sql",
+    ] {
         assert!(
             !storage_library.contains(&format!("pub mod {implementation_module};")),
             "storage implementation module {implementation_module:?} must not become public"
@@ -744,8 +754,8 @@ fn studio_has_one_spiral_persistence_boundary() {
         );
     }
 
-    let project_store =
-        fs::read_to_string(storage.join("src/adbc.rs")).expect("Spiral project-store source");
+    let project_store = fs::read_to_string(storage.join("src/project_store.rs"))
+        .expect("Spiral project-store source");
     for retired in [
         "spiral:memory:",
         "memory: Arc",
@@ -800,7 +810,11 @@ fn recording_and_spiral_connection_lifecycles_have_single_owners() {
 
     assert!(!data_routes.contains("backend_state()"));
     assert!(!data_routes.contains("configure_connection("));
-    assert!(data_routes.contains("self.state.connection().update("));
+    assert!(
+        data_routes.contains("self.state")
+            && data_routes.contains(".connection()")
+            && data_routes.contains(".update(")
+    );
     for owned in [
         "struct SpiralConnectionController",
         "current: Mutex<SpiralConnectionSettings>",
@@ -814,7 +828,7 @@ fn recording_and_spiral_connection_lifecycles_have_single_owners() {
 }
 
 #[test]
-fn robot_mutations_invalidate_pooled_read_snapshots() {
+fn robot_mutations_are_serialized_with_project_reads() {
     let backend = Path::new(env!("CARGO_MANIFEST_DIR"));
     let workspace = fs::read_to_string(backend.join("src/robots/workspace.rs"))
         .expect("robot workspace source");
@@ -837,8 +851,8 @@ fn robot_mutations_invalidate_pooled_read_snapshots() {
         .parent()
         .expect("workspace crates directory")
         .join("spiral-robotics-storage");
-    let project_store =
-        fs::read_to_string(storage.join("src/adbc.rs")).expect("Spiral project-store source");
+    let project_store = fs::read_to_string(storage.join("src/project_store.rs"))
+        .expect("Spiral project-store source");
     let invalidating = project_store
         .split_once("pub fn run_invalidating_blocking")
         .and_then(|(_, source)| source.split_once("/// Run a namespace replacement"))
@@ -846,80 +860,88 @@ fn robot_mutations_invalidate_pooled_read_snapshots() {
         .expect("invalidating project-store mutation implementation");
     assert!(
         invalidating.contains("self.operation_gate.write_unpoisoned()")
-            && invalidating.contains("self.hosted.lock_unpoisoned().available.clear()")
-            && !invalidating.contains("checkin(connection.into_inner())"),
-        "a robot write must drain readers and leave no pre-write or writer connection in the read pool"
+            && invalidating.contains("self.run_with_gate_held(operation)")
+            && !invalidating.contains("ConnectionPool"),
+        "a robot write must drain project readers before opening its request-scoped native connection"
     );
 }
 
 #[test]
-fn synchronous_adbc_is_confined_to_one_bounded_adapter() {
+fn native_async_spiral_is_confined_to_one_adapter() {
     let backend = Path::new(env!("CARGO_MANIFEST_DIR"));
     let source_root = backend
         .parent()
         .expect("workspace crates directory")
         .join("spiral-robotics-storage/src");
-    let adbc_path = source_root.join("adbc.rs");
+    let native_adapter_path = source_root.join("spiral_database.rs");
     let mut sources = Vec::new();
     collect_production_rust_sources(&source_root, &mut sources);
     for path in sources {
-        if path == adbc_path {
+        if path == native_adapter_path {
             continue;
         }
         let source = fs::read_to_string(&path).expect("backend source must be readable");
-        let names_spiral_connection = source
-            .split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
-            .any(|token| token == "SpiralConnection");
-        assert!(
-            !source.contains("adbc_core")
-                && !source.contains("adbc_driver_manager")
-                && !source.contains("adbc_driver_spiraldb")
-                && !names_spiral_connection,
-            "{} bypasses the storage-owned ADBC adapter",
-            path.display()
-        );
+        for implementation_detail in [
+            "spiral_client::",
+            "spiral_engine::",
+            "spiral_session::",
+            "vortex_array::",
+            "vortex_arrow::",
+        ] {
+            assert!(
+                !source.contains(implementation_detail),
+                "{} bypasses the storage-owned native adapter with {implementation_detail}",
+                path.display()
+            );
+        }
     }
 
-    let adbc = fs::read_to_string(adbc_path).expect("Spiral ADBC source must be readable");
-    assert!(
-        adbc.contains("use adbc_driver_spiraldb")
-            && !adbc.contains("adbc_driver_manager")
-            && !adbc.contains("load_dynamic")
-            && adbc.contains("struct ConnectionPool")
-            && adbc.contains("database: Option<SpiralDatabase>")
-            && adbc.contains("available: Vec<SpiralConnection>")
-            && adbc.contains("let mut driver = SpiralDriver")
-            && adbc.contains("if self.database.is_none()")
-            && adbc.contains("Semaphore::new(HOSTED_ADBC_CONNECTIONS)"),
-        "the adapter must own one native database/engine and bound its connection pool"
-    );
+    let native_adapter = fs::read_to_string(native_adapter_path)
+        .expect("native Spiral adapter source must be readable");
+    for native_boundary in [
+        "impl Database for SpiralDatabase",
+        "ConnectionCtx",
+        "collect_stream_with_options",
+        "struct ArrowStreamSource",
+    ] {
+        assert!(
+            native_adapter.contains(native_boundary),
+            "native Spiral adapter is missing {native_boundary}"
+        );
+    }
+    let database = fs::read_to_string(source_root.join("database.rs"))
+        .expect("async database contract must be readable");
+    for contract in [
+        "pub trait Database:",
+        "pub trait DatabaseSession:",
+        "pub enum DatabaseCommand",
+        "pub struct RecordBatchStream",
+    ] {
+        assert!(
+            database.contains(contract),
+            "async database boundary is missing {contract}"
+        );
+    }
     let server = fs::read_to_string(backend.join("src/http/server.rs"))
         .expect("backend server source must be readable");
     assert!(
-        !server.contains("spiral-adbc-driver") && !server.contains("SPIRALDB_ADBC_DRIVER"),
-        "Studio must not accept a runtime path for its linked SpiralDB driver"
+        server.contains("tokio::task::LocalSet::new()")
+            && server.contains("database_tasks.run_until("),
+        "the non-Send Spiral connection owner must run beside axum on its LocalSet"
     );
-    for operation in [
-        "pub(crate) async fn run",
-        "pub fn run_blocking",
-        "pub fn run_invalidating_blocking",
-        "pub fn run_exclusive_blocking",
+    for manifest_path in [
+        backend.join("../../Cargo.toml"),
+        backend.join("Cargo.toml"),
+        backend
+            .parent()
+            .expect("workspace crates directory")
+            .join("spiral-robotics-storage/Cargo.toml"),
     ] {
-        let implementation = adbc
-            .split_once(operation)
-            .map(|(_, implementation)| implementation)
-            .expect("project-store operation must exist");
-        let next_operation = implementation
-            .find("pub fn ")
-            .into_iter()
-            .chain(implementation.find("pub async fn "))
-            .min()
-            .unwrap_or(implementation.len());
-        let implementation = &implementation[..next_operation];
+        let manifest = fs::read_to_string(&manifest_path).expect("manifest must be readable");
         assert!(
-            implementation.contains("hosted_slots")
-                || implementation.contains("acquire_blocking_slot"),
-            "{operation} must consume the shared pool capacity gate"
+            !manifest.contains("adbc_core") && !manifest.contains("adbc-driver-spiraldb"),
+            "{} retains the retired Rust ADBC dependency",
+            manifest_path.display()
         );
     }
 }

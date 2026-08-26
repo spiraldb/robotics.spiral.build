@@ -168,7 +168,7 @@ types stay crate-private.
   product launcher and assets; `frontend` owns the browser interface and its
   interaction components; `backend` is organized by Data, Recording, Robots,
   Training, Rollout, and Workflow capabilities; `api` is the frontend/backend
-  wire contract and shared SQL validation; `storage` owns ADBC, schemas, SQL
+  wire contract and shared SQL validation; `storage` owns the async database boundary, native Spiral adapter, schemas, SQL
   execution, ingestion, and transfer; `viewport` owns presentation joint maps,
   pose values, and robot geometry; and `hardware` owns motor definitions,
   physical devices, native health verdicts, and fixed-rate control. The retired
@@ -286,7 +286,7 @@ types stay crate-private.
   [`spiral-robotics-hardware`](../../crates/spiral-robotics-hardware/)
 - HTTP and compute-runtime adapters:
   [`spiral-robotics-backend`](../../crates/spiral-robotics-backend/)
-- ADBC, schemas, SQL, ingestion, and project transfer:
+- Async database access, schemas, SQL, ingestion, and project transfer:
   [`spiral-robotics-storage`](../../crates/spiral-robotics-storage/)
 - URDF and rendering:
   [`spiral-robotics-viewport`](../../crates/spiral-robotics-viewport/)

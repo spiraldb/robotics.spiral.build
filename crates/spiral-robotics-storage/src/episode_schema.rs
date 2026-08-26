@@ -365,7 +365,7 @@ impl VideoStreamRows for [VideoStreamRow] {
     }
 }
 
-/// Convert rows into a batch suitable for ADBC `bind_stream` ingestion.
+/// Convert rows into a batch suitable for native Arrow-stream ingestion.
 pub(crate) trait JointSampleRows {
     fn batch(&self) -> Result<RecordBatch, EpisodeError>;
 }

@@ -98,7 +98,7 @@ impl<'a, B: Serialize> AbortableJsonRequest<'a, B> {
         self
     }
 
-    /// Aborting releases the UI immediately; hosted ADBC work is isolated on
+    /// Aborting releases the UI immediately; hosted database work is isolated on
     /// its own checked-out connection, so an abandoned query cannot block
     /// persistence or replay.
     pub(crate) async fn send<T: DeserializeOwned>(self) -> Result<T, String> {

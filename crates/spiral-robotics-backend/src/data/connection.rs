@@ -18,7 +18,7 @@ use crate::workflow::manager::WorkflowManager;
 
 pub(crate) struct SpiralConnectionController {
     current: Mutex<SpiralConnectionSettings>,
-    transition: Mutex<()>,
+    transition: tokio::sync::Mutex<()>,
     stores: SpiralConnectionStores,
     activities: ProjectStateManagers,
 }
@@ -84,7 +84,7 @@ impl SpiralConnectionController {
     pub(crate) fn new(stores: SpiralConnectionStores, activities: ProjectStateManagers) -> Self {
         Self {
             current: Mutex::new(stores.storage.connection_settings()),
-            transition: Mutex::new(()),
+            transition: tokio::sync::Mutex::new(()),
             stores,
             activities,
         }
@@ -112,12 +112,12 @@ impl SpiralConnectionController {
         )
     }
 
-    pub(crate) fn update(
+    pub(crate) async fn update(
         &self,
         command: UpdateDataSettingsCommand,
         catalog_was_available: bool,
     ) -> Result<DataSettingsSnapshot, OperationError> {
-        let _transition = self.transition.recover_lock();
+        let _transition = self.transition.lock().await;
         let previous_connection = self.current.recover_lock().clone();
         let current_credentials = previous_connection.credentials().cloned();
         let credentials = match command.client_secret() {
@@ -180,6 +180,7 @@ impl SpiralConnectionController {
                 .stores
                 .storage
                 .configure_connection(next_connection.clone())
+                .await
             {
                 let _ = self
                     .stores
@@ -191,7 +192,8 @@ impl SpiralConnectionController {
                 let _ = self
                     .stores
                     .storage
-                    .configure_connection(previous_connection.clone());
+                    .configure_connection(previous_connection.clone())
+                    .await;
                 let _ = self
                     .stores
                     .storage

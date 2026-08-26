@@ -24,8 +24,8 @@ use spiral_robotics_api::workflow::{
     WorkflowFeatureApplicability, WorkflowFeatureDefinition,
 };
 
-use crate::adbc::StorageConnection;
 use crate::manager::VideoAssetRecordBatch as _;
+use crate::project_store::StorageConnection;
 use crate::sql::SpiralSql;
 
 const PROJECT_MAGIC: &[u8; 8] = b"SPRPROJ1";
@@ -789,7 +789,7 @@ impl ProjectBundle {
         if let Some(warning) = transaction_warning {
             summary.push_warning(warning);
         }
-        // ADBC ingest can create a relation inside the import transaction, but
+        // Native ingest can create a relation inside the import transaction, but
         // Spiral's SQL binder cannot resolve that new relation until the commit is
         // published. Keep the project_store's exclusive checkout while reconciling
         // the derived MP4 resources immediately after the durable rows commit.
@@ -2366,7 +2366,7 @@ trait ProjectImportTransactionRunner: ProjectImportTransaction {
                     Err(restore) => {
                         connection.discard_project_connection();
                         return Err(format!(
-                            "{primary}; restoring ADBC autocommit after {operation} also failed: {restore}; connection discarded"
+                            "{primary}; restoring database autocommit after {operation} also failed: {restore}; connection discarded"
                         ));
                     }
                 },
@@ -2399,7 +2399,7 @@ trait ProjectImportTransactionRunner: ProjectImportTransaction {
                 Ok((
                     value,
                     Some(format!(
-                        "{operation} committed, but its Spiral connection was discarded because restoring ADBC autocommit failed: {restore}"
+                        "{operation} committed, but its Spiral connection was discarded because restoring database autocommit failed: {restore}"
                     )),
                 ))
             }
@@ -2969,9 +2969,9 @@ mod tests {
     use arrow_schema::{DataType, Field, Schema};
 
     use super::*;
-    use crate::adbc::ProjectStore;
     use crate::episodes::{EpisodeCompletion, EpisodeStart, EpisodeStore};
     use crate::manager::StorageManager;
+    use crate::project_store::ProjectStore;
     use crate::settings::{BackendStateStore, ServiceEndpoint, SpiralConnectionSettings};
 
     fn envelope(manifest: Manifest, entries: &[(&str, &[u8])]) -> Vec<u8> {
@@ -5105,7 +5105,40 @@ mod tests {
             .unwrap_or_else(|| ServiceEndpoint::environment_spiral_spfs().into_string())
     }
 
-    fn configured_project_store(project: String, namespace: String) -> Arc<ProjectStore> {
+    struct ConfiguredProjectStore {
+        store: Arc<ProjectStore>,
+        shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+        worker: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl ConfiguredProjectStore {
+        fn clone(&self) -> Arc<ProjectStore> {
+            Arc::clone(&self.store)
+        }
+    }
+
+    impl std::ops::Deref for ConfiguredProjectStore {
+        type Target = ProjectStore;
+
+        fn deref(&self) -> &Self::Target {
+            &self.store
+        }
+    }
+
+    impl Drop for ConfiguredProjectStore {
+        fn drop(&mut self) {
+            if let Some(shutdown) = self.shutdown.take() {
+                let _ = shutdown.send(());
+            }
+            if let Some(worker) = self.worker.take() {
+                worker
+                    .join()
+                    .expect("the local database test runtime stops");
+            }
+        }
+    }
+
+    fn configured_project_store(project: String, namespace: String) -> ConfiguredProjectStore {
         let settings = SpiralConnectionSettings::new(
             configured_spiral_endpoint(),
             configured_spiral_spfs_endpoint(),
@@ -5114,10 +5147,32 @@ mod tests {
         .with_project(&project)
         .expect("the Spiral E2E project must be valid")
         .with_credentials(stored_credentials());
-        Arc::new(
-            ProjectStore::new(settings, namespace)
-                .expect("the Spiral E2E project store must be valid"),
-        )
+        let (store_sender, store_receiver) = std::sync::mpsc::sync_channel(1);
+        let (shutdown, shutdown_receiver) = tokio::sync::oneshot::channel();
+        let worker = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("the local database test runtime builds");
+            let database_tasks = tokio::task::LocalSet::new();
+            runtime.block_on(database_tasks.run_until(async move {
+                let store = Arc::new(
+                    ProjectStore::new(settings, namespace)
+                        .expect("the Spiral E2E project store must be valid"),
+                );
+                store_sender
+                    .send(store)
+                    .expect("the configured project store reaches the test");
+                let _ = shutdown_receiver.await;
+            }));
+        });
+        ConfiguredProjectStore {
+            store: store_receiver
+                .recv()
+                .expect("the local database test runtime starts"),
+            shutdown: Some(shutdown),
+            worker: Some(worker),
+        }
     }
 
     fn relation_payloads(bundle: &[u8]) -> BTreeMap<String, Vec<u8>> {

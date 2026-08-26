@@ -24,9 +24,9 @@ use spiral_robotics_hardware::{
 };
 pub use spiral_robotics_hardware::{EpisodeCheckpoint, Sample};
 
-use crate::adbc::ProjectStore;
 use crate::episode_schema::{JointSampleRows, SpiralEpisodeEncoder};
 use crate::manager::EpisodeReplacement;
+use crate::project_store::ProjectStore;
 use crate::sql::SpiralSql;
 use crate::video::{VideoAssetMetadata, VideoSegment, VideoSize, VideoTiming};
 

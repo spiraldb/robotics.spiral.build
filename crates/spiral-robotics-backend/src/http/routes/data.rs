@@ -339,14 +339,17 @@ impl DataCatalogPort for DataHttpAdapter<'_> {
         self.state.connection().settings()
     }
 
-    fn update_settings(
+    async fn update_settings(
         &self,
         command: UpdateDataSettingsCommand,
     ) -> Result<DataSettingsSnapshot, OperationError> {
-        self.state.connection().update(
-            command,
-            self.state.bootstrap().current().catalog_available(),
-        )
+        self.state
+            .connection()
+            .update(
+                command,
+                self.state.bootstrap().current().catalog_available(),
+            )
+            .await
     }
 
     async fn refresh_training_readiness(&self) {

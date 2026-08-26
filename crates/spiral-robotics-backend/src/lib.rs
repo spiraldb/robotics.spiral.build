@@ -17,6 +17,8 @@ mod robotics;
 mod robots;
 mod rollout;
 mod sync;
+#[cfg(test)]
+mod test_database;
 mod training;
 mod workflow;
 

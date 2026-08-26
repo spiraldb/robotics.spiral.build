@@ -33,8 +33,6 @@ arrow-schema = "58.4.0"
 arrow-ipc = { version = "58.4.0", features = ["zstd"] }
 arrow-json = "58.4.0"
 arrow-select = "58.4.0"
-adbc_core = "0.24.0"
-adbc-driver-spiraldb.workspace = true
 base64.workspace = true
 candle-core.workspace = true
 candle-nn.workspace = true

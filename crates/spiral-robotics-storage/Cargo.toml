@@ -11,8 +11,6 @@ workspace = true
 [dependencies]
 spiral-robotics-api.workspace = true
 spiral-robotics-hardware.workspace = true
-adbc_core = "0.24.0"
-adbc-driver-spiraldb.workspace = true
 arrow-array = "58.4.0"
 arrow-schema = "58.4.0"
 arrow-ipc = { version = "58.4.0", features = ["zstd"] }
@@ -21,13 +19,22 @@ base64.workspace = true
 dirs = "6"
 futures = { version = "0.3", default-features = false, features = ["executor", "std"] }
 image.workspace = true
+parking_lot = "0.12"
 reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls", "stream"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
+spiral-client.workspace = true
+spiral-config.workspace = true
+spiral-defaults.workspace = true
+spiral-engine.workspace = true
+spiral-session.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
 tracing = "0.1"
 url = "2"
+vortex-array.workspace = true
+vortex-arrow.workspace = true
+vortex-error.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

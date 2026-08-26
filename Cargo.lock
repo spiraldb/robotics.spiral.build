@@ -3,42 +3,6 @@
 version = 4
 
 [[package]]
-name = "adbc-driver-spiraldb"
-version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#2170fd719678037b64ce79761757990db0fa7377"
-dependencies = [
- "adbc_core",
- "arrow-array",
- "arrow-buffer",
- "arrow-schema",
- "async-trait",
- "futures-util",
- "parking_lot",
- "spiral-arrow",
- "spiral-build-info",
- "spiral-client",
- "spiral-config",
- "spiral-defaults",
- "spiral-engine",
- "spiral-session",
- "spiraldb-control-plane",
- "url",
- "vortex-array",
- "vortex-arrow",
- "vortex-error",
-]
-
-[[package]]
-name = "adbc_core"
-version = "0.24.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "365059b13a01bbf6f324b5bfe328232a819679731431f78105e2883256236858"
-dependencies = [
- "arrow-array",
- "arrow-schema",
-]
-
-[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10609,8 +10573,6 @@ dependencies = [
 name = "spiral-robotics-backend"
 version = "0.1.0"
 dependencies = [
- "adbc-driver-spiraldb",
- "adbc_core",
  "arrow-array",
  "arrow-ipc",
  "arrow-json",
@@ -10704,8 +10666,6 @@ dependencies = [
 name = "spiral-robotics-storage"
 version = "0.1.0"
 dependencies = [
- "adbc-driver-spiraldb",
- "adbc_core",
  "arrow-array",
  "arrow-ipc",
  "arrow-json",
@@ -10714,16 +10674,25 @@ dependencies = [
  "dirs",
  "futures",
  "image",
+ "parking_lot",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "spiral-client",
+ "spiral-config",
+ "spiral-defaults",
+ "spiral-engine",
  "spiral-robotics-api",
  "spiral-robotics-hardware",
+ "spiral-session",
  "tempfile",
  "tokio",
  "tracing",
  "url",
+ "vortex-array",
+ "vortex-arrow",
+ "vortex-error",
 ]
 
 [[package]]

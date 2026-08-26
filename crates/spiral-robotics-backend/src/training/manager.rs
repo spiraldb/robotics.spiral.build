@@ -1,4 +1,4 @@
-//! Rust-owned supervision for Spiral ADBC and an injected training backend.
+//! Rust-owned supervision for Spiral storage and an injected training backend.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -654,7 +654,6 @@ impl TrainingManager {
             .iter()
             .filter(|checkpoint| checkpoint.step() > previous_checkpoint_step)
         {
-            self.inner.storage.invalidate_idle_connections();
             self.apply_update(
                 TrainingUpdate::Checkpoint {
                     run_id: run_id.to_owned(),

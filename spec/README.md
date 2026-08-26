@@ -133,7 +133,7 @@ confirmed requirement to match accidental code.
 
 These rules apply to every feature:
 
-- Core entities must not depend on HTTP, Dioxus, ADBC, hardware drivers, files,
+- Core entities must not depend on HTTP, Dioxus, database adapters, hardware drivers, files,
   or model frameworks. Backend policy is colocated with the capability it
   governs and remains separate from delivery adapters inside that capability.
 - Each consequential backend action must have one use case and explicit ports
@@ -168,7 +168,7 @@ These rules apply to every feature:
   private grouped values rather than public fields. The workspace lint policy
   denies unreachable public items for every first-party package.
 - Backend and frontend libraries export only their process/UI launchers.
-  Storage keeps ADBC, schema, SQL, settings, and manager modules private and
+  Storage keeps native database, schema, SQL, settings, and manager modules private and
   exposes reviewed feature types plus a flat connection facade.
 - Source must be organized around product capabilities and explicit boundaries
   rather than catch-all buckets such as core, common, or utility modules.

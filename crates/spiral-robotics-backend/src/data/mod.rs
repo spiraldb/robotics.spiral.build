@@ -341,7 +341,7 @@ impl QueryCommand {
 /// Data-catalog consequences expressed only in capability-owned models.
 pub(crate) trait DataCatalogPort: Send + Sync {
     fn settings(&self) -> DataSettingsSnapshot;
-    fn update_settings(
+    async fn update_settings(
         &self,
         command: UpdateDataSettingsCommand,
     ) -> Result<DataSettingsSnapshot, OperationError>;
@@ -357,7 +357,7 @@ impl UpdateDataSettingsCommand {
         port: &P,
     ) -> Result<DataSettingsSnapshot, OperationError> {
         let command = self.validated()?;
-        let settings = port.update_settings(command)?;
+        let settings = port.update_settings(command).await?;
         // Training readiness depends on the selected runtime endpoint, so publish
         // preferences before rebuilding it.
         port.refresh_training_readiness().await;
@@ -446,7 +446,7 @@ mod tests {
             settings_view("settings")
         }
 
-        fn update_settings(
+        async fn update_settings(
             &self,
             command: UpdateDataSettingsCommand,
         ) -> Result<DataSettingsSnapshot, OperationError> {

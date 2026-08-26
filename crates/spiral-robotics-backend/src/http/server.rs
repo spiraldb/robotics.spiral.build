@@ -223,17 +223,20 @@ impl StudioServer {
             }
         };
 
+        let database_tasks = tokio::task::LocalSet::new();
         match runtime.block_on(
-            ServerStartup {
-                arguments,
-                camera_access_error: camera_access.err(),
-                backend_state,
-                spiral_endpoint,
-                spiral_spfs_endpoint,
-                control_settings,
-                app,
-            }
-            .serve(),
+            database_tasks.run_until(
+                ServerStartup {
+                    arguments,
+                    camera_access_error: camera_access.err(),
+                    backend_state,
+                    spiral_endpoint,
+                    spiral_spfs_endpoint,
+                    control_settings,
+                    app,
+                }
+                .serve(),
+            ),
         ) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
@@ -483,7 +486,7 @@ impl AppState {
 
     async fn bootstrap_catalog(&self) {
         self.bootstrap()
-            .bootstrapping("Connecting to SpiralDB and warming the shared ADBC pool");
+            .bootstrapping("Connecting to SpiralDB and warming the native database session");
         if let Err(error) = self.storage().prewarm().await {
             tracing::warn!("could not prewarm SpiralDB during startup: {error}");
             self.bootstrap().degraded(false, error);

@@ -25,8 +25,8 @@ use spiral_robotics_api::datasets::{
 };
 use url::Url;
 
-use super::adbc::StorageConnection;
 use super::manager::StorageManager;
+use super::project_store::StorageConnection;
 use super::sql::SpiralSql;
 use crate::episode_schema::EpisodeSchema;
 
@@ -484,7 +484,7 @@ impl HuggingFaceDatasetDiscovery for HuggingFaceDatasetInspection {
 
 impl StorageManager {
     /// Atomically materialize one already pinned inspection into the active
-    /// Spiral project. Callers run this on a blocking worker because ADBC is
+    /// Spiral project. Callers run this on a blocking worker because this path is
     /// synchronous and the import may perform substantial remote I/O.
     pub fn import_huggingface_dataset(
         &self,

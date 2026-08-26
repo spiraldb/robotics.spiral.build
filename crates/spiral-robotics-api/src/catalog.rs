@@ -1,6 +1,6 @@
 //! User-visible catalog vocabulary shared by the Data and Training activities.
 //!
-//! Physical Arrow schemas and ADBC operations live in `spiral-robotics-storage`;
+//! Physical Arrow schemas and native database operations live in `spiral-robotics-storage`;
 //! this module only publishes the managed relation names and query templates
 //! that cross the frontend/backend boundary.
 
