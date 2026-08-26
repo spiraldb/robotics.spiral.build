@@ -9,8 +9,8 @@ use spiral_robotics_api::relations::{
     ProjectDataRelation, ProjectDataRelationsResponse, SpiralQueryRequest, SpiralQueryResponse,
 };
 
+use crate::activities::data::query_result::{QueryExecutionPresentation, QueryState};
 use crate::activities::data::state::data_controller;
-use crate::activities::data::workbench::{QueryExecutionPresentation, QueryState};
 use crate::client::http as api;
 
 const PREVIEW_ROWS: usize = 5;

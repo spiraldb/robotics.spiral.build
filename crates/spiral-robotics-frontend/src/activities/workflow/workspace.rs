@@ -16,7 +16,7 @@ use spiral_robotics_api::workflow::{
     WorkflowNodeKind, WorkflowNodePhase, WorkflowRunPhase,
 };
 
-use crate::activities::data::workbench::{QueryExecutionPresentation, QueryState};
+use crate::activities::data::query_result::{QueryExecutionPresentation, QueryState};
 use crate::activities::workflow::state::{
     ASSISTANT_PANEL_ID, AcceptedAgentDraft, AgentDraftKey, AgentPendingCommand, CANVAS_PANEL_ID,
     ModelFeatureTarget, NODE_PANEL_ID, RESULTS_PANEL_ID, WorkflowNodeData, WorkflowPendingCommand,

@@ -9,10 +9,10 @@ use dioxus_workbench::{LayoutNode, SplitAxis};
 use spiral_robotics_api::recording::{ReplayPhase, ReplayPurpose};
 use spiral_robotics_api::robots::ModeSelection;
 
+use crate::activities::data::query_result::QueryResultView;
 use crate::activities::data::relations::RelationsPanel;
-use crate::activities::data::workbench::{
-    EpisodeIdPresentation, EpisodesPanel, QueryPanel, QueryResultView,
-};
+use crate::activities::data::state::{DataController, data_controller};
+use crate::activities::data::workbench::{EpisodeIdPresentation, EpisodesPanel, QueryPanel};
 use crate::activities::live::workbench::LiveWorkbench;
 use crate::activities::rollout::state::rollout_controller;
 use crate::activities::rollout::workspace::{
@@ -76,6 +76,7 @@ impl ScreenWorkspaceDefinition {
 #[component]
 pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
     let studio = crate::shell::state::studio();
+    let data = data_controller();
     let configuration = StudioConfiguration::current();
     let dataset = configuration.dataset();
     let selected_dataset = studio.selected_dataset().read().to_owned();
@@ -154,7 +155,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
             sampled_replay_slot.set(None);
             return;
         };
-        let subject_episode = studio.visible_timeline_episode(activity);
+        let subject_episode = visible_timeline_episode(activity, studio, data);
         if !replay.matches_timeline_subject(subject_episode.as_deref()) {
             sampled_replay_slot.set(None);
             return;
@@ -189,7 +190,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
             .replay()
             .filter(|replay| replay.owns_timeline_transport())
         {
-            let subject_episode = studio.visible_timeline_episode(activity);
+            let subject_episode = visible_timeline_episode(activity, studio, data);
             if replay.matches_timeline_subject(subject_episode.as_deref()) {
                 playhead.set(replay.elapsed_seconds());
                 timeline.stop_preview();
@@ -259,7 +260,13 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
         );
     });
 
-    let data_episode_context = studio.focused_episode();
+    let selected_episode = data.selected_episode();
+    let data_episode_context = selected_episode.as_deref().and_then(|selected| {
+        studio
+            .episodes()
+            .into_iter()
+            .find(|episode| episode.id() == selected)
+    });
     let projection = ActivityProjection::derive(activity, studio.recording(), data_episode_context);
     let projected_recorded_identity = match &projection.timeline() {
         TimelineSubject::Recording(recording) if recording.paused() => Some((
@@ -820,16 +827,17 @@ impl TimelineReplay for spiral_robotics_api::recording::ReplayProgress {
     }
 }
 
-impl Studio {
-    fn visible_timeline_episode(self, activity: Activity) -> Option<String> {
-        let studio = self;
-        match activity {
-            Activity::Live => studio
-                .recording()
-                .map(|recording| recording.episode().to_owned()),
-            Activity::Data => studio.selected_episode().peek().to_owned(),
-            Activity::Workflow | Activity::Training | Activity::Rollout => None,
-        }
+fn visible_timeline_episode(
+    activity: Activity,
+    studio: Studio,
+    data: DataController,
+) -> Option<String> {
+    match activity {
+        Activity::Live => studio
+            .recording()
+            .map(|recording| recording.episode().to_owned()),
+        Activity::Data => data.selected_episode_peek(),
+        Activity::Workflow | Activity::Training | Activity::Rollout => None,
     }
 }
 

@@ -130,12 +130,6 @@ pub(crate) struct BackendSignals {
 
 #[derive(Clone, Copy)]
 pub(crate) struct StudioDataSignals {
-    /// The take the timeline is showing in detail.
-    ///
-    /// Deliberately not part of [`Selection`]: choosing a take must not point
-    /// the joint inspector somewhere else, because judging a take and watching
-    /// the arm that produced it are the same gesture.
-    selected_episode: Signal<Option<String>>,
     /// Dataset row used by capture, import, Data filtering, and new Training
     /// runs. This is distinct from the configured Spiral namespace.
     selected_dataset: Signal<String>,
@@ -210,10 +204,6 @@ impl Studio {
         self.pointed
     }
 
-    pub(crate) const fn selected_episode(self) -> Signal<Option<String>> {
-        self.data.selected_episode
-    }
-
     pub(crate) const fn selected_dataset(self) -> Signal<String> {
         self.data.selected_dataset
     }
@@ -239,7 +229,6 @@ impl Studio {
         let notifications = use_signal(NotificationCenterState::default);
         let selected = use_signal(|| None);
         let pointed = use_signal(|| None);
-        let selected_episode = use_signal(|| None);
         let selected_dataset = use_signal(|| "default".to_owned());
         let episode_catalog = use_signal(EpisodeCatalogState::default);
         let recording_signals = use_signal(SignalStore::default);
@@ -258,7 +247,6 @@ impl Studio {
                 clock_ms,
             },
             data: StudioDataSignals {
-                selected_episode,
                 selected_dataset,
                 episode_catalog,
                 recording_signals,
@@ -538,16 +526,6 @@ impl Studio {
     /// The episode being played back right now.
     pub(crate) fn replay(&self) -> Option<ReplayProgress> {
         self.telemetry.read().replay().cloned()
-    }
-
-    /// The take the timeline is showing, when it still exists.
-    pub(crate) fn focused_episode(&self) -> Option<EpisodeSummary> {
-        let episodes = self.data.episode_catalog.read();
-        let chosen = self.data.selected_episode.read();
-        chosen
-            .as_ref()
-            .and_then(|id| episodes.episodes.iter().find(|episode| episode.id() == id))
-            .cloned()
     }
 
     /// Robots whose motor bus is currently open.

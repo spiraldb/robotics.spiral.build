@@ -9,10 +9,11 @@ use gloo_net::http::Method;
 use spiral_robotics_api::catalog::QueryPreset;
 use spiral_robotics_api::relations::SpiralQueryRequest;
 
-use crate::activities::data::sql_draft::GeneratedSqlDraft;
-use crate::activities::data::workbench::{
-    DEFAULT_QUERY_ROWS, QueryExecutionPresentation, QueryPresetSql, QueryState, QueryTab,
+use crate::activities::data::query_result::{
+    DEFAULT_QUERY_ROWS, QueryExecutionPresentation, QueryState, QueryTab,
 };
+use crate::activities::data::sql_draft::GeneratedSqlDraft;
+use crate::activities::data::workbench::QueryPresetSql;
 use crate::client::http as api;
 use crate::shell::notifications::MessageSource;
 use crate::shell::state::Studio;
@@ -36,6 +37,7 @@ impl ActiveQuery {
 
 #[derive(Clone, Copy)]
 pub(crate) struct DataController {
+    selected_episode: Signal<Option<String>>,
     draft: QueryDraftSignals,
     execution: QueryExecutionSignals,
 }
@@ -62,6 +64,7 @@ pub(crate) fn use_data_controller(namespace: &str, dataset_id: &str) -> DataCont
     let initial_sql = QueryPreset::Episodes.scoped_sql(namespace, dataset_id);
     let sql_value = initial_sql.clone();
     let controller = DataController {
+        selected_episode: use_signal(|| None),
         draft: QueryDraftSignals {
             sql: use_signal(move || sql_value),
             generated_sql: use_signal(move || initial_sql),
@@ -89,6 +92,18 @@ pub(crate) fn data_controller() -> DataController {
 }
 
 impl DataController {
+    pub(crate) fn selected_episode(&self) -> Option<String> {
+        self.selected_episode.read().to_owned()
+    }
+
+    pub(crate) fn selected_episode_peek(&self) -> Option<String> {
+        self.selected_episode.peek().to_owned()
+    }
+
+    pub(crate) fn set_selected_episode(mut self, episode: Option<String>) {
+        self.selected_episode.set(episode);
+    }
+
     fn sync_dataset(mut self, namespace: &str, dataset_id: &str) {
         let previous = self.draft.generated_sql.peek().to_owned();
         let next = QueryPreset::Episodes.scoped_sql(namespace, dataset_id);
@@ -319,7 +334,7 @@ impl QuerySqlPresentation for str {
 
 #[cfg(test)]
 mod tests {
-    use crate::activities::data::workbench::{QueryExecutionPresentation, QueryState, QueryTab};
+    use crate::activities::data::query_result::{QueryExecutionPresentation, QueryState, QueryTab};
 
     use super::{MAX_QUERY_TABS, QuerySqlPresentation, QueryTabs};
 

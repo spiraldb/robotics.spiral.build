@@ -1,15 +1,16 @@
-//! Top-level Episodes and Query panels for the Data route.
+//! Top-level Episodes and Query editor panels for the Data route.
 //!
 //! Episode selection and query execution are independent state channels. A
-//! query result stays mounted while an operator selects, replays, imports, or
-//! exports episodes; neither tool has to impersonate navigation for the other.
+//! result owned by `query_result` stays mounted while an operator selects,
+//! replays, imports, or exports episodes; neither tool has to impersonate
+//! navigation for the other.
 
 use std::collections::BTreeSet;
 
 use crate::components::interaction::{
-    Action, ActionAuxiliaryHandlers, ActionLink, ActionPurpose, ActionVariant, BrowserFocus,
-    CloseIcon, ConfirmationCopy, ConfirmationDismissal, ConfirmationResponse, FileAction,
-    FileInput, InlineConfirmation, RefreshIcon,
+    Action, ActionLink, ActionPurpose, ActionVariant, CloseIcon, ConfirmationCopy,
+    ConfirmationDismissal, ConfirmationResponse, FileAction, FileInput, InlineConfirmation,
+    RefreshIcon,
 };
 use dioxus::prelude::*;
 use gloo_net::http::Method;
@@ -20,97 +21,21 @@ use spiral_robotics_api::datasets::{
 };
 use spiral_robotics_api::recording::EpisodeSummary;
 use spiral_robotics_api::relations::RelationCatalog;
-use spiral_robotics_api::relations::{QueryColumn, SpiralQueryResponse};
 
+use crate::activities::data::query_result::DEFAULT_QUERY_ROWS;
 use crate::activities::data::state::data_controller;
 use crate::client::http as api;
 use crate::format::ClockPresentation;
 use crate::shell::state::studio;
 use crate::tasks::SingleFlight;
 
-pub(crate) const DEFAULT_QUERY_ROWS: usize = 100;
 const QUERY_ROW_OPTIONS: [usize; 5] = [25, 100, 250, 500, 1_000];
-const IMAGE_EXTENSION_NAME: &str = "spql.image.Image";
-const VARIABLE_TENSOR_EXTENSION_NAME: &str = "arrow.variable_shape_tensor";
-const ENCODED_MEDIA_EXTENSION_NAME: &str = "spql.media.EncodedMedia";
-
-/// A complete, renderable snapshot of the Query tool.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct QueryExecutionPresentation {
-    sql: String,
-    max_rows: usize,
-    state: QueryState,
-}
-
-impl QueryExecutionPresentation {
-    pub(crate) fn new(sql: String, max_rows: usize, state: QueryState) -> Self {
-        Self {
-            sql,
-            max_rows,
-            state,
-        }
-    }
-
-    pub(crate) fn sql(&self) -> &str {
-        &self.sql
-    }
-
-    pub(crate) const fn max_rows(&self) -> usize {
-        self.max_rows
-    }
-
-    pub(crate) const fn state(&self) -> &QueryState {
-        &self.state
-    }
-
-    pub(crate) fn render(&self) -> Element {
-        rsx! { QueryResultContent { model: self.clone() } }
-    }
-}
-
-/// One immutable query execution. Editing the SQL draft or running another
-/// statement never mutates an earlier tab.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct QueryTab {
-    id: u64,
-    title: String,
-    model: QueryExecutionPresentation,
-}
-
-impl QueryTab {
-    pub(crate) fn new(id: u64, title: String, model: QueryExecutionPresentation) -> Self {
-        Self { id, title, model }
-    }
-
-    pub(crate) const fn id(&self) -> u64 {
-        self.id
-    }
-
-    pub(crate) const fn presentation(&self) -> &QueryExecutionPresentation {
-        &self.model
-    }
-
-    pub(crate) fn replace_presentation(&mut self, model: QueryExecutionPresentation) {
-        self.model = model;
-    }
-
-    pub(crate) fn mark_cancelled(&mut self) {
-        self.model.state = QueryState::Failed("Cancelled by operator.".to_owned());
-    }
-}
-
-/// Query execution state carried to the visualization region.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) enum QueryState {
-    Running,
-    Ready(SpiralQueryResponse),
-    Failed(String),
-}
 
 /// Dataset navigation, transfer, and per-episode actions.
 #[component]
 pub(crate) fn EpisodesPanel(namespace: String) -> Element {
     let studio = studio();
+    let data = data_controller();
     let importing = use_signal(|| false);
     let mut adding_data = use_signal(|| false);
     let mut confirming_delete = use_signal(|| None::<String>);
@@ -128,10 +53,10 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
             .into_iter()
             .filter(|episode| episode.dataset_id() == dataset_id)
             .collect::<Vec<_>>();
-        let current = studio.selected_episode().read().to_owned();
+        let current = data.selected_episode();
         let next = episodes.reconciled_selection(current.as_deref());
         if current != next {
-            studio.selected_episode().set(next);
+            data.set_selected_episode(next);
         }
     });
 
@@ -153,13 +78,14 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
         .into_iter()
         .filter(|episode| episode.dataset_id() == dataset_id)
         .collect::<Vec<_>>();
-    let selected = studio.selected_episode().read().to_owned();
-    let replaying = studio.replay();
+    let selected = data.selected_episode();
     let catalog_loading = studio.episodes_loading();
     let catalog_loaded = studio.episodes_loaded();
     let catalog_error = studio.episode_catalog_error();
     let catalog_issues = studio.episode_catalog_issues();
     let import_dataset_id = dataset_id.clone();
+    let confirming_delete_id = confirming_delete.read().to_owned();
+    let deleting_episode_id = deleting_episode.read().to_owned();
 
     rsx! {
         section {
@@ -256,7 +182,7 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
                                 match outcome {
                                     Ok(result) => {
                                         if let Some(episode) = result.first_episode() {
-                                            studio.selected_episode().set(Some(episode.to_owned()));
+                                            data.set_selected_episode(Some(episode.to_owned()));
                                         }
                                         studio.report_success(format!(
                                             "Imported {} episodes into {} ({} rows).{}",
@@ -347,18 +273,19 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
                                 episode: episode.clone(),
                                 state: EpisodeRowState {
                                     selected: selected.as_deref() == Some(episode.id()),
-                                    playing: replaying.as_ref().is_some_and(|progress| progress.episode() == episode.id()),
-                                    confirming_delete: confirming_delete.read().as_deref() == Some(episode.id()),
-                                    deleting: deleting_episode.read().as_deref() == Some(episode.id()),
-                                    delete_disabled: deleting_episode.read().is_some(),
+                                    deletion: EpisodeDeletionState::for_episode(
+                                        episode.id(),
+                                        confirming_delete_id.as_deref(),
+                                        deleting_episode_id.as_deref(),
+                                    ),
                                 },
                                 actions: EpisodeRowActions {
                                     on_select: EventHandler::new(move |chosen: EpisodeSummary| {
                                         if deleting_episode.peek().is_none() {
                                             confirming_delete.set(None);
                                         }
-                                        if studio.selected_episode().peek().as_deref() != Some(chosen.id()) {
-                                            studio.selected_episode().set(Some(chosen.id().to_owned()));
+                                        if data.selected_episode_peek().as_deref() != Some(chosen.id()) {
+                                            data.set_selected_episode(Some(chosen.id().to_owned()));
                                         }
                                     }),
                                     on_delete: EventHandler::new(move |id: String| {
@@ -367,6 +294,7 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
                                                 deleting_episode.set(Some(id.clone()));
                                                 EpisodeDeletion {
                                                     studio,
+                                                    data,
                                                     id,
                                                     signals: EpisodeDeletionSignals {
                                                         deleting: deleting_episode,
@@ -846,10 +774,29 @@ pub(crate) fn QueryPanel(namespace: String, dataset_id: String, query_available:
 #[derive(Clone, Copy, PartialEq)]
 struct EpisodeRowState {
     selected: bool,
-    playing: bool,
-    confirming_delete: bool,
-    deleting: bool,
-    delete_disabled: bool,
+    deletion: EpisodeDeletionState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EpisodeDeletionState {
+    Available,
+    Confirming,
+    Deleting,
+    Disabled,
+}
+
+impl EpisodeDeletionState {
+    fn for_episode(episode: &str, confirming: Option<&str>, deleting: Option<&str>) -> Self {
+        if deleting == Some(episode) {
+            Self::Deleting
+        } else if confirming == Some(episode) {
+            Self::Confirming
+        } else if deleting.is_some() {
+            Self::Disabled
+        } else {
+            Self::Available
+        }
+    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -865,15 +812,6 @@ fn EpisodeRow(
     state: EpisodeRowState,
     actions: EpisodeRowActions,
 ) -> Element {
-    let episode_state = if state.playing {
-        "Replaying"
-    } else if episode.problem().is_some() {
-        "Incomplete"
-    } else if episode.discarded() {
-        "Discarded"
-    } else {
-        "Recorded"
-    };
     let delete_title = "Delete this episode from SpiralDB";
 
     rsx! {
@@ -891,12 +829,6 @@ fn EpisodeRow(
                     },
                     span { class: "flex items-baseline gap-1.5",
                         strong { class: "truncate font-mono text-[11px] font-medium text-ink", "{episode.id().short_episode_id()}" }
-                        span { class: if state.playing { "text-[10px] text-accent" } else { "text-[10px] text-ink-faint" }, "{episode_state}" }
-                        // No storage badge. SpiralDB is the only persistent path
-                        // this product has, so the chip was green on every row of
-                        // every catalog and could never have read otherwise; the
-                        // panel header already names the store once. A tag that
-                        // cannot report an exception is not reporting anything.
                         span { class: "ml-auto shrink-0 font-mono text-[10px] text-ink-soft", "{episode.duration_seconds().clock_label()}" }
                     }
                     span { class: "mt-0.5 flex min-w-0 items-center gap-1.5 text-[10px] text-ink-faint",
@@ -904,7 +836,7 @@ fn EpisodeRow(
                         span { class: "ml-auto shrink-0 font-mono", "{episode.frames()}f · {episode.sample_hz():.0}Hz" }
                     }
                 }
-                if state.confirming_delete {
+                if matches!(state.deletion, EpisodeDeletionState::Confirming | EpisodeDeletionState::Deleting) {
                     InlineConfirmation {
                         id: "delete-episode-confirmation-{episode.id()}",
                         class: "data-delete-confirmation",
@@ -913,7 +845,7 @@ fn EpisodeRow(
                                 "Delete episode {}? Its streams and video will be permanently removed from SpiralDB.",
                                 episode.id().short_episode_id(),
                             ),
-                            if state.deleting { "Deleting…" } else { "Delete episode" },
+                            if state.deletion == EpisodeDeletionState::Deleting { "Deleting…" } else { "Delete episode" },
                             "Keep episode",
                         ),
                         response: ConfirmationResponse::new(
@@ -926,7 +858,7 @@ fn EpisodeRow(
                         ),
                         dismissal: ConfirmationDismissal::new(
                             format!("delete-episode-{}", episode.id()),
-                        ).with_pending(state.deleting),
+                        ).with_pending(state.deletion == EpisodeDeletionState::Deleting),
                     }
                 } else {
                     div { class: "data-episode-actions",
@@ -935,7 +867,7 @@ fn EpisodeRow(
                             purpose: ActionPurpose::Delete,
                             variant: ActionVariant::Link,
                             class: "data-delete-action ui-hover-action",
-                            disabled: state.delete_disabled,
+                            disabled: state.deletion == EpisodeDeletionState::Disabled,
                             title: delete_title,
                             onclick: {
                                 let id = episode.id().to_owned();
@@ -946,237 +878,6 @@ fn EpisodeRow(
                     }
                 }
             }
-        }
-    }
-}
-
-#[component]
-pub(crate) fn QueryResultView() -> Element {
-    let controller = data_controller();
-    let tabs = controller.query_tabs();
-    let active_id = controller.active_query();
-    let active = active_id
-        .and_then(|id| tabs.iter().find(|tab| tab.id == id))
-        .or_else(|| tabs.last())
-        .cloned();
-    let tab_ids = tabs.iter().map(|tab| tab.id).collect::<Vec<_>>();
-
-    rsx! {
-        section { class: "flex h-full min-h-0 flex-col bg-surface", "aria-label": "Query results",
-            if !tabs.is_empty() {
-                div { class: "query-result-tabs", role: "tablist", "aria-label": "Query results",
-                    for tab in tabs.iter() {
-                        div {
-                            class: if active_id == Some(tab.id) { "query-result-tab-item query-result-tab-item-active ui-hover-action-host" } else { "query-result-tab-item ui-hover-action-host" },
-                            Action {
-                                id: "query-tab-{tab.id}",
-                                purpose: ActionPurpose::Select,
-                                variant: ActionVariant::Tab,
-                                class: if active_id == Some(tab.id) { "query-result-tab query-result-tab-active" } else { "query-result-tab" },
-                                role: "tab",
-                                tabindex: if active_id == Some(tab.id) { "0" } else { "-1" },
-                                aria_selected: active_id == Some(tab.id),
-                                aria_controls: "query-panel-{tab.id}",
-                                onclick: {
-                                    let id = tab.id;
-                                    move |_| controller.select_query(id)
-                                },
-                                auxiliary_handlers: ActionAuxiliaryHandlers::keydown({
-                                    let ids = tab_ids.clone();
-                                    let id = tab.id;
-                                    move |event: KeyboardEvent| {
-                                        let target = match event.key() {
-                                            Key::ArrowLeft => ids.neighbor(id, false),
-                                            Key::ArrowRight => ids.neighbor(id, true),
-                                            Key::Home => ids.first().copied(),
-                                            Key::End => ids.last().copied(),
-                                            Key::Delete => {
-                                                let target = ids.neighbor_after_close(id);
-                                                controller.close_query(id);
-                                                target
-                                            }
-                                            _ => return,
-                                        };
-                                        event.prevent_default();
-                                        if let Some(target) = target {
-                                            controller.select_query(target);
-                                            target.focus_after_render();
-                                        }
-                                    }
-                                }),
-                                span { class: tab.presentation().state().tab_state_class(), "aria-hidden": "true" }
-                                span { class: "query-result-tab-label", "{tab.title}" }
-                            }
-                            Action {
-                                purpose: ActionPurpose::Close,
-                                variant: ActionVariant::Icon,
-                                class: "query-result-tab-close ui-hover-action",
-                                aria_label: "Close {tab.title}",
-                                title: "Close {tab.title}",
-                                onclick: {
-                                    let ids = tab_ids.clone();
-                                    let id = tab.id;
-                                    move |_| {
-                                        let target = ids.neighbor_after_close(id);
-                                        controller.close_query(id);
-                                        if let Some(target) = target {
-                                            controller.select_query(target);
-                                            target.focus_after_render();
-                                        }
-                                    }
-                                },
-                                CloseIcon {}
-                            }
-                        }
-                    }
-                }
-            }
-            if let Some(tab) = active {
-                div {
-                    id: "query-panel-{tab.id}",
-                    class: "query-result-panel",
-                    role: "tabpanel",
-                    tabindex: "0",
-                    "aria-labelledby": "query-tab-{tab.id}",
-                    header { class: "query-result-meta",
-                        if let QueryState::Ready(result) = tab.presentation().state() {
-                            span { class: "query-result-count", role: "status",
-                                strong { "{result.rows().len()} rows" }
-                                span { "{result.elapsed_ms()} ms" }
-                            }
-                            if result.truncated() { span { class: "chip chip-caution", "Truncated" } }
-                        }
-                        span { class: "query-result-limit", "Limit · {tab.presentation().max_rows()} rows" }
-                        details {
-                            summary { "SQL" }
-                            code { "{tab.presentation().sql()}" }
-                        }
-                    }
-                    {tab.presentation().render()}
-                }
-            } else {
-                div { class: "flex flex-1 items-center justify-center p-6 text-center",
-                    div {
-                        strong { class: "block text-[12px] font-medium text-ink", "No query results" }
-                        p { class: "mt-1 max-w-[52ch] text-[11px] text-ink-faint",
-                            "Run a read-only query to inspect data."
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-trait QueryTabNavigation {
-    fn neighbor(&self, current: u64, forward: bool) -> Option<u64>;
-    fn neighbor_after_close(&self, current: u64) -> Option<u64>;
-}
-
-impl QueryTabNavigation for [u64] {
-    fn neighbor(&self, current: u64, forward: bool) -> Option<u64> {
-        let index = self.iter().position(|id| *id == current)?;
-        let offset = if forward {
-            (index + 1) % self.len()
-        } else {
-            (index + self.len() - 1) % self.len()
-        };
-        self.get(offset).copied()
-    }
-
-    fn neighbor_after_close(&self, current: u64) -> Option<u64> {
-        let index = self.iter().position(|id| *id == current)?;
-        index
-            .checked_sub(1)
-            .and_then(|index| self.get(index))
-            .or_else(|| self.get(index + 1))
-            .copied()
-    }
-}
-
-trait QueryTabPresentation {
-    fn focus_after_render(self);
-}
-
-impl QueryTabPresentation for u64 {
-    fn focus_after_render(self) {
-        BrowserFocus::after_render(format!("query-tab-{self}"));
-    }
-}
-
-#[component]
-fn QueryResultContent(model: QueryExecutionPresentation) -> Element {
-    rsx! {
-        match model.state() {
-                QueryState::Running => rsx! {
-                    div { class: "flex flex-1 items-center justify-center p-6 text-[11px] text-ink-soft", role: "status",
-                        span { class: "mr-2 h-1.5 w-1.5 rounded-full bg-accent" }
-                        "Running query…"
-                    }
-                },
-                QueryState::Failed(error) => rsx! {
-                    div { class: "m-3 rounded bg-danger-soft px-3 py-2 text-[11px] text-danger", role: "alert",
-                        strong { class: "block font-medium", "Query failed" }
-                        p { class: "mt-0.5", "{error}" }
-                    }
-                },
-                QueryState::Ready(result) if result.rows().is_empty() => rsx! {
-                    div { class: "flex flex-1 items-center justify-center p-6 text-center",
-                        div {
-                            strong { class: "block text-[12px] font-medium text-ink", "No rows" }
-                            p { class: "mt-1 text-[11px] text-ink-faint", "The query completed successfully." }
-                        }
-                    }
-                },
-                QueryState::Ready(result) => {
-                    let has_video_previews = result.needs_video_preview_column();
-                    let result_row_count = result.rows().len();
-                    rsx! {
-                        div { class: "query-result-ready",
-                            div { class: "query-result-table-scroll",
-                            table { class: "query-table", "aria-label": "Query results",
-                                thead { tr {
-                                    if has_video_previews {
-                                        th { class: "query-media-heading", scope: "col",
-                                            span { class: "query-column-name", "Preview" }
-                                            span { class: "query-column-type", "Video" }
-                                        }
-                                    }
-                                    for column in &result.columns() {
-                                        th { key: "{column.name()}", scope: "col",
-                                            title: column.presentation_title(),
-                                            span { class: "query-column-name", "{column.name()}" }
-                                            span { class: "query-column-type", "{column.presentation_kind()}" }
-                                        }
-                                    }
-                                } }
-                                tbody {
-                                    for (index, row) in result.rows().iter().enumerate() {
-                                        tr { key: "{index}",
-                                            if has_video_previews {
-                                                {row.render_video_cell(index)}
-                                            }
-                                            for column in &result.columns() {
-                                                {QueryCellContext::new(column, row, QueryRowPosition::new(index, result_row_count)).render()}
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            }
-                        }
-                    }
-                },
-            }
-    }
-}
-
-impl QueryState {
-    fn tab_state_class(&self) -> &'static str {
-        match self {
-            Self::Running => "query-tab-state query-tab-running",
-            Self::Ready(_) => "query-tab-state query-tab-ready",
-            Self::Failed(_) => "query-tab-state query-tab-failed",
         }
     }
 }
@@ -1346,13 +1047,13 @@ struct EpisodeDeletionSignals {
 
 struct EpisodeDeletion {
     studio: crate::shell::state::Studio,
+    data: crate::activities::data::state::DataController,
     id: String,
     signals: EpisodeDeletionSignals,
 }
 
 impl EpisodeDeletion {
     fn delete(self) {
-        let mut selected = self.studio.selected_episode();
         let path = format!("/api/episodes/{}", self.id);
         let deleted_id = self.id.clone();
         let mut deleting = self.signals.deleting;
@@ -1366,296 +1067,12 @@ impl EpisodeDeletion {
                     self.studio.remove_episode(&deleted_id);
                     // A slower deletion must not clear a newer choice made while the
                     // request was in flight.
-                    if selected.peek().as_deref() == Some(deleted_id.as_str()) {
-                        selected.set(None);
+                    if self.data.selected_episode_peek().as_deref() == Some(deleted_id.as_str()) {
+                        self.data.set_selected_episode(None);
                     }
                 }
                 result
             });
-    }
-}
-
-trait QueryColumnPresentation {
-    fn presentation_title(&self) -> String;
-    fn humanized_name(&self) -> String;
-    fn is_image(&self) -> bool;
-    fn presentation_kind(&self) -> &str;
-    fn image_src<'a>(&self, value: Option<&'a serde_json::Value>) -> Option<&'a str>;
-}
-
-impl QueryColumnPresentation for QueryColumn {
-    fn presentation_title(&self) -> String {
-        let mut title = self.data_type().to_owned();
-        if let Some(semantic_type) = &self.semantic_type() {
-            title.push_str(" · ");
-            title.push_str(semantic_type);
-        }
-        if self.nullable() {
-            title.push_str(" · nullable");
-        }
-        title
-    }
-
-    fn humanized_name(&self) -> String {
-        let words = self
-            .name()
-            .trim_end_matches("_preview")
-            .trim_end_matches("_image")
-            .split('_')
-            .filter(|word| !word.is_empty())
-            .collect::<Vec<_>>();
-        let mut label = words.join(" ");
-        if let Some(first) = label.get_mut(0..1) {
-            first.make_ascii_uppercase();
-        }
-        if label.is_empty() {
-            "Image".to_owned()
-        } else {
-            label
-        }
-    }
-
-    fn is_image(&self) -> bool {
-        matches!(
-            self.semantic_type(),
-            Some(IMAGE_EXTENSION_NAME | VARIABLE_TENSOR_EXTENSION_NAME)
-        )
-    }
-
-    fn presentation_kind(&self) -> &str {
-        match self.semantic_type() {
-            Some(IMAGE_EXTENSION_NAME | VARIABLE_TENSOR_EXTENSION_NAME) => "Image",
-            Some(ENCODED_MEDIA_EXTENSION_NAME) => "Video",
-            _ => self.data_type(),
-        }
-    }
-
-    fn image_src<'a>(&self, value: Option<&'a serde_json::Value>) -> Option<&'a str> {
-        self.is_image()
-            .then(|| value?.as_str())?
-            .filter(|value| value.starts_with("data:image/"))
-    }
-}
-
-struct QueryCellContext<'a> {
-    column: &'a QueryColumn,
-    row: &'a serde_json::Map<String, serde_json::Value>,
-    row_index: usize,
-    row_count: usize,
-}
-
-#[derive(Clone, Copy)]
-struct QueryRowPosition {
-    index: usize,
-    count: usize,
-}
-
-impl QueryRowPosition {
-    const fn new(index: usize, count: usize) -> Self {
-        Self { index, count }
-    }
-}
-
-impl<'a> QueryCellContext<'a> {
-    const fn new(
-        column: &'a QueryColumn,
-        row: &'a serde_json::Map<String, serde_json::Value>,
-        position: QueryRowPosition,
-    ) -> Self {
-        Self {
-            column,
-            row,
-            row_index: position.index,
-            row_count: position.count,
-        }
-    }
-
-    fn image_alt(&self) -> String {
-        let prefix = self
-            .column
-            .name()
-            .strip_suffix("_preview")
-            .or_else(|| self.column.name().strip_suffix("_image"));
-        let mut context = Vec::new();
-        for (label, field) in [
-            ("episode", "episode_id"),
-            ("stream", "stream_id"),
-            ("frame", "frame_index"),
-        ] {
-            let specific = prefix.map(|prefix| format!("{prefix}_{field}"));
-            let value = specific
-                .as_deref()
-                .and_then(|field| self.row.get(field))
-                .or_else(|| self.row.get(field))
-                .map(QueryJsonValue::cell_value)
-                .filter(|value| value != "null");
-            if let Some(value) = value {
-                context.push(format!("{label} {value}"));
-            }
-        }
-        let context = if context.is_empty() {
-            String::new()
-        } else {
-            format!(" for {}", context.join(", "))
-        };
-        format!(
-            "{}{}; result {} of {}",
-            self.column.humanized_name(),
-            context,
-            self.row_index + 1,
-            self.row_count
-        )
-    }
-
-    fn render(&self) -> Element {
-        let column = self.column;
-        let value = self.row.get(column.name());
-        if column.is_image() {
-            return rsx! {
-                td { key: "{column.name()}", class: "query-media-cell",
-                    if let Some(src) = column.image_src(value) {
-                        img {
-                            class: "query-image-preview",
-                            src,
-                            alt: self.image_alt(),
-                            loading: "lazy",
-                            decoding: "async",
-                            draggable: "false",
-                        }
-                    } else {
-                        span { class: "query-image-unavailable", "No image" }
-                    }
-                }
-            };
-        }
-        if column.semantic_type() == Some(ENCODED_MEDIA_EXTENSION_NAME) {
-            return self.row.render_video_cell(self.row_index);
-        }
-        let rendered = value.cell_text();
-        let display = if value.is_none_or(serde_json::Value::is_null) {
-            "—"
-        } else {
-            rendered.as_str()
-        };
-        rsx! {
-            td {
-                key: "{column.name()}",
-                class: value.presentation_class(),
-                title: "{rendered}",
-                "{display}"
-            }
-        }
-    }
-}
-
-trait QueryJsonValue {
-    fn cell_value(&self) -> String;
-}
-
-impl QueryJsonValue for serde_json::Value {
-    fn cell_value(&self) -> String {
-        match self {
-            serde_json::Value::String(value) => value.clone(),
-            value => value.to_string(),
-        }
-    }
-}
-
-trait QueryResultPresentation {
-    fn needs_video_preview_column(&self) -> bool;
-}
-
-impl QueryResultPresentation for SpiralQueryResponse {
-    fn needs_video_preview_column(&self) -> bool {
-        if self
-            .columns()
-            .iter()
-            .any(|column| column.semantic_type() == Some(ENCODED_MEDIA_EXTENSION_NAME))
-        {
-            return false;
-        }
-        let has = |name: &str| self.columns().iter().any(|column| column.name() == name);
-        has("episode_id")
-            && has("stream_id")
-            && has("segment_index")
-            && (has("camera_id")
-                || has("byte_size")
-                || self
-                    .columns()
-                    .iter()
-                    .any(|column| column.semantic_type() == Some(ENCODED_MEDIA_EXTENSION_NAME)))
-    }
-}
-
-trait OptionalQueryValue {
-    fn presentation_class(self) -> &'static str;
-    fn cell_text(self) -> String;
-}
-
-impl OptionalQueryValue for Option<&serde_json::Value> {
-    fn presentation_class(self) -> &'static str {
-        match self {
-            None | Some(serde_json::Value::Null) => "query-value-null",
-            Some(serde_json::Value::Number(_)) => "query-value-number",
-            Some(serde_json::Value::Bool(_)) => "query-value-boolean",
-            _ => "",
-        }
-    }
-
-    fn cell_text(self) -> String {
-        let rendered = match self {
-            None | Some(serde_json::Value::Null) => "null".to_owned(),
-            Some(serde_json::Value::String(value)) => value.clone(),
-            Some(value) => serde_json::to_string(value).unwrap_or_default(),
-        };
-        const LIMIT: usize = 240;
-        if rendered.chars().count() > LIMIT {
-            format!("{}…", rendered.chars().take(LIMIT).collect::<String>())
-        } else {
-            rendered
-        }
-    }
-}
-
-trait QueryRowPresentation {
-    fn video_preview(&self) -> Option<(String, String)>;
-    fn render_video_cell(&self, row_index: usize) -> Element;
-}
-
-impl QueryRowPresentation for serde_json::Map<String, serde_json::Value> {
-    fn render_video_cell(&self, row_index: usize) -> Element {
-        let Some((url, label)) = self.video_preview() else {
-            return rsx! {
-                td { class: "query-media-cell query-media-unavailable", title: "This row does not identify one exact video segment", "—" }
-            };
-        };
-        rsx! {
-            td { class: "query-media-cell",
-                video {
-                    class: "query-video-preview",
-                    src: url,
-                    preload: "none",
-                    controls: true,
-                    playsinline: true,
-                    "aria-label": "Query video {label}, row {row_index + 1}",
-                    "Your browser cannot preview this MP4 segment."
-                }
-            }
-        }
-    }
-
-    fn video_preview(&self) -> Option<(String, String)> {
-        let episode = self.get("episode_id")?.as_str()?;
-        let stream = self.get("stream_id")?.as_str()?;
-        let segment = self.get("segment_index")?.as_u64()?.try_into().ok()?;
-        let label = self
-            .get("camera_id")
-            .and_then(serde_json::Value::as_str)
-            .filter(|label| !label.is_empty())
-            .unwrap_or(stream)
-            .to_owned();
-        use crate::client::http::EpisodeApiPath;
-        Some((episode.video_url(stream, segment), label))
     }
 }
 
@@ -1676,10 +1093,6 @@ impl EpisodeIdPresentation for str {
 mod tests {
     use super::*;
     use spiral_robotics_api::recording::{EpisodeAssessment, EpisodeIdentity, EpisodeTimeline};
-
-    fn query_column(name: &str, semantic_type: Option<&str>) -> QueryColumn {
-        QueryColumn::new(name, "Utf8", false).with_semantic_type(semantic_type.map(str::to_owned))
-    }
 
     fn episode(id: &str, usable: bool, discarded: bool) -> EpisodeSummary {
         EpisodeSummary::new(
@@ -1714,6 +1127,26 @@ mod tests {
     }
 
     #[test]
+    fn episode_deletion_state_has_one_authoritative_variant_per_row() {
+        assert_eq!(
+            EpisodeDeletionState::for_episode("take-1", None, None),
+            EpisodeDeletionState::Available
+        );
+        assert_eq!(
+            EpisodeDeletionState::for_episode("take-1", Some("take-1"), None),
+            EpisodeDeletionState::Confirming
+        );
+        assert_eq!(
+            EpisodeDeletionState::for_episode("take-1", Some("take-1"), Some("take-1")),
+            EpisodeDeletionState::Deleting
+        );
+        assert_eq!(
+            EpisodeDeletionState::for_episode("take-2", Some("take-1"), Some("take-1")),
+            EpisodeDeletionState::Disabled
+        );
+    }
+
+    #[test]
     fn presets_are_scoped_to_the_current_dataset() {
         assert_eq!(
             QueryPreset::JointSamples.scoped_sql("training", "pick-place"),
@@ -1727,117 +1160,6 @@ mod tests {
             QueryPreset::VideoAssets.scoped_sql("training", "pick-place"),
             "SELECT v.episode_id, v.stream_id, v.segment_index, v.camera_id, v.byte_size, v.width, v.height, v.fps, v.frames FROM training.video_assets AS v JOIN training.episodes AS e ON e.episode_id = v.episode_id WHERE e.dataset_id = 'pick-place' ORDER BY v.episode_id DESC, v.stream_id, v.segment_index LIMIT 100"
         );
-    }
-
-    #[test]
-    fn image_previews_require_both_semantic_type_and_an_encoded_image() {
-        let value = serde_json::json!("data:image/jpeg;base64,preview");
-        let image = query_column("frame", Some(IMAGE_EXTENSION_NAME));
-        let plain = query_column("frame", None);
-        assert_eq!(
-            image.image_src(Some(&value)),
-            Some("data:image/jpeg;base64,preview")
-        );
-        assert_eq!(plain.image_src(Some(&value)), None);
-        assert_eq!(
-            image.image_src(Some(&serde_json::json!("not-an-image"))),
-            None
-        );
-    }
-
-    #[test]
-    fn image_semantics_render_as_inline_image_columns() {
-        let image = query_column("top_preview", Some(IMAGE_EXTENSION_NAME));
-        let tensor = query_column("wrist_preview", Some(VARIABLE_TENSOR_EXTENSION_NAME));
-        let plain = query_column("episode_id", None);
-
-        assert!(image.is_image());
-        assert!(tensor.is_image());
-        assert!(!plain.is_image());
-        assert_eq!(image.presentation_kind(), "Image");
-        assert_eq!(tensor.presentation_kind(), "Image");
-        assert_eq!(plain.presentation_kind(), "Utf8");
-    }
-
-    #[test]
-    fn inline_image_alt_uses_camera_specific_identity_and_row_position() {
-        let column = query_column("wrist_preview", Some(IMAGE_EXTENSION_NAME));
-        let row = serde_json::Map::from_iter([
-            ("episode_id".to_owned(), serde_json::json!("take-12")),
-            (
-                "wrist_stream_id".to_owned(),
-                serde_json::json!("follower/wrist"),
-            ),
-            ("wrist_frame_index".to_owned(), serde_json::json!(42)),
-        ]);
-        assert_eq!(
-            QueryCellContext::new(&column, &row, QueryRowPosition::new(2, 18)).image_alt(),
-            "Wrist for episode take-12, stream follower/wrist, frame 42; result 3 of 18"
-        );
-    }
-
-    #[test]
-    fn nulls_and_numbers_have_stable_table_treatment() {
-        assert_eq!(None.presentation_class(), "query-value-null");
-        assert_eq!(
-            Some(&serde_json::Value::Null).presentation_class(),
-            "query-value-null"
-        );
-        assert_eq!(
-            Some(&serde_json::json!(0.82)).presentation_class(),
-            "query-value-number"
-        );
-        assert_eq!(
-            Some(&serde_json::json!(true)).presentation_class(),
-            "query-value-boolean"
-        );
-    }
-
-    #[test]
-    fn video_rows_map_to_the_exact_range_streaming_endpoint() {
-        let columns = vec![
-            query_column("episode_id", None),
-            query_column("stream_id", None),
-            query_column("segment_index", None),
-            query_column("camera_id", None),
-        ];
-        let row = serde_json::Map::from_iter([
-            ("episode_id".to_owned(), serde_json::json!("take 1")),
-            ("stream_id".to_owned(), serde_json::json!("follower/camera")),
-            ("segment_index".to_owned(), serde_json::json!(2)),
-            ("camera_id".to_owned(), serde_json::json!("wrist")),
-        ]);
-        let result = SpiralQueryResponse::new(columns, vec![row.clone()], false).with_elapsed_ms(1);
-        assert!(result.needs_video_preview_column());
-        assert_eq!(
-            row.video_preview(),
-            Some((
-                "/api/episodes/take%201/videos/follower%2Fcamera?segment=2".to_owned(),
-                "wrist".to_owned(),
-            ))
-        );
-
-        let encoded = SpiralQueryResponse::new(
-            vec![
-                query_column("episode_id", None),
-                query_column("stream_id", None),
-                query_column("segment_index", None),
-                query_column("media", Some(ENCODED_MEDIA_EXTENSION_NAME)),
-            ],
-            vec![row],
-            false,
-        )
-        .with_elapsed_ms(result.elapsed_ms());
-        assert!(!encoded.needs_video_preview_column());
-    }
-
-    #[test]
-    fn result_tab_keyboard_navigation_wraps_and_close_prefers_the_left_neighbor() {
-        let ids = [3, 7, 9];
-        assert_eq!(ids.neighbor(3, false), Some(9));
-        assert_eq!(ids.neighbor(9, true), Some(3));
-        assert_eq!(ids.neighbor_after_close(7), Some(3));
-        assert_eq!(ids.neighbor_after_close(3), Some(7));
     }
 
     #[test]

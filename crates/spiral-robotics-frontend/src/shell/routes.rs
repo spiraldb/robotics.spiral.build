@@ -134,7 +134,7 @@ fn StudioShell() -> Element {
     }));
 
     let selected_dataset = studio.selected_dataset().read().to_owned();
-    use_data_controller(&configuration.dataset, &selected_dataset);
+    let data = use_data_controller(&configuration.dataset, &selected_dataset);
     use_workflow_controller();
     use_training_controller(&configuration.dataset, &selected_dataset);
     use_rollout_controller();
@@ -221,7 +221,7 @@ fn StudioShell() -> Element {
                 StatusBar {
                     mode: activity,
                     on_open_episode: move |episode| {
-                        studio.selected_episode().set(Some(episode));
+                        data.set_selected_episode(Some(episode));
                         navigator.push(StudioRoute::Data {});
                     },
                 }

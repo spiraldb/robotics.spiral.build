@@ -72,6 +72,24 @@ fn product_surfaces_cannot_bypass_the_interaction_language() {
 }
 
 #[test]
+fn completed_episode_selection_belongs_to_the_data_controller() {
+    let frontend = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let data = fs::read_to_string(frontend.join("src/activities/data/state.rs"))
+        .expect("Data controller source should be readable");
+    let studio = fs::read_to_string(frontend.join("src/shell/state.rs"))
+        .expect("Studio state source should be readable");
+
+    assert!(
+        data.contains("selected_episode: Signal<Option<String>>"),
+        "the Data controller must own completed-episode selection",
+    );
+    assert!(
+        !studio.contains("selected_episode"),
+        "completed-episode selection must not drift back into Studio-wide state",
+    );
+}
+
+#[test]
 fn legacy_action_styles_cannot_return() {
     let frontend = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let styles = [frontend.join("tailwind.css")];
@@ -319,7 +337,7 @@ fn workflow_assistant_receipts_results_and_run_states_are_explicit() {
             .join("spiral-robotics-backend/src/workflow/agent.rs"),
     )
     .expect("Workflow agent source should be readable");
-    let data = fs::read_to_string(frontend.join("src/activities/data/workbench.rs"))
+    let data = fs::read_to_string(frontend.join("src/activities/data/query_result.rs"))
         .expect("query result source should be readable");
     let styles = fs::read_to_string(frontend.join("tailwind.css"))
         .expect("Workflow styles should be readable");

@@ -12,6 +12,7 @@ use spiral_robotics_api::settings::{
     ConnectionTestResponse, DataSettings, SpiralConnectionUpdate, UpdateDataSettingsRequest,
 };
 
+use crate::activities::data::state::data_controller;
 use crate::client::http as api;
 use crate::settings::robots::RobotPanel;
 use crate::shell::notifications::MessageSource;
@@ -92,6 +93,7 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
     let mut project_transfer_error = use_signal(|| None::<String>);
     let mut initial_focus_set = use_signal(|| false);
     let studio = studio();
+    let data = data_controller();
 
     use_effect(move || {
         if !initial_focus_set() {
@@ -420,7 +422,7 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
                                     "application/vnd.spiral-robotics.project",
                                 )
                                 .await?;
-                                studio.selected_episode().set(None);
+                                data.set_selected_episode(None);
                                 studio.refresh_episode_catalog().await?;
                                 let settings = api::Http::send_json::<(), DataSettings>(
                                     Method::GET,
