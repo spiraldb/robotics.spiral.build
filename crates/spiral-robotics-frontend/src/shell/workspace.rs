@@ -1013,9 +1013,7 @@ impl Studio {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::http::{
-        EpisodeTimelineResponse, TimelineSample, VideoAssetMetadata,
-    };
+    use crate::client::http::{EpisodeTimelineResponse, TimelineSample, VideoAssetMetadata};
     use spiral_robotics_api::recording::{
         EpisodeAssessment, EpisodeIdentity, EpisodeSummary, EpisodeTimeline, EpisodeVideoFormat,
         EpisodeVideoIdentity, EpisodeVideoTimeline, ReplayIdentity, ReplayTimeline,

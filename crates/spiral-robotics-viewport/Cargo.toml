@@ -9,7 +9,6 @@ publish = false
 workspace = true
 
 [dependencies]
-spiral-robotics-core.workspace = true
 glam.workspace = true
 js-sys = "0.3"
 roxmltree.workspace = true

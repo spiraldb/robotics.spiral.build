@@ -1,4 +1,5 @@
 use super::*;
+use spiral_robotics_hardware::ModeSelection as HardwareModeSelection;
 use spiral_robotics_storage::ingestion::HuggingFaceDatasetDiscovery as _;
 
 struct CatalogReservation {
@@ -293,7 +294,7 @@ impl AppState {
 
     fn import_activity_is_busy(&self, hardware: &HardwareState) -> bool {
         hardware.telemetry().recording().is_some()
-            || !matches!(hardware.mode().selection(), ModeSelection::Idle)
+            || !matches!(hardware.mode().selection(), HardwareModeSelection::Idle)
             || self
                 .training()
                 .snapshot()
@@ -461,7 +462,6 @@ impl DataCatalogPort for DataHttpAdapter<'_> {
             .map(Into::into)
             .map_err(OperationError::External)
     }
-
 }
 
 pub(super) struct DataSettingsOverrides<'a> {
@@ -679,7 +679,7 @@ impl DestinationChangeContext {
     fn new(hardware: &HardwareState, current_robot_ids: Option<&BTreeSet<String>>) -> Self {
         Self {
             hardware_busy: hardware.telemetry().recording().is_some()
-                || !matches!(hardware.mode().selection(), ModeSelection::Idle),
+                || !matches!(hardware.mode().selection(), HardwareModeSelection::Idle),
             connected_robot_ids: hardware
                 .connections()
                 .iter()
@@ -785,13 +785,12 @@ impl AppState {
                 ));
             }
             let hardware = state.hardware().state();
-            let rollout_is_active =
-                RolloutActions::new(&super::training_rollout::RolloutHttpAdapter::new(
-                    state.rollout().clone(),
-                ))
-                .snapshot()
-                .phase()
-                .active();
+            let rollout_is_active = RolloutActions::new(
+                &super::training_rollout::RolloutHttpAdapter::new(state.rollout().clone()),
+            )
+            .snapshot()
+            .phase()
+            .active();
             let current_robot_ids = state.workspace().try_list().ok().map(|records| {
                 records
                     .into_iter()
@@ -856,11 +855,9 @@ impl AppState {
             .await?;
         Ok(Json(result.into()))
     }
-
 }
 
-impl AppState {
-}
+impl AppState {}
 
 #[cfg(test)]
 mod destination_change_tests {

@@ -707,10 +707,10 @@ pub(crate) fn studio() -> Studio {
 
 #[cfg(test)]
 mod tests {
+    use spiral_robotics_api::robots::MotorDirection;
     use spiral_robotics_api::robots::{
         ConnectionStatus, MotorSummary, RobotAvailability, RobotSummary,
     };
-    use spiral_robotics_core::calibration::MotorDirection;
 
     use super::{RobotSelection, Selection};
 

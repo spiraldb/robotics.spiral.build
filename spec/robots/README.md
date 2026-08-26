@@ -32,11 +32,16 @@ the intended source of truth.
 
 ## Implementation ownership
 
-- Pure arm, calibration, and operation policy:
-  [`spiral-robotics-core`](../../crates/spiral-robotics-core/)
-- Motor buses, Feetech adapters, physical device discovery, camera capture, and
-  fixed-rate control:
+- Browser/backend robot wire contract:
+  [`spiral-robotics-api`](../../crates/spiral-robotics-api/)
+- Motor definitions, encoder units, calibration and motor-health policy, native
+  telemetry, motor buses, Feetech adapters, physical device discovery, camera
+  capture, and fixed-rate control:
   [`spiral-robotics-hardware`](../../crates/spiral-robotics-hardware/)
+- Hardware values do not depend on API DTOs. The backend projects native
+  hardware state into the wire contract.
+- Display joint order, labels, pose values, and robot geometry:
+  [`spiral-robotics-viewport`](../../crates/spiral-robotics-viewport/)
 - Robot configuration codecs and capability policy:
   [`backend/robots`](../../crates/spiral-robotics-backend/src/robots/)
 - SpiralDB robot storage:

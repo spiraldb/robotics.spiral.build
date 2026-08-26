@@ -7,12 +7,14 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
+use crate::OperationError;
 use crate::clock::SystemTimeMillis;
 use crate::sync::MutexRecovery;
 use crate::workflow::service::{
     WorkflowCancellationAdmission, WorkflowRunAdmission, WorkflowSaveAdmission,
 };
 use spiral_robotics_api::relations::SpiralQueryResponse;
+use spiral_robotics_api::sql::{QualifiedRelation, WorkflowSql};
 use spiral_robotics_api::workflow::{
     CancelWorkflowRequest, RunWorkflowRequest, SaveWorkflowRequest, WorkflowCapabilities,
     WorkflowDocument, WorkflowNodeArtifacts, WorkflowNodeConfig, WorkflowNodeOutcome,
@@ -20,8 +22,6 @@ use spiral_robotics_api::workflow::{
     WorkflowRunExecution, WorkflowRunIdentity, WorkflowRunPhase, WorkflowRunSnapshot,
     WorkflowRunTiming, WorkflowSpec, WorkflowStateResponse,
 };
-use spiral_robotics_core::OperationError;
-use spiral_robotics_core::workflow::{QualifiedRelation, WorkflowSql};
 use tokio::sync::broadcast;
 
 use crate::workflow::model::{

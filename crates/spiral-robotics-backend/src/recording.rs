@@ -7,11 +7,11 @@
 
 use std::collections::BTreeMap;
 
-use spiral_robotics_core::identity::DatasetId;
+use spiral_robotics_api::identity::DatasetId;
 
+use crate::OperationError;
 use crate::data::catalog_lease::CatalogLeaseToken;
 use crate::data::episode_arms::RecordedArms;
-use spiral_robotics_core::OperationError;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct StartRecordingCommand {

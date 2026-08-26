@@ -70,9 +70,13 @@ Recorded inspection is defined by
   [`spiral-robotics-backend/src/recording.rs`](../../crates/spiral-robotics-backend/src/recording.rs)
 - Hardware capture:
   [`spiral-robotics-hardware`](../../crates/spiral-robotics-hardware/)
+  Hardware receives only a durable completion token after storage commits; it
+  does not duplicate the episode wire summary.
 - Episode and media adapters:
   [`backend/recording`](../../crates/spiral-robotics-backend/src/recording/)
 - Live recording UI:
   [`frontend/activities/live`](../../crates/spiral-robotics-frontend/src/activities/live/)
 - Episode invariants:
-  [`spiral-robotics-core/src/episode.rs`](../../crates/spiral-robotics-core/src/episode.rs)
+  [`spiral-robotics-api/src/recording.rs`](../../crates/spiral-robotics-api/src/recording.rs)
+  and
+  [`spiral-robotics-storage/src/episodes.rs`](../../crates/spiral-robotics-storage/src/episodes.rs)

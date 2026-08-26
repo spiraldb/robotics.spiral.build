@@ -2,9 +2,9 @@
 
 use std::collections::BTreeMap;
 
-use spiral_robotics_core::calibration::NormalizedPosition;
+use spiral_robotics_hardware::calibration::NormalizedPosition;
 
-use spiral_robotics_core::OperationError;
+use crate::OperationError;
 
 /// Consequential robot-control actions shared by every delivery mechanism.
 #[derive(Clone, Debug, PartialEq)]

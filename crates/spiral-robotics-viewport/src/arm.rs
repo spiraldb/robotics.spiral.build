@@ -1,15 +1,10 @@
-//! The SO-ARM101 joint model.
+//! SO-ARM101 values used to present telemetry in the viewport.
 //!
-//! Everything here is mapping-level knowledge: which motors an SO-101 has and
-//! how raw encoder counts become neutral joint-angle values. Rendering geometry,
-//! robot-description parsing, and pose construction live in the viewport.
+//! Hardware owns bus IDs, encoder units, calibration, and motion. This module
+//! owns only display order, labels, and the permissive pose assembled from
+//! already-calibrated telemetry.
 
 use std::collections::BTreeMap;
-
-use crate::calibration::{MotorDirection, MotorSpec};
-
-/// Encoder counts in one full turn of an STS3215 output shaft.
-pub const ENCODER_COUNTS_PER_TURN: i64 = 4096;
 
 /// The role a motor plays in the arm's kinematic chain.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -28,13 +23,11 @@ enum JointRole {
     Gripper,
 }
 
-/// One motor of a stock SO-ARM101 arm.
+/// One displayed joint of a stock SO-ARM101 arm.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct JointDefinition {
     /// Motor name as it appears in the robot's JSON file.
     name: &'static str,
-    /// Feetech bus ID assigned by the SO-101 build instructions.
-    bus_id: u32,
     /// Where the motor sits in the kinematic chain.
     role: JointRole,
     /// Human-readable name for the UI.
@@ -47,22 +40,6 @@ impl JointDefinition {
         SO101_JOINTS.iter().find(|joint| joint.name == name)
     }
 
-    /// Convert a signed encoder-count offset to degrees of shaft rotation.
-    pub fn degrees_from_encoder_counts(counts: i64) -> f64 {
-        counts as f64 * 360.0 / ENCODER_COUNTS_PER_TURN as f64
-    }
-
-    /// Convert degrees of shaft rotation to a signed encoder-count offset.
-    #[cfg(test)]
-    fn encoder_counts_from_degrees(degrees: f64) -> Option<i64> {
-        let counts = (degrees * ENCODER_COUNTS_PER_TURN as f64 / 360.0).round();
-        // `i64::MAX as f64` rounds up to 2^63, so the positive bound must be
-        // exclusive. The negative bound -2^63 is exactly representable.
-        const I64_EXCLUSIVE_UPPER: f64 = 9_223_372_036_854_775_808.0;
-        (counts.is_finite() && counts >= i64::MIN as f64 && counts < I64_EXCLUSIVE_UPPER)
-            .then_some(counts as i64)
-    }
-
     pub const fn name(self) -> &'static str {
         self.name
     }
@@ -72,63 +49,39 @@ impl JointDefinition {
     }
 }
 
-/// The Feetech servo model used throughout a stock SO-101 arm.
-const SO101_MOTOR_MODEL: &str = "sts3215";
-
-/// The motors of a stock SO-ARM101, in bus-ID order.
+/// The joints of a stock SO-ARM101 in the Studio's canonical display order.
 pub const SO101_JOINTS: [JointDefinition; 6] = [
     JointDefinition {
         name: "shoulder_pan",
-        bus_id: 1,
         role: JointRole::Pan,
         label: "Shoulder pan",
     },
     JointDefinition {
         name: "shoulder_lift",
-        bus_id: 2,
         role: JointRole::Lift,
         label: "Shoulder lift",
     },
     JointDefinition {
         name: "elbow_flex",
-        bus_id: 3,
         role: JointRole::Elbow,
         label: "Elbow flex",
     },
     JointDefinition {
         name: "wrist_flex",
-        bus_id: 4,
         role: JointRole::WristFlex,
         label: "Wrist flex",
     },
     JointDefinition {
         name: "wrist_roll",
-        bus_id: 5,
         role: JointRole::WristRoll,
         label: "Wrist roll",
     },
     JointDefinition {
         name: "gripper",
-        bus_id: 6,
         role: JointRole::Gripper,
         label: "Gripper",
     },
 ];
-
-impl MotorSpec {
-    /// Build the default motor map for a new SO-101 robot instance.
-    pub fn so101_arm() -> BTreeMap<String, Self> {
-        SO101_JOINTS
-            .iter()
-            .map(|joint| {
-                (
-                    joint.name.to_owned(),
-                    Self::new(joint.bus_id, MotorDirection::Normal).with_model(SO101_MOTOR_MODEL),
-                )
-            })
-            .collect()
-    }
-}
 
 /// Joint angles relative to each joint's calibrated center.
 ///
@@ -212,7 +165,7 @@ impl JointAngles {
     ///
     /// Non-finite input becomes half-open. This permissive observation mapping is
     /// not authorization to substitute a motor command; command normalization
-    /// uses the strict calibration APIs instead.
+    /// uses the hardware-owned calibration policy instead.
     pub fn with_gripper_normalized(mut self, normalized: f64) -> Self {
         self.gripper_opening = if normalized.is_finite() {
             (1.0 - normalized) / 2.0
@@ -257,50 +210,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stock_joints_are_unique_and_bus_ordered() {
-        let mut ids = SO101_JOINTS
+    fn stock_joint_names_are_unique() {
+        let mut names = SO101_JOINTS
             .iter()
-            .map(|joint| joint.bus_id)
+            .map(|joint| joint.name)
             .collect::<Vec<_>>();
-        let sorted = ids.clone();
-        ids.sort_unstable();
-        ids.dedup();
-        assert_eq!(ids.len(), SO101_JOINTS.len(), "motor IDs must be unique");
-        assert_eq!(ids, sorted, "joints must be listed in bus-ID order");
-
-        let specs = MotorSpec::so101_arm();
-        assert_eq!(specs.len(), SO101_JOINTS.len());
-        assert_eq!(specs["gripper"].id(), 6);
-        assert_eq!(specs["gripper"].model(), Some(SO101_MOTOR_MODEL));
-    }
-
-    #[test]
-    fn count_and_degree_conversions_round_trip() {
-        assert_eq!(
-            JointDefinition::degrees_from_encoder_counts(ENCODER_COUNTS_PER_TURN),
-            360.0
-        );
-        assert_eq!(JointDefinition::degrees_from_encoder_counts(-1024), -90.0);
-        assert_eq!(
-            JointDefinition::encoder_counts_from_degrees(90.0),
-            Some(1024)
-        );
-        assert_eq!(
-            JointDefinition::encoder_counts_from_degrees(-360.0),
-            Some(-ENCODER_COUNTS_PER_TURN)
-        );
-        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, f64::MAX] {
-            assert_eq!(JointDefinition::encoder_counts_from_degrees(invalid), None);
-        }
-
-        for counts in [-2048, -7, 0, 3, 2048] {
-            assert_eq!(
-                JointDefinition::encoder_counts_from_degrees(
-                    JointDefinition::degrees_from_encoder_counts(counts)
-                ),
-                Some(counts)
-            );
-        }
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), SO101_JOINTS.len());
     }
 
     #[test]

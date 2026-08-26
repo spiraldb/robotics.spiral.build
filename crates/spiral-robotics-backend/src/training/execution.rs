@@ -4,12 +4,12 @@
 //! remote job. This module owns effect ordering and compensation around those
 //! boundaries; runtime execution and checkpoint writes belong to the worker.
 
+use crate::OperationError;
 use spiral_robotics_api::training::{
     StartTrainingRequest, TrainingReadiness, TrainingRun, TrainingRunHistory,
     TrainingRunIdentity as StoredTrainingRunIdentity, TrainingRunLifecycle, TrainingRunPhase,
     TrainingSource,
 };
-use spiral_robotics_core::OperationError;
 
 const STARTING_MESSAGE: &str = "Opening SpiralDB and starting the remote training job…";
 const STOPPING_MESSAGE: &str = "Finishing the current Spiral read or optimizer step…";

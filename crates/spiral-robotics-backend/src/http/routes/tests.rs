@@ -359,4 +359,3 @@ fn data_presenters_round_trip_transport_values_without_leaking_them_to_policy() 
         query
     );
 }
-

@@ -4,9 +4,10 @@ use crate::components::interaction::{
 };
 use dioxus::prelude::*;
 use gloo_net::http::Method;
-use spiral_robotics_api::robots::{CalibrationProgress, CalibrationReapplyResponse, RobotSummary};
-use spiral_robotics_core::arm;
-use spiral_robotics_core::calibration::MINIMUM_CALIBRATION_TRAVEL;
+use spiral_robotics_api::robots::{
+    CalibrationJointProgress, CalibrationProgress, CalibrationReapplyResponse, RobotSummary,
+};
+use spiral_robotics_viewport as arm;
 
 use crate::client::http as api;
 use crate::shell::notifications::MessageSource;
@@ -215,10 +216,10 @@ pub(super) fn CalibrationSection(
                         span { class: "w-16 shrink-0 truncate text-[11px]",
                             {arm::JointDefinition::so101(joint.name()).map_or_else(|| joint.name().to_owned(), |known| known.label().to_owned())}
                         }
-                        SweepBar { min: joint.min(), position: joint.position(), max: joint.max() }
+                        SweepBar { joint: joint.clone() }
                         span {
                             class: "w-3 shrink-0 text-center font-mono text-[10px]",
-                            style: if joint.span() >= MINIMUM_CALIBRATION_TRAVEL { "color: var(--tone-good)" } else { "color: var(--tone-line)" },
+                            style: if joint.ready() { "color: var(--tone-good)" } else { "color: var(--tone-line)" },
                             "✓"
                         }
                     }
@@ -252,16 +253,16 @@ impl CalibrationReapplyPresentation for CalibrationReapplyResponse {
 }
 
 #[component]
-fn SweepBar(min: i64, position: i64, max: i64) -> Element {
-    let full = arm::ENCODER_COUNTS_PER_TURN as f64;
+fn SweepBar(joint: CalibrationJointProgress) -> Element {
+    let full = joint.encoder_counts_per_turn().max(1) as f64;
     let percent = |value: i64| (value as f64 / full * 100.0).clamp(0.0, 100.0);
-    let left = percent(min);
-    let width = (percent(max) - left).max(0.5);
+    let left = percent(joint.min());
+    let width = (percent(joint.max()) - left).max(0.5);
 
     rsx! {
         div { class: "relative h-1 flex-1 rounded-full bg-line",
             div { class: "absolute inset-y-0 rounded-full bg-ink-faint", style: "left: {left}%; width: {width}%" }
-            div { class: "absolute top-1/2 h-2.5 w-0.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-ink", style: "left: {percent(position)}%" }
+            div { class: "absolute top-1/2 h-2.5 w-0.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-ink", style: "left: {percent(joint.position())}%" }
         }
     }
 }

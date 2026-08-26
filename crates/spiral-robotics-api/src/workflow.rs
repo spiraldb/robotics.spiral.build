@@ -6,9 +6,11 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+use crate::sql::{
+    QualifiedRelation, ReadOnlyQuery, ReadOnlyQueryMode, UnquotedSqlIdentifier, WorkflowNodeId,
+    WorkflowSql,
+};
 use serde::{Deserialize, Serialize};
-use spiral_robotics_core::query::{ReadOnlyQuery, ReadOnlyQueryMode, UnquotedSqlIdentifier};
-use spiral_robotics_core::workflow::{QualifiedRelation, WorkflowNodeId, WorkflowSql};
 
 use crate::relations::{QueryColumn, SpiralQueryResponse};
 
@@ -186,7 +188,7 @@ impl WorkflowFeatureApplicability {
     pub fn derived_cache_relation(source_relation: &str) -> String {
         format!(
             "workflow.features_{}",
-            spiral_robotics_core::identity::SqlNameComponent::from(source_relation).as_str()
+            crate::identity::SqlNameComponent::from(source_relation).as_str()
         )
     }
 
@@ -2752,7 +2754,7 @@ mod tests {
             WorkflowFeatureApplicability::derived_cache_relation("pick/place"),
             format!(
                 "workflow.features_{}",
-                spiral_robotics_core::identity::SqlNameComponent::from("pick/place").as_str()
+                crate::identity::SqlNameComponent::from("pick/place").as_str()
             )
         );
     }

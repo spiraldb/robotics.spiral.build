@@ -21,15 +21,13 @@ use dioxus::prelude::*;
 use dioxus_elements::geometry::WheelDelta;
 use dioxus_elements::input_data::MouseButton;
 use spiral_robotics_api::robots::{MotorCondition, RobotSummary};
-use spiral_robotics_core::arm::{JointAngles, JointDefinition};
-#[cfg(test)]
-use spiral_robotics_core::calibration::MotorDirection;
 use spiral_robotics_viewport::glam::Vec3;
 use spiral_robotics_viewport::{
     ArmPlacement, BENCH_SPACING, BenchPosition, Camera, CameraAttachment, CameraMount, Condition,
     Drag, DragUpdate, Gesture, Interaction, PickRequest, RobotEntity, RobotScene, SceneAppearance,
     SceneFrame, Viewport as Bench,
 };
+use spiral_robotics_viewport::{JointAngles, JointDefinition};
 #[cfg(feature = "web")]
 use wasm_bindgen::JsCast;
 #[cfg(feature = "web")]
@@ -617,26 +615,15 @@ impl SceneBuildRequest<'_> {
     }
 }
 
-/// Every motor's condition, judged once per frame against its own limits.
+/// Every hardware-owned motor verdict in the current frame.
 impl crate::shell::state::Studio {
     fn motor_conditions(self) -> BTreeMap<(String, String), Condition> {
-        let snapshot_signal = self.snapshot();
         let telemetry_signal = self.telemetry();
-        let snapshot = snapshot_signal.read();
         let telemetry = telemetry_signal.read();
         let mut conditions = BTreeMap::new();
         for robot in telemetry.robots() {
-            let Some(summary) = snapshot.robots().iter().find(|arm| arm.id() == robot.id()) else {
-                continue;
-            };
             for joint in robot.joints() {
-                let limits = summary
-                    .motors()
-                    .iter()
-                    .find(|motor| motor.name() == joint.name())
-                    .map(|motor| motor.limits())
-                    .unwrap_or_default();
-                let condition = match joint.condition(&limits) {
+                let condition = match joint.condition() {
                     MotorCondition::Nominal => Condition::Nominal,
                     MotorCondition::Caution => Condition::Caution,
                     MotorCondition::Fault => Condition::Fault,
@@ -769,7 +756,7 @@ impl crate::shell::state::Studio {
                 let historical_angles = source
                     .sample()
                     .and_then(|sample| sample.arms().iter().find(|sample| sample.arm() == arm.id()))
-                    .and_then(|sample| arm.historical_angles(sample));
+                    .and_then(HistoricalRobotPose::historical_angles);
                 let telemetry = source
                     .is_live()
                     .then(|| self.robot_telemetry(arm.id()).filter(|_| arm.calibrated()))
@@ -800,31 +787,19 @@ impl crate::shell::state::Studio {
     }
 }
 
-/// Map a stored normalized pose through the arm's current calibration for a
-/// faithful scene. This is preview-only: physical seek independently repeats
-/// the same calibration validation on the server before it can move anything.
+/// Render the current-calibration degrees projected by the backend.
 trait HistoricalRobotPose {
-    fn historical_angles(&self, sample: &TimelineArmSample) -> Option<JointAngles>;
+    fn historical_angles(&self) -> Option<JointAngles>;
 }
 
-impl HistoricalRobotPose for RobotSummary {
-    fn historical_angles(&self, sample: &TimelineArmSample) -> Option<JointAngles> {
-        let degrees = sample
-            .normalized()
+impl HistoricalRobotPose for TimelineArmSample {
+    fn historical_angles(&self) -> Option<JointAngles> {
+        let degrees = self
+            .degrees()
             .iter()
-            .filter_map(|(joint, normalized)| {
-                let normalized = (*normalized)?;
-                let calibration = self
-                    .motors()
-                    .iter()
-                    .find(|motor| motor.name() == *joint)?
-                    .calibration()?;
-                let raw = calibration.denormalize(normalized).ok()?;
-                let degrees = calibration.degrees_from_center(raw);
-                Some((joint.clone(), degrees))
-            })
+            .filter_map(|(joint, degrees)| Some((joint.clone(), (*degrees)?)))
             .collect::<BTreeMap<_, _>>();
-        let gripper = sample
+        let gripper = self
             .normalized()
             .get("gripper")
             .copied()
@@ -1056,59 +1031,27 @@ impl Drop for WindowListener {
 
 #[cfg(test)]
 mod tests {
-    use spiral_robotics_api::robots::{ConnectionStatus, MotorSummary, RobotAvailability};
-    use spiral_robotics_core::calibration::{MotorCalibration, MotorReading};
-
     use super::*;
 
-    fn robot(calibration: MotorCalibration) -> RobotSummary {
-        RobotSummary::new(
-            "follower",
-            Some("so101_follower".to_owned()),
-            RobotAvailability::new(true, None, ConnectionStatus::default()),
-        )
-        .with_motors(vec![
-            MotorSummary::new("shoulder_pan", 1, calibration.direction())
-                .with_calibration(Some(calibration)),
-        ])
-    }
-
     #[test]
-    fn historical_normalized_pose_uses_the_current_arm_calibration() {
-        let calibration = MotorCalibration::new(
-            1,
-            MotorDirection::Normal,
-            MotorReading::new(2_000, 1_000, 3_000),
-        )
-        .unwrap();
+    fn historical_pose_uses_backend_projected_degrees() {
         let sample = TimelineArmSample::new(
             "follower",
             BTreeMap::from([("shoulder_pan".to_owned(), Some(1.0))]),
-            BTreeMap::new(),
+            BTreeMap::from([("shoulder_pan".to_owned(), Some(90.0))]),
         );
 
-        let pose = robot(calibration)
-            .historical_angles(&sample)
-            .expect("historical pose");
-        assert_eq!(
-            pose.pan_degrees(),
-            JointDefinition::degrees_from_encoder_counts(1_000)
-        );
+        let pose = sample.historical_angles().expect("historical pose");
+        assert_eq!(pose.pan_degrees(), 90.0);
     }
 
     #[test]
-    fn historical_pose_does_not_guess_without_calibrated_values() {
-        let calibration = MotorCalibration::new(
-            1,
-            MotorDirection::Normal,
-            MotorReading::new(2_000, 1_000, 3_000),
-        )
-        .unwrap();
+    fn historical_pose_does_not_guess_without_projected_degrees() {
         let sample = TimelineArmSample::new(
             "follower",
             BTreeMap::from([("shoulder_pan".to_owned(), None)]),
-            BTreeMap::new(),
+            BTreeMap::from([("shoulder_pan".to_owned(), None)]),
         );
-        assert!(robot(calibration).historical_angles(&sample).is_none());
+        assert!(sample.historical_angles().is_none());
     }
 }

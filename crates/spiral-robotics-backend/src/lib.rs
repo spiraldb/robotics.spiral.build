@@ -9,6 +9,7 @@
 mod adapters;
 mod clock;
 mod data;
+mod error;
 mod http;
 mod recording;
 mod robotics;
@@ -18,4 +19,5 @@ mod sync;
 mod training;
 mod workflow;
 
+pub(crate) use error::OperationError;
 pub use http::server::StudioServer;

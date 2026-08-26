@@ -1,5 +1,7 @@
 use super::*;
+use crate::adapters::hardware::HardwareApiProjection as _;
 use crate::data::catalog_lease::{CatalogLeaseOwner, CatalogLeaseToken, CatalogMutationLease};
+use spiral_robotics_hardware::ModeSelection as HardwareModeSelection;
 use spiral_robotics_storage::episodes::ReappliedEpisodePositions;
 
 /// Camera discovery and preview do not depend on SpiralDB, so they remain
@@ -315,8 +317,12 @@ impl RobotConnectionPort for RobotHttpAdapter<'_> {
         self.state
             .hardware()
             .connect(
-                RobotSpec::new(id, PortSettings::new(port.path(), port.baud_rate()), motors)
-                    .with_calibration(calibration),
+                RobotSpec::new(
+                    id,
+                    spiral_robotics_hardware::PortSettings::new(port.path(), port.baud_rate()),
+                    motors,
+                )
+                .with_calibration(calibration),
             )
             .await
             .map_err(OperationError::conflict)
@@ -383,7 +389,7 @@ impl CalibrationHistoryPort for CalibrationHistoryHttpAdapter<'_> {
                 .as_ref()
                 .map(|recording| recording.episode().to_owned()),
             match &hardware.mode().selection() {
-                ModeSelection::Replay { episode, .. } => Some(episode.clone()),
+                HardwareModeSelection::Replay { episode, .. } => Some(episode.clone()),
                 _ => None,
             },
             self.state.training().snapshot().runs().iter().any(|run| {
@@ -489,7 +495,9 @@ impl AppState {
         State(state): State<Self>,
     ) -> Result<Json<Vec<SerialPortSummary>>, Failure> {
         Ok(Json(
-            SerialPortQueryAdapter { state: &state }.serial_ports().await?,
+            SerialPortQueryAdapter { state: &state }
+                .serial_ports()
+                .await?,
         ))
     }
 
@@ -553,7 +561,6 @@ impl AppState {
             .body(Body::from_stream(frames))
             .expect("a valid MJPEG response"))
     }
-
 }
 
 impl Frame {
@@ -585,7 +592,7 @@ impl AppState {
                         .get(robot.id())
                         .cloned()
                         .unwrap_or_default();
-                    adapter.summary(robot.id(), connection).ok()
+                    adapter.summary(robot.id(), connection.to_api()).ok()
                 })
                 .collect(),
         )
@@ -599,7 +606,10 @@ impl AppState {
             .get(robot.id())
             .cloned()
             .unwrap_or_default();
-        Ok(self.workspace().get(robot.id())?.summary(connection))
+        Ok(self
+            .workspace()
+            .get(robot.id())?
+            .summary(connection.to_api()))
     }
 
     async fn create_robot(
@@ -653,7 +663,12 @@ impl AppState {
             .get(robot.id())
             .cloned()
             .unwrap_or_default();
-        Ok(Json(state.workspace().get(robot.id())?.summary(connection)))
+        Ok(Json(
+            state
+                .workspace()
+                .get(robot.id())?
+                .summary(connection.to_api()),
+        ))
     }
 
     async fn update_robot(
@@ -849,7 +864,7 @@ impl AppState {
             .get(&id)
             .cloned()
             .unwrap_or_default();
-        Ok(Json(record.summary(connection)))
+        Ok(Json(record.summary(connection.to_api())))
     }
 
     async fn cancel_calibration(

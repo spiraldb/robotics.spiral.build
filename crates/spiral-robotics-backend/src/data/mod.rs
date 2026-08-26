@@ -8,10 +8,10 @@ pub(crate) mod seek;
 
 use std::collections::BTreeMap;
 
-use spiral_robotics_core::query::{ReadOnlyQuery, ReadOnlyQueryMode};
+use spiral_robotics_api::sql::{ReadOnlyQuery, ReadOnlyQueryMode};
 use url::Url;
 
-use spiral_robotics_core::OperationError;
+use crate::OperationError;
 
 const MAX_QUERY_ROWS: usize = 1_000;
 
@@ -490,7 +490,6 @@ mod tests {
                 Err,
             )
         }
-
     }
 
     fn settings_view(project: &str) -> DataSettingsSnapshot {
@@ -608,5 +607,4 @@ mod tests {
         ));
         assert!(data.events.lock().unwrap().is_empty());
     }
-
 }

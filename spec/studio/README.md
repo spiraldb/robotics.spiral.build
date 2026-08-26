@@ -103,20 +103,25 @@ allowing visualization panels to be arranged spatially.
   product launcher and assets; `frontend` owns the browser interface and its
   interaction components; `backend` is organized by Data, Recording, Robots,
   Training, Rollout, and Workflow capabilities; `api` is the frontend/backend
-  wire contract; `storage` owns ADBC, schemas, SQL, ingestion, and transfer;
-  and `hardware` owns physical devices and fixed-rate control. The retired
+  wire contract and shared SQL validation; `storage` owns ADBC, schemas, SQL
+  execution, ingestion, and transfer; `viewport` owns presentation joint maps,
+  pose values, and robot geometry; and `hardware` owns motor definitions,
+  physical devices, native health verdicts, and fixed-rate control. The retired
+  `spiral-robotics-arm`, `spiral-robotics-sql`,
   `spiral-robotics-studio-application`, `spiral-robotics-contracts`,
   `spiral-robotics-studio-backend`, `spiral-robotics-training-http`,
-  `spiral-robotics-boundary-build`, and `spiral-robotics-ui` crates must not
-  return. A generic root `contracts` directory must not combine unrelated
-  compatibility metadata: storage owns its schema version and training owns
-  its runtime protocol version and supported storage-schema range.
+  `spiral-robotics-boundary-build`, `spiral-robotics-core`, and
+  `spiral-robotics-ui` crates must not return. A generic root `contracts`
+  directory must not combine unrelated compatibility metadata: storage owns
+  its schema version and training owns its runtime protocol version and
+  supported storage-schema range.
 - **STUDIO-055** Dependencies must reflect trust boundaries: frontend depends
-  on API but never backend, storage, or hardware; backend composes API, storage,
-  and hardware; storage never depends on frontend or backend; and the Studio
-  launcher composes frontend with backend only for the native server build.
-  Cross-process work must use versioned neutral contracts rather than importing
-  another process's implementation.
+  on API and viewport but never backend, storage, or hardware; hardware never
+  depends on API; backend composes API, storage, and hardware; storage never
+  depends on frontend or backend; and the Studio launcher composes
+  frontend with backend only for the native server build. Cross-process work
+  must use versioned neutral contracts rather than importing another process's
+  implementation.
 - **STUDIO-056** Settings must be an in-shell utility panel rather than a modal.
   It must retain its section navigation, fixed action footer, the activity rail,
   and the status bar. A scope-wide destructive

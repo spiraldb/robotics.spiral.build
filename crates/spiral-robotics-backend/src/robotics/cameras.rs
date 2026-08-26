@@ -259,7 +259,10 @@ impl CameraManager {
     /// enumerate and their streams still open, but no frame ever arrives, so
     /// without this the operator would see an empty preview and no reason.
     pub(crate) fn note_issue(&self, message: impl Into<String>) {
-        self.state.recover_lock().persistent_issues.push(message.into());
+        self.state
+            .recover_lock()
+            .persistent_issues
+            .push(message.into());
     }
 
     /// Non-fatal problems worth showing the operator.

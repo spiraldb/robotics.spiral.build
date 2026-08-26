@@ -4,9 +4,11 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
+use crate::adapters::hardware::HardwareApiProjection as _;
 use crate::sync::MutexRecovery;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::OperationError;
 use arrow_array::{
     ArrayRef, Int64Array, LargeStringArray, RecordBatch, StringArray, StringViewArray,
 };
@@ -15,8 +17,7 @@ use serde_json::{Map, Value};
 use spiral_robotics_api::robots::{
     CameraBinding, ConnectionStatus, MotorLimits, MotorSummary, PortSettings, RobotSummary,
 };
-use spiral_robotics_core::OperationError;
-use spiral_robotics_core::calibration::{Calibration, MotorSpec, MotorSpecifications};
+use spiral_robotics_hardware::calibration::{Calibration, MotorSpec, MotorSpecifications};
 use spiral_robotics_storage::{
     ProjectStore, ROBOT_CONFIGURATION_COLUMN, ROBOT_IDENTIFIER_COLUMN, ROBOT_UPDATED_MILLIS_COLUMN,
     StorageSchema,
@@ -185,7 +186,6 @@ impl RobotRecord {
     pub(crate) fn id(&self) -> &str {
         &self.id
     }
-
 }
 
 impl RobotRecord {
@@ -289,12 +289,13 @@ impl RobotRecord {
         let mut motors = motors
             .into_iter()
             .map(|(name, spec)| {
-                MotorSummary::new(name.clone(), spec.id(), spec.direction())
+                MotorSummary::new(name.clone(), spec.id(), spec.direction().to_api())
                     .with_model(spec.model().map(str::to_owned))
                     .with_calibration(
                         calibration
                             .as_ref()
-                            .and_then(|calibration| calibration.motors().get(&name).copied()),
+                            .and_then(|calibration| calibration.motors().get(&name).copied())
+                            .map(|calibration| calibration.to_api()),
                     )
                     .with_limits(MotorLimits::default())
             })
@@ -382,7 +383,7 @@ impl RobotWorkspace {
         root.insert(
             "motors".to_owned(),
             RobotConfig::default()
-                .encode_motor_specs(&spiral_robotics_core::calibration::MotorSpec::so101_arm())
+                .encode_motor_specs(&spiral_robotics_hardware::calibration::MotorSpec::so101_arm())
                 .expect("stock motor specs encode"),
         );
         self.persist(id, RobotConfig::from_value(Value::Object(root))?)

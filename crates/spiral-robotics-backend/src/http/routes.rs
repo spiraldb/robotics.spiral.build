@@ -32,15 +32,14 @@ use spiral_robotics_api::recording::{
     EpisodeArmOptionalChannels, EpisodeArmScalarSamples, EpisodeAssessment, EpisodeCatalogResponse,
     EpisodeIdentity, EpisodeInspectionArm, EpisodeInspectionSnapshot, EpisodeOptionalFrameMatrix,
     EpisodeSummary, EpisodeTimeline, EpisodeVideoAssetMetadata, EpisodeVideoFormat,
-    EpisodeVideoIdentity, EpisodeVideoTimeline, SetRecordingPausedRequest,
-    SetReplayPausedRequest, StartRecordingRequest, StartReplayRequest,
-    StopRecordingRequest,
+    EpisodeVideoIdentity, EpisodeVideoTimeline, SetRecordingPausedRequest, SetReplayPausedRequest,
+    StartRecordingRequest, StartReplayRequest, StopRecordingRequest,
 };
 use spiral_robotics_api::relations::{SpiralQueryRequest, SpiralQueryResponse};
 use spiral_robotics_api::robots::{
-    CalibrationReapplyResponse, CameraStatus,
-    ConnectionStatus, CreateRobotRequest, GoalRequest, IdentifyPortRequest, IdentifyPortResponse,
-    ModeSelection, PortSettings, RobotSummary, SerialPortSummary, UpdateRobotRequest,
+    CalibrationReapplyResponse, CameraStatus, ConnectionStatus, CreateRobotRequest, GoalRequest,
+    IdentifyPortRequest, IdentifyPortResponse, ModeSelection, PortSettings, RobotSummary,
+    SerialPortSummary, UpdateRobotRequest,
 };
 use spiral_robotics_api::rollout::{RolloutSnapshot, StartRolloutRequest};
 use spiral_robotics_api::settings::{
@@ -51,9 +50,11 @@ use spiral_robotics_api::status::{
     ApiError, BackendReadiness, BackendReadinessState, StudioSnapshot,
 };
 use spiral_robotics_api::training::{StartTrainingRequest, TrainingRun};
-use spiral_robotics_core::calibration::{Calibration, MotorSpec};
+use spiral_robotics_hardware::calibration::{Calibration, MotorSpec};
 use spiral_robotics_hardware::serial_ports::{SerialPortCatalog, SerialPortTypeExt};
 
+use crate::OperationError;
+use crate::adapters::hardware::HardwareApiProjection as _;
 use crate::data::catalog::{
     DeleteEpisodeCommand, EpisodeActivity, EpisodeCatalogActions, EpisodeCatalogPort,
 };
@@ -77,31 +78,27 @@ use crate::recording::{
 };
 use crate::robotics::cameras::{CameraManager, Frame};
 use crate::robotics::video::{
-    CameraCaptureSpec, VideoAsset, VideoCapture, VideoCaptureRequest,
-    VideoEncoderSettings,
+    CameraCaptureSpec, VideoAsset, VideoCapture, VideoCaptureRequest, VideoEncoderSettings,
 };
 use crate::robots::calibration::{
     CalibrationActions, CalibrationControlActions, CalibrationHistoryActions,
-    CalibrationHistoryActivity, CalibrationHistoryPort, CalibrationUpdate,
-    RobotCalibrationStore,
+    CalibrationHistoryActivity, CalibrationHistoryPort, CalibrationUpdate, RobotCalibrationStore,
 };
 use crate::robots::control::{RobotControlActions, RobotControlCommand};
 use crate::robots::discovery::{
-    CameraDiscoveryPort,
-    IdentifySerialPortCommand, SerialPortInventory, SerialPortQueryPort,
+    CameraDiscoveryPort, IdentifySerialPortCommand, SerialPortInventory, SerialPortQueryPort,
 };
 use crate::robots::mode::{ModeActions, OperatorMode};
 use crate::robots::service::{
-    AutoConnectOutcome, AutoConnectStatus, CameraAssignment, CreateRobotCommand,
-    NewRobot, RobotActions, RobotCatalogActions, RobotConnectionActions,
-    RobotConnectionPort, RobotConnectionSpec, RobotStore, RobotUpdate, SavedRobot,
-    SerialPortConfiguration, UpdateRobotCommand,
+    AutoConnectOutcome, AutoConnectStatus, CameraAssignment, CreateRobotCommand, NewRobot,
+    RobotActions, RobotCatalogActions, RobotConnectionActions, RobotConnectionPort,
+    RobotConnectionSpec, RobotStore, RobotUpdate, SavedRobot, SerialPortConfiguration,
+    UpdateRobotCommand,
 };
 use crate::robots::workspace::{RobotRecord, RobotWorkspace, WorkspaceError};
 use crate::rollout::manager::RolloutManager;
 use crate::rollout::service::{
-    RolloutActions,
-    RolloutPhase as CapabilityRolloutPhase, RolloutRequest, RolloutSessionPort,
+    RolloutActions, RolloutPhase as CapabilityRolloutPhase, RolloutRequest, RolloutSessionPort,
     RolloutSnapshot as CapabilityRolloutSnapshot,
 };
 use crate::training::manager::TrainingManager;
@@ -111,7 +108,6 @@ use crate::training::service::{
 };
 use crate::workflow::agent::WorkflowAgentManager;
 use crate::workflow::manager::WorkflowManager;
-use spiral_robotics_core::OperationError;
 use spiral_robotics_hardware::{HardwareHandle, HardwareState, RobotSpec};
 use spiral_robotics_storage::BackendStateStore;
 use spiral_robotics_storage::StorageManager;
@@ -120,9 +116,7 @@ use spiral_robotics_storage::episodes::{
     ArmCondition, EpisodeError, EpisodeInspection, EpisodeRecordingRequest, EpisodeStore,
     EpisodeWriter, ReplayRequest,
 };
-use spiral_robotics_storage::video::{
-    VideoAssetKey, VideoByteRange,
-};
+use spiral_robotics_storage::video::{VideoAssetKey, VideoByteRange};
 
 /// Boundary marker separating parts of an MJPEG response.
 const MJPEG_BOUNDARY: &str = "spiral-robotics-frame";
@@ -639,7 +633,9 @@ impl AppState {
                         .get(saved.id())
                         .cloned()
                         .unwrap_or_default();
-                    let mut summary = robot_adapter.summary(saved.id(), connection).ok()?;
+                    let mut summary = robot_adapter
+                        .summary(saved.id(), connection.to_api())
+                        .ok()?;
                     // Limits come from the motors, not the saved configuration, so they
                     // are folded in here after loading the SpiralDB row.
                     if let Some(limits) = hardware.limits().get(saved.id()) {
@@ -649,7 +645,7 @@ impl AppState {
                             .cloned()
                             .map(|mut motor| {
                                 if let Some(limits) = limits.get(motor.name()) {
-                                    motor.set_limits(*limits);
+                                    motor.set_limits(limits.to_api());
                                 }
                                 motor
                             })
@@ -675,9 +671,8 @@ impl AppState {
             issues.push(issue.to_owned());
         }
 
-        let cameras =
-            devices::CameraDiscoveryAdapter::new(state.cameras().clone()).cameras();
-        StudioSnapshot::new(readiness, "SpiralDB", hardware.mode().clone())
+        let cameras = devices::CameraDiscoveryAdapter::new(state.cameras().clone()).cameras();
+        StudioSnapshot::new(readiness, "SpiralDB", hardware.mode().to_api())
             .with_robots(robots)
             .with_cameras(cameras)
             .with_issues(issues)
@@ -748,7 +743,10 @@ impl AppState {
                             continue;
                         }
                         last_sequence = telemetry.sequence();
-                        if let Ok(event) = Event::default().event("telemetry").json_data(telemetry) {
+                        if let Ok(event) = Event::default()
+                            .event("telemetry")
+                            .json_data(telemetry.to_api())
+                        {
                             yield Ok(event);
                         }
                     }

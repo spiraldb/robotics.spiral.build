@@ -10,7 +10,7 @@ use std::error::Error;
 use std::fmt;
 
 #[cfg(test)]
-use spiral_robotics_core::calibration::MotorSpec;
+use crate::calibration::MotorSpec;
 
 /// A fault reported by a motor controller.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -544,9 +544,7 @@ impl MotorBus for SimulatedBus {
                         motor.position,
                         MotorMechanicalSample::new(
                             Some(
-                                spiral_robotics_core::arm::JointDefinition::degrees_from_encoder_counts(
-                                    travelled,
-                                )
+                                MotorSpec::degrees_from_encoder_counts(travelled)
                                     * SIMULATED_READS_PER_SECOND,
                             ),
                             Some(motor.load),
@@ -602,7 +600,7 @@ impl MotorBus for SimulatedBus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spiral_robotics_core::calibration::MotorDirection;
+    use crate::calibration::MotorDirection;
 
     fn specs() -> BTreeMap<String, MotorSpec> {
         BTreeMap::from([

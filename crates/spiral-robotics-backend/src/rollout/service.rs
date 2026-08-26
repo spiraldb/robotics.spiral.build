@@ -7,11 +7,11 @@
 
 use std::sync::Arc;
 
+use spiral_robotics_api::rollout::RolloutDuration;
 use spiral_robotics_api::rollout::RolloutSnapshot as ContractRolloutSnapshot;
-use spiral_robotics_core::operation::RolloutDuration;
 
 use super::policy::{ControlOwner, ExpectedPolicyOwner, PolicyOwnership};
-use spiral_robotics_core::OperationError;
+use crate::OperationError;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RolloutRequest {

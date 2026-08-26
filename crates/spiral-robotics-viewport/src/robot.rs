@@ -1,21 +1,20 @@
 //! Arms, joints, and cameras, turned into a scene.
 //!
 //! This is the only module here that knows what any of those words mean, and it
-//! knows the neutral joint values through `spiral-robotics-core` and owns the
-//! renderer-facing robot description itself. What comes back is a [`Scene`] the layers
-//! below can draw without learning any of it, plus the table that says which
-//! [`EntityKey`] was which thing.
+//! owns both the neutral presentation pose and renderer-facing robot
+//! description. What comes back is a [`Scene`] the layers below can draw
+//! without learning any of it, plus the table that says which [`EntityKey`] was
+//! which thing.
 //!
 //! Everything drawn comes from the robot description. Link lengths, joint axes,
 //! and reach exist in the URDF file and nowhere else, including not here.
 
 use std::collections::BTreeMap;
 
-use glam::{EulerRot, Mat4, Quat, Vec3};
-use spiral_robotics_core::arm::JointAngles;
-
+use crate::arm::JointAngles;
 use crate::scene::{Condition, Entity, EntityKey, EntityShape, Interaction, Scene};
 use crate::urdf::{Geometry, Urdf};
+use glam::{EulerRot, Mat4, Quat, Vec3};
 
 /// How far apart two arms stand on the bench, in metres.
 pub const BENCH_SPACING: f32 = 0.34;
@@ -466,7 +465,7 @@ impl Urdf {
 
 #[cfg(test)]
 mod tests {
-    use spiral_robotics_core::arm::SO101_JOINTS;
+    use crate::SO101_JOINTS;
 
     use super::*;
     use crate::urdf::SO101_URDF;

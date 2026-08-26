@@ -136,7 +136,7 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
     });
 
     let dataset_id = studio.selected_dataset().read().trim().to_owned();
-    let dataset_valid = spiral_robotics_core::identity::DatasetId::is_canonical(&dataset_id);
+    let dataset_valid = spiral_robotics_api::identity::DatasetId::is_canonical(&dataset_id);
     let all_episodes = studio.episodes();
     let dataset_ids = all_episodes
         .iter()
@@ -723,7 +723,7 @@ pub(crate) fn QueryPanel(namespace: String, dataset_id: String, query_available:
         &dataset_id,
         query_available.then_some(relation_response).flatten(),
     );
-    let dataset_valid = spiral_robotics_core::identity::DatasetId::is_canonical(&dataset_id);
+    let dataset_valid = spiral_robotics_api::identity::DatasetId::is_canonical(&dataset_id);
     let can_query = query_available && dataset_valid;
     let query_running = controller.query_running();
     let run_query = move || controller.run_query(studio, can_query);

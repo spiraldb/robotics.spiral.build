@@ -368,8 +368,11 @@ fn product_crates_follow_functional_boundaries() {
         );
     }
     for retired in [
+        "spiral-robotics-arm",
         "spiral-robotics-boundary-build",
         "spiral-robotics-contracts",
+        "spiral-robotics-core",
+        "spiral-robotics-sql",
         "spiral-robotics-studio-application",
         "spiral-robotics-studio-backend",
         "spiral-robotics-training-http",
@@ -509,6 +512,7 @@ fn physical_io_and_control_share_one_compile_time_boundary() {
 
     let manifest = fs::read_to_string(hardware.join("Cargo.toml")).expect("hardware manifest");
     for forbidden in [
+        "spiral-robotics-api",
         "spiral-robotics-backend",
         "axum",
         "dioxus",
@@ -556,10 +560,7 @@ fn read_controllers_delegate_selection_and_admission_to_backend_capabilities() {
 
     let recordings =
         fs::read_to_string(root.join("routes/recordings.rs")).expect("recording routes");
-    for seam in [
-        "EpisodeQueries::new",
-        ".authorize_asset(",
-    ] {
+    for seam in ["EpisodeQueries::new", ".authorize_asset("] {
         assert!(
             recordings.contains(seam),
             "episode read controller bypasses {seam}"
@@ -937,19 +938,14 @@ fn workspace_crate_dependencies_point_toward_policy() {
 
     let crates = [
         (
-            "spiral-robotics-core",
-            "crates/spiral-robotics-core/Cargo.toml",
-            &[][..],
-        ),
-        (
             "spiral-robotics-api",
             "crates/spiral-robotics-api/Cargo.toml",
-            &["spiral-robotics-core"][..],
+            &[][..],
         ),
         (
             "spiral-robotics-hardware",
             "crates/spiral-robotics-hardware/Cargo.toml",
-            &["spiral-robotics-api", "spiral-robotics-core"][..],
+            &[][..],
         ),
         (
             "spiral-robotics-inference",
@@ -964,7 +960,7 @@ fn workspace_crate_dependencies_point_toward_policy() {
         (
             "spiral-robotics-viewport",
             "crates/spiral-robotics-viewport/Cargo.toml",
-            &["spiral-robotics-core"][..],
+            &[][..],
         ),
         (
             "spiral-robotics-studio",
@@ -974,27 +970,18 @@ fn workspace_crate_dependencies_point_toward_policy() {
         (
             "spiral-robotics-frontend",
             "crates/spiral-robotics-frontend/Cargo.toml",
-            &[
-                "spiral-robotics-api",
-                "spiral-robotics-core",
-                "spiral-robotics-viewport",
-            ][..],
+            &["spiral-robotics-api", "spiral-robotics-viewport"][..],
         ),
         (
             "spiral-robotics-storage",
             "crates/spiral-robotics-storage/Cargo.toml",
-            &[
-                "spiral-robotics-api",
-                "spiral-robotics-core",
-                "spiral-robotics-hardware",
-            ][..],
+            &["spiral-robotics-api", "spiral-robotics-hardware"][..],
         ),
         (
             "spiral-robotics-backend",
             "crates/spiral-robotics-backend/Cargo.toml",
             &[
                 "spiral-robotics-api",
-                "spiral-robotics-core",
                 "spiral-robotics-hardware",
                 "spiral-robotics-inference",
                 "spiral-robotics-storage",

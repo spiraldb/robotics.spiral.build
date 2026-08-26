@@ -1,6 +1,8 @@
 use super::*;
+use crate::adapters::hardware::{HardwareApiProjection as _, RecordingArmProjection as _};
 use crate::data::catalog_lease::{CatalogLeaseOwner, CatalogLeaseToken, CatalogMutationLease};
 use crate::recording::{RecordingDraftRequest, ReplayTrajectoryRequest};
+use spiral_robotics_hardware::ModeSelection as HardwareModeSelection;
 use spiral_robotics_storage::episodes::EpisodeArmCollection as _;
 
 impl AppState {
@@ -149,7 +151,7 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
     async fn enter_teleoperation(&self, pair: &TeleoperationPair) -> Result<(), OperationError> {
         self.state
             .hardware()
-            .set_mode(ModeSelection::Teleoperate {
+            .set_mode(HardwareModeSelection::Teleoperate {
                 leader: pair.leader().to_owned(),
                 follower: pair.follower().to_owned(),
             })
@@ -160,7 +162,7 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
     async fn enter_idle(&self) -> Result<(), OperationError> {
         self.state
             .hardware()
-            .set_mode(ModeSelection::Idle)
+            .set_mode(HardwareModeSelection::Idle)
             .await
             .map_err(OperationError::conflict)
     }
@@ -190,7 +192,7 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
     ) -> Result<RecordingResult, OperationError> {
         self.state
             .hardware()
-            .start_recording(draft.writer, draft.arms)
+            .start_recording(draft.writer, draft.arms.to_hardware())
             .await
             .map_err(OperationError::conflict)?;
         let result = RecordingResult::new(draft.summary.id());
@@ -220,13 +222,18 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
         &self,
         command: StopRecordingCommand,
     ) -> Result<RecordingResult, OperationError> {
-        let summary = self
+        let completion = self
             .state
             .hardware()
             .stop_recording(command.keep())
             .await
             .map_err(OperationError::conflict)?;
-        let result = RecordingResult::new(summary.id());
+        let summary = self
+            .state
+            .episodes()
+            .get(completion.episode())
+            .map_err(OperationError::from)?;
+        let result = RecordingResult::new(completion.episode());
         *self.presented_recording.lock().map_err(|_| {
             OperationError::Internal("recording presenter lock poisoned".to_owned())
         })? = Some(summary);
@@ -431,7 +438,7 @@ impl EpisodeCatalogPort for EpisodeHttpAdapter<'_> {
                 .as_ref()
                 .map(|recording| recording.episode().to_owned()),
             match &hardware.mode().selection() {
-                ModeSelection::Replay { episode, .. } => Some(episode.clone()),
+                HardwareModeSelection::Replay { episode, .. } => Some(episode.clone()),
                 _ => None,
             },
         )
@@ -465,10 +472,9 @@ impl EpisodeQueryPort for EpisodeHttpAdapter<'_> {
         self.state
             .episodes()
             .inspection(&episode)
-            .map(InspectionProjection::into_snapshot)
+            .map(|inspection| inspection.into_snapshot(self.state.workspace()))
             .map_err(OperationError::from)
     }
-
 }
 
 /// Projects a stored inspection into the wire snapshot.
@@ -477,11 +483,11 @@ impl EpisodeQueryPort for EpisodeHttpAdapter<'_> {
 /// transposition hangs off the stored value as a local extension trait rather
 /// than a `From` impl.
 trait InspectionProjection {
-    fn into_snapshot(self) -> EpisodeInspectionSnapshot;
+    fn into_snapshot(self, workspace: &RobotWorkspace) -> EpisodeInspectionSnapshot;
 }
 
 impl InspectionProjection for EpisodeInspection {
-    fn into_snapshot(self) -> EpisodeInspectionSnapshot {
+    fn into_snapshot(self, workspace: &RobotWorkspace) -> EpisodeInspectionSnapshot {
         let inspection = self;
         let (episode, summary, videos) = inspection.into_parts();
         let samples = episode.samples();
@@ -492,6 +498,10 @@ impl InspectionProjection for EpisodeInspection {
             .enumerate()
             .map(|(arm_index, arm)| {
                 let joint_count = arm.joints().len();
+                let calibration = workspace
+                    .get(arm.id())
+                    .ok()
+                    .and_then(|record| record.calibration().ok().flatten());
                 let normalized = samples
                     .iter()
                     .flat_map(|sample| sample.normalized()[arm_index].iter().copied())
@@ -499,6 +509,20 @@ impl InspectionProjection for EpisodeInspection {
                 let raw = samples
                     .iter()
                     .flat_map(|sample| sample.raw()[arm_index].iter().copied())
+                    .collect();
+                let degrees = samples
+                    .iter()
+                    .flat_map(|sample| {
+                        sample.raw()[arm_index]
+                            .iter()
+                            .zip(arm.joints())
+                            .map(|(raw, joint)| {
+                                calibration
+                                    .as_ref()
+                                    .and_then(|calibration| calibration.motors().get(joint))
+                                    .map(|motor| motor.degrees_from_center(*raw))
+                            })
+                    })
                     .collect();
                 let velocity = OptionalFrameMatrix::new(samples, joint_count, |sample, index| {
                     sample
@@ -525,7 +549,7 @@ impl InspectionProjection for EpisodeInspection {
                 EpisodeInspectionArm::new(
                     arm.id(),
                     arm.joints().to_vec(),
-                    EpisodeArmScalarSamples::new(normalized, raw),
+                    EpisodeArmScalarSamples::new(normalized, raw).with_degrees(degrees),
                 )
                 .with_optional_channels(EpisodeArmOptionalChannels::new(velocity, effort, action))
             })
@@ -627,8 +651,8 @@ impl PhysicalSeekPort for SeekHttpAdapter<'_> {
                 .as_ref()
                 .map(|recording| ActiveRecording::new(recording.episode(), recording.paused())),
             match hardware.mode().selection() {
-                ModeSelection::Idle => SeekControlMode::Idle,
-                ModeSelection::Replay { .. } => SeekControlMode::Replay,
+                HardwareModeSelection::Idle => SeekControlMode::Idle,
+                HardwareModeSelection::Replay { .. } => SeekControlMode::Replay,
                 _ => SeekControlMode::Other,
             },
         )
@@ -859,6 +883,7 @@ impl AppState {
                                     limits
                                         .and_then(|limits| limits.get(name))
                                         .copied()
+                                        .map(|limits| limits.to_api())
                                         .unwrap_or_default()
                                 })
                                 .collect(),
@@ -990,11 +1015,9 @@ impl AppState {
     }
 }
 
-impl AppState {
-}
+impl AppState {}
 
-impl AppState {
-}
+impl AppState {}
 
 #[derive(Debug, Deserialize)]
 struct HistoricalSeekRequest {

@@ -27,10 +27,10 @@ use spiral_robotics_api::relations::{
     ProjectDataRelation, ProjectDataRelationsResponse, QueryColumn, SpiralQueryResponse,
 };
 use spiral_robotics_api::settings::{ConnectionTestResponse, DataSettings, SpiralSettings};
+use spiral_robotics_api::sql::QualifiedRelation;
 use spiral_robotics_api::workflow::{
     WorkflowDocument, WorkflowRelation, WorkflowRelationsResponse,
 };
-use spiral_robotics_core::workflow::QualifiedRelation;
 
 use crate::adbc::{ProjectStore, StorageConnection};
 use crate::bundle;

@@ -43,6 +43,37 @@ pub struct MotorSpec {
 }
 
 impl MotorSpec {
+    /// Build the default motor map for a new SO-101 robot instance.
+    pub fn so101_arm() -> BTreeMap<String, Self> {
+        const SO101_MOTOR_MODEL: &str = "sts3215";
+        const SO101_MOTORS: [(&str, u32); 6] = [
+            ("shoulder_pan", 1),
+            ("shoulder_lift", 2),
+            ("elbow_flex", 3),
+            ("wrist_flex", 4),
+            ("wrist_roll", 5),
+            ("gripper", 6),
+        ];
+        SO101_MOTORS
+            .into_iter()
+            .map(|(name, id)| {
+                (
+                    name.to_owned(),
+                    Self::new(id, MotorDirection::Normal).with_model(SO101_MOTOR_MODEL),
+                )
+            })
+            .collect()
+    }
+
+    /// Convert STS3215 encoder counts to output-shaft degrees.
+    pub(crate) fn degrees_from_encoder_counts(counts: i64) -> f64 {
+        counts as f64 * 360.0 / Self::encoder_counts_per_turn() as f64
+    }
+
+    pub(crate) const fn encoder_counts_per_turn() -> i64 {
+        4096
+    }
+
     /// Construct a motor definition without any adapter-specific details.
     pub fn new(id: u32, direction: MotorDirection) -> Self {
         Self {
@@ -647,9 +678,8 @@ impl MotorCalibration {
     /// Convert a raw reading to degrees from this motor's calibrated center,
     /// preserving its configured joint direction.
     pub fn degrees_from_center(&self, raw: i64) -> f64 {
-        let degrees = crate::arm::JointDefinition::degrees_from_encoder_counts(
-            raw.saturating_sub(self.reading.center),
-        );
+        let degrees =
+            MotorSpec::degrees_from_encoder_counts(raw.saturating_sub(self.reading.center));
         match self.direction {
             MotorDirection::Normal => degrees,
             MotorDirection::Reversed => -degrees,
@@ -881,6 +911,22 @@ mod tests {
         assert_eq!(spec.id(), 7);
         assert_eq!(spec.direction(), MotorDirection::Normal);
         assert_eq!(spec.model(), Some("sts3215"));
+    }
+
+    #[test]
+    fn so101_motor_map_owns_hardware_ids_and_encoder_units() {
+        let motors = MotorSpec::so101_arm();
+        assert_eq!(motors.len(), 6);
+        assert_eq!(motors["shoulder_pan"].id(), 1);
+        assert_eq!(motors["gripper"].id(), 6);
+        assert!(
+            motors
+                .values()
+                .all(|motor| motor.model() == Some("sts3215"))
+        );
+        assert_eq!(MotorSpec::encoder_counts_per_turn(), 4096);
+        assert_eq!(MotorSpec::degrees_from_encoder_counts(4096), 360.0);
+        assert_eq!(MotorSpec::degrees_from_encoder_counts(-1024), -90.0);
     }
 
     #[test]

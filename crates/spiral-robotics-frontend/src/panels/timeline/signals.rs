@@ -8,7 +8,7 @@
 
 #[cfg(any(test, all(feature = "web", target_arch = "wasm32")))]
 use spiral_robotics_api::robots::TelemetryFrame;
-use spiral_robotics_core::arm;
+use spiral_robotics_viewport as arm;
 
 /// Thirty minutes at the studio's 20 Hz telemetry publish rate.
 #[cfg(any(test, all(feature = "web", target_arch = "wasm32")))]

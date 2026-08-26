@@ -1,7 +1,7 @@
 //! Framework-neutral discovery actions for serial ports and cameras.
 
+use crate::OperationError;
 use spiral_robotics_api::robots::{CameraStatus, IdentifyPortResponse, SerialPortSummary};
-use spiral_robotics_core::OperationError;
 
 pub(crate) trait SerialPortInventory: Send + Sync {
     async fn available_port_paths(&self) -> Result<Vec<String>, OperationError>;

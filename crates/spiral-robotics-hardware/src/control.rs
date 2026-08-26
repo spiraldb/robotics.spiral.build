@@ -29,28 +29,26 @@ use crate::bus::{
 };
 use crate::feetech::FeetechBus;
 
+#[cfg(test)]
+use crate::calibration::MotorDirection;
+use crate::calibration::{
+    Calibration, CalibrationError, CalibrationInput, MotorRangeTracker, MotorSpec,
+    MotorSpecifications,
+};
 use crate::control_policy::{
     CalibrationAdmission, ControlMode, ControlState, Decision as ControlDecision,
     Effect as ControlEffect, Event as ControlEvent, Intent as ControlIntent,
     ReplayDecision as ReplayPolicyDecision, ReplayEvent as ReplayPolicyEvent,
     ReplayState as ReplayPolicyState, RobotAdmission,
 };
-use spiral_robotics_api::recording::{
-    EpisodeArm, EpisodeSummary, RecordingClock as RecordingProgressClock, RecordingGap,
-    RecordingIdentity, RecordingProgress, RecordingState, ReplayIdentity, ReplayPhase,
-    ReplayProgress, ReplayPurpose, ReplayTimeline, ReplayTransport,
-};
-use spiral_robotics_api::robots::{
-    CAUTION_FOLLOW_ERROR_DEGREES, CalibrationJointProgress, CalibrationProgress, ConnectionStatus,
-    JointDiagnostics, JointIdentity, JointKinematics, JointRange, JointTelemetry, ModeSelection,
-    ModeStatus, MotorElectricalReadings, MotorFault, MotorLimits, MotorVoltageRange, PortSettings,
-    RobotTelemetry, TelemetryFrame,
-};
-#[cfg(test)]
-use spiral_robotics_core::calibration::MotorDirection;
-use spiral_robotics_core::calibration::{
-    Calibration, CalibrationError, CalibrationInput, MotorRangeTracker, MotorSpec,
-    MotorSpecifications,
+use crate::state::{
+    CAUTION_FOLLOW_ERROR_DEGREES, CalibrationJointProgress, CalibrationProgress,
+    CompletedRecording, ConnectionStatus, EpisodeArm, JointDiagnostics, JointIdentity,
+    JointKinematics, JointRange, JointTelemetry, ModeSelection, ModeStatus,
+    MotorElectricalReadings, MotorFault, MotorLimits, MotorVoltageRange, PortSettings,
+    RecordingClock as RecordingProgressClock, RecordingGap, RecordingIdentity, RecordingProgress,
+    RecordingState, ReplayIdentity, ReplayPhase, ReplayProgress, ReplayPurpose, ReplayTimeline,
+    ReplayTransport, RobotTelemetry, TelemetryFrame,
 };
 use tokio::sync::{oneshot, watch};
 
@@ -265,7 +263,10 @@ pub trait RecordingWriter: Send {
     fn push(&self, sample: Sample) -> bool;
     fn checkpoint(&self, completion: RecordingCompletion) -> Result<EpisodeCheckpoint, String>;
     fn failure(&self) -> Option<String>;
-    fn finish(self: Box<Self>, completion: RecordingCompletion) -> Result<EpisodeSummary, String>;
+    fn finish(
+        self: Box<Self>,
+        completion: RecordingCompletion,
+    ) -> Result<CompletedRecording, String>;
 }
 
 /// How often the control loop runs.
@@ -539,7 +540,7 @@ enum Command {
     },
     StopRecording {
         keep: bool,
-        reply: Reply<EpisodeSummary>,
+        reply: Reply<CompletedRecording>,
     },
     SetRecordingPaused {
         paused: bool,
@@ -923,7 +924,7 @@ impl HardwareHandle {
     }
 
     /// Finish the take in progress and return what was stored.
-    pub async fn stop_recording(&self, keep: bool) -> Result<EpisodeSummary, String> {
+    pub async fn stop_recording(&self, keep: bool) -> Result<CompletedRecording, String> {
         self.request(|reply| Command::StopRecording { keep, reply })
             .await
     }
@@ -1400,7 +1401,7 @@ impl ConnectedRobot {
                 JointTelemetry::new(
                     JointIdentity::new(name.clone(), spec.id()),
                     kinematics,
-                    diagnostics,
+                    diagnostics.assess(self.limits.get(name).copied().unwrap_or_default()),
                 )
             })
             .collect();
@@ -1421,6 +1422,10 @@ impl ConnectedRobot {
             self.spec.id.clone(),
             self.motion.torque.is_engaged(),
             joints,
+        )
+        .with_tracking_lagging(
+            self.follow_error_degrees()
+                .is_some_and(|error| error >= CAUTION_FOLLOW_ERROR_DEGREES),
         )
         .with_error(self.health.error.clone())
         .with_calibration(calibration)
@@ -1752,7 +1757,7 @@ impl Controller {
         Ok(())
     }
 
-    fn stop_recording(&mut self, keep: bool) -> Result<EpisodeSummary, String> {
+    fn stop_recording(&mut self, keep: bool) -> Result<CompletedRecording, String> {
         let mut recording = self
             .operations
             .recording
@@ -1846,7 +1851,7 @@ impl Controller {
                     self.published.recording_issue = Some(format!(
                         "{reason}. The {} frames captured before that are stored as {}",
                         summary.frames(),
-                        summary.id()
+                        summary.episode()
                     ));
                 }
                 Err(error) => {
@@ -1922,7 +1927,7 @@ impl Controller {
         match self.stop_recording(true) {
             Ok(summary) => {
                 self.published.recording_issue =
-                    Some(format!("stopped recording {}: {reason}", summary.id()));
+                    Some(format!("stopped recording {}: {reason}", summary.episode()));
             }
             Err(error) => {
                 self.published.recording_issue =
@@ -3087,12 +3092,12 @@ mod tests {
     use std::sync::Arc;
 
     use crate::bus::{BusError, MotorElectricalSample, MotorMechanicalSample};
-    use spiral_robotics_core::calibration::MotorReading;
+    use crate::calibration::MotorReading;
 
     use super::*;
 
     fn motors() -> BTreeMap<String, MotorSpec> {
-        spiral_robotics_core::calibration::MotorSpec::so101_arm()
+        crate::calibration::MotorSpec::so101_arm()
     }
 
     fn calibration(center: i64, span: i64) -> Calibration {

@@ -1,13 +1,30 @@
 //! Native policy-rollout contracts.
 
 use serde::{Deserialize, Serialize};
-use spiral_robotics_core::operation::OperationLifecycle;
 
 /// Operator-approved launch parameters for one backend-owned policy session.
-pub use spiral_robotics_core::operation::{
-    DEFAULT_ROLLOUT_DURATION_SECONDS, MAX_ROLLOUT_ACTION_STEPS, MAX_ROLLOUT_DURATION_SECONDS,
-    MIN_ROLLOUT_DURATION_SECONDS,
-};
+pub const MIN_ROLLOUT_DURATION_SECONDS: u32 = 1;
+pub const DEFAULT_ROLLOUT_DURATION_SECONDS: u32 = 30;
+pub const MAX_ROLLOUT_DURATION_SECONDS: u32 = 600;
+pub const MAX_ROLLOUT_ACTION_STEPS: usize = 20;
+
+/// A policy rollout duration admitted by the product safety window.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct RolloutDuration(u32);
+
+impl RolloutDuration {
+    pub const fn new(seconds: u32) -> Option<Self> {
+        if seconds >= MIN_ROLLOUT_DURATION_SECONDS && seconds <= MAX_ROLLOUT_DURATION_SECONDS {
+            Some(Self(seconds))
+        } else {
+            None
+        }
+    }
+
+    pub const fn seconds(self) -> u32 {
+        self.0
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct StartRolloutRequest {
@@ -65,13 +82,10 @@ pub enum RolloutPhase {
 
 impl RolloutPhase {
     pub const fn active(self) -> bool {
-        match self {
-            Self::Loading => OperationLifecycle::Pending,
-            Self::WarmingUp | Self::Running => OperationLifecycle::Running,
-            Self::Stopping => OperationLifecycle::Stopping,
-            Self::Idle | Self::Failed => OperationLifecycle::Finished,
-        }
-        .active()
+        matches!(
+            self,
+            Self::Loading | Self::WarmingUp | Self::Running | Self::Stopping
+        )
     }
 }
 

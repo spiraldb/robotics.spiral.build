@@ -2,9 +2,9 @@
 
 use std::collections::BTreeMap;
 
-use spiral_robotics_core::calibration::{Calibration, MotorSpec};
+use spiral_robotics_hardware::calibration::{Calibration, MotorSpec};
 
-use spiral_robotics_core::OperationError;
+use crate::OperationError;
 
 const DEFAULT_ROBOT_BAUD_RATE: u32 = 1_000_000;
 const MAX_ROBOT_ID_LENGTH: usize = 64;
@@ -329,7 +329,6 @@ impl<'a, R: RobotStore + ?Sized> RobotCatalogActions<'a, R> {
         self.store.ensure_exists(&robot)?;
         Ok(SavedRobot::new(robot))
     }
-
 }
 
 pub(crate) struct RobotActions<'a, R: RobotStore + ?Sized, C: RobotConnectionPort + ?Sized> {
@@ -851,10 +850,7 @@ mod tests {
                 id: "imported".to_owned()
             }
         );
-        assert_eq!(
-            *events.lock().unwrap(),
-            ["create:arm:none", "import"]
-        );
+        assert_eq!(*events.lock().unwrap(), ["create:arm:none", "import"]);
     }
 
     #[test]

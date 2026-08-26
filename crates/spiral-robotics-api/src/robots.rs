@@ -3,11 +3,6 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use spiral_robotics_core::calibration::{MotorCalibration, MotorDirection};
-pub use spiral_robotics_core::operation::{
-    CAUTION_FOLLOW_ERROR_DEGREES, CAUTION_LIMIT_FRACTION, CAUTION_VOLTAGE_MARGIN_VOLTS,
-};
-use spiral_robotics_core::operation::{MotorHealth, MotorHealthLimits, MotorHealthReadings};
 
 use crate::recording::{RecordingProgress, ReplayProgress};
 
@@ -148,6 +143,93 @@ impl CalibrationReapplyResponse {
     }
 }
 
+/// Direction of increasing raw motor readings in the wire contract.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum MotorDirection {
+    #[default]
+    Normal,
+    Reversed,
+}
+
+/// Raw calibration readings carried in robot API snapshots.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MotorReading {
+    center: i64,
+    range_min: i64,
+    range_max: i64,
+}
+
+impl MotorReading {
+    pub const fn new(center: i64, range_min: i64, range_max: i64) -> Self {
+        Self {
+            center,
+            range_min,
+            range_max,
+        }
+    }
+
+    pub const fn center(self) -> i64 {
+        self.center
+    }
+
+    pub const fn range_min(self) -> i64 {
+        self.range_min
+    }
+
+    pub const fn range_max(self) -> i64 {
+        self.range_max
+    }
+}
+
+/// One validated motor calibration carried in a robot API snapshot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MotorCalibration {
+    id: u32,
+    direction: MotorDirection,
+    reading: MotorReading,
+}
+
+impl MotorCalibration {
+    pub fn new(
+        id: u32,
+        direction: MotorDirection,
+        reading: MotorReading,
+    ) -> Result<Self, InvalidMotorCalibration> {
+        if reading.range_min < reading.center && reading.center < reading.range_max {
+            Ok(Self {
+                id,
+                direction,
+                reading,
+            })
+        } else {
+            Err(InvalidMotorCalibration)
+        }
+    }
+
+    pub const fn id(self) -> u32 {
+        self.id
+    }
+
+    pub const fn direction(self) -> MotorDirection {
+        self.direction
+    }
+
+    pub const fn reading(self) -> MotorReading {
+        self.reading
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InvalidMotorCalibration;
+
+impl std::fmt::Display for InvalidMotorCalibration {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("motor calibration requires range_min < center < range_max")
+    }
+}
+
+impl std::error::Error for InvalidMotorCalibration {}
+
 /// A motor as configured, with its calibration when one exists.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct MotorSummary {
@@ -226,8 +308,8 @@ impl MotorSummary {
 }
 
 mod direction_serde {
+    use super::MotorDirection;
     use serde::{Deserialize, Deserializer, Serializer, de};
-    use spiral_robotics_core::calibration::MotorDirection;
 
     pub(super) struct DirectionSerde;
 
@@ -262,8 +344,8 @@ mod direction_serde {
 }
 
 mod motor_calibration_option_serde {
+    use super::{MotorCalibration, MotorDirection, MotorReading};
     use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
-    use spiral_robotics_core::calibration::{MotorCalibration, MotorDirection, MotorReading};
 
     #[derive(Deserialize, Serialize)]
     #[serde(deny_unknown_fields)]
@@ -780,6 +862,9 @@ impl TelemetryFrame {
 pub struct RobotTelemetry {
     id: String,
     torque: bool,
+    /// Hardware-owned verdict for excessive measured-versus-commanded error.
+    #[serde(default)]
+    tracking_lagging: bool,
     joints: Vec<JointTelemetry>,
     error: Option<String>,
     /// Present only while a calibration sweep is running for this robot.
@@ -791,6 +876,7 @@ impl RobotTelemetry {
         Self {
             id: id.into(),
             torque,
+            tracking_lagging: false,
             joints,
             error: None,
             calibration: None,
@@ -799,6 +885,11 @@ impl RobotTelemetry {
 
     pub fn with_error(mut self, error: Option<String>) -> Self {
         self.error = error;
+        self
+    }
+
+    pub const fn with_tracking_lagging(mut self, tracking_lagging: bool) -> Self {
+        self.tracking_lagging = tracking_lagging;
         self
     }
 
@@ -812,6 +903,10 @@ impl RobotTelemetry {
     }
     pub const fn torque(&self) -> bool {
         self.torque
+    }
+
+    pub const fn tracking_lagging(&self) -> bool {
+        self.tracking_lagging
     }
 
     pub fn joints(&self) -> &[JointTelemetry] {
@@ -836,6 +931,9 @@ pub struct JointTelemetry {
     kinematics: JointKinematics,
     #[serde(flatten)]
     diagnostics: JointDiagnostics,
+    /// Hardware-owned assessment against this motor's reported limits.
+    #[serde(default)]
+    condition: MotorCondition,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -968,7 +1066,12 @@ impl JointTelemetry {
             identity,
             kinematics,
             diagnostics,
+            condition: MotorCondition::Nominal,
         }
+    }
+    pub const fn with_condition(mut self, condition: MotorCondition) -> Self {
+        self.condition = condition;
+        self
     }
     pub fn name(&self) -> &str {
         &self.identity.name
@@ -1060,27 +1163,8 @@ pub enum MotorCondition {
 }
 
 impl JointTelemetry {
-    /// This motor's condition, judged against the limits it reported itself.
-    ///
-    /// A motor raising its own fault bit is a fault whatever the limits say —
-    /// that is the hardware's verdict and it outranks any margin applied here.
-    /// Without limits there is nothing to be near, so only the motor's own
-    /// faults can speak.
-    pub fn condition(&self, limits: &MotorLimits) -> MotorCondition {
-        let readings = MotorHealthReadings::new(!self.faults().is_empty())
-            .with_temperature_celsius(self.temperature_celsius())
-            .with_voltage_volts(self.voltage_volts())
-            .with_load(self.load());
-        let health_limits = MotorHealthLimits::default()
-            .with_max_temperature_celsius(limits.max_temperature_celsius)
-            .with_min_voltage_volts(limits.min_voltage_volts)
-            .with_max_voltage_volts(limits.max_voltage_volts)
-            .with_max_load(limits.max_load);
-        match readings.assess(health_limits) {
-            MotorHealth::Nominal => MotorCondition::Nominal,
-            MotorHealth::Caution => MotorCondition::Caution,
-            MotorHealth::Fault => MotorCondition::Fault,
-        }
+    pub const fn condition(&self) -> MotorCondition {
+        self.condition
     }
 }
 
@@ -1137,6 +1221,10 @@ pub struct CalibrationJointProgress {
     min: i64,
     position: i64,
     max: i64,
+    #[serde(default)]
+    encoder_counts_per_turn: i64,
+    #[serde(default)]
+    ready: bool,
 }
 
 impl CalibrationJointProgress {
@@ -1146,10 +1234,20 @@ impl CalibrationJointProgress {
             min,
             position,
             max: position,
+            encoder_counts_per_turn: 0,
+            ready: false,
         }
     }
     pub const fn with_max(mut self, max: i64) -> Self {
         self.max = max;
+        self
+    }
+    pub const fn with_ready(mut self, ready: bool) -> Self {
+        self.ready = ready;
+        self
+    }
+    pub const fn with_encoder_counts_per_turn(mut self, encoder_counts_per_turn: i64) -> Self {
+        self.encoder_counts_per_turn = encoder_counts_per_turn;
         self
     }
     pub fn name(&self) -> &str {
@@ -1163,6 +1261,12 @@ impl CalibrationJointProgress {
     }
     pub const fn max(&self) -> i64 {
         self.max
+    }
+    pub const fn encoder_counts_per_turn(&self) -> i64 {
+        self.encoder_counts_per_turn
+    }
+    pub const fn ready(&self) -> bool {
+        self.ready
     }
     /// Travel observed so far, in encoder counts.
     pub fn span(&self) -> i64 {

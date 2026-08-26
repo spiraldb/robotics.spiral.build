@@ -3,8 +3,8 @@
 //! This module owns which catalog mutations are allowed. Storage formats and
 //! delivery response types remain opaque behind [`EpisodeCatalogPort`].
 
-use spiral_robotics_core::OperationError;
-use spiral_robotics_core::identity::EpisodeId;
+use crate::OperationError;
+use spiral_robotics_api::identity::EpisodeId;
 
 /// Current episode use that makes deletion unsafe.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -160,5 +160,4 @@ mod tests {
             ["episode_000003"]
         );
     }
-
 }

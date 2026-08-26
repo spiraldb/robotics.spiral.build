@@ -137,7 +137,7 @@ impl EpisodeTimelineResponse {
 pub(crate) struct TimelineArmSample {
     arm: String,
     normalized: BTreeMap<String, Option<f64>>,
-    raw: BTreeMap<String, i64>,
+    degrees: BTreeMap<String, Option<f64>>,
     velocity: Option<BTreeMap<String, Option<f64>>>,
     effort: Option<BTreeMap<String, Option<f64>>>,
     action: Option<BTreeMap<String, Option<f64>>>,
@@ -168,12 +168,12 @@ impl TimelineArmSample {
     pub(crate) fn new(
         arm: impl Into<String>,
         normalized: BTreeMap<String, Option<f64>>,
-        raw: BTreeMap<String, i64>,
+        degrees: BTreeMap<String, Option<f64>>,
     ) -> Self {
         Self {
             arm: arm.into(),
             normalized,
-            raw,
+            degrees,
             velocity: None,
             effort: None,
             action: None,
@@ -195,9 +195,8 @@ impl TimelineArmSample {
         &self.normalized
     }
 
-    #[cfg(test)]
-    pub(crate) const fn raw(&self) -> &BTreeMap<String, i64> {
-        &self.raw
+    pub(crate) const fn degrees(&self) -> &BTreeMap<String, Option<f64>> {
+        &self.degrees
     }
 }
 

@@ -12,7 +12,7 @@ use dioxus::prelude::*;
 use spiral_robotics_api::recording::{
     EpisodeInspectionArm, EpisodeInspectionSnapshot, EpisodeOptionalFrameMatrix,
 };
-use spiral_robotics_core::arm::SO101_JOINTS;
+use spiral_robotics_viewport::SO101_JOINTS;
 
 use crate::client::http as api;
 use crate::client::http::EpisodeApiPath;
@@ -418,7 +418,10 @@ impl HistoricalSnapshot for EpisodeInspectionSnapshot {
             let values = frames
                 .checked_mul(arm.joints().len())
                 .ok_or_else(|| "Episode inspection dimensions overflowed.".to_owned())?;
-            if arm.normalized().len() != values || arm.raw().len() != values {
+            if arm.normalized().len() != values
+                || arm.raw().len() != values
+                || arm.degrees().len() != values
+            {
                 return Err(format!(
                     "Episode {:?} delivered an incomplete state track for {:?}.",
                     snapshot.episode().id(),
@@ -558,7 +561,7 @@ impl HistoricalArm for EpisodeInspectionArm {
             arm.joints()
                 .iter()
                 .cloned()
-                .zip(arm.raw()[start..end].iter().copied())
+                .zip(arm.degrees()[start..end].iter().copied())
                 .collect(),
         )
         .with_optional_channels(api::TimelineOptionalArmChannels::new(
@@ -710,7 +713,8 @@ mod tests {
         let arm = EpisodeInspectionArm::new(
             "follower",
             joints,
-            EpisodeArmScalarSamples::new(normalized, vec![0, 1, 5, 6, 10, 11]),
+            EpisodeArmScalarSamples::new(normalized, vec![0, 1, 5, 6, 10, 11])
+                .with_degrees(vec![Some(0.0); 6]),
         )
         .with_optional_channels(EpisodeArmOptionalChannels::new(
             absent.clone(),
@@ -738,7 +742,7 @@ mod tests {
             .iter()
             .find(|arm| arm.arm() == "follower")
             .expect("follower sample");
-        assert_eq!(follower.raw()["shoulder_pan"], 5);
+        assert_eq!(follower.degrees()["shoulder_pan"], Some(0.0));
         assert_eq!(preview.signal_lanes()[0].series()[0].points().len(), 3);
     }
 

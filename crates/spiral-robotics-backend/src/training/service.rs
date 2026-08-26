@@ -2,15 +2,15 @@
 
 use std::collections::BTreeSet;
 
-use spiral_robotics_core::identity::DatasetId;
-use spiral_robotics_core::operation::RolloutDuration;
-use spiral_robotics_core::query::{ReadOnlyQuery, ReadOnlyQueryMode, UnquotedSqlIdentifier};
-
-use crate::rollout::service::RolloutRequest;
-use spiral_robotics_api::training::{
-    StartTrainingRequest, TrainingRun as ContractTrainingRun,
+use spiral_robotics_api::identity::DatasetId;
+use spiral_robotics_api::rollout::{
+    MAX_ROLLOUT_DURATION_SECONDS, MIN_ROLLOUT_DURATION_SECONDS, RolloutDuration,
 };
-use spiral_robotics_core::OperationError;
+use spiral_robotics_api::sql::{ReadOnlyQuery, ReadOnlyQueryMode, UnquotedSqlIdentifier};
+
+use crate::OperationError;
+use crate::rollout::service::RolloutRequest;
+use spiral_robotics_api::training::{StartTrainingRequest, TrainingRun as ContractTrainingRun};
 
 /// One image batch expanded to f32 model inputs must leave enough memory for
 /// model activations, optimizer state, and the hardware-control process itself.
@@ -478,8 +478,7 @@ impl RolloutRequest {
         if RolloutDuration::new(command.duration_seconds()).is_none() {
             return Err(OperationError::invalid_input(format!(
                 "rollout duration_seconds must be between {} and {}",
-                spiral_robotics_core::operation::MIN_ROLLOUT_DURATION_SECONDS,
-                spiral_robotics_core::operation::MAX_ROLLOUT_DURATION_SECONDS,
+                MIN_ROLLOUT_DURATION_SECONDS, MAX_ROLLOUT_DURATION_SECONDS,
             )));
         }
         Ok(command)
@@ -753,7 +752,7 @@ mod tests {
             RolloutRequest::new(String::new(), 20_000, "follower".to_owned()).with_duration(30),
             RolloutRequest::new("run-1".to_owned(), 0, "follower".to_owned()).with_duration(30),
             RolloutRequest::new("run-1".to_owned(), 20_000, "follower".to_owned())
-                .with_duration(spiral_robotics_core::operation::MAX_ROLLOUT_DURATION_SECONDS + 1),
+                .with_duration(MAX_ROLLOUT_DURATION_SECONDS + 1),
         ] {
             assert!(matches!(
                 TrainingActions::new(&training).admit_rollout(command),

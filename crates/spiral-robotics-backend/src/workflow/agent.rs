@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::OperationError;
 use crate::data::catalog_lease::{CatalogLeaseOwner, CatalogMutationLease};
 use crate::sync::MutexRecovery;
 use serde::{Deserialize, Serialize};
@@ -25,7 +26,6 @@ use spiral_robotics_api::workflow::{
     WorkflowAgentTurnRequest, WorkflowAgentUpdate, WorkflowNodeConfig, WorkflowRunPhase,
     WorkflowSpec,
 };
-use spiral_robotics_core::OperationError;
 use tokio::sync::broadcast;
 
 use crate::workflow::manager::WorkflowManager;

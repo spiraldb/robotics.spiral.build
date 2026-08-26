@@ -19,13 +19,14 @@
 //!
 //! `robot` is the layer that does know what an arm is. Together with `urdf`,
 //! it owns the renderer-facing description, parser, and pose construction. It
-//! accepts neutral measured joint angles from `spiral-robotics-core`, turns
-//! them and any mounted cameras into a [`Scene`], and hands back the table that
+//! accepts neutral measured joint angles, turns them and any mounted cameras
+//! into a [`Scene`], and hands back the table that
 //! says which key is which joint.
 //!
 //! The seam between them is the useful one: **this crate answers where a thing
 //! is on screen, and the application answers what should be said about it.**
 
+mod arm;
 mod camera;
 mod gesture;
 mod pick;
@@ -38,6 +39,7 @@ mod urdf;
 /// geometry without depending on the domain crate for rendering details.
 pub use glam;
 
+pub use arm::{JointAngles, JointDefinition, SO101_JOINTS};
 pub use camera::Camera;
 pub use gesture::{Drag, DragUpdate, Gesture};
 pub use pick::{PickRequest, SceneFrame, Viewport};

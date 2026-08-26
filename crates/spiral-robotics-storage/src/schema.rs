@@ -231,18 +231,18 @@ impl StorageSchema {
 
     /// Whether a value is safe to interpolate as an unquoted SQL identifier.
     pub fn is_identifier(value: &str) -> bool {
-        spiral_robotics_core::query::UnquotedSqlIdentifier::try_from(value).is_ok()
+        spiral_robotics_api::sql::UnquotedSqlIdentifier::try_from(value).is_ok()
     }
 
     /// Whether a value is safe as a logical dataset row identifier.
     pub fn is_dataset_id(value: &str) -> bool {
-        spiral_robotics_core::identity::DatasetId::is_canonical(value)
+        spiral_robotics_api::identity::DatasetId::is_canonical(value)
     }
 
     /// Convert an external immutable ID into one component of a generated name.
     #[cfg(test)]
     fn identifier_component(value: &str) -> String {
-        spiral_robotics_core::identity::SqlNameComponent::from(value).into_string()
+        spiral_robotics_api::identity::SqlNameComponent::from(value).into_string()
     }
 }
 

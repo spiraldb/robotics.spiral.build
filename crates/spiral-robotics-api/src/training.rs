@@ -1,7 +1,6 @@
 //! Native policy-training contracts and bounded run history.
 
 use serde::{Deserialize, Serialize};
-use spiral_robotics_core::operation::OperationLifecycle;
 
 /// The policy family executed by the native training runtime.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -310,13 +309,7 @@ impl TrainingRunPhase {
     }
 
     pub const fn active(self) -> bool {
-        match self {
-            Self::Starting => OperationLifecycle::Pending,
-            Self::Running => OperationLifecycle::Running,
-            Self::Stopping => OperationLifecycle::Stopping,
-            Self::Completed | Self::Stopped | Self::Failed => OperationLifecycle::Finished,
-        }
-        .active()
+        matches!(self, Self::Starting | Self::Running | Self::Stopping)
     }
 }
 

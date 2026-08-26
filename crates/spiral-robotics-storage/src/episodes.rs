@@ -11,18 +11,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::schema::{Table, column as db};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
+use spiral_robotics_api::identity::EpisodeId;
 use spiral_robotics_api::recording::{
     EpisodeArm, EpisodeAssessment, EpisodeIdentity as EpisodeSummaryIdentity, EpisodeSummary,
     EpisodeTimeline, RecordingGap,
 };
 use spiral_robotics_api::robots::MotorLimits;
-pub use spiral_robotics_core::MAX_EPISODE_FRAMES;
-use spiral_robotics_core::OperationError;
-use spiral_robotics_core::calibration::Calibration;
-use spiral_robotics_core::identity::EpisodeId;
-use spiral_robotics_hardware::RecordingCompletion;
-use spiral_robotics_hardware::RecordingWriter;
+use spiral_robotics_hardware::calibration::Calibration;
 pub use spiral_robotics_hardware::{ArmConditionSummary, EpisodeCheckpoint, Sample};
+use spiral_robotics_hardware::{
+    CompletedRecording, RecordingCompletion, RecordingGap as HardwareRecordingGap, RecordingWriter,
+};
 
 use crate::adbc::ProjectStore;
 use crate::episode_schema::{JointSampleRows, SpiralEpisodeEncoder};
@@ -31,6 +30,8 @@ use crate::sql::SpiralSql;
 use crate::video::{VideoAssetMetadata, VideoSegment, VideoSize, VideoTiming};
 
 const SAMPLE_QUEUE_DEPTH: usize = 2_048;
+/// Hard storage limit for a single recorded episode.
+pub const MAX_EPISODE_FRAMES: u64 = 1_000_000;
 const MAX_EPISODE_ROWS: usize = MAX_EPISODE_FRAMES as usize * 16;
 const NO_SAMPLE_TIMESTAMP_BITS: u64 = u64::MAX;
 
@@ -95,16 +96,6 @@ impl fmt::Display for EpisodeError {
 }
 
 impl std::error::Error for EpisodeError {}
-
-impl From<EpisodeError> for OperationError {
-    fn from(error: EpisodeError) -> Self {
-        let message = error.to_string();
-        match error {
-            EpisodeError::InvalidId(_) | EpisodeError::Invalid(_) => Self::InvalidInput(message),
-            EpisodeError::NotFound(_) => Self::NotFound(message),
-        }
-    }
-}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ArmCondition {
@@ -1042,7 +1033,7 @@ impl RecordingWriter for EpisodeWriter {
             self,
             EpisodeCompletion::new(
                 completion.duration_seconds(),
-                completion.recording_gaps().to_vec(),
+                completion.recording_gaps().to_api(),
                 completion.condition().to_vec(),
             )
             .with_max_follow_error_degrees(completion.max_follow_error_degrees()),
@@ -1053,18 +1044,34 @@ impl RecordingWriter for EpisodeWriter {
         EpisodeWriter::failure(self)
     }
 
-    fn finish(self: Box<Self>, completion: RecordingCompletion) -> Result<EpisodeSummary, String> {
+    fn finish(
+        self: Box<Self>,
+        completion: RecordingCompletion,
+    ) -> Result<CompletedRecording, String> {
         EpisodeWriter::finish(
             *self,
             EpisodeCompletion::new(
                 completion.duration_seconds(),
-                completion.recording_gaps().to_vec(),
+                completion.recording_gaps().to_api(),
                 completion.condition().to_vec(),
             )
             .with_max_follow_error_degrees(completion.max_follow_error_degrees())
             .with_discarded(completion.discarded()),
         )
+        .map(|summary| CompletedRecording::new(summary.id(), summary.frames()))
         .map_err(|error| error.to_string())
+    }
+}
+
+trait RecordingGapProjection {
+    fn to_api(&self) -> Vec<RecordingGap>;
+}
+
+impl RecordingGapProjection for [HardwareRecordingGap] {
+    fn to_api(&self) -> Vec<RecordingGap> {
+        self.iter()
+            .map(|gap| RecordingGap::new(gap.after_seconds(), gap.duration_seconds()))
+            .collect()
     }
 }
 

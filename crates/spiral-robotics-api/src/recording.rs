@@ -1,7 +1,6 @@
 //! Episode recording, inspection, and replay contracts.
 
 use serde::{Deserialize, Serialize};
-use spiral_robotics_core::operation::EpisodeOutcome;
 
 /// Replay a trajectory fetched directly from SpiralDB.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -152,7 +151,7 @@ impl EpisodeSummary {
 
     /// True when the take is complete enough to replay or export.
     pub fn usable(&self) -> bool {
-        EpisodeOutcome::new(self.timeline.frames, self.assessment.problem.is_some()).is_usable()
+        self.timeline.frames > 0 && self.assessment.problem.is_none()
     }
 
     /// The joints of the arm named, when this take sampled it.
@@ -309,23 +308,33 @@ impl EpisodeInspectionSnapshot {
 pub struct EpisodeInspectionArm {
     arm: String,
     joints: Vec<String>,
-    normalized: Vec<Option<f64>>,
-    raw: Vec<i64>,
+    #[serde(flatten)]
+    samples: EpisodeArmScalarSamples,
     velocity: EpisodeOptionalFrameMatrix,
     effort: EpisodeOptionalFrameMatrix,
     action: EpisodeOptionalFrameMatrix,
 }
 
 /// Dense scalar matrices that are present for every recorded arm frame.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct EpisodeArmScalarSamples {
     normalized: Vec<Option<f64>>,
     raw: Vec<i64>,
+    #[serde(default)]
+    degrees: Vec<Option<f64>>,
 }
 
 impl EpisodeArmScalarSamples {
     pub const fn new(normalized: Vec<Option<f64>>, raw: Vec<i64>) -> Self {
-        Self { normalized, raw }
+        Self {
+            normalized,
+            raw,
+            degrees: Vec::new(),
+        }
+    }
+    pub fn with_degrees(mut self, degrees: Vec<Option<f64>>) -> Self {
+        self.degrees = degrees;
+        self
     }
 }
 
@@ -360,8 +369,7 @@ impl EpisodeInspectionArm {
         Self {
             arm: arm.into(),
             joints,
-            normalized: samples.normalized,
-            raw: samples.raw,
+            samples,
             velocity: EpisodeOptionalFrameMatrix::default(),
             effort: EpisodeOptionalFrameMatrix::default(),
             action: EpisodeOptionalFrameMatrix::default(),
@@ -382,10 +390,13 @@ impl EpisodeInspectionArm {
         &self.joints
     }
     pub fn normalized(&self) -> &[Option<f64>] {
-        &self.normalized
+        &self.samples.normalized
     }
     pub fn raw(&self) -> &[i64] {
-        &self.raw
+        &self.samples.raw
+    }
+    pub fn degrees(&self) -> &[Option<f64>] {
+        &self.samples.degrees
     }
     pub const fn velocity(&self) -> &EpisodeOptionalFrameMatrix {
         &self.velocity

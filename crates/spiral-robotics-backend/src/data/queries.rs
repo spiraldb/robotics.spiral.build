@@ -1,9 +1,8 @@
 //! Read-only episode catalog use cases and delivery-neutral projections.
 
-
-use spiral_robotics_core::OperationError;
+use crate::OperationError;
+use spiral_robotics_api::identity::EpisodeId;
 use spiral_robotics_api::recording::{EpisodeInspectionSnapshot, EpisodeSummary};
-use spiral_robotics_core::identity::EpisodeId;
 
 pub(crate) trait EpisodeQueryPort: Send + Sync {
     fn episodes(&self) -> Vec<EpisodeSummary>;
@@ -48,7 +47,6 @@ impl<'a, P: EpisodeQueryPort + ?Sized> EpisodeQueries<'a, P> {
             })?;
         self.port.inspection(episode)
     }
-
 }
 
 #[cfg(test)]
@@ -80,7 +78,6 @@ mod tests {
                 .push(format!("inspection:{episode}"));
             Err(OperationError::NotFound(episode))
         }
-
     }
 
     #[test]

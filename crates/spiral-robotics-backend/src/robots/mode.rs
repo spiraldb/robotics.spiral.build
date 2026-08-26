@@ -1,6 +1,6 @@
 //! Operator-requested control-mode changes.
 
-use spiral_robotics_core::OperationError;
+use crate::OperationError;
 
 /// Modes an operator may enter directly.
 ///

@@ -49,7 +49,7 @@ inside the Data route.
 ## Implementation ownership
 
 - Query policy:
-  [`spiral-robotics-core/src/query.rs`](../../crates/spiral-robotics-core/src/query.rs)
+  [`spiral-robotics-api/src/sql`](../../crates/spiral-robotics-api/src/sql/)
 - Data query use case:
   [`spiral-robotics-backend/src/data/mod.rs`](../../crates/spiral-robotics-backend/src/data/mod.rs)
 - SQL validation and ADBC adapter:

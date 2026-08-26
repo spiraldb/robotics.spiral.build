@@ -7,7 +7,7 @@
 
 use crate::schema::{self as spiral, Table, column};
 use crate::video::{VideoAssetKey, VideoByteRange};
-pub(crate) use spiral_robotics_core::query::ReadOnlyQueryMode;
+pub(crate) use spiral_robotics_api::sql::ReadOnlyQueryMode;
 
 /// SQL generated for Spiral Robotics-owned storage resources.
 pub struct SpiralSql;
@@ -215,7 +215,7 @@ impl SpiralSql {
     }
 
     pub(crate) fn ensure_read_only(sql: &str, mode: ReadOnlyQueryMode) -> Result<(), String> {
-        spiral_robotics_core::query::ReadOnlyQuery::new(sql, mode)
+        spiral_robotics_api::sql::ReadOnlyQuery::new(sql, mode)
             .authorize()
             .map_err(|error| error.to_string())
     }

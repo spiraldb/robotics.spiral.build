@@ -3,7 +3,7 @@
 /// Stable failure categories that delivery adapters may present as HTTP,
 /// desktop, CLI, or other transport-specific responses.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum OperationError {
+pub(crate) enum OperationError {
     InvalidInput(String),
     NotFound(String),
     Conflict(String),
@@ -12,27 +12,15 @@ pub enum OperationError {
 }
 
 impl OperationError {
-    pub fn invalid_input(message: impl Into<String>) -> Self {
+    pub(crate) fn invalid_input(message: impl Into<String>) -> Self {
         Self::InvalidInput(message.into())
     }
 
-    pub fn not_found(message: impl Into<String>) -> Self {
-        Self::NotFound(message.into())
-    }
-
-    pub fn conflict(message: impl Into<String>) -> Self {
+    pub(crate) fn conflict(message: impl Into<String>) -> Self {
         Self::Conflict(message.into())
     }
 
-    pub fn external(message: impl Into<String>) -> Self {
-        Self::External(message.into())
-    }
-
-    pub fn internal(message: impl Into<String>) -> Self {
-        Self::Internal(message.into())
-    }
-
-    pub fn message(&self) -> &str {
+    pub(crate) fn message(&self) -> &str {
         match self {
             Self::InvalidInput(message)
             | Self::NotFound(message)
@@ -50,3 +38,16 @@ impl std::fmt::Display for OperationError {
 }
 
 impl std::error::Error for OperationError {}
+
+impl From<spiral_robotics_storage::episodes::EpisodeError> for OperationError {
+    fn from(error: spiral_robotics_storage::episodes::EpisodeError) -> Self {
+        let message = error.to_string();
+        match error {
+            spiral_robotics_storage::episodes::EpisodeError::InvalidId(_)
+            | spiral_robotics_storage::episodes::EpisodeError::Invalid(_) => {
+                Self::InvalidInput(message)
+            }
+            spiral_robotics_storage::episodes::EpisodeError::NotFound(_) => Self::NotFound(message),
+        }
+    }
+}

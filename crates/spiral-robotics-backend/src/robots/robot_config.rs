@@ -17,7 +17,7 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Number, Value};
-use spiral_robotics_core::calibration::{MotorDirection, MotorSpec};
+use spiral_robotics_hardware::calibration::{MotorDirection, MotorSpec};
 #[cfg(test)]
 use tempfile::NamedTempFile;
 
@@ -874,7 +874,7 @@ mod tests {
     use std::{fs, io};
 
     use serde_json::{Value, json};
-    use spiral_robotics_core::calibration::{MotorDirection, MotorSpec};
+    use spiral_robotics_hardware::calibration::{MotorDirection, MotorSpec};
     use tempfile::tempdir;
 
     use super::{ConfigError, RobotConfig, RobotConfigUpdate, SCHEMA_VERSION};

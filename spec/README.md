@@ -170,8 +170,8 @@ These rules apply to every feature:
 - Backend and frontend libraries export only their process/UI launchers.
   Storage keeps ADBC, schema, SQL, settings, and manager modules private and
   exposes reviewed feature types plus a flat connection facade.
-- Source must be organized around product capabilities and features rather than
-  technical buckets such as generic API, data, or view modules.
+- Source must be organized around product capabilities and explicit boundaries
+  rather than catch-all buckets such as core, common, or utility modules.
 - Runtime state must have an explicit owner; first-party Rust code must not use
   process-wide `static` variables.
 - Public construction must be narrow and invariant-preserving. Prefer focused
@@ -185,8 +185,9 @@ These rules apply to every feature:
 - A recursive syntax-level architecture test enforces the ownership, field,
   parameter, visibility, and no-static bounds across every first-party
   production crate, including build support and examples.
-- Critical invariants must be enforced by core, backend capability policy, or
-  hardware control policy, not only by UI controls.
+- Critical invariants must be enforced by their narrow owner: SQL policy,
+  backend capability policy, hardware control policy, storage policy, or a wire
+  contract invariant—not only by UI controls.
 - Pure feature tests must run without hardware, HTTP, SpiralDB, or a compute
   runtime.
 - Adapter and end-to-end tests must verify real external behavior where it
@@ -194,6 +195,4 @@ These rules apply to every feature:
 - The Nix flake must define the Rust and web development environment.
 
 Architecture enforcement currently lives in
-[`spiral-robotics-core/tests/architecture.rs`](../crates/spiral-robotics-core/tests/architecture.rs)
-and
 [`spiral-robotics-backend/tests/architecture.rs`](../crates/spiral-robotics-backend/tests/architecture.rs).

@@ -8,7 +8,6 @@ use futures_util::FutureExt as _;
 use image::imageops::FilterType;
 use safetensors::SafeTensors;
 use serde::Deserialize;
-use spiral_robotics_api::robots::{ModeSelection, ModeStatus, RobotTelemetry};
 use spiral_robotics_api::rollout::{
     RolloutPhase as ContractRolloutPhase, RolloutSnapshot as ContractRolloutSnapshot,
     StartRolloutRequest,
@@ -22,6 +21,7 @@ use tokio::time::{Instant as TokioInstant, MissedTickBehavior};
 
 use crate::adapters::clock::SystemClock;
 use crate::adapters::compute_runtime::HttpPolicyLoader;
+use crate::adapters::hardware::HardwareApiProjection as _;
 use crate::clock::{Clock, StableIdSequence};
 use crate::robotics::cameras::{CameraManager, Frame};
 use crate::robots::workspace::RobotWorkspace;
@@ -37,7 +37,9 @@ use crate::rollout::service::{
     RolloutRequest, RolloutSnapshot,
 };
 use crate::sync::MutexRecovery;
-use spiral_robotics_hardware::{HardwareHandle, HardwareState, PolicyGoals};
+use spiral_robotics_hardware::{
+    HardwareHandle, HardwareState, ModeSelection, ModeStatus, PolicyGoals, RobotTelemetry,
+};
 use spiral_robotics_storage::StorageManager;
 use spiral_robotics_storage::StudioPreferencesStore;
 use spiral_robotics_storage::checkpoints::{CheckpointArtifact, CheckpointKey, CheckpointStore};
@@ -655,7 +657,7 @@ impl RolloutManager {
             .get(request.robot())
             .cloned()
             .unwrap_or_default();
-        let summary = record.summary(connection);
+        let summary = record.summary(connection.to_api());
         let contract = manifest
             .data_contract
             .into_policy_contract(spiral_robotics_storage::SCHEMA_VERSION)

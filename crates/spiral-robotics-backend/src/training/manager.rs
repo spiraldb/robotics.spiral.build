@@ -7,10 +7,10 @@ use std::time::Duration;
 
 use spiral_robotics_api::settings::ConnectionTestResponse;
 use spiral_robotics_api::training::{
-    MAX_TRAINING_HISTORY_RUNS,
-    StartTrainingRequest, TrainingCheckpoint, TrainingMetricPoint, TrainingMetricProgress,
-    TrainingReadiness, TrainingResourceMetrics, TrainingRun, TrainingRunPhase,
-    TrainingRuntimeInfo, TrainingSnapshot, TrainingSource, TrainingStageTimings, TrainingUpdate,
+    MAX_TRAINING_HISTORY_RUNS, StartTrainingRequest, TrainingCheckpoint, TrainingMetricPoint,
+    TrainingMetricProgress, TrainingReadiness, TrainingResourceMetrics, TrainingRun,
+    TrainingRunPhase, TrainingRuntimeInfo, TrainingSnapshot, TrainingSource, TrainingStageTimings,
+    TrainingUpdate,
 };
 use spiral_robotics_training::{
     ActLayerCounts, ActModelDimensions, ActTrainingArchitecture, ActTrainingInput,
@@ -22,6 +22,7 @@ use spiral_robotics_training::{
 };
 use tokio::sync::broadcast;
 
+use crate::OperationError;
 use crate::adapters::clock::SystemClock;
 use crate::clock::{Clock, StableIdSequence};
 use crate::sync::MutexRecovery;
@@ -29,7 +30,6 @@ use crate::training::execution::{
     RunStateChange, TrainingCoordinatorPort, TrainingLaunch, TrainingRunIdentity, TrainingRunPort,
 };
 use crate::training::runs::{RunPhase as CapabilityRunPhase, RunRecord, TrainingRunRegistry};
-use spiral_robotics_core::OperationError;
 use spiral_robotics_storage::StorageManager;
 use spiral_robotics_storage::checkpoints::CheckpointStore;
 
@@ -234,10 +234,7 @@ impl TrainingManager {
             let manager = self.clone();
             tokio::spawn(async move {
                 manager
-                    .run_backend(
-                        TrainingLaunch::new(run.id(), run.config().clone()),
-                        cancel,
-                    )
+                    .run_backend(TrainingLaunch::new(run.id(), run.config().clone()), cancel)
                     .await;
             });
         }
@@ -794,7 +791,7 @@ impl TrainingRunPort for TrainingManager {
 
     fn transition_run(&self, run_id: &str, change: RunStateChange) -> Result<(), String> {
         self.set_phase(
-            TrainingPhaseUpdate::new(run_id.to_owned(), change.phase().into())
+            TrainingPhaseUpdate::new(run_id.to_owned(), change.phase())
                 .with_completion(change.finished_ms(), change.message().map(str::to_owned)),
         )
     }
@@ -823,10 +820,7 @@ impl TrainingCoordinatorPort for TrainingManager {
         self.refresh_readiness().await
     }
 
-    fn resolve_training_source(
-        &self,
-        dataset_id: &str,
-    ) -> Result<TrainingSource, OperationError> {
+    fn resolve_training_source(&self, dataset_id: &str) -> Result<TrainingSource, OperationError> {
         Ok(TrainingSource::new(dataset_id))
     }
 

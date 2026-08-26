@@ -28,6 +28,9 @@ use hf_hub::{Repo, RepoType};
 use image::imageops::FilterType;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use spiral_robotics_api::sql::{
+    QualifiedRelation, ReadOnlyQuery, ReadOnlyQueryMode, UnquotedSqlIdentifier,
+};
 use spiral_robotics_api::workflow::{
     MAX_SIGLIP_CONCEPT_LENGTH, MAX_WORKFLOW_FEATURE_DESCRIPTION_LENGTH,
     MAX_WORKFLOW_FEATURE_STREAMS, SIGLIP_BASE_MODEL_ID, SIGLIP_BASE_REPOSITORY,
@@ -35,8 +38,6 @@ use spiral_robotics_api::workflow::{
     WorkflowFeatureDefinition, WorkflowModelExecution, WorkflowModelIdentity, WorkflowModelMetrics,
     WorkflowModelRunMetadata, WorkflowNodeProgress, WorkflowQuarantineSummary,
 };
-use spiral_robotics_core::query::{ReadOnlyQuery, ReadOnlyQueryMode, UnquotedSqlIdentifier};
-use spiral_robotics_core::workflow::QualifiedRelation;
 use tokenizers::Tokenizer;
 use tokenizers::utils::padding::{PaddingDirection, PaddingParams, PaddingStrategy};
 use tokenizers::utils::truncation::TruncationParams;

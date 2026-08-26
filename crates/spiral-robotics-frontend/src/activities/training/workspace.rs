@@ -18,10 +18,10 @@ use dioxus::prelude::*;
 use dioxus_workbench::{LayoutNode, Panel, PanelId, PanelLayout, PanelWorkspace, SplitAxis};
 #[cfg(test)]
 use spiral_robotics_api::catalog as spiral;
+use spiral_robotics_api::identity::DatasetId;
 use spiral_robotics_api::training::{
     TrainingMetricPoint, TrainingReadiness, TrainingRun, TrainingRunPhase,
 };
-use spiral_robotics_core::identity::DatasetId;
 
 use crate::activities::training::state::training_controller;
 use crate::components::charts::{

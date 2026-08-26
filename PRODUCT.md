@@ -406,7 +406,7 @@ rollout, replay, export), *ingestion*
 
 Real, in-repo:
 
-- `crates/spiral-robotics-core/assets/so101.urdf` — the shipped robot description.
+- `crates/spiral-robotics-viewport/assets/so101.urdf` — the shipped robot description.
 - `examples/robot.json`, `examples/calibration-input.json` — real configuration
   and calibration input.
 - `robots/leader.json`, `robots/follower.json` — a working two-arm setup.

@@ -1,9 +1,6 @@
 //! Studio bootstrap status, top-level snapshot, and request failures.
 
 use serde::{Deserialize, Serialize};
-use spiral_robotics_core::operation::{
-    RobotReadiness, TeleoperationCandidate, TeleoperationCandidates,
-};
 
 use crate::robots::{CameraStatus, ModeStatus, RobotSummary};
 
@@ -131,27 +128,48 @@ impl StudioSnapshot {
     /// Compatibility is checked here so the Record button and the server make the
     /// same decision instead of offering a pair the control thread must reject.
     pub fn default_teleoperation_pair(&self) -> Option<(String, String)> {
-        let candidates = self
+        let ready = self
             .robots
             .iter()
-            .map(|robot| {
-                TeleoperationCandidate::new(
-                    robot.id().to_owned(),
-                    RobotReadiness::new(
-                        robot.connection().connected(),
-                        robot.calibrated(),
-                        robot.problem().is_none(),
-                    ),
-                    robot
-                        .motors()
-                        .iter()
-                        .map(|motor| motor.name().to_owned())
-                        .collect(),
-                )
-                .with_robot_type(robot.robot_type().map(str::to_owned))
+            .filter(|robot| {
+                robot.connection().connected() && robot.calibrated() && robot.problem().is_none()
             })
             .collect::<Vec<_>>();
-        TeleoperationCandidates::from(candidates.as_slice()).best_pair()
+        ready
+            .iter()
+            .enumerate()
+            .flat_map(|(leader_index, leader)| {
+                ready
+                    .iter()
+                    .enumerate()
+                    .filter(move |(follower_index, follower)| {
+                        leader_index != *follower_index
+                            && leader.motors().iter().any(|leader_motor| {
+                                follower
+                                    .motors()
+                                    .iter()
+                                    .any(|motor| motor.name() == leader_motor.name())
+                            })
+                    })
+                    .map(move |(follower_index, follower)| {
+                        let leader_has_role = leader
+                            .robot_type()
+                            .is_some_and(|kind| kind.to_ascii_lowercase().contains("leader"));
+                        let follower_has_role = follower
+                            .robot_type()
+                            .is_some_and(|kind| kind.to_ascii_lowercase().contains("follower"));
+                        (
+                            (
+                                u8::from(!leader_has_role) + u8::from(!follower_has_role),
+                                leader_index,
+                                follower_index,
+                            ),
+                            (leader.id().to_owned(), follower.id().to_owned()),
+                        )
+                    })
+            })
+            .min_by_key(|(rank, _)| *rank)
+            .map(|(_, pair)| pair)
     }
 }
 
@@ -181,10 +199,10 @@ mod tests {
     use super::*;
     use crate::recording::*;
     use crate::robots::*;
+    use crate::robots::{MotorCalibration, MotorDirection, MotorReading};
     use crate::rollout::*;
     use crate::settings::*;
     use crate::training::*;
-    use spiral_robotics_core::calibration::{MotorCalibration, MotorDirection, MotorReading};
 
     #[test]
     fn act_defaults_match_current_lerobot_architecture() {
@@ -441,105 +459,6 @@ mod tests {
     fn calibration_span_saturates_instead_of_overflowing() {
         let progress = CalibrationJointProgress::new("gripper", i64::MIN, 0).with_max(i64::MAX);
         assert_eq!(progress.span(), i64::MAX);
-    }
-
-    fn joint() -> JointTelemetry {
-        joint_with_diagnostics(
-            MotorElectricalReadings::new(Some(30.0), Some(7.4), Some(0.2)),
-            Some(0.1),
-            Vec::new(),
-        )
-    }
-
-    fn joint_with_diagnostics(
-        electrical: MotorElectricalReadings,
-        load: Option<f64>,
-        faults: Vec<MotorFault>,
-    ) -> JointTelemetry {
-        JointTelemetry::new(
-            JointIdentity::new("shoulder_pan", 1),
-            JointKinematics::new(2048, None, None),
-            JointDiagnostics::new(electrical, load, Some(0.0))
-                .with_temperature_rise(Some(0.0))
-                .with_faults(faults),
-        )
-    }
-
-    fn limits() -> MotorLimits {
-        MotorLimits::from_hardware_limits(
-            Some(70.0),
-            MotorVoltageRange::new(Some(4.5), Some(9.0)),
-            Some(1.0),
-        )
-    }
-
-    #[test]
-    fn a_motor_within_its_own_limits_is_nominal() {
-        assert_eq!(joint().condition(&limits()), MotorCondition::Nominal);
-    }
-
-    #[test]
-    fn nearing_a_limit_is_caution_and_the_motors_own_verdict_is_fault() {
-        let hot = joint_with_diagnostics(
-            MotorElectricalReadings::new(Some(70.0 * CAUTION_LIMIT_FRACTION), Some(7.4), Some(0.2)),
-            Some(0.1),
-            Vec::new(),
-        );
-        assert_eq!(hot.condition(&limits()), MotorCondition::Caution);
-
-        let strained = joint_with_diagnostics(
-            MotorElectricalReadings::new(Some(30.0), Some(7.4), Some(0.2)),
-            Some(-0.9),
-            Vec::new(),
-        );
-        assert_eq!(
-            strained.condition(&limits()),
-            MotorCondition::Caution,
-            "load is judged by how hard it is pushing, not which way"
-        );
-
-        let sagging = joint_with_diagnostics(
-            MotorElectricalReadings::new(
-                Some(30.0),
-                Some(4.5 + CAUTION_VOLTAGE_MARGIN_VOLTS - 0.1),
-                Some(0.2),
-            ),
-            Some(0.1),
-            Vec::new(),
-        );
-        assert_eq!(sagging.condition(&limits()), MotorCondition::Caution);
-
-        // The motor's own fault byte outranks every margin applied here.
-        let faulted = joint_with_diagnostics(
-            MotorElectricalReadings::new(Some(30.0), Some(7.4), Some(0.2)),
-            Some(0.1),
-            vec![MotorFault::Overheat],
-        );
-        assert_eq!(faulted.condition(&limits()), MotorCondition::Fault);
-    }
-
-    #[test]
-    fn without_limits_only_the_motors_own_faults_can_speak() {
-        let scorching = joint_with_diagnostics(
-            MotorElectricalReadings::new(Some(200.0), Some(7.4), Some(0.2)),
-            Some(0.1),
-            Vec::new(),
-        );
-
-        assert_eq!(
-            scorching.condition(&MotorLimits::default()),
-            MotorCondition::Nominal,
-            "there is nothing to be near, and a threshold invented here would be a guess"
-        );
-        assert_eq!(
-            joint_with_diagnostics(
-                MotorElectricalReadings::new(Some(200.0), Some(7.4), Some(0.2)),
-                Some(0.1),
-                vec![MotorFault::Unrecognized],
-            )
-            .condition(&MotorLimits::default()),
-            MotorCondition::Fault
-        );
     }
 
     #[test]

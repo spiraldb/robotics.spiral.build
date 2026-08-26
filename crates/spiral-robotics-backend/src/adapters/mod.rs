@@ -2,4 +2,4 @@
 
 pub(crate) mod clock;
 pub(crate) mod compute_runtime;
-mod hardware;
+pub(crate) mod hardware;

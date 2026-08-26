@@ -4,7 +4,7 @@
 //! revision and single-run concurrency rules without depending on HTTP, Tokio,
 //! SpiralDB, or a wire representation.
 
-use spiral_robotics_core::OperationError;
+use crate::OperationError;
 
 pub(crate) struct WorkflowSaveAdmission {
     expected_revision: u64,

@@ -26,7 +26,7 @@ use crate::bus::{
     BusError, MotorBus, MotorElectricalSample, MotorMechanicalSample, MotorVoltageLimits,
 };
 use crate::bus::{MotorFaults, MotorLimits, MotorSample};
-use spiral_robotics_core::calibration::MotorSpec;
+use crate::calibration::MotorSpec;
 
 const BROADCAST_ID: u8 = 0xfe;
 const INSTRUCTION_READ: u8 = 0x02;
@@ -883,9 +883,7 @@ impl<'a> RegisterValues<'a> {
     fn sample(&self) -> MotorSample {
         let mechanical = MotorMechanicalSample::new(
             self.word(OFFSET_SPEED).map(|speed| {
-                spiral_robotics_core::arm::JointDefinition::degrees_from_encoder_counts(i64::from(
-                    Self::sign_magnitude(speed),
-                ))
+                MotorSpec::degrees_from_encoder_counts(i64::from(Self::sign_magnitude(speed)))
             }),
             self.word(OFFSET_LOAD).map(|load| {
                 f64::from(Self::sign_magnitude_at(load, LOAD_SIGN_BIT)) / LOAD_FULL_SCALE
@@ -1010,7 +1008,7 @@ mod tests {
 
     use super::*;
     use crate::bus::MotorFault;
-    use spiral_robotics_core::calibration::MotorDirection;
+    use crate::calibration::MotorDirection;
 
     /// Build a well-formed status packet carrying `parameters` from `id`.
     fn status_packet(id: u8, parameters: &[u8]) -> Vec<u8> {

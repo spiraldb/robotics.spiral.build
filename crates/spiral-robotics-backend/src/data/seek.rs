@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 
 use super::episode_arms::RecordedArms;
-use spiral_robotics_core::OperationError;
+use crate::OperationError;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct SeekEpisodeCommand {

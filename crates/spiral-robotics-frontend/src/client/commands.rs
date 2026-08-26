@@ -20,7 +20,7 @@ use crate::shell::state::Studio;
 impl Studio {
     pub(crate) fn recording_blocker(self) -> Option<String> {
         let studio = self;
-        if !spiral_robotics_core::identity::DatasetId::is_canonical(
+        if !spiral_robotics_api::identity::DatasetId::is_canonical(
             studio.selected_dataset().read().trim(),
         ) {
             Some("Choose a dataset ID using letters, numbers, '.', '_' or '-'.".to_owned())

@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::query::UnquotedSqlIdentifier;
+use super::query::UnquotedSqlIdentifier;
 
 const PLACEHOLDER_PREFIX: &str = "{{node:";
 

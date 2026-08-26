@@ -15,6 +15,7 @@ use arrow_ipc::writer::StreamWriter;
 use arrow_schema::{DataType, Field, Schema};
 use serde::{Deserialize, Serialize};
 use spiral_robotics_api::datasets::{EpisodeImportSummary, ProjectImportSummary};
+use spiral_robotics_api::sql::{QualifiedRelation, UnquotedSqlIdentifier};
 use spiral_robotics_api::workflow::{
     DEFAULT_WORKFLOW_ID, MAX_SIGLIP_CONCEPT_LENGTH, MAX_WORKFLOW_AGENT_CONVERSATION_TITLE_CHARS,
     MAX_WORKFLOW_AGENT_CONVERSATIONS, MAX_WORKFLOW_AGENT_MESSAGES_PER_CONVERSATION,
@@ -23,8 +24,6 @@ use spiral_robotics_api::workflow::{
     WorkflowAgentArtifactKind, WorkflowAgentMessagePhase, WorkflowAgentPhase, WorkflowAgentRole,
     WorkflowAgentToolPhase, WorkflowFeatureApplicability, WorkflowFeatureDefinition,
 };
-use spiral_robotics_core::query::UnquotedSqlIdentifier;
-use spiral_robotics_core::workflow::QualifiedRelation;
 
 use crate::adbc::StorageConnection;
 use crate::manager::VideoAssetRecordBatch as _;

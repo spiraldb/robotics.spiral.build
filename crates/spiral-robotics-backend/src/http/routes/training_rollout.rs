@@ -67,10 +67,7 @@ impl RolloutSessionPort for RolloutHttpAdapter {
         RolloutManager::snapshot(self.0.as_ref())
     }
 
-    async fn start(
-        &self,
-        command: RolloutRequest,
-    ) -> Result<RolloutSnapshot, OperationError> {
+    async fn start(&self, command: RolloutRequest) -> Result<RolloutSnapshot, OperationError> {
         RolloutManager::start(&self.0, command.into())
             .await
             .map_err(OperationError::conflict)

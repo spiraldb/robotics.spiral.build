@@ -1,6 +1,6 @@
 //! Recorded-arm selection shared by replay and historical seek actions.
 
-use spiral_robotics_core::OperationError;
+use crate::OperationError;
 
 pub(crate) struct RecordedArms<'a> {
     episode: &'a str,

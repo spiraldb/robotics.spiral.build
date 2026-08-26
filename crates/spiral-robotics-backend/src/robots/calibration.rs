@@ -3,11 +3,11 @@
 use std::collections::BTreeMap;
 
 use spiral_robotics_api::robots::CalibrationReapplyResponse;
-use spiral_robotics_core::calibration::{Calibration, CalibrationInput, MotorSpec};
+use spiral_robotics_hardware::calibration::{Calibration, CalibrationInput, MotorSpec};
 use spiral_robotics_storage::episodes::ReappliedEpisodePositions;
 
+use crate::OperationError;
 use crate::data::catalog_lease::CatalogLeaseToken;
-use spiral_robotics_core::OperationError;
 
 pub(crate) struct CalibrationUpdate<'a> {
     motors: &'a BTreeMap<String, MotorSpec>,
@@ -256,14 +256,12 @@ impl<'a, P: CalibrationHistoryPort + ?Sized> CalibrationHistoryActions<'a, P> {
                 .reapply_positions(robot.to_owned(), calibration)
                 .await?
                 .into_parts();
-        Ok(
-            CalibrationReapplyResponse::new(
-                updated_episode_ids.len() as u64,
-                frames_updated,
-                episodes_unchanged,
-            )
-            .with_skipped(episodes_skipped, warnings),
+        Ok(CalibrationReapplyResponse::new(
+            updated_episode_ids.len() as u64,
+            frames_updated,
+            episodes_unchanged,
         )
+        .with_skipped(episodes_skipped, warnings))
     }
 }
 
@@ -271,7 +269,7 @@ impl<'a, P: CalibrationHistoryPort + ?Sized> CalibrationHistoryActions<'a, P> {
 mod tests {
     use std::sync::Mutex;
 
-    use spiral_robotics_core::calibration::{CalibrationError, MotorDirection, MotorReading};
+    use spiral_robotics_hardware::calibration::{CalibrationError, MotorDirection, MotorReading};
 
     use super::*;
     use crate::data::catalog_lease::{CatalogLeaseOwner, CatalogMutationLease};

@@ -12,7 +12,7 @@ use gloo_net::http::Method;
 use spiral_robotics_api::robots::{
     GoalRequest, JointTelemetry, MotorCondition, MotorLimits, RobotSummary, RobotTelemetry,
 };
-use spiral_robotics_core::arm::{self, JointAngles};
+use spiral_robotics_viewport::{self as arm, JointAngles};
 
 use crate::client::http as api;
 use crate::shell::state::{Selection, studio};
@@ -105,8 +105,9 @@ fn ToolReadout(telemetry: Option<RobotTelemetry>, calibrated: bool) -> Element {
             .filter(|error| error.is_finite())
             .reduce(f64::max)
     });
-    let lagging = tracking_error
-        .is_some_and(|error| error >= spiral_robotics_api::robots::CAUTION_FOLLOW_ERROR_DEGREES);
+    let lagging = telemetry
+        .as_ref()
+        .is_some_and(RobotTelemetry::tracking_lagging);
 
     rsx! {
         dl { class: "live-summary-readouts grid gap-1.5 px-3 pb-1 pt-2",
@@ -191,9 +192,7 @@ fn ConditionReadout(robot: RobotSummary, telemetry: Option<RobotTelemetry>) -> E
                 .unwrap_or_default()
                 .total_cmp(&right.temperature_celsius().unwrap_or_default())
         });
-    let hot = hottest.is_some_and(|joint| {
-        joint.condition(&robot.motor_limits(joint.name())) != MotorCondition::Nominal
-    });
+    let hot = hottest.is_some_and(|joint| joint.condition() != MotorCondition::Nominal);
 
     // Every motor shares one supply, so the interesting number is the worst of
     // them: the motor seeing the deepest sag is the one about to complain.
@@ -204,7 +203,7 @@ fn ConditionReadout(robot: RobotSummary, telemetry: Option<RobotTelemetry>) -> E
     let sagging = joints.iter().any(|joint| {
         joint.voltage_volts().is_some()
             && joint.voltage_volts() == supply
-            && joint.condition(&robot.motor_limits(joint.name())) != MotorCondition::Nominal
+            && joint.condition() != MotorCondition::Nominal
     });
 
     let hardest = joints
@@ -216,9 +215,7 @@ fn ConditionReadout(robot: RobotSummary, telemetry: Option<RobotTelemetry>) -> E
                 .abs()
                 .total_cmp(&right.load().unwrap_or_default().abs())
         });
-    let strained = hardest.is_some_and(|joint| {
-        joint.condition(&robot.motor_limits(joint.name())) != MotorCondition::Nominal
-    });
+    let strained = hardest.is_some_and(|joint| joint.condition() != MotorCondition::Nominal);
 
     rsx! {
         dl { class: "live-summary-readouts grid gap-1.5 px-3 pb-2 pt-0.5",
@@ -299,7 +296,7 @@ fn MotorDetail(robot: RobotSummary, telemetry: Option<RobotTelemetry>) -> Elemen
         .find(|motor| motor.name() == joint.name())
         .and_then(|motor| motor.model().to_owned());
     let limits = robot.motor_limits(joint.name());
-    let condition = joint.condition(&limits);
+    let condition = joint.condition();
 
     rsx! {
         section { class: "motor-detail",
@@ -556,7 +553,7 @@ fn JointControls(
                             .read()
                             .as_ref()
                             .is_some_and(|selection| selection.matches_joint(robot.id(), joint.name())),
-                        condition: joint.condition(&robot.motor_limits(joint.name())),
+                        condition: joint.condition(),
                         value: drivable
                             .then(|| commanded.read().get(joint.name()).copied())
                             .flatten(),

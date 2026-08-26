@@ -21,7 +21,7 @@ use charming::element::{
 use charming::series::Line;
 use dioxus::prelude::*;
 use serde::Deserialize;
-use spiral_robotics_core::arm::SO101_JOINTS;
+use spiral_robotics_viewport::SO101_JOINTS;
 
 use crate::activities::data::workbench::EpisodeIdPresentation;
 use crate::components::charts::{CharmingChart, ChartPoints, StudioTooltip};

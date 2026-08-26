@@ -708,7 +708,7 @@ const DEFAULT_COLOR: [f32; 4] = [0.7, 0.72, 0.75, 1.0];
 
 #[cfg(test)]
 mod tests {
-    use spiral_robotics_core::arm::SO101_JOINTS;
+    use crate::SO101_JOINTS;
 
     use super::*;
 
