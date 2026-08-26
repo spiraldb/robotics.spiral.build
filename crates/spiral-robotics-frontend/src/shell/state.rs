@@ -3,16 +3,13 @@
 use std::future::Future;
 
 use dioxus::prelude::*;
-use spiral_robotics_api::recording::{
-    DatasetSummary, EpisodeCatalogResponse, EpisodeSummary, RecordingProgress, ReplayProgress,
-};
+use spiral_robotics_api::recording::{RecordingProgress, ReplayProgress};
 use spiral_robotics_api::robots::{ModeSelection, RobotSummary, RobotTelemetry, TelemetryFrame};
 use spiral_robotics_api::rollout::RolloutSnapshot;
 use spiral_robotics_api::status::StudioSnapshot;
 use spiral_robotics_api::training::TrainingSnapshot;
 use spiral_robotics_api::workflow::{WorkflowAgentStateResponse, WorkflowStateResponse};
 
-use crate::client::http as api;
 #[cfg(all(feature = "web", target_arch = "wasm32"))]
 use crate::client::http::StudioEvent;
 use crate::panels::timeline::signals::SignalStore;
@@ -88,18 +85,8 @@ impl RobotSelection for [RobotSummary] {
     }
 }
 
-#[derive(Clone, Debug, Default)]
-struct EpisodeCatalogState {
-    datasets: Vec<DatasetSummary>,
-    episodes: Vec<EpisodeSummary>,
-    issues: Vec<String>,
-    loading: bool,
-    loaded: bool,
-    error: Option<String>,
-}
-
-/// Shared frontend state. Live state follows the server event stream; the
-/// episode catalog is an explicit HTTP resource owned by the browser session.
+/// Shared frontend state. Live state follows the server event stream; Data
+/// activity state is owned by its controller rather than this shell state.
 #[derive(Clone, Copy)]
 pub(crate) struct Studio {
     snapshot: Signal<StudioSnapshot>,
@@ -133,7 +120,6 @@ pub(crate) struct StudioDataSignals {
     /// Dataset row used by capture, import, Data filtering, and new Training
     /// runs. This is distinct from the configured Spiral namespace.
     selected_dataset: Signal<String>,
-    episode_catalog: Signal<EpisodeCatalogState>,
     /// Joint angles for the take being recorded, or the last one recorded.
     ///
     /// Filled from the event stream rather than from the panel that draws it:
@@ -212,7 +198,7 @@ impl Studio {
         self.data.recording_signals
     }
 
-    /// Create the shared state, load the episode catalog, and follow live state.
+    /// Create the shared state and follow live state.
     pub(crate) fn use_studio() -> Self {
         // Hooks own the lifetime of every signal. The context publishes only
         // their handles; it does not construct unscoped reactive state inside
@@ -230,7 +216,6 @@ impl Studio {
         let selected = use_signal(|| None);
         let pointed = use_signal(|| None);
         let selected_dataset = use_signal(|| "default".to_owned());
-        let episode_catalog = use_signal(EpisodeCatalogState::default);
         let recording_signals = use_signal(SignalStore::default);
         let studio = use_context_provider(|| Self {
             snapshot,
@@ -248,7 +233,6 @@ impl Studio {
             },
             data: StudioDataSignals {
                 selected_dataset,
-                episode_catalog,
                 recording_signals,
             },
             notifications,
@@ -269,23 +253,6 @@ impl Studio {
         });
         #[cfg(all(feature = "web", target_arch = "wasm32"))]
         let studio = studio;
-
-        // The listener deliberately precedes catalog bootstrap. Wait for its
-        // explicit readiness edge before making the browser session's one
-        // initial catalog request.
-        #[cfg(all(feature = "web", target_arch = "wasm32"))]
-        let mut catalog_bootstrap_started = use_signal(|| false);
-        #[cfg(all(feature = "web", target_arch = "wasm32"))]
-        use_effect(move || {
-            if studio.snapshot().read().readiness().catalog_available()
-                && !catalog_bootstrap_started()
-            {
-                catalog_bootstrap_started.set(true);
-                spawn(async move {
-                    let _ = studio.refresh_episode_catalog().await;
-                });
-            }
-        });
 
         // One long-lived task owns the connection and reconnects if the server
         // restarts, so the page recovers without a manual refresh.
@@ -436,82 +403,6 @@ impl Studio {
                 2 + hash % 2
             }
         }
-    }
-
-    /// Every recorded take, oldest first.
-    pub(crate) fn episodes(&self) -> Vec<EpisodeSummary> {
-        self.data.episode_catalog.read().episodes.clone()
-    }
-
-    pub(crate) fn datasets(&self) -> Vec<DatasetSummary> {
-        self.data.episode_catalog.read().datasets.clone()
-    }
-
-    pub(crate) fn episodes_loading(&self) -> bool {
-        self.data.episode_catalog.read().loading
-    }
-
-    pub(crate) fn episodes_loaded(&self) -> bool {
-        self.data.episode_catalog.read().loaded
-    }
-
-    pub(crate) fn episode_catalog_error(&self) -> Option<String> {
-        self.data.episode_catalog.read().error.clone()
-    }
-
-    pub(crate) fn episode_catalog_issues(&self) -> Vec<String> {
-        self.data.episode_catalog.read().issues.clone()
-    }
-
-    /// Replace the browser's episode catalog in one request.
-    pub(crate) async fn refresh_episode_catalog(mut self) -> Result<(), String> {
-        {
-            let mut catalog = self.data.episode_catalog.write();
-            catalog.loading = true;
-            catalog.error = None;
-        }
-        match api::Http::get::<EpisodeCatalogResponse>("/api/episodes").await {
-            Ok(response) => {
-                let mut catalog = self.data.episode_catalog.write();
-                let (datasets, episodes, issues) = response.into_parts();
-                catalog.datasets = datasets;
-                catalog.episodes = episodes;
-                catalog.issues = issues;
-                catalog.loading = false;
-                catalog.loaded = true;
-                Ok(())
-            }
-            Err(error) => {
-                let mut catalog = self.data.episode_catalog.write();
-                catalog.loading = false;
-                catalog.error = Some(error.clone());
-                Err(format!("Could not refresh the episode catalog: {error}"))
-            }
-        }
-    }
-
-    /// Apply the authoritative response from a known episode mutation.
-    pub(crate) fn upsert_episode(mut self, episode: EpisodeSummary) {
-        let mut catalog = self.data.episode_catalog.write();
-        if let Some(existing) = catalog
-            .episodes
-            .iter_mut()
-            .find(|existing| existing.id() == episode.id())
-        {
-            *existing = episode;
-        } else {
-            catalog.episodes.push(episode);
-        }
-        catalog.episodes.sort_by(|left, right| {
-            left.started_ms()
-                .cmp(&right.started_ms())
-                .then_with(|| left.id().cmp(right.id()))
-        });
-    }
-
-    pub(crate) fn remove_episode(mut self, episode: &str) {
-        let mut catalog = self.data.episode_catalog.write();
-        catalog.episodes.retain(|existing| existing.id() != episode);
     }
 
     /// The take being captured right now.

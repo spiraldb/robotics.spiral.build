@@ -2,10 +2,10 @@
 
 use crate::OperationError;
 use spiral_robotics_api::identity::EpisodeId;
-use spiral_robotics_api::recording::{EpisodeInspectionSnapshot, EpisodeSummary};
+use spiral_robotics_api::recording::{EpisodeInfo, EpisodeInspectionSnapshot};
 
 pub(crate) trait EpisodeQueryPort: Send + Sync {
-    fn episodes(&self) -> Vec<EpisodeSummary>;
+    fn episodes(&self) -> Vec<EpisodeInfo>;
     fn ensure_episode_exists(&self, episode: &str) -> Result<(), OperationError>;
     fn inspection(&self, episode: String) -> Result<EpisodeInspectionSnapshot, OperationError>;
 }
@@ -30,7 +30,7 @@ impl<'a, P: EpisodeQueryPort + ?Sized> EpisodeQueries<'a, P> {
         self.port.ensure_episode_exists(&episode)
     }
 
-    pub(crate) fn list(&self) -> Vec<EpisodeSummary> {
+    pub(crate) fn list(&self) -> Vec<EpisodeInfo> {
         self.port.episodes()
     }
 
@@ -61,7 +61,7 @@ mod tests {
     }
 
     impl EpisodeQueryPort for Queries {
-        fn episodes(&self) -> Vec<EpisodeSummary> {
+        fn episodes(&self) -> Vec<EpisodeInfo> {
             self.calls.lock().unwrap().push("list".to_owned());
             Vec::new()
         }

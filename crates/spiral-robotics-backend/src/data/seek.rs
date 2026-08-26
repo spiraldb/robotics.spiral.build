@@ -1,4 +1,4 @@
-//! Historical physical-seek capability action.
+//! Recorded physical-seek capability action.
 //!
 //! Delivery supplies plain input. The action admits the motion, chooses the
 //! recorded source arm, validates the sampled pose, and orders ticketing,
@@ -61,7 +61,7 @@ pub(crate) struct SampledArm {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct HistoricalSample {
+pub(crate) struct RecordedSample {
     seconds: f64,
     frame: u64,
     arms: Vec<SampledArm>,
@@ -77,14 +77,14 @@ pub(crate) struct PhysicalSeekPlan {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum HistoricalSeekState {
+pub(crate) enum RecordedSeekState {
     Seeking,
     Coalesced,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct HistoricalSeekResult {
-    state: HistoricalSeekState,
+pub(crate) struct RecordedSeekResult {
+    state: RecordedSeekState,
     episode: String,
     robot: String,
     source_arm: String,
@@ -190,7 +190,7 @@ impl SampledArm {
     }
 }
 
-impl HistoricalSample {
+impl RecordedSample {
     pub(crate) fn new(seconds: f64, frame: u64, arms: Vec<SampledArm>) -> Self {
         Self {
             seconds,
@@ -228,9 +228,9 @@ impl PhysicalSeekPlan {
     }
 }
 
-impl HistoricalSeekResult {
+impl RecordedSeekResult {
     pub(crate) fn new(
-        state: HistoricalSeekState,
+        state: RecordedSeekState,
         episode: impl Into<String>,
         robot: impl Into<String>,
     ) -> Self {
@@ -261,7 +261,7 @@ impl HistoricalSeekResult {
         self
     }
 
-    pub(crate) fn state(&self) -> HistoricalSeekState {
+    pub(crate) fn state(&self) -> RecordedSeekState {
         self.state
     }
     pub(crate) fn episode(&self) -> &str {
@@ -294,7 +294,7 @@ pub(crate) trait PhysicalSeekPort {
         &self,
         episode: &str,
         seconds: f64,
-    ) -> Result<HistoricalSample, OperationError>;
+    ) -> Result<RecordedSample, OperationError>;
 
     /// Under the seek serialization gate, command the pose only if `ticket`
     /// is still current. Returning `false` means a newer scrub superseded it.
@@ -313,11 +313,11 @@ impl<'a, P: PhysicalSeekPort + ?Sized> PhysicalSeekActions<'a, P> {
     pub(crate) async fn seek(
         &self,
         command: SeekEpisodeCommand,
-    ) -> Result<HistoricalSeekResult, OperationError> {
+    ) -> Result<RecordedSeekResult, OperationError> {
         let port = self.port;
         if !command.seconds.is_finite() || command.seconds < 0.0 {
             return Err(OperationError::InvalidInput(
-                "historical seek time must be a finite, non-negative number of seconds".to_owned(),
+                "recorded seek time must be a finite, non-negative number of seconds".to_owned(),
             ));
         }
 
@@ -348,7 +348,7 @@ impl<'a, P: PhysicalSeekPort + ?Sized> PhysicalSeekActions<'a, P> {
         })?;
         if !target.is_follower() {
             return Err(OperationError::InvalidInput(format!(
-                "historical seek only drives an explicitly configured follower; robot {:?} is {:?}",
+                "recorded seek only drives an explicitly configured follower; robot {:?} is {:?}",
                 command.robot, target.robot_type
             )));
         }
@@ -397,7 +397,7 @@ impl<'a, P: PhysicalSeekPort + ?Sized> PhysicalSeekActions<'a, P> {
         let sample = port.sample_at(&command.episode, command.seconds).await?;
         if !sample.seconds.is_finite() || sample.seconds < 0.0 {
             return Err(OperationError::InvalidInput(format!(
-                "take {:?} returned an invalid historical sample time",
+                "take {:?} returned an invalid recorded sample time",
                 command.episode
             )));
         }
@@ -436,11 +436,11 @@ impl<'a, P: PhysicalSeekPort + ?Sized> PhysicalSeekActions<'a, P> {
             )
             .await?;
 
-        Ok(HistoricalSeekResult::new(
+        Ok(RecordedSeekResult::new(
             if committed {
-                HistoricalSeekState::Seeking
+                RecordedSeekState::Seeking
             } else {
-                HistoricalSeekState::Coalesced
+                RecordedSeekState::Coalesced
             },
             command.episode,
             command.robot,

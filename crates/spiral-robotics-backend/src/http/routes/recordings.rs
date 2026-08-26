@@ -32,7 +32,7 @@ impl AppState {
 /// framework-neutral capability action.
 struct RecordingHttpAdapter<'a> {
     state: &'a AppState,
-    presented_recording: std::sync::Mutex<Option<EpisodeSummary>>,
+    presented_recording: std::sync::Mutex<Option<EpisodeInfo>>,
 }
 
 impl<'a> RecordingHttpAdapter<'a> {
@@ -43,7 +43,7 @@ impl<'a> RecordingHttpAdapter<'a> {
         }
     }
 
-    fn present_recording(&self, result: RecordingResult) -> Result<EpisodeSummary, OperationError> {
+    fn present_recording(&self, result: RecordingResult) -> Result<EpisodeInfo, OperationError> {
         let summary = self
             .presented_recording
             .lock()
@@ -64,7 +64,7 @@ impl<'a> RecordingHttpAdapter<'a> {
 struct RecordingDraft {
     writer: EpisodeWriter,
     arms: Vec<spiral_robotics_api::recording::EpisodeArm>,
-    summary: EpisodeSummary,
+    summary: EpisodeInfo,
 }
 
 impl RecordingPort for RecordingHttpAdapter<'_> {
@@ -447,7 +447,7 @@ impl EpisodeCatalogPort for EpisodeHttpAdapter<'_> {
 }
 
 impl EpisodeQueryPort for EpisodeHttpAdapter<'_> {
-    fn episodes(&self) -> Vec<EpisodeSummary> {
+    fn episodes(&self) -> Vec<EpisodeInfo> {
         self.state.episodes().list().to_vec()
     }
 
@@ -625,7 +625,7 @@ where
     }
 }
 
-/// Adapter for historical physical seeks. The current-ticket check and motor
+/// Adapter for recorded physical seeks. The current-ticket check and motor
 /// handoff share the store's serialization gate, so a coalesced result proves
 /// no stale pose reached hardware.
 struct SeekHttpAdapter<'a> {
@@ -692,7 +692,7 @@ impl PhysicalSeekPort for SeekHttpAdapter<'_> {
         &self,
         episode: &str,
         seconds: f64,
-    ) -> Result<HistoricalSample, OperationError> {
+    ) -> Result<RecordedSample, OperationError> {
         let episodes = self.state.episodes().clone();
         let episode = episode.to_owned();
         tokio::task::spawn_blocking(move || episodes.sample_at(&episode, seconds))
@@ -700,7 +700,7 @@ impl PhysicalSeekPort for SeekHttpAdapter<'_> {
             .map_err(|error| OperationError::Internal(error.to_string()))?
             .map(|sample| {
                 let (frame, seconds, _, arms) = sample.into_parts();
-                HistoricalSample::new(
+                RecordedSample::new(
                     seconds,
                     frame,
                     arms.into_iter()
@@ -769,7 +769,7 @@ impl AppState {
     async fn start_recording(
         State(state): State<Self>,
         Json(request): Json<StartRecordingRequest>,
-    ) -> Result<Json<EpisodeSummary>, Failure> {
+    ) -> Result<Json<EpisodeInfo>, Failure> {
         let adapter = RecordingHttpAdapter::new(&state);
         let result = RecordingActions::new(&adapter)
             .start(StartRecordingCommand::new(
@@ -891,7 +891,7 @@ impl AppState {
             .map_err(OperationError::from)?;
         let id = writer.id().to_owned();
         let started_ms = writer.started_ms();
-        let summary = EpisodeSummary::new(
+        let summary = EpisodeInfo::new(
             EpisodeIdentity::new(id, dataset_id, arms.clone()).with_source(source),
             EpisodeTimeline::new(0, 0.0, sample_hz).with_started_ms(started_ms),
             EpisodeAssessment::new(false, None, None),
@@ -953,7 +953,7 @@ impl AppState {
     async fn stop_recording(
         State(state): State<Self>,
         Json(request): Json<StopRecordingRequest>,
-    ) -> Result<Json<EpisodeSummary>, Failure> {
+    ) -> Result<Json<EpisodeInfo>, Failure> {
         let adapter = RecordingHttpAdapter::new(&state);
         let result = RecordingActions::new(&adapter)
             .stop(StopRecordingCommand::new(request.keep()))
@@ -1009,7 +1009,7 @@ impl AppState {}
 impl AppState {}
 
 #[derive(Debug, Deserialize)]
-struct HistoricalSeekRequest {
+struct RecordedSeekRequest {
     robot: String,
     #[serde(default)]
     source_arm: Option<String>,
@@ -1017,7 +1017,7 @@ struct HistoricalSeekRequest {
 }
 
 #[derive(Debug, Serialize)]
-struct HistoricalSeekResponse {
+struct RecordedSeekResponse {
     state: &'static str,
     episode: String,
     robot: String,
@@ -1027,7 +1027,7 @@ struct HistoricalSeekResponse {
     frame: u64,
 }
 
-/// Move a physical follower to one committed historical sample.
+/// Move a physical follower to one committed recorded sample.
 ///
 /// This is intentionally distinct from visual sampling. The controller still
 /// owns torque, calibration, joint compatibility, bounded ramping, obstruction
@@ -1038,8 +1038,8 @@ impl AppState {
     async fn seek_episode(
         State(state): State<Self>,
         Path(id): Path<String>,
-        Json(request): Json<HistoricalSeekRequest>,
-    ) -> Result<Json<HistoricalSeekResponse>, Failure> {
+        Json(request): Json<RecordedSeekRequest>,
+    ) -> Result<Json<RecordedSeekResponse>, Failure> {
         let adapter = SeekHttpAdapter { state: &state };
         let result = PhysicalSeekActions::new(&adapter)
             .seek(
@@ -1047,10 +1047,10 @@ impl AppState {
                     .with_source_arm(request.source_arm),
             )
             .await?;
-        Ok(Json(HistoricalSeekResponse {
+        Ok(Json(RecordedSeekResponse {
             state: match result.state() {
-                HistoricalSeekState::Seeking => "seeking",
-                HistoricalSeekState::Coalesced => "coalesced",
+                RecordedSeekState::Seeking => "seeking",
+                RecordedSeekState::Coalesced => "coalesced",
             },
             episode: result.episode().to_owned(),
             robot: result.robot().to_owned(),

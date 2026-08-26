@@ -65,7 +65,7 @@ follower without making visual scrubbing dangerous.
 
 - Timeline panel and state:
   [`frontend/panels/timeline`](../../crates/spiral-robotics-frontend/src/panels/timeline/)
-- Historical camera panel:
+- Recorded camera panel:
   [`frontend/panels/camera.rs`](../../crates/spiral-robotics-frontend/src/panels/camera.rs)
 - Seek and replay policy:
   [`spiral-robotics-backend/src/data/seek.rs`](../../crates/spiral-robotics-backend/src/data/seek.rs)

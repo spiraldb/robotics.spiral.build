@@ -100,7 +100,7 @@ impl RobotSummary {
     }
 }
 
-/// Result of reinterpreting historical measured state with a robot's current calibration.
+/// Result of reinterpreting recorded measured state with a robot's current calibration.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CalibrationReapplyResponse {
     episodes_updated: u64,

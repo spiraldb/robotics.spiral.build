@@ -183,10 +183,11 @@ fn TrainingRunControl(
     active_run: Option<TrainingRun>,
 ) -> Element {
     let studio = studio();
+    let data = crate::activities::data::state::data_controller();
     let mut selected_dataset = studio.selected_dataset();
     let controller = training_controller();
     let request = controller.request();
-    let dataset_ids = studio
+    let dataset_ids = data
         .episodes()
         .into_iter()
         .map(|episode| episode.dataset_id().to_owned())

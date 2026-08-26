@@ -268,7 +268,7 @@ never becomes the motor-control runtime.
   completed recordings commit directly to the configured SpiralDB project.
 - One canonical **Timeline** in both Live and Data. During capture it follows
   new joint and camera data. A paused or completed episode can be scrubbed to
-  synchronize recorded camera frames, historical 3D pose, signals, and the
+  synchronize recorded camera frames, recorded 3D pose, signals, and the
   playhead. Physical time-seeking is separate, explicit, server-gated, and
   applied on committed release rather than every pointer move.
 - Dataset semantics are explicit: one dataset contains many episodes. An

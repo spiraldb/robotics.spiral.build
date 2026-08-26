@@ -207,9 +207,7 @@ fn StudioShell() -> Element {
                                 },
                                 move |_| {
                                     settings.restart();
-                                    spawn(async move {
-                                        let _ = studio.refresh_episode_catalog().await;
-                                    });
+                                    data.invalidate_episode_catalog();
                                 },
                                 move |busy| settings_busy.set(busy),
                             ),

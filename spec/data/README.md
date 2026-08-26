@@ -60,9 +60,10 @@ consumers draw from it: query, curation, [training](../training/README.md),
 
 ## Catalog refresh
 
-- **DATA-013** The browser must load the episode catalog once per session, after
-  backend readiness first reports that the catalog is available, and update
-  its local catalog from successful recording, deletion, and import responses.
+- **DATA-013** The Data Activity Controller must load the episode catalog when
+  Data first opens, retain it across route changes, and update it from
+  successful recording, deletion, and import responses. Studio-wide shell
+  state must not own or eagerly load this catalog.
 - **DATA-014** The episode catalog must not travel in the live event stream or
   use interval polling. The Episodes panel must provide an explicit Refresh
   action that reloads episodes and catalog issues in one request.
@@ -78,6 +79,11 @@ consumers draw from it: query, curation, [training](../training/README.md),
 - **DATA-019** Relations must expose the active project's user-facing table
   structure, counts, likely shared-key joins, schemas, and bounded previews
   without exposing Studio persistence plumbing as project data.
+- **DATA-020** Each catalog entry must pair its lightweight `EpisodeInfo` with
+  one full-data state: unloaded, loading, ready, or failed. Selecting an episode
+  loads its full data once and attaches the result to that same entry; Scene,
+  Cameras, Signals, Timeline, scrubbing, and visual playback must derive from
+  that attached data rather than a second Data cache.
 
 ## Curation direction
 

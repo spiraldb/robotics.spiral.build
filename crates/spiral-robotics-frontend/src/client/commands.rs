@@ -7,11 +7,12 @@
 use dioxus::prelude::*;
 use gloo_net::http::Method;
 use spiral_robotics_api::recording::{
-    EpisodeSummary, SetRecordingPausedRequest, SetReplayPausedRequest, StartRecordingRequest,
+    EpisodeInfo, SetRecordingPausedRequest, SetReplayPausedRequest, StartRecordingRequest,
     StartReplayRequest, StopRecordingRequest,
 };
 use spiral_robotics_api::robots::ModeSelection;
 
+use crate::activities::data::state::DataController;
 use crate::activities::data::workbench::EpisodeIdPresentation;
 use crate::client::http as api;
 use crate::format::ClockPresentation;
@@ -48,7 +49,7 @@ impl Studio {
         }
         let request = StartRecordingRequest::new(studio.selected_dataset().read().trim());
         studio.run("", async move {
-            api::Http::send_json::<_, EpisodeSummary>(
+            api::Http::send_json::<_, EpisodeInfo>(
                 Method::POST,
                 "/api/episodes/record",
                 Some(&request),
@@ -102,13 +103,13 @@ impl Studio {
             "Recording discarded. Teleoperation stopped."
         };
         studio.run_safety(message, async move {
-            let summary = api::Http::send_json::<_, EpisodeSummary>(
+            let summary = api::Http::send_json::<_, EpisodeInfo>(
                 Method::POST,
                 "/api/episodes/record/stop",
                 Some(&request),
             )
             .await?;
-            studio.upsert_episode(summary.clone());
+            completion.data.upsert_episode(summary.clone());
             if completion.keep {
                 studio.report_episode_success(
                     format!(
@@ -126,10 +127,7 @@ impl Studio {
         });
     }
 
-    pub(crate) fn replay_target(
-        self,
-        episode: &EpisodeSummary,
-    ) -> Option<(String, Option<String>)> {
+    pub(crate) fn replay_target(self, episode: &EpisodeInfo) -> Option<(String, Option<String>)> {
         let studio = self;
         let ready = studio
             .connected_robots()
@@ -163,7 +161,7 @@ impl Studio {
         Some((target, Some(source)))
     }
 
-    pub(crate) fn replay_blocker(self, episode: &EpisodeSummary) -> Option<String> {
+    pub(crate) fn replay_blocker(self, episode: &EpisodeInfo) -> Option<String> {
         let studio = self;
         if !episode.usable() {
             Some("This episode did not finish and cannot be replayed.".to_owned())
@@ -182,7 +180,7 @@ impl Studio {
         }
     }
 
-    pub(crate) fn start_replay(self, episode: &EpisodeSummary, start_seconds: f64) {
+    pub(crate) fn start_replay(self, episode: &EpisodeInfo, start_seconds: f64) {
         let studio = self;
         if let Some(reason) = studio.replay_blocker(episode) {
             studio.report(reason);
@@ -230,13 +228,22 @@ impl Studio {
 }
 
 pub(crate) struct RecordingCompletion {
+    data: DataController,
     keep: bool,
-    on_completed: EventHandler<EpisodeSummary>,
+    on_completed: EventHandler<EpisodeInfo>,
 }
 
 impl RecordingCompletion {
-    pub(crate) const fn new(keep: bool, on_completed: EventHandler<EpisodeSummary>) -> Self {
-        Self { keep, on_completed }
+    pub(crate) const fn new(
+        data: DataController,
+        keep: bool,
+        on_completed: EventHandler<EpisodeInfo>,
+    ) -> Self {
+        Self {
+            data,
+            keep,
+            on_completed,
+        }
     }
 }
 

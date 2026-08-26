@@ -2,9 +2,10 @@
 
 use dioxus::prelude::*;
 
+use crate::activities::data::state::DataController;
 use crate::client::commands::{RecordingCompletion, TimelineSeekBody};
-use crate::client::historical::{
-    HistoricalPreviewRequest, HistoricalPreviewSignals, HistoricalReplayTime,
+use crate::client::episode_data::{
+    EpisodePlaybackTime, EpisodePreviewRequest, EpisodePreviewSignals,
 };
 use crate::panels::timeline::panel::{
     TimelineAction, TimelineCaptureAction, TimelinePreviewAction, TimelineRobotSyncAction,
@@ -128,18 +129,21 @@ impl TimelineActionContext {
 
 pub(crate) struct TimelineActionSession {
     studio: Studio,
+    data: DataController,
     controller: TimelineController,
     subject: TimelineSubject,
 }
 
 impl TimelineActionSession {
     pub(crate) const fn new(
-        studio: Studio,
+        controllers: (Studio, DataController),
         controller: TimelineController,
         subject: TimelineSubject,
     ) -> Self {
+        let (studio, data) = controllers;
         Self {
             studio,
+            data,
             controller,
             subject,
         }
@@ -149,19 +153,19 @@ impl TimelineActionSession {
 pub(crate) struct RecordedTimelineActionState {
     review_episode: Option<String>,
     seek_context: Option<(String, String, Option<String>)>,
-    historical: HistoricalPreviewSignals,
+    episode_preview: EpisodePreviewSignals,
 }
 
 impl RecordedTimelineActionState {
     pub(crate) const fn new(
         review_episode: Option<String>,
         seek_context: Option<(String, String, Option<String>)>,
-        historical: HistoricalPreviewSignals,
+        episode_preview: EpisodePreviewSignals,
     ) -> Self {
         Self {
             review_episode,
             seek_context,
-            historical,
+            episode_preview,
         }
     }
 }
@@ -192,6 +196,7 @@ impl TimelineActionContext {
             session:
                 TimelineActionSession {
                     studio,
+                    data,
                     controller,
                     subject,
                 },
@@ -199,7 +204,7 @@ impl TimelineActionContext {
                 RecordedTimelineActionState {
                     review_episode,
                     seek_context,
-                    historical,
+                    episode_preview,
                 },
             preview_targets:
                 TimelinePreviewTargets {
@@ -207,8 +212,8 @@ impl TimelineActionContext {
                     interactive: mut interactive_preview_target,
                 },
         } = self;
-        let (mut historical_state, mut historical_revision, mut historical_cache) =
-            historical.into_signals();
+        let (mut episode_preview_state, mut episode_preview_revision, mut episode_data_cache) =
+            episode_preview.into_signals();
         let mut playhead = controller.playhead;
         let mut follow_live = controller.follow_live;
         let mut robot_sync_target = controller.robot_sync_target;
@@ -224,8 +229,8 @@ impl TimelineActionContext {
                         studio.set_recording_paused(&episode, paused);
                         follow_live.set(!paused);
                         if !paused {
-                            historical_cache.write().invalidate(&episode);
-                            historical_state.set(None);
+                            episode_data_cache.write().invalidate(&episode);
+                            episode_preview_state.set(None);
                         }
                     }
                 }
@@ -236,14 +241,15 @@ impl TimelineActionContext {
                         studio.stop_recording(
                             &episode,
                             RecordingCompletion::new(
+                                data,
                                 keep,
                                 EventHandler::new(
-                                    move |_: spiral_robotics_api::recording::EpisodeSummary| {
-                                        historical_cache.write().invalidate(&finished_episode);
+                                    move |_: spiral_robotics_api::recording::EpisodeInfo| {
+                                        episode_data_cache.write().invalidate(&finished_episode);
                                         let next_revision =
-                                            historical_revision.peek().wrapping_add(1);
-                                        historical_revision.set(next_revision);
-                                        historical_state.set(None);
+                                            episode_preview_revision.peek().wrapping_add(1);
+                                        episode_preview_revision.set(next_revision);
+                                        episode_preview_state.set(None);
                                         automatic_preview_target.set(None);
                                         interactive_preview_target.set(None);
                                     },
@@ -293,13 +299,14 @@ impl TimelineActionContext {
                         || interactive_preview_target.peek().as_ref() != Some(&target)
                     {
                         interactive_preview_target.set(Some(target));
-                        studio.request_historical_preview(
-                            HistoricalPreviewRequest::new(episode, None, request.seconds()),
-                            HistoricalPreviewSignals::new(
-                                historical_state,
-                                historical_revision,
-                                historical_cache,
-                            ),
+                        studio.request_episode_preview(
+                            EpisodePreviewRequest::new(episode, None, request.seconds()),
+                            EpisodePreviewSignals::new(
+                                episode_preview_state,
+                                episode_preview_revision,
+                                episode_data_cache,
+                            )
+                            .with_data(data),
                         );
                     }
                 }
@@ -340,15 +347,17 @@ impl TimelineActionContext {
             TimelineAction::ReloadRecorded { episode }
                 if review_episode.as_deref() == Some(episode.as_str()) =>
             {
-                historical_state.set(None);
-                historical_cache.write().invalidate(&episode);
-                studio.request_historical_preview(
-                    HistoricalPreviewRequest::new(episode, None, playhead()),
-                    HistoricalPreviewSignals::new(
-                        historical_state,
-                        historical_revision,
-                        historical_cache,
-                    ),
+                episode_preview_state.set(None);
+                episode_data_cache.write().invalidate(&episode);
+                data.reload_selected_episode_data(&episode);
+                studio.request_episode_preview(
+                    EpisodePreviewRequest::new(episode, None, playhead()),
+                    EpisodePreviewSignals::new(
+                        episode_preview_state,
+                        episode_preview_revision,
+                        episode_data_cache,
+                    )
+                    .with_data(data),
                 );
             }
             _ => studio.report("The Timeline subject changed before the action was applied."),

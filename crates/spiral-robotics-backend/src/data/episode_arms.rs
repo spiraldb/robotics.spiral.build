@@ -1,4 +1,4 @@
-//! Recorded-arm selection shared by replay and historical seek actions.
+//! Recorded-arm selection shared by replay and recorded seek actions.
 
 use crate::OperationError;
 

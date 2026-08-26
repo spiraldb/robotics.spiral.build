@@ -599,11 +599,18 @@ fn episode_catalog_is_loaded_explicitly_from_spiral() {
     );
 
     let frontend_state =
-        fs::read_to_string(crates.join("spiral-robotics-frontend/src/shell/state.rs"))
-            .expect("frontend state source");
+        fs::read_to_string(crates.join("spiral-robotics-frontend/src/activities/data/state.rs"))
+            .expect("Data controller source");
     assert!(
         frontend_state.contains("api::Http::get::<EpisodeCatalogResponse>(\"/api/episodes\")"),
-        "the browser must load episodes as one explicit catalog"
+        "the Data controller must load episodes as one explicit catalog"
+    );
+    let studio_state =
+        fs::read_to_string(crates.join("spiral-robotics-frontend/src/shell/state.rs"))
+            .expect("Studio state source");
+    assert!(
+        !studio_state.contains("episode_catalog"),
+        "Studio-wide state must not own or eagerly load the Data episode catalog",
     );
     assert!(
         !backend.join("src/recording/dataset.rs").exists(),

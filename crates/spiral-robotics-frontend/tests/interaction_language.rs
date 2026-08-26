@@ -90,6 +90,37 @@ fn completed_episode_selection_belongs_to_the_data_controller() {
 }
 
 #[test]
+fn episode_catalog_and_full_data_belong_to_the_data_controller() {
+    let frontend = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let data = fs::read_to_string(frontend.join("src/activities/data/state.rs"))
+        .expect("Data controller source should be readable");
+    let studio = fs::read_to_string(frontend.join("src/shell/state.rs"))
+        .expect("Studio state source should be readable");
+    let episodes = fs::read_to_string(frontend.join("src/activities/data/workbench.rs"))
+        .expect("Episodes panel source should be readable");
+
+    for ownership in [
+        "episode_catalog: Signal<EpisodeCatalogState>",
+        "info: EpisodeInfo",
+        "full_data: EpisodeDataState",
+        "Ready(Arc<EpisodeData>)",
+    ] {
+        assert!(
+            data.contains(ownership),
+            "the Data controller is missing episode ownership {ownership:?}",
+        );
+    }
+    assert!(
+        !studio.contains("episode_catalog"),
+        "the episode catalog must not drift back into Studio-wide state",
+    );
+    assert!(
+        episodes.contains("if !data.episodes_loaded() && !data.episodes_loading()"),
+        "the episode catalog must load when the Episodes panel mounts",
+    );
+}
+
+#[test]
 fn legacy_action_styles_cannot_return() {
     let frontend = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let styles = [frontend.join("tailwind.css")];

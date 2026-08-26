@@ -423,7 +423,7 @@ mod tests {
     #[test]
     fn an_unfinished_take_is_listed_but_not_offered() {
         let episode_with = |frames, problem| {
-            EpisodeSummary::new(
+            EpisodeInfo::new(
                 EpisodeIdentity::new(
                     "episode_000001",
                     "default",

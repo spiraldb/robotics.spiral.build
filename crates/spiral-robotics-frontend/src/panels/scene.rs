@@ -237,7 +237,7 @@ pub(crate) fn Viewport(
     // scene the crate just drew, so a mark cannot drift away from the part it
     // is about as the camera moves.
     let marks = condition_marks();
-    let historical_active = !source.is_live();
+    let recorded_active = !source.is_live();
     let recorded_status = source.recorded_status();
 
     rsx! {
@@ -412,7 +412,7 @@ pub(crate) fn Viewport(
                     }
                 }
                 if let Some(hovered) = hover() {
-                    HoverNote { hover: hovered, historical: historical_active }
+                    HoverNote { hover: hovered, episode_preview: recorded_active }
                 }
                 Legend { arms, on_select }
                 if let Some(sample) = source.sample() {
@@ -492,9 +492,9 @@ pub(crate) fn Viewport(
 /// the operator is going next anyway — and which stays reachable without a
 /// pointer at all.
 #[component]
-fn HoverNote(hover: Hover, historical: bool) -> Element {
+fn HoverNote(hover: Hover, episode_preview: bool) -> Element {
     let studio = studio();
-    let (title, detail) = hover.entity.describe(&studio, historical);
+    let (title, detail) = hover.entity.describe(&studio, episode_preview);
     rsx! {
         div {
             class: "bench-note",
@@ -513,7 +513,7 @@ trait TargetPresentation {
     fn describe(
         &self,
         studio: &crate::shell::state::Studio,
-        historical: bool,
+        episode_preview: bool,
     ) -> (String, Option<String>);
 }
 
@@ -521,7 +521,7 @@ impl TargetPresentation for Target {
     fn describe(
         &self,
         studio: &crate::shell::state::Studio,
-        historical: bool,
+        episode_preview: bool,
     ) -> (String, Option<String>) {
         match self {
             Target::Robot { robot } => (robot.clone(), None),
@@ -530,7 +530,7 @@ impl TargetPresentation for Target {
                 let label = Joint::named(joint)
                     .map_or_else(|| joint.clone(), |joint| joint.label().to_owned());
                 let telemetry = studio.robot_telemetry(robot);
-                let detail = (!historical)
+                let detail = (!episode_preview)
                     .then(|| {
                         telemetry.as_ref().and_then(|telemetry| {
                             telemetry
@@ -709,15 +709,15 @@ impl crate::shell::state::Studio {
             // An arm that is offline or uncalibrated has no angles worth
             // drawing, so it stands at its rest pose and is faded rather than
             // left out — an empty bench says less than a greyed-out one.
-            let historical_angles = source
+            let recorded_angles = source
                 .sample()
                 .and_then(|sample| sample.arms().iter().find(|sample| sample.arm() == arm.id()))
-                .and_then(HistoricalRobotPose::historical_angles);
+                .and_then(RecordedRobotPose::recorded_angles);
             let telemetry = source
                 .is_live()
                 .then(|| self.robot_telemetry(arm.id()).filter(|_| arm.calibrated()))
                 .flatten();
-            let angles = historical_angles.or_else(|| {
+            let angles = recorded_angles.or_else(|| {
                 telemetry.as_ref().map(|robot| {
                     use crate::activities::live::control::MeasuredJointTelemetry;
                     robot.joints().measured_angles()
@@ -737,12 +737,12 @@ impl crate::shell::state::Studio {
 }
 
 /// Render the current-calibration degrees projected by the backend.
-trait HistoricalRobotPose {
-    fn historical_angles(&self) -> Option<ArmPose>;
+trait RecordedRobotPose {
+    fn recorded_angles(&self) -> Option<ArmPose>;
 }
 
-impl HistoricalRobotPose for TimelineArmSample {
-    fn historical_angles(&self) -> Option<ArmPose> {
+impl RecordedRobotPose for TimelineArmSample {
+    fn recorded_angles(&self) -> Option<ArmPose> {
         let degrees = self
             .degrees()
             .iter()
@@ -759,11 +759,11 @@ impl HistoricalRobotPose for TimelineArmSample {
     }
 }
 
-trait HistoricalTimePresentation {
+trait RecordedTimePresentation {
     fn history_time(self) -> String;
 }
 
-impl HistoricalTimePresentation for f64 {
+impl RecordedTimePresentation for f64 {
     fn history_time(self) -> String {
         let seconds = self.max(0.0);
         let minutes = (seconds / 60.0).floor() as u64;
@@ -970,24 +970,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn historical_pose_uses_backend_projected_degrees() {
+    fn recorded_pose_uses_backend_projected_degrees() {
         let sample = TimelineArmSample::new(
             "follower",
             BTreeMap::from([("shoulder_pan".to_owned(), Some(1.0))]),
             BTreeMap::from([("shoulder_pan".to_owned(), Some(90.0))]),
         );
 
-        let pose = sample.historical_angles().expect("historical pose");
+        let pose = sample.recorded_angles().expect("episode_preview pose");
         assert_eq!(pose.degrees(Joint::ShoulderPan), Some(90.0));
     }
 
     #[test]
-    fn historical_pose_does_not_guess_without_projected_degrees() {
+    fn recorded_pose_does_not_guess_without_projected_degrees() {
         let sample = TimelineArmSample::new(
             "follower",
             BTreeMap::from([("shoulder_pan".to_owned(), None)]),
             BTreeMap::from([("shoulder_pan".to_owned(), None)]),
         );
-        assert!(sample.historical_angles().is_none());
+        assert!(sample.recorded_angles().is_none());
     }
 }

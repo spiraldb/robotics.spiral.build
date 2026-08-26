@@ -19,7 +19,7 @@ use spiral_robotics_api::datasets::{
     EpisodeImportSummary, HuggingFaceDatasetFormat, HuggingFaceDatasetImportSummary,
     HuggingFaceDatasetInspection, HuggingFaceDatasetRequest,
 };
-use spiral_robotics_api::recording::EpisodeSummary;
+use spiral_robotics_api::recording::EpisodeInfo;
 use spiral_robotics_api::relations::RelationCatalog;
 
 use crate::activities::data::query_result::DEFAULT_QUERY_ROWS;
@@ -41,6 +41,14 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
     let mut confirming_delete = use_signal(|| None::<String>);
     let mut deleting_episode = use_signal(|| None::<String>);
 
+    // The catalog belongs to Data and is loaded only when this view first
+    // mounts. The controller survives route changes, so returning is instant.
+    use_effect(move || {
+        if !data.episodes_loaded() && !data.episodes_loading() {
+            studio.run_utility("", data.refresh_episode_catalog());
+        }
+    });
+
     // Keep the shared selection inside the active dataset without creating a
     // panel-local copy that could drift from Scene, cameras, and Timeline.
     // The comparison before `set` is essential: Dioxus effects are reactive
@@ -48,7 +56,7 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
     // this effect forever when a dataset has no episodes.
     use_effect(move || {
         let dataset_id = studio.selected_dataset().read().trim().to_owned();
-        let episodes = studio
+        let episodes = data
             .episodes()
             .into_iter()
             .filter(|episode| episode.dataset_id() == dataset_id)
@@ -62,13 +70,12 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
 
     let dataset_id = studio.selected_dataset().read().trim().to_owned();
     let dataset_valid = spiral_robotics_api::identity::DatasetId::is_canonical(&dataset_id);
-    let all_episodes = studio.episodes();
+    let all_episodes = data.episodes();
     let dataset_ids = all_episodes
         .iter()
         .map(|episode| episode.dataset_id().to_owned())
         .chain(
-            studio
-                .datasets()
+            data.datasets()
                 .into_iter()
                 .map(|dataset| dataset.id().to_owned()),
         )
@@ -79,10 +86,10 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
         .filter(|episode| episode.dataset_id() == dataset_id)
         .collect::<Vec<_>>();
     let selected = data.selected_episode();
-    let catalog_loading = studio.episodes_loading();
-    let catalog_loaded = studio.episodes_loaded();
-    let catalog_error = studio.episode_catalog_error();
-    let catalog_issues = studio.episode_catalog_issues();
+    let catalog_loading = data.episodes_loading();
+    let catalog_loaded = data.episodes_loaded();
+    let catalog_error = data.episode_catalog_error();
+    let catalog_issues = data.episode_catalog_issues();
     let import_dataset_id = dataset_id.clone();
     let confirming_delete_id = confirming_delete.read().to_owned();
     let deleting_episode_id = deleting_episode.read().to_owned();
@@ -133,7 +140,7 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
                         disabled: catalog_loading,
                         aria_busy: catalog_loading,
                         onclick: move |_| {
-                            studio.run_utility("", studio.refresh_episode_catalog());
+                            studio.run_utility("", data.refresh_episode_catalog());
                         },
                         RefreshIcon {}
                     }
@@ -172,7 +179,7 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
                                             "application/vnd.spiral-robotics.episodes",
                                         )
                                         .await?;
-                                        studio.refresh_episode_catalog().await?;
+                                        data.refresh_episode_catalog().await?;
                                         Ok::<_, String>(result)
                                     })
                                     .await
@@ -280,7 +287,7 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
                                     ),
                                 },
                                 actions: EpisodeRowActions {
-                                    on_select: EventHandler::new(move |chosen: EpisodeSummary| {
+                                    on_select: EventHandler::new(move |chosen: EpisodeInfo| {
                                         if deleting_episode.peek().is_none() {
                                             confirming_delete.set(None);
                                         }
@@ -562,7 +569,7 @@ fn HuggingFaceImport(dataset_id: String, on_close: EventHandler<()>) -> Element 
                                                     ),
                                                 );
                                                 imported.set(Some(summary.clone()));
-                                                studio.refresh_episode_catalog().await.map_err(|problem| {
+                                                controller.refresh_episode_catalog().await.map_err(|problem| {
                                                     format!(
                                                         "Dataset imported successfully, but Studio could not refresh the catalog: {problem}"
                                                     )
@@ -801,17 +808,13 @@ impl EpisodeDeletionState {
 
 #[derive(Clone, PartialEq)]
 struct EpisodeRowActions {
-    on_select: EventHandler<EpisodeSummary>,
+    on_select: EventHandler<EpisodeInfo>,
     on_delete: EventHandler<String>,
     on_cancel_delete: EventHandler<()>,
 }
 
 #[component]
-fn EpisodeRow(
-    episode: EpisodeSummary,
-    state: EpisodeRowState,
-    actions: EpisodeRowActions,
-) -> Element {
+fn EpisodeRow(episode: EpisodeInfo, state: EpisodeRowState, actions: EpisodeRowActions) -> Element {
     let delete_title = "Delete this episode from SpiralDB";
 
     rsx! {
@@ -1020,12 +1023,12 @@ impl ManagedTablePresentation for Table {
 }
 
 trait EpisodeSelection {
-    fn preferred(&self) -> Option<&EpisodeSummary>;
+    fn preferred(&self) -> Option<&EpisodeInfo>;
     fn reconciled_selection(&self, current: Option<&str>) -> Option<String>;
 }
 
-impl EpisodeSelection for [EpisodeSummary] {
-    fn preferred(&self) -> Option<&EpisodeSummary> {
+impl EpisodeSelection for [EpisodeInfo] {
+    fn preferred(&self) -> Option<&EpisodeInfo> {
         self.iter()
             .rev()
             .find(|episode| episode.usable() && !episode.discarded())
@@ -1064,7 +1067,7 @@ impl EpisodeDeletion {
                 deleting.set(None);
                 if result.is_ok() {
                     confirming.set(None);
-                    self.studio.remove_episode(&deleted_id);
+                    self.data.remove_episode(&deleted_id);
                     // A slower deletion must not clear a newer choice made while the
                     // request was in flight.
                     if self.data.selected_episode_peek().as_deref() == Some(deleted_id.as_str()) {
@@ -1094,8 +1097,8 @@ mod tests {
     use super::*;
     use spiral_robotics_api::recording::{EpisodeAssessment, EpisodeIdentity, EpisodeTimeline};
 
-    fn episode(id: &str, usable: bool, discarded: bool) -> EpisodeSummary {
-        EpisodeSummary::new(
+    fn episode(id: &str, usable: bool, discarded: bool) -> EpisodeInfo {
+        EpisodeInfo::new(
             EpisodeIdentity::new(id, "default", Vec::new()).with_source("test"),
             EpisodeTimeline::new(1, 1.0, 60.0),
             EpisodeAssessment::new(discarded, None, (!usable).then(|| "unavailable".to_owned())),
@@ -1104,7 +1107,7 @@ mod tests {
 
     #[test]
     fn episode_selection_reconciliation_is_stable_when_the_dataset_is_empty() {
-        let episodes = Vec::<EpisodeSummary>::new();
+        let episodes = Vec::<EpisodeInfo>::new();
         assert_eq!(episodes.reconciled_selection(None), None);
         assert_eq!(episodes.reconciled_selection(Some("deleted")), None);
     }

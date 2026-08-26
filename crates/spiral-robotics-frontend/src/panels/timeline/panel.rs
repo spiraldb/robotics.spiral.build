@@ -150,7 +150,7 @@ impl TimelineSignalLane {
     }
 }
 
-/// Wire response from the bounded historical trace endpoint.
+/// Wire response from the bounded recorded trace endpoint.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub(crate) struct RecordedTimelineTraces {
     episode: String,

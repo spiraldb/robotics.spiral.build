@@ -29,7 +29,7 @@ impl StartSpiralReplayRequest {
 /// judgement may change, and normalized measured state may be re-derived from
 /// raw counts after the originating arm is recalibrated.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct EpisodeSummary {
+pub struct EpisodeInfo {
     #[serde(flatten)]
     identity: EpisodeIdentity,
     #[serde(flatten)]
@@ -124,7 +124,7 @@ impl DatasetSummary {
     }
 }
 
-impl EpisodeSummary {
+impl EpisodeInfo {
     pub fn new(
         identity: EpisodeIdentity,
         timeline: EpisodeTimeline,
@@ -252,7 +252,7 @@ impl EpisodeAssessment {
 /// memory. Video bytes remain separate range-addressable resources.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct EpisodeInspectionSnapshot {
-    episode: EpisodeSummary,
+    episode: EpisodeInfo,
     sample_times_seconds: Vec<f64>,
     follow_error_degrees: Vec<Option<f64>>,
     arms: Vec<EpisodeInspectionArm>,
@@ -261,7 +261,7 @@ pub struct EpisodeInspectionSnapshot {
 
 impl EpisodeInspectionSnapshot {
     pub fn new(
-        episode: EpisodeSummary,
+        episode: EpisodeInfo,
         sample_times_seconds: Vec<f64>,
         follow_error_degrees: Vec<Option<f64>>,
     ) -> Self {
@@ -284,7 +284,7 @@ impl EpisodeInspectionSnapshot {
         self
     }
 
-    pub const fn episode(&self) -> &EpisodeSummary {
+    pub const fn episode(&self) -> &EpisodeInfo {
         &self.episode
     }
     pub fn sample_times_seconds(&self) -> &[f64] {
@@ -547,7 +547,7 @@ pub struct EpisodeCatalogResponse {
     #[serde(default)]
     datasets: Vec<DatasetSummary>,
     /// Every stored episode, oldest first.
-    episodes: Vec<EpisodeSummary>,
+    episodes: Vec<EpisodeInfo>,
     /// Catalog rows that could not be decoded.
     issues: Vec<String>,
 }
@@ -555,7 +555,7 @@ pub struct EpisodeCatalogResponse {
 impl EpisodeCatalogResponse {
     pub const fn new(
         datasets: Vec<DatasetSummary>,
-        episodes: Vec<EpisodeSummary>,
+        episodes: Vec<EpisodeInfo>,
         issues: Vec<String>,
     ) -> Self {
         Self {
@@ -568,13 +568,13 @@ impl EpisodeCatalogResponse {
     pub fn datasets(&self) -> &[DatasetSummary] {
         &self.datasets
     }
-    pub fn episodes(&self) -> &[EpisodeSummary] {
+    pub fn episodes(&self) -> &[EpisodeInfo] {
         &self.episodes
     }
     pub fn issues(&self) -> &[String] {
         &self.issues
     }
-    pub fn into_parts(self) -> (Vec<DatasetSummary>, Vec<EpisodeSummary>, Vec<String>) {
+    pub fn into_parts(self) -> (Vec<DatasetSummary>, Vec<EpisodeInfo>, Vec<String>) {
         (self.datasets, self.episodes, self.issues)
     }
 }

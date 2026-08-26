@@ -82,7 +82,7 @@ impl CalibrationHistoryActivity {
     }
 }
 
-/// Historical episode boundary for applying a robot's current calibration.
+/// Recorded episode boundary for applying a robot's current calibration.
 pub(crate) trait CalibrationHistoryPort {
     fn reserve_catalog_mutation(&self) -> Result<Option<CatalogLeaseToken>, OperationError>;
     fn release_catalog_mutation(&self, token: CatalogLeaseToken);
@@ -507,7 +507,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn historical_state_is_rewritten_directly_in_spiral() {
+    async fn recorded_state_is_rewritten_directly_in_spiral() {
         let history = history();
         let output = CalibrationHistoryActions::new(&history)
             .reapply("arm")
@@ -522,7 +522,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn active_episode_consumers_block_historical_recalibration() {
+    async fn active_episode_consumers_block_recorded_recalibration() {
         for activity in [
             CalibrationHistoryActivity {
                 recording: Some("episode_000003".to_owned()),

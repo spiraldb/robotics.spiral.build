@@ -30,8 +30,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use spiral_robotics_api::recording::{
     EpisodeArmOptionalChannels, EpisodeArmScalarSamples, EpisodeAssessment, EpisodeCatalogResponse,
-    EpisodeIdentity, EpisodeInspectionArm, EpisodeInspectionSnapshot, EpisodeOptionalFrameMatrix,
-    EpisodeSummary, EpisodeTimeline, EpisodeVideoAssetMetadata, EpisodeVideoFormat,
+    EpisodeIdentity, EpisodeInfo, EpisodeInspectionArm, EpisodeInspectionSnapshot,
+    EpisodeOptionalFrameMatrix, EpisodeTimeline, EpisodeVideoAssetMetadata, EpisodeVideoFormat,
     EpisodeVideoIdentity, EpisodeVideoTimeline, SetRecordingPausedRequest, SetReplayPausedRequest,
     StartRecordingRequest, StartReplayRequest, StopRecordingRequest,
 };
@@ -60,8 +60,8 @@ use crate::data::catalog::{
 use crate::data::catalog_lease::{CatalogLeaseOwner, CatalogLeaseToken, CatalogMutationLease};
 use crate::data::queries::{EpisodeQueries, EpisodeQueryPort};
 use crate::data::seek::{
-    ActiveRecording, HistoricalSample, HistoricalSeekState, PhysicalSeekActions, PhysicalSeekPlan,
-    PhysicalSeekPort, SampledArm, SeekActivity, SeekControlMode, SeekEpisodeCommand, SeekTarget,
+    ActiveRecording, PhysicalSeekActions, PhysicalSeekPlan, PhysicalSeekPort, RecordedSample,
+    RecordedSeekState, SampledArm, SeekActivity, SeekControlMode, SeekEpisodeCommand, SeekTarget,
     SeekableEpisode,
 };
 use crate::data::{

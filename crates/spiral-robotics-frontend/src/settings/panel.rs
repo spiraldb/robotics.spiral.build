@@ -423,7 +423,7 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
                                 )
                                 .await?;
                                 data.set_selected_episode(None);
-                                studio.refresh_episode_catalog().await?;
+                                data.invalidate_episode_catalog();
                                 let settings = api::Http::send_json::<(), DataSettings>(
                                     Method::GET,
                                     "/api/settings/data",

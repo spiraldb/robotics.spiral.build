@@ -222,7 +222,7 @@ powerful, but the chrome remains Notion-like, compact, and quiet.
 
 The **Timeline is the shared clock**, not a footer or a dataset rail. It is
 registered in both Live and Data and synchronizes recording, replay, camera
-video, historical 3D pose, signals, query selection, and optionally a
+video, recorded 3D pose, signals, query selection, and optionally a
 safety-gated physical seek. Signals belongs to the episode on that clock. Full
 camera images belong in camera panels; robot ownership remains explicit through
 arm and role, and actionable camera failures stay inside the affected frame
@@ -666,7 +666,7 @@ physical motion is sent only for the committed seek.
 | Active activity | `StudioShell` / Activity host | Activity Rail, active controller, Status Bar |
 | Live robot and camera selection | Live Activity Controller | Live Workbench, Scene, Live camera registry |
 | Live recording and review subject | Live Activity Controller, reconciled with backend truth | Live Workbench, Timeline, recorded preview surfaces |
-| Data tool, selected episode, and query | Data Activity Controller | Data Workbench and the complete Data projection |
+| Episode catalog, selected episode with attached full data, Data tool, and query | Data Activity Controller | Data Workbench and the complete Data projection |
 | Workflow saved graph, local draft, typed feature definitions, source-derived cache metadata, run snapshot, and terminal result | Workflow Activity Controller, reconciled with backend truth | Node panel, Workflow canvas, Results panel, Assistant, Status Bar |
 | Workflow Assistant readiness, bounded project-scoped conversations, active selection/turn, and typed tool summaries/receipts | Backend Workflow agent, reconciled by the Workflow Activity Controller | Assistant panel; canvas and Results consume only authoritative Workflow state |
 | Rollout checkpoint, execution inputs, fixed follower, and readiness | Rollout Activity Controller, reconciled with backend truth | Rollout Workbench, live Scene, follower Camera, Inference lane |
@@ -681,7 +681,8 @@ truth.
 ### Required Interaction Flows
 
 **Select an episode:** `DataWorkbench → SelectEpisode(id) → Data Activity
-Controller → Recorded source → Scene + Cameras + Signals + Timeline`.
+Controller → selected catalog entry (EpisodeInfo + full data state) → Scene +
+Cameras + Signals + Timeline`.
 
 **Open Query:** `DataWorkbench → ShowQuery(query) → Data Activity Controller →
 preserved Scene + active QueryResult sibling tab + explicit episode context or
@@ -707,7 +708,7 @@ authoritative throughout; Assistant activity never creates a browser-local
 graph or a second Run control.
 
 **Seek or rewind:** `Timeline → Seek(subject, time, phase) → Activity Controller
-→ one synchronized historical projection`. A committed, explicitly armed
+→ one synchronized recorded projection`. A committed, explicitly armed
 physical seek additionally becomes a backend request.
 
 **Receive live telemetry:** `Backend event → Live Activity Controller → Live
@@ -1028,7 +1029,7 @@ This is the signature component system.
   implies Teleop. Play/Pause affects visualizations only until robot sync is
   explicitly enabled.
 - **Playhead:** One pointer and keyboard-operable time cursor drives every
-  historical surface. Scrubbing updates camera, scene, and signals; with robot
+  recorded surface. Scrubbing updates camera, scene, and signals; with robot
   sync enabled, physical motion commits only on release.
 - **Lanes:** Joint signals share the episode scale and make recording gaps
   explicit instead of compressing them away. One Charming/ECharts canvas owns
@@ -1181,10 +1182,13 @@ ambient browser selection—decides whether execution may begin.
 - **Episode transfer:** Data exports a versioned `.spiral-episodes` file for the
   selected dataset. Import merges into the selected target dataset and refuses
   episode-ID collisions rather than replacing an existing episode.
-- **Catalog refresh:** Episodes load once when the browser starts. Known
-  recording, deletion, and import results update the browser-owned catalog;
-  one compact Refresh action in the Episodes header explicitly reloads the
-  catalog and catalog issues in one request. None uses
+- **Catalog refresh:** The Data Activity Controller loads Episodes when Data
+  first opens and retains them across route changes. Known recording, deletion,
+  and import results update the controller-owned catalog; one compact Refresh
+  action in the Episodes header explicitly reloads the catalog and catalog
+  issues in one request. Each `EpisodeInfo` entry owns its
+  unloaded/loading/ready/failed full-data state, so inspection and playback use
+  the attached episode data instead of a second Data cache. None uses
   polling or the live event stream.
 - **Form decision:** This is an incumbent-surface extension, exempt from a
   concept roll because the operator explicitly retained the existing ordered

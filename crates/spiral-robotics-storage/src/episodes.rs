@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use spiral_robotics_api::identity::EpisodeId;
 use spiral_robotics_api::recording::{
-    EpisodeArm, EpisodeAssessment, EpisodeIdentity as EpisodeSummaryIdentity, EpisodeSummary,
+    EpisodeArm, EpisodeAssessment, EpisodeIdentity as EpisodeInfoIdentity, EpisodeInfo,
     EpisodeTimeline, RecordingGap,
 };
 use spiral_robotics_api::robots::MotorLimits;
@@ -380,12 +380,12 @@ impl CompletedEpisode {
 #[derive(Clone, Debug)]
 pub struct EpisodeInspection {
     episode: CompletedEpisode,
-    summary: EpisodeSummary,
+    summary: EpisodeInfo,
     videos: Vec<VideoAssetMetadata>,
 }
 
 impl EpisodeInspection {
-    pub fn into_parts(self) -> (CompletedEpisode, EpisodeSummary, Vec<VideoAssetMetadata>) {
+    pub fn into_parts(self) -> (CompletedEpisode, EpisodeInfo, Vec<VideoAssetMetadata>) {
         (self.episode, self.summary, self.videos)
     }
 }
@@ -574,7 +574,7 @@ impl EpisodeStore {
         }
     }
 
-    pub fn list(&self) -> Vec<EpisodeSummary> {
+    pub fn list(&self) -> Vec<EpisodeInfo> {
         match self.try_list() {
             Ok(episodes) => {
                 *self.last_issue.lock_unpoisoned() = None;
@@ -589,7 +589,7 @@ impl EpisodeStore {
     pub fn issues(&self) -> Vec<String> {
         self.last_issue.lock_unpoisoned().iter().cloned().collect()
     }
-    pub fn get(&self, id: &str) -> Result<EpisodeSummary, EpisodeError> {
+    pub fn get(&self, id: &str) -> Result<EpisodeInfo, EpisodeError> {
         EpisodeId::try_from(id).map_err(|_| EpisodeError::InvalidId(id.to_owned()))?;
         self.try_list()?
             .into_iter()
@@ -871,7 +871,7 @@ impl EpisodeStore {
         }).map_err(EpisodeError::Invalid)
     }
 
-    fn try_list(&self) -> Result<Vec<EpisodeSummary>, EpisodeError> {
+    fn try_list(&self) -> Result<Vec<EpisodeInfo>, EpisodeError> {
         let relation = Table::Episodes.qualified_name(self.project_store.namespace());
         self.project_store
             .run_blocking(move |connection| {
@@ -959,10 +959,7 @@ pub(crate) trait EpisodeWriteSession: Send {
     fn push(&self, sample: Sample) -> bool;
     fn checkpoint(&self, completion: EpisodeCompletion) -> Result<EpisodeCheckpoint, String>;
     fn failure(&self) -> Option<String>;
-    fn finish(
-        self: Box<Self>,
-        completion: EpisodeCompletion,
-    ) -> Result<EpisodeSummary, EpisodeError>;
+    fn finish(self: Box<Self>, completion: EpisodeCompletion) -> Result<EpisodeInfo, EpisodeError>;
 }
 
 pub struct EpisodeWriter {
@@ -1029,10 +1026,7 @@ impl EpisodeWriter {
     pub fn failure(&self) -> Option<String> {
         self.session.failure()
     }
-    pub(crate) fn finish(
-        self,
-        completion: EpisodeCompletion,
-    ) -> Result<EpisodeSummary, EpisodeError> {
+    pub(crate) fn finish(self, completion: EpisodeCompletion) -> Result<EpisodeInfo, EpisodeError> {
         self.session.finish(completion)
     }
 }
@@ -1166,7 +1160,7 @@ impl EpisodeWriteSession for SpiralEpisodeWriter {
     fn finish(
         mut self: Box<Self>,
         completion: EpisodeCompletion,
-    ) -> Result<EpisodeSummary, EpisodeError> {
+    ) -> Result<EpisodeInfo, EpisodeError> {
         self.sender.take();
         let samples = self
             .thread
@@ -1356,10 +1350,10 @@ impl EpisodeStart {
             .collect()
     }
 
-    fn summary(&self, completion: &EpisodeCompletion, frames: u64) -> EpisodeSummary {
+    fn summary(&self, completion: &EpisodeCompletion, frames: u64) -> EpisodeInfo {
         let start = self;
         let identity =
-            EpisodeSummaryIdentity::new(start.id(), start.dataset_id(), start.arms().to_vec())
+            EpisodeInfoIdentity::new(start.id(), start.dataset_id(), start.arms().to_vec())
                 .with_source(start.source());
         let timeline =
             EpisodeTimeline::new(frames, completion.duration_seconds(), start.sample_hz())
@@ -1370,7 +1364,7 @@ impl EpisodeStart {
             completion.max_follow_error_degrees(),
             None,
         );
-        EpisodeSummary::new(identity, timeline, assessment)
+        EpisodeInfo::new(identity, timeline, assessment)
     }
 
     fn timeline_sample(&self, sample: &Sample, frame: u64) -> TimelineSample {
@@ -1470,7 +1464,7 @@ trait EpisodeJsonRow {
     fn i64s(&self, name: &str) -> Result<Vec<i64>, String>;
     fn optional_f64s(&self, name: &str) -> Result<Vec<Option<f64>>, String>;
     fn optional_optional_f64s(&self, name: &str) -> Result<Option<Vec<Option<f64>>>, String>;
-    fn episode_summary(&self) -> Result<EpisodeSummary, String>;
+    fn episode_summary(&self) -> Result<EpisodeInfo, String>;
     fn video_metadata(&self) -> Result<VideoAssetMetadata, String>;
 }
 
@@ -1525,7 +1519,7 @@ impl EpisodeJsonRow for JsonMap<String, JsonValue> {
         }
     }
 
-    fn episode_summary(&self) -> Result<EpisodeSummary, String> {
+    fn episode_summary(&self) -> Result<EpisodeInfo, String> {
         let metadata = self
             .get(db::METADATA_JSON)
             .and_then(JsonValue::as_str)

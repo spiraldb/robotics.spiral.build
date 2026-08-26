@@ -6,7 +6,7 @@ struct FakePort {
     activity: SeekActivity,
     target: Option<SeekTarget>,
     episode: SeekableEpisode,
-    sample: HistoricalSample,
+    sample: RecordedSample,
     current: bool,
     events: Mutex<Vec<String>>,
     committed: Mutex<Vec<PhysicalSeekPlan>>,
@@ -33,7 +33,7 @@ impl Default for FakePort {
                 problem: None,
                 unfinished: false,
             },
-            sample: HistoricalSample {
+            sample: RecordedSample {
                 seconds: 0.25,
                 frame: 15,
                 arms: vec![SampledArm {
@@ -76,7 +76,7 @@ impl PhysicalSeekPort for FakePort {
         &self,
         _episode: &str,
         _seconds: f64,
-    ) -> Result<HistoricalSample, OperationError> {
+    ) -> Result<RecordedSample, OperationError> {
         self.events.lock().unwrap().push("sample".to_owned());
         Ok(self.sample.clone())
     }
@@ -192,7 +192,7 @@ async fn target_must_exist_and_be_an_explicit_follower() {
             .await
             .unwrap()
             .state,
-        HistoricalSeekState::Seeking
+        RecordedSeekState::Seeking
     );
 }
 
@@ -249,7 +249,7 @@ async fn broken_finished_episode_is_refused_but_matching_paused_partial_is_allow
             .await
             .unwrap()
             .state,
-        HistoricalSeekState::Seeking
+        RecordedSeekState::Seeking
     );
 }
 
@@ -366,7 +366,7 @@ async fn admission_reservation_sampling_and_commit_stay_in_safe_order() {
         .await
         .unwrap();
 
-    assert_eq!(result.state, HistoricalSeekState::Seeking);
+    assert_eq!(result.state, RecordedSeekState::Seeking);
     assert_eq!(result.resolved_seconds, 0.25);
     assert_eq!(result.frame, 15);
     assert_eq!(
@@ -395,7 +395,7 @@ async fn superseded_ticket_reports_coalesced_without_claiming_motion() {
             .await
             .unwrap()
             .state,
-        HistoricalSeekState::Coalesced
+        RecordedSeekState::Coalesced
     );
     assert!(port.committed.lock().unwrap().is_empty());
 }

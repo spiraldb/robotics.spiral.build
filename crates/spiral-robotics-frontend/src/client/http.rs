@@ -14,7 +14,7 @@ use js_sys::Uint8Array;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use spiral_robotics_api::recording::EpisodeSummary;
+use spiral_robotics_api::recording::EpisodeInfo;
 pub(crate) use spiral_robotics_api::recording::{
     EpisodeInspectionSnapshot, EpisodeVideoAssetMetadata as VideoAssetMetadata,
 };
@@ -115,16 +115,16 @@ impl<'a, B: Serialize> AbortableJsonRequest<'a, B> {
 /// Episode detail used to align timeline samples and recorded media.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub(crate) struct EpisodeTimelineResponse {
-    episode: EpisodeSummary,
+    episode: EpisodeInfo,
     videos: Vec<VideoAssetMetadata>,
 }
 
 impl EpisodeTimelineResponse {
-    pub(crate) const fn new(episode: EpisodeSummary, videos: Vec<VideoAssetMetadata>) -> Self {
+    pub(crate) const fn new(episode: EpisodeInfo, videos: Vec<VideoAssetMetadata>) -> Self {
         Self { episode, videos }
     }
 
-    pub(crate) const fn episode(&self) -> &EpisodeSummary {
+    pub(crate) const fn episode(&self) -> &EpisodeInfo {
         &self.episode
     }
 
@@ -200,7 +200,7 @@ impl TimelineArmSample {
     }
 }
 
-/// The nearest stored sample to a committed historical playhead position.
+/// The nearest stored sample to a committed recorded playhead position.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub(crate) struct TimelineSample {
     frame: u64,

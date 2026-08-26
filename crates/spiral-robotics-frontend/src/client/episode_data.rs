@@ -1,9 +1,10 @@
 //! Load-once recorded episode inspection and browser-local frame selection.
 //!
 //! A snapshot contains the complete visual joint timeline in a compact
-//! columnar form. Studio caches a bounded number of immutable snapshots and
-//! resolves preview playback and scrubbing in memory; only physical motion
-//! continues through backend-owned validation and control.
+//! columnar form. Data attaches the immutable loaded object to its catalog
+//! entry and resolves playback and scrubbing from that object in memory. The
+//! small workspace cache below is only for paused recordings outside Data;
+//! physical motion continues through backend-owned validation and control.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
@@ -14,6 +15,7 @@ use spiral_robotics_api::recording::{
 };
 use spiral_robotics_viewport::SO101_JOINTS;
 
+use crate::activities::data::state::{DataController, EpisodeDataState};
 use crate::client::http as api;
 use crate::client::http::EpisodeApiPath;
 use crate::panels::timeline::panel::{
@@ -23,34 +25,34 @@ use crate::panels::timeline::signals::SignalNamePresentation;
 use crate::shell::activity::{LoadState, RecordedSource};
 use crate::shell::state::Studio;
 
-const HISTORICAL_RENDER_HZ: f64 = 30.0;
+const EPISODE_RENDER_HZ: f64 = 30.0;
 const RECORDED_REQUEST_TIMEOUT_MS: u32 = 15_000;
 const TRACE_BUCKETS: usize = 240;
 const MAX_CACHED_EPISODES: usize = 4;
 
-pub(crate) trait HistoricalReplayTime {
+pub(crate) trait EpisodePlaybackTime {
     fn replay_slot(self) -> u64;
 }
 
-impl HistoricalReplayTime for f64 {
+impl EpisodePlaybackTime for f64 {
     fn replay_slot(self) -> u64 {
         if !self.is_finite() || self <= 0.0 {
             return 0;
         }
-        (self * HISTORICAL_RENDER_HZ).floor() as u64
+        (self * EPISODE_RENDER_HZ).floor() as u64
     }
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct HistoricalPreview {
+pub(crate) struct EpisodePreview {
     episode: String,
     timeline: Arc<api::EpisodeTimelineResponse>,
     sample: api::TimelineSample,
     signal_lanes: Arc<[TimelineSignalLane; 6]>,
 }
 
-impl HistoricalPreview {
-    fn from_inspection(inspection: &CachedInspection, sample: api::TimelineSample) -> Self {
+impl EpisodePreview {
+    fn from_inspection(inspection: &EpisodeData, sample: api::TimelineSample) -> Self {
         Self {
             episode: inspection.snapshot.episode().id().to_owned(),
             timeline: Arc::clone(&inspection.timeline),
@@ -97,14 +99,14 @@ impl HistoricalPreview {
 }
 
 #[derive(Clone, Debug)]
-struct CachedInspection {
+pub(crate) struct EpisodeData {
     snapshot: EpisodeInspectionSnapshot,
     timeline: Arc<api::EpisodeTimelineResponse>,
     signal_lanes: Arc<[TimelineSignalLane; 6]>,
 }
 
-impl CachedInspection {
-    fn try_new(snapshot: EpisodeInspectionSnapshot) -> Result<Self, String> {
+impl EpisodeData {
+    pub(crate) fn try_new(snapshot: EpisodeInspectionSnapshot) -> Result<Self, String> {
         snapshot.validate()?;
         let timeline = Arc::new(api::EpisodeTimelineResponse::new(
             snapshot.episode().to_owned(),
@@ -118,21 +120,37 @@ impl CachedInspection {
         })
     }
 
-    fn preview_at(&self, seconds: f64) -> Result<HistoricalPreview, String> {
+    pub(crate) fn preview_at(&self, seconds: f64) -> Result<EpisodePreview, String> {
         let sample = self.snapshot.sample_at(seconds)?;
-        Ok(HistoricalPreview::from_inspection(self, sample))
+        Ok(EpisodePreview::from_inspection(self, sample))
+    }
+
+    pub(crate) fn info(&self) -> &spiral_robotics_api::recording::EpisodeInfo {
+        self.snapshot.episode()
+    }
+
+    pub(crate) async fn load(episode: &str) -> Result<Arc<Self>, String> {
+        let path = episode.inspection_url();
+        EpisodeDataDeadline::run(
+            "The episode data",
+            RECORDED_REQUEST_TIMEOUT_MS,
+            api::Http::get::<api::EpisodeInspectionSnapshot>(&path),
+        )
+        .await
+        .and_then(Self::try_new)
+        .map(Arc::new)
     }
 }
 
-/// Small FIFO cache bounded independently of the total catalog size. A new
-/// persisted frame count replaces an older snapshot with the same episode ID.
+/// Small FIFO cache for recorded sources outside the Data catalog lifecycle.
+/// A new persisted frame count replaces an older snapshot with the same ID.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct EpisodeInspectionCache {
-    entries: VecDeque<Arc<CachedInspection>>,
+    entries: VecDeque<Arc<EpisodeData>>,
 }
 
 impl EpisodeInspectionCache {
-    fn get(&self, episode: &str, expected_frames: Option<u64>) -> Option<Arc<CachedInspection>> {
+    fn get(&self, episode: &str, expected_frames: Option<u64>) -> Option<Arc<EpisodeData>> {
         self.entries
             .iter()
             .find(|entry| {
@@ -143,7 +161,7 @@ impl EpisodeInspectionCache {
             .cloned()
     }
 
-    fn insert(&mut self, inspection: Arc<CachedInspection>) {
+    pub(crate) fn insert(&mut self, inspection: Arc<EpisodeData>) {
         self.entries
             .retain(|entry| entry.snapshot.episode().id() != inspection.snapshot.episode().id());
         self.entries.push_front(inspection);
@@ -156,13 +174,13 @@ impl EpisodeInspectionCache {
     }
 }
 
-pub(crate) struct HistoricalPreviewRequest {
+pub(crate) struct EpisodePreviewRequest {
     episode: String,
     expected_frames: Option<u64>,
     seconds: f64,
 }
 
-impl HistoricalPreviewRequest {
+impl EpisodePreviewRequest {
     pub(crate) fn new(episode: String, expected_frames: Option<u64>, seconds: f64) -> Self {
         Self {
             episode,
@@ -173,15 +191,16 @@ impl HistoricalPreviewRequest {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct HistoricalPreviewSignals {
-    state: Signal<Option<RecordedSource<HistoricalPreview>>>,
+pub(crate) struct EpisodePreviewSignals {
+    state: Signal<Option<RecordedSource<EpisodePreview>>>,
     revision: Signal<u64>,
     cache: Signal<EpisodeInspectionCache>,
+    data: Option<DataController>,
 }
 
-impl HistoricalPreviewSignals {
+impl EpisodePreviewSignals {
     pub(crate) const fn new(
-        state: Signal<Option<RecordedSource<HistoricalPreview>>>,
+        state: Signal<Option<RecordedSource<EpisodePreview>>>,
         revision: Signal<u64>,
         cache: Signal<EpisodeInspectionCache>,
     ) -> Self {
@@ -189,13 +208,19 @@ impl HistoricalPreviewSignals {
             state,
             revision,
             cache,
+            data: None,
         }
+    }
+
+    pub(crate) const fn with_data(mut self, data: DataController) -> Self {
+        self.data = Some(data);
+        self
     }
 
     pub(crate) const fn into_signals(
         self,
     ) -> (
-        Signal<Option<RecordedSource<HistoricalPreview>>>,
+        Signal<Option<RecordedSource<EpisodePreview>>>,
         Signal<u64>,
         Signal<EpisodeInspectionCache>,
     ) {
@@ -204,22 +229,49 @@ impl HistoricalPreviewSignals {
 }
 
 impl Studio {
-    pub(crate) fn request_historical_preview(
+    pub(crate) fn request_episode_preview(
         self,
-        request: HistoricalPreviewRequest,
-        signals: HistoricalPreviewSignals,
+        request: EpisodePreviewRequest,
+        signals: EpisodePreviewSignals,
     ) {
         let studio = self;
-        let HistoricalPreviewRequest {
+        let EpisodePreviewRequest {
             episode,
             expected_frames,
             seconds,
         } = request;
-        let HistoricalPreviewSignals {
+        let EpisodePreviewSignals {
             mut state,
             mut revision,
             mut cache,
+            data,
         } = signals;
+        // A completed episode selected in Data owns its full data. Sampling
+        // always reads that attached object; the workspace cache below exists
+        // only for recorded sources outside the Data catalog lifecycle.
+        if let Some(selected_data) = data.and_then(|data| data.selected_episode_data_for(&episode))
+        {
+            let ticket = revision.peek().wrapping_add(1);
+            revision.set(ticket);
+            let next = match selected_data {
+                EpisodeDataState::Ready(data) => match data.preview_at(seconds) {
+                    Ok(preview) => LoadState::Ready(preview),
+                    Err(reason) => LoadState::Failed {
+                        reason,
+                        previous: None,
+                    },
+                },
+                EpisodeDataState::Failed(reason) => LoadState::Failed {
+                    reason,
+                    previous: None,
+                },
+                EpisodeDataState::Unloaded | EpisodeDataState::Loading => {
+                    LoadState::Loading { previous: None }
+                }
+            };
+            state.set(Some(RecordedSource::new(episode, seconds, next)));
+            return;
+        }
         // A controller clock may advance while the one snapshot request is in
         // flight. Record the newest requested time without starting another read;
         // the completion below samples that newest time from the loaded snapshot.
@@ -271,15 +323,7 @@ impl Studio {
             },
         )));
         spawn(async move {
-            let path = episode.inspection_url();
-            let loaded = HistoricalDeadline::run(
-                "The episode inspection snapshot",
-                RECORDED_REQUEST_TIMEOUT_MS,
-                api::Http::get::<api::EpisodeInspectionSnapshot>(&path),
-            )
-            .await
-            .and_then(CachedInspection::try_new)
-            .map(Arc::new);
+            let loaded = EpisodeData::load(&episode).await;
             if !revision.peek().eq(&ticket) {
                 return;
             }
@@ -347,13 +391,13 @@ impl Studio {
     }
 }
 
-trait HistoricalSnapshot {
+trait EpisodeSnapshot {
     fn validate(&self) -> Result<(), String>;
     fn sample_at(&self, seconds: f64) -> Result<api::TimelineSample, String>;
     fn signal_lanes(&self, buckets: usize) -> [TimelineSignalLane; 6];
 }
 
-impl HistoricalSnapshot for EpisodeInspectionSnapshot {
+impl EpisodeSnapshot for EpisodeInspectionSnapshot {
     fn validate(&self) -> Result<(), String> {
         let snapshot = self;
         let frames = self.sample_times_seconds().len();
@@ -530,11 +574,11 @@ impl SampleClock for [f64] {
     }
 }
 
-trait HistoricalArm {
+trait RecordedArm {
     fn sample_at(&self, frame: usize) -> Result<api::TimelineArmSample, String>;
 }
 
-impl HistoricalArm for EpisodeInspectionArm {
+impl RecordedArm for EpisodeInspectionArm {
     fn sample_at(&self, frame: usize) -> Result<api::TimelineArmSample, String> {
         let arm = self;
         let joint_count = self.joints().len();
@@ -646,9 +690,9 @@ impl TraceBucket {
     }
 }
 
-struct HistoricalDeadline;
+struct EpisodeDataDeadline;
 
-impl HistoricalDeadline {
+impl EpisodeDataDeadline {
     #[cfg(all(feature = "web", target_arch = "wasm32"))]
     async fn timer(millis: u32) {
         gloo_timers::future::TimeoutFuture::new(millis).await;
@@ -682,7 +726,7 @@ mod tests {
     use super::*;
     use spiral_robotics_api::recording::{
         EpisodeArm, EpisodeArmOptionalChannels, EpisodeArmScalarSamples, EpisodeAssessment,
-        EpisodeIdentity, EpisodeInspectionArm, EpisodeOptionalFrameMatrix, EpisodeSummary,
+        EpisodeIdentity, EpisodeInfo, EpisodeInspectionArm, EpisodeOptionalFrameMatrix,
         EpisodeTimeline,
     };
 
@@ -700,7 +744,7 @@ mod tests {
     fn snapshot_with_normalized(normalized: Vec<Option<f64>>) -> EpisodeInspectionSnapshot {
         let joints = vec!["shoulder_pan".to_owned(), "gripper".to_owned()];
         let absent = EpisodeOptionalFrameMatrix::new(vec![false; 3], vec![None; 6]);
-        let episode = EpisodeSummary::new(
+        let episode = EpisodeInfo::new(
             EpisodeIdentity::new(
                 "take-1",
                 "default",
@@ -727,7 +771,7 @@ mod tests {
 
     #[test]
     fn a_cached_snapshot_resolves_nearest_frames_without_another_request() {
-        let inspection = Arc::new(CachedInspection::try_new(snapshot()).expect("snapshot"));
+        let inspection = Arc::new(EpisodeData::try_new(snapshot()).expect("snapshot"));
         let mut cache = EpisodeInspectionCache::default();
         cache.insert(Arc::clone(&inspection));
 
@@ -748,7 +792,7 @@ mod tests {
 
     #[test]
     fn a_new_frame_count_invalidates_the_cached_revision() {
-        let inspection = Arc::new(CachedInspection::try_new(snapshot()).expect("snapshot"));
+        let inspection = Arc::new(EpisodeData::try_new(snapshot()).expect("snapshot"));
         let mut cache = EpisodeInspectionCache::default();
         cache.insert(inspection);
 
@@ -762,7 +806,7 @@ mod tests {
             snapshot_with_normalized(vec![Some(0.0), Some(0.1), Some(0.5), Some(0.6), Some(1.0)]);
 
         assert!(
-            CachedInspection::try_new(malformed)
+            EpisodeData::try_new(malformed)
                 .expect_err("invalid snapshot")
                 .contains("incomplete state track")
         );

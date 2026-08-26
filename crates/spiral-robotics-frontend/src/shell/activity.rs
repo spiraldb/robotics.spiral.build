@@ -5,7 +5,7 @@
 //! [`ActivityProjection`]; renderers consume that projection without guessing
 //! whether absent data means Live, loading, or failure.
 
-use spiral_robotics_api::recording::{EpisodeSummary, RecordingProgress};
+use spiral_robotics_api::recording::{EpisodeInfo, RecordingProgress};
 
 /// The Studio's five primary activities.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -40,7 +40,7 @@ pub(crate) enum TimelineSubject {
     Recording(RecordingProgress),
     Episode {
         activity: Activity,
-        episode: EpisodeSummary,
+        episode: EpisodeInfo,
     },
 }
 
@@ -97,7 +97,7 @@ impl TimelineSubject {
         }
     }
 
-    pub(crate) fn episode(&self) -> Option<&EpisodeSummary> {
+    pub(crate) fn episode(&self) -> Option<&EpisodeInfo> {
         match self {
             Self::Episode { episode, .. } => Some(episode),
             Self::Empty { .. } | Self::Recording(_) => None,
@@ -162,7 +162,7 @@ impl TimelineSubject {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum PrimaryVisualization {
     LiveScene,
-    RecordedScene(Box<EpisodeSummary>),
+    RecordedScene(Box<EpisodeInfo>),
     EmptyEpisodes,
 }
 
@@ -170,7 +170,7 @@ pub(crate) enum PrimaryVisualization {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum CameraRegistrySource {
     LiveAssignments,
-    RecordedEpisode(Box<EpisodeSummary>),
+    RecordedEpisode(Box<EpisodeInfo>),
     None,
 }
 
@@ -203,7 +203,7 @@ impl ActivityProjection {
     pub(crate) fn derive(
         activity: Activity,
         recording: Option<RecordingProgress>,
-        data_episode_context: Option<EpisodeSummary>,
+        data_episode_context: Option<EpisodeInfo>,
     ) -> Self {
         match activity {
             Activity::Live => {
@@ -376,8 +376,8 @@ mod tests {
     use super::*;
     use spiral_robotics_api::recording::{EpisodeAssessment, EpisodeIdentity, EpisodeTimeline};
 
-    fn episode(id: &str) -> EpisodeSummary {
-        EpisodeSummary::new(
+    fn episode(id: &str) -> EpisodeInfo {
+        EpisodeInfo::new(
             EpisodeIdentity::new(id, "default", Vec::new()).with_source("Teleoperation"),
             EpisodeTimeline::new(120, 2.0, 60.0),
             EpisodeAssessment::new(false, None, None),

@@ -2,7 +2,7 @@
 
 use dioxus::prelude::*;
 
-use crate::client::historical::HistoricalPreview;
+use crate::client::episode_data::EpisodePreview;
 use crate::client::http::{CameraApiPath, EpisodeApiPath};
 use crate::format::ClockPresentation;
 use crate::shell::activity::{LoadState, RecordedSource, TimelineSubject};
@@ -19,7 +19,7 @@ pub(crate) enum CameraEditorSource {
         role: String,
         device: String,
     },
-    Recorded(RecordedSource<HistoricalCamera>),
+    Recorded(RecordedSource<RecordedCamera>),
     Empty {
         title: String,
         detail: String,
@@ -188,7 +188,7 @@ fn LiveCameraFrame(robot: String, role: String, device: String) -> Element {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct HistoricalCamera {
+pub(crate) struct RecordedCamera {
     label: String,
     url: String,
     video_seconds: f64,
@@ -196,7 +196,7 @@ pub(crate) struct HistoricalCamera {
     approximate: bool,
 }
 
-impl HistoricalCamera {
+impl RecordedCamera {
     #[cfg(test)]
     pub(crate) fn url(&self) -> &str {
         &self.url
@@ -265,7 +265,7 @@ impl HistoricalCamera {
 impl TimelineSubject {
     pub(crate) fn recorded_scene_source(
         &self,
-        source: Option<&RecordedSource<HistoricalPreview>>,
+        source: Option<&RecordedSource<EpisodePreview>>,
     ) -> crate::panels::scene::SceneSource {
         let Some(episode) = self.recorded_episode() else {
             return crate::panels::scene::SceneSource::Live;
@@ -273,7 +273,7 @@ impl TimelineSubject {
         let source = source
             .filter(|source| source.episode() == episode)
             .cloned()
-            .map(|source| source.map(HistoricalPreview::into_sample))
+            .map(|source| source.map(EpisodePreview::into_sample))
             .unwrap_or_else(|| {
                 RecordedSource::new(episode, 0.0, LoadState::Loading { previous: None })
             });
@@ -283,14 +283,14 @@ impl TimelineSubject {
 
 pub(crate) struct RecordedCameraSourceRequest<'a> {
     episode: &'a str,
-    source: Option<&'a RecordedSource<HistoricalPreview>>,
+    source: Option<&'a RecordedSource<EpisodePreview>>,
     at: f64,
 }
 
 impl<'a> RecordedCameraSourceRequest<'a> {
     pub(crate) const fn new(
         episode: &'a str,
-        source: Option<&'a RecordedSource<HistoricalPreview>>,
+        source: Option<&'a RecordedSource<EpisodePreview>>,
         at: f64,
     ) -> Self {
         Self {
@@ -306,16 +306,14 @@ impl<'a> RecordedCameraSourceRequest<'a> {
     ) -> CameraEditorSource {
         let at = self.at;
         CameraEditorSource::Recorded(
-            self.map_camera(|preview| preview.historical_camera_at(Some(camera), at)),
+            self.map_camera(|preview| preview.recorded_camera_at(Some(camera), at)),
         )
     }
 
     pub(crate) fn for_stream(self, stream_id: &str, label: &str) -> CameraEditorSource {
         let at = self.at;
         CameraEditorSource::Recorded(
-            self.map_camera(|preview| {
-                HistoricalCameraStream::new(preview, stream_id, label).at(at)
-            }),
+            self.map_camera(|preview| RecordedCameraStream::new(preview, stream_id, label).at(at)),
         )
     }
 
@@ -345,8 +343,8 @@ impl<'a> RecordedCameraSourceRequest<'a> {
 
     fn map_camera(
         self,
-        select: impl Fn(&HistoricalPreview) -> Option<HistoricalCamera>,
-    ) -> RecordedSource<HistoricalCamera> {
+        select: impl Fn(&EpisodePreview) -> Option<RecordedCamera>,
+    ) -> RecordedSource<RecordedCamera> {
         let Some(source) = self
             .source
             .filter(|source| source.episode() == self.episode)
@@ -375,20 +373,20 @@ impl<'a> RecordedCameraSourceRequest<'a> {
     }
 }
 
-impl HistoricalPreview {
+impl EpisodePreview {
     #[cfg(test)]
-    pub(crate) fn historical_camera(
+    pub(crate) fn recorded_camera(
         &self,
         selected: Option<&(String, String, String)>,
-    ) -> Option<HistoricalCamera> {
-        self.historical_camera_at(selected, self.sample().seconds())
+    ) -> Option<RecordedCamera> {
+        self.recorded_camera_at(selected, self.sample().seconds())
     }
 
-    pub(crate) fn historical_camera_at(
+    pub(crate) fn recorded_camera_at(
         &self,
         selected: Option<&(String, String, String)>,
         at: f64,
-    ) -> Option<HistoricalCamera> {
+    ) -> Option<RecordedCamera> {
         let expected = selected.map(|(robot, role, _)| format!("{robot}.camera.{role}"));
         let stream_id = if let Some(expected) = expected.as_deref() {
             self.timeline()
@@ -407,7 +405,7 @@ impl HistoricalPreview {
             .map(|(_, role, _)| role.clone())
             .or_else(|| stream_id.rsplit('.').next().map(str::to_owned))
             .unwrap_or_else(|| "recorded".to_owned());
-        HistoricalCameraStream::new(self, stream_id, &label).at(at)
+        RecordedCameraStream::new(self, stream_id, &label).at(at)
     }
 
     pub(crate) fn recorded_camera_streams(&self) -> Vec<(String, String)> {
@@ -432,14 +430,14 @@ impl HistoricalPreview {
     }
 }
 
-struct HistoricalCameraStream<'a> {
-    preview: &'a HistoricalPreview,
+struct RecordedCameraStream<'a> {
+    preview: &'a EpisodePreview,
     stream_id: &'a str,
     label: &'a str,
 }
 
-impl<'a> HistoricalCameraStream<'a> {
-    const fn new(preview: &'a HistoricalPreview, stream_id: &'a str, label: &'a str) -> Self {
+impl<'a> RecordedCameraStream<'a> {
+    const fn new(preview: &'a EpisodePreview, stream_id: &'a str, label: &'a str) -> Self {
         Self {
             preview,
             stream_id,
@@ -447,7 +445,7 @@ impl<'a> HistoricalCameraStream<'a> {
         }
     }
 
-    fn at(self, at: f64) -> Option<HistoricalCamera> {
+    fn at(self, at: f64) -> Option<RecordedCamera> {
         let assets = self
             .preview
             .timeline()
@@ -515,7 +513,7 @@ impl<'a> HistoricalCameraStream<'a> {
             .preview
             .episode()
             .video_url(asset.stream_id(), asset.segment_index());
-        Some(HistoricalCamera {
+        Some(RecordedCamera {
             label,
             url,
             video_seconds,
