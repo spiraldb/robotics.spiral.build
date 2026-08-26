@@ -35,8 +35,8 @@ pub use cameras::{
 pub use control::{
     ArmConditionSummary, CONTROL_HZ, ControlSettings, DEFAULT_MAX_STEP_COUNTS,
     DEFAULT_TELEOP_MAX_STEP_COUNTS, EpisodeCheckpoint, HardwareHandle, HardwareState, JointGoals,
-    PolicyGoals, RecordingCompletion, RecordingWriter, ReplayRequest, ReplayTrajectory, RobotSpec,
-    Sample,
+    PolicyGoals, RecordingCompletion, RecordingWriter, ReplayTrajectory, RobotPlaybackRequest,
+    RobotSpec, Sample,
 };
 pub use serial_ports::SerialPortCatalog;
 pub use state::{

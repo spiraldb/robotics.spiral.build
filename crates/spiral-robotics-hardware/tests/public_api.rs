@@ -3,7 +3,7 @@ use std::fmt::Debug;
 
 use spiral_robotics_hardware::{
     CameraRuntime, ControlSettings, HardwareInputError, HardwareState, JointGoals, MotorSpec,
-    NormalizedPosition, PortSettings, ReplayRequest, ReplayTrajectory, RobotSpec,
+    NormalizedPosition, PortSettings, ReplayTrajectory, RobotPlaybackRequest, RobotSpec,
 };
 
 #[test]
@@ -18,7 +18,7 @@ fn a_caller_can_compose_valid_hardware_inputs_from_the_flat_boundary() {
     .expect("nonempty goals");
     let trajectory =
         ReplayTrajectory::single_pose(goals.as_ref().clone(), 60.0).expect("valid trajectory");
-    let replay = ReplayRequest::timeline(
+    let replay = RobotPlaybackRequest::timeline(
         "follower".to_owned(),
         "episode_000001".to_owned(),
         trajectory,
@@ -63,7 +63,7 @@ fn malformed_values_are_unrepresentable_at_the_actor_boundary() {
 
     let trajectory =
         ReplayTrajectory::single_pose(BTreeMap::from([("gripper".to_owned(), 0.0)]), 60.0).unwrap();
-    let replay = ReplayRequest::timeline(
+    let replay = RobotPlaybackRequest::timeline(
         "follower".to_owned(),
         "episode_000001".to_owned(),
         trajectory,

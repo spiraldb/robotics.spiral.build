@@ -247,14 +247,14 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
         episode: String,
         media: Self::MediaOutput,
     ) -> Result<(), OperationError> {
-        let completed = self
+        let full_episode = self
             .state
             .episodes()
-            .completed(&episode)
+            .full_episode(&episode)
             .map_err(OperationError::from)?;
         self.state
             .storage()
-            .commit_episode_blocking(&completed, &media)
+            .commit_episode_blocking(&full_episode, &media)
             .map_err(OperationError::Internal)
     }
 
@@ -289,10 +289,10 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
         let episodes = self.state.episodes().clone();
         let storage = self.state.storage().clone();
         let outcome = tokio::task::spawn_blocking(move || {
-            let completed = episodes
-                .completed(&episode)
+            let full_episode = episodes
+                .full_episode(&episode)
                 .map_err(|error| error.to_string())?;
-            storage.commit_episode_blocking(&completed, &media)
+            storage.commit_episode_blocking(&full_episode, &media)
         })
         .await
         .unwrap_or_else(|error| Err(format!("video checkpoint task stopped: {error}")));
@@ -372,7 +372,10 @@ impl ReplayPort for RecordingHttpAdapter<'_> {
         let source_arm = request.source_arm().to_owned();
         let start_seconds = request.start_seconds();
         tokio::task::spawn_blocking(move || {
-            episodes.trajectory_at(&episode, ReplayRequest::new(&source_arm, start_seconds))
+            episodes.trajectory_at(
+                &episode,
+                RobotPlaybackRequest::new(&source_arm, start_seconds),
+            )
         })
         .await
         .map_err(|error| OperationError::Internal(error.to_string()))?
@@ -390,9 +393,10 @@ impl ReplayPort for RecordingHttpAdapter<'_> {
             plan.into_parts();
         let trajectory = spiral_robotics_hardware::ReplayTrajectory::new(frames, sample_hz)
             .map_err(|error| OperationError::invalid_input(error.to_string()))?;
-        let request = spiral_robotics_hardware::ReplayRequest::timeline(robot, episode, trajectory)
-            .and_then(|request| request.starting_at(start_frame, resolved_start_seconds))
-            .map_err(|error| OperationError::invalid_input(error.to_string()))?;
+        let request =
+            spiral_robotics_hardware::RobotPlaybackRequest::timeline(robot, episode, trajectory)
+                .and_then(|request| request.starting_at(start_frame, resolved_start_seconds))
+                .map_err(|error| OperationError::invalid_input(error.to_string()))?;
         self.state
             .hardware()
             .start_replay(request)
@@ -722,9 +726,10 @@ impl PhysicalSeekPort for SeekHttpAdapter<'_> {
         }
         let trajectory = spiral_robotics_hardware::ReplayTrajectory::single_pose(pose, sample_hz)
             .map_err(|error| OperationError::invalid_input(error.to_string()))?;
-        let request =
-            spiral_robotics_hardware::ReplayRequest::physical_seek(robot, episode, trajectory)
-                .map_err(|error| OperationError::invalid_input(error.to_string()))?;
+        let request = spiral_robotics_hardware::RobotPlaybackRequest::physical_seek(
+            robot, episode, trajectory,
+        )
+        .map_err(|error| OperationError::invalid_input(error.to_string()))?;
         self.state
             .hardware()
             .start_replay(request)

@@ -60,6 +60,9 @@ follower without making visual scrubbing dangerous.
   event.
 - **REPLAY-008** Missing, corrupt, non-finite, or incompatible data must fail
   closed before motion.
+- **REPLAY-009** Internal requests that load or command recorded physical motion
+  must use the `RobotPlaybackRequest` name so they cannot be confused with
+  frontend-only visual playback.
 
 ## Implementation ownership
 

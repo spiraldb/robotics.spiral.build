@@ -101,8 +101,9 @@ fn episode_catalog_and_full_data_belong_to_the_data_controller() {
 
     for ownership in [
         "episode_catalog: Signal<EpisodeCatalogState>",
+        "episode_loader: Resource<Option<EpisodeLoadResult>>",
         "info: EpisodeInfo",
-        "full_data: EpisodeDataState",
+        "full_data: Option<Arc<EpisodeData>>",
         "Ready(Arc<EpisodeData>)",
     ] {
         assert!(
@@ -110,6 +111,10 @@ fn episode_catalog_and_full_data_belong_to_the_data_controller() {
             "the Data controller is missing episode ownership {ownership:?}",
         );
     }
+    assert!(
+        !data.contains("full_data: EpisodeDataState"),
+        "catalog entries must cache successful data rather than duplicate resource state",
+    );
     assert!(
         !studio.contains("episode_catalog"),
         "the episode catalog must not drift back into Studio-wide state",

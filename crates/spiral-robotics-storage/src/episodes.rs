@@ -271,12 +271,12 @@ impl EpisodeRecordingRequest {
     }
 }
 
-pub struct ReplayRequest<'a> {
+pub struct RobotPlaybackRequest<'a> {
     arm: &'a str,
     seconds: f64,
 }
 
-impl<'a> ReplayRequest<'a> {
+impl<'a> RobotPlaybackRequest<'a> {
     pub fn new(arm: &'a str, seconds: f64) -> Self {
         Self { arm, seconds }
     }
@@ -358,13 +358,13 @@ impl EpisodeCompletion {
 }
 
 #[derive(Clone, Debug)]
-pub struct CompletedEpisode {
+pub struct FullEpisode {
     start: EpisodeStart,
     samples: Vec<Sample>,
     completion: EpisodeCompletion,
 }
 
-impl CompletedEpisode {
+impl FullEpisode {
     pub const fn start(&self) -> &EpisodeStart {
         &self.start
     }
@@ -379,13 +379,13 @@ impl CompletedEpisode {
 
 #[derive(Clone, Debug)]
 pub struct EpisodeInspection {
-    episode: CompletedEpisode,
+    episode: FullEpisode,
     summary: EpisodeInfo,
     videos: Vec<VideoAssetMetadata>,
 }
 
 impl EpisodeInspection {
-    pub fn into_parts(self) -> (CompletedEpisode, EpisodeInfo, Vec<VideoAssetMetadata>) {
+    pub fn into_parts(self) -> (FullEpisode, EpisodeInfo, Vec<VideoAssetMetadata>) {
         (self.episode, self.summary, self.videos)
     }
 }
@@ -597,7 +597,7 @@ impl EpisodeStore {
             .ok_or_else(|| EpisodeError::NotFound(id.to_owned()))
     }
 
-    pub fn completed(&self, id: &str) -> Result<CompletedEpisode, EpisodeError> {
+    pub fn full_episode(&self, id: &str) -> Result<FullEpisode, EpisodeError> {
         EpisodeId::try_from(id).map_err(|_| EpisodeError::InvalidId(id.to_owned()))?;
         let episodes = Table::Episodes.qualified_name(self.project_store.namespace());
         let samples = Table::JointSamples.qualified_name(self.project_store.namespace());
@@ -637,7 +637,7 @@ impl EpisodeStore {
                     Vec::new()
                 };
                 let decoded = start.decode_samples(rows)?;
-                Ok(CompletedEpisode {
+                Ok(FullEpisode {
                     start,
                     samples: decoded,
                     completion,
@@ -647,7 +647,7 @@ impl EpisodeStore {
     }
 
     pub fn inspection(&self, id: &str) -> Result<EpisodeInspection, EpisodeError> {
-        let episode = self.completed(id)?;
+        let episode = self.full_episode(id)?;
         let summary = episode
             .start
             .summary(&episode.completion, episode.samples.len() as u64);
@@ -724,7 +724,7 @@ impl EpisodeStore {
                 ));
                 continue;
             }
-            let mut episode = self.completed(summary.id())?;
+            let mut episode = self.full_episode(summary.id())?;
             let mut changed = false;
             for sample in &mut episode.samples {
                 let normalized = joints.iter().enumerate().map(|(joint_index, joint)| {
@@ -753,7 +753,7 @@ impl EpisodeStore {
     pub fn trajectory_at(
         &self,
         id: &str,
-        request: ReplayRequest<'_>,
+        request: RobotPlaybackRequest<'_>,
     ) -> Result<ReplayTrajectory, EpisodeError> {
         let arm = request.arm;
         let seconds = request.seconds;
@@ -762,7 +762,7 @@ impl EpisodeStore {
                 "replay start time must be finite and non-negative".to_owned(),
             ));
         }
-        let episode = self.completed(id)?;
+        let episode = self.full_episode(id)?;
         let arm_index = episode
             .start
             .arms
@@ -822,7 +822,7 @@ impl EpisodeStore {
                 "timeline time must be finite".to_owned(),
             ));
         }
-        let episode = self.completed(id)?;
+        let episode = self.full_episode(id)?;
         let (frame, sample) = episode
             .samples
             .iter()
@@ -896,7 +896,7 @@ impl EpisodeStore {
             .map_err(EpisodeError::Invalid)
     }
 
-    fn replace_samples(&self, episode: &CompletedEpisode) -> Result<(), EpisodeError> {
+    fn replace_samples(&self, episode: &FullEpisode) -> Result<(), EpisodeError> {
         let episode = episode.clone();
         let namespace = self.project_store.namespace().to_owned();
         self.project_store
@@ -1172,7 +1172,7 @@ impl EpisodeWriteSession for SpiralEpisodeWriter {
         if let Some(error) = self.failure() {
             return Err(EpisodeError::Invalid(error));
         }
-        let completed = CompletedEpisode {
+        let full_episode = FullEpisode {
             start: self.start.clone(),
             samples,
             completion,
@@ -1180,12 +1180,12 @@ impl EpisodeWriteSession for SpiralEpisodeWriter {
         let namespace = self.project_store.namespace().to_owned();
         self.project_store
             .run_blocking(|connection| {
-                EpisodeReplacement::new(&namespace, &completed, &[]).save(connection)
+                EpisodeReplacement::new(&namespace, &full_episode, &[]).save(connection)
             })
             .map_err(EpisodeError::Invalid)?;
-        Ok(completed
+        Ok(full_episode
             .start
-            .summary(&completed.completion, completed.samples.len() as u64))
+            .summary(&full_episode.completion, full_episode.samples.len() as u64))
     }
 }
 
@@ -1241,14 +1241,14 @@ impl EpisodeDrain<'_> {
                     completion,
                     complete,
                 } => {
-                    let completed = CompletedEpisode {
+                    let full_episode = FullEpisode {
                         start: self.start.clone(),
                         samples: samples.clone(),
                         completion,
                     };
                     let namespace = self.project_store.namespace().to_owned();
                     let result = self.project_store.run_blocking(|connection| {
-                        EpisodeReplacement::new(&namespace, &completed, &[]).save(connection)
+                        EpisodeReplacement::new(&namespace, &full_episode, &[]).save(connection)
                     });
                     if let Err(error) = &result {
                         *self.shared.failure.lock_unpoisoned() = Some(error.clone());

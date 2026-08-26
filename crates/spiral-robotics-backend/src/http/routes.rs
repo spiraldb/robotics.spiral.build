@@ -113,7 +113,7 @@ use spiral_robotics_storage::StorageManager;
 use spiral_robotics_storage::StudioPreferencesStore;
 use spiral_robotics_storage::episodes::{
     ArmCondition, EpisodeError, EpisodeInspection, EpisodeRecordingRequest, EpisodeStore,
-    EpisodeWriter, ReplayRequest,
+    EpisodeWriter, RobotPlaybackRequest,
 };
 use spiral_robotics_storage::video::{VideoAssetKey, VideoByteRange};
 
@@ -462,7 +462,7 @@ impl AppState {
             let storage = self.storage().clone();
             let committed = tokio::task::spawn_blocking(move || {
                 let episode = episodes
-                    .completed(&episode_id)
+                    .full_episode(&episode_id)
                     .map_err(|error| error.to_string())?;
                 storage.commit_episode_blocking(&episode, &videos)
             })

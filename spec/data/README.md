@@ -80,10 +80,15 @@ consumers draw from it: query, curation, [training](../training/README.md),
   structure, counts, likely shared-key joins, schemas, and bounded previews
   without exposing Studio persistence plumbing as project data.
 - **DATA-020** Each catalog entry must pair its lightweight `EpisodeInfo` with
-  one full-data state: unloaded, loading, ready, or failed. Selecting an episode
-  loads its full data once and attaches the result to that same entry; Scene,
-  Cameras, Signals, Timeline, scrubbing, and visual playback must derive from
-  that attached data rather than a second Data cache.
+  an optional successful immutable full-data value. The selected episode must
+  drive one reactive resource that owns transient loading and failure state,
+  reads the entry's cached value when present, and otherwise loads and attaches
+  the result to that same entry. Scene, Cameras, Signals, Timeline, scrubbing,
+  and visual playback must derive from that selected resource and attached
+  value rather than a second Data cache.
+- **DATA-021** Storage must call the loaded header, samples, and recording
+  summary aggregate `FullEpisode`; a persisted pause checkpoint must not be
+  described as a completed episode.
 
 ## Curation direction
 

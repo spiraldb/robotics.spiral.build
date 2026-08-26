@@ -562,7 +562,7 @@ impl ReplayTrajectory {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct ReplayRequest {
+pub struct RobotPlaybackRequest {
     robot: String,
     episode: String,
     trajectory: ReplayTrajectory,
@@ -595,7 +595,7 @@ impl PolicyGoals {
     }
 }
 
-impl ReplayRequest {
+impl RobotPlaybackRequest {
     pub fn timeline(
         robot: String,
         episode: String,
@@ -719,7 +719,7 @@ enum Command {
         reply: Reply<()>,
     },
     StartReplay {
-        request: Box<ReplayRequest>,
+        request: Box<RobotPlaybackRequest>,
         reply: Reply<()>,
     },
     Shutdown {
@@ -1107,7 +1107,7 @@ impl HardwareHandle {
     }
 
     /// Play or physically seek through a validated recorded trajectory.
-    pub async fn start_replay(&self, request: ReplayRequest) -> Result<(), String> {
+    pub async fn start_replay(&self, request: RobotPlaybackRequest) -> Result<(), String> {
         self.request(|reply| Command::StartReplay {
             request: Box::new(request),
             reply,
@@ -2100,8 +2100,8 @@ impl Controller {
         }
     }
 
-    fn start_replay(&mut self, request: ReplayRequest) -> Result<(), String> {
-        let ReplayRequest {
+    fn start_replay(&mut self, request: RobotPlaybackRequest) -> Result<(), String> {
+        let RobotPlaybackRequest {
             robot,
             episode,
             trajectory: ReplayTrajectory { frames, sample_hz },
@@ -3304,8 +3304,8 @@ mod tests {
         robot: &str,
         frames: Vec<BTreeMap<String, f64>>,
         sample_hz: f64,
-    ) -> ReplayRequest {
-        ReplayRequest::timeline(
+    ) -> RobotPlaybackRequest {
+        RobotPlaybackRequest::timeline(
             robot.to_owned(),
             "episode_000001".to_owned(),
             ReplayTrajectory::new(frames, sample_hz).expect("valid trajectory"),
@@ -3414,7 +3414,7 @@ mod tests {
             .collect::<Vec<_>>();
         controller
             .start_replay(
-                ReplayRequest::timeline(
+                RobotPlaybackRequest::timeline(
                     "arm".to_owned(),
                     "episode_000001".to_owned(),
                     ReplayTrajectory::new(frames, 60.0).expect("valid trajectory"),
@@ -3497,7 +3497,7 @@ mod tests {
             .collect::<Vec<_>>();
         controller
             .start_replay(
-                ReplayRequest::timeline(
+                RobotPlaybackRequest::timeline(
                     "arm".to_owned(),
                     "episode_000001".to_owned(),
                     ReplayTrajectory::new(frames, 60.0).expect("valid trajectory"),
@@ -3610,7 +3610,7 @@ mod tests {
         controller.poll_robots();
         controller
             .start_replay(
-                ReplayRequest::physical_seek(
+                RobotPlaybackRequest::physical_seek(
                     "arm".to_owned(),
                     "episode_000001".to_owned(),
                     ReplayTrajectory::single_pose(

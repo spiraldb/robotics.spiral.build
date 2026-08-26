@@ -11,7 +11,7 @@ use spiral_robotics_api::training::TrainingSnapshot;
 use spiral_robotics_api::workflow::{WorkflowAgentStateResponse, WorkflowStateResponse};
 
 #[cfg(all(feature = "web", target_arch = "wasm32"))]
-use crate::client::http::StudioEvent;
+use crate::client::http::{self as api, StudioEvent};
 use crate::panels::timeline::signals::SignalStore;
 use crate::shell::notifications::{
     MessageAction, MessageNotice, MessageSeverity, MessageSource, NotificationCenterState,

@@ -1,8 +1,9 @@
 //! Durable state and transitions for the Data screen.
 //!
 //! The controller outlives the mounted Data workbench. Views render its
-//! signals and emit semantic transitions; async query completion is accepted
-//! only by the request generation that started it.
+//! signals and emit semantic transitions. The selected episode drives one
+//! resource, while successful immutable episode data is cached on its catalog
+//! entry.
 
 use std::sync::Arc;
 
@@ -43,8 +44,16 @@ impl ActiveQuery {
 pub(crate) struct DataController {
     selected_episode: Signal<Option<String>>,
     episode_catalog: Signal<EpisodeCatalogState>,
+    episode_loader: Resource<Option<EpisodeLoadResult>>,
     draft: QueryDraftSignals,
     execution: QueryExecutionSignals,
+}
+
+#[derive(Clone, Debug)]
+struct EpisodeLoadResult {
+    episode: String,
+    expected_frames: u64,
+    result: Result<Arc<EpisodeData>, String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -63,12 +72,13 @@ struct EpisodeCatalogState {
 #[derive(Clone, Debug)]
 struct EpisodeEntry {
     info: EpisodeInfo,
-    full_data: EpisodeDataState,
+    full_data: Option<Arc<EpisodeData>>,
 }
 
-#[derive(Clone, Debug, Default)]
+/// The selected resource projected into the state consumed by recorded views.
+/// Catalog entries cache only successful data, never this transient state.
+#[derive(Clone, Debug)]
 pub(crate) enum EpisodeDataState {
-    #[default]
     Unloaded,
     Loading,
     Ready(Arc<EpisodeData>),
@@ -90,13 +100,13 @@ impl EpisodeEntry {
     fn new(info: EpisodeInfo) -> Self {
         Self {
             info,
-            full_data: EpisodeDataState::Unloaded,
+            full_data: None,
         }
     }
 
     fn replace_info(mut self, info: EpisodeInfo) -> Self {
         if self.info.frames() != info.frames() {
-            self.full_data = EpisodeDataState::Unloaded;
+            self.full_data = None;
         }
         self.info = info;
         self
@@ -124,9 +134,54 @@ struct QueryExecutionSignals {
 pub(crate) fn use_data_controller(namespace: &str, dataset_id: &str) -> DataController {
     let initial_sql = QueryPreset::Episodes.scoped_sql(namespace, dataset_id);
     let sql_value = initial_sql.clone();
+    let selected_episode = use_signal(|| None::<String>);
+    let episode_catalog = use_signal(EpisodeCatalogState::default);
+    let episode_loader = use_resource(move || {
+        let selected = selected_episode();
+        let source = selected.and_then(|episode| {
+            episode_catalog
+                .peek()
+                .episodes
+                .iter()
+                .find(|entry| entry.info.id() == episode)
+                .map(|entry| {
+                    (
+                        episode,
+                        entry.info.frames(),
+                        entry.full_data.as_ref().map(Arc::clone),
+                    )
+                })
+        });
+        async move {
+            let Some((episode, expected_frames, cached)) = source else {
+                return None;
+            };
+            let result = match cached {
+                Some(data) => Ok(data),
+                None => EpisodeData::load(&episode).await,
+            }
+            .and_then(|data| {
+                if data.info().id() == episode && data.info().frames() == expected_frames {
+                    Ok(data)
+                } else {
+                    Err(format!(
+                        "Episode data did not match the selected catalog entry (expected {episode} with {expected_frames} frames, received {} with {} frames).",
+                        data.info().id(),
+                        data.info().frames(),
+                    ))
+                }
+            });
+            Some(EpisodeLoadResult {
+                episode,
+                expected_frames,
+                result,
+            })
+        }
+    });
     let controller = DataController {
-        selected_episode: use_signal(|| None),
-        episode_catalog: use_signal(EpisodeCatalogState::default),
+        selected_episode,
+        episode_catalog,
+        episode_loader,
         draft: QueryDraftSignals {
             sql: use_signal(move || sql_value),
             generated_sql: use_signal(move || initial_sql),
@@ -140,6 +195,16 @@ pub(crate) fn use_data_controller(namespace: &str, dataset_id: &str) -> DataCont
             relation_generation: use_signal(|| 0),
         },
     };
+    use_effect(move || {
+        if episode_loader.state().cloned() != UseResourceState::Ready {
+            return;
+        }
+        let loaded = episode_loader.read();
+        let Some(Some(loaded)) = loaded.as_ref() else {
+            return;
+        };
+        controller.cache_episode_data(loaded);
+    });
     let namespace_dependency = namespace.to_owned();
     let dataset_dependency = dataset_id.to_owned();
     use_effect(use_reactive(
@@ -164,59 +229,33 @@ impl DataController {
 
     pub(crate) fn set_selected_episode(mut self, episode: Option<String>) {
         if self.selected_episode.peek().as_ref() != episode.as_ref() {
-            self.selected_episode.set(episode.clone());
-        }
-        if let Some(episode) = episode {
-            self.load_episode_data(episode);
+            self.selected_episode.set(episode);
         }
     }
 
-    fn load_episode_data(mut self, episode: String) {
-        let expected_frames = {
-            let mut catalog = self.episode_catalog.write();
-            let Some(entry) = catalog
-                .episodes
-                .iter_mut()
-                .find(|entry| entry.info.id() == episode)
-            else {
-                return;
-            };
-            if matches!(
-                entry.full_data,
-                EpisodeDataState::Loading | EpisodeDataState::Ready(_)
-            ) {
-                return;
-            }
-            entry.full_data = EpisodeDataState::Loading;
-            entry.info.frames()
+    fn cache_episode_data(mut self, loaded: &EpisodeLoadResult) {
+        let Ok(data) = &loaded.result else {
+            return;
         };
-        spawn(async move {
-            let loaded = EpisodeData::load(&episode).await;
-            let mut catalog = self.episode_catalog.write();
-            let Some(entry) = catalog
-                .episodes
-                .iter_mut()
-                .find(|entry| entry.info.id() == episode)
-            else {
-                return;
-            };
-            if entry.info.frames() != expected_frames {
-                return;
-            }
-            entry.full_data = match loaded {
-                Ok(data)
-                    if data.info().id() == episode && data.info().frames() == expected_frames =>
-                {
-                    EpisodeDataState::Ready(data)
-                }
-                Ok(data) => EpisodeDataState::Failed(format!(
-                    "Episode data did not match the selected catalog entry (expected {episode} with {expected_frames} frames, received {} with {} frames).",
-                    data.info().id(),
-                    data.info().frames(),
-                )),
-                Err(error) => EpisodeDataState::Failed(error),
-            };
-        });
+        let mut catalog = self.episode_catalog.write();
+        let Some(entry) = catalog
+            .episodes
+            .iter_mut()
+            .find(|entry| entry.info.id() == loaded.episode)
+        else {
+            return;
+        };
+        if entry.info.frames() != loaded.expected_frames
+            || data.info().id() != loaded.episode
+            || data.info().frames() != loaded.expected_frames
+            || entry
+                .full_data
+                .as_ref()
+                .is_some_and(|cached| Arc::ptr_eq(cached, data))
+        {
+            return;
+        }
+        entry.full_data = Some(Arc::clone(data));
     }
 
     /// Every recorded take known to the Data activity, oldest first.
@@ -241,12 +280,31 @@ impl DataController {
 
     pub(crate) fn selected_episode_data(&self) -> Option<EpisodeDataState> {
         let selected = self.selected_episode.read();
-        self.episode_catalog
-            .read()
+        let catalog = self.episode_catalog.read();
+        let entry = catalog
             .episodes
             .iter()
-            .find(|entry| Some(entry.info.id()) == selected.as_deref())
-            .map(|entry| entry.full_data.clone())
+            .find(|entry| Some(entry.info.id()) == selected.as_deref())?;
+        if let Some(data) = &entry.full_data {
+            return Some(EpisodeDataState::Ready(Arc::clone(data)));
+        }
+        let expected_frames = entry.info.frames();
+        drop(catalog);
+
+        if self.episode_loader.state().cloned() == UseResourceState::Pending {
+            return Some(EpisodeDataState::Loading);
+        }
+        let loaded = self.episode_loader.read();
+        let Some(loaded) = loaded.as_ref().and_then(Option::as_ref) else {
+            return Some(EpisodeDataState::Unloaded);
+        };
+        if loaded.episode != selected.as_deref()? || loaded.expected_frames != expected_frames {
+            return Some(EpisodeDataState::Unloaded);
+        }
+        Some(match &loaded.result {
+            Ok(data) => EpisodeDataState::Ready(Arc::clone(data)),
+            Err(error) => EpisodeDataState::Failed(error.clone()),
+        })
     }
 
     pub(crate) fn selected_episode_data_for(&self, episode: &str) -> Option<EpisodeDataState> {
@@ -266,9 +324,9 @@ impl DataController {
             .iter_mut()
             .find(|entry| entry.info.id() == episode)
         {
-            entry.full_data = EpisodeDataState::Unloaded;
+            entry.full_data = None;
         }
-        self.load_episode_data(episode.to_owned());
+        self.episode_loader.restart();
     }
 
     pub(crate) fn datasets(&self) -> Vec<DatasetSummary> {
@@ -324,8 +382,8 @@ impl DataController {
                 catalog.loading = false;
                 catalog.loaded = true;
                 drop(catalog);
-                if let Some(selected) = self.selected_episode.peek().to_owned() {
-                    self.load_episode_data(selected);
+                if self.selected_episode.peek().is_some() {
+                    self.episode_loader.restart();
                 }
                 Ok(())
             }
@@ -340,6 +398,7 @@ impl DataController {
 
     /// Apply the authoritative response from a known episode mutation.
     pub(crate) fn upsert_episode(mut self, info: EpisodeInfo) {
+        let selected = self.selected_episode.peek().as_deref() == Some(info.id());
         let mut catalog = self.episode_catalog.write();
         if let Some(index) = catalog
             .episodes
@@ -357,6 +416,10 @@ impl DataController {
                 .cmp(&right.info.started_ms())
                 .then_with(|| left.info.id().cmp(right.info.id()))
         });
+        drop(catalog);
+        if selected {
+            self.episode_loader.restart();
+        }
     }
 
     pub(crate) fn remove_episode(mut self, episode: &str) {

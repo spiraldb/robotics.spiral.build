@@ -36,7 +36,7 @@ use crate::checkpoints::{CheckpointArtifact, CheckpointFuture, CheckpointKey, Ch
 use crate::episode_schema::{
     JointSampleRows, SpiralEpisodeEncoder, VideoStreamProperties, VideoStreamRow, VideoStreamRows,
 };
-use crate::episodes::CompletedEpisode;
+use crate::episodes::FullEpisode;
 use crate::settings::{SpiralConnectionSettings, StoredStudioPreferences};
 use crate::sql::{ReadOnlyQueryMode, SpiralSql};
 use crate::video::{VideoAsset, VideoAssetKey, VideoByteRange};
@@ -287,7 +287,7 @@ impl StorageManager {
     /// joint writer has inserted the episode's initial catalog row.
     pub fn commit_episode_blocking(
         &self,
-        episode: &CompletedEpisode,
+        episode: &FullEpisode,
         videos: &[VideoAsset],
     ) -> Result<(), String> {
         let namespace = self.project_store.namespace().to_owned();
@@ -1240,14 +1240,14 @@ impl CheckpointStore for StorageManager {
 
 pub(crate) struct EpisodeReplacement<'a> {
     namespace: &'a str,
-    episode: &'a CompletedEpisode,
+    episode: &'a FullEpisode,
     videos: &'a [VideoAsset],
 }
 
 impl<'a> EpisodeReplacement<'a> {
     pub(crate) const fn new(
         namespace: &'a str,
-        episode: &'a CompletedEpisode,
+        episode: &'a FullEpisode,
         videos: &'a [VideoAsset],
     ) -> Self {
         Self {
