@@ -17,7 +17,7 @@ use serde_json::{Map, Value};
 use spiral_robotics_api::robots::{
     CameraBinding, ConnectionStatus, MotorLimits, MotorSummary, PortSettings, RobotSummary,
 };
-use spiral_robotics_hardware::calibration::{Calibration, MotorSpec, MotorSpecifications};
+use spiral_robotics_hardware::{Calibration, MotorSpec};
 use spiral_robotics_storage::{
     ProjectStore, ROBOT_CONFIGURATION_COLUMN, ROBOT_IDENTIFIER_COLUMN, ROBOT_UPDATED_MILLIS_COLUMN,
     StorageSchema,
@@ -245,7 +245,7 @@ impl RobotRecord {
                 WorkspaceError::Invalid(format!("robot {:?} has invalid motors: {source}", self.id))
             })?
             .unwrap_or_default();
-        MotorSpecifications::try_from(&motors).map_err(|source| {
+        MotorSpec::validate_set(&motors).map_err(|source| {
             WorkspaceError::Invalid(format!("robot {:?} has invalid motors: {source}", self.id))
         })?;
         Ok(motors)
@@ -383,7 +383,7 @@ impl RobotWorkspace {
         root.insert(
             "motors".to_owned(),
             RobotConfig::default()
-                .encode_motor_specs(&spiral_robotics_hardware::calibration::MotorSpec::so101_arm())
+                .encode_motor_specs(&spiral_robotics_hardware::MotorSpec::so101_arm())
                 .expect("stock motor specs encode"),
         );
         self.persist(id, RobotConfig::from_value(Value::Object(root))?)

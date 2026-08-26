@@ -17,6 +17,7 @@ clap.workspace = true
 dioxus = { workspace = true, features = ["cli-config", "server"] }
 serde.workspace = true
 serde_json.workspace = true
+serialport.workspace = true
 axum = { version = "0.8", features = ["macros"] }
 bytes = "1"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }

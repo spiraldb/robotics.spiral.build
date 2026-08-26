@@ -71,7 +71,9 @@ Recorded inspection is defined by
 - Hardware capture:
   [`spiral-robotics-hardware`](../../crates/spiral-robotics-hardware/)
   Hardware receives only a durable completion token after storage commits; it
-  does not duplicate the episode wire summary.
+  does not duplicate the episode wire summary. Hardware-native samples and
+  condition measurements cross the capture-sink trait without `serde` or a
+  storage schema; the storage adapter owns their durable projection.
 - Episode and media adapters:
   [`backend/recording`](../../crates/spiral-robotics-backend/src/recording/)
 - Live recording UI:

@@ -4,6 +4,40 @@ use crate::data::catalog_lease::{CatalogLeaseOwner, CatalogLeaseToken, CatalogMu
 use spiral_robotics_hardware::ModeSelection as HardwareModeSelection;
 use spiral_robotics_storage::episodes::ReappliedEpisodePositions;
 
+trait SerialPortPresentation {
+    fn kind(&self) -> &'static str;
+    fn description(&self) -> Option<String>;
+}
+
+impl SerialPortPresentation for serialport::SerialPortType {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::UsbPort(_) => "usb",
+            Self::BluetoothPort => "bluetooth",
+            Self::PciPort => "pci",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    fn description(&self) -> Option<String> {
+        match self {
+            Self::UsbPort(info) => {
+                let mut details = vec![format!("USB {:04x}:{:04x}", info.vid, info.pid)];
+                if let Some(product) = &info.product {
+                    details.push(product.clone());
+                }
+                if let Some(serial) = &info.serial_number {
+                    details.push(format!("serial {serial}"));
+                }
+                Some(details.join(", "))
+            }
+            Self::BluetoothPort => Some("Bluetooth".to_owned()),
+            Self::PciPort => Some("PCI".to_owned()),
+            Self::Unknown => None,
+        }
+    }
+}
+
 /// Camera discovery and preview do not depend on SpiralDB, so they remain
 /// useful while catalog bootstrap is still running or needs repair.
 impl AppState {
@@ -314,16 +348,19 @@ impl RobotConnectionPort for RobotHttpAdapter<'_> {
 
     async fn connect(&self, specification: RobotConnectionSpec) -> Result<(), OperationError> {
         let (id, port, motors, calibration) = specification.into_parts();
+        let port = spiral_robotics_hardware::PortSettings::new(port.path(), port.baud_rate())
+            .map_err(|error| OperationError::invalid_input(error.to_string()))?;
+        let specification = RobotSpec::new(id, port, motors)
+            .map_err(|error| OperationError::invalid_input(error.to_string()))?;
+        let specification = match calibration {
+            Some(calibration) => specification
+                .with_calibration(calibration)
+                .map_err(|error| OperationError::invalid_input(error.to_string()))?,
+            None => specification,
+        };
         self.state
             .hardware()
-            .connect(
-                RobotSpec::new(
-                    id,
-                    spiral_robotics_hardware::PortSettings::new(port.path(), port.baud_rate()),
-                    motors,
-                )
-                .with_calibration(calibration),
-            )
+            .connect(specification)
             .await
             .map_err(OperationError::conflict)
     }
@@ -384,11 +421,10 @@ impl CalibrationHistoryPort for CalibrationHistoryHttpAdapter<'_> {
         let hardware = self.state.hardware().state();
         CalibrationHistoryActivity::new(
             hardware
-                .telemetry()
                 .recording()
                 .as_ref()
                 .map(|recording| recording.episode().to_owned()),
-            match &hardware.mode().selection() {
+            match hardware.mode() {
                 HardwareModeSelection::Replay { episode, .. } => Some(episode.clone()),
                 _ => None,
             },

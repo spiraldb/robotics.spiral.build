@@ -17,7 +17,9 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use spiral_robotics_api::robots::{CameraStatus, CameraStreamFormat, CameraStreamState};
-use spiral_robotics_hardware::cameras::{self, DEFAULT_JPEG_QUALITY, DetectedCamera};
+use spiral_robotics_hardware::{
+    DEFAULT_JPEG_QUALITY, DetectedCamera, JpegStreamConfig, ProbeOutcome,
+};
 use tokio::sync::watch;
 
 use crate::sync::MutexRecovery;
@@ -93,7 +95,7 @@ impl Stream {
                 .spawn(move || {
                     let mut idle_since: Option<Instant> = None;
                     let result = camera.stream_jpeg_frames(
-                        cameras::JpegStreamConfig::new(&stop, DEFAULT_JPEG_QUALITY),
+                        JpegStreamConfig::new(&stop, DEFAULT_JPEG_QUALITY),
                         |frame| {
                             let sequence = frame.sequence();
                             frames.send_replace(Some(Arc::new(Frame {
@@ -181,7 +183,7 @@ impl CameraManager {
     /// Probing spawns short-lived child processes, so this must not run on an
     /// async runtime thread.
     pub(crate) fn refresh_blocking(&self) {
-        let (discovered, issues) = match cameras::ProbeOutcome::discover() {
+        let (discovered, issues) = match ProbeOutcome::discover() {
             Ok(outcome) => {
                 let (cameras, skipped, failures) = outcome.into_parts();
                 let mut issues = Vec::new();

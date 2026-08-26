@@ -4,20 +4,11 @@ use std::collections::BTreeMap;
 #[cfg(test)]
 use std::collections::BTreeSet;
 
-use serialport::{SerialPortInfo, SerialPortType};
+use serialport::SerialPortInfo;
 
 /// A stable, de-duplicated snapshot of the serial devices visible to Studio.
 #[derive(Clone, Debug, Default)]
 pub struct SerialPortCatalog(Vec<SerialPortInfo>);
-
-/// Product-facing descriptions for serial-port transport metadata.
-pub trait SerialPortTypeExt {
-    /// A one-word transport category, for grouping ports in a UI.
-    fn kind(&self) -> &'static str;
-
-    /// Describe a port's hardware, or return `None` when nothing is known.
-    fn description(&self) -> Option<String>;
-}
 
 impl SerialPortCatalog {
     /// Discover the serial ports that could carry a motor bus.
@@ -93,32 +84,18 @@ impl SerialPortCatalog {
     }
 }
 
-impl SerialPortTypeExt for SerialPortType {
-    fn kind(&self) -> &'static str {
-        match self {
-            Self::UsbPort(_) => "usb",
-            Self::BluetoothPort => "bluetooth",
-            Self::PciPort => "pci",
-            Self::Unknown => "unknown",
-        }
+impl AsRef<[SerialPortInfo]> for SerialPortCatalog {
+    fn as_ref(&self) -> &[SerialPortInfo] {
+        self.ports()
     }
+}
 
-    fn description(&self) -> Option<String> {
-        match self {
-            Self::UsbPort(info) => {
-                let mut details = vec![format!("USB {:04x}:{:04x}", info.vid, info.pid)];
-                if let Some(product) = &info.product {
-                    details.push(product.clone());
-                }
-                if let Some(serial) = &info.serial_number {
-                    details.push(format!("serial {serial}"));
-                }
-                Some(details.join(", "))
-            }
-            Self::BluetoothPort => Some("Bluetooth".to_owned()),
-            Self::PciPort => Some("PCI".to_owned()),
-            Self::Unknown => None,
-        }
+impl IntoIterator for SerialPortCatalog {
+    type Item = SerialPortInfo;
+    type IntoIter = std::vec::IntoIter<Self::Item>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
     }
 }
 

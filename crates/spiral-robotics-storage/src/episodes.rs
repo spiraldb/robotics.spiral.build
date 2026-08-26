@@ -17,11 +17,12 @@ use spiral_robotics_api::recording::{
     EpisodeTimeline, RecordingGap,
 };
 use spiral_robotics_api::robots::MotorLimits;
-use spiral_robotics_hardware::calibration::Calibration;
-pub use spiral_robotics_hardware::{ArmConditionSummary, EpisodeCheckpoint, Sample};
+use spiral_robotics_hardware::Calibration;
 use spiral_robotics_hardware::{
-    CompletedRecording, RecordingCompletion, RecordingGap as HardwareRecordingGap, RecordingWriter,
+    ArmConditionSummary as HardwareArmConditionSummary, CompletedRecording, RecordingCompletion,
+    RecordingGap as HardwareRecordingGap, RecordingWriter,
 };
+pub use spiral_robotics_hardware::{EpisodeCheckpoint, Sample};
 
 use crate::adbc::ProjectStore;
 use crate::episode_schema::{JointSampleRows, SpiralEpisodeEncoder};
@@ -288,6 +289,27 @@ pub(crate) struct EpisodeCompletion {
     max_follow_error_degrees: Option<f64>,
     discarded: bool,
     condition: Vec<ArmConditionSummary>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ArmConditionSummary {
+    arm: String,
+    peak_temperature_celsius: Vec<Option<f64>>,
+    min_voltage_volts: Vec<Option<f64>>,
+    peak_load: Vec<Option<f64>>,
+    peak_current_amps: Vec<Option<f64>>,
+}
+
+impl From<&HardwareArmConditionSummary> for ArmConditionSummary {
+    fn from(summary: &HardwareArmConditionSummary) -> Self {
+        Self {
+            arm: summary.arm().to_owned(),
+            peak_temperature_celsius: summary.peak_temperature_celsius().to_vec(),
+            min_voltage_volts: summary.min_voltage_volts().to_vec(),
+            peak_load: summary.peak_load().to_vec(),
+            peak_current_amps: summary.peak_current_amps().to_vec(),
+        }
+    }
 }
 
 impl EpisodeCompletion {
@@ -1034,7 +1056,11 @@ impl RecordingWriter for EpisodeWriter {
             EpisodeCompletion::new(
                 completion.duration_seconds(),
                 completion.recording_gaps().to_api(),
-                completion.condition().to_vec(),
+                completion
+                    .condition()
+                    .iter()
+                    .map(ArmConditionSummary::from)
+                    .collect(),
             )
             .with_max_follow_error_degrees(completion.max_follow_error_degrees()),
         )
@@ -1053,7 +1079,11 @@ impl RecordingWriter for EpisodeWriter {
             EpisodeCompletion::new(
                 completion.duration_seconds(),
                 completion.recording_gaps().to_api(),
-                completion.condition().to_vec(),
+                completion
+                    .condition()
+                    .iter()
+                    .map(ArmConditionSummary::from)
+                    .collect(),
             )
             .with_max_follow_error_degrees(completion.max_follow_error_degrees())
             .with_discarded(completion.discarded()),

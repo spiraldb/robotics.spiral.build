@@ -6,7 +6,7 @@ use crate::OperationError;
 use spiral_robotics_api::recording as api_recording;
 use spiral_robotics_api::robots as api_robots;
 use spiral_robotics_hardware as hardware;
-use spiral_robotics_hardware::calibration::{
+use spiral_robotics_hardware::{
     Calibration, CalibrationInput, MotorCalibration, MotorDirection, NormalizedPosition,
 };
 
@@ -28,15 +28,8 @@ impl RobotControlPort for hardware::HardwareHandle {
         robot: &str,
         normalized: BTreeMap<String, NormalizedPosition>,
     ) -> Result<(), String> {
-        hardware::HardwareHandle::set_goals(
-            self,
-            robot,
-            normalized
-                .into_iter()
-                .map(|(joint, value)| (joint, value.get()))
-                .collect(),
-        )
-        .await
+        let goals = hardware::JointGoals::new(normalized).map_err(|error| error.to_string())?;
+        hardware::HardwareHandle::set_goals(self, robot, goals).await
     }
 }
 
@@ -113,12 +106,12 @@ impl HardwareApiProjection<api_robots::ConnectionStatus> for hardware::Connectio
     }
 }
 
-impl HardwareApiProjection<api_robots::ModeStatus> for hardware::ModeStatus {
+impl HardwareApiProjection<api_robots::ModeStatus> for hardware::HardwareState {
     fn to_api(&self) -> api_robots::ModeStatus {
         api_robots::ModeStatus::new(
-            self.selection().to_api(),
-            self.active(),
-            self.error().map(str::to_owned),
+            self.mode().to_api(),
+            self.mode_active(),
+            self.mode_error().map(str::to_owned),
         )
     }
 }
@@ -158,7 +151,7 @@ impl HardwareApiProjection<api_robots::MotorCalibration> for MotorCalibration {
     }
 }
 
-impl HardwareApiProjection<api_robots::TelemetryFrame> for hardware::TelemetryFrame {
+impl HardwareApiProjection<api_robots::TelemetryFrame> for hardware::HardwareState {
     fn to_api(&self) -> api_robots::TelemetryFrame {
         api_robots::TelemetryFrame::new(self.sequence(), self.loop_hz(), self.target_hz())
             .with_robots(self.robots().iter().map(|robot| robot.to_api()).collect())

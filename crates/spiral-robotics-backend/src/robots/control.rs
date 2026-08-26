@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use spiral_robotics_hardware::calibration::NormalizedPosition;
+use spiral_robotics_hardware::NormalizedPosition;
 
 use crate::OperationError;
 

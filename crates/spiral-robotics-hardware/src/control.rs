@@ -29,6 +29,7 @@ use crate::bus::{
 };
 use crate::feetech::FeetechBus;
 
+use crate::HardwareInputError;
 #[cfg(test)]
 use crate::calibration::MotorDirection;
 use crate::calibration::{
@@ -48,11 +49,11 @@ use crate::state::{
     MotorElectricalReadings, MotorFault, MotorLimits, MotorVoltageRange, PortSettings,
     RecordingClock as RecordingProgressClock, RecordingGap, RecordingIdentity, RecordingProgress,
     RecordingState, ReplayIdentity, ReplayPhase, ReplayProgress, ReplayPurpose, ReplayTimeline,
-    ReplayTransport, RobotTelemetry, TelemetryFrame,
+    ReplayTransport, RobotTelemetry,
 };
 use tokio::sync::{oneshot, watch};
 
-#[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ArmConditionSummary {
     arm: String,
     peak_temperature_celsius: Vec<Option<f64>>,
@@ -78,6 +79,18 @@ impl ArmConditionSummary {
 
     pub fn min_voltage_volts(&self) -> &[Option<f64>] {
         &self.min_voltage_volts
+    }
+
+    pub fn peak_temperature_celsius(&self) -> &[Option<f64>] {
+        &self.peak_temperature_celsius
+    }
+
+    pub fn peak_load(&self) -> &[Option<f64>] {
+        &self.peak_load
+    }
+
+    pub fn peak_current_amps(&self) -> &[Option<f64>] {
+        &self.peak_current_amps
     }
 
     fn observe_motor(&mut self, slot: usize, track: &MotorTrack) {
@@ -314,23 +327,36 @@ pub struct RobotSpec {
 }
 
 impl RobotSpec {
-    pub fn new(id: String, port: PortSettings, motors: BTreeMap<String, MotorSpec>) -> Self {
-        Self {
+    pub fn new(
+        id: String,
+        port: PortSettings,
+        motors: BTreeMap<String, MotorSpec>,
+    ) -> Result<Self, HardwareInputError> {
+        HardwareInputError::validate_name("robot identifier", &id)?;
+        MotorSpec::validate_set(&motors)
+            .map_err(|error| HardwareInputError::new(format!("invalid motor set: {error}")))?;
+        Ok(Self {
             id,
             port,
             motors,
             calibration: None,
-        }
+        })
     }
 
-    pub fn with_calibration(mut self, calibration: Option<Calibration>) -> Self {
-        self.calibration = calibration;
-        self
+    pub fn with_calibration(
+        mut self,
+        calibration: Calibration,
+    ) -> Result<Self, HardwareInputError> {
+        calibration
+            .validate_for_motor_specs(&self.motors)
+            .map_err(|error| HardwareInputError::new(format!("invalid calibration: {error}")))?;
+        self.calibration = Some(calibration);
+        Ok(self)
     }
 }
 
 /// Tuning for the control loop.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ControlSettings {
     period: Duration,
     /// Largest change in encoder counts applied to a joint in one cycle.
@@ -342,17 +368,19 @@ pub struct ControlSettings {
 impl ControlSettings {
     /// Override the ordinary and teleoperation motion limits while preserving
     /// the requirement that every control-cycle step is positive.
-    pub fn try_with_motion_limits(
+    pub fn with_motion_limits(
         mut self,
         max_step_counts: i64,
         teleop_max_step_counts: i64,
-    ) -> Option<Self> {
+    ) -> Result<Self, HardwareInputError> {
         if max_step_counts <= 0 || teleop_max_step_counts <= 0 {
-            return None;
+            return Err(HardwareInputError::new(
+                "control-cycle motion limits must be greater than zero",
+            ));
         }
         self.max_step_counts = max_step_counts;
         self.teleop_max_step_counts = teleop_max_step_counts;
-        Some(self)
+        Ok(self)
     }
 }
 
@@ -367,39 +395,71 @@ impl Default for ControlSettings {
 }
 
 /// A published sample of everything the control thread knows.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct HardwareState {
-    telemetry: TelemetryFrame,
+    telemetry: HardwareTelemetry,
     /// Every robot the thread has been asked to connect, including ones whose
     /// bus has since been lost, so the reason stays visible.
     connections: BTreeMap<String, ConnectionStatus>,
     mode: ModeStatus,
     /// What each connected robot's motors said they will fault at.
     ///
-    /// Keyed robot then motor. These ride the snapshot rather than the
-    /// telemetry frame because they are read once at connect and do not change
-    /// while an arm runs; publishing them twenty times a second would be
-    /// publishing a constant.
+    /// Keyed robot then motor. These ride the snapshot rather than every live
+    /// joint sample because they do not change while an arm runs.
     limits: BTreeMap<String, BTreeMap<String, MotorLimits>>,
     /// Why the last take stopped on its own, kept until another one starts.
-    ///
-    /// A take cut short by an arm going away has to survive the moment it
-    /// happens: the recording counters vanish with the recording, and an
-    /// operator looking up a second later would otherwise see nothing at all.
     recording_issue: Option<String>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
+struct HardwareTelemetry {
+    sequence: u64,
+    loop_hz: f64,
+    target_hz: f64,
+    robots: Vec<RobotTelemetry>,
+    recording: Option<RecordingProgress>,
+    replay: Option<ReplayProgress>,
+}
+
 impl HardwareState {
-    pub const fn telemetry(&self) -> &TelemetryFrame {
-        &self.telemetry
+    pub const fn sequence(&self) -> u64 {
+        self.telemetry.sequence
+    }
+
+    pub const fn loop_hz(&self) -> f64 {
+        self.telemetry.loop_hz
+    }
+
+    pub const fn target_hz(&self) -> f64 {
+        self.telemetry.target_hz
+    }
+
+    pub fn robots(&self) -> &[RobotTelemetry] {
+        &self.telemetry.robots
+    }
+
+    pub const fn recording(&self) -> Option<&RecordingProgress> {
+        self.telemetry.recording.as_ref()
+    }
+
+    pub const fn replay(&self) -> Option<&ReplayProgress> {
+        self.telemetry.replay.as_ref()
     }
 
     pub const fn connections(&self) -> &BTreeMap<String, ConnectionStatus> {
         &self.connections
     }
 
-    pub const fn mode(&self) -> &ModeStatus {
-        &self.mode
+    pub const fn mode(&self) -> &ModeSelection {
+        self.mode.selection()
+    }
+
+    pub const fn mode_active(&self) -> bool {
+        self.mode.active()
+    }
+
+    pub fn mode_error(&self) -> Option<&str> {
+        self.mode.error()
     }
 
     pub const fn limits(&self) -> &BTreeMap<String, BTreeMap<String, MotorLimits>> {
@@ -411,21 +471,97 @@ impl HardwareState {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct JointGoals(BTreeMap<String, f64>);
+
+impl JointGoals {
+    /// Compose a nonempty joint command from already validated positions.
+    pub fn new(
+        positions: BTreeMap<String, crate::NormalizedPosition>,
+    ) -> Result<Self, HardwareInputError> {
+        let values: BTreeMap<String, f64> = positions
+            .into_iter()
+            .map(|(joint, position)| (joint, position.get()))
+            .collect();
+        Self::try_from(values)
+    }
+
+    pub(crate) fn values(&self) -> &BTreeMap<String, f64> {
+        &self.0
+    }
+}
+
+impl AsRef<BTreeMap<String, f64>> for JointGoals {
+    fn as_ref(&self) -> &BTreeMap<String, f64> {
+        self.values()
+    }
+}
+
+impl TryFrom<BTreeMap<String, f64>> for JointGoals {
+    type Error = HardwareInputError;
+
+    fn try_from(values: BTreeMap<String, f64>) -> Result<Self, Self::Error> {
+        if values.is_empty() {
+            return Err(HardwareInputError::new(
+                "a joint command must contain at least one target",
+            ));
+        }
+        for (joint, value) in &values {
+            HardwareInputError::validate_name("joint name", joint)?;
+            crate::NormalizedPosition::new(*value).map_err(|error| {
+                HardwareInputError::new(format!("joint {joint:?} has an invalid target: {error}"))
+            })?;
+        }
+        Ok(Self(values))
+    }
+}
+
+#[derive(Debug, PartialEq)]
 pub struct ReplayTrajectory {
     frames: Vec<BTreeMap<String, f64>>,
     sample_hz: f64,
 }
 
 impl ReplayTrajectory {
-    pub fn new(frames: Vec<BTreeMap<String, f64>>, sample_hz: f64) -> Self {
-        Self { frames, sample_hz }
+    pub fn new(
+        frames: Vec<BTreeMap<String, f64>>,
+        sample_hz: f64,
+    ) -> Result<Self, HardwareInputError> {
+        if frames.is_empty() {
+            return Err(HardwareInputError::new(
+                "a replay trajectory must contain at least one frame",
+            ));
+        }
+        if !sample_hz.is_finite() || sample_hz <= 0.0 {
+            return Err(HardwareInputError::new(
+                "replay sample rate must be finite and greater than zero",
+            ));
+        }
+        let expected_joints = frames[0]
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        for (index, frame) in frames.iter().enumerate() {
+            JointGoals::try_from(frame.clone())?;
+            let actual_joints = frame.keys().map(String::as_str).collect::<BTreeSet<_>>();
+            if actual_joints != expected_joints {
+                return Err(HardwareInputError::new(format!(
+                    "replay frame {index} changes the trajectory's joint set"
+                )));
+            }
+        }
+        Ok(Self { frames, sample_hz })
     }
 
-    pub fn single_pose(pose: BTreeMap<String, f64>, sample_hz: f64) -> Self {
+    pub fn single_pose(
+        pose: BTreeMap<String, f64>,
+        sample_hz: f64,
+    ) -> Result<Self, HardwareInputError> {
         Self::new(vec![pose], sample_hz)
     }
 }
 
+#[derive(Debug, PartialEq)]
 pub struct ReplayRequest {
     robot: String,
     episode: String,
@@ -436,45 +572,77 @@ pub struct ReplayRequest {
 }
 
 /// One normalized command admitted under a specific policy session.
+#[derive(Debug, PartialEq)]
 pub struct PolicyGoals {
     robot: String,
     session: String,
-    normalized: BTreeMap<String, f64>,
+    normalized: JointGoals,
 }
 
 impl PolicyGoals {
-    pub fn new(robot: String, session: String, normalized: BTreeMap<String, f64>) -> Self {
-        Self {
+    pub fn new(
+        robot: String,
+        session: String,
+        normalized: JointGoals,
+    ) -> Result<Self, HardwareInputError> {
+        HardwareInputError::validate_name("robot identifier", &robot)?;
+        HardwareInputError::validate_name("policy session identifier", &session)?;
+        Ok(Self {
             robot,
             session,
             normalized,
-        }
+        })
     }
 }
 
 impl ReplayRequest {
-    pub fn timeline(robot: String, episode: String, trajectory: ReplayTrajectory) -> Self {
-        Self {
+    pub fn timeline(
+        robot: String,
+        episode: String,
+        trajectory: ReplayTrajectory,
+    ) -> Result<Self, HardwareInputError> {
+        HardwareInputError::validate_name("robot identifier", &robot)?;
+        HardwareInputError::validate_name("replay identifier", &episode)?;
+        Ok(Self {
             robot,
             episode,
             trajectory,
             start_frame: 0,
             resolved_start_seconds: 0.0,
             purpose: ReplayPurpose::Timeline,
-        }
+        })
     }
 
-    pub fn physical_seek(robot: String, episode: String, trajectory: ReplayTrajectory) -> Self {
-        Self {
+    pub fn physical_seek(
+        robot: String,
+        episode: String,
+        trajectory: ReplayTrajectory,
+    ) -> Result<Self, HardwareInputError> {
+        Ok(Self {
             purpose: ReplayPurpose::PhysicalSeek,
-            ..Self::timeline(robot, episode, trajectory)
-        }
+            ..Self::timeline(robot, episode, trajectory)?
+        })
     }
 
-    pub fn starting_at(mut self, start_frame: usize, resolved_start_seconds: f64) -> Self {
+    pub fn starting_at(
+        mut self,
+        start_frame: usize,
+        resolved_start_seconds: f64,
+    ) -> Result<Self, HardwareInputError> {
+        if start_frame >= self.trajectory.frames.len() {
+            return Err(HardwareInputError::new(format!(
+                "replay start frame {start_frame} is outside {} trajectory frames",
+                self.trajectory.frames.len()
+            )));
+        }
+        if !resolved_start_seconds.is_finite() || resolved_start_seconds < 0.0 {
+            return Err(HardwareInputError::new(
+                "replay start time must be finite and non-negative",
+            ));
+        }
         self.start_frame = start_frame;
         self.resolved_start_seconds = resolved_start_seconds;
-        self
+        Ok(self)
     }
 }
 
@@ -497,7 +665,7 @@ enum Command {
     },
     SetGoals {
         id: String,
-        normalized: BTreeMap<String, f64>,
+        normalized: JointGoals,
         reply: Reply<()>,
     },
     SetPolicyGoals {
@@ -828,11 +996,7 @@ impl HardwareHandle {
     }
 
     /// Command joint targets in normalized units.
-    pub async fn set_goals(
-        &self,
-        id: &str,
-        normalized: BTreeMap<String, f64>,
-    ) -> Result<(), String> {
+    pub async fn set_goals(&self, id: &str, normalized: JointGoals) -> Result<(), String> {
         self.request(|reply| Command::SetGoals {
             id: id.to_owned(),
             normalized,
@@ -1637,7 +1801,7 @@ impl Controller {
                 normalized,
                 reply,
             } => {
-                let _ = reply.send(self.set_goals(&id, &normalized));
+                let _ = reply.send(self.set_goals(&id, normalized.values()));
             }
             Command::SetPolicyGoals { goals, reply } => {
                 let _ = reply.send(self.set_policy_goals(&goals));
@@ -2272,7 +2436,7 @@ impl Controller {
             robot: goals.robot.clone(),
             session: goals.session.clone(),
         })?;
-        self.set_normalized_goals(&goals.robot, &goals.normalized)
+        self.set_normalized_goals(&goals.robot, goals.normalized.values())
     }
 
     fn set_normalized_goals(
@@ -2991,60 +3155,58 @@ impl Controller {
 
     fn publish(&mut self) {
         self.published.sequence += 1;
-        let state = HardwareState {
-            telemetry: TelemetryFrame::new(
-                self.published.sequence,
-                self.published.loop_hz,
-                1.0 / self.settings.period.as_secs_f64(),
+        let recording = self.operations.recording.as_ref().map(|recording| {
+            let now = Instant::now();
+            let identity = RecordingIdentity::new(
+                recording.writer.id().to_owned(),
+                recording.writer.dataset_id().to_owned(),
+                recording
+                    .arms
+                    .iter()
+                    .map(|arm| arm.id().to_owned())
+                    .collect(),
+            );
+            let clock = RecordingProgressClock::new(
+                recording.frames,
+                recording.active_elapsed(now).as_secs_f64(),
+                recording.clock.wall_elapsed(now).as_secs_f64(),
             )
-            .with_robots(
-                self.robots
+            .with_paused_seconds(recording.paused_elapsed(now).as_secs_f64());
+            let state = RecordingState::new(
+                recording.clock.is_paused(),
+                recording.follow_error(),
+                recording.writer.failure(),
+            );
+            RecordingProgress::new(identity, clock, state)
+        });
+        let replay = self.operations.replay.as_ref().map(|replay| {
+            let identity = ReplayIdentity::new(replay.episode.clone(), replay.robot.clone());
+            // Seeking preserves the requested episode position while the arm
+            // ramps there, so visualizations never jump back to frame zero
+            // after a committed scrub.
+            let timeline = ReplayTimeline::new(
+                replay.cursor().min(replay.frames.len()) as u64,
+                replay.frames.len() as u64,
+                replay.elapsed_seconds(),
+            )
+            .with_duration_seconds(replay.duration_seconds());
+            let transport =
+                ReplayTransport::new(replay.purpose, replay.phase, replay.timing.paused);
+            ReplayProgress::new(identity, timeline, transport)
+        });
+        let state = HardwareState {
+            telemetry: HardwareTelemetry {
+                sequence: self.published.sequence,
+                loop_hz: self.published.loop_hz,
+                target_hz: 1.0 / self.settings.period.as_secs_f64(),
+                robots: self
+                    .robots
                     .values()
                     .map(ConnectedRobot::telemetry)
                     .collect(),
-            )
-            .with_operations(
-                self.operations.recording.as_ref().map(|recording| {
-                    let now = Instant::now();
-                    let identity = RecordingIdentity::new(
-                        recording.writer.id().to_owned(),
-                        recording.writer.dataset_id().to_owned(),
-                        recording
-                            .arms
-                            .iter()
-                            .map(|arm| arm.id().to_owned())
-                            .collect(),
-                    );
-                    let clock = RecordingProgressClock::new(
-                        recording.frames,
-                        recording.active_elapsed(now).as_secs_f64(),
-                        recording.clock.wall_elapsed(now).as_secs_f64(),
-                    )
-                    .with_paused_seconds(recording.paused_elapsed(now).as_secs_f64());
-                    let state = RecordingState::new(
-                        recording.clock.is_paused(),
-                        recording.follow_error(),
-                        recording.writer.failure(),
-                    );
-                    RecordingProgress::new(identity, clock, state)
-                }),
-                self.operations.replay.as_ref().map(|replay| {
-                    let identity =
-                        ReplayIdentity::new(replay.episode.clone(), replay.robot.clone());
-                    // Seeking preserves the requested episode position while
-                    // the arm ramps there, so visualizations never jump back
-                    // to frame zero after a committed scrub.
-                    let timeline = ReplayTimeline::new(
-                        replay.cursor().min(replay.frames.len()) as u64,
-                        replay.frames.len() as u64,
-                        replay.elapsed_seconds(),
-                    )
-                    .with_duration_seconds(replay.duration_seconds());
-                    let transport =
-                        ReplayTransport::new(replay.purpose, replay.phase, replay.timing.paused);
-                    ReplayProgress::new(identity, timeline, transport)
-                }),
-            ),
+                recording,
+                replay,
+            },
             connections: self.published.connections.clone(),
             mode: self.published.mode.clone(),
             limits: self
@@ -3125,12 +3287,17 @@ mod tests {
     }
 
     fn spec(id: &str, calibration: Option<Calibration>) -> RobotSpec {
-        RobotSpec::new(
+        let specification = RobotSpec::new(
             id.to_owned(),
-            PortSettings::new(format!("/dev/{id}"), 1_000_000),
+            PortSettings::new(format!("/dev/{id}"), 1_000_000).expect("port settings"),
             motors(),
         )
-        .with_calibration(calibration)
+        .expect("robot specification");
+        calibration.map_or(specification.clone(), |calibration| {
+            specification
+                .with_calibration(calibration)
+                .expect("matching calibration")
+        })
     }
 
     fn timeline_replay(
@@ -3141,8 +3308,18 @@ mod tests {
         ReplayRequest::timeline(
             robot.to_owned(),
             "episode_000001".to_owned(),
-            ReplayTrajectory::new(frames, sample_hz),
+            ReplayTrajectory::new(frames, sample_hz).expect("valid trajectory"),
         )
+        .expect("valid replay request")
+    }
+
+    fn policy_goals(robot: &str, session: &str, goals: BTreeMap<String, f64>) -> PolicyGoals {
+        PolicyGoals::new(
+            robot.to_owned(),
+            session.to_owned(),
+            JointGoals::try_from(goals).expect("valid joint goals"),
+        )
+        .expect("valid policy goals")
     }
 
     fn controller() -> Controller {
@@ -3236,11 +3413,14 @@ mod tests {
             .map(|step| BTreeMap::from([("gripper".to_owned(), 0.5 + 0.1 * step as f64)]))
             .collect::<Vec<_>>();
         controller
-            .start_replay(ReplayRequest::timeline(
-                "arm".to_owned(),
-                "episode_000001".to_owned(),
-                ReplayTrajectory::new(frames, 60.0),
-            ))
+            .start_replay(
+                ReplayRequest::timeline(
+                    "arm".to_owned(),
+                    "episode_000001".to_owned(),
+                    ReplayTrajectory::new(frames, 60.0).expect("valid trajectory"),
+                )
+                .expect("valid replay request"),
+            )
             .expect("start replay");
 
         assert_eq!(
@@ -3316,11 +3496,14 @@ mod tests {
             .map(|step| BTreeMap::from([("gripper".to_owned(), 0.05 + 0.01 * step as f64)]))
             .collect::<Vec<_>>();
         controller
-            .start_replay(ReplayRequest::timeline(
-                "arm".to_owned(),
-                "episode_000001".to_owned(),
-                ReplayTrajectory::new(frames, 60.0),
-            ))
+            .start_replay(
+                ReplayRequest::timeline(
+                    "arm".to_owned(),
+                    "episode_000001".to_owned(),
+                    ReplayTrajectory::new(frames, 60.0).expect("valid trajectory"),
+                )
+                .expect("valid replay request"),
+            )
             .expect("start replay");
 
         for _ in 0..400 {
@@ -3397,7 +3580,11 @@ mod tests {
             .collect::<Vec<_>>();
 
         controller
-            .start_replay(timeline_replay("arm", frames, 60.0).starting_at(60, 1.25))
+            .start_replay(
+                timeline_replay("arm", frames, 60.0)
+                    .starting_at(60, 1.25)
+                    .expect("valid replay start"),
+            )
             .expect("start replay at playhead");
 
         let replay = controller
@@ -3422,11 +3609,18 @@ mod tests {
             .expect("connect");
         controller.poll_robots();
         controller
-            .start_replay(ReplayRequest::physical_seek(
-                "arm".to_owned(),
-                "episode_000001".to_owned(),
-                ReplayTrajectory::single_pose(BTreeMap::from([("gripper".to_owned(), 0.25)]), 60.0),
-            ))
+            .start_replay(
+                ReplayRequest::physical_seek(
+                    "arm".to_owned(),
+                    "episode_000001".to_owned(),
+                    ReplayTrajectory::single_pose(
+                        BTreeMap::from([("gripper".to_owned(), 0.25)]),
+                        60.0,
+                    )
+                    .expect("valid pose"),
+                )
+                .expect("valid physical seek"),
+            )
             .expect("start physical seek");
 
         controller
@@ -3487,15 +3681,15 @@ mod tests {
                 .contains("calibrated")
         );
         assert!(
-            controller
-                .start_replay(timeline_replay("arm", Vec::new(), 60.0))
+            ReplayTrajectory::new(Vec::new(), 60.0)
                 .expect_err("no frames")
-                .contains("no frames")
+                .to_string()
+                .contains("at least one frame")
         );
         assert!(
-            controller
-                .start_replay(timeline_replay("arm", pose.clone(), 0.0))
+            ReplayTrajectory::new(pose.clone(), 0.0)
                 .expect_err("bad rate")
+                .to_string()
                 .contains("sample rate")
         );
         assert!(
@@ -3516,20 +3710,34 @@ mod tests {
     }
 
     #[test]
-    fn every_replay_frame_must_contain_known_finite_joints() {
+    fn replay_static_shape_and_live_joint_membership_are_both_enforced() {
         let mut controller = controller();
         controller
             .connect(spec("arm", Some(calibration(2048, 500))))
             .expect("connect");
 
-        for (label, frames) in [
-            (
-                "later unknown joint",
+        assert!(
+            ReplayTrajectory::new(
                 vec![
                     BTreeMap::from([("gripper".to_owned(), 0.0)]),
                     BTreeMap::from([("sixth_axis".to_owned(), 0.1)]),
                 ],
-            ),
+                60.0,
+            )
+            .is_err(),
+            "a changing joint set must be rejected before actor admission"
+        );
+
+        let frames = vec![
+            BTreeMap::from([("sixth_axis".to_owned(), 0.0)]),
+            BTreeMap::from([("sixth_axis".to_owned(), 0.1)]),
+        ];
+        let error = controller
+            .start_replay(timeline_replay("arm", frames, 60.0))
+            .expect_err("unknown live joint");
+        assert!(error.contains("no calibrated joint"), "{error}");
+
+        for (label, frames) in [
             (
                 "later non-finite value",
                 vec![
@@ -3545,19 +3753,16 @@ mod tests {
                 ],
             ),
         ] {
-            let error = controller
-                .start_replay(timeline_replay("arm", frames, 60.0))
-                .expect_err(label);
             assert!(
-                error.contains("frame 1"),
-                "{label} should identify its later frame: {error}"
-            );
-            assert!(controller.operations.replay.is_none());
-            assert_eq!(
-                controller.published.mode.selection().clone(),
-                ModeSelection::Idle
+                ReplayTrajectory::new(frames, 60.0).is_err(),
+                "{label} must be rejected before actor admission"
             );
         }
+        assert!(controller.operations.replay.is_none());
+        assert_eq!(
+            controller.published.mode.selection().clone(),
+            ModeSelection::Idle
+        );
     }
 
     #[test]
@@ -3723,10 +3928,16 @@ mod tests {
         );
         let stale = calibration_for(&stale_motors, 2048, 500);
 
-        let error = controller
-            .connect(spec("stale", Some(stale.clone())))
-            .expect_err("stale calibration must not reach a motor bus");
-        assert!(error.contains("does not match"), "{error}");
+        let stale_specification = RobotSpec::new(
+            "stale".to_owned(),
+            PortSettings::new("/dev/stale", 1_000_000).expect("port"),
+            motors(),
+        )
+        .expect("robot definition");
+        let error = stale_specification
+            .with_calibration(stale.clone())
+            .expect_err("stale calibration must not become a robot specification");
+        assert!(error.to_string().contains("does not match"), "{error}");
         assert!(controller.robots.is_empty());
 
         controller
@@ -3933,20 +4144,12 @@ mod tests {
         let goals = BTreeMap::from([("gripper".to_owned(), 0.5)]);
         assert!(
             controller
-                .set_policy_goals(&PolicyGoals::new(
-                    "arm".to_owned(),
-                    "old-rollout".to_owned(),
-                    goals.clone(),
-                ))
+                .set_policy_goals(&policy_goals("arm", "old-rollout", goals.clone()))
                 .expect_err("stale session")
                 .contains("not allowed")
         );
         controller
-            .set_policy_goals(&PolicyGoals::new(
-                "arm".to_owned(),
-                "rollout-1".to_owned(),
-                goals.clone(),
-            ))
+            .set_policy_goals(&policy_goals("arm", "rollout-1", goals.clone()))
             .expect("active session may command");
         assert_eq!(controller.robots["arm"].motion.target["gripper"], 2298);
         let before = controller.robots["arm"].motion.commanded["gripper"];
@@ -3983,11 +4186,7 @@ mod tests {
         );
         assert!(
             controller
-                .set_policy_goals(&PolicyGoals::new(
-                    "arm".to_owned(),
-                    "rollout-1".to_owned(),
-                    goals.clone(),
-                ))
+                .set_policy_goals(&policy_goals("arm", "rollout-1", goals.clone()))
                 .expect_err("finished session")
                 .contains("not allowed")
         );
@@ -4322,13 +4521,11 @@ mod tests {
 
         let state = controller.state.borrow().clone();
         let calibrated = state
-            .telemetry
             .robots()
             .iter()
             .find(|robot| robot.id() == "calibrated")
             .expect("calibrated telemetry");
         let raw = state
-            .telemetry
             .robots()
             .iter()
             .find(|robot| robot.id() == "raw")
@@ -4363,7 +4560,7 @@ mod tests {
         controller.publish();
 
         let state = controller.state.borrow().clone();
-        let raw = &state.telemetry.robots()[0];
+        let raw = &state.robots()[0];
 
         // Calibration is what turns counts into degrees; it has nothing to do
         // with the motor's own condition, and an arm nobody has calibrated yet

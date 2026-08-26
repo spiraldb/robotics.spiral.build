@@ -293,8 +293,8 @@ impl AppState {
     }
 
     fn import_activity_is_busy(&self, hardware: &HardwareState) -> bool {
-        hardware.telemetry().recording().is_some()
-            || !matches!(hardware.mode().selection(), HardwareModeSelection::Idle)
+        hardware.recording().is_some()
+            || !matches!(hardware.mode(), HardwareModeSelection::Idle)
             || self
                 .training()
                 .snapshot()
@@ -678,8 +678,8 @@ struct DestinationChangeContext {
 impl DestinationChangeContext {
     fn new(hardware: &HardwareState, current_robot_ids: Option<&BTreeSet<String>>) -> Self {
         Self {
-            hardware_busy: hardware.telemetry().recording().is_some()
-                || !matches!(hardware.mode().selection(), HardwareModeSelection::Idle),
+            hardware_busy: hardware.recording().is_some()
+                || !matches!(hardware.mode(), HardwareModeSelection::Idle),
             connected_robot_ids: hardware
                 .connections()
                 .iter()

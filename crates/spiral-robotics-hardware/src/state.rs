@@ -19,11 +19,19 @@ pub struct PortSettings {
 }
 
 impl PortSettings {
-    pub fn new(path: impl Into<String>, baud_rate: u32) -> Self {
-        Self {
-            path: path.into(),
-            baud_rate,
+    pub fn new(path: impl Into<String>, baud_rate: u32) -> Result<Self, crate::HardwareInputError> {
+        let path = path.into();
+        if path.trim().is_empty() {
+            return Err(crate::HardwareInputError::new(
+                "serial port path must not be empty",
+            ));
         }
+        if baud_rate == 0 {
+            return Err(crate::HardwareInputError::new(
+                "serial port baud rate must be greater than zero",
+            ));
+        }
+        Ok(Self { path, baud_rate })
     }
 
     pub(crate) fn path(&self) -> &str {
@@ -80,7 +88,7 @@ pub enum ModeSelection {
 
 /// Selected control owner and its current activity.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct ModeStatus {
+pub(crate) struct ModeStatus {
     selection: ModeSelection,
     active: bool,
     error: Option<String>,
@@ -95,15 +103,15 @@ impl ModeStatus {
         }
     }
 
-    pub const fn selection(&self) -> &ModeSelection {
+    pub(crate) const fn selection(&self) -> &ModeSelection {
         &self.selection
     }
 
-    pub const fn active(&self) -> bool {
+    pub(crate) const fn active(&self) -> bool {
         self.active
     }
 
-    pub fn error(&self) -> Option<&str> {
+    pub(crate) fn error(&self) -> Option<&str> {
         self.error.as_deref()
     }
 
@@ -922,69 +930,6 @@ impl ReplayProgress {
 
     pub const fn paused(&self) -> bool {
         self.transport.paused
-    }
-}
-
-/// One published sample of the entire hardware runtime.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct TelemetryFrame {
-    sequence: u64,
-    loop_hz: f64,
-    target_hz: f64,
-    robots: Vec<RobotTelemetry>,
-    recording: Option<RecordingProgress>,
-    replay: Option<ReplayProgress>,
-}
-
-impl TelemetryFrame {
-    pub(crate) fn new(sequence: u64, loop_hz: f64, target_hz: f64) -> Self {
-        Self {
-            sequence,
-            loop_hz,
-            target_hz,
-            robots: Vec::new(),
-            recording: None,
-            replay: None,
-        }
-    }
-
-    pub(crate) fn with_robots(mut self, robots: Vec<RobotTelemetry>) -> Self {
-        self.robots = robots;
-        self
-    }
-
-    pub(crate) fn with_operations(
-        mut self,
-        recording: Option<RecordingProgress>,
-        replay: Option<ReplayProgress>,
-    ) -> Self {
-        self.recording = recording;
-        self.replay = replay;
-        self
-    }
-
-    pub const fn sequence(&self) -> u64 {
-        self.sequence
-    }
-
-    pub const fn loop_hz(&self) -> f64 {
-        self.loop_hz
-    }
-
-    pub const fn target_hz(&self) -> f64 {
-        self.target_hz
-    }
-
-    pub fn robots(&self) -> &[RobotTelemetry] {
-        &self.robots
-    }
-
-    pub const fn recording(&self) -> Option<&RecordingProgress> {
-        self.recording.as_ref()
-    }
-
-    pub const fn replay(&self) -> Option<&ReplayProgress> {
-        self.replay.as_ref()
     }
 }
 

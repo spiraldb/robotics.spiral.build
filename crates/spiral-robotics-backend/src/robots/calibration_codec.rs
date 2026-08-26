@@ -11,8 +11,8 @@ use std::marker::PhantomData;
 use serde::de::{self, DeserializeOwned, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
-use spiral_robotics_hardware::calibration::CalibrationInput;
-use spiral_robotics_hardware::calibration::{
+use spiral_robotics_hardware::CalibrationInput;
+use spiral_robotics_hardware::{
     Calibration, CalibrationFormat, MotorCalibration, MotorDirection, MotorReading,
 };
 
@@ -128,7 +128,7 @@ impl From<MotorCalibration> for MotorCalibrationWire {
 }
 
 impl TryFrom<MotorCalibrationWire> for MotorCalibration {
-    type Error = spiral_robotics_hardware::calibration::CalibrationError;
+    type Error = spiral_robotics_hardware::CalibrationError;
 
     fn try_from(value: MotorCalibrationWire) -> Result<Self, Self::Error> {
         Self::new(
@@ -250,7 +250,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spiral_robotics_hardware::calibration::{
+    use spiral_robotics_hardware::{
         CALIBRATION_COORDINATE_SPACE, CALIBRATION_FORMAT_VERSION, CALIBRATION_UNITS,
     };
 

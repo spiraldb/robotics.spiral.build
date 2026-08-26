@@ -30,6 +30,53 @@ project data. Their production persistence is specified by
 [Data persistence](../data/persistence.md). JSON is an import/export format, not
 the intended source of truth.
 
+### Hardware crate boundary
+
+`spiral-robotics-hardware` owns only facts and behavior whose invariants depend
+on physical I/O: serial and camera discovery, camera capture, motor definitions
+and calibration, motor-bus adapters, the fixed-rate control actor, bounded
+motion, hardware-native observations, and the narrow capture sink driven by
+that actor. Its source modules are private; callers use one reviewed flat Rust
+API rather than depending on implementation layout.
+
+The application owns robot-file and calibration codecs, HTTP and browser DTOs,
+operator workflow and admission, episode identity and schemas, serialized
+recording summaries, persistence, and policy inference. In particular,
+hardware condition measurements have no persistence serialization contract;
+storage projects them into its own durable representation, and serial-port
+display wording belongs to the backend presenter.
+
+The minimum connection input is one nonempty robot identifier, one nonempty
+serial path and nonzero baud rate, a nonempty named motor set with unique bus
+IDs, and an optional calibration that exactly matches those names, IDs, and
+directions. Motion inputs contain a nonempty set of valid joint names and
+finite normalized positions in `[-1, 1]`. Replay additionally requires at
+least one nonempty valid pose, one stable joint set across all poses, a finite
+positive sample rate, a start frame inside the trajectory, and a finite
+non-negative resolved start time.
+
+These preconditions are checked by invariant-preserving constructors before a
+value can enter the control actor. The actor rechecks live facts that can change
+after construction, including connection, calibration, torque ownership,
+reported joint sets, and bus health. Construction uses focused constructors and
+builders for optional state; dynamic steering uses `HardwareHandle` commands
+and typed `JointGoals` rather than public mutable fields.
+
+Every published `HardwareState` is one immutable atomic snapshot. Its sequence,
+loop timing, robot observations, recording/replay progress, connection results,
+control owner, reported limits, and retained issues come from the same control
+publication. A successful command reply means the serialized actor accepted
+and applied that transition; the next published state is the observable
+postcondition. Boundary values implement the standard traits needed by callers
+(`Debug`, `Clone`/`Copy`, equality, `Error`, `TryFrom`, `From`, `AsRef`, and
+`IntoIterator` where their semantics apply).
+
+The hardware public-API test composes a valid connection and replay exclusively
+through the flat facade, asserts constructor rejection for malformed values,
+and checks the caller-facing trait contract. Control tests verify state-machine,
+safety, and snapshot postconditions; backend adapter tests verify projection
+without moving application policy into the crate.
+
 ## Implementation ownership
 
 - Browser/backend robot wire contract:

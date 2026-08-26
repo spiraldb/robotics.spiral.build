@@ -386,11 +386,25 @@ impl NormalizedPosition {
     }
 }
 
+impl TryFrom<f64> for NormalizedPosition {
+    type Error = CalibrationError;
+
+    fn try_from(value: f64) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<NormalizedPosition> for f64 {
+    fn from(value: NormalizedPosition) -> Self {
+        value.get()
+    }
+}
+
 impl Error for CalibrationError {}
 
 /// A borrowed motor specification map whose names and bus IDs are valid.
 #[derive(Clone, Copy, Debug)]
-pub struct MotorSpecifications<'a>(&'a BTreeMap<String, MotorSpec>);
+pub(crate) struct MotorSpecifications<'a>(&'a BTreeMap<String, MotorSpec>);
 
 impl<'a> TryFrom<&'a BTreeMap<String, MotorSpec>> for MotorSpecifications<'a> {
     type Error = CalibrationError;
@@ -439,6 +453,15 @@ impl<'a> MotorSpecifications<'a> {
 }
 
 impl MotorSpec {
+    /// Validate a complete named motor set.
+    ///
+    /// This associated operation keeps the validation policy with the motor
+    /// definition without exposing the borrowed wrapper used internally by
+    /// calibration and control.
+    pub fn validate_set(specifications: &BTreeMap<String, Self>) -> Result<(), CalibrationError> {
+        MotorSpecifications::try_from(specifications).map(|_| ())
+    }
+
     fn validate_name(&self, name: &str) -> Result<(), CalibrationError> {
         if name.is_empty()
             || name
@@ -689,27 +712,27 @@ impl MotorCalibration {
 
 /// The travel one motor has shown so far during a live calibration sweep.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct MotorTravelRange {
+pub(crate) struct MotorTravelRange {
     minimum: i64,
     position: i64,
     maximum: i64,
 }
 
 impl MotorTravelRange {
-    pub const fn minimum(self) -> i64 {
+    pub(crate) const fn minimum(self) -> i64 {
         self.minimum
     }
 
-    pub const fn position(self) -> i64 {
+    pub(crate) const fn position(self) -> i64 {
         self.position
     }
 
-    pub const fn maximum(self) -> i64 {
+    pub(crate) const fn maximum(self) -> i64 {
         self.maximum
     }
 
     /// Travel observed so far, saturating rather than overflowing.
-    pub fn span(&self) -> i64 {
+    pub(crate) fn span(&self) -> i64 {
         self.maximum.saturating_sub(self.minimum)
     }
 }
@@ -720,7 +743,7 @@ impl MotorTravelRange {
 /// this the same way, so "did this joint move far enough" has exactly one
 /// definition.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MotorRangeTracker {
+pub(crate) struct MotorRangeTracker {
     ranges: BTreeMap<String, MotorTravelRange>,
 }
 
@@ -728,11 +751,11 @@ pub struct MotorRangeTracker {
 ///
 /// Two counts is the smallest span that leaves the center strictly inside the
 /// range, which [`CalibrationInput::build`] requires.
-pub const MINIMUM_CALIBRATION_TRAVEL: i64 = 2;
+pub(crate) const MINIMUM_CALIBRATION_TRAVEL: i64 = 2;
 
 impl MotorRangeTracker {
     /// Start tracking from an initial reading of every motor.
-    pub fn new(positions: BTreeMap<String, i64>) -> Result<Self, CalibrationError> {
+    pub(crate) fn new(positions: BTreeMap<String, i64>) -> Result<Self, CalibrationError> {
         if positions.is_empty() {
             return Err(CalibrationError::NoPositions);
         }
@@ -754,7 +777,10 @@ impl MotorRangeTracker {
     }
 
     /// Fold one fresh reading of every motor into the tracked extrema.
-    pub fn observe(&mut self, positions: &BTreeMap<String, i64>) -> Result<(), CalibrationError> {
+    pub(crate) fn observe(
+        &mut self,
+        positions: &BTreeMap<String, i64>,
+    ) -> Result<(), CalibrationError> {
         let expected = self.ranges.keys().cloned().collect::<BTreeSet<_>>();
         let actual = positions.keys().cloned().collect::<BTreeSet<_>>();
         if expected != actual {
@@ -777,12 +803,12 @@ impl MotorRangeTracker {
     }
 
     /// Borrow the tracked travel of every motor.
-    pub fn ranges(&self) -> &BTreeMap<String, MotorTravelRange> {
+    pub(crate) fn ranges(&self) -> &BTreeMap<String, MotorTravelRange> {
         &self.ranges
     }
 
     /// Motors that have not yet moved far enough to produce a valid range.
-    pub fn insufficient_travel(&self) -> Vec<String> {
+    pub(crate) fn insufficient_travel(&self) -> Vec<String> {
         self.ranges
             .iter()
             .filter(|(_, range)| range.span() < MINIMUM_CALIBRATION_TRAVEL)
@@ -791,13 +817,13 @@ impl MotorRangeTracker {
     }
 
     /// True once every motor has swept a usable range.
-    pub fn is_ready(&self) -> bool {
+    pub(crate) fn is_ready(&self) -> bool {
         self.insufficient_travel().is_empty()
     }
 
     /// Reduce the sweep to calibration input, centering each motor on the
     /// midpoint of its observed travel.
-    pub fn into_input(self) -> Result<CalibrationInput, CalibrationError> {
+    pub(crate) fn into_input(self) -> Result<CalibrationInput, CalibrationError> {
         let insufficient = self.insufficient_travel();
         if !insufficient.is_empty() {
             return Err(CalibrationError::InsufficientTravel {

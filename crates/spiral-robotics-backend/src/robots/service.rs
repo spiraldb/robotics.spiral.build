@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use spiral_robotics_hardware::calibration::{Calibration, MotorSpec};
+use spiral_robotics_hardware::{Calibration, MotorSpec};
 
 use crate::OperationError;
 

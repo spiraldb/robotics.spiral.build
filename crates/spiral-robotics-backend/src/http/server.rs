@@ -19,9 +19,9 @@ use crate::training::remote::ConfiguredHttpTrainingBackend;
 use crate::workflow::agent::WorkflowAgentManager;
 use crate::workflow::manager::WorkflowManager;
 use clap::Parser;
-use spiral_robotics_hardware::cameras;
 use spiral_robotics_hardware::{
-    ControlSettings, DEFAULT_MAX_STEP_COUNTS, DEFAULT_TELEOP_MAX_STEP_COUNTS, HardwareHandle,
+    CameraRuntime, ControlSettings, DEFAULT_MAX_STEP_COUNTS, DEFAULT_TELEOP_MAX_STEP_COUNTS,
+    HardwareHandle,
 };
 use spiral_robotics_storage::ProjectStore;
 use spiral_robotics_storage::StorageManager;
@@ -118,9 +118,7 @@ impl MotionArguments {
                 std::io::Error::other("--teleop-max-step must be greater than zero").into(),
             );
         }
-        ControlSettings::default()
-            .try_with_motion_limits(self.max_step, self.teleop_max_step)
-            .ok_or_else(|| std::io::Error::other("invalid control motion limits").into())
+        Ok(ControlSettings::default().with_motion_limits(self.max_step, self.teleop_max_step)?)
     }
 }
 
@@ -141,17 +139,9 @@ impl StudioServer {
     pub fn run(app: fn() -> dioxus::prelude::Element) -> ExitCode {
         // Camera probing re-executes this binary as an isolated worker, so this
         // must come before argument parsing.
-        match cameras::CameraWorkerMode::from_environment() {
-            Ok(Some(mode)) => {
-                return match mode.run() {
-                    Ok(()) => ExitCode::SUCCESS,
-                    Err(error) => {
-                        eprintln!("error: {error}");
-                        ExitCode::FAILURE
-                    }
-                };
-            }
-            Ok(None) => {}
+        match CameraRuntime::run_worker_from_environment() {
+            Ok(true) => return ExitCode::SUCCESS,
+            Ok(false) => {}
             Err(error) => {
                 eprintln!("error: {error}");
                 return ExitCode::FAILURE;
@@ -216,7 +206,7 @@ impl StudioServer {
         let camera_access = if arguments.video.no_cameras {
             Ok(())
         } else {
-            cameras::CameraAccess::initialize().map_err(|error| error.to_string())
+            CameraRuntime::initialize_access().map_err(|error| error.to_string())
         };
         if let Err(error) = &camera_access {
             tracing::warn!("camera access unavailable: {error}");

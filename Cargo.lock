@@ -10635,6 +10635,7 @@ dependencies = [
  "safetensors 0.7.0",
  "serde",
  "serde_json",
+ "serialport",
  "sha2 0.10.9",
  "spiral-robotics-api",
  "spiral-robotics-hardware",

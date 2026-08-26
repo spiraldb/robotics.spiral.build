@@ -50,8 +50,7 @@ use spiral_robotics_api::status::{
     ApiError, BackendReadiness, BackendReadinessState, StudioSnapshot,
 };
 use spiral_robotics_api::training::{StartTrainingRequest, TrainingRun};
-use spiral_robotics_hardware::calibration::{Calibration, MotorSpec};
-use spiral_robotics_hardware::serial_ports::{SerialPortCatalog, SerialPortTypeExt};
+use spiral_robotics_hardware::{Calibration, MotorSpec, SerialPortCatalog};
 
 use crate::OperationError;
 use crate::adapters::hardware::HardwareApiProjection as _;
@@ -411,7 +410,6 @@ impl AppState {
             };
             let hardware = self.hardware().state();
             let hardware_episode = hardware
-                .telemetry()
                 .recording()
                 .as_ref()
                 .map(|recording| recording.episode().to_owned());
@@ -672,7 +670,7 @@ impl AppState {
         }
 
         let cameras = devices::CameraDiscoveryAdapter::new(state.cameras().clone()).cameras();
-        StudioSnapshot::new(readiness, "SpiralDB", hardware.mode().to_api())
+        StudioSnapshot::new(readiness, "SpiralDB", hardware.to_api())
             .with_robots(robots)
             .with_cameras(cameras)
             .with_issues(issues)
@@ -738,14 +736,15 @@ impl AppState {
                     }
                     _ = telemetry_timer.tick() => {
                         let hardware = state.hardware().state();
-                        let telemetry = hardware.telemetry();
+                        let telemetry: spiral_robotics_api::robots::TelemetryFrame =
+                            hardware.to_api();
                         if telemetry.sequence() == last_sequence {
                             continue;
                         }
                         last_sequence = telemetry.sequence();
                         if let Ok(event) = Event::default()
                             .event("telemetry")
-                            .json_data(telemetry.to_api())
+                            .json_data(telemetry)
                         {
                             yield Ok(event);
                         }

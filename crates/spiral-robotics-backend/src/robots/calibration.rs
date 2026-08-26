@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use spiral_robotics_api::robots::CalibrationReapplyResponse;
-use spiral_robotics_hardware::calibration::{Calibration, CalibrationInput, MotorSpec};
+use spiral_robotics_hardware::{Calibration, CalibrationInput, MotorSpec};
 use spiral_robotics_storage::episodes::ReappliedEpisodePositions;
 
 use crate::OperationError;
@@ -269,7 +269,7 @@ impl<'a, P: CalibrationHistoryPort + ?Sized> CalibrationHistoryActions<'a, P> {
 mod tests {
     use std::sync::Mutex;
 
-    use spiral_robotics_hardware::calibration::{CalibrationError, MotorDirection, MotorReading};
+    use spiral_robotics_hardware::{CalibrationError, MotorDirection, MotorReading};
 
     use super::*;
     use crate::data::catalog_lease::{CatalogLeaseOwner, CatalogMutationLease};

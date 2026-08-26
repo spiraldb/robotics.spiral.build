@@ -38,7 +38,7 @@ use crate::rollout::service::{
 };
 use crate::sync::MutexRecovery;
 use spiral_robotics_hardware::{
-    HardwareHandle, HardwareState, ModeSelection, ModeStatus, PolicyGoals, RobotTelemetry,
+    HardwareHandle, HardwareState, ModeSelection, PolicyGoals, RobotTelemetry,
 };
 use spiral_robotics_storage::StorageManager;
 use spiral_robotics_storage::StudioPreferencesStore;
@@ -803,7 +803,7 @@ impl RolloutManager {
         // this one-time fill; once actions start, every later inference runs
         // concurrently with dispatch from the current action queue.
         let initial_hardware = self.hardware.hardware.state();
-        if let Some(outcome) = self.classify_control(session, initial_hardware.mode())? {
+        if let Some(outcome) = self.classify_control(session, &initial_hardware)? {
             return Ok(outcome);
         }
         let initial_robot = initial_hardware.policy_robot(request.robot())?;
@@ -873,13 +873,13 @@ impl RolloutManager {
             }
             let cycle_started = Instant::now();
             let hardware = self.hardware.hardware.state();
-            if hardware.telemetry().sequence() != last_hardware_sequence {
-                last_hardware_sequence = hardware.telemetry().sequence();
+            if hardware.sequence() != last_hardware_sequence {
+                last_hardware_sequence = hardware.sequence();
                 hardware_changed_at = Instant::now();
             } else if hardware_changed_at.elapsed() > INPUT_STALE_AFTER {
                 return Err("stopped policy: hardware telemetry became stale".to_owned());
             }
-            if let Some(outcome) = self.classify_control(session, hardware.mode())? {
+            if let Some(outcome) = self.classify_control(session, &hardware)? {
                 return Ok(outcome);
             }
             let robot = hardware.policy_robot(request.robot())?;
@@ -943,14 +943,12 @@ impl RolloutManager {
                     }
                 }
 
-                self.hardware
-                    .hardware
-                    .set_policy_goals(PolicyGoals::new(
-                        request.robot().to_owned(),
-                        session.to_owned(),
-                        prepared.goals().clone(),
-                    ))
-                    .await?;
+                let goals =
+                    spiral_robotics_hardware::JointGoals::try_from(prepared.goals().clone())
+                        .map_err(|error| error.to_string())?;
+                let goals = PolicyGoals::new(request.robot().to_owned(), session.to_owned(), goals)
+                    .map_err(|error| error.to_string())?;
+                self.hardware.hardware.set_policy_goals(goals).await?;
                 self.lifecycle
                     .coordinator
                     .recover_lock()
@@ -969,7 +967,7 @@ impl RolloutManager {
             let must_go = actions.remaining() == 0 && must_go_when_empty;
             if must_go || (action_executed && actions.remaining() <= refill_threshold) {
                 let refreshed = self.hardware.hardware.state();
-                if let Some(outcome) = self.classify_control(session, refreshed.mode())? {
+                if let Some(outcome) = self.classify_control(session, &refreshed)? {
                     return Ok(outcome);
                 }
                 let refreshed_robot = refreshed.policy_robot(request.robot())?;
@@ -1008,15 +1006,13 @@ impl RolloutManager {
     fn classify_control(
         &self,
         session: &str,
-        mode: &ModeStatus,
+        hardware: &HardwareState,
     ) -> Result<Option<ExecutionOutcome>, String> {
-        let owner = mode.selection().control_owner();
-        match self
-            .lifecycle
-            .coordinator
-            .recover_lock()
-            .observe_control(session, ControlObservation::new(&owner, mode.error()))?
-        {
+        let owner = hardware.mode().control_owner();
+        match self.lifecycle.coordinator.recover_lock().observe_control(
+            session,
+            ControlObservation::new(&owner, hardware.mode_error()),
+        )? {
             ControlDecision::Continue => Ok(None),
             ControlDecision::Finish(reason) => Ok(Some(ExecutionOutcome::Completed(reason))),
             ControlDecision::Fail(error) => Ok(Some(ExecutionOutcome::Failed(error))),
@@ -1069,7 +1065,7 @@ impl RestoredRolloutSnapshot for ContractRolloutSnapshot {
 enum PolicyAdmission {
     Admitted,
     Stopped,
-    Replaced(ModeStatus),
+    Replaced(HardwareState),
 }
 
 struct PolicyAdmissionWait<'a> {
@@ -1099,7 +1095,7 @@ impl<'a> PolicyAdmissionWait<'a> {
             }
             let state = self.hardware.borrow().clone();
             if matches!(
-                &state.mode().selection(),
+                state.mode(),
                 ModeSelection::Policy { robot, session }
                     if robot == self.expected.robot() && session == self.expected.session()
             ) {
@@ -1121,7 +1117,7 @@ impl<'a> PolicyAdmissionWait<'a> {
                     }
                 }
                 _ = tokio::time::sleep_until(deadline) => {
-                    return Ok(PolicyAdmission::Replaced(self.hardware.borrow().mode().clone()));
+                    return Ok(PolicyAdmission::Replaced(self.hardware.borrow().clone()));
                 }
             }
         }
@@ -1223,8 +1219,7 @@ trait HardwarePolicyTelemetry {
 
 impl HardwarePolicyTelemetry for HardwareState {
     fn policy_robot(&self, robot: &str) -> Result<&RobotTelemetry, String> {
-        self.telemetry()
-            .robots()
+        self.robots()
             .iter()
             .find(|candidate| candidate.id() == robot)
             .ok_or_else(|| "stopped policy: follower telemetry disappeared".to_owned())

@@ -3,8 +3,8 @@
 //! Probing an unknown video node can hang or take a driver down with it, so
 //! discovery runs in a short-lived copy of the current executable and is
 //! killed if it overruns. Any binary that calls [`ProbeOutcome::discover`] must
-//! hand control to [`CameraWorkerMode::run`] at startup when
-//! [`CameraWorkerMode::from_environment`] returns a mode.
+//! call [`CameraRuntime::run_worker_from_environment`] before parsing its own
+//! arguments.
 //!
 //! Live streaming runs in the calling thread instead: by the time an operator
 //! asks for a preview, the device has already survived discovery, and piping
@@ -122,11 +122,13 @@ pub struct ProbeOutcome {
     failures: Vec<String>,
 }
 
-/// An isolated camera operation requested through the process environment.
-pub struct CameraWorkerMode(String);
+/// Process-level camera initialization required by discovery and capture.
+pub struct CameraRuntime {
+    _private: (),
+}
 
-/// Operating-system camera permission initialization.
-pub struct CameraAccess;
+/// An isolated camera operation requested through the process environment.
+struct CameraWorkerMode(String);
 
 impl ProbeOutcome {
     /// Probe every camera the operating system reports, one isolated child at
@@ -193,12 +195,24 @@ impl JpegFrame {
     }
 }
 
-impl CameraWorkerMode {
-    /// Return the worker mode this process was launched with, if any.
+impl CameraRuntime {
+    /// Run an isolated camera worker when this process was launched as one.
     ///
-    /// Binaries that discover or capture from cameras must check this before
-    /// parsing their own arguments and run the returned mode.
-    pub fn from_environment() -> Result<Option<Self>> {
+    /// Returns `true` after handling a worker invocation and `false` for the
+    /// ordinary application process. Binaries must call this before argument
+    /// parsing so internal worker arguments never reach the application CLI.
+    pub fn run_worker_from_environment() -> Result<bool> {
+        let mode = match CameraWorkerMode::from_environment()? {
+            Some(mode) => mode,
+            None => return Ok(false),
+        };
+        mode.run()?;
+        Ok(true)
+    }
+}
+
+impl CameraWorkerMode {
+    fn from_environment() -> Result<Option<Self>> {
         match env::var(WORKER_MODE_ENV) {
             Ok(mode) => Ok(Some(Self(mode))),
             Err(env::VarError::NotPresent) => Ok(None),
@@ -209,7 +223,7 @@ impl CameraWorkerMode {
     }
 
     /// Run the isolated camera operation this process was launched to perform.
-    pub fn run(&self) -> Result<()> {
+    fn run(&self) -> Result<()> {
         let request = WorkerFile::from_environment(WORKER_REQUEST_ENV)?;
         let response = WorkerFile::from_environment(WORKER_RESPONSE_ENV)?;
 
@@ -242,8 +256,8 @@ impl CameraWorkerMode {
 /// On macOS this must run before any camera is opened, and it blocks until the
 /// operator answers the system prompt.
 #[cfg(target_os = "macos")]
-impl CameraAccess {
-    pub fn initialize() -> Result<()> {
+impl CameraRuntime {
+    pub fn initialize_access() -> Result<()> {
         use std::sync::mpsc;
 
         let (sender, receiver) = mpsc::channel();
@@ -269,8 +283,8 @@ impl CameraAccess {
 
 /// Ask the operating system for camera permission, where it is required.
 #[cfg(not(target_os = "macos"))]
-impl CameraAccess {
-    pub fn initialize() -> Result<()> {
+impl CameraRuntime {
+    pub fn initialize_access() -> Result<()> {
         Ok(())
     }
 }

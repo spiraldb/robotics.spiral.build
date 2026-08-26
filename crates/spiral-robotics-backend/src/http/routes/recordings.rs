@@ -106,12 +106,7 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
     }
 
     fn recording_active(&self) -> bool {
-        self.state
-            .hardware()
-            .state()
-            .telemetry()
-            .recording()
-            .is_some()
+        self.state.hardware().state().recording().is_some()
     }
 
     fn default_teleoperation_pair(&self) -> Option<TeleoperationPair> {
@@ -124,7 +119,6 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
     fn recording_context(&self) -> RecordingContext {
         let hardware = self.state.hardware().state();
         let connected_arms = hardware
-            .telemetry()
             .robots()
             .iter()
             .filter(|robot| {
@@ -135,8 +129,8 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
             })
             .map(|robot| robot.id().to_owned())
             .collect();
-        let sample_hz = if hardware.telemetry().target_hz() > 0.0 {
-            (hardware.telemetry().target_hz() * 1_000.0).round() / 1_000.0
+        let sample_hz = if hardware.target_hz() > 0.0 {
+            (hardware.target_hz() * 1_000.0).round() / 1_000.0
         } else {
             spiral_robotics_hardware::CONTROL_HZ as f64
         };
@@ -394,16 +388,14 @@ impl ReplayPort for RecordingHttpAdapter<'_> {
     async fn start_replay(&self, plan: ReplayPlan) -> Result<(), OperationError> {
         let (robot, episode, frames, sample_hz, start_frame, resolved_start_seconds) =
             plan.into_parts();
+        let trajectory = spiral_robotics_hardware::ReplayTrajectory::new(frames, sample_hz)
+            .map_err(|error| OperationError::invalid_input(error.to_string()))?;
+        let request = spiral_robotics_hardware::ReplayRequest::timeline(robot, episode, trajectory)
+            .and_then(|request| request.starting_at(start_frame, resolved_start_seconds))
+            .map_err(|error| OperationError::invalid_input(error.to_string()))?;
         self.state
             .hardware()
-            .start_replay(
-                spiral_robotics_hardware::ReplayRequest::timeline(
-                    robot,
-                    episode,
-                    spiral_robotics_hardware::ReplayTrajectory::new(frames, sample_hz),
-                )
-                .starting_at(start_frame, resolved_start_seconds),
-            )
+            .start_replay(request)
             .await
             .map_err(OperationError::conflict)
     }
@@ -433,11 +425,10 @@ impl EpisodeCatalogPort for EpisodeHttpAdapter<'_> {
         let hardware = self.state.hardware().state();
         EpisodeActivity::new(
             hardware
-                .telemetry()
                 .recording()
                 .as_ref()
                 .map(|recording| recording.episode().to_owned()),
-            match &hardware.mode().selection() {
+            match hardware.mode() {
                 HardwareModeSelection::Replay { episode, .. } => Some(episode.clone()),
                 _ => None,
             },
@@ -646,11 +637,10 @@ impl PhysicalSeekPort for SeekHttpAdapter<'_> {
         let hardware = self.state.hardware().state();
         SeekActivity::new(
             hardware
-                .telemetry()
                 .recording()
                 .as_ref()
                 .map(|recording| ActiveRecording::new(recording.episode(), recording.paused())),
-            match hardware.mode().selection() {
+            match hardware.mode() {
                 HardwareModeSelection::Idle => SeekControlMode::Idle,
                 HardwareModeSelection::Replay { .. } => SeekControlMode::Replay,
                 _ => SeekControlMode::Other,
@@ -730,13 +720,14 @@ impl PhysicalSeekPort for SeekHttpAdapter<'_> {
         if !self.state.episodes().seek_is_current(&robot, ticket) {
             return Ok(false);
         }
+        let trajectory = spiral_robotics_hardware::ReplayTrajectory::single_pose(pose, sample_hz)
+            .map_err(|error| OperationError::invalid_input(error.to_string()))?;
+        let request =
+            spiral_robotics_hardware::ReplayRequest::physical_seek(robot, episode, trajectory)
+                .map_err(|error| OperationError::invalid_input(error.to_string()))?;
         self.state
             .hardware()
-            .start_replay(spiral_robotics_hardware::ReplayRequest::physical_seek(
-                robot,
-                episode,
-                spiral_robotics_hardware::ReplayTrajectory::single_pose(pose, sample_hz),
-            ))
+            .start_replay(request)
             .await
             .map_err(OperationError::conflict)?;
         Ok(true)
@@ -750,7 +741,6 @@ impl AppState {
         let recording = state
             .hardware()
             .state()
-            .telemetry()
             .recording()
             .as_ref()
             .map(|progress| progress.episode().to_owned());
@@ -804,7 +794,6 @@ impl AppState {
         let (dataset_id, _requested_arms, note) = command.into_parts();
         let hardware = self.hardware().state();
         let connected = hardware
-            .telemetry()
             .robots()
             .iter()
             .filter(|robot| {
