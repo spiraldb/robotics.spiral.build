@@ -110,9 +110,12 @@ flowchart TD
   newly ingested relations are not bindable before publication. A repair
   failure must therefore return a successful committed-row summary with an
   explicit warning; it must never report the durable import as rolled back.
-  If restoring autocommit after a successful commit fails, Studio must likewise
-  return the committed summary with a warning and discard the uncertain
-  connection.
+  Commit and rollback are terminal transaction operations. Import must open a
+  fresh logical connection under the same exclusive project lease before
+  derived-resource reconciliation. If that post-commit connection cannot be
+  opened, Studio must return the committed summary with an explicit warning
+  and skip reconciliation rather than misreporting the durable commit as
+  uncertain.
 - **PERSIST-029** Whole-project import must disconnect every connected robot
   before replacing project data and must stop without importing if a robot
   cannot be safely disconnected. After a successful replacement it must
@@ -166,7 +169,10 @@ flowchart TD
   futures through `block_on` or a blocking worker. CPU-bound model inference,
   media encoding, hardware I/O, and synchronous external SDK calls may use
   dedicated threads or Tokio's blocking pool, but database access before and
-  after that work remains async. Native
+  after that work remains async. The project connection must expose explicit
+  begin, consuming commit/rollback, and intentional post-commit reconnection;
+  it must not retain an ADBC-style `set_autocommit` compatibility surface.
+  Native
   logical connections must not be constrained by an arbitrary application
   semaphore; each connection owner serializes only its own stateful operations.
   Spiral and Vortex crates must resolve to revisions already pinned in

@@ -297,15 +297,10 @@ impl ModelRunContext {
         });
 
         let (sender, mut receiver) = mpsc::channel(INPUT_PREFETCH_CHUNKS);
-        let producer_store = project_store.clone();
-        let producer_sql = request.candidate_sql.clone();
-        let producer_cancel = cancel.clone();
-        let producer = tokio::spawn(async move {
-            CandidateBatchProducer::new(producer_sql, chunk_rows, producer_cancel)
+        let producer =
+            CandidateBatchProducer::new(request.candidate_sql.clone(), chunk_rows, cancel.clone())
                 .with_sender(sender)
-                .produce(producer_store)
-                .await
-        });
+                .produce(project_store.clone());
 
         let computation_cancel = cancel.clone();
         let computation_events = events.clone();
@@ -370,14 +365,10 @@ impl ModelRunContext {
                 quarantine,
             })
         });
-        let computation = computation
-            .await
-            .map_err(|error| format!("Workflow model computation stopped: {error}"));
-        let production = producer
-            .await
-            .map_err(|error| format!("Workflow candidate producer stopped: {error}"));
-        production??;
-        let backfill = computation??;
+        let (production, computation) = tokio::join!(producer, computation);
+        production?;
+        let backfill = computation
+            .map_err(|error| format!("Workflow model computation stopped: {error}"))??;
         let ModelBackfillOutput {
             cache,
             decode_ms,
@@ -1671,7 +1662,7 @@ impl<'a> FeaturePublication<'a> {
             .ok_or_else(|| "Workflow feature cache relation was not qualified.".to_owned())?;
         let mut connection = project_store.connect_exclusive().await?;
         connection.ensure_dataset_namespace(namespace).await?;
-        if let Err(error) = connection.set_autocommit(false).await {
+        if let Err(error) = connection.begin_transaction().await {
             connection.discard();
             return Err(format!(
                 "starting feature publication transaction failed and its connection was discarded: {error}"
@@ -1693,29 +1684,16 @@ impl<'a> FeaturePublication<'a> {
                     "committing feature publication failed with an uncertain outcome; connection discarded: {commit}"
                 ));
             }
-            if connection.set_autocommit(true).await.is_err() {
-                connection.discard();
-            }
             return Ok(());
         };
 
         let rollback = connection.rollback().await;
-        let restore = connection.set_autocommit(true).await;
-        if rollback.is_err() || restore.is_err() {
+        if rollback.is_err() {
             connection.discard();
         }
-        match (rollback, restore) {
-            (Ok(()), Ok(())) => Err(error),
-            (Err(rollback), Ok(())) => {
-                Err(FeaturePublicationError::new(error).with_rollback(Err(rollback)))
-            }
-            (Ok(()), Err(restore)) => Err(format!(
-                "{error}; restoring database autocommit after feature publication also failed: {restore}"
-            )),
-            (Err(rollback), Err(restore)) => Err(format!(
-                "{}; restoring database autocommit after feature publication also failed: {restore}",
-                FeaturePublicationError::new(error).with_rollback(Err(rollback))
-            )),
+        match rollback {
+            Ok(()) => Err(error),
+            Err(rollback) => Err(FeaturePublicationError::new(error).with_rollback(Err(rollback))),
         }
     }
 
@@ -1757,7 +1735,6 @@ trait FeaturePublicationTransaction {
     fn begin(&mut self) -> Result<(), String>;
     fn commit_publication(&mut self) -> Result<(), String>;
     fn rollback_publication(&mut self) -> Result<(), String>;
-    fn restore_autocommit(&mut self) -> Result<(), String>;
     fn discard_publication_connection(&mut self);
 
     fn run_publication<F>(&mut self, publication: F) -> Result<(), String>
@@ -1766,29 +1743,20 @@ trait FeaturePublicationTransaction {
         F: FnOnce(&mut Self) -> Result<(), String>,
     {
         self.begin()?;
-        let mutation = publication(self).and_then(|()| self.commit_publication());
-        let rollback = mutation.is_err().then(|| self.rollback_publication());
-        if rollback.as_ref().is_some_and(Result::is_err) {
-            self.discard_publication_connection();
-        }
-        let restore = self.restore_autocommit();
-        if restore.is_err() {
-            self.discard_publication_connection();
-        }
-        match (mutation, rollback, restore) {
-            (Ok(()), None, Ok(())) => Ok(()),
-            (Err(error), Some(rollback), Ok(())) => {
-                Err(FeaturePublicationError::new(error).with_rollback(rollback))
+        if let Err(error) = publication(self) {
+            let rollback = self.rollback_publication();
+            if rollback.is_err() {
+                self.discard_publication_connection();
             }
-            (Ok(()), None, Err(_)) => Ok(()),
-            (Err(error), Some(rollback), Err(restore)) => Err(format!(
-                "{}; restoring database autocommit after feature publication also failed: {restore}",
-                FeaturePublicationError::new(error).with_rollback(rollback)
-            )),
-            (Ok(()), Some(_), _) | (Err(_), None, _) => {
-                unreachable!("rollback state follows feature publication outcome")
-            }
+            return Err(FeaturePublicationError::new(error).with_rollback(rollback));
         }
+        if let Err(error) = self.commit_publication() {
+            self.discard_publication_connection();
+            return Err(format!(
+                "committing feature publication failed with an uncertain outcome; connection discarded: {error}"
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -3079,8 +3047,8 @@ mod tests {
             began: bool,
             committed: bool,
             rolled_back: bool,
-            restored: bool,
             discarded: bool,
+            commit_error: Option<String>,
             rollback_error: Option<String>,
         }
 
@@ -3092,17 +3060,12 @@ mod tests {
 
             fn commit_publication(&mut self) -> Result<(), String> {
                 self.committed = true;
-                Ok(())
+                self.commit_error.clone().map_or(Ok(()), Err)
             }
 
             fn rollback_publication(&mut self) -> Result<(), String> {
                 self.rolled_back = true;
                 self.rollback_error.clone().map_or(Ok(()), Err)
-            }
-
-            fn restore_autocommit(&mut self) -> Result<(), String> {
-                self.restored = true;
-                Ok(())
             }
 
             fn discard_publication_connection(&mut self) {
@@ -3123,7 +3086,6 @@ mod tests {
         assert!(error.contains("second relation replacement failed"));
         assert!(transaction.began);
         assert!(transaction.rolled_back);
-        assert!(transaction.restored);
         assert!(!transaction.committed);
 
         let mut uncertain = InjectedTransaction {
@@ -3135,6 +3097,16 @@ mod tests {
             .unwrap_err();
         assert!(error.contains("rolling back feature publication also failed"));
         assert!(uncertain.discarded);
+
+        let mut uncertain_commit = InjectedTransaction {
+            commit_error: Some("commit failed".to_owned()),
+            ..InjectedTransaction::default()
+        };
+        let error = uncertain_commit.run_publication(|_| Ok(())).unwrap_err();
+        assert!(error.contains("uncertain outcome") && error.contains("commit failed"));
+        assert!(uncertain_commit.committed);
+        assert!(!uncertain_commit.rolled_back);
+        assert!(uncertain_commit.discarded);
     }
 
     #[tokio::test]
@@ -3659,7 +3631,7 @@ mod tests {
             let registry_existed = self.registry_existed;
             let registry_batch = self.previous_registry.record_batch()?;
             let mut connection = self.project_store.connect_exclusive().await?;
-            connection.set_autocommit(false).await?;
+            connection.begin_transaction().await?;
             let mutation = match connection
                 .execute_update_sql(&format!("DROP TABLE IF EXISTS {cache_relation}"))
                 .await
@@ -3678,23 +3650,16 @@ mod tests {
                 }
                 Err(error) => Err(error),
             };
-            let mutation = match mutation {
-                Ok(()) => connection.commit().await,
-                Err(error) => Err(error),
-            };
-            if mutation.is_err() {
-                let _ = connection.rollback().await;
-            }
-            let restore = connection.set_autocommit(true).await;
-            match (mutation, restore) {
-                (Ok(()), Ok(())) => {}
-                (Err(error), Ok(())) => return Err(error),
-                (Ok(()), Err(_)) => connection.discard(),
-                (Err(error), Err(restore)) => {
-                    connection.discard();
-                    return Err(format!(
-                        "{error}; restoring database autocommit after registry cleanup also failed: {restore}"
-                    ));
+            match mutation {
+                Ok(()) => connection.commit().await?,
+                Err(error) => {
+                    if let Err(rollback) = connection.rollback().await {
+                        connection.discard();
+                        return Err(format!(
+                            "{error}; rolling back registry cleanup also failed: {rollback}; connection discarded"
+                        ));
+                    }
+                    return Err(error);
                 }
             }
             self.cleaned = true;

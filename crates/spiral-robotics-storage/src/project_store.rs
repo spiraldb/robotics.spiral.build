@@ -39,7 +39,7 @@ pub struct ProjectConnection {
 enum ProjectConnectionState {
     Autocommit(Box<dyn DatabaseConnection>),
     Transaction(Box<dyn DatabaseTransaction>),
-    Transitioning,
+    Closed,
 }
 
 enum ProjectOperationLease {
@@ -79,7 +79,7 @@ impl ProjectConnection {
     }
 
     pub fn discard(&mut self) {
-        self.state = ProjectConnectionState::Transitioning;
+        self.state = ProjectConnectionState::Closed;
     }
 
     pub async fn execute_query(
@@ -103,10 +103,7 @@ impl ProjectConnection {
     /// Enumerate the durable relations advertised by the active Spiral
     /// project. Temporary query-session relations are intentionally absent
     /// from the native project's catalog.
-    pub(crate) async fn list_catalog_relations(
-        &mut self,
-        _project: &str,
-    ) -> Result<Vec<CatalogRelation>, String> {
+    pub(crate) async fn list_catalog_relations(&mut self) -> Result<Vec<CatalogRelation>, String> {
         let mut relations = self
             .relations()
             .await
@@ -124,8 +121,8 @@ impl ProjectConnection {
 
     /// List durable relation names without exposing the driver's catalog
     /// representation across the storage boundary.
-    pub async fn catalog_relation_names(&mut self, project: &str) -> Result<Vec<String>, String> {
-        self.list_catalog_relations(project).await.map(|relations| {
+    pub async fn catalog_relation_names(&mut self) -> Result<Vec<String>, String> {
+        self.list_catalog_relations().await.map(|relations| {
             relations
                 .into_iter()
                 .map(|relation| relation.name)
@@ -133,14 +130,17 @@ impl ProjectConnection {
         })
     }
 
-    pub async fn set_autocommit(&mut self, enabled: bool) -> Result<(), String> {
-        if enabled {
-            return Ok(());
-        }
-        let state = std::mem::replace(&mut self.state, ProjectConnectionState::Transitioning);
-        let ProjectConnectionState::Autocommit(connection) = state else {
-            self.state = state;
-            return Err("database connection is already in a transaction".to_owned());
+    pub async fn begin_transaction(&mut self) -> Result<(), String> {
+        let state = std::mem::replace(&mut self.state, ProjectConnectionState::Closed);
+        let connection = match state {
+            ProjectConnectionState::Autocommit(connection) => connection,
+            ProjectConnectionState::Transaction(transaction) => {
+                self.state = ProjectConnectionState::Transaction(transaction);
+                return Err("database connection is already in a transaction".to_owned());
+            }
+            ProjectConnectionState::Closed => {
+                return Err("database connection is closed".to_owned());
+            }
         };
         self.state = ProjectConnectionState::Transaction(
             connection
@@ -159,8 +159,21 @@ impl ProjectConnection {
         self.complete_transaction(false).await
     }
 
+    pub(crate) async fn reconnect(&mut self) -> Result<(), String> {
+        if !matches!(self.state, ProjectConnectionState::Closed) {
+            return Err("database connection is already open".to_owned());
+        }
+        let connection = self
+            .database
+            .connect()
+            .await
+            .map_err(|error| error.to_string())?;
+        self.state = ProjectConnectionState::Autocommit(connection);
+        Ok(())
+    }
+
     async fn complete_transaction(&mut self, commit: bool) -> Result<(), String> {
-        let state = std::mem::replace(&mut self.state, ProjectConnectionState::Transitioning);
+        let state = std::mem::replace(&mut self.state, ProjectConnectionState::Closed);
         let ProjectConnectionState::Transaction(transaction) = state else {
             self.state = state;
             return Err("database connection has no active transaction".to_owned());
@@ -176,12 +189,6 @@ impl ProjectConnection {
                 .await
                 .map_err(|error| error.to_string())?;
         }
-        let connection = self
-            .database
-            .connect()
-            .await
-            .map_err(|error| error.to_string())?;
-        self.state = ProjectConnectionState::Autocommit(connection);
         Ok(())
     }
 }
@@ -191,9 +198,9 @@ impl DatabaseSession for ProjectConnection {
         match &mut self.state {
             ProjectConnectionState::Autocommit(connection) => connection.execute(command),
             ProjectConnectionState::Transaction(transaction) => transaction.execute(command),
-            ProjectConnectionState::Transitioning => async {
+            ProjectConnectionState::Closed => async {
                 Err(DatabaseError::invalid_state(
-                    "database connection is transitioning or closed",
+                    "database connection is closed",
                 ))
             }
             .boxed(),
@@ -204,9 +211,9 @@ impl DatabaseSession for ProjectConnection {
         match &mut self.state {
             ProjectConnectionState::Autocommit(connection) => connection.table_schema(relation),
             ProjectConnectionState::Transaction(transaction) => transaction.table_schema(relation),
-            ProjectConnectionState::Transitioning => async {
+            ProjectConnectionState::Closed => async {
                 Err(DatabaseError::invalid_state(
-                    "database connection is transitioning or closed",
+                    "database connection is closed",
                 ))
             }
             .boxed(),
@@ -217,9 +224,9 @@ impl DatabaseSession for ProjectConnection {
         match &mut self.state {
             ProjectConnectionState::Autocommit(connection) => connection.relations(),
             ProjectConnectionState::Transaction(transaction) => transaction.relations(),
-            ProjectConnectionState::Transitioning => async {
+            ProjectConnectionState::Closed => async {
                 Err(DatabaseError::invalid_state(
-                    "database connection is transitioning or closed",
+                    "database connection is closed",
                 ))
             }
             .boxed(),

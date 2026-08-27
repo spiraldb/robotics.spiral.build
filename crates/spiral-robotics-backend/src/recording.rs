@@ -198,7 +198,7 @@ pub(crate) trait RecordingPort {
 
     async fn request_media_pause(&self);
     async fn set_recording_paused(&self, paused: bool) -> Result<f64, OperationError>;
-    async fn finish_media_pause(&self);
+    async fn finish_media_pause(&self) -> Result<(), OperationError>;
     async fn resume_media(&self, active_seconds: f64);
 }
 
@@ -431,8 +431,9 @@ impl<'a, P: RecordingPort + ?Sized> RecordingActions<'a, P> {
         if command.paused {
             self.port.request_media_pause().await;
             let paused = self.port.set_recording_paused(true).await;
-            self.port.finish_media_pause().await;
+            let media = self.port.finish_media_pause().await;
             paused?;
+            media?;
         } else {
             let active_seconds = self.port.set_recording_paused(false).await?;
             self.port.resume_media(active_seconds).await;
@@ -875,8 +876,9 @@ mod tests {
             self.pause_error.clone().map_or(Ok(1.25), Err)
         }
 
-        async fn finish_media_pause(&self) {
+        async fn finish_media_pause(&self) -> Result<(), OperationError> {
             self.events.lock().unwrap().push("finish-pause".to_owned());
+            self.commit_error.clone().map_or(Ok(()), Err)
         }
 
         async fn resume_media(&self, active_seconds: f64) {
@@ -1081,6 +1083,25 @@ mod tests {
             .set_paused(SetRecordingPausedCommand { paused: true })
             .await
             .unwrap_err();
+        assert_eq!(
+            *port.events.lock().unwrap(),
+            ["request-pause", "hardware-pause:true", "finish-pause"]
+        );
+    }
+
+    #[tokio::test]
+    async fn pause_returns_the_combined_episode_and_media_commit_failure() {
+        let port = FakePort {
+            commit_error: Some(OperationError::Internal(
+                "paused episode could not be committed".to_owned(),
+            )),
+            ..FakePort::default()
+        };
+        let error = RecordingActions::new(&port)
+            .set_paused(SetRecordingPausedCommand { paused: true })
+            .await
+            .unwrap_err();
+        assert!(error.message().contains("could not be committed"));
         assert_eq!(
             *port.events.lock().unwrap(),
             ["request-pause", "hardware-pause:true", "finish-pause"]

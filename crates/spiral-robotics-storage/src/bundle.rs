@@ -791,34 +791,31 @@ impl ProjectBundle {
             Ok(summary)
         }
         .await;
-        let (mut summary, transaction_warning) = connection
+        let (mut summary, reconnect_warning) = connection
             .finish_bundle_transaction(outcome, "project import")
             .await?;
-        let can_reconcile = transaction_warning.is_none();
-        if let Some(warning) = transaction_warning {
+        if let Some(warning) = reconnect_warning {
             summary.push_warning(warning);
+            summary.push_warning(
+                "project rows committed, but derived video reconciliation was skipped because a post-commit connection could not be opened"
+                    .to_owned(),
+            );
+            return Ok(summary);
         }
         // Native ingest can create a relation inside the import transaction, but
         // Spiral's SQL binder cannot resolve that new relation until the commit is
         // published. Keep the project_store's exclusive checkout while reconciling
         // the derived MP4 resources immediately after the durable rows commit.
-        if can_reconcile {
-            if let Err(error) = EpisodeBundle::reconcile_project_video_dataset(
-                connection,
-                namespace,
-                &imported_video_episodes,
-            )
-            .await
-            {
-                summary.push_warning(format!(
-                    "project rows committed, but the derived video dataset needs repair: {error}"
-                ));
-            }
-        } else {
-            summary.push_warning(
-            "project rows committed, but derived video reconciliation was skipped because the transaction connection could not be reused"
-                .to_owned(),
-        );
+        if let Err(error) = EpisodeBundle::reconcile_project_video_dataset(
+            connection,
+            namespace,
+            &imported_video_episodes,
+        )
+        .await
+        {
+            summary.push_warning(format!(
+                "project rows committed, but the derived video dataset needs repair: {error}"
+            ));
         }
         Ok(summary)
     }
@@ -899,27 +896,26 @@ impl EpisodeBundle {
             )
         }
         .await;
-        let (mut summary, transaction_warning) = connection
+        let (mut summary, reconnect_warning) = connection
             .finish_bundle_transaction(outcome, "episode import")
             .await?;
-        let can_reconcile = transaction_warning.is_none();
-        if let Some(warning) = transaction_warning {
+        if let Some(warning) = reconnect_warning {
             summary.push_warning(warning);
-        }
-        if can_reconcile {
-            if !video_episode_ids.is_empty()
-                && let Err(error) =
-                    EpisodeBundle::reconcile_appended_video_dataset(connection, namespace).await
-            {
-                summary.push_warning(format!(
-                    "episode rows committed, but the derived video dataset needs repair: {error}"
-                ));
+            if !video_episode_ids.is_empty() {
+                summary.push_warning(
+                    "episode rows committed, but derived video reconciliation was skipped because a post-commit connection could not be opened"
+                        .to_owned(),
+                );
             }
-        } else if !video_episode_ids.is_empty() {
-            summary.push_warning(
-            "episode rows committed, but derived video reconciliation was skipped because the transaction connection could not be reused"
-                .to_owned(),
-        );
+            return Ok(summary);
+        }
+        if !video_episode_ids.is_empty()
+            && let Err(error) =
+                EpisodeBundle::reconcile_appended_video_dataset(connection, namespace).await
+        {
+            summary.push_warning(format!(
+                "episode rows committed, but the derived video dataset needs repair: {error}"
+            ));
         }
         Ok(summary)
     }
@@ -2339,7 +2335,7 @@ trait ProjectImportTransaction {
     fn begin_project_import(&mut self) -> Result<(), String>;
     fn commit_project_import(&mut self) -> Result<(), String>;
     fn rollback_project_import(&mut self) -> Result<(), String>;
-    fn restore_project_autocommit(&mut self) -> Result<(), String>;
+    fn reconnect_project(&mut self) -> Result<(), String>;
     fn discard_project_connection(&mut self);
 }
 
@@ -2361,15 +2357,7 @@ trait ProjectImportTransactionRunner: ProjectImportTransaction {
         let value = match mutation(connection) {
             Ok(value) => value,
             Err(primary) => match connection.rollback_project_import() {
-                Ok(()) => match connection.restore_project_autocommit() {
-                    Ok(()) => return Err(primary),
-                    Err(restore) => {
-                        connection.discard_project_connection();
-                        return Err(format!(
-                            "{primary}; restoring database autocommit after {operation} also failed: {restore}; connection discarded"
-                        ));
-                    }
-                },
+                Ok(()) => return Err(primary),
                 Err(rollback) => {
                     connection.discard_project_connection();
                     return Err(format!(
@@ -2380,26 +2368,19 @@ trait ProjectImportTransactionRunner: ProjectImportTransaction {
         };
 
         if let Err(commit) = connection.commit_project_import() {
-            let rollback = connection.rollback_project_import();
             connection.discard_project_connection();
-            return Err(match rollback {
-                Ok(()) => format!(
-                    "committing {operation} failed with an uncertain outcome; connection discarded: {commit}"
-                ),
-                Err(rollback) => format!(
-                    "committing {operation} failed with an uncertain outcome: {commit}; rolling back also failed: {rollback}; connection discarded"
-                ),
-            });
+            return Err(format!(
+                "committing {operation} failed with an uncertain outcome; connection discarded: {commit}"
+            ));
         }
-
-        match connection.restore_project_autocommit() {
+        match connection.reconnect_project() {
             Ok(()) => Ok((value, None)),
-            Err(restore) => {
+            Err(error) => {
                 connection.discard_project_connection();
                 Ok((
                     value,
                     Some(format!(
-                        "{operation} committed, but its Spiral connection was discarded because restoring database autocommit failed: {restore}"
+                        "{operation} committed, but its post-commit Spiral connection could not be opened and was discarded: {error}"
                     )),
                 ))
             }
@@ -2412,7 +2393,7 @@ impl<C: ProjectImportTransaction> ProjectImportTransactionRunner for C {}
 
 impl ProjectConnection {
     async fn begin_bundle_transaction(&mut self, operation: &str) -> Result<(), String> {
-        if let Err(error) = self.set_autocommit(false).await {
+        if let Err(error) = self.begin_transaction().await {
             self.discard();
             return Err(format!(
                 "starting {operation} transaction failed and its connection was discarded: {error}"
@@ -2429,15 +2410,7 @@ impl ProjectConnection {
         let value = match outcome {
             Ok(value) => value,
             Err(primary) => match self.rollback().await {
-                Ok(()) => match self.set_autocommit(true).await {
-                    Ok(()) => return Err(primary),
-                    Err(restore) => {
-                        self.discard();
-                        return Err(format!(
-                            "{primary}; restoring database autocommit after {operation} also failed: {restore}; connection discarded"
-                        ));
-                    }
-                },
+                Ok(()) => return Err(primary),
                 Err(rollback) => {
                     self.discard();
                     return Err(format!(
@@ -2447,27 +2420,20 @@ impl ProjectConnection {
             },
         };
 
-        if let Err(commit) = self.commit_catalog_transaction().await {
-            let rollback = self.rollback().await;
+        if let Err(commit) = self.commit().await {
             self.discard();
-            return Err(match rollback {
-                Ok(()) => format!(
-                    "committing {operation} failed with an uncertain outcome; connection discarded: {commit}"
-                ),
-                Err(rollback) => format!(
-                    "committing {operation} failed with an uncertain outcome: {commit}; rolling back also failed: {rollback}; connection discarded"
-                ),
-            });
+            return Err(format!(
+                "committing {operation} failed with an uncertain outcome; connection discarded: {commit}"
+            ));
         }
-
-        match self.set_autocommit(true).await {
+        match self.reconnect().await {
             Ok(()) => Ok((value, None)),
-            Err(restore) => {
+            Err(error) => {
                 self.discard();
                 Ok((
                     value,
                     Some(format!(
-                        "{operation} committed, but its Spiral connection was discarded because restoring database autocommit failed: {restore}"
+                        "{operation} committed, but its post-commit Spiral connection could not be opened and was discarded: {error}"
                     )),
                 ))
             }
@@ -4067,7 +4033,7 @@ mod tests {
         begin_error: Option<&'static str>,
         commit_error: Option<&'static str>,
         rollback_error: Option<&'static str>,
-        restore_error: Option<&'static str>,
+        reconnect_error: Option<&'static str>,
         discarded: bool,
     }
 
@@ -4090,9 +4056,9 @@ mod tests {
                 .map_or(Ok(()), |error| Err(error.to_owned()))
         }
 
-        fn restore_project_autocommit(&mut self) -> Result<(), String> {
-            self.events.push("restore");
-            self.restore_error
+        fn reconnect_project(&mut self) -> Result<(), String> {
+            self.events.push("reconnect");
+            self.reconnect_error
                 .map_or(Ok(()), |error| Err(error.to_owned()))
         }
 
@@ -4112,7 +4078,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(result, (7, None));
-        assert_eq!(success.events, ["begin", "mutation", "commit", "restore"]);
+        assert_eq!(success.events, ["begin", "mutation", "commit", "reconnect"]);
         assert!(!success.discarded);
 
         let mut failure = MockProjectTransaction::default();
@@ -4123,7 +4089,7 @@ mod tests {
             })
             .unwrap_err();
         assert_eq!(error, "mutation failed");
-        assert_eq!(failure.events, ["begin", "mutation", "rollback", "restore"]);
+        assert_eq!(failure.events, ["begin", "mutation", "rollback"]);
         assert!(!failure.discarded);
     }
 
@@ -4159,56 +4125,23 @@ mod tests {
             .run_project_import_transaction("project import", |_| Ok(()))
             .unwrap_err();
         assert!(error.contains("commit failed") && error.contains("uncertain outcome"));
-        assert_eq!(
-            uncertain_commit.events,
-            ["begin", "commit", "rollback", "discard"]
-        );
-
-        let mut commit = MockProjectTransaction {
-            commit_error: Some("commit failed"),
-            rollback_error: Some("rollback after commit failed"),
-            ..Default::default()
-        };
-        let error = commit
-            .run_project_import_transaction("project import", |_| Ok(()))
-            .unwrap_err();
-        assert!(
-            error.contains("commit failed")
-                && error.contains("rollback after commit failed")
-                && error.contains("uncertain outcome")
-        );
-        assert_eq!(commit.events, ["begin", "commit", "rollback", "discard"]);
-
-        let mut rollback_restore = MockProjectTransaction {
-            restore_error: Some("restore failed"),
-            ..Default::default()
-        };
-        let error = rollback_restore
-            .run_project_import_transaction::<()>("project import", |_| {
-                Err("mutation failed".to_owned())
-            })
-            .unwrap_err();
-        assert!(error.contains("mutation failed") && error.contains("restore failed"));
-        assert_eq!(
-            rollback_restore.events,
-            ["begin", "rollback", "restore", "discard"]
-        );
+        assert_eq!(uncertain_commit.events, ["begin", "commit", "discard"]);
     }
 
     #[test]
-    fn project_transaction_returns_committed_value_with_restore_warning() {
+    fn project_transaction_returns_committed_value_with_reconnect_warning() {
         let mut transaction = MockProjectTransaction {
-            restore_error: Some("restore failed"),
+            reconnect_error: Some("connect failed"),
             ..Default::default()
         };
         let (value, warning) = transaction
             .run_project_import_transaction("project import", |_| Ok(9))
             .unwrap();
         assert_eq!(value, 9);
-        assert!(warning.unwrap().contains("restore failed"));
+        assert!(warning.unwrap().contains("post-commit"));
         assert_eq!(
             transaction.events,
-            ["begin", "commit", "restore", "discard"]
+            ["begin", "commit", "reconnect", "discard"]
         );
         assert!(transaction.discarded);
     }
@@ -4912,7 +4845,7 @@ mod tests {
 
         async fn write_transaction(self, connection: &mut ProjectConnection) -> Result<(), String> {
             let begin_start = Instant::now();
-            connection.set_autocommit(false).await?;
+            connection.begin_transaction().await?;
             let begin_seconds = begin_start.elapsed().as_secs_f64();
 
             let write_start = Instant::now();
@@ -4928,9 +4861,13 @@ mod tests {
             let write_seconds = write_start.elapsed().as_secs_f64();
 
             let commit_start = Instant::now();
-            connection.commit_catalog_transaction().await?;
+            connection.commit().await?;
             let commit_seconds = commit_start.elapsed().as_secs_f64();
-            connection.set_autocommit(true).await?;
+            connection.reconnect().await.map_err(|error| {
+                format!(
+                    "profile transaction committed, but its post-commit connection could not open: {error}"
+                )
+            })?;
             let (rows, bytes) = self.metrics;
             let label = self.label;
             let phase = self.phase;
@@ -5018,7 +4955,7 @@ mod tests {
         );
         let transaction_start = Instant::now();
         connection
-            .set_autocommit(false)
+            .begin_transaction()
             .await
             .map_err(|error| format!("starting profiled project import transaction: {error}"))?;
         profile_event("spiral.transaction_begin", transaction_start, (0, 0));
@@ -5111,7 +5048,7 @@ mod tests {
             Ok(summary) => {
                 let commit_start = Instant::now();
                 connection
-                    .commit_catalog_transaction()
+                    .commit()
                     .await
                     .map_err(|error| format!("committing profiled project import: {error}"))?;
                 profile_event(
@@ -5131,18 +5068,13 @@ mod tests {
                 });
             }
         };
-        let autocommit_start = Instant::now();
-        if let Err(error) = connection.set_autocommit(true).await {
+        if let Err(error) = connection.reconnect().await {
             connection.discard();
             summary.push_warning(format!(
-                "profiled project import committed, but its Spiral connection was discarded: {error}"
+                "profiled project import committed, but its post-commit connection could not open; video reconciliation was skipped: {error}"
             ));
+            return Ok(summary);
         }
-        profile_event(
-            "spiral.transaction_restore_autocommit",
-            autocommit_start,
-            (0, 0),
-        );
 
         if !profile_bool("SPIRAL_PROFILE_SKIP_VIDEO_RECONCILE") {
             let reconcile_total_start = Instant::now();

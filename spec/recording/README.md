@@ -58,7 +58,11 @@ built-in producer for the data core; external data enters through
   Studio must not silently fall back to local durable storage.
 - **RECORD-020** Persistence must not depend on an open browser session.
 - **RECORD-021** Pausing must checkpoint accepted joint samples and completed
-  camera segments directly to SpiralDB so paused inspection is deterministic.
+  camera segments in one awaited asynchronous SpiralDB commit so paused
+  inspection is deterministic. The synchronous hardware encoder may publish
+  an in-memory sample barrier, but it must not spawn a database writer, block
+  on a database future, or write an intermediate joint-only episode that the
+  backend immediately reads and replaces.
 - **RECORD-022** One backend recording-session manager must own the catalog
   reservation, episode identity, opening/recording/finalizing phase, and
   optional camera capture through durable commit. Hardware remains the sole

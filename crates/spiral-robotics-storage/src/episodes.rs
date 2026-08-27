@@ -25,7 +25,6 @@ use spiral_robotics_hardware::{
 pub use spiral_robotics_hardware::{EpisodeCheckpoint, Sample};
 
 use crate::episode_schema::{JointSampleRows, SpiralEpisodeEncoder};
-use crate::manager::EpisodeReplacement;
 use crate::project_store::ProjectStore;
 use crate::sql::SpiralSql;
 use crate::video::{VideoAssetMetadata, VideoSegment, VideoSize, VideoTiming};
@@ -714,11 +713,7 @@ impl EpisodeStore {
             .with_source(request.source, request.note)
             .with_arms(request.arms, request.condition);
         SpiralEpisodeEncoder::new(start.clone())?;
-        EpisodeWriter::start(
-            start,
-            self.project_store.clone(),
-            Arc::clone(&self.completed),
-        )
+        EpisodeWriter::start(start, Arc::clone(&self.completed))
     }
 
     pub async fn delete(&self, id: &str) -> Result<(), EpisodeError> {
@@ -1029,11 +1024,6 @@ enum WriterMessage {
     },
 }
 
-struct EpisodeDatabaseWrite {
-    episode: FullEpisode,
-    complete: tokio::sync::oneshot::Sender<Result<(), String>>,
-}
-
 pub(crate) trait EpisodeWriteSession: Send {
     fn start(&self) -> &EpisodeStart;
     fn push(&self, sample: Sample) -> bool;
@@ -1054,32 +1044,28 @@ impl EpisodeWriter {
     }
     fn start(
         start: EpisodeStart,
-        project_store: Arc<ProjectStore>,
         completed: Arc<Mutex<BTreeMap<String, FullEpisode>>>,
     ) -> Result<Self, EpisodeError> {
         let (sender, receiver) = mpsc::sync_channel(SAMPLE_QUEUE_DEPTH);
-        let (database_sender, database_receiver) = tokio::sync::mpsc::channel(4);
-        tokio::spawn(EpisodeDatabaseWriter::new(project_store).run(database_receiver));
         let shared = Arc::new(WriterShared {
             written: AtomicU64::new(0),
             failure: Mutex::new(None),
         });
         let worker_shared = shared.clone();
+        let worker_completed = Arc::clone(&completed);
         let validation_start = start.clone();
         let thread = std::thread::Builder::new()
-            .name("spiral-episode-transaction".to_owned())
+            .name("spiral-episode-encoder".to_owned())
             .spawn(move || {
                 EpisodeDrain {
                     start: &validation_start,
-                    database_sender,
+                    completed: &worker_completed,
                     shared: &worker_shared,
                 }
                 .run(receiver)
             })
             .map_err(|source| {
-                EpisodeError::Invalid(format!(
-                    "could not start the SpiralDB episode transaction: {source}"
-                ))
+                EpisodeError::Invalid(format!("could not start the episode encoder: {source}"))
             })?;
         Ok(Self::from_session(SpiralEpisodeWriter {
             start,
@@ -1231,7 +1217,7 @@ impl EpisodeWriteSession for SpiralEpisodeWriter {
         let (complete, receiver) = tokio::sync::oneshot::channel();
         self.sender
             .as_ref()
-            .ok_or_else(|| "episode transaction is closed".to_owned())?
+            .ok_or_else(|| "episode encoder is closed".to_owned())?
             .try_send(WriterMessage::Checkpoint {
                 completion,
                 complete,
@@ -1252,7 +1238,7 @@ impl EpisodeWriteSession for SpiralEpisodeWriter {
             .take()
             .expect("episode worker exists")
             .join()
-            .map_err(|_| EpisodeError::Invalid("episode transaction worker panicked".to_owned()))?
+            .map_err(|_| EpisodeError::Invalid("episode encoder worker panicked".to_owned()))?
             .map_err(EpisodeError::Invalid)?;
         if let Some(error) = self.failure() {
             return Err(EpisodeError::Invalid(error));
@@ -1292,7 +1278,7 @@ impl Drop for SpiralEpisodeWriter {
 
 struct EpisodeDrain<'a> {
     start: &'a EpisodeStart,
-    database_sender: tokio::sync::mpsc::Sender<EpisodeDatabaseWrite>,
+    completed: &'a Mutex<BTreeMap<String, FullEpisode>>,
     shared: &'a WriterShared,
 }
 
@@ -1328,42 +1314,14 @@ impl EpisodeDrain<'_> {
                         samples: samples.clone(),
                         completion,
                     };
-                    if let Err(error) = self.database_sender.blocking_send(EpisodeDatabaseWrite {
-                        episode: full_episode,
-                        complete,
-                    }) {
-                        let detail = format!("episode database writer stopped: {error}");
-                        *self.shared.failure.lock_unpoisoned() = Some(detail);
-                    }
+                    self.completed
+                        .lock_unpoisoned()
+                        .insert(self.start.id().to_owned(), full_episode);
+                    let _ = complete.send(Ok(()));
                 }
             }
         }
         Ok(samples)
-    }
-}
-
-struct EpisodeDatabaseWriter {
-    project_store: Arc<ProjectStore>,
-}
-
-impl EpisodeDatabaseWriter {
-    fn new(project_store: Arc<ProjectStore>) -> Self {
-        Self { project_store }
-    }
-
-    async fn run(self, mut receiver: tokio::sync::mpsc::Receiver<EpisodeDatabaseWrite>) {
-        while let Some(write) = receiver.recv().await {
-            let namespace = self.project_store.namespace().to_owned();
-            let result = match self.project_store.connect().await {
-                Ok(mut connection) => {
-                    EpisodeReplacement::new(&namespace, &write.episode, &[])
-                        .save(&mut connection)
-                        .await
-                }
-                Err(error) => Err(error),
-            };
-            let _ = write.complete.send(result);
-        }
     }
 }
 

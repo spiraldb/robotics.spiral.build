@@ -888,7 +888,7 @@ impl WorkflowManager {
                     let event_node_id = node.id().to_owned();
                     let worker_cancel = cancel.clone();
                     let worker_publication_gate = publication_gate.clone();
-                    let event_task = tokio::spawn(async move {
+                    let progress = async move {
                         while let Some(event) = events.recv().await {
                             event_manager
                                 .set_model_event(
@@ -897,22 +897,11 @@ impl WorkflowManager {
                                 )
                                 .await;
                         }
-                    });
-                    let result = ModelRunContext::new(project_store, request, worker_cancel)
+                    };
+                    let model = ModelRunContext::new(project_store, request, worker_cancel)
                         .with_publication_gate(worker_publication_gate)
-                        .run(event_sender)
-                        .await;
-                    if let Err(error) = event_task.await {
-                        self.finish_failed(
-                            WorkflowFailure::new(
-                                &run_id,
-                                format!("Workflow Model progress task stopped: {error}"),
-                            )
-                            .at_node(Some(node.id())),
-                        )
-                        .await;
-                        return;
-                    }
+                        .run(event_sender);
+                    let (result, ()) = tokio::join!(model, progress);
                     let result = match result {
                         Ok(result) => result,
                         Err(ModelRunFailure::Cancelled) => {
@@ -2642,11 +2631,6 @@ mod tests {
             for attempt in 1..=MAX_ATTEMPTS {
                 let mut connection = self.project_store.connect_exclusive().await?;
                 let result = connection.execute_update_sql(sql).await;
-                if result.as_ref().is_err_and(|error| {
-                    error.contains("project namespace compare-and-swap conflict")
-                }) {
-                    let _ = connection.rollback().await;
-                }
                 match result {
                     Ok(()) => return Ok(()),
                     Err(error)
@@ -2665,7 +2649,7 @@ mod tests {
             const MAX_ATTEMPTS: usize = 32;
             for attempt in 1..=MAX_ATTEMPTS {
                 let mut connection = self.project_store.connect_exclusive().await?;
-                let result = async {
+                let result: Result<(), String> = async {
                     if connection.table_exists(relation).await? {
                         connection
                             .execute_update_sql(&format!("DROP TABLE {relation}"))
@@ -2674,11 +2658,6 @@ mod tests {
                     Ok(())
                 }
                 .await;
-                if result.as_ref().is_err_and(|error: &String| {
-                    error.contains("project namespace compare-and-swap conflict")
-                }) {
-                    let _ = connection.rollback().await;
-                }
                 match result {
                     Ok(()) => return Ok(()),
                     Err(error)
@@ -2696,10 +2675,9 @@ mod tests {
         async fn assert_absent(&self) -> Result<(), String> {
             let namespace = self.namespace.clone();
             let relations = self.relations.clone();
-            let project = self.project_store.project_id();
             let mut connection = self.project_store.connect_exclusive().await?;
             let leaked = connection
-                .catalog_relation_names(&project)
+                .catalog_relation_names()
                 .await?
                 .into_iter()
                 .filter(|relation_name| {

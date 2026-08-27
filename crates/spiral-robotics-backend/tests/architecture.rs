@@ -950,6 +950,73 @@ fn native_async_spiral_is_confined_to_one_adapter() {
 }
 
 #[test]
+fn async_database_use_cases_use_structured_tasks_and_explicit_transactions() {
+    let backend = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let storage = backend
+        .parent()
+        .expect("workspace crates directory")
+        .join("spiral-robotics-storage/src");
+    let project_store = fs::read_to_string(storage.join("project_store.rs"))
+        .expect("project-store source must be readable");
+    assert!(
+        project_store.contains("pub async fn begin_transaction")
+            && project_store.contains("pub async fn commit")
+            && project_store.contains("pub async fn rollback")
+            && project_store.contains("pub(crate) async fn reconnect")
+            && !project_store.contains("set_autocommit"),
+        "native transactions must have explicit terminal operations without the retired ADBC-style autocommit shim"
+    );
+
+    let mut storage_sources = Vec::new();
+    collect_production_rust_sources(&storage, &mut storage_sources);
+    for path in storage_sources {
+        if path.file_name().and_then(|name| name.to_str()) == Some("spiral_database.rs") {
+            continue;
+        }
+        let source = fs::read_to_string(&path).expect("storage source must be readable");
+        let production = source.split("#[cfg(test)]").next().unwrap_or(&source);
+        for retired_bridge in [
+            "tokio::spawn(",
+            "spawn_blocking(",
+            "block_on(",
+            "block_in_place(",
+            "blocking_send(",
+            "run_blocking",
+        ] {
+            assert!(
+                !production.contains(retired_bridge),
+                "{} retains retired database bridge {retired_bridge:?}",
+                path.display()
+            );
+        }
+    }
+
+    let episodes = fs::read_to_string(storage.join("episodes.rs"))
+        .expect("episode storage source must be readable");
+    assert!(
+        !episodes.contains("EpisodeDatabaseWriter")
+            && !episodes.contains("blocking_send")
+            && !episodes.contains("tokio::spawn"),
+        "the synchronous episode encoder must publish only an in-memory barrier; the async recording use case owns the durable commit"
+    );
+
+    let model = fs::read_to_string(backend.join("src/workflow/model.rs"))
+        .expect("Workflow model source must be readable");
+    let manager = fs::read_to_string(backend.join("src/workflow/manager.rs"))
+        .expect("Workflow manager source must be readable");
+    assert!(
+        model.contains("tokio::join!(producer, computation)")
+            && !model.contains("let producer = tokio::spawn"),
+        "the async database producer and blocking model consumer must use structured concurrency"
+    );
+    assert!(
+        manager.contains("tokio::join!(model, progress)")
+            && !manager.contains("let event_task = tokio::spawn"),
+        "Workflow model progress must be consumed as part of the owning run task"
+    );
+}
+
+#[test]
 fn backend_associated_types_are_only_closed_loop_capability_tokens() {
     let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let allowed = BTreeSet::from([

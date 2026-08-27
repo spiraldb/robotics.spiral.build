@@ -326,9 +326,9 @@ impl StorageManager {
         self.project_store.namespace()
     }
 
-    /// Commit a complete episode transaction directly to SpiralDB. This is
-    /// also used once more when finalized camera segments arrive after the
-    /// joint writer has inserted the episode's initial catalog row.
+    /// Persist one complete episode snapshot and its finalized media directly
+    /// to SpiralDB. A later pause or stop replaces the same episode
+    /// idempotently with the newer complete snapshot.
     pub async fn commit_episode(
         &self,
         episode: &FullEpisode,
@@ -413,41 +413,24 @@ impl StorageManager {
             .map_err(|error| format!("encoding Workflow runs snapshot: {error}"))?;
         let mut connection = self.project_store.connect_exclusive().await?;
         connection.ensure_dataset_namespace(&namespace).await?;
-        connection.set_autocommit(false).await?;
-        let mutation = match JsonDocumentWrite::new(
+        connection.begin_transaction().await?;
+        let mutation = JsonDocumentWrite::new(
             JsonDocumentTarget::new(Table::WorkflowRuns, &relation, "agent:default"),
             json,
         )
         .save(&mut connection)
-        .await
-        {
-            Ok(()) => connection.commit().await,
-            Err(error) => Err(error),
-        };
+        .await;
         match mutation {
-            Ok(()) => match connection.set_autocommit(true).await {
-                Ok(()) => Ok(()),
-                Err(_) => {
+            Ok(()) => connection.commit().await,
+            Err(error) => match connection.rollback().await {
+                Ok(()) => Err(error),
+                Err(rollback) => {
                     connection.discard();
-                    Ok(())
+                    Err(format!(
+                        "{error}; rolling back Assistant history also failed: {rollback}; connection discarded"
+                    ))
                 }
             },
-            Err(error) => {
-                let rollback = connection.rollback().await;
-                let restore = connection.set_autocommit(true).await;
-                let mut detail = error;
-                if let Err(rollback) = rollback {
-                    detail.push_str(&format!(
-                        "; rolling back Assistant history failed: {rollback}"
-                    ));
-                }
-                if let Err(restore) = restore {
-                    detail.push_str(&format!(
-                        "; restoring database autocommit failed: {restore}"
-                    ));
-                }
-                Err(detail)
-            }
         }
     }
 
@@ -466,48 +449,41 @@ impl StorageManager {
         let json = serde_json::to_string(value)
             .map_err(|error| format!("encoding reset Assistant history: {error}"))?;
         let mut connection = self.project_store.connect_exclusive().await?;
-        connection.set_autocommit(false).await?;
-        let mutation = match connection
-            .load_json_document_raw_optional(&relation, "agent:default")
-            .await?
-        {
-            Some(current)
-                if Sha256::digest(current.as_bytes()).as_slice() == expected_digest.as_slice() =>
+        connection.begin_transaction().await?;
+        let mutation = async {
+            match connection
+                .load_json_document_raw_optional(&relation, "agent:default")
+                .await?
             {
-                match JsonDocumentWrite::new(
-                    JsonDocumentTarget::new(Table::WorkflowRuns, &relation, "agent:default"),
-                    json,
-                )
-                .save(&mut connection)
-                .await
+                Some(current)
+                    if Sha256::digest(current.as_bytes()).as_slice()
+                        == expected_digest.as_slice() =>
                 {
-                    Ok(()) => connection.commit().await,
-                    Err(error) => Err(error),
+                    JsonDocumentWrite::new(
+                        JsonDocumentTarget::new(Table::WorkflowRuns, &relation, "agent:default"),
+                        json,
+                    )
+                    .save(&mut connection)
+                    .await
                 }
+                _ => Err(
+                    "Assistant history changed before reset. Reload the current project."
+                        .to_owned(),
+                ),
             }
-            _ => Err(
-                "Assistant history changed before reset. Reload the current project.".to_owned(),
-            ),
-        };
-        let rollback = if mutation.is_err() {
-            Some(connection.rollback().await)
-        } else {
-            None
-        };
-        if rollback.as_ref().is_some_and(Result::is_err) {
-            connection.discard();
         }
-        let restore = connection.set_autocommit(true).await;
-        if restore.is_err() {
-            connection.discard();
-        }
-        match (mutation, rollback, restore) {
-            (Ok(()), None, Ok(())) | (Ok(()), None, Err(_)) => Ok(()),
-            (Err(error), Some(Ok(())), Ok(())) => Err(error),
-            (Err(error), Some(rollback), restore) => Err(format!(
-                "{error}; Assistant reset cleanup was uncertain (rollback: {rollback:?}, autocommit: {restore:?})"
-            )),
-            _ => unreachable!("recovery rollback follows the mutation outcome"),
+        .await;
+        match mutation {
+            Ok(()) => connection.commit().await,
+            Err(error) => match connection.rollback().await {
+                Ok(()) => Err(error),
+                Err(rollback) => {
+                    connection.discard();
+                    Err(format!(
+                        "{error}; rolling back Assistant reset also failed: {rollback}; connection discarded"
+                    ))
+                }
+            },
         }
     }
 
@@ -720,29 +696,21 @@ impl StorageManager {
 
         let json = serde_json::to_string(&document)
             .map_err(|error| format!("encoding reset {table} snapshot: {error}"))?;
-        connection.set_autocommit(false).await?;
-        let mutation =
-            match JsonDocumentWrite::new(JsonDocumentTarget::new(table, &relation, key), json)
-                .save(&mut connection)
-                .await
-            {
-                Ok(()) => connection.commit().await,
-                Err(error) => Err(error),
-            };
-        if mutation.is_err() {
-            let _ = connection.rollback().await;
-        }
-        let restore = connection.set_autocommit(true).await;
-        match (mutation, restore) {
-            (Ok(()), Ok(())) => Ok(document),
-            (Err(error), Ok(())) => Err(error),
-            (Ok(()), Err(_)) => {
-                connection.discard();
-                Ok(document)
-            }
-            (Err(error), Err(restore)) => Err(format!(
-                "{error}; restoring database autocommit after resetting obsolete Workflow history also failed: {restore}"
-            )),
+        connection.begin_transaction().await?;
+        let mutation = JsonDocumentWrite::new(JsonDocumentTarget::new(table, &relation, key), json)
+            .save(&mut connection)
+            .await;
+        match mutation {
+            Ok(()) => connection.commit().await.map(|()| document),
+            Err(error) => match connection.rollback().await {
+                Ok(()) => Err(error),
+                Err(rollback) => {
+                    connection.discard();
+                    Err(format!(
+                        "{error}; rolling back obsolete Workflow history reset also failed: {rollback}; connection discarded"
+                    ))
+                }
+            },
         }
     }
 
@@ -1919,26 +1887,6 @@ impl ProjectConnection {
             .and_then(crate::DatabaseOutput::into_summary)
             .map(|_| ())
             .map_err(|error| error.to_string())
-    }
-
-    /// Finish a Spiral transaction, rebasing its optimistic project mutation when
-    /// a concurrently published managed artifact advances the project head.
-    pub(crate) async fn commit_catalog_transaction(&mut self) -> Result<(), String> {
-        const MAX_COMMIT_ATTEMPTS: usize = 16;
-
-        for attempt in 1..=MAX_COMMIT_ATTEMPTS {
-            match self.commit().await {
-                Ok(()) => return Ok(()),
-                Err(error)
-                    if error.contains("project namespace compare-and-swap conflict")
-                        && attempt < MAX_COMMIT_ATTEMPTS =>
-                {
-                    tokio::task::yield_now().await;
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        unreachable!("the bounded commit loop returns on its final attempt")
     }
 
     /// Spiral reports a no-op DELETE as an execution error. Replacement and

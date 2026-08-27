@@ -327,7 +327,6 @@ impl ImportTarget<'_> {
 }
 
 struct ImportCollision<'a> {
-    project: &'a str,
     namespace: &'a str,
     dataset_id: &'a str,
     relations: &'a ImportRelations,
@@ -349,7 +348,7 @@ impl ImportCollision<'_> {
             ));
         }
         if let Some(existing) = connection
-            .list_catalog_relations(self.project)
+            .list_catalog_relations()
             .await?
             .into_iter()
             .map(|relation| relation.into_name())
@@ -492,7 +491,6 @@ impl StorageManager {
         inspection: HuggingFaceDatasetInspection,
     ) -> Result<HuggingFaceDatasetImportSummary, String> {
         let namespace = self.project_store().namespace().to_owned();
-        let project = self.project_store().project_id();
         let relations = ImportTarget {
             namespace: &namespace,
             dataset_id: inspection.dataset_id(),
@@ -500,9 +498,10 @@ impl StorageManager {
         .relations(inspection.format(), inspection.files());
         let expected_prefix = relations.base.clone();
         let dataset_id = inspection.dataset_id().to_owned();
+        let mut warnings = inspection.warnings().to_vec();
         let mut connection = self.project_store().connect_exclusive().await?;
         connection.ensure_dataset_namespace(&namespace).await?;
-        if let Err(error) = connection.set_autocommit(false).await {
+        if let Err(error) = connection.begin_transaction().await {
             connection.discard();
             return Err(format!(
                 "starting Hugging Face import transaction failed and its connection was discarded: {error}"
@@ -510,7 +509,6 @@ impl StorageManager {
         }
         let mutation = async {
             ImportCollision {
-                project: &project,
                 namespace: &namespace,
                 dataset_id: &dataset_id,
                 relations: &relations,
@@ -523,40 +521,59 @@ impl StorageManager {
                     &Table::Datasets.qualified_name(&namespace),
                     inspection.catalog_batch()?,
                 )
-                .await?;
-            connection.commit_catalog_transaction().await
+                .await
         }
         .await;
-        let rollback = if mutation.is_err() {
-            Some(connection.rollback().await)
-        } else {
-            None
-        };
-        if rollback.as_ref().is_some_and(Result::is_err) {
-            connection.discard();
-        }
-        let restore = connection.set_autocommit(true).await;
-        if restore.is_err() {
-            connection.discard();
-        }
-        match (mutation, rollback, restore) {
-            (Ok(()), None, Ok(())) | (Ok(()), None, Err(_)) => {}
-            (Err(error), Some(Ok(())), Ok(())) => return Err(error),
-            (Err(error), Some(rollback), restore) => {
-                return Err(format!(
-                    "{error}; import cleanup was uncertain (rollback: {rollback:?}, autocommit: {restore:?})"
-                ));
+        let connection_reopened = match mutation {
+            Ok(()) => {
+                if let Err(error) = connection.commit().await {
+                    connection.discard();
+                    return Err(format!(
+                        "committing Hugging Face import failed with an uncertain outcome; connection discarded: {error}"
+                    ));
+                }
+                match connection.reconnect().await {
+                    Ok(()) => true,
+                    Err(error) => {
+                        connection.discard();
+                        warnings.push(format!(
+                            "Hugging Face rows committed, but the post-commit Spiral connection could not open; relation names are reported from the import plan: {error}"
+                        ));
+                        false
+                    }
+                }
             }
-            _ => unreachable!("recovery rollback follows the mutation outcome"),
-        }
+            Err(error) => {
+                let rollback = connection.rollback().await;
+                if rollback.is_err() {
+                    connection.discard();
+                }
+                if let Err(rollback) = rollback {
+                    return Err(format!(
+                        "{error}; rolling back Hugging Face import also failed: {rollback}; connection discarded"
+                    ));
+                }
+                return Err(error);
+            }
+        };
 
-        let mut created = connection
-            .list_catalog_relations(&project)
-            .await?
-            .into_iter()
-            .map(|relation| relation.into_name())
-            .filter(|name| name.starts_with(&expected_prefix))
-            .collect::<Vec<_>>();
+        let mut created = if connection_reopened {
+            match connection.list_catalog_relations().await {
+                Ok(relations) => relations
+                    .into_iter()
+                    .map(|relation| relation.into_name())
+                    .filter(|name| name.starts_with(&expected_prefix))
+                    .collect::<Vec<_>>(),
+                Err(error) => {
+                    warnings.push(format!(
+                        "Hugging Face rows committed, but the imported relation catalog could not be inspected; relation names are reported from the import plan: {error}"
+                    ));
+                    relations.planned(inspection.format())
+                }
+            }
+        } else {
+            relations.planned(inspection.format())
+        };
         created.sort();
         created.dedup();
         let suggested_sql = match inspection.format() {
@@ -581,8 +598,7 @@ impl StorageManager {
             created,
         )
         .with_suggested_sql(suggested_sql);
-        Ok(HuggingFaceDatasetImportSummary::new(source, outcome)
-            .with_warnings(inspection.warnings().to_vec()))
+        Ok(HuggingFaceDatasetImportSummary::new(source, outcome).with_warnings(warnings))
     }
 }
 

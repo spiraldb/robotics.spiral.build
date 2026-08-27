@@ -262,40 +262,36 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
             .map_err(OperationError::conflict)
     }
 
-    async fn finish_media_pause(&self) {
-        let checkpoint = if let Some((episode, media, failures)) =
-            self.state.recording_session().finish_media_pause().await
-        {
-            for failure in failures {
-                self.state
-                    .cameras()
-                    .note_issue(format!("paused episode video was not saved: {failure}"));
+    async fn finish_media_pause(&self) -> Result<(), OperationError> {
+        let checkpoint = self.state.recording_session().finish_media_pause().await;
+        let (episode, media) = match checkpoint {
+            Some((episode, media, failures)) => {
+                for failure in failures {
+                    self.state
+                        .cameras()
+                        .note_issue(format!("paused episode video was not saved: {failure}"));
+                }
+                (episode, media)
             }
-            Some((episode, media))
-        } else {
-            None
+            None => {
+                let Some(episode) = self.state.recording_session().episode() else {
+                    return Ok(());
+                };
+                (episode, Vec::new())
+            }
         };
-        let Some((episode, media)) = checkpoint else {
-            return;
-        };
-        let outcome = async {
-            let full_episode = self
-                .state
-                .episodes()
-                .full_episode(&episode)
-                .await
-                .map_err(|error| error.to_string())?;
-            self.state
-                .storage()
-                .commit_episode(&full_episode, &media)
-                .await
-        }
-        .await;
-        if let Err(error) = outcome {
-            self.state.cameras().note_issue(format!(
-                "paused episode video was not saved to SpiralDB: {error}"
-            ));
-        }
+        let full_episode = self
+            .state
+            .episodes()
+            .completed_episode(&episode)
+            .map_err(OperationError::from)?;
+        self.state
+            .storage()
+            .commit_episode(&full_episode, &media)
+            .await
+            .map_err(OperationError::Internal)?;
+        self.state.episodes().forget_completed(&episode);
+        Ok(())
     }
 
     async fn resume_media(&self, active_seconds: f64) {
