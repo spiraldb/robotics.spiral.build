@@ -128,9 +128,9 @@ impl SpiralConnection {
                     .await
                     .map_err(DatabaseError::from_external)?
                 {
-                    CommandOutput::Statement { rows } => Ok(DatabaseOutput::AffectedRows(
-                        ExecutionSummary::new(Some(rows)),
-                    )),
+                    CommandOutput::Statement { .. } => {
+                        Ok(DatabaseOutput::AffectedRows(ExecutionSummary))
+                    }
                     CommandOutput::Query { relation, options } => {
                         Self::query_output(relation, options).await
                     }
@@ -145,10 +145,8 @@ impl SpiralConnection {
                 }
             }
             DatabaseCommand::Ingest(ingestion) => {
-                let rows = self.ingest(ingestion).await?;
-                Ok(DatabaseOutput::AffectedRows(ExecutionSummary::new(Some(
-                    rows,
-                ))))
+                self.ingest(ingestion).await?;
+                Ok(DatabaseOutput::AffectedRows(ExecutionSummary))
             }
         }
     }
@@ -270,7 +268,7 @@ impl SpiralConnection {
             .collect()
     }
 
-    async fn ingest(&mut self, ingestion: BatchIngestion) -> DatabaseResult<u64> {
+    async fn ingest(&mut self, ingestion: BatchIngestion) -> DatabaseResult<()> {
         let (relation, mode, batches) = ingestion.into_parts();
         let target = Self::relation_name(&relation)?;
         let session = self.context.session().clone();
@@ -296,7 +294,7 @@ impl SpiralConnection {
                 self.context
                     .execute_insert(&insert, options)
                     .await
-                    .map(|summary| summary.rows())
+                    .map(|_| ())
                     .map_err(DatabaseError::from_external)
             }
             IngestMode::CreateOrAppend if exists => {
@@ -306,7 +304,7 @@ impl SpiralConnection {
                 self.context
                     .execute_insert(&insert, options)
                     .await
-                    .map(|summary| summary.rows())
+                    .map(|_| ())
                     .map_err(DatabaseError::from_external)
             }
             IngestMode::CreateOrAppend => {
@@ -324,13 +322,13 @@ impl SpiralConnection {
         &self,
         creation: TableCreation,
         options: spiral_engine::QueryOptions,
-    ) -> DatabaseResult<u64> {
+    ) -> DatabaseResult<()> {
         let (target, plan, replace) = creation.into_parts();
         let create = CreateTable::new(target, plan, [], false, replace, false);
         self.context
             .execute_create_table(&create, options)
             .await
-            .map(|summary| summary.rows())
+            .map(|_| ())
             .map_err(DatabaseError::from_external)
     }
 
@@ -395,7 +393,7 @@ impl DatabaseTransaction for SpiralTransaction {
                 .context
                 .commit()
                 .await
-                .map(|_| ExecutionSummary::default())
+                .map(|_| ExecutionSummary)
                 .map_err(DatabaseError::from_external)
         }
         .boxed()

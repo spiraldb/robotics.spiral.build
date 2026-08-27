@@ -184,7 +184,7 @@ impl Renderer {
                 Geometry::Sphere { radius } => (&self.primitives.sphere, Vec3::splat(*radius)),
                 // Nothing in this build loads mesh files; skipping keeps a
                 // description that references one drawable rather than blank.
-                Geometry::Mesh { .. } => continue,
+                Geometry::Mesh => continue,
             };
             gl.uniform1f(
                 self.pipeline.uniforms.shaded.as_ref(),

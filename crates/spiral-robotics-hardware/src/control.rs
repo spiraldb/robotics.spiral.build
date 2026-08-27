@@ -4595,7 +4595,7 @@ mod tests {
         let now = Instant::now();
         let idle = MotorSample::new(
             0,
-            MotorMechanicalSample::new(None, Some(0.05), None),
+            MotorMechanicalSample::new(None, Some(0.05)),
             MotorElectricalSample::new(None, None, Some(0.1)),
         );
         for _ in 0..40 {
@@ -4606,7 +4606,7 @@ mod tests {
         track.observe(
             MotorSample::new(
                 0,
-                MotorMechanicalSample::new(None, Some(0.9), None),
+                MotorMechanicalSample::new(None, Some(0.9)),
                 MotorElectricalSample::new(None, None, Some(1.3)),
             ),
             now,

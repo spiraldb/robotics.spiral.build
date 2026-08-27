@@ -1,9 +1,9 @@
 //! Pure lifecycle policy for native training runs.
 //!
 //! The manager adapter maps persisted and wire-facing run DTOs into these
-//! plain records. Admission, restart recovery, transition legality, and history
-//! retention therefore stay independent of serialization, filesystems, task
-//! runtimes, and the native trainer.
+//! plain records. Admission, transition legality, and history retention
+//! therefore stay independent of serialization, filesystems, task runtimes,
+//! and the native trainer.
 
 use std::collections::BTreeSet;
 
@@ -54,13 +54,6 @@ impl RunRecord {
             phase,
         }
     }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct RunTransition {
-    id: String,
-    from: RunPhase,
-    to: RunPhase,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -122,29 +115,7 @@ impl TrainingRunRegistry {
         Ok(())
     }
 
-    #[cfg(test)]
-    fn recover_after_restart(&mut self) -> Vec<RunTransition> {
-        self.runs
-            .iter_mut()
-            .filter_map(|run| {
-                let from = run.phase;
-                from.active().then(|| {
-                    run.phase = RunPhase::Failed;
-                    RunTransition {
-                        id: run.id.clone(),
-                        from,
-                        to: RunPhase::Failed,
-                    }
-                })
-            })
-            .collect()
-    }
-
-    pub(crate) fn transition(
-        &mut self,
-        run_id: &str,
-        next: RunPhase,
-    ) -> Result<RunTransition, String> {
+    pub(crate) fn transition(&mut self, run_id: &str, next: RunPhase) -> Result<(), String> {
         let run = self
             .runs
             .iter_mut()
@@ -157,11 +128,7 @@ impl TrainingRunRegistry {
             ));
         }
         run.phase = next;
-        Ok(RunTransition {
-            id: run.id.clone(),
-            from,
-            to: next,
-        })
+        Ok(())
     }
 
     pub(crate) fn retained_ids(&self) -> impl Iterator<Item = &str> {
@@ -222,21 +189,6 @@ mod tests {
     }
 
     #[test]
-    fn restart_recovery_fails_every_active_phase() {
-        for phase in [RunPhase::Starting, RunPhase::Running, RunPhase::Stopping] {
-            let mut registry = TrainingRunRegistry::new(4, [run("run", phase)]).unwrap();
-            assert_eq!(
-                registry.recover_after_restart(),
-                vec![RunTransition {
-                    id: "run".to_owned(),
-                    from: phase,
-                    to: RunPhase::Failed,
-                }]
-            );
-        }
-    }
-
-    #[test]
     fn terminal_runs_cannot_be_resurrected() {
         let mut registry = TrainingRunRegistry::new(
             4,
@@ -252,14 +204,10 @@ mod tests {
                 .unwrap_err()
                 .contains("cannot transition")
         );
-        assert_eq!(
-            registry.transition("live", RunPhase::Stopping).unwrap().to,
-            RunPhase::Stopping
-        );
-        assert_eq!(
-            registry.transition("live", RunPhase::Stopped).unwrap().to,
-            RunPhase::Stopped
-        );
+        registry.transition("live", RunPhase::Stopping).unwrap();
+        assert_eq!(registry.runs[1].phase, RunPhase::Stopping);
+        registry.transition("live", RunPhase::Stopped).unwrap();
+        assert_eq!(registry.runs[1].phase, RunPhase::Stopped);
     }
 
     #[test]

@@ -857,7 +857,6 @@ impl AppState {
     }
 }
 
-#[derive(Eq, PartialEq)]
 struct AgentCursor {
     scope_id: String,
     revision: u64,
@@ -865,7 +864,7 @@ struct AgentCursor {
 
 impl AgentCursor {
     fn advance_to(&mut self, next: Self) -> bool {
-        if *self == next {
+        if self.scope_id == next.scope_id && self.revision == next.revision {
             return false;
         }
         *self = next;

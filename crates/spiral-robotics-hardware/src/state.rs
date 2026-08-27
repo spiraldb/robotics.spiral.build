@@ -630,15 +630,13 @@ impl RobotTelemetry {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EpisodeArm {
     id: String,
-    robot_type: Option<String>,
     joints: Vec<String>,
 }
 
 impl EpisodeArm {
-    pub fn new(id: impl Into<String>, robot_type: Option<String>, joints: Vec<String>) -> Self {
+    pub fn new(id: impl Into<String>, joints: Vec<String>) -> Self {
         Self {
             id: id.into(),
-            robot_type,
             joints,
         }
     }

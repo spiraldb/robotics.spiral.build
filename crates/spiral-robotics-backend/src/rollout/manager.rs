@@ -550,8 +550,7 @@ impl RolloutManager {
         let Some(active) = active.as_ref() else {
             return Err("no policy rollout is active".to_owned());
         };
-        let signal = self.lifecycle.coordinator.recover_lock().request_stop()?;
-        debug_assert_eq!(signal.session(), active.session);
+        self.lifecycle.coordinator.recover_lock().request_stop()?;
         active
             .stop
             .send(true)

@@ -185,15 +185,7 @@ pub enum IngestMode {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct ExecutionSummary {
-    affected_rows: Option<u64>,
-}
-
-impl ExecutionSummary {
-    pub(crate) const fn new(affected_rows: Option<u64>) -> Self {
-        Self { affected_rows }
-    }
-}
+pub struct ExecutionSummary;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RelationMetadata {

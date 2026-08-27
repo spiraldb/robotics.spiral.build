@@ -186,7 +186,11 @@ These rules apply to every feature:
   use `serde` flattening when their external shape must remain flat.
 - A recursive syntax-level architecture test enforces the ownership, field,
   parameter, visibility, and no-static bounds across every first-party
-  production crate, including build support and examples.
+  production crate, including build support and examples. Private fields must
+  have an explicit production consumer unless a reviewed serialization,
+  command-line, error, key-ordering, or memory-layout contract consumes them;
+  passive `Clone`, `Debug`, `Eq`, and `PartialEq` derives do not count as use;
+  derived equality counts only when production code actually compares that type.
 - Critical invariants must be enforced by their narrow owner: SQL policy,
   backend capability policy, hardware control policy, storage policy, or a wire
   contract invariant—not only by UI controls.

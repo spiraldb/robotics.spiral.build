@@ -271,18 +271,6 @@ pub(crate) enum ControlDecision {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct StopSignal {
-    session: String,
-    newly_requested: bool,
-}
-
-impl StopSignal {
-    pub(crate) fn session(&self) -> &str {
-        &self.session
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CleanupTicket {
     session: String,
 }
@@ -452,12 +440,11 @@ impl RolloutCoordinator {
         Ok(self.snapshot.clone())
     }
 
-    pub(crate) fn request_stop(&mut self) -> Result<StopSignal, String> {
+    pub(crate) fn request_stop(&mut self) -> Result<(), String> {
         let active = self
             .active
             .as_mut()
             .ok_or_else(|| "no policy rollout is active".to_owned())?;
-        let newly_requested = !active.stop_requested;
         active.stop_stage.get_or_insert(match active.phase {
             SessionPhase::Loading => StopStage::BeforeModel,
             SessionPhase::WarmingUp | SessionPhase::AwaitingControl => StopStage::BeforeControl,
@@ -468,12 +455,8 @@ impl RolloutCoordinator {
         self.snapshot.lifecycle.phase = RolloutPhase::Stopping;
         self.snapshot.lifecycle.message =
             Some("Stopping after the current control cycle…".to_owned());
-        let session = active.session.clone();
         self.publish();
-        Ok(StopSignal {
-            session,
-            newly_requested,
-        })
+        Ok(())
     }
 
     pub(crate) fn stopped_outcome(&self, session: &str) -> Result<ExecutionOutcome, String> {
@@ -845,9 +828,7 @@ mod tests {
             .unwrap();
         coordinator.warming_up("session-1").unwrap();
         coordinator.awaiting_control("session-1").unwrap();
-        let signal = coordinator.request_stop().unwrap();
-
-        assert!(signal.newly_requested);
+        coordinator.request_stop().unwrap();
         assert!(
             !coordinator
                 .running("session-1", PolicyCadence::new(60.0, 10))

@@ -1,10 +1,11 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
 use syn::visit::{self, Visit};
 use syn::{
-    Attribute, Fields, FnArg, ImplItem, Item, ReturnType, Signature, TraitItem, Type, Visibility,
+    Attribute, BinOp, Expr, ExprBinary, ExprField, Fields, FnArg, ImplItem, Item, ItemEnum,
+    ItemStruct, Member, Pat, PatStruct, ReturnType, Signature, TraitItem, Type, Visibility,
 };
 
 fn collect_production_rust_sources(directory: &Path, sources: &mut Vec<std::path::PathBuf>) {
@@ -209,6 +210,7 @@ fn direct_type_name(r#type: &Type) -> Option<String> {
     match r#type {
         Type::Group(group) => direct_type_name(&group.elem),
         Type::Paren(paren) => direct_type_name(&paren.elem),
+        Type::Reference(reference) => direct_type_name(&reference.elem),
         Type::Path(path) if path.qself.is_none() => path
             .path
             .segments
@@ -310,6 +312,291 @@ impl<'ast> Visit<'ast> for ComplexityBoundaryVisitor<'_> {
     }
 }
 
+struct PrivateFieldDeclaration {
+    source_path: String,
+    owner: String,
+    equality_owner: String,
+    name: String,
+    derives_equality: bool,
+}
+
+#[derive(Default)]
+struct PrivateFieldUsageVisitor {
+    current_source_path: String,
+    declarations: Vec<PrivateFieldDeclaration>,
+    explicit_uses: BTreeSet<String>,
+    equality_consumers: BTreeSet<String>,
+    binding_types: Vec<BTreeMap<String, String>>,
+    production_macro_tokens: String,
+}
+
+impl PrivateFieldUsageVisitor {
+    fn begin_source(&mut self, source_path: &Path) {
+        self.current_source_path = source_path.display().to_string();
+    }
+
+    fn record_named_fields(
+        &mut self,
+        owner: String,
+        equality_owner: String,
+        fields: &Fields,
+        derives_equality: bool,
+    ) {
+        let Fields::Named(fields) = fields else {
+            return;
+        };
+        self.declarations.extend(
+            fields
+                .named
+                .iter()
+                .filter(|field| matches!(field.vis, Visibility::Inherited))
+                .filter_map(|field| field.ident.as_ref())
+                .map(ToString::to_string)
+                .filter(|name| !name.starts_with('_'))
+                .map(|name| PrivateFieldDeclaration {
+                    source_path: self.current_source_path.clone(),
+                    owner: owner.clone(),
+                    equality_owner: equality_owner.clone(),
+                    name,
+                    derives_equality,
+                }),
+        );
+    }
+
+    fn derives_partial_eq(attributes: &[Attribute]) -> bool {
+        attributes.iter().any(|attribute| {
+            if !attribute.path().is_ident("derive") {
+                return false;
+            }
+            let mut derives_partial_eq = false;
+            let _ = attribute.parse_nested_meta(|meta| {
+                derives_partial_eq |= meta
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|segment| segment.ident == "PartialEq");
+                Ok(())
+            });
+            derives_partial_eq
+        })
+    }
+
+    fn push_signature_bindings(&mut self, signature: &Signature) {
+        let bindings = signature
+            .inputs
+            .iter()
+            .filter_map(|argument| {
+                let FnArg::Typed(argument) = argument else {
+                    return None;
+                };
+                let Pat::Ident(pattern) = argument.pat.as_ref() else {
+                    return None;
+                };
+                direct_type_name(&argument.ty).map(|name| (pattern.ident.to_string(), name))
+            })
+            .collect();
+        self.binding_types.push(bindings);
+    }
+
+    fn binding_type(&self, name: &str) -> Option<String> {
+        self.binding_types
+            .iter()
+            .rev()
+            .find_map(|bindings| bindings.get(name).cloned())
+    }
+
+    fn expression_type(&self, expression: &Expr) -> Option<String> {
+        match expression {
+            Expr::Group(group) => self.expression_type(&group.expr),
+            Expr::Paren(paren) => self.expression_type(&paren.expr),
+            Expr::Reference(reference) => self.expression_type(&reference.expr),
+            Expr::Unary(unary) => self.expression_type(&unary.expr),
+            Expr::Path(path) if path.qself.is_none() && path.path.segments.len() == 1 => {
+                self.binding_type(&path.path.segments.first()?.ident.to_string())
+            }
+            _ => None,
+        }
+    }
+
+    fn derive_supplies_semantics(attributes: &[Attribute]) -> bool {
+        attributes.iter().any(|attribute| {
+            if !attribute.path().is_ident("derive") {
+                return false;
+            }
+            let mut supplies_semantics = false;
+            let _ = attribute.parse_nested_meta(|meta| {
+                supplies_semantics |= meta.path.segments.last().is_some_and(|segment| {
+                    matches!(
+                        segment.ident.to_string().as_str(),
+                        "Args"
+                            | "Deserialize"
+                            | "Error"
+                            | "Hash"
+                            | "Ord"
+                            | "Parser"
+                            | "PartialOrd"
+                            | "Pod"
+                            | "Props"
+                            | "Serialize"
+                            | "Subcommand"
+                            | "ValueEnum"
+                            | "Zeroable"
+                    )
+                });
+                Ok(())
+            });
+            supplies_semantics
+        })
+    }
+
+    fn has_layout_contract(attributes: &[Attribute]) -> bool {
+        attributes
+            .iter()
+            .any(|attribute| attribute.path().is_ident("repr"))
+    }
+
+    fn unconsumed_fields(self) -> Vec<String> {
+        self.declarations
+            .into_iter()
+            .filter(|field| {
+                !self.explicit_uses.contains(&field.name)
+                    && !(field.derives_equality
+                        && self.equality_consumers.contains(&field.equality_owner))
+                    && !self
+                        .production_macro_tokens
+                        .contains(&format!(".{}", field.name))
+                    && !self
+                        .production_macro_tokens
+                        .contains(&format!(". {}", field.name))
+            })
+            .map(|field| {
+                format!(
+                    "{} private field {}::{} is only initialized or passively derived",
+                    field.source_path, field.owner, field.name
+                )
+            })
+            .collect()
+    }
+}
+
+impl<'ast> Visit<'ast> for PrivateFieldUsageVisitor {
+    fn visit_item(&mut self, item: &'ast Item) {
+        let attributes: &[Attribute] = match item {
+            Item::Const(item) => &item.attrs,
+            Item::Enum(item) => &item.attrs,
+            Item::ExternCrate(item) => &item.attrs,
+            Item::Fn(item) => &item.attrs,
+            Item::ForeignMod(item) => &item.attrs,
+            Item::Impl(item) => &item.attrs,
+            Item::Macro(item) => &item.attrs,
+            Item::Mod(item) => &item.attrs,
+            Item::Static(item) => &item.attrs,
+            Item::Struct(item) => &item.attrs,
+            Item::Trait(item) => &item.attrs,
+            Item::TraitAlias(item) => &item.attrs,
+            Item::Type(item) => &item.attrs,
+            Item::Union(item) => &item.attrs,
+            Item::Use(item) => &item.attrs,
+            _ => &[],
+        };
+        if !has_cfg_test(attributes) {
+            visit::visit_item(self, item);
+        }
+    }
+
+    fn visit_impl_item(&mut self, item: &'ast ImplItem) {
+        let attributes: &[Attribute] = match item {
+            ImplItem::Const(item) => &item.attrs,
+            ImplItem::Fn(item) => &item.attrs,
+            ImplItem::Type(item) => &item.attrs,
+            ImplItem::Macro(item) => &item.attrs,
+            _ => &[],
+        };
+        if !has_cfg_test(attributes) {
+            visit::visit_impl_item(self, item);
+        }
+    }
+
+    fn visit_item_struct(&mut self, item: &'ast ItemStruct) {
+        if !Self::derive_supplies_semantics(&item.attrs) && !Self::has_layout_contract(&item.attrs)
+        {
+            let owner = item.ident.to_string();
+            self.record_named_fields(
+                owner.clone(),
+                owner,
+                &item.fields,
+                Self::derives_partial_eq(&item.attrs),
+            );
+        }
+        visit::visit_item_struct(self, item);
+    }
+
+    fn visit_item_enum(&mut self, item: &'ast ItemEnum) {
+        if !Self::derive_supplies_semantics(&item.attrs) && !Self::has_layout_contract(&item.attrs)
+        {
+            let equality_owner = item.ident.to_string();
+            for variant in &item.variants {
+                self.record_named_fields(
+                    format!("{}::{}", item.ident, variant.ident),
+                    equality_owner.clone(),
+                    &variant.fields,
+                    Self::derives_partial_eq(&item.attrs),
+                );
+            }
+        }
+        visit::visit_item_enum(self, item);
+    }
+
+    fn visit_expr_field(&mut self, expression: &'ast ExprField) {
+        if let Member::Named(member) = &expression.member {
+            self.explicit_uses.insert(member.to_string());
+        }
+        visit::visit_expr_field(self, expression);
+    }
+
+    fn visit_expr_binary(&mut self, expression: &'ast ExprBinary) {
+        if matches!(expression.op, BinOp::Eq(_) | BinOp::Ne(_))
+            && let Some(owner) = self
+                .expression_type(&expression.left)
+                .or_else(|| self.expression_type(&expression.right))
+        {
+            self.equality_consumers.insert(owner);
+        }
+        visit::visit_expr_binary(self, expression);
+    }
+
+    fn visit_item_fn(&mut self, function: &'ast syn::ItemFn) {
+        self.push_signature_bindings(&function.sig);
+        visit::visit_item_fn(self, function);
+        self.binding_types.pop();
+    }
+
+    fn visit_impl_item_fn(&mut self, function: &'ast syn::ImplItemFn) {
+        self.push_signature_bindings(&function.sig);
+        visit::visit_impl_item_fn(self, function);
+        self.binding_types.pop();
+    }
+
+    fn visit_pat_struct(&mut self, pattern: &'ast PatStruct) {
+        self.explicit_uses.extend(
+            pattern
+                .fields
+                .iter()
+                .filter_map(|field| match &field.member {
+                    Member::Named(member) => Some(member.to_string()),
+                    Member::Unnamed(_) => None,
+                }),
+        );
+        visit::visit_pat_struct(self, pattern);
+    }
+
+    fn visit_macro(&mut self, r#macro: &'ast syn::Macro) {
+        self.production_macro_tokens
+            .push_str(&r#macro.tokens.to_string());
+        visit::visit_macro(self, r#macro);
+    }
+}
+
 #[test]
 fn first_party_items_stay_within_cognitive_complexity_bounds() {
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -350,6 +637,78 @@ fn first_party_items_stay_within_cognitive_complexity_bounds() {
         "first-party architecture bounds were exceeded:\n{}",
         violations.join("\n")
     );
+}
+
+#[test]
+fn private_fields_have_explicit_production_consumers_or_external_semantics() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("backend crate lives under workspace/crates");
+    let mut violations = Vec::new();
+    for entry in
+        fs::read_dir(workspace_root.join("crates")).expect("workspace crates directory must exist")
+    {
+        let entry = entry.expect("workspace crate entry must be readable");
+        let crate_root = entry.path();
+        if !entry
+            .file_type()
+            .expect("crate entry type must be readable")
+            .is_dir()
+            || !crate_root.join("Cargo.toml").is_file()
+        {
+            continue;
+        }
+        let mut sources = Vec::new();
+        collect_production_rust_sources(&crate_root, &mut sources);
+        sources.sort();
+        let mut visitor = PrivateFieldUsageVisitor::default();
+        for source_path in sources {
+            let source = fs::read_to_string(&source_path).expect("Rust source must be readable");
+            let syntax = syn::parse_file(&source)
+                .unwrap_or_else(|error| panic!("{} must parse: {error}", source_path.display()));
+            visitor.begin_source(&source_path);
+            visitor.visit_file(&syntax);
+        }
+        violations.extend(visitor.unconsumed_fields());
+    }
+
+    assert!(
+        violations.is_empty(),
+        "private fields must have explicit production consumers or derive a reviewed external/key/layout contract:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn derived_equality_counts_only_when_production_compares_the_type() {
+    let syntax = syn::parse_file(
+        r#"
+        #[derive(PartialEq)]
+        struct PassiveEquality {
+            derive_only_identity: u64,
+        }
+
+        #[derive(PartialEq)]
+        struct ComparedIdentity {
+            compared_identity: u64,
+        }
+
+        impl ComparedIdentity {
+            fn matches(&self, other: ComparedIdentity) -> bool {
+                *self == other
+            }
+        }
+        "#,
+    )
+    .expect("equality audit fixture must parse");
+    let mut visitor = PrivateFieldUsageVisitor::default();
+    visitor.begin_source(Path::new("equality-audit-fixture.rs"));
+    visitor.visit_file(&syntax);
+
+    let violations = visitor.unconsumed_fields();
+    assert_eq!(violations.len(), 1);
+    assert!(violations[0].contains("PassiveEquality::derive_only_identity"));
 }
 
 #[test]

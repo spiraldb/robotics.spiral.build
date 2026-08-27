@@ -94,7 +94,6 @@ pub(crate) struct MotorMechanicalSample {
     speed_degrees_per_second: Option<f64>,
     /// Load as a signed fraction of the motor's rated torque.
     load: Option<f64>,
-    moving: Option<bool>,
 }
 
 /// Electrical and thermal readings captured in the same motor transaction.
@@ -166,15 +165,10 @@ impl MotorSample {
 }
 
 impl MotorMechanicalSample {
-    pub(crate) fn new(
-        speed_degrees_per_second: Option<f64>,
-        load: Option<f64>,
-        moving: Option<bool>,
-    ) -> Self {
+    pub(crate) fn new(speed_degrees_per_second: Option<f64>, load: Option<f64>) -> Self {
         Self {
             speed_degrees_per_second,
             load,
-            moving,
         }
     }
 
@@ -184,11 +178,6 @@ impl MotorMechanicalSample {
 
     pub(crate) fn load(self) -> Option<f64> {
         self.load
-    }
-
-    #[cfg(test)]
-    pub(crate) fn moving(self) -> Option<bool> {
-        self.moving
     }
 }
 
@@ -548,7 +537,6 @@ impl MotorBus for SimulatedBus {
                                     * SIMULATED_READS_PER_SECOND,
                             ),
                             Some(motor.load),
-                            Some(travelled != 0),
                         ),
                         MotorElectricalSample::new(
                             Some(SIMULATED_VOLTS),

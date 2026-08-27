@@ -89,13 +89,7 @@ pub(crate) trait RecordingArmProjection {
 impl RecordingArmProjection for [api_recording::EpisodeArm] {
     fn to_hardware(&self) -> Vec<hardware::EpisodeArm> {
         self.iter()
-            .map(|arm| {
-                hardware::EpisodeArm::new(
-                    arm.id(),
-                    arm.robot_type().map(str::to_owned),
-                    arm.joints().to_vec(),
-                )
-            })
+            .map(|arm| hardware::EpisodeArm::new(arm.id(), arm.joints().to_vec()))
             .collect()
     }
 }

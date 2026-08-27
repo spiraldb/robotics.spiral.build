@@ -61,7 +61,6 @@ const OFFSET_LOAD: usize = 4;
 const OFFSET_VOLTAGE: usize = 6;
 const OFFSET_TEMPERATURE: usize = 7;
 const OFFSET_STATUS: usize = 9;
-const OFFSET_MOVING: usize = 10;
 const OFFSET_CURRENT: usize = 13;
 
 /// The EEPROM limits a servo enforces on itself, read once when the bus opens.
@@ -888,7 +887,6 @@ impl<'a> RegisterValues<'a> {
             self.word(OFFSET_LOAD).map(|load| {
                 f64::from(Self::sign_magnitude_at(load, LOAD_SIGN_BIT)) / LOAD_FULL_SCALE
             }),
-            self.0.get(OFFSET_MOVING).map(|moving| *moving != 0),
         );
         let electrical = MotorElectricalSample::new(
             // A servo answering at all is a servo with supply voltage, so a zero
@@ -1254,7 +1252,6 @@ mod tests {
         assert_eq!(reading.electrical().voltage_volts(), Some(7.4));
         assert_eq!(reading.electrical().temperature_celsius(), Some(43.0));
         assert!((reading.electrical().current_amps().unwrap() - 0.78).abs() < 1e-9);
-        assert_eq!(reading.mechanical().moving(), Some(true));
         assert!(!reading.faults().has_faults());
     }
 
@@ -1265,7 +1262,6 @@ mod tests {
         assert_eq!(reading.position(), 2048);
         assert_eq!(reading.electrical().temperature_celsius(), None);
         assert_eq!(reading.electrical().current_amps(), None);
-        assert_eq!(reading.mechanical().moving(), None);
         // Voltage is the last field that did arrive, so it is still reported.
         assert_eq!(reading.electrical().voltage_volts(), Some(7.4));
     }

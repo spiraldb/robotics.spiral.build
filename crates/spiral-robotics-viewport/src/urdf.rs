@@ -72,10 +72,7 @@ pub(crate) enum Geometry {
         radius: f32,
     },
     /// Kept so a mesh-based description still parses; nothing draws it.
-    Mesh {
-        filename: String,
-        scale: Vec3,
-    },
+    Mesh,
 }
 
 /// One drawable shape on a link.
@@ -533,13 +530,13 @@ impl UrdfParser {
                 "sphere" => Ok(Geometry::Sphere {
                     radius: Self::number(shape, "radius")?.unwrap_or(0.0),
                 }),
-                "mesh" => Ok(Geometry::Mesh {
-                    filename: Self::required(shape, "filename")?.to_owned(),
-                    scale: match shape.attribute("scale") {
-                        Some(_) => Self::vec3(shape, "scale")?,
-                        None => Vec3::ONE,
-                    },
-                }),
+                "mesh" => {
+                    Self::required(shape, "filename")?;
+                    if shape.attribute("scale").is_some() {
+                        Self::vec3(shape, "scale")?;
+                    }
+                    Ok(Geometry::Mesh)
+                }
                 _ => continue,
             };
         }
@@ -924,13 +921,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(
-            urdf.links[0].visuals[0].geometry,
-            Geometry::Mesh {
-                filename: "arm.stl".to_owned(),
-                scale: Vec3::splat(0.001),
-            }
-        );
+        assert_eq!(urdf.links[0].visuals[0].geometry, Geometry::Mesh);
     }
 
     #[test]
@@ -1046,7 +1037,7 @@ mod tests {
         for link in &urdf.links {
             for visual in &link.visuals {
                 assert!(
-                    !matches!(visual.geometry, Geometry::Mesh { .. }),
+                    !matches!(visual.geometry, Geometry::Mesh),
                     "{} should not need a mesh file",
                     link.name
                 );

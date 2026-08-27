@@ -69,7 +69,6 @@ fn artifact_identity_binds_format_purpose_namespace_run_and_step() {
 fn valid_contract_resolves_camera_roles_and_preserves_checkpoint_joint_order() {
     let result = data().validated_with(&model(), &target()).unwrap();
     assert_eq!(result.joint_names, ["shoulder", "elbow"]);
-    assert_eq!(result.action_steps, MAX_ROLLOUT_ACTION_STEPS);
     assert_eq!(result.sample_hz, 60.0);
     assert_eq!(result.sample_period, Duration::from_secs_f64(1.0 / 60.0));
     assert_eq!(
@@ -79,16 +78,6 @@ fn valid_contract_resolves_camera_roles_and_preserves_checkpoint_joint_order() {
             camera_id: "camera-1".to_owned(),
         }]
     );
-}
-
-#[test]
-fn rollout_preserves_a_checkpoint_prefix_shorter_than_the_replanning_cap() {
-    let short_model = PolicyModelContract::new(2, 2, vec!["follower.camera.wrist".to_owned()])
-        .with_action_shape(10, 10);
-
-    let result = data().validated_with(&short_model, &target()).unwrap();
-
-    assert_eq!(result.action_steps, 10);
 }
 
 #[test]

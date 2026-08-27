@@ -6,8 +6,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use spiral_robotics_api::rollout::MAX_ROLLOUT_ACTION_STEPS;
-
 use crate::OperationError;
 
 pub(crate) const ACT_ARTIFACT_FORMAT: &str = "spiral_robotics.act.safetensors.v2";
@@ -143,7 +141,6 @@ pub(crate) struct ValidatedRolloutContract {
     camera_bindings: Vec<ResolvedCameraBinding>,
     sample_hz: f64,
     sample_period: Duration,
-    action_steps: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -411,7 +408,6 @@ impl PolicyDataContract {
             camera_bindings: resolved,
             sample_hz: data.observations.sample_hz,
             sample_period: Duration::from_secs_f64(1.0 / data.observations.sample_hz),
-            action_steps: model.recommended_action_steps.min(MAX_ROLLOUT_ACTION_STEPS),
         })
     }
 }
