@@ -129,22 +129,6 @@ impl ArmCondition {
         self.limits = limits;
         self
     }
-
-    pub fn arm(&self) -> &str {
-        &self.arm
-    }
-
-    pub fn temperature_celsius(&self) -> &[Option<f64>] {
-        &self.temperature_celsius
-    }
-
-    pub fn voltage_volts(&self) -> &[Option<f64>] {
-        &self.voltage_volts
-    }
-
-    pub fn limits(&self) -> &[MotorLimits] {
-        &self.limits
-    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -212,22 +196,22 @@ impl EpisodeStart {
         self
     }
 
-    pub fn id(&self) -> &str {
+    pub(crate) fn id(&self) -> &str {
         &self.identity.id
     }
-    pub fn dataset_id(&self) -> &str {
+    pub(crate) fn dataset_id(&self) -> &str {
         &self.identity.dataset_id
     }
-    pub const fn started_ms(&self) -> i64 {
+    pub(crate) const fn started_ms(&self) -> i64 {
         self.recording.started_ms
     }
-    pub const fn sample_hz(&self) -> f64 {
+    pub(crate) const fn sample_hz(&self) -> f64 {
         self.recording.sample_hz
     }
-    pub fn source(&self) -> &str {
+    pub(crate) fn source(&self) -> &str {
         &self.recording.source
     }
-    pub fn note(&self) -> Option<&str> {
+    pub(crate) fn note(&self) -> Option<&str> {
         self.recording.note.as_deref()
     }
     pub fn arms(&self) -> &[EpisodeArm] {
@@ -404,6 +388,16 @@ pub struct ReappliedEpisodePositions {
 }
 
 impl ReappliedEpisodePositions {
+    pub fn into_parts(self) -> (Vec<String>, u64, u64, u64, Vec<String>) {
+        (
+            self.updated_episode_ids,
+            self.frames_updated,
+            self.episodes_unchanged,
+            self.episodes_skipped,
+            self.warnings,
+        )
+    }
+    #[cfg(any(test, feature = "test-support"))]
     pub fn new(
         updated_episode_ids: Vec<String>,
         frames_updated: u64,
@@ -417,33 +411,11 @@ impl ReappliedEpisodePositions {
             warnings: Vec::new(),
         }
     }
-
+    #[cfg(any(test, feature = "test-support"))]
     pub fn with_skipped(mut self, episodes_skipped: u64, warnings: Vec<String>) -> Self {
         self.episodes_skipped = episodes_skipped;
         self.warnings = warnings;
         self
-    }
-
-    pub const fn frames_updated(&self) -> u64 {
-        self.frames_updated
-    }
-    pub const fn episodes_unchanged(&self) -> u64 {
-        self.episodes_unchanged
-    }
-    pub const fn episodes_skipped(&self) -> u64 {
-        self.episodes_skipped
-    }
-    pub fn warnings(&self) -> &[String] {
-        &self.warnings
-    }
-    pub fn into_parts(self) -> (Vec<String>, u64, u64, u64, Vec<String>) {
-        (
-            self.updated_episode_ids,
-            self.frames_updated,
-            self.episodes_unchanged,
-            self.episodes_skipped,
-            self.warnings,
-        )
     }
 }
 
@@ -458,48 +430,6 @@ pub struct TimelineArmSample {
 }
 
 impl TimelineArmSample {
-    pub fn new(
-        arm: String,
-        normalized: BTreeMap<String, Option<f64>>,
-        raw: BTreeMap<String, i64>,
-    ) -> Self {
-        Self {
-            arm,
-            normalized,
-            raw,
-            ..Self::default()
-        }
-    }
-    pub fn with_velocity(mut self, velocity: Option<BTreeMap<String, Option<f64>>>) -> Self {
-        self.velocity = velocity;
-        self
-    }
-    pub fn with_effort(mut self, effort: Option<BTreeMap<String, Option<f64>>>) -> Self {
-        self.effort = effort;
-        self
-    }
-    pub fn with_action(mut self, action: Option<BTreeMap<String, Option<f64>>>) -> Self {
-        self.action = action;
-        self
-    }
-    pub fn arm(&self) -> &str {
-        &self.arm
-    }
-    pub fn normalized(&self) -> &BTreeMap<String, Option<f64>> {
-        &self.normalized
-    }
-    pub fn raw(&self) -> &BTreeMap<String, i64> {
-        &self.raw
-    }
-    pub fn velocity(&self) -> Option<&BTreeMap<String, Option<f64>>> {
-        self.velocity.as_ref()
-    }
-    pub fn effort(&self) -> Option<&BTreeMap<String, Option<f64>>> {
-        self.effort.as_ref()
-    }
-    pub fn action(&self) -> Option<&BTreeMap<String, Option<f64>>> {
-        self.action.as_ref()
-    }
     pub fn into_parts(self) -> TimelineArmSampleParts {
         (
             self.arm,
@@ -521,34 +451,6 @@ pub struct TimelineSample {
 }
 
 impl TimelineSample {
-    pub const fn new(frame: u64, seconds: f64) -> Self {
-        Self {
-            frame,
-            seconds,
-            follow_error_degrees: None,
-            arms: Vec::new(),
-        }
-    }
-    pub fn with_follow_error_degrees(mut self, value: Option<f64>) -> Self {
-        self.follow_error_degrees = value;
-        self
-    }
-    pub fn with_arms(mut self, arms: Vec<TimelineArmSample>) -> Self {
-        self.arms = arms;
-        self
-    }
-    pub const fn frame(&self) -> u64 {
-        self.frame
-    }
-    pub const fn seconds(&self) -> f64 {
-        self.seconds
-    }
-    pub const fn follow_error_degrees(&self) -> Option<f64> {
-        self.follow_error_degrees
-    }
-    pub fn arms(&self) -> &[TimelineArmSample] {
-        &self.arms
-    }
     pub fn into_parts(self) -> (u64, f64, Option<f64>, Vec<TimelineArmSample>) {
         (
             self.frame,
@@ -604,7 +506,7 @@ impl EpisodeStore {
             .ok_or_else(|| EpisodeError::NotFound(id.to_owned()))
     }
 
-    pub async fn full_episode(&self, id: &str) -> Result<FullEpisode, EpisodeError> {
+    pub(crate) async fn full_episode(&self, id: &str) -> Result<FullEpisode, EpisodeError> {
         EpisodeId::try_from(id).map_err(|_| EpisodeError::InvalidId(id.to_owned()))?;
         let episodes = Table::Episodes.qualified_name(self.project_store.namespace());
         let samples = Table::JointSamples.qualified_name(self.project_store.namespace());
@@ -623,7 +525,7 @@ impl EpisodeStore {
             return Err(EpisodeError::NotFound(id.to_owned()));
         }
         let metadata = connection
-            .run_query(
+            .query_rows(
                 &format!(
                     "SELECT {} FROM {episodes} WHERE {} = {episode_value} LIMIT 1",
                     db::METADATA_JSON,
@@ -651,7 +553,7 @@ impl EpisodeStore {
             .map_err(EpisodeError::Invalid)?
         {
             let result = connection
-                .run_query(&sample_query, MAX_EPISODE_ROWS)
+                .query_rows(&sample_query, MAX_EPISODE_ROWS)
                 .await
                 .map_err(EpisodeError::Invalid)?;
             if result.truncated() {
@@ -684,7 +586,7 @@ impl EpisodeStore {
         })
     }
 
-    pub async fn next_id(&self) -> Result<String, EpisodeError> {
+    pub(crate) async fn next_id(&self) -> Result<String, EpisodeError> {
         let highest = self
             .try_list()
             .await?
@@ -904,7 +806,7 @@ impl EpisodeStore {
         {
             return Ok(Vec::new());
         }
-        let result = connection.run_query(&format!("SELECT {}, {}, {}, {}, {}, {}, {}, {} FROM {relation} WHERE {} = {id} ORDER BY {}, {}", db::STREAM_ID, db::CAMERA_ID, db::WIDTH, db::HEIGHT, db::FPS, db::FRAMES, db::SEGMENT_INDEX, db::TIMELINE_OFFSET_NS, db::EPISODE_ID, db::STREAM_ID, db::SEGMENT_INDEX), 10_000).await.map_err(EpisodeError::Invalid)?;
+        let result = connection.query_rows(&format!("SELECT {}, {}, {}, {}, {}, {}, {}, {} FROM {relation} WHERE {} = {id} ORDER BY {}, {}", db::STREAM_ID, db::CAMERA_ID, db::WIDTH, db::HEIGHT, db::FPS, db::FRAMES, db::SEGMENT_INDEX, db::TIMELINE_OFFSET_NS, db::EPISODE_ID, db::STREAM_ID, db::SEGMENT_INDEX), 10_000).await.map_err(EpisodeError::Invalid)?;
         result
             .into_rows()
             .into_iter()
@@ -927,7 +829,7 @@ impl EpisodeStore {
             return Ok(Vec::new());
         }
         let result = connection
-            .run_query(
+            .query_rows(
                 &format!(
                     "SELECT {}, {} FROM {relation} ORDER BY {}",
                     db::METADATA_JSON,
@@ -1079,13 +981,13 @@ impl EpisodeWriter {
     pub fn id(&self) -> &str {
         self.session.start().id()
     }
-    pub fn dataset_id(&self) -> &str {
+    pub(crate) fn dataset_id(&self) -> &str {
         self.session.start().dataset_id()
     }
     pub fn started_ms(&self) -> i64 {
         self.session.start().started_ms()
     }
-    pub fn push(&self, sample: Sample) -> bool {
+    pub(crate) fn push(&self, sample: Sample) -> bool {
         self.session.push(sample)
     }
     pub(crate) fn checkpoint(
@@ -1094,7 +996,7 @@ impl EpisodeWriter {
     ) -> Result<EpisodeCheckpoint, String> {
         self.session.checkpoint(completion)
     }
-    pub fn failure(&self) -> Option<String> {
+    pub(crate) fn failure(&self) -> Option<String> {
         self.session.failure()
     }
     pub(crate) fn finish(self, completion: EpisodeCompletion) -> Result<EpisodeInfo, EpisodeError> {

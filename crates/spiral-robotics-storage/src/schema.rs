@@ -188,9 +188,10 @@ pub(crate) mod column {
     pub(crate) const PAYLOAD: &str = "payload";
     pub(crate) const POLICY: &str = "policy";
     pub(crate) const RAW_POSITION: &str = "raw_position";
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) const REPLAY_POSITION: &str = "replay_position";
     pub(crate) const ROBOT_TYPE: &str = "robot_type";
     pub(crate) const ROBOT_ID: &str = "robot_id";
-    pub(crate) const REPLAY_POSITION: &str = "replay_position";
     pub(crate) const RUN_ID: &str = "run_id";
     pub(crate) const RUN_NAME: &str = "run_name";
     pub(crate) const SAMPLE_HZ: &str = "sample_hz";

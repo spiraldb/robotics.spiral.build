@@ -10,18 +10,6 @@ pub struct StartSpiralReplayRequest {
     stream: String,
 }
 
-impl StartSpiralReplayRequest {
-    pub fn episode(&self) -> &str {
-        &self.episode
-    }
-    pub fn robot(&self) -> &str {
-        &self.robot
-    }
-    pub fn stream(&self) -> &str {
-        &self.stream
-    }
-}
-
 /// One recorded episode, as summarised from SpiralDB.
 ///
 /// An episode is one take: the operator arms the recorder, performs the task
@@ -113,15 +101,6 @@ impl DatasetSummary {
     pub fn id(&self) -> &str {
         &self.id
     }
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-    pub const fn created_ms(&self) -> i64 {
-        self.created_ms
-    }
-    pub fn description(&self) -> Option<&str> {
-        self.description.as_deref()
-    }
 }
 
 impl EpisodeInfo {
@@ -165,9 +144,6 @@ impl EpisodeInfo {
     pub const fn duration_seconds(&self) -> f64 {
         self.timeline.duration_seconds
     }
-    pub fn recording_gaps(&self) -> &[RecordingGap] {
-        &self.timeline.recording_gaps
-    }
     pub const fn sample_hz(&self) -> f64 {
         self.timeline.sample_hz
     }
@@ -176,9 +152,6 @@ impl EpisodeInfo {
     }
     pub fn source(&self) -> &str {
         &self.identity.source
-    }
-    pub const fn max_follow_error_degrees(&self) -> Option<f64> {
-        self.assessment.max_follow_error_degrees
     }
     pub const fn discarded(&self) -> bool {
         self.assessment.discarded
@@ -510,21 +483,6 @@ impl EpisodeVideoAssetMetadata {
     pub fn stream_id(&self) -> &str {
         &self.identity.stream_id
     }
-    pub fn camera_id(&self) -> &str {
-        &self.identity.camera_id
-    }
-    pub const fn width(&self) -> u32 {
-        self.format.width
-    }
-    pub const fn height(&self) -> u32 {
-        self.format.height
-    }
-    pub const fn fps(&self) -> u32 {
-        self.format.fps
-    }
-    pub const fn frames(&self) -> u64 {
-        self.timeline.frames
-    }
     pub const fn duration_seconds(&self) -> f64 {
         self.timeline.duration_seconds
     }
@@ -534,6 +492,7 @@ impl EpisodeVideoAssetMetadata {
     pub const fn timeline_offset_seconds(&self) -> Option<f64> {
         self.timeline.timeline_offset_seconds
     }
+    #[cfg(any(test, feature = "test-support"))]
     pub fn with_stream_id(mut self, stream_id: impl Into<String>) -> Self {
         self.identity.stream_id = stream_id.into();
         self
@@ -565,15 +524,6 @@ impl EpisodeCatalogResponse {
         }
     }
 
-    pub fn datasets(&self) -> &[DatasetSummary] {
-        &self.datasets
-    }
-    pub fn episodes(&self) -> &[EpisodeInfo] {
-        &self.episodes
-    }
-    pub fn issues(&self) -> &[String] {
-        &self.issues
-    }
     pub fn into_parts(self) -> (Vec<DatasetSummary>, Vec<EpisodeInfo>, Vec<String>) {
         (self.datasets, self.episodes, self.issues)
     }
@@ -727,9 +677,6 @@ impl RecordingProgress {
     pub const fn paused(&self) -> bool {
         self.state.paused
     }
-    pub const fn max_follow_error_degrees(&self) -> Option<f64> {
-        self.state.max_follow_error_degrees
-    }
     pub fn error(&self) -> Option<&str> {
         self.state.error.as_deref()
     }
@@ -752,12 +699,6 @@ impl RecordingGap {
             after_seconds,
             duration_seconds,
         }
-    }
-    pub const fn after_seconds(self) -> f64 {
-        self.after_seconds
-    }
-    pub const fn duration_seconds(self) -> f64 {
-        self.duration_seconds
     }
 }
 
@@ -872,20 +813,8 @@ impl ReplayProgress {
     pub fn episode(&self) -> &str {
         &self.identity.episode
     }
-    pub fn robot(&self) -> &str {
-        &self.identity.robot
-    }
-    pub const fn frame(&self) -> u64 {
-        self.timeline.frame
-    }
-    pub const fn frames(&self) -> u64 {
-        self.timeline.frames
-    }
     pub const fn elapsed_seconds(&self) -> f64 {
         self.timeline.elapsed_seconds
-    }
-    pub const fn duration_seconds(&self) -> f64 {
-        self.timeline.duration_seconds
     }
     pub const fn purpose(&self) -> ReplayPurpose {
         self.transport.purpose
@@ -896,6 +825,7 @@ impl ReplayProgress {
     pub const fn paused(&self) -> bool {
         self.transport.paused
     }
+    #[cfg(any(test, feature = "test-support"))]
     pub const fn set_transport(&mut self, transport: ReplayTransport) {
         self.transport = transport;
     }
@@ -937,16 +867,6 @@ impl StartRecordingRequest {
             arms: Vec::new(),
             note: None,
         }
-    }
-
-    pub fn with_arms(mut self, arms: Vec<String>) -> Self {
-        self.arms = arms;
-        self
-    }
-
-    pub fn with_note(mut self, note: Option<String>) -> Self {
-        self.note = note;
-        self
     }
 
     pub fn dataset_id(&self) -> &str {
@@ -1059,11 +979,5 @@ impl StartReplayRequest {
     }
     pub const fn start_seconds(&self) -> f64 {
         self.start_seconds
-    }
-}
-
-impl JudgeEpisodeRequest {
-    pub const fn discarded(&self) -> bool {
-        self.discarded
     }
 }

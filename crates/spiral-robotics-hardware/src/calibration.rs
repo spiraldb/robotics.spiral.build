@@ -381,7 +381,7 @@ impl NormalizedPosition {
         Ok(Self(value))
     }
 
-    pub const fn get(self) -> f64 {
+    pub(crate) const fn get(self) -> f64 {
         self.0
     }
 }
@@ -861,7 +861,7 @@ impl MotorRangeTracker {
 /// corrupt command into motion toward center can move a physical arm while
 /// hiding the upstream fault.
 impl MotorCalibration {
-    pub fn denormalize(&self, normalized: f64) -> Result<i64, CalibrationError> {
+    pub(crate) fn denormalize(&self, normalized: f64) -> Result<i64, CalibrationError> {
         let calibration = self;
         if !normalized.is_finite() {
             return Err(CalibrationError::NonFiniteNormalizedCommand);

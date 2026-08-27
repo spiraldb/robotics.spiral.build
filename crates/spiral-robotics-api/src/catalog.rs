@@ -173,22 +173,6 @@ impl QueryPreset {
         Self::WorkflowRuns,
     ];
 
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Datasets => "Datasets",
-            Self::Episodes => "Episodes",
-            Self::EpisodeStreams => "Streams",
-            Self::JointSamples => "Joint samples",
-            Self::VideoAssets => "Video assets",
-            Self::TrainingCheckpoints => "Checkpoints",
-            Self::Robots => "Robots",
-            Self::StudioSettings => "Studio settings",
-            Self::TrainingRuns => "Training runs",
-            Self::RolloutRuns => "Rollout runs",
-            Self::WorkflowRuns => "Workflow runs",
-        }
-    }
-
     pub const fn table(self) -> ManagedTable {
         match self {
             Self::Datasets => ManagedTable::Datasets,

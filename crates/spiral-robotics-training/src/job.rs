@@ -717,14 +717,6 @@ pub struct TrainingJobCursor {
 }
 
 impl TrainingJobCursor {
-    pub const fn new(metric_step: u64, checkpoint_step: u64, log_offset: u64) -> Self {
-        Self {
-            metric_step,
-            checkpoint_step,
-            log_offset,
-        }
-    }
-
     pub const fn metric_step(self) -> u64 {
         self.metric_step
     }
@@ -797,10 +789,6 @@ impl TrainingJobSnapshot {
 
     pub const fn current_step(&self) -> u64 {
         self.state.current_step
-    }
-
-    pub const fn finished_ms(&self) -> Option<i64> {
-        self.state.finished_ms
     }
 
     pub fn message(&self) -> Option<&str> {

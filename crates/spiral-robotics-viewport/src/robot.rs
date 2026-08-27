@@ -56,7 +56,7 @@ pub enum Target {
 }
 
 impl Target {
-    pub fn robot(&self) -> &str {
+    pub(crate) fn robot(&self) -> &str {
         match self {
             Self::Joint { robot, .. } | Self::Robot { robot } | Self::Camera { robot, .. } => robot,
         }

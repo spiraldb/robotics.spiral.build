@@ -9,6 +9,9 @@ publish = false
 [lints]
 workspace = true
 
+[features]
+test-support = []
+
 [dependencies]
 serde.workspace = true
 thiserror = "2"

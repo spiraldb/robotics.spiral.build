@@ -284,7 +284,7 @@ impl CameraRuntime {
 /// Ask the operating system for camera permission, where it is required.
 #[cfg(not(target_os = "macos"))]
 impl CameraRuntime {
-    pub fn initialize_access() -> Result<()> {
+    pub(crate) fn initialize_access() -> Result<()> {
         Ok(())
     }
 }

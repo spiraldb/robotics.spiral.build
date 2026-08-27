@@ -184,7 +184,7 @@ impl WorkflowFeatureApplicability {
     }
 
     /// Derive this applicability's server-owned feature cache relation.
-    pub fn cache_relation(&self) -> String {
+    pub(crate) fn cache_relation(&self) -> String {
         Self::derived_cache_relation(&self.source_relation)
     }
 
@@ -255,7 +255,7 @@ pub enum WorkflowNodeKind {
 }
 
 impl WorkflowNodeKind {
-    pub const fn label(self) -> &'static str {
+    pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Table => "Table",
             Self::Model => "Model",
@@ -296,9 +296,6 @@ impl WorkflowValidationReport {
     }
 }
 impl WorkflowValidationIssue {
-    pub fn code(&self) -> &str {
-        &self.code
-    }
     pub fn message(&self) -> &str {
         &self.message
     }
@@ -307,6 +304,10 @@ impl WorkflowValidationIssue {
     }
     pub fn node_id(&self) -> Option<&str> {
         self.node_id.as_deref()
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn code(&self) -> &str {
+        &self.code
     }
 }
 
@@ -378,14 +379,6 @@ impl WorkflowCommand {
     pub fn cancel(scope_id: impl Into<String>) -> Self {
         Self::Cancel {
             scope_id: scope_id.into(),
-        }
-    }
-
-    pub fn scope_id(&self) -> &str {
-        match self {
-            Self::Apply { scope_id, .. }
-            | Self::Run { scope_id, .. }
-            | Self::Cancel { scope_id } => scope_id,
         }
     }
 }
@@ -523,14 +516,8 @@ impl WorkflowRunSnapshot {
     pub const fn started_ms(&self) -> u64 {
         self.timing.started_ms
     }
-    pub const fn finished_ms(&self) -> u64 {
-        self.timing.finished_ms
-    }
     pub const fn updated_ms(&self) -> u64 {
         self.timing.updated_ms
-    }
-    pub fn set_run_id(&mut self, run_id: Option<String>) {
-        self.identity.run_id = run_id;
     }
     pub const fn set_workflow_revision(&mut self, revision: u64) {
         self.identity.workflow_revision = revision;
@@ -550,14 +537,19 @@ impl WorkflowRunSnapshot {
     pub const fn set_result_stale(&mut self, result_stale: bool) {
         self.execution.result_stale = result_stale;
     }
-    pub const fn set_started_ms(&mut self, started_ms: u64) {
-        self.timing.started_ms = started_ms;
-    }
     pub const fn set_finished_ms(&mut self, finished_ms: u64) {
         self.timing.finished_ms = finished_ms;
     }
     pub const fn set_updated_ms(&mut self, updated_ms: u64) {
         self.timing.updated_ms = updated_ms;
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_run_id(&mut self, run_id: Option<String>) {
+        self.identity.run_id = run_id;
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    pub const fn set_started_ms(&mut self, started_ms: u64) {
+        self.timing.started_ms = started_ms;
     }
 }
 
@@ -637,11 +629,6 @@ impl WorkflowNodeSnapshot {
         }
     }
 
-    pub fn with_progress(mut self, progress: WorkflowNodeProgress) -> Self {
-        self.outcome.progress = Some(progress);
-        self
-    }
-
     pub fn with_quarantine(mut self, quarantine: WorkflowQuarantineSummary) -> Self {
         self.outcome.quarantine = quarantine;
         self
@@ -657,12 +644,7 @@ impl WorkflowNodeSnapshot {
         self
     }
 
-    pub const fn with_elapsed_ms(mut self, elapsed_ms: u64) -> Self {
-        self.elapsed_ms = elapsed_ms;
-        self
-    }
-
-    pub fn pending(node_id: impl Into<String>, detail: impl Into<String>) -> Self {
+    pub(crate) fn pending(node_id: impl Into<String>, detail: impl Into<String>) -> Self {
         Self::new(node_id, WorkflowNodePhase::Pending, detail)
     }
     pub fn node_id(&self) -> &str {
@@ -673,12 +655,6 @@ impl WorkflowNodeSnapshot {
     }
     pub fn detail(&self) -> &str {
         &self.detail
-    }
-    pub const fn elapsed_ms(&self) -> u64 {
-        self.elapsed_ms
-    }
-    pub const fn rows(&self) -> Option<usize> {
-        self.outcome.rows
     }
     pub fn error(&self) -> Option<&str> {
         self.outcome.error.as_deref()
@@ -721,6 +697,11 @@ impl WorkflowNodeSnapshot {
     }
     pub fn warnings_mut(&mut self) -> &mut Vec<String> {
         &mut self.artifacts.warnings
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_progress(mut self, progress: WorkflowNodeProgress) -> Self {
+        self.outcome.progress = Some(progress);
+        self
     }
 }
 
@@ -834,15 +815,6 @@ impl WorkflowModelRunMetadata {
         self
     }
 
-    pub fn model_id(&self) -> &str {
-        &self.identity.model_id
-    }
-    pub fn feature_cache_relation(&self) -> &str {
-        &self.identity.feature_cache_relation
-    }
-    pub fn features(&self) -> &[WorkflowFeatureDefinition] {
-        &self.execution.features
-    }
     pub fn fingerprint(&self) -> &str {
         &self.identity.fingerprint
     }
@@ -852,17 +824,20 @@ impl WorkflowModelRunMetadata {
     pub fn device(&self) -> &str {
         &self.execution.device
     }
-    pub const fn input_rows(&self) -> u64 {
-        self.metrics.input_rows
-    }
-    pub const fn output_rows(&self) -> u64 {
-        self.metrics.output_rows
-    }
     pub const fn decode_ms(&self) -> u64 {
         self.metrics.decode_ms
     }
     pub const fn inference_ms(&self) -> u64 {
         self.metrics.inference_ms
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    pub const fn input_rows(&self) -> u64 {
+        self.metrics.input_rows
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub const fn output_rows(&self) -> u64 {
+        self.metrics.output_rows
     }
 }
 
@@ -1018,11 +993,6 @@ impl WorkflowAgentMessage {
         self
     }
 
-    pub fn with_tools(mut self, tools: Vec<WorkflowAgentToolSummary>) -> Self {
-        self.content.tools = tools;
-        self
-    }
-
     pub const fn with_created_ms(mut self, created_ms: u64) -> Self {
         self.identity.created_ms = created_ms;
         self
@@ -1051,12 +1021,6 @@ impl WorkflowAgentMessage {
     pub fn tools(&self) -> &[WorkflowAgentToolSummary] {
         &self.content.tools
     }
-    pub fn run_id(&self) -> Option<&str> {
-        self.content.run_id.as_deref()
-    }
-    pub const fn created_ms(&self) -> u64 {
-        self.identity.created_ms
-    }
     pub const fn set_phase(&mut self, phase: WorkflowAgentMessagePhase) {
         self.content.phase = phase;
     }
@@ -1068,6 +1032,11 @@ impl WorkflowAgentMessage {
     }
     pub fn set_run_id(&mut self, run_id: Option<String>) {
         self.content.run_id = run_id;
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_tools(mut self, tools: Vec<WorkflowAgentToolSummary>) -> Self {
+        self.content.tools = tools;
+        self
     }
 }
 
@@ -1149,16 +1118,6 @@ impl WorkflowAgentSession {
         }
     }
 
-    pub const fn with_revision(mut self, revision: u64) -> Self {
-        self.identity.revision = revision;
-        self
-    }
-
-    pub fn with_messages(mut self, messages: Vec<WorkflowAgentMessage>) -> Self {
-        self.activity.messages = messages;
-        self
-    }
-
     pub const fn with_updated_ms(mut self, updated_ms: u64) -> Self {
         self.identity.updated_ms = updated_ms;
         self
@@ -1187,14 +1146,8 @@ impl WorkflowAgentSession {
     pub fn error(&self) -> Option<&str> {
         self.activity.error.as_deref()
     }
-    pub const fn updated_ms(&self) -> u64 {
-        self.identity.updated_ms
-    }
     pub const fn set_revision(&mut self, revision: u64) {
         self.identity.revision = revision;
-    }
-    pub fn set_workflow_id(&mut self, workflow_id: impl Into<String>) {
-        self.identity.workflow_id = workflow_id.into();
     }
     pub const fn set_phase(&mut self, phase: WorkflowAgentPhase) {
         self.activity.phase = phase;
@@ -1213,6 +1166,25 @@ impl WorkflowAgentSession {
     }
     pub const fn set_updated_ms(&mut self, updated_ms: u64) {
         self.identity.updated_ms = updated_ms;
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    pub const fn updated_ms(&self) -> u64 {
+        self.identity.updated_ms
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub const fn with_revision(mut self, revision: u64) -> Self {
+        self.identity.revision = revision;
+        self
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_messages(mut self, messages: Vec<WorkflowAgentMessage>) -> Self {
+        self.activity.messages = messages;
+        self
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_workflow_id(&mut self, workflow_id: impl Into<String>) {
+        self.identity.workflow_id = workflow_id.into();
     }
 }
 
@@ -1307,20 +1279,29 @@ impl WorkflowAgentStateResponse {
     pub const fn session(&self) -> &WorkflowAgentSession {
         &self.session
     }
-    pub fn set_scope_id(&mut self, scope_id: impl Into<String>) {
-        self.context.scope_id = scope_id.into();
-    }
-    pub const fn set_revision(&mut self, revision: u64) {
-        self.context.revision = revision;
-    }
-    pub const fn set_history_available(&mut self, history_available: bool) {
-        self.context.history_available = history_available;
-    }
+    #[cfg(any(test, feature = "test-support"))]
     pub fn conversations_mut(&mut self) -> &mut Vec<WorkflowAgentConversationSummary> {
         &mut self.conversations
     }
+
+    #[cfg(any(test, feature = "test-support"))]
     pub const fn session_mut(&mut self) -> &mut WorkflowAgentSession {
         &mut self.session
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub const fn set_history_available(&mut self, history_available: bool) {
+        self.context.history_available = history_available;
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub const fn set_revision(&mut self, revision: u64) {
+        self.context.revision = revision;
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_scope_id(&mut self, scope_id: impl Into<String>) {
+        self.context.scope_id = scope_id.into();
     }
 }
 
@@ -1803,14 +1784,20 @@ impl WorkflowSpec {
             .iter()
             .any(|node| matches!(node.config, WorkflowNodeConfig::Model { .. }))
     }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_name(&mut self, name: impl Into<String>) {
+        self.name = name.into();
+    }
 }
 
 impl WorkflowSpec {
     pub fn id(&self) -> &str {
         &self.id
-    }
-    pub fn name(&self) -> &str {
-        &self.name
     }
     pub const fn revision(&self) -> u64 {
         self.revision
@@ -1829,9 +1816,6 @@ impl WorkflowSpec {
     }
     pub const fn set_revision(&mut self, revision: u64) {
         self.revision = revision;
-    }
-    pub fn set_name(&mut self, name: impl Into<String>) {
-        self.name = name.into();
     }
 }
 impl WorkflowNodeSpec {
@@ -1854,14 +1838,19 @@ impl WorkflowNodeSpec {
     pub fn config_mut(&mut self) -> &mut WorkflowNodeConfig {
         &mut self.config
     }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_config(&mut self, config: WorkflowNodeConfig) {
+        self.config = config;
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
     pub fn set_id(&mut self, id: impl Into<String>) {
         self.id = id.into();
     }
+
+    #[cfg(any(test, feature = "test-support"))]
     pub fn set_name(&mut self, name: impl Into<String>) {
         self.name = name.into();
-    }
-    pub fn set_config(&mut self, config: WorkflowNodeConfig) {
-        self.config = config;
     }
 }
 impl WorkflowEdgeSpec {
@@ -1881,9 +1870,6 @@ impl WorkflowEdgeSpec {
 impl WorkflowValidationReport {
     pub fn errors(&self) -> &[WorkflowValidationIssue] {
         &self.errors
-    }
-    pub fn warnings(&self) -> &[WorkflowValidationIssue] {
-        &self.warnings
     }
 }
 impl WorkflowStateResponse {
@@ -1910,17 +1896,20 @@ impl WorkflowStateResponse {
     pub const fn snapshot(&self) -> &WorkflowRunSnapshot {
         &self.snapshot
     }
-    pub fn workflow_mut(&mut self) -> &mut WorkflowSpec {
-        &mut self.workflow
-    }
     pub fn set_snapshot(&mut self, snapshot: WorkflowRunSnapshot) {
         self.snapshot = snapshot;
     }
+    pub fn set_scope_id(&mut self, scope_id: impl Into<String>) {
+        self.scope_id = scope_id.into();
+    }
+    #[cfg(any(test, feature = "test-support"))]
     pub const fn snapshot_mut(&mut self) -> &mut WorkflowRunSnapshot {
         &mut self.snapshot
     }
-    pub fn set_scope_id(&mut self, scope_id: impl Into<String>) {
-        self.scope_id = scope_id.into();
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn workflow_mut(&mut self) -> &mut WorkflowSpec {
+        &mut self.workflow
     }
 }
 
@@ -1936,12 +1925,6 @@ impl WorkflowNodeProgress {
     }
 }
 impl WorkflowAgentReadiness {
-    pub fn unconfigured(detail: impl Into<String>) -> Self {
-        Self::Unconfigured {
-            detail: detail.into(),
-        }
-    }
-
     pub fn ready(detail: impl Into<String>) -> Self {
         Self::Ready {
             detail: detail.into(),
@@ -2001,6 +1984,13 @@ impl WorkflowAgentArtifactReceipt {
         }
     }
 
+    pub fn run_id(&self) -> Option<&str> {
+        match self {
+            Self::Run { run_id, .. } | Self::Results { run_id, .. } => Some(run_id),
+            Self::Graph { .. } => None,
+        }
+    }
+    #[cfg(any(test, feature = "test-support"))]
     pub const fn revision(&self) -> Option<u64> {
         match self {
             Self::Graph { revision, .. } => Some(*revision),
@@ -2008,13 +1998,7 @@ impl WorkflowAgentArtifactReceipt {
         }
     }
 
-    pub fn run_id(&self) -> Option<&str> {
-        match self {
-            Self::Run { run_id, .. } | Self::Results { run_id, .. } => Some(run_id),
-            Self::Graph { .. } => None,
-        }
-    }
-
+    #[cfg(any(test, feature = "test-support"))]
     pub const fn row_count(&self) -> Option<usize> {
         match self {
             Self::Results { row_count, .. } => *row_count,
@@ -2098,18 +2082,13 @@ impl WorkflowAgentConversationSummary {
     pub fn title(&self) -> &str {
         &self.title
     }
-    pub const fn created_ms(&self) -> u64 {
-        self.created_ms
-    }
-    pub const fn updated_ms(&self) -> u64 {
-        self.updated_ms
-    }
     pub const fn message_count(&self) -> usize {
         self.message_count
     }
     pub fn owned_run_id(&self) -> Option<&str> {
         self.owned_run_id.as_deref()
     }
+    #[cfg(any(test, feature = "test-support"))]
     pub fn set_owned_run_id(&mut self, owned_run_id: Option<String>) {
         self.owned_run_id = owned_run_id;
     }
@@ -2171,9 +2150,6 @@ impl WorkflowAgentCommand {
     }
 }
 impl WorkflowQuarantineSummary {
-    pub fn new(count: u64, examples: Vec<String>) -> Self {
-        Self { count, examples }
-    }
     pub const fn count(&self) -> u64 {
         self.count
     }
@@ -2185,6 +2161,10 @@ impl WorkflowQuarantineSummary {
     }
     pub fn examples_mut(&mut self) -> &mut Vec<String> {
         &mut self.examples
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn new(count: u64, examples: Vec<String>) -> Self {
+        Self { count, examples }
     }
 }
 

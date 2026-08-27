@@ -2,8 +2,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     TRAINING_BACKEND_API_ID, TRAINING_BACKEND_API_REVISION, TRAINING_BACKEND_API_VERSION,
-    TRAINING_BACKEND_MAX_SPIRAL_SCHEMA_VERSION, TRAINING_BACKEND_MIN_SPIRAL_SCHEMA_VERSION,
     TrainingJobCursor, TrainingJobRequest, TrainingJobSnapshot,
+};
+
+#[cfg(any(test, feature = "test-support"))]
+use crate::{
+    TRAINING_BACKEND_MAX_SPIRAL_SCHEMA_VERSION, TRAINING_BACKEND_MIN_SPIRAL_SCHEMA_VERSION,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -20,16 +24,6 @@ struct TrainingBackendProtocol {
 }
 
 impl TrainingBackendProtocol {
-    fn current() -> Self {
-        Self {
-            api_id: TRAINING_BACKEND_API_ID.to_owned(),
-            api_version: TRAINING_BACKEND_API_VERSION,
-            api_revision: TRAINING_BACKEND_API_REVISION,
-            spiral_schema_minimum: TRAINING_BACKEND_MIN_SPIRAL_SCHEMA_VERSION,
-            spiral_schema_maximum: TRAINING_BACKEND_MAX_SPIRAL_SCHEMA_VERSION,
-        }
-    }
-
     fn is_revision_compatible(&self) -> bool {
         self.api_revision
             .cmp(&TRAINING_BACKEND_API_REVISION)
@@ -45,6 +39,16 @@ impl TrainingBackendProtocol {
             ..Self::current()
         }
     }
+    #[cfg(any(test, feature = "test-support"))]
+    fn current() -> Self {
+        Self {
+            api_id: TRAINING_BACKEND_API_ID.to_owned(),
+            api_version: TRAINING_BACKEND_API_VERSION,
+            api_revision: TRAINING_BACKEND_API_REVISION,
+            spiral_schema_minimum: TRAINING_BACKEND_MIN_SPIRAL_SCHEMA_VERSION,
+            spiral_schema_maximum: TRAINING_BACKEND_MAX_SPIRAL_SCHEMA_VERSION,
+        }
+    }
 }
 
 /// Stable identity reported by a training backend.
@@ -53,33 +57,6 @@ pub struct TrainingBackendIdentity {
     id: String,
     display_name: String,
     runtime: String,
-}
-
-impl TrainingBackendIdentity {
-    pub fn new(
-        id: impl Into<String>,
-        display_name: impl Into<String>,
-        runtime: impl Into<String>,
-    ) -> Self {
-        let identity = Self {
-            id: id.into(),
-            display_name: display_name.into(),
-            runtime: runtime.into(),
-        };
-        assert!(
-            !identity.id.trim().is_empty(),
-            "backend ID must not be empty"
-        );
-        assert!(
-            !identity.display_name.trim().is_empty(),
-            "backend display name must not be empty"
-        );
-        assert!(
-            !identity.runtime.trim().is_empty(),
-            "backend runtime description must not be empty"
-        );
-        identity
-    }
 }
 
 /// Health and compatibility information for one training backend.
@@ -93,19 +70,6 @@ pub struct TrainingBackendInfo {
 }
 
 impl TrainingBackendInfo {
-    /// Constructs health information for a backend implementing this protocol.
-    pub fn new(identity: TrainingBackendIdentity, devices: Vec<String>) -> Self {
-        assert!(
-            devices.iter().all(|device| !device.trim().is_empty()),
-            "backend device names must not be empty"
-        );
-        Self {
-            protocol: TrainingBackendProtocol::current(),
-            identity,
-            devices,
-        }
-    }
-
     pub(crate) fn api_id(&self) -> &str {
         &self.protocol.api_id
     }
@@ -225,6 +189,19 @@ impl TrainingBackendInfo {
         fixture.protocol.api_version = api_version;
         fixture
     }
+    #[cfg(any(test, feature = "test-support"))]
+    /// Constructs health information for a backend implementing this protocol.
+    pub fn new(identity: TrainingBackendIdentity, devices: Vec<String>) -> Self {
+        assert!(
+            devices.iter().all(|device| !device.trim().is_empty()),
+            "backend device names must not be empty"
+        );
+        Self {
+            protocol: TrainingBackendProtocol::current(),
+            identity,
+            devices,
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -275,5 +252,33 @@ pub trait TrainingBackend: Send + Sync {
         Err(TrainingBackendError::new(
             "this training backend does not support worker-owned jobs",
         ))
+    }
+}
+
+impl TrainingBackendIdentity {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn new(
+        id: impl Into<String>,
+        display_name: impl Into<String>,
+        runtime: impl Into<String>,
+    ) -> Self {
+        let identity = Self {
+            id: id.into(),
+            display_name: display_name.into(),
+            runtime: runtime.into(),
+        };
+        assert!(
+            !identity.id.trim().is_empty(),
+            "backend ID must not be empty"
+        );
+        assert!(
+            !identity.display_name.trim().is_empty(),
+            "backend display name must not be empty"
+        );
+        assert!(
+            !identity.runtime.trim().is_empty(),
+            "backend runtime description must not be empty"
+        );
+        identity
     }
 }

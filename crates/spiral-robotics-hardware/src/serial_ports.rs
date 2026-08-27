@@ -32,7 +32,7 @@ impl SerialPortCatalog {
     }
 
     /// Borrow the discovered ports in their stable display order.
-    pub fn ports(&self) -> &[SerialPortInfo] {
+    pub(crate) fn ports(&self) -> &[SerialPortInfo] {
         &self.0
     }
 

@@ -27,7 +27,7 @@ use spiral_robotics_api::relations::{CatalogRelation, RelationCatalog};
 use spiral_robotics_api::relations::{
     ProjectDataRelation, ProjectDataRelationsResponse, QueryColumn, SpiralQueryResponse,
 };
-use spiral_robotics_api::settings::{ConnectionTestResponse, DataSettings, SpiralSettings};
+use spiral_robotics_api::settings::ConnectionTestResponse;
 use spiral_robotics_api::sql::QualifiedRelation;
 
 use crate::bundle;
@@ -48,7 +48,6 @@ const MAX_INTERNAL_QUERY_RESPONSE_BYTES: usize = 128 * 1024 * 1024;
 const QUERY_JSON_CHUNK_ROWS: usize = 64;
 const QUERY_IMAGE_PREVIEW_MAX_EDGE: u32 = 640;
 const QUERY_IMAGE_JPEG_QUALITY: u8 = 82;
-const MAX_REPLAY_ROWS: usize = 250_000;
 const JOINT_BATCH_ROWS: usize = 512;
 const BLOB_EXTENSION_NAME: &str = "spql.io.Blob";
 const IMAGE_EXTENSION_NAME: &str = "spql.image.Image";
@@ -217,28 +216,6 @@ impl StorageManager {
 
     pub(crate) fn project_store(&self) -> &ProjectStore {
         &self.project_store
-    }
-
-    pub fn data_settings(&self, preferences: &StoredStudioPreferences) -> DataSettings {
-        let credentials = self.project_store.credentials();
-        let spiral = SpiralSettings::new(
-            self.project_store.endpoint(),
-            self.project_store.spfs_endpoint(),
-            self.project_store.project_id(),
-        )
-        .with_client(
-            credentials
-                .as_ref()
-                .map(|credentials| credentials.client_id().to_owned())
-                .unwrap_or_default(),
-            credentials.is_some(),
-        )
-        .with_namespace(self.project_store.namespace());
-        DataSettings::new(
-            spiral,
-            preferences.training().clone(),
-            preferences.video().clone(),
-        )
     }
 
     pub fn project_id(&self) -> String {
@@ -497,7 +474,7 @@ impl StorageManager {
             return Ok(StoredStudioPreferences::default());
         }
         let result = connection
-            .run_query(
+            .query_rows(
                 &format!(
                     "SELECT {} FROM {relation} WHERE {} = 'preferences' ORDER BY {} DESC LIMIT 1",
                     db::VALUE_JSON,
@@ -578,17 +555,6 @@ impl StorageManager {
             .await
     }
 
-    pub async fn export_episode_bundle(&self, dataset_id: &str) -> Result<Vec<u8>, String> {
-        let namespace = self.project_store.namespace().to_owned();
-        let mut connection = self.project_store.connect_exclusive().await?;
-        bundle::EpisodeBundle
-            .export(
-                &mut connection,
-                bundle::EpisodeBundleSelection::new(&namespace, dataset_id),
-            )
-            .await
-    }
-
     pub async fn import_episode_bundle(
         &self,
         dataset_id: &str,
@@ -618,7 +584,7 @@ impl StorageManager {
             return Ok(T::default());
         }
         let result = connection
-            .run_query(
+            .query_rows(
                 &format!(
                     "SELECT {} FROM {relation} WHERE {} = {key} ORDER BY {} DESC LIMIT 1",
                     db::SNAPSHOT_JSON,
@@ -670,7 +636,7 @@ impl StorageManager {
             return Ok(T::default());
         }
         let result = connection
-            .run_query(
+            .query_rows(
                 &format!(
                     "SELECT {} FROM {relation} WHERE {} = {} ORDER BY {} DESC LIMIT 1",
                     db::SNAPSHOT_JSON,
@@ -1049,27 +1015,6 @@ impl StorageManager {
             })
     }
 
-    pub async fn trajectory(
-        &self,
-        episode: &str,
-        stream: &str,
-    ) -> Result<(f64, Vec<BTreeMap<String, f64>>), String> {
-        let sql = SpiralSql::trajectory(self.project_store.namespace(), episode, stream);
-        let mut connection = self.project_store.connect().await?;
-        let result = QueryExecution::new(
-            &sql,
-            QueryLimits::new(MAX_REPLAY_ROWS, MAX_INTERNAL_QUERY_RESPONSE_BYTES),
-        )
-        .run_async(&mut connection)
-        .await?;
-        if result.truncated() {
-            return Err(format!(
-                "Spiral trajectory exceeds the replay safety limit of {MAX_REPLAY_ROWS} rows"
-            ));
-        }
-        DecodedTrajectory::decode(result.into_rows()).map(DecodedTrajectory::into_parts)
-    }
-
     /// Read the authoritative MP4 size without materializing its bytes.
     pub async fn video_asset_size(&self, asset: &VideoAssetKey) -> Result<u64, String> {
         let sql = SpiralSql::video_asset_size(self.project_store.namespace(), asset);
@@ -1088,15 +1033,6 @@ impl StorageManager {
     ) -> Result<Vec<u8>, String> {
         let sql = SpiralSql::video_asset_range(self.project_store.namespace(), asset, range);
         self.binary_query(sql).await
-    }
-
-    pub async fn video_asset(&self, asset: VideoAssetKey) -> Result<Vec<u8>, String> {
-        let size = self.video_asset_size(&asset).await?;
-        if size == 0 {
-            return Ok(Vec::new());
-        }
-        self.video_asset_range(&asset, VideoByteRange::new(0, size))
-            .await
     }
 
     async fn record_batches(&self, sql: String) -> Result<crate::RecordBatchStream, String> {
@@ -1214,6 +1150,17 @@ impl StorageManager {
         .into_iter()
         .any(|table| relation == table.qualified_name(namespace))
     }
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn export_episode_bundle(&self, dataset_id: &str) -> Result<Vec<u8>, String> {
+        let namespace = self.project_store.namespace().to_owned();
+        let mut connection = self.project_store.connect_exclusive().await?;
+        bundle::EpisodeBundle
+            .export(
+                &mut connection,
+                bundle::EpisodeBundleSelection::new(&namespace, dataset_id),
+            )
+            .await
+    }
 }
 
 impl ProjectConnection {
@@ -1226,7 +1173,7 @@ impl ProjectConnection {
             return Ok(None);
         }
         let result = self
-            .run_query(
+            .query_rows(
                 &format!(
                     "SELECT {} FROM {relation} WHERE {} = {} ORDER BY {} DESC LIMIT 1",
                     db::SNAPSHOT_JSON,
@@ -1261,101 +1208,6 @@ impl JsonDocumentDecode for str {
             Ok(document) => (document, false),
             Err(_) => (T::default(), true),
         }
-    }
-}
-
-/// Decode remote replay data without dropping malformed joints or inventing a
-/// clock. Physical replay is all-or-nothing: every row must declare the same
-/// finite sample rate and one exact, unique, finite pose.
-struct DecodedTrajectory {
-    sample_hz: f64,
-    frames: Vec<BTreeMap<String, f64>>,
-}
-
-impl DecodedTrajectory {
-    fn decode(rows: Vec<JsonMap<String, JsonValue>>) -> Result<Self, String> {
-        let mut sample_hz: Option<f64> = None;
-        let mut trajectory = Vec::with_capacity(rows.len());
-        for (row_index, row) in rows.into_iter().enumerate() {
-            let row_hz = row
-                .get(db::SAMPLE_HZ)
-                .and_then(JsonValue::as_f64)
-                .filter(|value| value.is_finite() && *value > 0.0)
-                .ok_or_else(|| {
-                    format!(
-                        "Spiral trajectory row {row_index} has no finite positive {}",
-                        db::SAMPLE_HZ
-                    )
-                })?;
-            if sample_hz.is_some_and(|expected| expected.to_bits() != row_hz.to_bits()) {
-                return Err(format!(
-                    "Spiral trajectory row {row_index} changed {}",
-                    db::SAMPLE_HZ
-                ));
-            }
-            sample_hz.get_or_insert(row_hz);
-
-            let names = row
-                .get(db::JOINT_NAMES)
-                .and_then(JsonValue::as_array)
-                .ok_or_else(|| {
-                    format!(
-                        "Spiral trajectory row {row_index} is missing {}",
-                        db::JOINT_NAMES
-                    )
-                })?;
-            let values = row
-                .get(db::REPLAY_POSITION)
-                .and_then(JsonValue::as_array)
-                .ok_or_else(|| {
-                    format!(
-                        "Spiral trajectory row {row_index} is missing {}",
-                        db::REPLAY_POSITION
-                    )
-                })?;
-            if names.is_empty() || names.len() != values.len() {
-                return Err(format!(
-                    "Spiral trajectory row {row_index} has {} joint names but {} positions",
-                    names.len(),
-                    values.len()
-                ));
-            }
-            let mut pose = BTreeMap::new();
-            for (joint_index, (name, value)) in names.iter().zip(values).enumerate() {
-                let name = name
-                .as_str()
-                .filter(|name| !name.trim().is_empty())
-                .ok_or_else(|| {
-                    format!(
-                        "Spiral trajectory row {row_index} joint {joint_index} has no valid name"
-                    )
-                })?;
-                let value = value
-                .as_f64()
-                .filter(|value| value.is_finite())
-                .ok_or_else(|| {
-                    format!(
-                        "Spiral trajectory row {row_index} joint {name:?} has no finite position"
-                    )
-                })?;
-                if pose.insert(name.to_owned(), value).is_some() {
-                    return Err(format!(
-                        "Spiral trajectory row {row_index} repeats joint {name:?}"
-                    ));
-                }
-            }
-            trajectory.push(pose);
-        }
-        let sample_hz =
-            sample_hz.ok_or_else(|| "Spiral returned no commandable trajectory rows".to_owned())?;
-        Ok(Self {
-            sample_hz,
-            frames: trajectory,
-        })
-    }
-
-    fn into_parts(self) -> (f64, Vec<BTreeMap<String, f64>>) {
-        (self.sample_hz, self.frames)
     }
 }
 
@@ -1501,8 +1353,11 @@ impl<'a> EpisodeReplacement<'a> {
         }
         if !videos.is_empty() {
             let media_relation = SpiralSql::video_dataset_output(namespace);
-            let batch =
-                VideoAsset::publication_batch(episode.start().id(), videos, &media_relation)?;
+            let batch = VideoAsset::storage_publication_batch(
+                episode.start().id(),
+                videos,
+                &media_relation,
+            )?;
             connection
                 .ingest_batch(&Table::VideoAssets.qualified_name(namespace), batch)
                 .await?;
@@ -1510,7 +1365,7 @@ impl<'a> EpisodeReplacement<'a> {
         if video_rows_changed {
             if has_video_rows {
                 connection
-                    .rebuild_video_dataset(namespace, dataset_exists)
+                    .rebuild_video_dataset_internal(namespace, dataset_exists)
                     .await?;
             } else {
                 connection.drop_video_dataset(namespace).await?;
@@ -1538,7 +1393,7 @@ impl<'a> EpisodeReplacement<'a> {
 /// existing output does not prove that its video index matches the imported
 /// payloads.
 impl ProjectConnection {
-    pub async fn rebuild_video_dataset(
+    pub(crate) async fn rebuild_video_dataset_internal(
         &mut self,
         namespace: &str,
         dataset_exists: bool,
@@ -1566,11 +1421,21 @@ impl ProjectConnection {
             .map_err(|error| format!("refreshing Spiral MP4 dataset: {error}"))
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn rebuild_video_dataset(
+        &mut self,
+        namespace: &str,
+        dataset_exists: bool,
+    ) -> Result<(), String> {
+        self.rebuild_video_dataset_internal(namespace, dataset_exists)
+            .await
+    }
+
     pub(crate) async fn video_dataset_exists(&mut self, namespace: &str) -> Result<bool, String> {
         let connection = self;
         let dataset = SpiralSql::video_dataset_relation(namespace);
         match connection
-            .run_query(&format!("DESCRIBE {dataset}"), 1)
+            .query_rows(&format!("DESCRIBE {dataset}"), 1)
             .await
         {
             Ok(_) => Ok(true),
@@ -1591,7 +1456,7 @@ impl ProjectConnection {
         QualifiedRelation::try_from(dataset.as_str())
             .map_err(|error| format!("refusing to drop an invalid Spiral MP4 Dataset: {error}"))?;
         connection
-            .execute_update_sql(&SpiralSql::drop_video_dataset(&dataset))
+            .execute_update_sql(&SpiralSql::drop_video_dataset_sql(&dataset))
             .await
             .map_err(|error| format!("dropping Spiral MP4 dataset with CASCADE: {error}"))?;
         connection
@@ -1660,7 +1525,7 @@ impl ProjectConnection {
             connection.drop_video_dataset(namespace).await?;
         } else {
             connection
-                .rebuild_video_dataset(namespace, dataset_exists)
+                .rebuild_video_dataset_internal(namespace, dataset_exists)
                 .await?;
         }
         Ok(())
@@ -1697,7 +1562,7 @@ impl ProjectConnection {
             return Ok(BTreeSet::new());
         }
         let result = connection
-            .run_query(
+            .query_rows(
                 &format!(
                     "SELECT DISTINCT {episode_id} FROM {assets}",
                     episode_id = db::EPISODE_ID
@@ -1732,7 +1597,7 @@ impl ProjectConnection {
         if !connection.table_exists(&assets).await? {
             return Ok(false);
         }
-        let result = connection.run_query(
+        let result = connection.query_rows(
         &format!(
             "SELECT {episode_column} FROM {assets} WHERE {episode_column} = {episode_id} LIMIT 1",
             episode_column = db::EPISODE_ID,
@@ -1766,7 +1631,7 @@ impl ProjectConnection {
             return Ok(false);
         }
         let result = connection
-            .run_query(&SpiralSql::dataset_exists(target, dataset_id), 1)
+            .query_rows(&SpiralSql::dataset_exists(target, dataset_id), 1)
             .await?;
         Ok(!result.rows().is_empty())
     }
@@ -2150,7 +2015,7 @@ impl ProjectConnection {
 }
 
 impl ProjectConnection {
-    pub async fn run_query(
+    pub(crate) async fn query_rows(
         &mut self,
         sql: &str,
         max_rows: usize,
@@ -2161,6 +2026,15 @@ impl ProjectConnection {
         )
         .run_async(self)
         .await
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn run_query(
+        &mut self,
+        sql: &str,
+        max_rows: usize,
+    ) -> Result<SpiralQueryResponse, String> {
+        self.query_rows(sql, max_rows).await
     }
 }
 
@@ -2591,7 +2465,7 @@ impl CheckpointArtifact {
             ));
         };
         Self::validate_size(config_json.len(), payload.len())?;
-        Self::new(config_json, payload)
+        Self::from_bytes(config_json, payload)
     }
 }
 
@@ -2815,34 +2689,5 @@ mod tests {
                 .and_then(JsonValue::as_str)
                 .is_some_and(|value| value.starts_with("data:image/jpeg;base64,"))
         );
-    }
-
-    #[test]
-    fn remote_trajectory_requires_a_consistent_clock_and_pose() {
-        let rows = vec![JsonMap::from_iter([
-            (db::SAMPLE_HZ.to_owned(), JsonValue::from(60.0)),
-            (
-                db::JOINT_NAMES.to_owned(),
-                serde_json::json!(["shoulder", "elbow"]),
-            ),
-            (
-                db::REPLAY_POSITION.to_owned(),
-                serde_json::json!([0.25, -0.5]),
-            ),
-        ])];
-        let (sample_hz, trajectory) = DecodedTrajectory::decode(rows).unwrap().into_parts();
-        assert_eq!(sample_hz, 60.0);
-        assert_eq!(trajectory[0]["shoulder"], 0.25);
-        assert_eq!(trajectory[0]["elbow"], -0.5);
-    }
-
-    #[test]
-    fn malformed_remote_trajectory_is_rejected() {
-        let rows = vec![JsonMap::from_iter([
-            (db::SAMPLE_HZ.to_owned(), JsonValue::from(0.0)),
-            (db::JOINT_NAMES.to_owned(), serde_json::json!(["shoulder"])),
-            (db::REPLAY_POSITION.to_owned(), serde_json::json!([0.0])),
-        ])];
-        assert!(DecodedTrajectory::decode(rows).is_err());
     }
 }

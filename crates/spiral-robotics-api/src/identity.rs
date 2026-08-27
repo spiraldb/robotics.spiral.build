@@ -33,7 +33,7 @@ impl TryFrom<&str> for DatasetId {
 }
 
 impl DatasetId {
-    pub fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
 }
@@ -61,10 +61,6 @@ pub struct EpisodeId(String);
 
 impl EpisodeId {
     pub const MAX_BYTES: usize = 64;
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
 
     /// Parse the sequence number from Studio's generated `episode_NNNNNN` IDs.
     pub fn sequence_number(&self) -> Option<u64> {
@@ -133,10 +129,10 @@ impl From<&str> for SqlNameComponent {
 }
 
 impl SqlNameComponent {
-    pub fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
-
+    #[cfg(any(test, feature = "test-support"))]
     pub fn into_string(self) -> String {
         self.0
     }

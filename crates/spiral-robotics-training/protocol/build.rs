@@ -120,7 +120,9 @@ impl<'a> ProtocolVersionGenerator<'a> {
             "pub(crate) const TRAINING_BACKEND_API_ID: &str = {api_id:?};\n\
              pub(crate) const TRAINING_BACKEND_API_VERSION: u32 = {api_major};\n\
              pub(crate) const TRAINING_BACKEND_API_REVISION: u32 = {api_minor};\n\
+             #[cfg(any(test, feature = \"test-support\"))]\n\
              pub(crate) const TRAINING_BACKEND_MIN_SPIRAL_SCHEMA_VERSION: u32 = {schema_minimum};\n\
+             #[cfg(any(test, feature = \"test-support\"))]\n\
              pub(crate) const TRAINING_BACKEND_MAX_SPIRAL_SCHEMA_VERSION: u32 = {schema_maximum};\n"
         );
         let output_directory =

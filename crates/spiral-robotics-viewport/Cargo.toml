@@ -8,6 +8,9 @@ publish = false
 [lints]
 workspace = true
 
+[features]
+test-support = []
+
 [dependencies]
 glam.workspace = true
 js-sys = "0.3"

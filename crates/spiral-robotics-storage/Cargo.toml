@@ -8,6 +8,9 @@ publish = false
 [lints]
 workspace = true
 
+[features]
+test-support = []
+
 [dependencies]
 spiral-robotics-api.workspace = true
 spiral-robotics-hardware.workspace = true

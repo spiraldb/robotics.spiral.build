@@ -1,5 +1,6 @@
 //! Persisted video values shared by camera capture and episode storage.
 
+#[cfg(any(test, feature = "test-support"))]
 use arrow_array::RecordBatch;
 use serde::{Deserialize, Serialize};
 
@@ -42,7 +43,7 @@ impl VideoTiming {
         self.frames
     }
 
-    pub fn duration_seconds(self) -> f64 {
+    pub(crate) fn duration_seconds(self) -> f64 {
         if self.fps == 0 {
             0.0
         } else {
@@ -96,6 +97,7 @@ impl VideoAsset {
         }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn publication_batch(
         episode_id: &str,
         assets: &[Self],
@@ -119,11 +121,11 @@ impl VideoAsset {
         self
     }
 
-    pub fn stream_id(&self) -> &str {
+    pub(crate) fn stream_id(&self) -> &str {
         &self.stream_id
     }
 
-    pub fn camera_id(&self) -> &str {
+    pub(crate) fn camera_id(&self) -> &str {
         &self.camera_id
     }
 
@@ -131,18 +133,18 @@ impl VideoAsset {
         &self.payload
     }
 
-    pub const fn size(&self) -> VideoSize {
+    pub(crate) const fn size(&self) -> VideoSize {
         self.size
     }
 
-    pub const fn timing(&self) -> VideoTiming {
+    pub(crate) const fn timing(&self) -> VideoTiming {
         self.timing
     }
 
-    pub const fn segment(&self) -> VideoSegment {
+    pub(crate) const fn segment(&self) -> VideoSegment {
         self.segment
     }
-
+    #[cfg(any(test, feature = "test-support"))]
     pub fn metadata(&self) -> VideoAssetMetadata {
         VideoAssetMetadata {
             stream_id: self.stream_id.clone(),
@@ -169,7 +171,7 @@ pub struct VideoAssetMetadata {
 }
 
 impl VideoAssetMetadata {
-    pub fn new(stream_id: String, camera_id: String, duration_seconds: f64) -> Self {
+    pub(crate) fn new(stream_id: String, camera_id: String, duration_seconds: f64) -> Self {
         Self {
             stream_id,
             camera_id,
@@ -180,17 +182,17 @@ impl VideoAssetMetadata {
         }
     }
 
-    pub fn with_size(mut self, size: VideoSize) -> Self {
+    pub(crate) fn with_size(mut self, size: VideoSize) -> Self {
         self.size = size;
         self
     }
 
-    pub fn with_timing(mut self, timing: VideoTiming) -> Self {
+    pub(crate) fn with_timing(mut self, timing: VideoTiming) -> Self {
         self.timing = timing;
         self
     }
 
-    pub fn with_segment(mut self, segment: VideoSegment) -> Self {
+    pub(crate) fn with_segment(mut self, segment: VideoSegment) -> Self {
         self.segment = segment;
         self
     }
@@ -236,15 +238,15 @@ impl VideoAssetKey {
         }
     }
 
-    pub fn episode_id(&self) -> &str {
+    pub(crate) fn episode_id(&self) -> &str {
         &self.episode_id
     }
 
-    pub fn stream_id(&self) -> &str {
+    pub(crate) fn stream_id(&self) -> &str {
         &self.stream_id
     }
 
-    pub const fn segment_index(&self) -> Option<u32> {
+    pub(crate) const fn segment_index(&self) -> Option<u32> {
         self.segment_index
     }
 }
@@ -260,11 +262,11 @@ impl VideoByteRange {
         Self { offset, size }
     }
 
-    pub const fn offset(self) -> u64 {
+    pub(crate) const fn offset(self) -> u64 {
         self.offset
     }
 
-    pub const fn size(self) -> u64 {
+    pub(crate) const fn size(self) -> u64 {
         self.size
     }
 }

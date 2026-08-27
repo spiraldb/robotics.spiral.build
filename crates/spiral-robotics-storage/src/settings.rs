@@ -147,10 +147,6 @@ impl ServiceEndpoint {
         )
     }
 
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
     pub fn into_string(self) -> String {
         self.0
     }
@@ -246,10 +242,6 @@ impl BackendStateStore {
             .then_some(SpiralCredentials::new(client_id, client_secret))
     }
 
-    pub fn client_id(&self) -> String {
-        self.current.lock_unpoisoned().client_id.trim().to_owned()
-    }
-
     pub fn save_connection(&self, settings: &SpiralConnectionSettings) -> Result<(), String> {
         let project_id = settings.project_id().ok_or_else(|| {
             "Spiral project is not configured. Choose a project in Settings → SpiralDB.".to_owned()
@@ -282,7 +274,7 @@ pub struct StoredStudioPreferences {
 }
 
 impl StoredStudioPreferences {
-    pub const fn new(training: TrainingRuntimeSettings, video: VideoSettings) -> Self {
+    pub(crate) const fn new(training: TrainingRuntimeSettings, video: VideoSettings) -> Self {
         Self { training, video }
     }
 

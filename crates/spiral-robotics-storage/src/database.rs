@@ -22,7 +22,7 @@ pub struct RecordBatchStream {
 }
 
 impl RecordBatchStream {
-    pub fn new(
+    pub(crate) fn new(
         schema: Arc<Schema>,
         batches: BoxStream<'static, DatabaseResult<RecordBatch>>,
     ) -> Self {
@@ -79,11 +79,11 @@ pub enum DatabaseCommand {
 }
 
 impl DatabaseCommand {
-    pub fn statement(sql: impl Into<String>) -> Self {
+    pub(crate) fn statement(sql: impl Into<String>) -> Self {
         Self::Statement(SqlStatement::new(sql))
     }
 
-    pub fn ingest(ingestion: BatchIngestion) -> Self {
+    pub(crate) fn ingest(ingestion: BatchIngestion) -> Self {
         Self::Ingest(ingestion)
     }
 }
@@ -95,7 +95,7 @@ pub enum DatabaseOutput {
 }
 
 impl DatabaseOutput {
-    pub fn into_records(self) -> DatabaseResult<RecordBatchStream> {
+    pub(crate) fn into_records(self) -> DatabaseResult<RecordBatchStream> {
         match self {
             Self::Records(records) => Ok(records),
             Self::AffectedRows(_) => Err(DatabaseError::invalid_state(
@@ -104,7 +104,7 @@ impl DatabaseOutput {
         }
     }
 
-    pub fn into_summary(self) -> DatabaseResult<ExecutionSummary> {
+    pub(crate) fn into_summary(self) -> DatabaseResult<ExecutionSummary> {
         match self {
             Self::AffectedRows(summary) => Ok(summary),
             Self::Records(_) => Err(DatabaseError::invalid_state(
@@ -119,16 +119,12 @@ impl DatabaseOutput {
 pub struct SqlStatement(String);
 
 impl SqlStatement {
-    pub fn new(sql: impl Into<String>) -> Self {
+    pub(crate) fn new(sql: impl Into<String>) -> Self {
         Self(sql.into())
     }
 
-    pub fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         &self.0
-    }
-
-    pub fn into_string(self) -> String {
-        self.0
     }
 }
 
@@ -137,7 +133,7 @@ impl SqlStatement {
 pub struct RelationName(String);
 
 impl RelationName {
-    pub fn parse(name: impl Into<String>) -> DatabaseResult<Self> {
+    pub(crate) fn parse(name: impl Into<String>) -> DatabaseResult<Self> {
         let name = name.into();
         if name.is_empty() || name.split('.').any(str::is_empty) {
             return Err(DatabaseError::invalid_input(
@@ -147,11 +143,11 @@ impl RelationName {
         Ok(Self(name))
     }
 
-    pub fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
 
-    pub fn into_string(self) -> String {
+    pub(crate) fn into_string(self) -> String {
         self.0
     }
 }
@@ -164,7 +160,11 @@ pub struct BatchIngestion {
 }
 
 impl BatchIngestion {
-    pub fn new(relation: RelationName, mode: IngestMode, batches: RecordBatchStream) -> Self {
+    pub(crate) fn new(
+        relation: RelationName,
+        mode: IngestMode,
+        batches: RecordBatchStream,
+    ) -> Self {
         Self {
             relation,
             mode,
@@ -172,7 +172,7 @@ impl BatchIngestion {
         }
     }
 
-    pub fn into_parts(self) -> (RelationName, IngestMode, RecordBatchStream) {
+    pub(crate) fn into_parts(self) -> (RelationName, IngestMode, RecordBatchStream) {
         (self.relation, self.mode, self.batches)
     }
 }
@@ -190,12 +190,8 @@ pub struct ExecutionSummary {
 }
 
 impl ExecutionSummary {
-    pub const fn new(affected_rows: Option<u64>) -> Self {
+    pub(crate) const fn new(affected_rows: Option<u64>) -> Self {
         Self { affected_rows }
-    }
-
-    pub const fn affected_rows(self) -> Option<u64> {
-        self.affected_rows
     }
 }
 
@@ -206,11 +202,11 @@ pub struct RelationMetadata {
 }
 
 impl RelationMetadata {
-    pub fn new(name: RelationName, kind: RelationKind) -> Self {
+    pub(crate) fn new(name: RelationName, kind: RelationKind) -> Self {
         Self { name, kind }
     }
 
-    pub fn into_parts(self) -> (RelationName, RelationKind) {
+    pub(crate) fn into_parts(self) -> (RelationName, RelationKind) {
         (self.name, self.kind)
     }
 }
@@ -239,30 +235,22 @@ pub struct DatabaseError {
 }
 
 impl DatabaseError {
-    pub fn new(kind: DatabaseErrorKind, message: impl Into<String>) -> Self {
+    pub(crate) fn new(kind: DatabaseErrorKind, message: impl Into<String>) -> Self {
         Self {
             kind,
             message: message.into(),
         }
     }
 
-    pub fn invalid_input(message: impl Into<String>) -> Self {
+    pub(crate) fn invalid_input(message: impl Into<String>) -> Self {
         Self::new(DatabaseErrorKind::InvalidInput, message)
     }
 
-    pub fn invalid_state(message: impl Into<String>) -> Self {
+    pub(crate) fn invalid_state(message: impl Into<String>) -> Self {
         Self::new(DatabaseErrorKind::InvalidState, message)
     }
 
-    pub fn internal(message: impl Into<String>) -> Self {
-        Self::new(DatabaseErrorKind::Internal, message)
-    }
-
-    pub const fn kind(&self) -> DatabaseErrorKind {
-        self.kind
-    }
-
-    pub fn message(&self) -> &str {
+    pub(crate) fn message(&self) -> &str {
         &self.message
     }
 }

@@ -337,7 +337,7 @@ impl ImportCollision<'_> {
         let datasets = Table::Datasets.qualified_name(self.namespace);
         if connection.table_exists(&datasets).await?
             && !connection
-                .run_query(&SpiralSql::dataset_exists(&datasets, self.dataset_id), 1)
+                .query_rows(&SpiralSql::dataset_exists(&datasets, self.dataset_id), 1)
                 .await?
                 .rows()
                 .is_empty()

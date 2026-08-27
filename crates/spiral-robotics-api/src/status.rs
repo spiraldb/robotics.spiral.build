@@ -106,9 +106,6 @@ impl StudioSnapshot {
     pub const fn readiness(&self) -> &BackendReadiness {
         &self.readiness
     }
-    pub fn storage(&self) -> &str {
-        &self.storage
-    }
     pub fn robots(&self) -> &[RobotSummary] {
         &self.robots
     }
@@ -186,9 +183,6 @@ impl ApiError {
         }
     }
 
-    pub fn error(&self) -> &str {
-        &self.error
-    }
     pub fn into_error(self) -> String {
         self.error
     }

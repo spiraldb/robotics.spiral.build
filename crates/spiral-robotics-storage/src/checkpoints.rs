@@ -20,10 +20,10 @@ impl CheckpointKey {
     pub fn new(run_id: String, step: u64) -> Self {
         Self { run_id, step }
     }
-    pub fn run_id(&self) -> &str {
+    pub(crate) fn run_id(&self) -> &str {
         &self.run_id
     }
-    pub const fn step(&self) -> u64 {
+    pub(crate) const fn step(&self) -> u64 {
         self.step
     }
 }
@@ -36,12 +36,17 @@ pub struct CheckpointArtifact {
 }
 
 impl CheckpointArtifact {
-    pub fn new(config_json: Vec<u8>, payload: Vec<u8>) -> Result<Self, String> {
+    pub(crate) fn from_bytes(config_json: Vec<u8>, payload: Vec<u8>) -> Result<Self, String> {
         Self::validate_size(config_json.len(), payload.len())?;
         Ok(Self {
             config_json,
             payload,
         })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn new(config_json: Vec<u8>, payload: Vec<u8>) -> Result<Self, String> {
+        Self::from_bytes(config_json, payload)
     }
 
     pub fn into_parts(self) -> (Vec<u8>, Vec<u8>) {

@@ -279,6 +279,64 @@ impl<'a> EpisodeBundleImport<'a> {
 
 impl EpisodeBundle {
     pub const MAX_BYTES: usize = ProjectBundle::MAX_BYTES;
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) async fn export(
+        &self,
+        connection: &mut ProjectConnection,
+        selection: EpisodeBundleSelection<'_>,
+    ) -> Result<Vec<u8>, String> {
+        let EpisodeBundleSelection {
+            namespace,
+            dataset_id,
+        } = selection;
+        EpisodeBundle::validate_dataset_id(dataset_id)?;
+        let datasets = Table::Datasets.qualified_name(namespace);
+        let episodes = Table::Episodes.qualified_name(namespace);
+        if !connection.table_exists(&datasets).await? || !connection.table_exists(&episodes).await?
+        {
+            return Err(format!("dataset {dataset_id:?} has no episodes to export"));
+        }
+        let dataset = SpiralSql::string_literal(dataset_id);
+        let episode_ids = format!(
+            "SELECT {episode_id} FROM {episodes} WHERE {dataset_id_column} = {dataset}",
+            episode_id = column::EPISODE_ID,
+            dataset_id_column = column::DATASET_ID,
+        );
+        let mut queries = Vec::new();
+        for table in EPISODE_TABLES {
+            let relation = table.qualified_name(namespace);
+            if !connection.table_exists(&relation).await? {
+                continue;
+            }
+            let query = match table {
+                Table::Datasets | Table::Episodes => format!(
+                    "SELECT * FROM {relation} WHERE {} = {dataset}",
+                    column::DATASET_ID
+                ),
+                Table::EpisodeStreams | Table::JointSamples => format!(
+                    "SELECT * FROM {relation} WHERE {} IN ({episode_ids})",
+                    column::EPISODE_ID
+                ),
+                Table::VideoAssets => BundleSpec::portable_video_assets_query(
+                    &relation,
+                    Some(&format!("{} IN ({episode_ids})", column::EPISODE_ID)),
+                ),
+                _ => unreachable!("episode bundle table set is closed"),
+            };
+            queries.push((table, query));
+        }
+        let export = EPISODES_SPEC.export_queries(connection, queries).await?;
+        if export
+            .row_counts
+            .iter()
+            .find_map(|(table, rows)| (*table == Table::Episodes).then_some(*rows))
+            .unwrap_or(0)
+            == 0
+        {
+            return Err(format!("dataset {dataset_id:?} has no episodes to export"));
+        }
+        Ok(export.bytes)
+    }
 }
 
 const EPISODE_TABLES: [Table; 5] = [
@@ -323,6 +381,7 @@ struct Manifest {
     relations: Vec<String>,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 struct ExportedBundle {
     bytes: Vec<u8>,
     row_counts: Vec<(Table, u64)>,
@@ -330,6 +389,7 @@ struct ExportedBundle {
 
 struct NamedExportedBundle {
     bytes: Vec<u8>,
+    #[cfg(any(test, feature = "test-support"))]
     row_counts: Vec<(String, u64)>,
 }
 
@@ -472,67 +532,70 @@ impl ProjectBundle {
     }
 }
 
-impl EpisodeBundle {
-    pub(crate) async fn export(
+impl BundleSpec {
+    async fn export_named_queries(
         &self,
         connection: &mut ProjectConnection,
-        selection: EpisodeBundleSelection<'_>,
-    ) -> Result<Vec<u8>, String> {
-        let EpisodeBundleSelection {
-            namespace,
-            dataset_id,
-        } = selection;
-        EpisodeBundle::validate_dataset_id(dataset_id)?;
-        let datasets = Table::Datasets.qualified_name(namespace);
-        let episodes = Table::Episodes.qualified_name(namespace);
-        if !connection.table_exists(&datasets).await? || !connection.table_exists(&episodes).await?
-        {
-            return Err(format!("dataset {dataset_id:?} has no episodes to export"));
-        }
-        let dataset = SpiralSql::string_literal(dataset_id);
-        let episode_ids = format!(
-            "SELECT {episode_id} FROM {episodes} WHERE {dataset_id_column} = {dataset}",
-            episode_id = column::EPISODE_ID,
-            dataset_id_column = column::DATASET_ID,
-        );
-        let mut queries = Vec::new();
-        for table in EPISODE_TABLES {
-            let relation = table.qualified_name(namespace);
-            if !connection.table_exists(&relation).await? {
-                continue;
+        queries: Vec<(String, String)>,
+    ) -> Result<NamedExportedBundle, String> {
+        let mut entries = Vec::<(String, Vec<u8>)>::new();
+        #[cfg(any(test, feature = "test-support"))]
+        let mut row_counts = Vec::new();
+        for (relation, query) in queries {
+            let mut records = connection
+                .execute_query(query)
+                .await
+                .map_err(|error| format!("reading {} relation {relation}: {error}", self.label))?;
+            let occupied = Self::encoded_entries_size(&entries)
+                .saturating_add(self.magic.len() + 4 + MAX_MANIFEST_BYTES + 2);
+            let payload_limit = self
+                .max_bytes
+                .saturating_sub(occupied)
+                .saturating_sub(2 + relation.len() + 8);
+            let mut payload = LimitedPayload::new(payload_limit, self.label);
+            #[cfg(any(test, feature = "test-support"))]
+            let mut rows = 0_u64;
+            {
+                let mut writer = StreamWriter::try_new(&mut payload, records.schema().as_ref())
+                    .map_err(|error| format!("opening Arrow stream for {relation}: {error}"))?;
+                while let Some(batch) = records.next().await {
+                    let batch = batch.map_err(|error| {
+                        format!("reading {} relation {relation}: {error}", self.label)
+                    })?;
+                    #[cfg(any(test, feature = "test-support"))]
+                    {
+                        rows = rows.saturating_add(batch.num_rows() as u64);
+                    }
+                    writer
+                        .write(&batch)
+                        .map_err(|error| format!("writing Arrow stream for {relation}: {error}"))?;
+                }
+                writer
+                    .finish()
+                    .map_err(|error| format!("finishing Arrow stream for {relation}: {error}"))?;
             }
-            let query = match table {
-                Table::Datasets | Table::Episodes => format!(
-                    "SELECT * FROM {relation} WHERE {} = {dataset}",
-                    column::DATASET_ID
-                ),
-                Table::EpisodeStreams | Table::JointSamples => format!(
-                    "SELECT * FROM {relation} WHERE {} IN ({episode_ids})",
-                    column::EPISODE_ID
-                ),
-                Table::VideoAssets => BundleSpec::portable_video_assets_query(
-                    &relation,
-                    Some(&format!("{} IN ({episode_ids})", column::EPISODE_ID)),
-                ),
-                _ => unreachable!("episode bundle table set is closed"),
-            };
-            queries.push((table, query));
+            let payload = payload.into_inner();
+            let projected_size = Self::encoded_entries_size(&entries)
+                .saturating_add(2 + relation.len() + 8 + payload.len())
+                .saturating_add(self.magic.len() + 4 + MAX_MANIFEST_BYTES);
+            if projected_size > self.max_bytes {
+                return Err(format!(
+                    "{} export exceeds the {} MiB portable-file limit",
+                    self.label,
+                    self.max_bytes / (1024 * 1024),
+                ));
+            }
+            #[cfg(any(test, feature = "test-support"))]
+            row_counts.push((relation.clone(), rows));
+            entries.push((relation, payload));
         }
-        let export = EPISODES_SPEC.export_queries(connection, queries).await?;
-        if export
-            .row_counts
-            .iter()
-            .find_map(|(table, rows)| (*table == Table::Episodes).then_some(*rows))
-            .unwrap_or(0)
-            == 0
-        {
-            return Err(format!("dataset {dataset_id:?} has no episodes to export"));
-        }
-        Ok(export.bytes)
+        self.build(entries).map(|bytes| NamedExportedBundle {
+            bytes,
+            #[cfg(any(test, feature = "test-support"))]
+            row_counts,
+        })
     }
-}
-
-impl BundleSpec {
+    #[cfg(any(test, feature = "test-support"))]
     async fn export_queries(
         &self,
         connection: &mut ProjectConnection,
@@ -562,60 +625,6 @@ impl BundleSpec {
             bytes: export.bytes,
             row_counts,
         })
-    }
-
-    async fn export_named_queries(
-        &self,
-        connection: &mut ProjectConnection,
-        queries: Vec<(String, String)>,
-    ) -> Result<NamedExportedBundle, String> {
-        let mut entries = Vec::<(String, Vec<u8>)>::new();
-        let mut row_counts = Vec::new();
-        for (relation, query) in queries {
-            let mut records = connection
-                .execute_query(query)
-                .await
-                .map_err(|error| format!("reading {} relation {relation}: {error}", self.label))?;
-            let occupied = Self::encoded_entries_size(&entries)
-                .saturating_add(self.magic.len() + 4 + MAX_MANIFEST_BYTES + 2);
-            let payload_limit = self
-                .max_bytes
-                .saturating_sub(occupied)
-                .saturating_sub(2 + relation.len() + 8);
-            let mut payload = LimitedPayload::new(payload_limit, self.label);
-            let mut rows = 0_u64;
-            {
-                let mut writer = StreamWriter::try_new(&mut payload, records.schema().as_ref())
-                    .map_err(|error| format!("opening Arrow stream for {relation}: {error}"))?;
-                while let Some(batch) = records.next().await {
-                    let batch = batch.map_err(|error| {
-                        format!("reading {} relation {relation}: {error}", self.label)
-                    })?;
-                    rows = rows.saturating_add(batch.num_rows() as u64);
-                    writer
-                        .write(&batch)
-                        .map_err(|error| format!("writing Arrow stream for {relation}: {error}"))?;
-                }
-                writer
-                    .finish()
-                    .map_err(|error| format!("finishing Arrow stream for {relation}: {error}"))?;
-            }
-            let payload = payload.into_inner();
-            let projected_size = Self::encoded_entries_size(&entries)
-                .saturating_add(2 + relation.len() + 8 + payload.len())
-                .saturating_add(self.magic.len() + 4 + MAX_MANIFEST_BYTES);
-            if projected_size > self.max_bytes {
-                return Err(format!(
-                    "{} export exceeds the {} MiB portable-file limit",
-                    self.label,
-                    self.max_bytes / (1024 * 1024),
-                ));
-            }
-            row_counts.push((relation.clone(), rows));
-            entries.push((relation, payload));
-        }
-        self.build(entries)
-            .map(|bytes| NamedExportedBundle { bytes, row_counts })
     }
 }
 
@@ -860,7 +869,7 @@ impl EpisodeBundle {
             let datasets = Table::Datasets.qualified_name(namespace);
             let dataset_exists = connection.table_exists(&datasets).await?
                 && !connection
-                    .run_query(&SpiralSql::dataset_exists(&datasets, dataset_id), 1)
+                    .query_rows(&SpiralSql::dataset_exists(&datasets, dataset_id), 1)
                     .await?
                     .rows()
                     .is_empty();
@@ -2551,7 +2560,7 @@ impl EpisodeBundle {
             connection.drop_video_dataset(namespace).await?;
         } else {
             connection
-                .rebuild_video_dataset(namespace, dataset_exists)
+                .rebuild_video_dataset_internal(namespace, dataset_exists)
                 .await?;
         }
         Ok(())
@@ -2563,7 +2572,7 @@ impl EpisodeBundle {
     ) -> Result<(), String> {
         let dataset_exists = connection.video_dataset_exists(namespace).await?;
         connection
-            .rebuild_video_dataset(namespace, dataset_exists)
+            .rebuild_video_dataset_internal(namespace, dataset_exists)
             .await?;
         Ok(())
     }
@@ -2690,7 +2699,7 @@ impl EpisodeBundle {
                 "SELECT {episode_id} FROM {episodes} WHERE {episode_id} IN ({candidates})",
                 episode_id = column::EPISODE_ID,
             );
-            let existing = connection.run_query(&query, chunk.len()).await?;
+            let existing = connection.query_rows(&query, chunk.len()).await?;
             if let Some(value) = existing
                 .rows()
                 .first()
@@ -4336,7 +4345,7 @@ mod tests {
             .expect("the merged episode project must connect");
         let episodes = Table::Episodes.qualified_name(project_store.namespace());
         let result = connection
-            .run_query(
+            .query_rows(
                 &format!(
                     "SELECT {episode_id}, {dataset_id} FROM {episodes} ORDER BY {episode_id}",
                     episode_id = column::EPISODE_ID,
@@ -4494,7 +4503,7 @@ mod tests {
             Some("spql.io.Blob"),
         );
         let descriptor = connection
-            .run_query(
+            .query_rows(
                 &format!(
                     "SELECT spql.blob.uri({payload}) AS uri FROM {assets}",
                     payload = column::PAYLOAD,
@@ -4526,7 +4535,7 @@ mod tests {
 
         let output = SpiralSql::video_dataset_output(project_store.namespace());
         let rows = connection
-            .run_query(&SpiralSql::count_rows(&output), 1)
+            .query_rows(&SpiralSql::count_rows(&output), 1)
             .await
             .expect("the rebuilt video dataset must be countable");
         assert_eq!(
@@ -4536,7 +4545,7 @@ mod tests {
             Some(1)
         );
         let frames = connection
-            .run_query(
+            .query_rows(
                 &format!(
                     "SELECT COUNT(*) AS count FROM {output} AS asset, \
                          LATERAL spql.video.frames(asset.media, \

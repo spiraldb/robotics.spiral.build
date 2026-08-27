@@ -141,11 +141,6 @@ impl CatalogRelation {
         }
     }
 
-    pub const fn with_row_count(mut self, row_count: Option<u64>) -> Self {
-        self.row_count = row_count;
-        self
-    }
-
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -156,10 +151,6 @@ impl CatalogRelation {
 
     pub fn columns(&self) -> &[QueryColumn] {
         &self.columns
-    }
-
-    pub const fn row_count(&self) -> Option<u64> {
-        self.row_count
     }
 }
 
@@ -269,9 +260,6 @@ impl ProjectDataRelation {
     }
     pub fn name(&self) -> &str {
         &self.name
-    }
-    pub fn relation_type(&self) -> &str {
-        &self.relation_type
     }
     pub fn columns(&self) -> &[QueryColumn] {
         &self.columns

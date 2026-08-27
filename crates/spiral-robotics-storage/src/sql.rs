@@ -41,30 +41,6 @@ impl SpiralSql {
         )
     }
 
-    pub(crate) fn trajectory(dataset: &str, episode_id: &str, stream_id: &str) -> String {
-        let episodes = Table::Episodes.qualified_name(dataset);
-        let streams = Table::EpisodeStreams.qualified_name(dataset);
-        let samples = Table::JointSamples.qualified_name(dataset);
-        format!(
-            "SELECT e.{sample_hz}, s.{joint_names}, \
-         COALESCE(j.{action}, j.{state}) AS {replay} \
-         FROM {episodes} e JOIN {streams} s ON e.{episode_id} = s.{episode_id} \
-         JOIN {samples} j ON j.{episode_id} = s.{episode_id} AND j.{stream_id} = s.{stream_id} \
-         WHERE e.{episode_id} = {episode_value} AND s.{stream_id} = {stream_value} \
-         ORDER BY j.{sample_index}",
-            sample_hz = column::SAMPLE_HZ,
-            joint_names = column::JOINT_NAMES,
-            action = column::ACTION_POSITION,
-            state = column::STATE_POSITION,
-            replay = column::REPLAY_POSITION,
-            episode_id = column::EPISODE_ID,
-            stream_id = column::STREAM_ID,
-            sample_index = column::SAMPLE_INDEX,
-            episode_value = Self::string_literal(episode_id),
-            stream_value = Self::string_literal(stream_id),
-        )
-    }
-
     pub(crate) fn episode_samples(dataset: &str, episode_id: &str) -> String {
         format!(
             "SELECT * FROM {} WHERE {} = {} ORDER BY {}, {}",
@@ -206,8 +182,13 @@ impl SpiralSql {
         format!("REFRESH DATASET {dataset}")
     }
 
-    pub fn drop_video_dataset(dataset: &str) -> String {
+    pub(crate) fn drop_video_dataset_sql(dataset: &str) -> String {
         format!("DROP DATASET IF EXISTS {dataset} CASCADE")
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn drop_video_dataset(dataset: &str) -> String {
+        Self::drop_video_dataset_sql(dataset)
     }
 
     pub(crate) fn drop_video_sources(sources: &str) -> String {
@@ -225,6 +206,30 @@ impl SpiralSql {
     /// generated statements isolate this compatibility fallback in one function.
     pub fn string_literal(value: &str) -> String {
         format!("'{}'", value.replace('\'', "''"))
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn trajectory(dataset: &str, episode_id: &str, stream_id: &str) -> String {
+        let episodes = Table::Episodes.qualified_name(dataset);
+        let streams = Table::EpisodeStreams.qualified_name(dataset);
+        let samples = Table::JointSamples.qualified_name(dataset);
+        format!(
+            "SELECT e.{sample_hz}, s.{joint_names}, \
+         COALESCE(j.{action}, j.{state}) AS {replay} \
+         FROM {episodes} e JOIN {streams} s ON e.{episode_id} = s.{episode_id} \
+         JOIN {samples} j ON j.{episode_id} = s.{episode_id} AND j.{stream_id} = s.{stream_id} \
+         WHERE e.{episode_id} = {episode_value} AND s.{stream_id} = {stream_value} \
+         ORDER BY j.{sample_index}",
+            sample_hz = column::SAMPLE_HZ,
+            joint_names = column::JOINT_NAMES,
+            action = column::ACTION_POSITION,
+            state = column::STATE_POSITION,
+            replay = column::REPLAY_POSITION,
+            episode_id = column::EPISODE_ID,
+            stream_id = column::STREAM_ID,
+            sample_index = column::SAMPLE_INDEX,
+            episode_value = Self::string_literal(episode_id),
+            stream_value = Self::string_literal(stream_id),
+        )
     }
 }
 

@@ -166,9 +166,6 @@ impl SpiralSettings {
         &self.namespace
     }
 
-    pub const fn endpoint_restart_required(&self) -> bool {
-        self.endpoint_restart_required
-    }
     pub fn set_endpoint(&mut self, endpoint: impl Into<String>) {
         self.endpoint = endpoint.into();
     }

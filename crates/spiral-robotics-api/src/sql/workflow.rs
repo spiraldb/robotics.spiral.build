@@ -7,6 +7,7 @@
 //! pass to the backend adapter after the existing read-only query gate admits
 //! the surrounding statement.
 
+#[cfg(any(test, feature = "test-support"))]
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -53,12 +54,6 @@ impl<'a> TryFrom<&'a str> for WorkflowNodeId<'a> {
     }
 }
 
-impl WorkflowNodeId<'_> {
-    pub const fn as_str(&self) -> &str {
-        self.0
-    }
-}
-
 /// A validated unquoted, dotted Spiral relation name.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct QualifiedRelation<'a>(&'a str);
@@ -86,12 +81,6 @@ impl<'a> TryFrom<&'a str> for QualifiedRelation<'a> {
             ));
         }
         Ok(Self(relation))
-    }
-}
-
-impl QualifiedRelation<'_> {
-    pub const fn as_str(&self) -> &str {
-        self.0
     }
 }
 
@@ -145,7 +134,7 @@ impl WorkflowSql<'_> {
         }
         Ok(placeholders)
     }
-
+    #[cfg(any(test, feature = "test-support"))]
     /// Replace placeholders with prevalidated, server-owned qualified relations.
     pub fn substitute(
         self,

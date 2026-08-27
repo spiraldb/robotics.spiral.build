@@ -165,8 +165,10 @@ These rules apply to every feature:
 - Every item must use the narrowest useful visibility. Named struct fields are
   private and exposed through narrow constructors, builders, getters, and
   domain operations. Serialized contracts preserve their flat wire shape with
-  private grouped values rather than public fields. The workspace lint policy
-  denies unreachable public items for every first-party package.
+  private grouped values rather than public fields. Public test fixtures must
+  be gated behind a `test-support` feature when another first-party package's
+  tests need them. The workspace lint policy denies dead code and unreachable
+  public items for every first-party package.
 - Backend and frontend libraries export only their process/UI launchers.
   Storage keeps native database, schema, SQL, settings, and manager modules private and
   exposes reviewed feature types plus a flat connection facade.

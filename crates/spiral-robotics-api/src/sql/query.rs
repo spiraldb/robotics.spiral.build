@@ -140,12 +140,6 @@ impl<'a> TryFrom<&'a str> for UnquotedSqlIdentifier<'a> {
     }
 }
 
-impl UnquotedSqlIdentifier<'_> {
-    pub const fn as_str(&self) -> &str {
-        self.0
-    }
-}
-
 /// Extract unquoted SQL words while rejecting extra statements.
 struct SqlTokenScanner<'a>(&'a str);
 

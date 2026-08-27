@@ -116,17 +116,6 @@ impl ProjectConnection {
         Ok(relations)
     }
 
-    /// List durable relation names without exposing the driver's catalog
-    /// representation across the storage boundary.
-    pub async fn catalog_relation_names(&mut self) -> Result<Vec<String>, String> {
-        self.list_catalog_relations().await.map(|relations| {
-            relations
-                .into_iter()
-                .map(|relation| relation.name)
-                .collect()
-        })
-    }
-
     pub async fn begin_transaction(&mut self) -> Result<(), String> {
         let state = std::mem::replace(&mut self.state, ProjectConnectionState::Closed);
         let connection = match state {
@@ -187,6 +176,17 @@ impl ProjectConnection {
                 .map_err(|error| error.to_string())?;
         }
         Ok(())
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    /// List durable relation names without exposing the driver's catalog
+    /// representation across the storage boundary.
+    pub async fn catalog_relation_names(&mut self) -> Result<Vec<String>, String> {
+        self.list_catalog_relations().await.map(|relations| {
+            relations
+                .into_iter()
+                .map(|relation| relation.name)
+                .collect()
+        })
     }
 }
 
@@ -280,7 +280,7 @@ impl ProjectStore {
         })
     }
 
-    pub fn project_id(&self) -> String {
+    pub(crate) fn project_id(&self) -> String {
         self.connection_settings
             .read_unpoisoned()
             .project_id()
@@ -336,7 +336,7 @@ impl ProjectStore {
     /// The exclusive gate drains active project-store work before replacing
     /// the configured session.
     #[cfg(test)]
-    pub async fn configure_project(&self, project_id: &str) -> Result<(), String> {
+    pub(crate) async fn configure_project(&self, project_id: &str) -> Result<(), String> {
         let _async_operation = self.async_operation_gate.write().await;
         let settings = self
             .connection_settings

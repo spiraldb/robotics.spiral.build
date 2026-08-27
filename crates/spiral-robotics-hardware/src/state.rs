@@ -643,15 +643,11 @@ impl EpisodeArm {
         }
     }
 
-    pub fn id(&self) -> &str {
+    pub(crate) fn id(&self) -> &str {
         &self.id
     }
 
-    pub fn robot_type(&self) -> Option<&str> {
-        self.robot_type.as_deref()
-    }
-
-    pub fn joints(&self) -> &[String] {
+    pub(crate) fn joints(&self) -> &[String] {
         &self.joints
     }
 }
@@ -790,7 +786,7 @@ pub struct RecordingGap {
 }
 
 impl RecordingGap {
-    pub const fn new(after_seconds: f64, duration_seconds: f64) -> Self {
+    pub(crate) const fn new(after_seconds: f64, duration_seconds: f64) -> Self {
         Self {
             after_seconds,
             duration_seconds,
@@ -952,7 +948,7 @@ impl CompletedRecording {
         &self.episode
     }
 
-    pub const fn frames(&self) -> u64 {
+    pub(crate) const fn frames(&self) -> u64 {
         self.frames
     }
 }

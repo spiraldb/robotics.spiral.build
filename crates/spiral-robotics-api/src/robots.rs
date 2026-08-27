@@ -168,15 +168,15 @@ impl MotorReading {
         }
     }
 
-    pub const fn center(self) -> i64 {
+    pub(crate) const fn center(self) -> i64 {
         self.center
     }
 
-    pub const fn range_min(self) -> i64 {
+    pub(crate) const fn range_min(self) -> i64 {
         self.range_min
     }
 
-    pub const fn range_max(self) -> i64 {
+    pub(crate) const fn range_max(self) -> i64 {
         self.range_max
     }
 }
@@ -206,15 +206,15 @@ impl MotorCalibration {
         }
     }
 
-    pub const fn id(self) -> u32 {
+    pub(crate) const fn id(self) -> u32 {
         self.id
     }
 
-    pub const fn direction(self) -> MotorDirection {
+    pub(crate) const fn direction(self) -> MotorDirection {
         self.direction
     }
 
-    pub const fn reading(self) -> MotorReading {
+    pub(crate) const fn reading(self) -> MotorReading {
         self.reading
     }
 }
@@ -293,14 +293,8 @@ impl MotorSummary {
     pub const fn id(&self) -> u32 {
         self.id
     }
-    pub const fn direction(&self) -> MotorDirection {
-        self.direction
-    }
     pub fn model(&self) -> Option<&str> {
         self.model.as_deref()
-    }
-    pub const fn calibration(&self) -> Option<MotorCalibration> {
-        self.calibration
     }
     pub const fn limits(&self) -> MotorLimits {
         self.limits
@@ -453,18 +447,6 @@ impl MotorLimits {
     pub const fn max_temperature_celsius(self) -> Option<f64> {
         self.max_temperature_celsius
     }
-
-    pub const fn min_voltage_volts(self) -> Option<f64> {
-        self.min_voltage_volts
-    }
-
-    pub const fn max_voltage_volts(self) -> Option<f64> {
-        self.max_voltage_volts
-    }
-
-    pub const fn max_load(self) -> Option<f64> {
-        self.max_load
-    }
 }
 
 /// Serial settings for a robot's motor bus.
@@ -550,15 +532,6 @@ impl CameraMount {
     /// Field of view assumed for a mount that does not state one.
     const fn default_field_of_view() -> f64 {
         62.0
-    }
-
-    pub fn new(frame: Option<String>, xyz: [f64; 3], rpy: [f64; 3]) -> Self {
-        Self {
-            frame,
-            xyz,
-            rpy,
-            fov_degrees: Self::default_field_of_view(),
-        }
     }
 
     pub fn frame(&self) -> Option<&str> {
@@ -711,9 +684,6 @@ impl SerialPortSummary {
     pub fn path(&self) -> &str {
         &self.path
     }
-    pub fn kind(&self) -> &str {
-        &self.kind
-    }
     pub fn description(&self) -> Option<&str> {
         self.description.as_deref()
     }
@@ -782,15 +752,6 @@ impl ModeStatus {
 
     pub const fn active(&self) -> bool {
         self.active
-    }
-
-    pub fn error(&self) -> Option<&str> {
-        self.error.as_deref()
-    }
-
-    pub fn update_activity(&mut self, active: bool, error: Option<String>) {
-        self.active = active;
-        self.error = error;
     }
 }
 
@@ -1088,12 +1049,6 @@ impl JointTelemetry {
     pub const fn normalized(&self) -> Option<f64> {
         self.kinematics.normalized
     }
-    pub const fn goal_raw(&self) -> Option<i64> {
-        self.kinematics.goal_raw
-    }
-    pub const fn target_raw(&self) -> Option<i64> {
-        self.kinematics.target_raw
-    }
     pub const fn target_degrees(&self) -> Option<f64> {
         self.kinematics.target_degrees
     }
@@ -1180,15 +1135,6 @@ impl JointRange {
     pub const fn new(min: i64, center: i64, max: i64) -> Self {
         Self { min, center, max }
     }
-    pub const fn min(self) -> i64 {
-        self.min
-    }
-    pub const fn center(self) -> i64 {
-        self.center
-    }
-    pub const fn max(self) -> i64 {
-        self.max
-    }
 }
 
 /// Live progress of a calibration sweep.
@@ -1268,6 +1214,7 @@ impl CalibrationJointProgress {
     pub const fn ready(&self) -> bool {
         self.ready
     }
+    #[cfg(any(test, feature = "test-support"))]
     /// Travel observed so far, in encoder counts.
     pub fn span(&self) -> i64 {
         self.max.saturating_sub(self.min)
@@ -1320,12 +1267,6 @@ impl CreateRobotRequest {
         }
     }
 
-    pub fn with_port(mut self, port: impl Into<String>, baud_rate: u32) -> Self {
-        self.port = Some(port.into());
-        self.baud_rate = Some(baud_rate);
-        self
-    }
-
     pub fn id(&self) -> &str {
         &self.id
     }
@@ -1344,13 +1285,6 @@ impl CreateRobotRequest {
 }
 
 impl UpdateRobotRequest {
-    pub fn with_robot_type(robot_type: Option<String>) -> Self {
-        Self {
-            robot_type,
-            ..Self::default()
-        }
-    }
-
     pub fn with_port(port: PortSettings) -> Self {
         Self {
             port: Some(port),
@@ -1428,12 +1362,13 @@ impl IdentifyPortResponse {
     pub fn port(&self) -> Option<&str> {
         self.port.as_deref()
     }
-    /// Every port that disappeared, for the ambiguous case.
-    pub fn removed(&self) -> &[String] {
-        &self.removed
-    }
 
     pub fn message(&self) -> &str {
         &self.message
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    /// Every port that disappeared, for the ambiguous case.
+    pub fn removed(&self) -> &[String] {
+        &self.removed
     }
 }

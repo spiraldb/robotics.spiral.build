@@ -125,19 +125,6 @@ impl ArmPose {
         self.gripper_opening
     }
 
-    /// The calibrated-center angle for a rotary joint. The gripper is linear
-    /// presentation state and is read through [`Self::gripper_opening`].
-    pub const fn degrees(self, joint: Joint) -> Option<f64> {
-        match joint {
-            Joint::ShoulderPan => Some(self.pan_degrees),
-            Joint::ShoulderLift => Some(self.lift_degrees),
-            Joint::ElbowFlex => Some(self.elbow_degrees),
-            Joint::WristFlex => Some(self.wrist_flex_degrees),
-            Joint::WristRoll => Some(self.wrist_roll_degrees),
-            Joint::Gripper => None,
-        }
-    }
-
     #[cfg(test)]
     pub(crate) fn with_pan_degrees(mut self, degrees: f64) -> Self {
         self.pan_degrees = Self::finite_or_neutral(degrees);
@@ -199,6 +186,19 @@ impl ArmPose {
     /// is observation, not configuration or motion authority.
     pub fn from_degrees(named_degrees: &BTreeMap<String, f64>, gripper_normalized: f64) -> Self {
         Self::from(named_degrees).with_gripper_normalized(gripper_normalized)
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    /// The calibrated-center angle for a rotary joint. The gripper is linear
+    /// presentation state and is read through [`Self::gripper_opening`].
+    pub const fn degrees(self, joint: Joint) -> Option<f64> {
+        match joint {
+            Joint::ShoulderPan => Some(self.pan_degrees),
+            Joint::ShoulderLift => Some(self.lift_degrees),
+            Joint::ElbowFlex => Some(self.elbow_degrees),
+            Joint::WristFlex => Some(self.wrist_flex_degrees),
+            Joint::WristRoll => Some(self.wrist_roll_degrees),
+            Joint::Gripper => None,
+        }
     }
 }
 

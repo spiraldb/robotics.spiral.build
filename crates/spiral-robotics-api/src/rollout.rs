@@ -20,10 +20,6 @@ impl RolloutDuration {
             None
         }
     }
-
-    pub const fn seconds(self) -> u32 {
-        self.0
-    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

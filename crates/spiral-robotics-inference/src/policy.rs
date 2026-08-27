@@ -133,21 +133,6 @@ pub struct PolicySpecification {
 }
 
 impl PolicySpecification {
-    pub fn new(
-        kind: PolicyKind,
-        observation: ObservationSpecification,
-        actions: ActionChunkSpecification,
-    ) -> Self {
-        Self {
-            kind,
-            state_dimensions: observation.state_dimensions,
-            image_inputs: observation.image_inputs,
-            action_dimensions: actions.action_dimensions,
-            action_chunk_size: actions.chunk_size,
-            recommended_action_steps: actions.recommended_steps,
-        }
-    }
-
     pub fn state_dimensions(&self) -> usize {
         self.state_dimensions
     }
@@ -167,6 +152,21 @@ impl PolicySpecification {
     pub fn recommended_action_steps(&self) -> usize {
         self.recommended_action_steps
     }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn new(
+        kind: PolicyKind,
+        observation: ObservationSpecification,
+        actions: ActionChunkSpecification,
+    ) -> Self {
+        Self {
+            kind,
+            state_dimensions: observation.state_dimensions,
+            image_inputs: observation.image_inputs,
+            action_dimensions: actions.action_dimensions,
+            action_chunk_size: actions.chunk_size,
+            recommended_action_steps: actions.recommended_steps,
+        }
+    }
 }
 
 /// Observation shape accepted by a policy.
@@ -176,31 +176,12 @@ pub struct ObservationSpecification {
     image_inputs: Vec<ImageInputSpecification>,
 }
 
-impl ObservationSpecification {
-    pub fn new(state_dimensions: usize, image_inputs: Vec<ImageInputSpecification>) -> Self {
-        Self {
-            state_dimensions,
-            image_inputs,
-        }
-    }
-}
-
 /// Action shape and consumption recommendation produced by a policy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ActionChunkSpecification {
     action_dimensions: usize,
     chunk_size: usize,
     recommended_steps: usize,
-}
-
-impl ActionChunkSpecification {
-    pub fn new(action_dimensions: usize, chunk_size: usize, recommended_steps: usize) -> Self {
-        Self {
-            action_dimensions,
-            chunk_size,
-            recommended_steps,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -212,15 +193,6 @@ pub struct ImageInputSpecification {
 }
 
 impl ImageInputSpecification {
-    pub fn new(name: impl Into<String>, channels: usize, dimensions: ImageDimensions) -> Self {
-        Self {
-            name: name.into(),
-            channels,
-            height: dimensions.height,
-            width: dimensions.width,
-        }
-    }
-
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -376,6 +348,27 @@ pub trait Policy: Send {
 /// therefore use a remote policy without linking the loader implementation.
 pub trait PolicyLoader: Send + Sync {
     fn load(&self, artifact: crate::ModelArtifact) -> InferenceResult<Box<dyn Policy>>;
+}
+
+impl ActionChunkSpecification {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn new(action_dimensions: usize, chunk_size: usize, recommended_steps: usize) -> Self {
+        Self {
+            action_dimensions,
+            chunk_size,
+            recommended_steps,
+        }
+    }
+}
+
+impl ObservationSpecification {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn new(state_dimensions: usize, image_inputs: Vec<ImageInputSpecification>) -> Self {
+        Self {
+            state_dimensions,
+            image_inputs,
+        }
+    }
 }
 
 #[cfg(test)]

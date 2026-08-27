@@ -14,17 +14,6 @@ pub struct ProjectImportSummary {
 }
 
 impl ProjectImportSummary {
-    pub const fn new(relations: u64, rows: u64) -> Self {
-        Self {
-            relations,
-            rows,
-            warnings: Vec::new(),
-        }
-    }
-    pub fn with_warnings(mut self, warnings: Vec<String>) -> Self {
-        self.warnings = warnings;
-        self
-    }
     pub const fn relations(&self) -> u64 {
         self.relations
     }
@@ -68,10 +57,6 @@ impl EpisodeImportSummary {
     }
     pub fn with_first_episode(mut self, first_episode: Option<String>) -> Self {
         self.first_episode = first_episode;
-        self
-    }
-    pub fn with_warnings(mut self, warnings: Vec<String>) -> Self {
-        self.warnings = warnings;
         self
     }
     pub fn dataset_id(&self) -> &str {
@@ -361,9 +346,6 @@ impl HuggingFaceDatasetImportSummary {
         self.warnings = warnings;
         self
     }
-    pub fn dataset_id(&self) -> &str {
-        &self.source.dataset_id
-    }
     pub fn repository(&self) -> &str {
         &self.source.repository
     }
@@ -376,16 +358,10 @@ impl HuggingFaceDatasetImportSummary {
     pub const fn files(&self) -> u64 {
         self.outcome.files
     }
-    pub const fn total_bytes(&self) -> u64 {
-        self.outcome.total_bytes
-    }
     pub fn relations(&self) -> &[String] {
         &self.outcome.relations
     }
     pub fn suggested_sql(&self) -> &str {
         &self.outcome.suggested_sql
-    }
-    pub fn warnings(&self) -> &[String] {
-        &self.warnings
     }
 }
