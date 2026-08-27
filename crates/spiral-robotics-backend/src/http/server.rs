@@ -223,20 +223,17 @@ impl StudioServer {
             }
         };
 
-        let database_tasks = tokio::task::LocalSet::new();
         match runtime.block_on(
-            database_tasks.run_until(
-                ServerStartup {
-                    arguments,
-                    camera_access_error: camera_access.err(),
-                    backend_state,
-                    spiral_endpoint,
-                    spiral_spfs_endpoint,
-                    control_settings,
-                    app,
-                }
-                .serve(),
-            ),
+            ServerStartup {
+                arguments,
+                camera_access_error: camera_access.err(),
+                backend_state,
+                spiral_endpoint,
+                spiral_spfs_endpoint,
+                control_settings,
+                app,
+            }
+            .serve(),
         ) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {

@@ -1628,23 +1628,6 @@ mod tests {
     use spiral_robotics_storage::video::{VideoSegment, VideoSize, VideoTiming};
     use spiral_robotics_storage::{BackendStateStore, ServiceEndpoint, SpiralConnectionSettings};
 
-    struct LocalDatabaseTest;
-
-    impl LocalDatabaseTest {
-        fn run<Assertions, AssertionsFuture>(assertions: Assertions)
-        where
-            Assertions: FnOnce() -> AssertionsFuture,
-            AssertionsFuture: std::future::Future<Output = ()>,
-        {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            let database_tasks = tokio::task::LocalSet::new();
-            runtime.block_on(database_tasks.run_until(assertions()));
-        }
-    }
-
     #[test]
     fn revision_increment_alone_does_not_stale_a_result() {
         let current = WorkflowSpec::default();
@@ -1761,117 +1744,113 @@ mod tests {
         );
     }
 
-    #[test]
-    fn terminal_save_failure_keeps_the_run_active_and_cancel_can_retry_finalization() {
-        LocalDatabaseTest::run(|| async {
-            let project_store = Arc::new(
-                ProjectStore::new(
-                    SpiralConnectionSettings::new(
-                        "https://api.spiraldb.dev".to_owned(),
-                        "https://spfs.spiraldb.dev".to_owned(),
-                    )
-                    .expect("the unconfigured test connection is valid"),
-                    "workflow_terminal_failure".to_owned(),
+    #[tokio::test(flavor = "current_thread")]
+    async fn terminal_save_failure_keeps_the_run_active_and_cancel_can_retry_finalization() {
+        let project_store = Arc::new(
+            ProjectStore::new(
+                SpiralConnectionSettings::new(
+                    "https://api.spiraldb.dev".to_owned(),
+                    "https://spfs.spiraldb.dev".to_owned(),
                 )
-                .expect("the unconfigured test project_store is valid"),
-            );
-            let manager = WorkflowManager::new(Arc::new(StorageManager::new(project_store)));
-            let workflow = WorkflowSpec::default();
-            let run_id = "terminal-save-failure".to_owned();
-            let mut snapshot = workflow
-                .starting_snapshot(&WorkflowRunSnapshot::idle_for(&workflow), run_id.clone());
-            snapshot.set_phase(WorkflowRunPhase::Running);
-            *manager.inner.document.recover_lock() = WorkflowDocument::new(workflow, snapshot);
-            *manager.inner.active.recover_lock() = Some(ActiveRun {
-                run_id: run_id.clone(),
-                cancel: Arc::new(AtomicBool::new(false)),
-                publication_gate: Arc::new(AsyncMutex::new(())),
-                task: None,
-                terminal_persistence_failed: false,
-            });
-            let (_, mut updates) = manager.subscription();
-            manager
-                .inner
-                .persistence
-                .test_outcomes
-                .recover_lock()
-                .push_back(Err("injected terminal write failure".to_owned()));
-
-            manager.finish_completed(&run_id, None).await;
-
-            let state = manager.state();
-            assert_eq!(state.snapshot().phase(), WorkflowRunPhase::Running);
-            assert!(state.snapshot().error().is_some_and(|error| {
-                error.contains("Could not durably finalize") && error.contains("choose Cancel")
-            }));
-            assert!(manager.inner.active.lock().unwrap().is_some());
-            let published = updates
-                .try_recv()
-                .expect("the recovery state must be published");
-            assert_eq!(published.snapshot().phase(), WorkflowRunPhase::Running);
-
-            manager
-                .inner
-                .persistence
-                .test_outcomes
-                .recover_lock()
-                .extend([Ok(()), Ok(())]);
-            let recovered = manager
-                .cancel(&manager.scope_id())
-                .await
-                .expect("Cancel must retry the durable terminal transition");
-            assert_eq!(recovered.phase(), WorkflowRunPhase::Cancelled);
-            assert!(recovered.error().is_none());
-            assert!(manager.inner.active.lock().unwrap().is_none());
+                .expect("the unconfigured test connection is valid"),
+                "workflow_terminal_failure".to_owned(),
+            )
+            .expect("the unconfigured test project_store is valid"),
+        );
+        let manager = WorkflowManager::new(Arc::new(StorageManager::new(project_store)));
+        let workflow = WorkflowSpec::default();
+        let run_id = "terminal-save-failure".to_owned();
+        let mut snapshot =
+            workflow.starting_snapshot(&WorkflowRunSnapshot::idle_for(&workflow), run_id.clone());
+        snapshot.set_phase(WorkflowRunPhase::Running);
+        *manager.inner.document.recover_lock() = WorkflowDocument::new(workflow, snapshot);
+        *manager.inner.active.recover_lock() = Some(ActiveRun {
+            run_id: run_id.clone(),
+            cancel: Arc::new(AtomicBool::new(false)),
+            publication_gate: Arc::new(AsyncMutex::new(())),
+            task: None,
+            terminal_persistence_failed: false,
         });
+        let (_, mut updates) = manager.subscription();
+        manager
+            .inner
+            .persistence
+            .test_outcomes
+            .recover_lock()
+            .push_back(Err("injected terminal write failure".to_owned()));
+
+        manager.finish_completed(&run_id, None).await;
+
+        let state = manager.state();
+        assert_eq!(state.snapshot().phase(), WorkflowRunPhase::Running);
+        assert!(state.snapshot().error().is_some_and(|error| {
+            error.contains("Could not durably finalize") && error.contains("choose Cancel")
+        }));
+        assert!(manager.inner.active.lock().unwrap().is_some());
+        let published = updates
+            .try_recv()
+            .expect("the recovery state must be published");
+        assert_eq!(published.snapshot().phase(), WorkflowRunPhase::Running);
+
+        manager
+            .inner
+            .persistence
+            .test_outcomes
+            .recover_lock()
+            .extend([Ok(()), Ok(())]);
+        let recovered = manager
+            .cancel(&manager.scope_id())
+            .await
+            .expect("Cancel must retry the durable terminal transition");
+        assert_eq!(recovered.phase(), WorkflowRunPhase::Cancelled);
+        assert!(recovered.error().is_none());
+        assert!(manager.inner.active.lock().unwrap().is_none());
     }
 
-    #[test]
-    fn authoritative_project_reload_gets_a_new_scope_for_a_lower_revision() {
-        LocalDatabaseTest::run(|| async {
-            let project_store = Arc::new(
-                ProjectStore::new(
-                    SpiralConnectionSettings::new(
-                        "https://api.spiraldb.dev".to_owned(),
-                        "https://spfs.spiraldb.dev".to_owned(),
-                    )
-                    .expect("the unconfigured test connection is valid"),
-                    "workflow_scope_reload".to_owned(),
+    #[tokio::test(flavor = "current_thread")]
+    async fn authoritative_project_reload_gets_a_new_scope_for_a_lower_revision() {
+        let project_store = Arc::new(
+            ProjectStore::new(
+                SpiralConnectionSettings::new(
+                    "https://api.spiraldb.dev".to_owned(),
+                    "https://spfs.spiraldb.dev".to_owned(),
                 )
-                .expect("the unconfigured test project_store is valid"),
-            );
-            let manager = WorkflowManager::new(Arc::new(StorageManager::new(project_store)));
-            let mut project_a = WorkflowDocument::default();
-            project_a.workflow_mut().set_revision(9);
-            project_a.snapshot_mut().set_workflow_revision(9);
-            manager
-                .install_hydrated_document(project_a)
-                .await
-                .expect("the first project installs");
-            let scope_a = manager.state().scope_id().to_owned();
+                .expect("the unconfigured test connection is valid"),
+                "workflow_scope_reload".to_owned(),
+            )
+            .expect("the unconfigured test project_store is valid"),
+        );
+        let manager = WorkflowManager::new(Arc::new(StorageManager::new(project_store)));
+        let mut project_a = WorkflowDocument::default();
+        project_a.workflow_mut().set_revision(9);
+        project_a.snapshot_mut().set_workflow_revision(9);
+        manager
+            .install_hydrated_document(project_a)
+            .await
+            .expect("the first project installs");
+        let scope_a = manager.state().scope_id().to_owned();
 
-            let mut project_b = WorkflowDocument::default();
-            project_b.workflow_mut().set_revision(1);
-            project_b.snapshot_mut().set_workflow_revision(1);
-            manager
-                .install_hydrated_document(project_b)
-                .await
-                .expect("the replacement project installs");
-            let state_b = manager.state();
+        let mut project_b = WorkflowDocument::default();
+        project_b.workflow_mut().set_revision(1);
+        project_b.snapshot_mut().set_workflow_revision(1);
+        manager
+            .install_hydrated_document(project_b)
+            .await
+            .expect("the replacement project installs");
+        let state_b = manager.state();
 
-            assert_ne!(state_b.scope_id(), scope_a);
-            assert_eq!(state_b.workflow().revision(), 1);
-            assert!(matches!(
-                manager
-                    .command(WorkflowCommand::apply(
-                        scope_a,
-                        state_b.workflow().revision(),
-                        state_b.workflow().clone(),
-                    ))
-                    .await,
-                Err(OperationError::Conflict(_))
-            ));
-        });
+        assert_ne!(state_b.scope_id(), scope_a);
+        assert_eq!(state_b.workflow().revision(), 1);
+        assert!(matches!(
+            manager
+                .command(WorkflowCommand::apply(
+                    scope_a,
+                    state_b.workflow().revision(),
+                    state_b.workflow().clone(),
+                ))
+                .await,
+            Err(OperationError::Conflict(_))
+        ));
     }
 
     #[test]
@@ -2001,9 +1980,10 @@ mod tests {
         .and_then(|settings| settings.with_project(&project))
         .expect("the Workflow E2E connection must be valid")
         .with_credentials(stored.as_ref().and_then(BackendStateStore::credentials));
-        let database_runtime =
-            crate::test_database::LocalProjectStore::start(connection, namespace.clone());
-        let project_store = database_runtime.store();
+        let project_store = Arc::new(
+            ProjectStore::new(connection, namespace.clone())
+                .expect("the Workflow E2E project store must be valid"),
+        );
         let seed_relation = format!("{namespace}.seed_values");
         let mut cleanup = WorkflowTestNamespace::new(
             project_store.clone(),
@@ -2140,9 +2120,10 @@ mod tests {
         .and_then(|settings| settings.with_project(&project))
         .expect("the Workflow SigLIP connection must be valid")
         .with_credentials(stored.as_ref().and_then(BackendStateStore::credentials));
-        let database_runtime =
-            crate::test_database::LocalProjectStore::start(connection, namespace.clone());
-        let project_store = database_runtime.store();
+        let project_store = Arc::new(
+            ProjectStore::new(connection, namespace.clone())
+                .expect("the Workflow SigLIP project store must be valid"),
+        );
         let manifest_relation = format!("{namespace}.video_assets");
         let media_relation = format!("{namespace}.video.assets");
         let empty_relation = format!("{namespace}.empty_video_assets");

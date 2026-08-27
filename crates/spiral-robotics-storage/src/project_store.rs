@@ -27,9 +27,6 @@ const TRANSPORT_FAILURE_MARKERS: [&str; 5] = [
 ];
 
 /// One async, project-scoped logical connection.
-///
-/// The boxed state is always a `Send` proxy. The native Spiral connection stays
-/// on its `LocalSet` owner for the complete lifetime of this value.
 pub struct ProjectConnection {
     database: Arc<dyn Database>,
     state: ProjectConnectionState,
@@ -237,33 +234,8 @@ impl DatabaseSession for ProjectConnection {
 pub struct ProjectStore {
     connection_settings: Arc<RwLock<SpiralConnectionSettings>>,
     namespace: String,
-    database: ProjectDatabase,
+    database: Arc<SpiralDatabase>,
     async_operation_gate: Arc<tokio::sync::RwLock<()>>,
-}
-
-#[derive(Clone)]
-struct ProjectDatabase {
-    native: SpiralDatabase,
-    interface: Arc<dyn Database>,
-}
-
-impl ProjectDatabase {
-    fn start(settings: SpiralConnectionSettings) -> Result<Self, String> {
-        let native = SpiralDatabase::start(settings).map_err(|error| error.to_string())?;
-        let interface = Arc::new(native.clone()) as Arc<dyn Database>;
-        Ok(Self { native, interface })
-    }
-
-    async fn configure(&self, settings: SpiralConnectionSettings) -> Result<(), String> {
-        self.native
-            .configure(settings)
-            .await
-            .map_err(|error| error.to_string())
-    }
-
-    fn interface(&self) -> Arc<dyn Database> {
-        Arc::clone(&self.interface)
-    }
 }
 
 impl ProjectStore {
@@ -290,9 +262,6 @@ impl ProjectStore {
         )
     }
 
-    /// Start the database service on the current Tokio [`tokio::task::LocalSet`].
-    /// The server installs that local executor beside Axum before constructing
-    /// the project store.
     pub fn new(
         connection_settings: SpiralConnectionSettings,
         namespace: String,
@@ -300,7 +269,9 @@ impl ProjectStore {
         if !crate::schema::StorageSchema::is_identifier(&namespace) {
             return Err("Spiral namespace is not a safe SQL identifier".to_owned());
         }
-        let database = ProjectDatabase::start(connection_settings.clone())?;
+        let database = Arc::new(
+            SpiralDatabase::new(connection_settings.clone()).map_err(|error| error.to_string())?,
+        );
         Ok(Self {
             connection_settings: Arc::new(RwLock::new(connection_settings)),
             namespace,
@@ -362,8 +333,8 @@ impl ProjectStore {
     }
 
     /// Change the bootstrap pointer without introducing another data store.
-    /// The exclusive gate drains active project-store work before the local
-    /// database owner installs its replacement session.
+    /// The exclusive gate drains active project-store work before replacing
+    /// the configured session.
     #[cfg(test)]
     pub async fn configure_project(&self, project_id: &str) -> Result<(), String> {
         let _async_operation = self.async_operation_gate.write().await;
@@ -372,13 +343,15 @@ impl ProjectStore {
             .read_unpoisoned()
             .clone()
             .with_project(project_id)?;
-        self.database.configure(settings.clone()).await?;
+        self.database
+            .configure(settings.clone())
+            .map_err(|error| error.to_string())?;
         *self.connection_settings.write_unpoisoned() = settings;
         Ok(())
     }
 
     /// Atomically replace the complete per-database destination. Active work
-    /// is drained before the local owner installs the new session. The next
+    /// is drained before the new session is installed. The next
     /// operation opens a connection with the new scoped endpoint and credential
     /// options. An unconfigured value is accepted so a failed first-time setup
     /// can restore the bootstrap state exactly.
@@ -387,7 +360,9 @@ impl ProjectStore {
         connection_settings: SpiralConnectionSettings,
     ) -> Result<(), String> {
         let _async_operation = self.async_operation_gate.write().await;
-        self.database.configure(connection_settings.clone()).await?;
+        self.database
+            .configure(connection_settings.clone())
+            .map_err(|error| error.to_string())?;
         *self.connection_settings.write_unpoisoned() = connection_settings;
         Ok(())
     }
@@ -420,7 +395,7 @@ impl ProjectStore {
             })?;
             settings.endpoint().to_owned()
         };
-        let database = self.database.interface();
+        let database = Arc::clone(&self.database) as Arc<dyn Database>;
         ProjectConnection::open(database, operation)
             .await
             .map_err(|error| Self::present_error(&endpoint, error))
@@ -446,116 +421,90 @@ impl<T> UnpoisonedRwLock<T> for RwLock<T> {
 
 #[cfg(test)]
 mod tests {
-    use std::future::Future;
-
     use super::*;
 
-    struct LocalDatabaseTest;
+    #[tokio::test(flavor = "current_thread")]
+    async fn project_store_can_start_unconfigured_then_select_one_project() {
+        let project_store = ProjectStore::new(
+            SpiralConnectionSettings::new(
+                "https://api.spiraldb.dev".to_owned(),
+                "https://spfs.spiraldb.dev".to_owned(),
+            )
+            .unwrap(),
+            "spiral_robotics".to_owned(),
+        )
+        .unwrap();
 
-    impl LocalDatabaseTest {
-        fn run(assertions: impl Future<Output = ()>) {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            let database_tasks = tokio::task::LocalSet::new();
-            runtime.block_on(database_tasks.run_until(assertions));
-        }
+        assert!(!project_store.is_configured());
+        let error = project_store.connect().await.err().unwrap();
+        assert!(error.contains("Settings"));
+        project_store
+            .configure_project(" project-123 ")
+            .await
+            .unwrap();
+        assert!(project_store.is_configured());
+        assert_eq!(project_store.project_id(), "project-123");
     }
 
-    #[test]
-    fn project_store_can_start_unconfigured_then_select_one_project() {
-        LocalDatabaseTest::run(async {
-            let project_store = ProjectStore::new(
-                SpiralConnectionSettings::new(
-                    "https://api.spiraldb.dev".to_owned(),
-                    "https://spfs.spiraldb.dev".to_owned(),
-                )
-                .unwrap(),
-                "spiral_robotics".to_owned(),
-            )
-            .unwrap();
+    #[tokio::test(flavor = "current_thread")]
+    async fn complete_connection_replacement_can_restore_unconfigured_bootstrap_state() {
+        let unconfigured = SpiralConnectionSettings::new(
+            "https://api.spiraldb.dev".to_owned(),
+            "https://spfs.spiraldb.dev".to_owned(),
+        )
+        .unwrap();
+        let project_store =
+            ProjectStore::new(unconfigured.clone(), "spiral_robotics".to_owned()).unwrap();
+        let configured = unconfigured.clone().with_project("project-123").unwrap();
 
-            assert!(!project_store.is_configured());
-            let error = project_store.connect().await.err().unwrap();
-            assert!(error.contains("Settings"));
+        project_store
+            .configure_connection(configured)
+            .await
+            .unwrap();
+        assert!(project_store.is_configured());
+        project_store
+            .configure_connection(unconfigured)
+            .await
+            .unwrap();
+        assert!(!project_store.is_configured());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn invalid_project_selection_does_not_configure_the_project_store() {
+        let project_store = ProjectStore::new(
+            SpiralConnectionSettings::new(
+                "https://api.spiraldb.dev".to_owned(),
+                "https://spfs.spiraldb.dev".to_owned(),
+            )
+            .unwrap(),
+            "spiral_robotics".to_owned(),
+        )
+        .unwrap();
+
+        assert!(
             project_store
-                .configure_project(" project-123 ")
+                .configure_project("not/a/project")
                 .await
-                .unwrap();
-            assert!(project_store.is_configured());
-            assert_eq!(project_store.project_id(), "project-123");
-        });
+                .is_err()
+        );
+        assert!(!project_store.is_configured());
     }
 
-    #[test]
-    fn complete_connection_replacement_can_restore_unconfigured_bootstrap_state() {
-        LocalDatabaseTest::run(async {
-            let unconfigured = SpiralConnectionSettings::new(
-                "https://api.spiraldb.dev".to_owned(),
-                "https://spfs.spiraldb.dev".to_owned(),
-            )
-            .unwrap();
-            let project_store = Arc::new(
-                ProjectStore::new(unconfigured.clone(), "spiral_robotics".to_owned()).unwrap(),
-            );
-            let configured = unconfigured.clone().with_project("project-123").unwrap();
+    #[tokio::test(flavor = "current_thread")]
+    async fn native_connections_are_independent_without_a_capacity_gate() {
+        let settings = SpiralConnectionSettings::new(
+            "https://api.spiraldb.dev".to_owned(),
+            "https://spfs.spiraldb.dev".to_owned(),
+        )
+        .and_then(|settings| settings.with_project("project-123"))
+        .unwrap();
+        let project_store = ProjectStore::new(settings, "spiral_robotics".to_owned()).unwrap();
 
-            let configuring_store = Arc::clone(&project_store);
-            tokio::spawn(async move { configuring_store.configure_connection(configured).await })
-                .await
-                .unwrap()
-                .unwrap();
-            assert!(project_store.is_configured());
-            let restoring_store = Arc::clone(&project_store);
-            tokio::spawn(async move { restoring_store.configure_connection(unconfigured).await })
-                .await
-                .unwrap()
-                .unwrap();
-            assert!(!project_store.is_configured());
-        });
-    }
+        let first = project_store.connect().await.unwrap();
+        let second = project_store.connect().await.unwrap();
 
-    #[test]
-    fn invalid_project_selection_does_not_configure_the_project_store() {
-        LocalDatabaseTest::run(async {
-            let project_store = ProjectStore::new(
-                SpiralConnectionSettings::new(
-                    "https://api.spiraldb.dev".to_owned(),
-                    "https://spfs.spiraldb.dev".to_owned(),
-                )
-                .unwrap(),
-                "spiral_robotics".to_owned(),
-            )
-            .unwrap();
-
-            assert!(
-                project_store
-                    .configure_project("not/a/project")
-                    .await
-                    .is_err()
-            );
-            assert!(!project_store.is_configured());
-        });
-    }
-
-    #[test]
-    fn native_connections_are_independent_without_a_capacity_gate() {
-        LocalDatabaseTest::run(async {
-            let settings = SpiralConnectionSettings::new(
-                "https://api.spiraldb.dev".to_owned(),
-                "https://spfs.spiraldb.dev".to_owned(),
-            )
-            .and_then(|settings| settings.with_project("project-123"))
-            .unwrap();
-            let project_store = ProjectStore::new(settings, "spiral_robotics".to_owned()).unwrap();
-
-            let first = project_store.connect().await.unwrap();
-            let second = project_store.connect().await.unwrap();
-
-            drop(first);
-            drop(second);
-        });
+        drop(first);
+        drop(second);
     }
 
     #[test]

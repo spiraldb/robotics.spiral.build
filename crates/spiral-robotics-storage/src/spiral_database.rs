@@ -1,8 +1,4 @@
 //! Native async Spiral implementation of the database traits.
-//!
-//! The public proxies are `Send`; every `ConnectionCtx` remains owned by one
-//! Tokio `LocalSet` task. Spiral query pipelines are submitted back to the
-//! caller's multithreaded Tokio runtime through `EngineRuntime::current`.
 
 use std::fmt;
 use std::sync::Arc;
@@ -11,6 +7,7 @@ use arrow_array::cast::AsArray as _;
 use arrow_array::{ArrayRef as ArrowArrayRef, RecordBatch, StringArray, StructArray};
 use arrow_schema::{DataType, Field, Schema};
 use futures::{FutureExt as _, StreamExt as _, TryStreamExt as _};
+use parking_lot::RwLock;
 use spiral_client::SpiralClientOptions;
 use spiral_client::authn::ClientCredentials;
 use spiral_config::ClientSettings;
@@ -30,7 +27,7 @@ use spiral_engine::sql::{CommandOutput, ConnectionCtx};
 use spiral_engine::statement::CreateTable;
 use spiral_engine::{EngineRuntime, Morsel, RelationMeta};
 use spiral_session::SpiralSession;
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::Mutex;
 use url::Url;
 use vortex_array::{ArrayRef, VortexSessionExecute as _};
 use vortex_arrow::ArrowSessionExt as _;
@@ -44,278 +41,25 @@ use crate::database::{
 };
 use crate::settings::SpiralConnectionSettings;
 
-const DATABASE_CHANNEL_CAPACITY: usize = 64;
-const CONNECTION_CHANNEL_CAPACITY: usize = 16;
 const QUERY_BATCH_CAPACITY: usize = 16;
 const SPIRALDB_CATALOG: &str = "spiraldb";
 
-/// `Send + Sync` entry point held by application state.
-#[derive(Clone)]
+/// Configured database entry point held by application state.
 pub(crate) struct SpiralDatabase {
-    sender: mpsc::Sender<DatabaseServiceRequest>,
+    session: RwLock<SpiralSession>,
 }
 
 impl SpiralDatabase {
-    /// Start the connection owner on the current [`tokio::task::LocalSet`].
-    pub(crate) fn start(settings: SpiralConnectionSettings) -> DatabaseResult<Self> {
-        let (sender, receiver) = mpsc::channel(DATABASE_CHANNEL_CAPACITY);
-        let service = SpiralDatabaseService::new(settings, receiver)?;
-        tokio::task::spawn_local(service.run());
-        Ok(Self { sender })
-    }
-
-    pub(crate) fn configure(&self, settings: SpiralConnectionSettings) -> DatabaseFuture<'_, ()> {
-        let sender = self.sender.clone();
-        async move {
-            let (response, reply) = oneshot::channel();
-            sender
-                .send(DatabaseServiceRequest::Configure { settings, response })
-                .await
-                .map_err(DatabaseError::closed)?;
-            reply.await.map_err(DatabaseError::closed)?
-        }
-        .boxed()
-    }
-
-    fn request_connection(&self) -> DatabaseFuture<'_, Box<dyn DatabaseConnection>> {
-        let sender = self.sender.clone();
-        async move {
-            let (response, reply) = oneshot::channel();
-            sender
-                .send(DatabaseServiceRequest::Open(OpenConnectionRequest {
-                    response,
-                }))
-                .await
-                .map_err(DatabaseError::closed)?;
-            reply.await.map_err(DatabaseError::closed)?
-        }
-        .boxed()
-    }
-}
-
-impl Database for SpiralDatabase {
-    fn connect(&self) -> DatabaseFuture<'_, Box<dyn DatabaseConnection>> {
-        self.request_connection()
-    }
-}
-
-struct SpiralConnectionProxy {
-    active: bool,
-    sender: mpsc::Sender<ConnectionRequest>,
-}
-
-impl SpiralConnectionProxy {
-    fn new(sender: mpsc::Sender<ConnectionRequest>) -> Self {
-        Self {
-            active: true,
-            sender,
-        }
-    }
-
-    fn ensure_active(&self) -> DatabaseResult<()> {
-        self.active
-            .then_some(())
-            .ok_or_else(|| DatabaseError::invalid_state("database connection is closed"))
-    }
-
-    fn take_sender(&mut self) -> DatabaseResult<mpsc::Sender<ConnectionRequest>> {
-        self.ensure_active()?;
-        self.active = false;
-        Ok(self.sender.clone())
-    }
-}
-
-impl DatabaseSession for SpiralConnectionProxy {
-    fn execute(&mut self, command: DatabaseCommand) -> DatabaseFuture<'_, DatabaseOutput> {
-        let active = self.ensure_active();
-        let sender = self.sender.clone();
-        async move {
-            active?;
-            let (response, reply) = oneshot::channel();
-            sender
-                .send(ConnectionRequest::Execute(ExecuteRequest {
-                    command,
-                    response,
-                }))
-                .await
-                .map_err(DatabaseError::closed)?;
-            reply.await.map_err(DatabaseError::closed)?
-        }
-        .boxed()
-    }
-
-    fn table_schema(&mut self, relation: RelationName) -> DatabaseFuture<'_, Option<Arc<Schema>>> {
-        let active = self.ensure_active();
-        let sender = self.sender.clone();
-        async move {
-            active?;
-            let (response, reply) = oneshot::channel();
-            sender
-                .send(ConnectionRequest::TableSchema(TableSchemaRequest {
-                    relation,
-                    response,
-                }))
-                .await
-                .map_err(DatabaseError::closed)?;
-            reply.await.map_err(DatabaseError::closed)?
-        }
-        .boxed()
-    }
-
-    fn relations(&mut self) -> DatabaseFuture<'_, Vec<RelationMetadata>> {
-        let active = self.ensure_active();
-        let sender = self.sender.clone();
-        async move {
-            active?;
-            let (response, reply) = oneshot::channel();
-            sender
-                .send(ConnectionRequest::Relations { response })
-                .await
-                .map_err(DatabaseError::closed)?;
-            reply.await.map_err(DatabaseError::closed)?
-        }
-        .boxed()
-    }
-}
-
-impl DatabaseConnection for SpiralConnectionProxy {
-    fn begin(mut self: Box<Self>) -> DatabaseFuture<'static, Box<dyn DatabaseTransaction>> {
-        let sender = self.take_sender();
-        async move {
-            let sender = sender?;
-            let (response, reply) = oneshot::channel();
-            sender
-                .send(ConnectionRequest::Begin { response })
-                .await
-                .map_err(DatabaseError::closed)?;
-            reply.await.map_err(DatabaseError::closed)??;
-            Ok(Box::new(SpiralTransactionProxy::new(sender)) as Box<dyn DatabaseTransaction>)
-        }
-        .boxed()
-    }
-}
-
-struct SpiralTransactionProxy {
-    connection: SpiralConnectionProxy,
-}
-
-impl SpiralTransactionProxy {
-    fn new(sender: mpsc::Sender<ConnectionRequest>) -> Self {
-        Self {
-            connection: SpiralConnectionProxy::new(sender),
-        }
-    }
-}
-
-impl DatabaseSession for SpiralTransactionProxy {
-    fn execute(&mut self, command: DatabaseCommand) -> DatabaseFuture<'_, DatabaseOutput> {
-        self.connection.execute(command)
-    }
-
-    fn table_schema(&mut self, relation: RelationName) -> DatabaseFuture<'_, Option<Arc<Schema>>> {
-        self.connection.table_schema(relation)
-    }
-
-    fn relations(&mut self) -> DatabaseFuture<'_, Vec<RelationMetadata>> {
-        self.connection.relations()
-    }
-}
-
-impl DatabaseTransaction for SpiralTransactionProxy {
-    fn commit(mut self: Box<Self>) -> DatabaseFuture<'static, ExecutionSummary> {
-        let sender = self.connection.take_sender();
-        async move { TransactionTerminal::Commit.finish(sender?).await }.boxed()
-    }
-
-    fn rollback(mut self: Box<Self>) -> DatabaseFuture<'static, ()> {
-        let sender = self.connection.take_sender();
-        async move {
-            TransactionTerminal::Rollback
-                .finish(sender?)
-                .await
-                .map(|_| ())
-        }
-        .boxed()
-    }
-}
-
-enum TransactionTerminal {
-    Commit,
-    Rollback,
-}
-
-impl TransactionTerminal {
-    async fn finish(
-        self,
-        sender: mpsc::Sender<ConnectionRequest>,
-    ) -> DatabaseResult<ExecutionSummary> {
-        let (response, reply) = oneshot::channel();
-        sender
-            .send(ConnectionRequest::FinishTransaction(
-                FinishTransactionRequest {
-                    terminal: self,
-                    response,
-                },
-            ))
-            .await
-            .map_err(DatabaseError::closed)?;
-        reply.await.map_err(DatabaseError::closed)?
-    }
-}
-
-struct OpenConnectionRequest {
-    response: oneshot::Sender<DatabaseResult<Box<dyn DatabaseConnection>>>,
-}
-
-enum DatabaseServiceRequest {
-    Open(OpenConnectionRequest),
-    Configure {
-        settings: SpiralConnectionSettings,
-        response: oneshot::Sender<DatabaseResult<()>>,
-    },
-}
-
-enum ConnectionRequest {
-    Execute(ExecuteRequest),
-    TableSchema(TableSchemaRequest),
-    Relations {
-        response: oneshot::Sender<DatabaseResult<Vec<RelationMetadata>>>,
-    },
-    Begin {
-        response: oneshot::Sender<DatabaseResult<()>>,
-    },
-    FinishTransaction(FinishTransactionRequest),
-}
-
-struct ExecuteRequest {
-    command: DatabaseCommand,
-    response: oneshot::Sender<DatabaseResult<DatabaseOutput>>,
-}
-
-struct TableSchemaRequest {
-    relation: RelationName,
-    response: oneshot::Sender<DatabaseResult<Option<Arc<Schema>>>>,
-}
-
-struct FinishTransactionRequest {
-    terminal: TransactionTerminal,
-    response: oneshot::Sender<DatabaseResult<ExecutionSummary>>,
-}
-
-struct SpiralDatabaseService {
-    session: SpiralSession,
-    receiver: mpsc::Receiver<DatabaseServiceRequest>,
-}
-
-impl SpiralDatabaseService {
-    fn new(
-        settings: SpiralConnectionSettings,
-        receiver: mpsc::Receiver<DatabaseServiceRequest>,
-    ) -> DatabaseResult<Self> {
+    pub(crate) fn new(settings: SpiralConnectionSettings) -> DatabaseResult<Self> {
         Ok(Self {
-            session: Self::create_session(&settings)?,
-            receiver,
+            session: RwLock::new(Self::create_session(&settings)?),
         })
+    }
+
+    pub(crate) fn configure(&self, settings: SpiralConnectionSettings) -> DatabaseResult<()> {
+        let session = Self::create_session(&settings)?;
+        *self.session.write() = session;
+        Ok(())
     }
 
     fn create_session(settings: &SpiralConnectionSettings) -> DatabaseResult<SpiralSession> {
@@ -349,94 +93,37 @@ impl SpiralDatabaseService {
         let runtime = EngineRuntime::current(workers).map_err(DatabaseError::from_external)?;
         Ok(runtime.install_io(session))
     }
+}
 
-    async fn run(mut self) {
-        while let Some(request) = self.receiver.recv().await {
-            match request {
-                DatabaseServiceRequest::Open(request) => self.open(request),
-                DatabaseServiceRequest::Configure { settings, response } => {
-                    let result = Self::create_session(&settings).map(|session| {
-                        self.session = session;
-                    });
-                    let _ = response.send(result);
-                }
-            }
+impl Database for SpiralDatabase {
+    fn connect(&self) -> DatabaseFuture<'_, Box<dyn DatabaseConnection>> {
+        async move {
+            let session = self.session.read().clone();
+            Ok(Box::new(SpiralConnection::new(session)) as Box<dyn DatabaseConnection>)
         }
-    }
-
-    fn open(&self, request: OpenConnectionRequest) {
-        let (sender, receiver) = mpsc::channel(CONNECTION_CHANNEL_CAPACITY);
-        let service = SpiralConnectionService::new(self.session.clone(), receiver);
-        tokio::task::spawn_local(service.run());
-        let connection =
-            Box::new(SpiralConnectionProxy::new(sender)) as Box<dyn DatabaseConnection>;
-        let _ = request.response.send(Ok(connection));
+        .boxed()
     }
 }
 
-struct SpiralConnectionService {
-    session: SpiralSession,
-    connection: Option<ConnectionCtx>,
-    receiver: mpsc::Receiver<ConnectionRequest>,
+struct SpiralConnection {
+    context: ConnectionCtx,
 }
 
-impl SpiralConnectionService {
-    fn new(session: SpiralSession, receiver: mpsc::Receiver<ConnectionRequest>) -> Self {
+impl SpiralConnection {
+    fn new(session: SpiralSession) -> Self {
         Self {
-            connection: Some(ConnectionCtx::new(session.clone())),
-            session,
-            receiver,
+            context: ConnectionCtx::new(session),
         }
-    }
-
-    async fn run(mut self) {
-        while let Some(request) = self.receiver.recv().await {
-            self.handle(request).await;
-        }
-    }
-
-    async fn handle(&mut self, request: ConnectionRequest) {
-        match request {
-            ConnectionRequest::Execute(request) => self.execute(request).await,
-            ConnectionRequest::TableSchema(request) => self.table_schema(request).await,
-            ConnectionRequest::Relations { response } => {
-                let result = self.relations().await;
-                let _ = response.send(result);
-            }
-            ConnectionRequest::Begin { response } => {
-                let result = self.begin().await;
-                let _ = response.send(result);
-            }
-            ConnectionRequest::FinishTransaction(request) => {
-                self.finish_transaction(request).await;
-            }
-        }
-    }
-
-    fn connection(&mut self) -> DatabaseResult<&mut ConnectionCtx> {
-        self.connection
-            .as_mut()
-            .ok_or_else(|| DatabaseError::invalid_state("database connection is closed"))
-    }
-
-    async fn execute(&mut self, request: ExecuteRequest) {
-        let ExecuteRequest { command, response } = request;
-        let session = self.session.clone();
-        let result = match self.connection() {
-            Ok(connection) => Self::execute_command(connection, session, command).await,
-            Err(error) => Err(error),
-        };
-        let _ = response.send(result);
     }
 
     async fn execute_command(
-        connection: &mut ConnectionCtx,
-        session: SpiralSession,
+        &mut self,
         command: DatabaseCommand,
     ) -> DatabaseResult<DatabaseOutput> {
         match command {
             DatabaseCommand::Statement(statement) => {
-                match connection
+                match self
+                    .context
                     .execute_command(statement.as_str())
                     .await
                     .map_err(DatabaseError::from_external)?
@@ -458,7 +145,7 @@ impl SpiralConnectionService {
                 }
             }
             DatabaseCommand::Ingest(ingestion) => {
-                let rows = Self::ingest(connection, session, ingestion).await?;
+                let rows = self.ingest(ingestion).await?;
                 Ok(DatabaseOutput::AffectedRows(ExecutionSummary::new(Some(
                     rows,
                 ))))
@@ -537,47 +224,34 @@ impl SpiralConnectionService {
         ))
     }
 
-    async fn table_schema(&mut self, request: TableSchemaRequest) {
-        let TableSchemaRequest { relation, response } = request;
-        let result = match self.connection() {
-            Ok(connection) => {
-                let target = Self::relation_name(&relation);
-                match target {
-                    Ok(target) => {
-                        let catalog = connection.relation_catalog().clone();
-                        let session = connection.session().clone();
-                        catalog
-                            .bind_relation_opt(&target, &session)
-                            .await
-                            .map_err(DatabaseError::from_external)
-                            .and_then(|definition| {
-                                definition
-                                    .map(|definition| {
-                                        session
-                                            .vortex()
-                                            .arrow()
-                                            .to_arrow_schema(definition.definition().dtype())
-                                            .map(Arc::new)
-                                            .map_err(DatabaseError::from_external)
-                                    })
-                                    .transpose()
-                            })
-                    }
-                    Err(error) => Err(error),
-                }
-            }
-            Err(error) => Err(error),
-        };
-        let _ = response.send(result);
+    async fn fetch_table_schema(
+        &mut self,
+        relation: RelationName,
+    ) -> DatabaseResult<Option<Arc<Schema>>> {
+        let target = Self::relation_name(&relation)?;
+        let catalog = self.context.relation_catalog().clone();
+        let session = self.context.session().clone();
+        catalog
+            .bind_relation_opt(&target, &session)
+            .await
+            .map_err(DatabaseError::from_external)?
+            .map(|definition| {
+                session
+                    .vortex()
+                    .arrow()
+                    .to_arrow_schema(definition.definition().dtype())
+                    .map(Arc::new)
+                    .map_err(DatabaseError::from_external)
+            })
+            .transpose()
     }
 
-    async fn relations(&mut self) -> DatabaseResult<Vec<RelationMetadata>> {
-        let connection = self.connection()?;
+    async fn list_relations(&mut self) -> DatabaseResult<Vec<RelationMetadata>> {
         let request = CatalogEntryRequest::default()
             .with_relation_types(vec![RelationType::Table, RelationType::View]);
-        let catalog = connection.relation_catalog().clone();
+        let catalog = self.context.relation_catalog().clone();
         let mut entries = catalog
-            .list_entries(connection.session(), request)
+            .list_entries(self.context.session(), request)
             .map_err(DatabaseError::from_external)?
             .try_collect::<Vec<_>>()
             .await
@@ -596,48 +270,11 @@ impl SpiralConnectionService {
             .collect()
     }
 
-    async fn begin(&mut self) -> DatabaseResult<()> {
-        let result = self
-            .connection()?
-            .set_autocommit(false)
-            .await
-            .map_err(DatabaseError::from_external);
-        if result.is_err() {
-            self.connection = None;
-        }
-        result
-    }
-
-    async fn finish_transaction(&mut self, request: FinishTransactionRequest) {
-        let FinishTransactionRequest { terminal, response } = request;
-        let result = match self.connection.take() {
-            Some(connection) => match terminal {
-                TransactionTerminal::Commit => connection
-                    .commit()
-                    .await
-                    .map(|_| ExecutionSummary::default())
-                    .map_err(DatabaseError::from_external),
-                TransactionTerminal::Rollback => connection
-                    .rollback()
-                    .await
-                    .map(|_| ExecutionSummary::default())
-                    .map_err(DatabaseError::from_external),
-            },
-            None => Err(DatabaseError::invalid_state(
-                "database transaction is closed",
-            )),
-        };
-        let _ = response.send(result);
-    }
-
-    async fn ingest(
-        connection: &mut ConnectionCtx,
-        session: SpiralSession,
-        ingestion: BatchIngestion,
-    ) -> DatabaseResult<u64> {
+    async fn ingest(&mut self, ingestion: BatchIngestion) -> DatabaseResult<u64> {
         let (relation, mode, batches) = ingestion.into_parts();
         let target = Self::relation_name(&relation)?;
-        let catalog = connection.relation_catalog().clone();
+        let session = self.context.session().clone();
+        let catalog = self.context.relation_catalog().clone();
         let exists = catalog
             .bind_relation_opt(&target, &session)
             .await
@@ -650,13 +287,13 @@ impl SpiralConnectionService {
             ));
         }
         let plan = ArrowStreamSource::plan(session.clone(), batches)?;
-        let options = connection.query_options();
+        let options = self.context.query_options();
         match mode {
             IngestMode::Append => {
                 let insert = Relation::new(session, plan)
                     .insert_into(target)
                     .map_err(DatabaseError::from_external)?;
-                connection
+                self.context
                     .execute_insert(&insert, options)
                     .await
                     .map(|summary| summary.rows())
@@ -666,31 +303,31 @@ impl SpiralConnectionService {
                 let insert = Relation::new(session, plan)
                     .insert_into(target)
                     .map_err(DatabaseError::from_external)?;
-                connection
+                self.context
                     .execute_insert(&insert, options)
                     .await
                     .map(|summary| summary.rows())
                     .map_err(DatabaseError::from_external)
             }
             IngestMode::CreateOrAppend => {
-                Self::create_table(connection, TableCreation::new(target, plan, false), options)
+                self.create_table(TableCreation::new(target, plan, false), options)
                     .await
             }
             IngestMode::Replace => {
-                Self::create_table(connection, TableCreation::new(target, plan, true), options)
+                self.create_table(TableCreation::new(target, plan, true), options)
                     .await
             }
         }
     }
 
     async fn create_table(
-        connection: &ConnectionCtx,
+        &self,
         creation: TableCreation,
         options: spiral_engine::QueryOptions,
     ) -> DatabaseResult<u64> {
         let (target, plan, replace) = creation.into_parts();
         let create = CreateTable::new(target, plan, [], false, replace, false);
-        connection
+        self.context
             .execute_create_table(&create, options)
             .await
             .map(|summary| summary.rows())
@@ -701,6 +338,78 @@ impl SpiralConnectionService {
         Ok(SpiralRelationName::new(
             relation.as_str().split('.').map(str::to_owned),
         ))
+    }
+}
+
+impl DatabaseSession for SpiralConnection {
+    fn execute(&mut self, command: DatabaseCommand) -> DatabaseFuture<'_, DatabaseOutput> {
+        async move { self.execute_command(command).await }.boxed()
+    }
+
+    fn table_schema(&mut self, relation: RelationName) -> DatabaseFuture<'_, Option<Arc<Schema>>> {
+        async move { self.fetch_table_schema(relation).await }.boxed()
+    }
+
+    fn relations(&mut self) -> DatabaseFuture<'_, Vec<RelationMetadata>> {
+        async move { self.list_relations().await }.boxed()
+    }
+}
+
+impl DatabaseConnection for SpiralConnection {
+    fn begin(self: Box<Self>) -> DatabaseFuture<'static, Box<dyn DatabaseTransaction>> {
+        async move {
+            let connection = *self;
+            connection
+                .context
+                .set_autocommit(false)
+                .await
+                .map_err(DatabaseError::from_external)?;
+            Ok(Box::new(SpiralTransaction { connection }) as Box<dyn DatabaseTransaction>)
+        }
+        .boxed()
+    }
+}
+
+struct SpiralTransaction {
+    connection: SpiralConnection,
+}
+
+impl DatabaseSession for SpiralTransaction {
+    fn execute(&mut self, command: DatabaseCommand) -> DatabaseFuture<'_, DatabaseOutput> {
+        self.connection.execute(command)
+    }
+
+    fn table_schema(&mut self, relation: RelationName) -> DatabaseFuture<'_, Option<Arc<Schema>>> {
+        self.connection.table_schema(relation)
+    }
+
+    fn relations(&mut self) -> DatabaseFuture<'_, Vec<RelationMetadata>> {
+        self.connection.relations()
+    }
+}
+
+impl DatabaseTransaction for SpiralTransaction {
+    fn commit(self: Box<Self>) -> DatabaseFuture<'static, ExecutionSummary> {
+        async move {
+            self.connection
+                .context
+                .commit()
+                .await
+                .map(|_| ExecutionSummary::default())
+                .map_err(DatabaseError::from_external)
+        }
+        .boxed()
+    }
+
+    fn rollback(self: Box<Self>) -> DatabaseFuture<'static, ()> {
+        async move {
+            self.connection
+                .context
+                .rollback()
+                .await
+                .map_err(DatabaseError::from_external)
+        }
+        .boxed()
     }
 }
 
@@ -725,13 +434,6 @@ impl TableCreation {
 }
 
 impl DatabaseError {
-    fn closed(error: impl fmt::Display) -> Self {
-        Self::new(
-            DatabaseErrorKind::Unavailable,
-            format!("database service is unavailable: {error}"),
-        )
-    }
-
     fn from_external(error: impl fmt::Display) -> Self {
         let message = error.to_string();
         let normalized = message.to_ascii_lowercase();

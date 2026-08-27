@@ -157,11 +157,12 @@ flowchart TD
   Rust APIs through a storage-owned database trait. The trait must expose
   logical connections, explicit transactions, schema/catalog inspection, one
   unified SQL-or-Arrow command, record streams, update summaries, and typed
-  errors without exposing Spiral engine or Vortex types. Each non-`Send`
-  `ConnectionCtx` must be owned by its own task on a Tokio `LocalSet`; `Send`
-  proxies must communicate with those tasks through bounded channels. Axum,
-  the local connection owners, and Vortex execution must share the server's
-  Tokio runtime, while Vortex CPU work may use that runtime's worker pool.
+  errors without exposing Spiral engine or Vortex types. Native `ConnectionCtx`
+  values and their futures must be `Send` and owned directly by the logical
+  connection implementation; the adapter must not add local-executor tasks,
+  request channels, or proxy state machines. Axum and Vortex execution share
+  the server's Tokio runtime, while Vortex CPU work may use that runtime's
+  worker pool.
   Every backend persistence path, including recording finalization, import,
   project transfer, Workflow publication, Training, Rollout, and robot
   configuration, must await the database trait directly. The project store
@@ -174,7 +175,7 @@ flowchart TD
   it must not retain an ADBC-style `set_autocommit` compatibility surface.
   Native
   logical connections must not be constrained by an arbitrary application
-  semaphore; each connection owner serializes only its own stateful operations.
+  semaphore; each connection directly owns its own stateful operations.
   Spiral and Vortex crates must resolve to revisions already pinned in
   `Cargo.lock`; this change must not introduce another Spiral-related package.
   The Rust backend must not depend on an ADBC crate or accept a driver-library

@@ -3207,9 +3207,10 @@ mod tests {
         .and_then(|settings| settings.with_project(&project))
         .expect("the Workflow registry connection must be valid")
         .with_credentials(stored.as_ref().and_then(BackendStateStore::credentials));
-        let database_runtime =
-            crate::test_database::LocalProjectStore::start(connection, "workflow".to_owned());
-        let project_store = database_runtime.store();
+        let project_store = Arc::new(
+            ProjectStore::new(connection, "workflow".to_owned())
+                .expect("the Workflow registry project store must be valid"),
+        );
         let mut connection = project_store
             .connect()
             .await
@@ -3457,9 +3458,10 @@ mod tests {
         .and_then(|settings| settings.with_project(&project))
         .expect("the Workflow golden connection must be valid")
         .with_credentials(stored.as_ref().and_then(BackendStateStore::credentials));
-        let database_runtime =
-            crate::test_database::LocalProjectStore::start(connection, namespace.clone());
-        let project_store = database_runtime.store();
+        let project_store = Arc::new(
+            ProjectStore::new(connection, namespace.clone())
+                .expect("the Workflow golden project store must be valid"),
+        );
         let cleanup = GoldenRelations {
             project_store: project_store.clone(),
             relations: vec![input_relation.clone(), output_relation.clone()],

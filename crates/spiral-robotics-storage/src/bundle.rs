@@ -5192,40 +5192,7 @@ mod tests {
             .unwrap_or_else(|| ServiceEndpoint::environment_spiral_spfs().into_string())
     }
 
-    struct ConfiguredProjectStore {
-        store: Arc<ProjectStore>,
-        shutdown: Option<tokio::sync::oneshot::Sender<()>>,
-        worker: Option<std::thread::JoinHandle<()>>,
-    }
-
-    impl ConfiguredProjectStore {
-        fn clone(&self) -> Arc<ProjectStore> {
-            Arc::clone(&self.store)
-        }
-    }
-
-    impl std::ops::Deref for ConfiguredProjectStore {
-        type Target = ProjectStore;
-
-        fn deref(&self) -> &Self::Target {
-            &self.store
-        }
-    }
-
-    impl Drop for ConfiguredProjectStore {
-        fn drop(&mut self) {
-            if let Some(shutdown) = self.shutdown.take() {
-                let _ = shutdown.send(());
-            }
-            if let Some(worker) = self.worker.take() {
-                worker
-                    .join()
-                    .expect("the local database test runtime stops");
-            }
-        }
-    }
-
-    fn configured_project_store(project: String, namespace: String) -> ConfiguredProjectStore {
+    fn configured_project_store(project: String, namespace: String) -> Arc<ProjectStore> {
         let settings = SpiralConnectionSettings::new(
             configured_spiral_endpoint(),
             configured_spiral_spfs_endpoint(),
@@ -5234,32 +5201,10 @@ mod tests {
         .with_project(&project)
         .expect("the Spiral E2E project must be valid")
         .with_credentials(stored_credentials());
-        let (store_sender, store_receiver) = std::sync::mpsc::sync_channel(1);
-        let (shutdown, shutdown_receiver) = tokio::sync::oneshot::channel();
-        let worker = std::thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("the local database test runtime builds");
-            let database_tasks = tokio::task::LocalSet::new();
-            runtime.block_on(database_tasks.run_until(async move {
-                let store = Arc::new(
-                    ProjectStore::new(settings, namespace)
-                        .expect("the Spiral E2E project store must be valid"),
-                );
-                store_sender
-                    .send(store)
-                    .expect("the configured project store reaches the test");
-                let _ = shutdown_receiver.await;
-            }));
-        });
-        ConfiguredProjectStore {
-            store: store_receiver
-                .recv()
-                .expect("the local database test runtime starts"),
-            shutdown: Some(shutdown),
-            worker: Some(worker),
-        }
+        Arc::new(
+            ProjectStore::new(settings, namespace)
+                .expect("the Spiral E2E project store must be valid"),
+        )
     }
 
     fn relation_payloads(bundle: &[u8]) -> BTreeMap<String, Vec<u8>> {

@@ -903,6 +903,7 @@ fn native_async_spiral_is_confined_to_one_adapter() {
         .expect("native Spiral adapter source must be readable");
     for native_boundary in [
         "impl Database for SpiralDatabase",
+        "struct SpiralConnection",
         "ConnectionCtx",
         "collect_stream_with_options",
         "struct ArrowStreamSource",
@@ -910,6 +911,19 @@ fn native_async_spiral_is_confined_to_one_adapter() {
         assert!(
             native_adapter.contains(native_boundary),
             "native Spiral adapter is missing {native_boundary}"
+        );
+    }
+    for retired_indirection in [
+        "tokio::task::LocalSet",
+        "spawn_local",
+        "mpsc::",
+        "oneshot::",
+        "ConnectionRequest",
+        "SpiralConnectionProxy",
+    ] {
+        assert!(
+            !native_adapter.contains(retired_indirection),
+            "native Spiral adapter retains retired indirection {retired_indirection:?}"
         );
     }
     let database = fs::read_to_string(source_root.join("database.rs"))
@@ -928,9 +942,8 @@ fn native_async_spiral_is_confined_to_one_adapter() {
     let server = fs::read_to_string(backend.join("src/http/server.rs"))
         .expect("backend server source must be readable");
     assert!(
-        server.contains("tokio::task::LocalSet::new()")
-            && server.contains("database_tasks.run_until("),
-        "the non-Send Spiral connection owner must run beside axum on its LocalSet"
+        !server.contains("LocalSet") && !server.contains("run_until("),
+        "the server must run native Send database futures directly on its Tokio runtime"
     );
     for manifest_path in [
         backend.join("../../Cargo.toml"),
@@ -970,9 +983,6 @@ fn async_database_use_cases_use_structured_tasks_and_explicit_transactions() {
     let mut storage_sources = Vec::new();
     collect_production_rust_sources(&storage, &mut storage_sources);
     for path in storage_sources {
-        if path.file_name().and_then(|name| name.to_str()) == Some("spiral_database.rs") {
-            continue;
-        }
         let source = fs::read_to_string(&path).expect("storage source must be readable");
         let production = source.split("#[cfg(test)]").next().unwrap_or(&source);
         for retired_bridge in [

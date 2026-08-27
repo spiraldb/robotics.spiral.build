@@ -114,7 +114,7 @@ impl DatabaseOutput {
     }
 }
 
-/// Owned SQL text safe to move through the async adapter channel.
+/// Owned SQL text passed through the async database boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SqlStatement(String);
 
