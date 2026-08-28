@@ -156,6 +156,34 @@ fn workflow_backend_state_has_one_frontend_owner() {
 }
 
 #[test]
+fn relation_schemas_belong_to_studio_while_exact_counts_are_data_view_scoped() {
+    let frontend = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let studio = fs::read_to_string(frontend.join("src/shell/state.rs"))
+        .expect("Studio state source should be readable");
+    let routes = fs::read_to_string(frontend.join("src/shell/routes.rs"))
+        .expect("Studio routes source should be readable");
+    let data_state = fs::read_to_string(frontend.join("src/activities/data/state.rs"))
+        .expect("Data controller source should be readable");
+    let relations = fs::read_to_string(frontend.join("src/activities/data/relations.rs"))
+        .expect("Data relations source should be readable");
+    let query = fs::read_to_string(frontend.join("src/activities/data/workbench.rs"))
+        .expect("Data Query source should be readable");
+    let workflow = fs::read_to_string(frontend.join("src/activities/workflow/state.rs"))
+        .expect("Workflow controller source should be readable");
+
+    assert!(studio.contains("relation_catalog: Resource<Result<RelationCatalog, String>>"));
+    assert!(studio.contains("/api/spiral/relations"));
+    assert_eq!(studio.matches("/api/spiral/relations").count(), 1);
+    assert!(routes.contains("Studio::use_studio"));
+    assert!(!frontend.join("src/shell/catalog.rs").exists());
+    assert!(!query.contains("get::<RelationCatalog>"));
+    assert!(!workflow.contains("get::<RelationCatalog>"));
+    assert!(!data_state.contains("relation_generation"));
+    assert!(relations.contains("statements.join(\"\\nUNION ALL\\n\")"));
+    assert!(relations.contains("COUNT(*) AS row_count"));
+}
+
+#[test]
 fn legacy_action_styles_cannot_return() {
     let frontend = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let styles = [frontend.join("tailwind.css")];

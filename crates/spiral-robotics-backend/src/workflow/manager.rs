@@ -368,7 +368,7 @@ impl WorkflowManager {
 
     pub(crate) async fn relations(&self) -> Result<RelationCatalog, String> {
         let scope_id = self.scope_id();
-        let response = self.inner.storage.workflow_relations().await?;
+        let response = self.inner.storage.relation_catalog().await?;
         if self.scope_id() != scope_id {
             return Err(
                 "The Spiral project changed while Workflow relations were loading. Reload them."
@@ -667,7 +667,7 @@ impl WorkflowManager {
                 return;
             }
         };
-        let discovered = match self.inner.storage.workflow_relations().await {
+        let discovered = match self.inner.storage.relation_catalog().await {
             Ok(relations) => relations,
             Err(error) => {
                 self.finish_failed(

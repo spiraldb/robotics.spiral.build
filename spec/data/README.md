@@ -78,7 +78,10 @@ consumers draw from it: query, curation, [training](../training/README.md),
   inline in Episodes and must not obscure Query with a modal.
 - **DATA-019** Relations must expose the active project's user-facing table
   structure, counts, likely shared-key joins, schemas, and bounded previews
-  without exposing Studio persistence plumbing as project data.
+  without exposing Studio persistence plumbing as project data. Qualified
+  names and schemas come from the startup catalog resource in `Studio` state;
+  exact counts come from one Relations-view query and previews remain per
+  selection.
 - **DATA-020** Each catalog entry must pair its lightweight `EpisodeInfo` with
   an optional successful immutable full-data value. The selected episode must
   drive one reactive resource that owns transient loading and failure state,

@@ -1,19 +1,23 @@
 //! User-facing project relation map and bounded row preview.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::components::interaction::{Action, ActionPurpose, ActionVariant, RefreshIcon};
 use dioxus::prelude::*;
 use gloo_net::http::Method;
+use spiral_robotics_api::catalog::ManagedTable as Table;
 use spiral_robotics_api::relations::{
-    ProjectDataRelation, ProjectDataRelationsResponse, SpiralQueryRequest, SpiralQueryResponse,
+    CatalogRelation, RelationCatalog, SpiralQueryRequest, SpiralQueryResponse,
 };
 
 use crate::activities::data::query_result::{QueryExecutionPresentation, QueryState};
 use crate::activities::data::state::data_controller;
 use crate::client::http as api;
+use crate::shell::state::studio;
 
 const PREVIEW_ROWS: usize = 5;
+const MAX_COUNTED_RELATIONS: usize = 1_000;
+const MAX_COUNT_QUERY_BYTES: usize = 60 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RelationLink {
@@ -22,31 +26,207 @@ struct RelationLink {
     keys: Vec<String>,
 }
 
+#[derive(Clone, Debug, Default)]
+struct ProjectRelations {
+    relations: Vec<CatalogRelation>,
+    complete: bool,
+    limitation: Option<String>,
+    countable_relations: usize,
+}
+
+struct ProjectRelationScope<'a> {
+    namespace: &'a str,
+}
+
+impl ProjectRelations {
+    fn from_catalog(catalog: &RelationCatalog, namespace: &str) -> Self {
+        let scope = ProjectRelationScope { namespace };
+        let relations = catalog
+            .relations()
+            .iter()
+            .filter(|relation| scope.includes(relation))
+            .cloned()
+            .collect::<Vec<_>>();
+        let countable_relations = Self::countable_relation_count(&relations);
+        let count_limitation = (relations.len() > countable_relations).then(|| {
+            format!(
+                "Exact counts are limited to the first {countable_relations} visible relations by the bounded query contract."
+            )
+        });
+        let limitation = match (catalog.limitation(), count_limitation) {
+            (Some(catalog_limitation), Some(count_limitation)) => {
+                Some(format!("{catalog_limitation} {count_limitation}"))
+            }
+            (Some(catalog_limitation), None) => Some(catalog_limitation.to_owned()),
+            (None, count_limitation) => count_limitation,
+        };
+        Self {
+            relations,
+            complete: catalog.complete(),
+            limitation,
+            countable_relations,
+        }
+    }
+
+    fn count_request(&self) -> Option<SpiralQueryRequest> {
+        let statements = self
+            .relations
+            .iter()
+            .take(self.countable_relations)
+            .enumerate()
+            .map(|(index, relation)| Self::count_statement(index, relation))
+            .collect::<Vec<_>>();
+        (!statements.is_empty()).then(|| {
+            SpiralQueryRequest::new(statements.join("\nUNION ALL\n"), self.countable_relations)
+        })
+    }
+
+    fn countable_relation_count(relations: &[CatalogRelation]) -> usize {
+        let mut query_bytes = 0_usize;
+        let mut relation_count = 0_usize;
+        for (index, relation) in relations.iter().enumerate() {
+            if relation_count == MAX_COUNTED_RELATIONS {
+                break;
+            }
+            let separator_bytes = if index > 0 { "\nUNION ALL\n".len() } else { 0 };
+            let statement_bytes = Self::count_statement(index, relation).len();
+            if query_bytes + separator_bytes + statement_bytes > MAX_COUNT_QUERY_BYTES {
+                break;
+            }
+            query_bytes += separator_bytes + statement_bytes;
+            relation_count += 1;
+        }
+        relation_count
+    }
+
+    fn count_statement(index: usize, relation: &CatalogRelation) -> String {
+        format!(
+            "SELECT {index} AS relation_index, COUNT(*) AS row_count FROM {}",
+            relation.name()
+        )
+    }
+
+    fn with_counts(mut self, response: &SpiralQueryResponse) -> Self {
+        let counts = response
+            .rows()
+            .iter()
+            .filter_map(|row| {
+                let index = row
+                    .get("relation_index")
+                    .and_then(|value| {
+                        value
+                            .as_u64()
+                            .or_else(|| value.as_i64().and_then(|value| value.try_into().ok()))
+                    })?
+                    .try_into()
+                    .ok()?;
+                let count = row.get("row_count").and_then(|value| {
+                    value
+                        .as_u64()
+                        .or_else(|| value.as_i64().and_then(|value| value.try_into().ok()))
+                })?;
+                Some((index, count))
+            })
+            .collect::<BTreeMap<usize, u64>>();
+        self.relations = self
+            .relations
+            .into_iter()
+            .enumerate()
+            .map(|(index, relation)| relation.with_row_count(counts.get(&index).copied()))
+            .collect();
+        self.complete = self.complete
+            && self.relations.len() <= self.countable_relations
+            && self
+                .relations
+                .iter()
+                .all(|relation| relation.row_count().is_some());
+        self
+    }
+
+    fn relations(&self) -> &[CatalogRelation] {
+        &self.relations
+    }
+
+    const fn complete(&self) -> bool {
+        self.complete
+    }
+
+    fn limitation(&self) -> Option<&str> {
+        self.limitation.as_deref()
+    }
+}
+
+impl ProjectRelationScope<'_> {
+    fn includes(&self, relation: &CatalogRelation) -> bool {
+        let name = relation.name();
+        if name == self.namespace
+            || name == format!("{}_video_sources", self.namespace)
+            || name == format!("{}.video", self.namespace)
+            || name == format!("{}.video.assets", self.namespace)
+            || name.starts_with("workflow.")
+        {
+            return false;
+        }
+        ![
+            Table::Robots,
+            Table::StudioSettings,
+            Table::TrainingCheckpoints,
+            Table::TrainingRuns,
+            Table::RolloutRuns,
+            Table::WorkflowRuns,
+        ]
+        .into_iter()
+        .any(|table| name == table.qualified_name(self.namespace))
+    }
+}
+
 #[component]
 pub(crate) fn RelationsPanel(namespace: String, query_available: bool) -> Element {
+    let studio = studio();
     let controller = data_controller();
     let mut selected = use_signal(|| None::<String>);
-    let mut catalog = use_resource(move || {
-        let _generation = controller.relation_generation();
+    let count_namespace = namespace.clone();
+    let mut counts = use_resource(move || {
+        let catalog = studio.relation_catalog();
+        let namespace = count_namespace.clone();
         async move {
-            if query_available {
-                api::Http::get::<ProjectDataRelationsResponse>("/api/spiral/project-relations")
-                    .await
-            } else {
-                Ok(ProjectDataRelationsResponse::default())
-            }
+            let Some(catalog) = query_available.then_some(catalog).flatten() else {
+                return Ok(None);
+            };
+            let relations = ProjectRelations::from_catalog(&catalog, &namespace);
+            let Some(request) = relations.count_request() else {
+                return Ok(None);
+            };
+            api::Http::send_json::<_, SpiralQueryResponse>(
+                Method::POST,
+                "/api/spiral/query",
+                Some(&request),
+            )
+            .await
+            .map(Some)
         }
     });
-    let catalog_result = catalog.read_unchecked().to_owned();
-    let response = catalog_result
+    let catalog_result = studio.relation_catalog_result();
+    let catalog_response = catalog_result
         .as_ref()
         .and_then(|result| result.as_ref().ok())
-        .cloned()
+        .map(|catalog| ProjectRelations::from_catalog(catalog, &namespace))
         .unwrap_or_default();
     let catalog_error = catalog_result
         .as_ref()
         .and_then(|result| result.as_ref().err())
         .cloned();
+    let count_result = counts.read_unchecked().to_owned();
+    let count_error = count_result
+        .as_ref()
+        .and_then(|result| result.as_ref().err())
+        .cloned();
+    let response = count_result
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .and_then(Option::as_ref)
+        .map(|counts| catalog_response.clone().with_counts(counts))
+        .unwrap_or(catalog_response);
     let selection_candidates = response
         .relations()
         .iter()
@@ -105,8 +285,18 @@ pub(crate) fn RelationsPanel(namespace: String, query_available: bool) -> Elemen
             .iter()
             .all(|relation| relation.row_count().is_some());
     let catalog_metrics = match catalog_result.as_ref() {
-        None if query_available => "Reading tables and counting rows…".to_owned(),
+        None if query_available => "Reading table schemas…".to_owned(),
         Some(Err(_)) => "Metrics unavailable".to_owned(),
+        _ if count_error.is_some() => format!(
+            "{} tables · exact counts unavailable · {} shared-key links",
+            response.relations().len(),
+            links.len()
+        ),
+        _ if count_result.is_none() && !response.relations().is_empty() => format!(
+            "{} tables · counting rows… · {} shared-key links",
+            response.relations().len(),
+            links.len()
+        ),
         _ if count_complete => format!(
             "{} tables · {} rows · {} shared-key links",
             response.relations().len(),
@@ -135,8 +325,7 @@ pub(crate) fn RelationsPanel(namespace: String, query_available: bool) -> Elemen
                     title: "Refresh table schemas, row counts, relationships, and the active preview",
                     disabled: catalog_result.is_none() && query_available,
                     onclick: move |_| {
-                        controller.refresh_relations();
-                        catalog.restart();
+                        studio.refresh_relation_catalog();
                         preview.restart();
                     },
                     RefreshIcon {}
@@ -155,7 +344,7 @@ pub(crate) fn RelationsPanel(namespace: String, query_available: bool) -> Elemen
                     Action {
                         purpose: ActionPurpose::Retry,
                         variant: ActionVariant::Outline,
-                        onclick: move |_| catalog.restart(),
+                        onclick: move |_| studio.refresh_relation_catalog(),
                         "Retry"
                     }
                 }
@@ -163,7 +352,7 @@ pub(crate) fn RelationsPanel(namespace: String, query_available: bool) -> Elemen
                 div { class: "data-relations-loading", role: "status",
                     div { class: "data-relations-loading-line" }
                     div { class: "data-relations-loading-line data-relations-loading-line-short" }
-                    span { "Reading schemas and exact row counts…" }
+                    span { "Reading table schemas…" }
                 }
             } else if response.relations().is_empty() {
                 div { class: "data-relations-message", role: "status",
@@ -294,6 +483,17 @@ pub(crate) fn RelationsPanel(namespace: String, query_available: bool) -> Elemen
             if let Some(limitation) = response.limitation() {
                 footer { class: "data-relations-limitation", role: "status", "{limitation}" }
             }
+            if count_error.is_some() {
+                footer { class: "data-relations-limitation", role: "status",
+                    span { "Exact row counts could not be loaded in the combined query." }
+                    Action {
+                        purpose: ActionPurpose::Retry,
+                        variant: ActionVariant::Link,
+                        onclick: move |_| counts.restart(),
+                        "Retry counts"
+                    }
+                }
+            }
         }
     }
 }
@@ -358,7 +558,7 @@ trait RelationCollection {
     fn relation_links(&self) -> Vec<RelationLink>;
 }
 
-impl RelationCollection for [ProjectDataRelation] {
+impl RelationCollection for [CatalogRelation] {
     fn relation_links(&self) -> Vec<RelationLink> {
         let mut links = Vec::new();
         for (index, left) in self.iter().enumerate() {
@@ -452,8 +652,8 @@ mod tests {
 
     use super::*;
 
-    fn relation(name: &str, columns: &[&str]) -> ProjectDataRelation {
-        ProjectDataRelation::new(
+    fn relation(name: &str, columns: &[&str]) -> CatalogRelation {
+        CatalogRelation::new(
             name,
             "TABLE",
             columns
@@ -486,6 +686,52 @@ mod tests {
         assert_eq!(0_u64.grouped_count(), "0");
         assert_eq!(999_u64.grouped_count(), "999");
         assert_eq!(12_345_678_u64.grouped_count(), "12,345,678");
+    }
+
+    #[test]
+    fn project_relation_counts_use_one_read_only_statement() {
+        let catalog = RelationCatalog::new(
+            vec![
+                relation("robotics.episodes", &["episode_id"]),
+                relation("customer.annotations", &["episode_id"]),
+            ],
+            true,
+        );
+        let request = ProjectRelations::from_catalog(&catalog, "robotics")
+            .count_request()
+            .expect("two visible relations produce a count query");
+
+        assert_eq!(request.max_rows(), 2);
+        assert_eq!(request.sql().matches("COUNT(*)").count(), 2);
+        assert_eq!(request.sql().matches("UNION ALL").count(), 1);
+        assert!(!request.sql().contains(';'));
+        spiral_robotics_api::sql::ReadOnlyQuery::new(
+            request.sql(),
+            spiral_robotics_api::sql::ReadOnlyQueryMode::Preview,
+        )
+        .authorize()
+        .expect("the combined count query must pass the shared read-only policy");
+    }
+
+    #[test]
+    fn project_relation_scope_hides_studio_plumbing_but_keeps_external_relations() {
+        let scope = ProjectRelationScope {
+            namespace: "robotics",
+        };
+        for hidden in [
+            "robotics.robots",
+            "robotics.studio_settings",
+            "robotics.training_checkpoints",
+            "robotics.training_runs",
+            "robotics.rollout_runs",
+            "robotics.workflow_runs",
+            "workflow.feature_registry",
+            "robotics.video.assets",
+        ] {
+            assert!(!scope.includes(&relation(hidden, &["id"])), "{hidden}");
+        }
+        assert!(scope.includes(&relation("robotics.episodes", &["episode_id"])));
+        assert!(scope.includes(&relation("customer.annotations", &["episode_id"])));
     }
 
     #[test]

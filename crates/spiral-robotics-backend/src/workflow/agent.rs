@@ -1663,7 +1663,7 @@ impl WorkflowAgentManager {
             .map_err(|error| format!("Tool arguments are malformed: {error}"))?;
         match call.function().name() {
             "list_relations" => {
-                let response = self.inner.services.storage.workflow_relations().await?;
+                let response = self.inner.services.storage.relation_catalog().await?;
                 Ok(json!({
                     "relations": response.relations().iter().map(|relation| relation.name()).collect::<Vec<_>>(),
                     "complete": response.complete(),
@@ -1678,7 +1678,7 @@ impl WorkflowAgentManager {
                 if names.len() > 20 {
                     return Err("Describe at most 20 relations per tool call.".to_owned());
                 }
-                let discovered = self.inner.services.storage.workflow_relations().await?;
+                let discovered = self.inner.services.storage.relation_catalog().await?;
                 let requested = names.iter().filter_map(Value::as_str).collect::<Vec<_>>();
                 let relations = discovered
                     .relations()

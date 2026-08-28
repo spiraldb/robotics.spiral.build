@@ -555,7 +555,7 @@ fn HuggingFaceImport(dataset_id: String, on_close: EventHandler<()>) -> Element 
                                         };
                                         match outcome {
                                             Ok(summary) => {
-                                                controller.refresh_relations();
+                                                studio.refresh_relation_catalog();
                                                 controller.set_sql(summary.suggested_sql().to_owned());
                                                 studio.report_success_from(
                                                     crate::shell::notifications::MessageSource::Data,
@@ -635,17 +635,7 @@ impl ByteCountPresentation for u64 {
 pub(crate) fn QueryPanel(namespace: String, dataset_id: String, query_available: bool) -> Element {
     let studio = studio();
     let controller = data_controller();
-    let mut relation_catalog = use_resource(move || {
-        let _generation = controller.relation_generation();
-        async move {
-            if query_available {
-                api::Http::get::<RelationCatalog>("/api/spiral/relations").await
-            } else {
-                Ok(RelationCatalog::default())
-            }
-        }
-    });
-    let relation_result = relation_catalog.read_unchecked().to_owned();
+    let relation_result = studio.relation_catalog_result();
     let relation_error = relation_result
         .as_ref()
         .and_then(|result| result.as_ref().err())
@@ -694,7 +684,7 @@ pub(crate) fn QueryPanel(namespace: String, dataset_id: String, query_available:
                             Action {
                                 purpose: ActionPurpose::Retry,
                                 variant: ActionVariant::Link,
-                                onclick: move |_| relation_catalog.restart(),
+                                onclick: move |_| studio.refresh_relation_catalog(),
                                 "Retry"
                             }
                             small { "{problem}" }

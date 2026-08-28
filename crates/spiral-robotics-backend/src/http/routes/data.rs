@@ -2,15 +2,15 @@ use super::*;
 use spiral_robotics_hardware::ModeSelection as HardwareModeSelection;
 use spiral_robotics_storage::ingestion::HuggingFaceDatasetDiscovery as _;
 
-struct CatalogReservation {
+struct CatalogLeaseReservation {
     lease: Arc<CatalogMutationLease>,
     token: CatalogLeaseToken,
 }
 
-impl Drop for CatalogReservation {
+impl Drop for CatalogLeaseReservation {
     fn drop(&mut self) {
         let released = self.lease.release(self.token);
-        debug_assert!(released, "catalog transfer releases its exact lease once");
+        debug_assert!(released, "catalog operation releases its exact lease once");
     }
 }
 
@@ -39,10 +39,6 @@ impl AppState {
             .route("/spiral/query", post(Self::spiral_query))
             .route("/spiral/relations", get(Self::spiral_relations))
             .route(
-                "/spiral/project-relations",
-                get(Self::project_data_relations),
-            )
-            .route(
                 "/datasets/huggingface/import",
                 post(Self::import_huggingface_dataset),
             )
@@ -66,23 +62,24 @@ impl AppState {
     async fn spiral_relations(
         State(state): State<Self>,
     ) -> Result<Json<spiral_robotics_api::relations::RelationCatalog>, Failure> {
+        let token = state
+            .catalog_lease()
+            .try_acquire(CatalogLeaseOwner::StudioCatalogRead)
+            .ok_or_else(|| {
+                Failure::conflict(
+                    "Wait for the current recording or catalog change before loading Studio relations",
+                )
+            })?;
+        let _reservation = CatalogLeaseReservation {
+            lease: state.catalog_lease().clone(),
+            token,
+        };
         state
-            .storage()
-            .workflow_relations()
+            .workflow()
+            .relations()
             .await
             .map(Json)
-            .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error))
-    }
-
-    async fn project_data_relations(
-        State(state): State<Self>,
-    ) -> Result<Json<spiral_robotics_api::relations::ProjectDataRelationsResponse>, Failure> {
-        state
-            .storage()
-            .project_data_relations()
-            .await
-            .map(Json)
-            .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error))
+            .map_err(Failure::import)
     }
 
     async fn inspect_huggingface_dataset(
@@ -116,7 +113,7 @@ impl AppState {
                     "Wait for the current recording or catalog change before importing a dataset",
                 )
             })?;
-        let _reservation = CatalogReservation {
+        let _reservation = CatalogLeaseReservation {
             lease: state.catalog_lease().clone(),
             token,
         };
@@ -185,7 +182,7 @@ impl AppState {
                         .to_owned(),
                 )
             })?;
-        let _reservation = CatalogReservation {
+        let _reservation = CatalogLeaseReservation {
             lease: state.catalog_lease().clone(),
             token,
         };
@@ -251,7 +248,7 @@ impl AppState {
                     "Wait for the current recording or catalog change before importing episodes",
                 )
             })?;
-        let _reservation = CatalogReservation {
+        let _reservation = CatalogLeaseReservation {
             lease: state.catalog_lease().clone(),
             token,
         };
@@ -690,7 +687,7 @@ impl AppState {
                     "Wait for the current recording or catalog change before changing the Spiral destination",
                 )
             })?;
-            let reservation = CatalogReservation {
+            let reservation = CatalogLeaseReservation {
                 lease: state.catalog_lease().clone(),
                 token,
             };

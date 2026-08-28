@@ -13,6 +13,7 @@ pub(crate) use spiral_robotics_api::sql::ReadOnlyQueryMode;
 pub struct SpiralSql;
 
 impl SpiralSql {
+    #[cfg(test)]
     pub(crate) fn count_rows(relation: &str) -> String {
         format!("SELECT COUNT(*) AS rows FROM {relation}")
     }

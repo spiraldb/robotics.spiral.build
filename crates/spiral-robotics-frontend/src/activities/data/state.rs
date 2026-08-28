@@ -126,7 +126,6 @@ struct QueryExecutionSignals {
     active_query: Signal<Option<u64>>,
     active_request: Signal<Option<ActiveQuery>>,
     next_query_id: Signal<u64>,
-    relation_generation: Signal<u64>,
 }
 
 /// Create the Data controller once at the shell boundary and publish it to the
@@ -190,7 +189,6 @@ pub(crate) fn use_data_controller(namespace: &str, dataset_id: &str) -> DataCont
             active_query: use_signal(|| None),
             active_request: use_signal(|| None),
             next_query_id: use_signal(|| 1),
-            relation_generation: use_signal(|| 0),
         },
     };
     use_effect(move || {
@@ -459,15 +457,6 @@ impl DataController {
 
     pub(crate) fn query_running(&self) -> bool {
         self.execution.active_request.read().is_some()
-    }
-
-    pub(crate) fn relation_generation(&self) -> u64 {
-        *self.execution.relation_generation.read()
-    }
-
-    pub(crate) fn refresh_relations(mut self) {
-        let next = self.execution.relation_generation.peek().wrapping_add(1);
-        self.execution.relation_generation.set(next);
     }
 
     pub(crate) fn select_query(mut self, id: u64) {

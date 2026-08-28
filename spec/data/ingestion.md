@@ -101,7 +101,8 @@ prefixes are not supported by this ingestion path.
   when they contain no Studio episode rows.
 - **INGEST-020** Query must discover current Spiral relations from the backend
   catalog rather than from only Studio's fixed managed-table list.
-- **INGEST-021** A successful import must refresh both catalogs and install a
+- **INGEST-021** A successful import must refresh the Data episode catalog and
+  the relation/schema catalog in `Studio` state, then install a
   format-appropriate read-only starter query without running it automatically.
 - **INGEST-022** Hugging Face repositories, files, credentials, and import
   controls must remain outside Workflow. Workflow receives only the resulting

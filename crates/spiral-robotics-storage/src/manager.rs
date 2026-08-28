@@ -23,9 +23,8 @@ use serde::de::DeserializeOwned;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use sha2::{Digest as _, Sha256};
 use spiral_robotics_api::recording::DatasetSummary;
-use spiral_robotics_api::relations::{CatalogRelation, RelationCatalog};
 use spiral_robotics_api::relations::{
-    ProjectDataRelation, ProjectDataRelationsResponse, QueryColumn, SpiralQueryResponse,
+    CatalogRelation, QueryColumn, RelationCatalog, SpiralQueryResponse,
 };
 use spiral_robotics_api::settings::ConnectionTestResponse;
 use spiral_robotics_api::sql::QualifiedRelation;
@@ -796,7 +795,7 @@ impl StorageManager {
             .collect()
     }
 
-    pub async fn workflow_relations(&self) -> Result<RelationCatalog, String> {
+    pub async fn relation_catalog(&self) -> Result<RelationCatalog, String> {
         let project = self.project_store.project_id();
         if project.is_empty() {
             return Ok(
@@ -860,120 +859,12 @@ impl StorageManager {
                     .collect(),
             ));
         }
-        let limitation = if skipped == 0 {
-            Some("Row counts are omitted from Workflow relation discovery.".to_owned())
-        } else {
-            Some(format!(
-                "Row counts are omitted; {skipped} catalog entries without a qualified name or Arrow schema were not returned."
-            ))
-        };
+        let limitation = (skipped > 0).then(|| {
+            format!(
+                "{skipped} catalog entries without a qualified name or Arrow schema were not returned."
+            )
+        });
         Ok(RelationCatalog::new(relations, skipped == 0).with_limitation(limitation))
-    }
-
-    /// Describe the active project's user-facing data and add exact row
-    /// counts through ordinary read-only SQL. Counts live outside the Workflow
-    /// catalog so opening Workflow remains a schema-only operation.
-    pub async fn project_data_relations(&self) -> Result<ProjectDataRelationsResponse, String> {
-        let project = self.project_store.project_id();
-        let namespace = self.project_store.namespace().to_owned();
-        if project.is_empty() {
-            return Ok(
-                ProjectDataRelationsResponse::new(Vec::new(), false).with_limitation(Some(
-                    "Choose a Spiral project in Settings to discover project data.".to_owned(),
-                )),
-            );
-        }
-        let mut connection = self.project_store.connect().await?;
-        let catalog = connection
-            .relations()
-            .await
-            .map_err(|error| error.to_string())?;
-        let mut relations = Vec::with_capacity(catalog.len());
-        let mut skipped = 0_usize;
-        let mut uncounted = 0_usize;
-        for entry in catalog {
-            let (relation_name, kind) = entry.into_parts();
-            if !Self::is_user_project_relation(relation_name.as_str(), &namespace) {
-                continue;
-            }
-            if QualifiedRelation::try_from(relation_name.as_str()).is_err() {
-                skipped += 1;
-                continue;
-            }
-            let schema = match connection.table_schema(relation_name.clone()).await {
-                Ok(Some(schema)) => schema,
-                Ok(None) => {
-                    skipped += 1;
-                    continue;
-                }
-                Err(error)
-                    if error.message().contains(
-                        "extension type cannot be converted to Arrow without a plugin",
-                    ) =>
-                {
-                    skipped += 1;
-                    continue;
-                }
-                Err(error) => {
-                    return Err(format!(
-                        "describing Spiral relation {:?}: {error}",
-                        relation_name.as_str()
-                    ));
-                }
-            };
-            let relation_type = match kind {
-                RelationKind::Table => "TABLE",
-                RelationKind::View => "VIEW",
-            };
-            let relation_name = relation_name.into_string();
-            let row_count = match self
-                .async_relation_row_count(&mut connection, &relation_name)
-                .await
-            {
-                Ok(row_count) => Some(row_count),
-                Err(_) => {
-                    uncounted += 1;
-                    None
-                }
-            };
-            relations.push(
-                ProjectDataRelation::new(
-                    relation_name,
-                    relation_type.to_owned(),
-                    schema
-                        .fields()
-                        .iter()
-                        .map(|field| {
-                            QueryColumn::new(
-                                field.name().clone(),
-                                field.data_type().to_string(),
-                                field.is_nullable(),
-                            )
-                            .with_semantic_type(
-                                field.metadata().get(EXTENSION_TYPE_NAME_KEY).cloned(),
-                            )
-                        })
-                        .collect(),
-                )
-                .with_row_count(row_count),
-            );
-        }
-        let limitation = match (skipped, uncounted) {
-            (0, 0) => None,
-            (skipped, 0) => Some(format!(
-                "{skipped} project relations without a qualified name or readable Arrow schema were omitted."
-            )),
-            (0, uncounted) => Some(format!(
-                "Exact row counts were unavailable for {uncounted} project relations."
-            )),
-            (skipped, uncounted) => Some(format!(
-                "{skipped} project relations were omitted and exact row counts were unavailable for {uncounted} others."
-            )),
-        };
-        Ok(
-            ProjectDataRelationsResponse::new(relations, skipped == 0 && uncounted == 0)
-                .with_limitation(limitation),
-        )
     }
 
     /// Resolve the query and its Arrow contract before starting the trainer.
@@ -1109,47 +1000,6 @@ impl StorageManager {
         artifact.ok_or_else(|| "No checkpoint matched that training run and step".to_owned())
     }
 
-    async fn async_relation_row_count(
-        &self,
-        connection: &mut dyn DatabaseSession,
-        relation: &str,
-    ) -> Result<u64, String> {
-        let sql = SpiralSql::count_rows(relation);
-        let result =
-            QueryExecution::new(&sql, QueryLimits::new(1, MAX_INTERNAL_QUERY_RESPONSE_BYTES))
-                .run_async(connection)
-                .await?;
-        let value = result
-            .rows()
-            .first()
-            .and_then(|row| row.get("rows"))
-            .ok_or_else(|| format!("Spiral returned no row count for {relation}"))?;
-        value
-            .as_u64()
-            .or_else(|| value.as_i64().and_then(|count| count.try_into().ok()))
-            .ok_or_else(|| format!("Spiral returned a non-integer row count for {relation}"))
-    }
-
-    fn is_user_project_relation(relation: &str, namespace: &str) -> bool {
-        if relation == namespace
-            || relation == SpiralSql::video_sources_relation(namespace)
-            || relation == SpiralSql::video_dataset_relation(namespace)
-            || relation == SpiralSql::video_dataset_output(namespace)
-            || relation.starts_with("workflow.")
-        {
-            return false;
-        }
-        ![
-            Table::Robots,
-            Table::StudioSettings,
-            Table::TrainingCheckpoints,
-            Table::TrainingRuns,
-            Table::RolloutRuns,
-            Table::WorkflowRuns,
-        ]
-        .into_iter()
-        .any(|table| relation == table.qualified_name(namespace))
-    }
     #[cfg(any(test, feature = "test-support"))]
     pub async fn export_episode_bundle(&self, dataset_id: &str) -> Result<Vec<u8>, String> {
         let namespace = self.project_store.namespace().to_owned();
@@ -2492,40 +2342,6 @@ mod tests {
     #[derive(Debug, Default, PartialEq, serde::Deserialize)]
     struct CurrentPrototypeDocument {
         features: Vec<String>,
-    }
-
-    #[test]
-    fn project_data_catalog_hides_studio_plumbing_but_keeps_external_relations() {
-        let namespace = "robotics";
-        for table in [
-            Table::Robots,
-            Table::StudioSettings,
-            Table::TrainingCheckpoints,
-            Table::TrainingRuns,
-            Table::RolloutRuns,
-            Table::WorkflowRuns,
-        ] {
-            assert!(!StorageManager::is_user_project_relation(
-                &table.qualified_name(namespace),
-                namespace
-            ));
-        }
-        assert!(!StorageManager::is_user_project_relation(
-            "workflow.feature_registry",
-            namespace
-        ));
-        assert!(!StorageManager::is_user_project_relation(
-            "robotics.video.assets",
-            namespace
-        ));
-        assert!(StorageManager::is_user_project_relation(
-            "robotics.episodes",
-            namespace
-        ));
-        assert!(StorageManager::is_user_project_relation(
-            "customer.annotations",
-            namespace
-        ));
     }
 
     #[test]

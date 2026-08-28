@@ -5,7 +5,6 @@ use axum::Json;
 use axum::Router;
 use axum::extract::State;
 use axum::routing::{get, post};
-use spiral_robotics_api::relations::RelationCatalog;
 use spiral_robotics_api::workflow::{
     WorkflowAgentCommand, WorkflowAgentStateResponse, WorkflowCommand, WorkflowStateResponse,
 };
@@ -15,7 +14,6 @@ use super::{AppState, Failure};
 impl AppState {
     pub(super) fn workflow_router() -> Router<Self> {
         Router::new()
-            .route("/workflow/relations", get(Self::workflow_relations))
             .route("/workflow", get(Self::workflow_state))
             .route("/workflow/command", post(Self::workflow_command))
             .route("/workflow/agent", get(Self::workflow_agent_state))
@@ -23,28 +21,6 @@ impl AppState {
                 "/workflow/agent/command",
                 post(Self::workflow_agent_command),
             )
-    }
-
-    async fn workflow_relations(
-        State(state): State<Self>,
-    ) -> Result<Json<RelationCatalog>, Failure> {
-        let token = state
-        .catalog_lease()
-        .try_acquire(CatalogLeaseOwner::WorkflowCatalogRead)
-        .ok_or_else(|| {
-            Failure::conflict(
-                "Wait for the current recording or catalog change before loading Workflow relations",
-            )
-        })?;
-        let result = state
-            .workflow()
-            .relations()
-            .await
-            .map(Json)
-            .map_err(Failure::import);
-        let released = state.catalog_lease().release(token);
-        debug_assert!(released, "Workflow catalog read releases its lease once");
-        result
     }
 
     async fn workflow_state(State(state): State<Self>) -> Json<WorkflowStateResponse> {

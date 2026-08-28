@@ -54,6 +54,14 @@ allowing visualization panels to be arranged spatially.
   and project-scoped Training, Rollout, Workflow, and Assistant reload as one
   explicit transition. HTTP adapters submit the settings command and must not
   merge or independently mutate multiple connection copies.
+- **STUDIO-073** The active project's qualified Spiral relation names and Arrow
+  schemas are one project-scoped resource stored directly in `Studio` state and
+  loaded on Studio startup. Data Query and Workflow must consume the resource
+  through `Studio` instead of introducing a second catalog context or issuing
+  their own catalog requests. Expensive derivatives stay at their narrowest
+  useful lifetime: Data Relations owns its combined exact-count query, table
+  selection, and five-row preview; individual panels own only transient
+  interaction state.
 
 ## Panel workspace
 

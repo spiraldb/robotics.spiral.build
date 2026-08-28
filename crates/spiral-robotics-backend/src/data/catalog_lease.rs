@@ -18,7 +18,7 @@ pub(crate) enum CatalogLeaseOwner {
     ProjectImport,
     ProjectSwitch,
     WorkflowStart,
-    WorkflowCatalogRead,
+    StudioCatalogRead,
     WorkflowAgentStart,
     WorkflowAgentHistory,
 }

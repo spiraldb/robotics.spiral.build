@@ -152,6 +152,15 @@ impl CatalogRelation {
     pub fn columns(&self) -> &[QueryColumn] {
         &self.columns
     }
+
+    pub const fn with_row_count(mut self, row_count: Option<u64>) -> Self {
+        self.row_count = row_count;
+        self
+    }
+
+    pub const fn row_count(&self) -> Option<u64> {
+        self.row_count
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
@@ -193,78 +202,5 @@ impl SpiralQueryResponse {
     }
     pub const fn elapsed_ms(&self) -> u64 {
         self.elapsed_ms
-    }
-}
-
-/// User-facing relation catalog for the active Spiral project.
-///
-/// This intentionally excludes Studio's settings, run snapshots, derived
-/// caches, and managed media plumbing. The Data activity uses it to explain
-/// the project's data rather than Studio's persistence implementation.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ProjectDataRelationsResponse {
-    relations: Vec<ProjectDataRelation>,
-    complete: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    limitation: Option<String>,
-}
-
-impl ProjectDataRelationsResponse {
-    pub fn new(relations: Vec<ProjectDataRelation>, complete: bool) -> Self {
-        Self {
-            relations,
-            complete,
-            limitation: None,
-        }
-    }
-    pub fn with_limitation(mut self, limitation: Option<String>) -> Self {
-        self.limitation = limitation;
-        self
-    }
-    pub fn relations(&self) -> &[ProjectDataRelation] {
-        &self.relations
-    }
-    pub const fn complete(&self) -> bool {
-        self.complete
-    }
-    pub fn limitation(&self) -> Option<&str> {
-        self.limitation.as_deref()
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ProjectDataRelation {
-    name: String,
-    relation_type: String,
-    columns: Vec<QueryColumn>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    row_count: Option<u64>,
-}
-
-impl ProjectDataRelation {
-    pub fn new(
-        name: impl Into<String>,
-        relation_type: impl Into<String>,
-        columns: Vec<QueryColumn>,
-    ) -> Self {
-        Self {
-            name: name.into(),
-            relation_type: relation_type.into(),
-            columns,
-            row_count: None,
-        }
-    }
-    pub const fn with_row_count(mut self, row_count: Option<u64>) -> Self {
-        self.row_count = row_count;
-        self
-    }
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-    pub fn columns(&self) -> &[QueryColumn] {
-        &self.columns
-    }
-    pub const fn row_count(&self) -> Option<u64> {
-        self.row_count
     }
 }

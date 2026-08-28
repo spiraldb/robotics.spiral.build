@@ -259,6 +259,7 @@ pub(crate) struct WorkflowController {
     document: WorkflowDocumentSignals,
     lifecycle: WorkflowLifecycleSignals,
     assistant: WorkflowAssistantSignals,
+    studio: Studio,
 }
 
 #[derive(Clone, Copy)]
@@ -272,7 +273,6 @@ struct WorkflowGraphSignals {
 struct WorkflowDocumentSignals {
     server: Signal<WorkflowStateResponse>,
     draft: Signal<WorkflowSpec>,
-    relations: Signal<RelationCatalog>,
 }
 
 #[derive(Clone, Copy)]
@@ -292,6 +292,7 @@ struct WorkflowAssistantSignals {
 }
 
 pub(crate) fn use_workflow_controller() -> WorkflowController {
+    let studio = studio();
     let initial = WorkflowStateResponse::from_workflow("", WorkflowSpec::default());
     let initial_spec = initial.workflow().to_owned();
     let initial_nodes = initial_spec.graph_nodes(initial.snapshot(), &[]);
@@ -305,7 +306,6 @@ pub(crate) fn use_workflow_controller() -> WorkflowController {
         document: WorkflowDocumentSignals {
             server: use_signal(move || initial),
             draft: use_signal(move || initial_spec),
-            relations: use_signal(RelationCatalog::default),
         },
         lifecycle: WorkflowLifecycleSignals {
             loaded: use_signal(|| false),
@@ -319,10 +319,14 @@ pub(crate) fn use_workflow_controller() -> WorkflowController {
             agent_error: use_signal(|| None),
             agent_drafts: use_signal(BTreeMap::new),
         },
+        studio,
     };
-    let studio = studio();
     use_future(move || async move {
         controller.load(studio).await;
+    });
+    use_effect(move || {
+        let _catalog_result = studio.relation_catalog_result();
+        controller.sync_graph();
     });
     use_context_provider(|| controller)
 }
@@ -356,15 +360,19 @@ impl WorkflowController {
     }
 
     pub(crate) fn relations(&self) -> Vec<CatalogRelation> {
-        self.document.relations.read().relations().to_owned()
+        self.scoped_relation_catalog()
+            .map(|catalog| catalog.relations().to_owned())
+            .unwrap_or_default()
     }
 
     pub(crate) fn relation_limitation(&self) -> Option<String> {
-        self.document
-            .relations
-            .read()
-            .limitation()
-            .map(str::to_owned)
+        if let Some(error) = self.studio.relation_catalog_error() {
+            return Some(format!(
+                "The Studio relation catalog is unavailable: {error}"
+            ));
+        }
+        self.scoped_relation_catalog()
+            .and_then(|catalog| catalog.limitation().map(str::to_owned))
     }
 
     pub(crate) fn has_model(&self) -> bool {
@@ -1079,8 +1087,6 @@ impl WorkflowController {
                 false
             }
         };
-        let relations_scope = self.document.server.peek().scope_id().to_owned();
-        self.load_relations(studio, relations_scope).await;
         let agent_bootstrap_scope = self.assistant.agent.peek().scope_id().to_owned();
         match api::Http::get::<WorkflowAgentStateResponse>("/api/workflow/agent").await {
             Ok(state) => self.reconcile_agent_bootstrap(state, &agent_bootstrap_scope),
@@ -1093,20 +1099,6 @@ impl WorkflowController {
         }
         if state_loaded {
             self.lifecycle.loaded.set(true);
-        }
-    }
-
-    async fn load_relations(mut self, studio: Studio, expected_scope_id: String) {
-        match api::Http::get::<RelationCatalog>("/api/workflow/relations").await {
-            Ok(relations) => {
-                if relations
-                    .matches_scope(self.document.server.peek().scope_id(), &expected_scope_id)
-                {
-                    self.document.relations.set(relations);
-                    self.sync_graph();
-                }
-            }
-            Err(error) => studio.report_from(MessageSource::Workflow, error),
         }
     }
 
@@ -1150,7 +1142,7 @@ impl WorkflowController {
         let keep_local_draft = !scope_changed
             && *self.document.draft.peek() != *self.document.server.peek().workflow();
         if scope_changed {
-            self.document.relations.set(RelationCatalog::default());
+            self.studio.refresh_relation_catalog();
             self.graph.ui.set(WorkflowUiState::default());
             self.lifecycle.command.set(None);
         }
@@ -1165,13 +1157,8 @@ impl WorkflowController {
     }
 
     #[cfg(all(feature = "web", target_arch = "wasm32"))]
-    pub(crate) fn accept_streamed_state(self, state: WorkflowStateResponse, studio: Studio) {
-        if self.reconcile_state(state) {
-            let expected_scope_id = self.document.server.peek().scope_id().to_owned();
-            dioxus::dioxus_core::spawn_forever(async move {
-                self.load_relations(studio, expected_scope_id).await;
-            });
-        }
+    pub(crate) fn accept_streamed_state(self, state: WorkflowStateResponse) {
+        self.reconcile_state(state);
     }
 
     fn reconcile_state_command(
@@ -1262,7 +1249,7 @@ impl WorkflowController {
     fn sync_graph(mut self) {
         let spec = self.document.draft.peek().to_owned();
         let snapshot = self.document.server.peek().snapshot().to_owned();
-        let relations = self.document.relations.peek().relations().to_owned();
+        let relations = self.relations();
         let mut next = spec.graph_nodes(&snapshot, &relations);
         let next_edges = spec.graph_edges(&snapshot);
         let previous = self
@@ -1301,6 +1288,13 @@ impl WorkflowController {
         }
         self.graph.nodes.set(next);
         self.graph.edges.set(next_edges);
+    }
+
+    fn scoped_relation_catalog(&self) -> Option<RelationCatalog> {
+        let current_scope_id = self.document.server.peek().scope_id().to_owned();
+        self.studio
+            .relation_catalog()
+            .filter(|catalog| catalog.matches_scope(&current_scope_id, &current_scope_id))
     }
 }
 

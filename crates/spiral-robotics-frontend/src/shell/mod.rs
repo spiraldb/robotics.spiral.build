@@ -13,12 +13,10 @@ use crate::components::interaction::UiStyles;
 use dioxus::prelude::*;
 
 use self::routes::StudioRouter;
-use self::state::Studio;
 
-/// Install application-wide providers once, then render the reactive shell.
+/// Render the routed shell; its layout owns application-wide providers.
 #[component]
 pub fn App() -> Element {
-    Studio::use_studio();
     rsx! {
         UiStyles {}
         StudioRouter {}

@@ -4,14 +4,16 @@ use std::future::Future;
 
 use dioxus::prelude::*;
 use spiral_robotics_api::recording::{RecordingProgress, ReplayProgress};
+use spiral_robotics_api::relations::RelationCatalog;
 use spiral_robotics_api::robots::{ModeSelection, RobotSummary, RobotTelemetry, TelemetryFrame};
 use spiral_robotics_api::rollout::RolloutSnapshot;
 use spiral_robotics_api::status::StudioSnapshot;
 use spiral_robotics_api::training::TrainingSnapshot;
 
 use crate::activities::workflow::state::WorkflowController;
+use crate::client::http as api;
 #[cfg(all(feature = "web", target_arch = "wasm32"))]
-use crate::client::http::{self as api, StudioEvent};
+use crate::client::http::StudioEvent;
 use crate::panels::timeline::signals::SignalStore;
 use crate::shell::notifications::{
     MessageAction, MessageNotice, MessageSeverity, MessageSource, NotificationCenterState,
@@ -93,9 +95,9 @@ pub(crate) struct Studio {
     telemetry: Signal<TelemetryFrame>,
     backend: BackendSignals,
     data: StudioDataSignals,
+    relation_catalog: Resource<Result<RelationCatalog, String>>,
     notifications: Signal<NotificationCenterState>,
-    selected: Signal<Option<Selection>>,
-    pointed: Signal<Option<Selection>>,
+    interaction: StudioInteractionSignals,
 }
 
 #[derive(Clone, Copy)]
@@ -123,6 +125,12 @@ pub(crate) struct StudioDataSignals {
     /// arriving to find it empty would be the interface deciding what was
     /// measured. See [`crate::panels::timeline::signals`].
     recording_signals: Signal<SignalStore>,
+}
+
+#[derive(Clone, Copy)]
+struct StudioInteractionSignals {
+    selected: Signal<Option<Selection>>,
+    pointed: Signal<Option<Selection>>,
 }
 
 impl Studio {
@@ -171,11 +179,11 @@ impl Studio {
     }
 
     pub(crate) const fn selection(self) -> Signal<Option<Selection>> {
-        self.selected
+        self.interaction.selected
     }
 
     pub(crate) const fn pointed_selection(self) -> Signal<Option<Selection>> {
-        self.pointed
+        self.interaction.pointed
     }
 
     pub(crate) const fn selected_dataset(self) -> Signal<String> {
@@ -186,8 +194,24 @@ impl Studio {
         self.data.recording_signals
     }
 
-    /// Create the shared state and follow live state.
-    pub(crate) fn use_studio() -> Self {
+    pub(crate) fn relation_catalog_result(&self) -> Option<Result<RelationCatalog, String>> {
+        self.relation_catalog.read_unchecked().to_owned()
+    }
+
+    pub(crate) fn relation_catalog(&self) -> Option<RelationCatalog> {
+        self.relation_catalog_result().and_then(Result::ok)
+    }
+
+    pub(crate) fn relation_catalog_error(&self) -> Option<String> {
+        self.relation_catalog_result().and_then(Result::err)
+    }
+
+    pub(crate) fn refresh_relation_catalog(mut self) {
+        self.relation_catalog.restart();
+    }
+
+    /// Create the shared state and its project-scoped catalog resource.
+    pub(crate) fn use_studio(query_available: bool) -> Self {
         // Hooks own the lifetime of every signal. The context publishes only
         // their handles; it does not construct unscoped reactive state inside
         // a provider closure.
@@ -203,6 +227,16 @@ impl Studio {
         let pointed = use_signal(|| None);
         let selected_dataset = use_signal(|| "default".to_owned());
         let recording_signals = use_signal(SignalStore::default);
+        let relation_catalog = use_resource(use_reactive(
+            (&query_available,),
+            move |(query_available,)| async move {
+                if query_available {
+                    api::Http::get::<RelationCatalog>("/api/spiral/relations").await
+                } else {
+                    Ok(RelationCatalog::default())
+                }
+            },
+        ));
         let studio = use_context_provider(|| Self {
             snapshot,
             telemetry,
@@ -219,9 +253,9 @@ impl Studio {
                 selected_dataset,
                 recording_signals,
             },
+            relation_catalog,
             notifications,
-            selected,
-            pointed,
+            interaction: StudioInteractionSignals { selected, pointed },
         });
         let mut default_selection = studio.selection();
         use_effect(move || {
@@ -277,9 +311,7 @@ impl Studio {
                         StudioEvent::TrainingSnapshot(value) => training.set(*value),
                         StudioEvent::TrainingUpdate(update) => training.write().apply(*update),
                         StudioEvent::Rollout(value) => rollout.set(*value),
-                        StudioEvent::WorkflowState(value) => {
-                            workflow.accept_streamed_state(*value, studio)
-                        }
+                        StudioEvent::WorkflowState(value) => workflow.accept_streamed_state(*value),
                         StudioEvent::WorkflowAgent(value) => workflow.accept_streamed_agent(*value),
                         StudioEvent::Telemetry(frame) => {
                             if frame.recording().is_some() || recording_signals.peek().live() {
@@ -334,7 +366,7 @@ impl Studio {
     /// effect that writes the signal it reads.
     pub(crate) fn focused(&self) -> Option<RobotSummary> {
         let robots = self.snapshot.read();
-        let chosen = self.selected.read();
+        let chosen = self.interaction.selected.read();
         chosen
             .as_ref()
             .and_then(|selection| {

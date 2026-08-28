@@ -16,6 +16,7 @@ use crate::settings::panel::SettingsPanel;
 use crate::shell::activity::Activity;
 use crate::shell::frame::{ActivityRail, StatusBar};
 use crate::shell::navigation::{ShellAction, use_shell_controller};
+use crate::shell::state::Studio;
 use crate::shell::workspace::EpisodeWorkspace;
 
 const TAILWIND: Asset = asset!("/assets/tailwind.css");
@@ -98,7 +99,6 @@ pub(crate) fn StudioRouter() -> Element {
 /// runs, messages, and long-running backend commands survive navigation.
 #[component]
 fn StudioShell() -> Element {
-    let studio = crate::shell::state::studio();
     let route = use_route::<StudioRoute>();
     let activity = route.activity();
     let navigator = use_navigator();
@@ -129,6 +129,7 @@ fn StudioShell() -> Element {
     }));
     use_context_provider(|| configuration);
     let configuration_value = configuration();
+    let studio = Studio::use_studio(configuration_value.spiral_query_available);
 
     let selected_dataset = studio.selected_dataset().read().to_owned();
     let data = use_data_controller(&configuration_value.dataset, &selected_dataset);
@@ -205,6 +206,7 @@ fn StudioShell() -> Element {
                                 },
                                 move |_| {
                                     settings.restart();
+                                    studio.refresh_relation_catalog();
                                     data.invalidate_episode_catalog();
                                 },
                                 move |busy| settings_busy.set(busy),
