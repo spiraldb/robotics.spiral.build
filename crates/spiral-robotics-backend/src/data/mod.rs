@@ -79,10 +79,19 @@ pub(crate) struct DataSettingsSnapshot {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DataSettingsUpdate {
+    settings: DataSettingsSnapshot,
+    project_state_rehydrated: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ConnectionCheck {
     ok: bool,
     message: String,
+    project_state_rehydrated: bool,
 }
+
+pub(crate) struct TestConnectionCommand;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum QueryValue {
@@ -257,16 +266,35 @@ impl DataSettingsSnapshot {
     }
 }
 
+impl DataSettingsUpdate {
+    pub(crate) fn new(settings: DataSettingsSnapshot, project_state_rehydrated: bool) -> Self {
+        Self {
+            settings,
+            project_state_rehydrated,
+        }
+    }
+
+    pub(crate) fn into_parts(self) -> (DataSettingsSnapshot, bool) {
+        (self.settings, self.project_state_rehydrated)
+    }
+}
+
 impl ConnectionCheck {
     pub(crate) fn new(ok: bool, message: impl Into<String>) -> Self {
         Self {
             ok,
             message: message.into(),
+            project_state_rehydrated: false,
         }
     }
 
-    pub(crate) fn into_parts(self) -> (bool, String) {
-        (self.ok, self.message)
+    fn with_rehydrated_project_state(mut self) -> Self {
+        self.project_state_rehydrated = true;
+        self
+    }
+
+    pub(crate) fn into_parts(self) -> (bool, String, bool) {
+        (self.ok, self.message, self.project_state_rehydrated)
     }
 }
 
@@ -344,10 +372,11 @@ pub(crate) trait DataCatalogPort: Send + Sync {
     async fn update_settings(
         &self,
         command: UpdateDataSettingsCommand,
-    ) -> Result<DataSettingsSnapshot, OperationError>;
+    ) -> Result<DataSettingsUpdate, OperationError>;
     async fn refresh_training_readiness(&self);
 
     async fn test_connection(&self) -> ConnectionCheck;
+    async fn recover_project_state(&self) -> Result<(), OperationError>;
     async fn query(&self, command: QueryCommand) -> Result<QueryResult, OperationError>;
 }
 
@@ -355,13 +384,31 @@ impl UpdateDataSettingsCommand {
     pub(crate) async fn apply<P: DataCatalogPort + ?Sized>(
         self,
         port: &P,
-    ) -> Result<DataSettingsSnapshot, OperationError> {
+    ) -> Result<DataSettingsUpdate, OperationError> {
         let command = self.validated()?;
-        let settings = port.update_settings(command).await?;
+        let update = port.update_settings(command).await?;
         // Training readiness depends on the selected runtime endpoint, so publish
         // preferences before rebuilding it.
         port.refresh_training_readiness().await;
-        Ok(settings)
+        Ok(update)
+    }
+}
+
+impl TestConnectionCommand {
+    pub(crate) async fn execute<P: DataCatalogPort + ?Sized>(port: &P) -> ConnectionCheck {
+        let check = port.test_connection().await;
+        if !check.ok {
+            return check;
+        }
+        match port.recover_project_state().await {
+            Ok(()) => check.with_rehydrated_project_state(),
+            Err(error) => ConnectionCheck::new(
+                false,
+                format!(
+                    "SpiralDB provisioning succeeded, but Studio could not reload the project state: {error}"
+                ),
+            ),
+        }
     }
 }
 
@@ -428,6 +475,9 @@ mod tests {
     struct FakeData {
         events: Mutex<Vec<String>>,
         update_error: Option<OperationError>,
+        update_rehydrated: bool,
+        connection_check: ConnectionCheck,
+        recovery_error: Option<OperationError>,
         query_error: Option<OperationError>,
     }
 
@@ -436,6 +486,9 @@ mod tests {
             Self {
                 events: Mutex::new(Vec::new()),
                 update_error: None,
+                update_rehydrated: false,
+                connection_check: ConnectionCheck::new(true, "connected"),
+                recovery_error: None,
                 query_error: None,
             }
         }
@@ -449,7 +502,7 @@ mod tests {
         async fn update_settings(
             &self,
             command: UpdateDataSettingsCommand,
-        ) -> Result<DataSettingsSnapshot, OperationError> {
+        ) -> Result<DataSettingsUpdate, OperationError> {
             self.events.lock().unwrap().push(format!(
                 "update:{}:{}:{}:{}:{}",
                 command.spiral_endpoint,
@@ -458,9 +511,15 @@ mod tests {
                 command.training_endpoint,
                 command.video_enabled
             ));
-            self.update_error
-                .clone()
-                .map_or_else(|| Ok(settings_view("saved")), Err)
+            self.update_error.clone().map_or_else(
+                || {
+                    Ok(DataSettingsUpdate::new(
+                        settings_view("saved"),
+                        self.update_rehydrated,
+                    ))
+                },
+                Err,
+            )
         }
 
         async fn refresh_training_readiness(&self) {
@@ -468,10 +527,13 @@ mod tests {
         }
 
         async fn test_connection(&self) -> ConnectionCheck {
-            ConnectionCheck {
-                ok: true,
-                message: "connected".to_owned(),
-            }
+            self.events.lock().unwrap().push("test".to_owned());
+            self.connection_check.clone()
+        }
+
+        async fn recover_project_state(&self) -> Result<(), OperationError> {
+            self.events.lock().unwrap().push("recover".to_owned());
+            self.recovery_error.clone().map_or(Ok(()), Err)
         }
 
         async fn query(&self, command: QueryCommand) -> Result<QueryResult, OperationError> {
@@ -524,7 +586,10 @@ mod tests {
     #[tokio::test]
     async fn settings_are_validated_normalized_saved_then_readiness_is_refreshed() {
         let data = FakeData::new();
-        assert_eq!(settings().apply(&data).await, Ok(settings_view("saved")));
+        assert_eq!(
+            settings().apply(&data).await,
+            Ok(DataSettingsUpdate::new(settings_view("saved"), false))
+        );
         assert_eq!(
             *data.events.lock().unwrap(),
             [
@@ -532,6 +597,47 @@ mod tests {
                 "refresh"
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn successful_spiral_test_recovers_project_state() {
+        let data = FakeData::new();
+
+        let result = TestConnectionCommand::execute(&data).await;
+
+        assert_eq!(result.into_parts(), (true, "connected".to_owned(), true));
+        assert_eq!(*data.events.lock().unwrap(), ["test", "recover"]);
+    }
+
+    #[tokio::test]
+    async fn failed_spiral_test_does_not_touch_project_state() {
+        let mut data = FakeData::new();
+        data.connection_check = ConnectionCheck::new(false, "connection refused");
+
+        let result = TestConnectionCommand::execute(&data).await;
+
+        assert_eq!(
+            result.into_parts(),
+            (false, "connection refused".to_owned(), false)
+        );
+        assert_eq!(*data.events.lock().unwrap(), ["test"]);
+    }
+
+    #[tokio::test]
+    async fn recovery_failure_does_not_report_a_successful_spiral_test() {
+        let mut data = FakeData::new();
+        data.recovery_error = Some(OperationError::External(
+            "unknown table rollout_runs".to_owned(),
+        ));
+
+        let result = TestConnectionCommand::execute(&data).await;
+        let (ok, message, project_state_rehydrated) = result.into_parts();
+
+        assert!(!ok);
+        assert!(!project_state_rehydrated);
+        assert!(message.contains("provisioning succeeded"), "{message}");
+        assert!(message.contains("unknown table rollout_runs"), "{message}");
+        assert_eq!(*data.events.lock().unwrap(), ["test", "recover"]);
     }
 
     #[tokio::test]

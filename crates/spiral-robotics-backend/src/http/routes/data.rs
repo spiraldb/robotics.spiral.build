@@ -7,6 +7,26 @@ struct CatalogLeaseReservation {
     token: CatalogLeaseToken,
 }
 
+struct ProjectRecoveryPublication {
+    project_state_rehydrated: bool,
+}
+
+impl ProjectRecoveryPublication {
+    fn new(project_state_rehydrated: bool) -> Self {
+        Self {
+            project_state_rehydrated,
+        }
+    }
+
+    fn publish_to(self, bootstrap: &BootstrapState) -> bool {
+        if !self.project_state_rehydrated {
+            return false;
+        }
+        bootstrap.ready();
+        true
+    }
+}
+
 impl Drop for CatalogLeaseReservation {
     fn drop(&mut self) {
         let released = self.lease.release(self.token);
@@ -198,35 +218,11 @@ impl AppState {
             .import_project_bundle(&body)
             .await
             .map_err(Failure::import)?;
+        DataHttpAdapter { state: &state }
+            .recover_project_state()
+            .await
+            .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
         state.auto_connect_saved_robots().await;
-        state.preferences().replace(
-            state
-                .storage()
-                .load_studio_preferences()
-                .await
-                .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error))?,
-        );
-        state
-            .training()
-            .reload_from_storage()
-            .await
-            .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error))?;
-        state.training().refresh_readiness().await;
-        state
-            .rollout()
-            .reload_from_storage()
-            .await
-            .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error))?;
-        state
-            .workflow()
-            .reload_from_storage()
-            .await
-            .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error))?;
-        state
-            .workflow_agent()
-            .reload_from_storage()
-            .await
-            .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error))?;
         Ok(Json(summary))
     }
 
@@ -343,7 +339,7 @@ impl DataCatalogPort for DataHttpAdapter<'_> {
     async fn update_settings(
         &self,
         command: UpdateDataSettingsCommand,
-    ) -> Result<DataSettingsSnapshot, OperationError> {
+    ) -> Result<DataSettingsUpdate, OperationError> {
         self.state
             .connection()
             .update(
@@ -360,6 +356,12 @@ impl DataCatalogPort for DataHttpAdapter<'_> {
     async fn test_connection(&self) -> ConnectionCheck {
         let response = self.state.storage().test_spiral().await;
         ConnectionCheck::new(response.ok(), response.message())
+    }
+
+    async fn recover_project_state(&self) -> Result<(), OperationError> {
+        self.state.connection().recover_project_state().await?;
+        self.state.training().refresh_readiness().await;
+        Ok(())
     }
 
     async fn query(&self, command: QueryCommand) -> Result<CapabilityQueryResult, OperationError> {
@@ -639,6 +641,20 @@ impl DestinationChangeContext {
 }
 
 impl AppState {
+    fn spawn_auto_connect_saved_robots(&self) {
+        let reconnect_state = self.clone();
+        tokio::spawn(async move { reconnect_state.auto_connect_saved_robots().await });
+    }
+
+    fn complete_project_recovery(&self, project_state_rehydrated: bool) -> bool {
+        let published =
+            ProjectRecoveryPublication::new(project_state_rehydrated).publish_to(self.bootstrap());
+        if published {
+            self.spawn_auto_connect_saved_robots();
+        }
+        published
+    }
+
     async fn update_data_settings(
         State(state): State<Self>,
         Json(request): Json<UpdateDataSettingsRequest>,
@@ -657,6 +673,7 @@ impl AppState {
             )
             .map(spiral_robotics_storage::ServiceEndpoint::into_string)
             .map_err(Failure::bad_request)?;
+        let catalog_was_available = state.bootstrap().current().catalog_available();
         let current_connection = state.connection().settings();
         let endpoint_changed = current_connection.spiral().endpoint() != requested_endpoint
             || current_connection.spiral().spfs_endpoint() != requested_spfs_endpoint;
@@ -737,20 +754,21 @@ impl AppState {
         } else {
             None
         };
-        let settings = UpdateDataSettingsCommand::from(request)
+        let update = UpdateDataSettingsCommand::from(request)
             .apply(&DataHttpAdapter { state: &state })
             .await?;
-        if !endpoint_changed {
-            state.bootstrap().ready();
-            let reconnect_state = state.clone();
-            tokio::spawn(async move { reconnect_state.auto_connect_saved_robots().await });
+        let (settings, project_state_rehydrated) = update.into_parts();
+        let recovery_completed = state.complete_project_recovery(project_state_rehydrated);
+        if !recovery_completed && !endpoint_changed && catalog_was_available {
+            state.spawn_auto_connect_saved_robots();
         }
         Ok(Json(settings.into()))
     }
 
     async fn test_spiral(State(state): State<Self>) -> Json<ConnectionTestResponse> {
-        let result = DataHttpAdapter { state: &state }.test_connection().await;
-        let (ok, message) = result.into_parts();
+        let result = TestConnectionCommand::execute(&DataHttpAdapter { state: &state }).await;
+        let (ok, message, project_state_rehydrated) = result.into_parts();
+        state.complete_project_recovery(project_state_rehydrated);
         Json(ConnectionTestResponse::new(ok, message))
     }
 
@@ -803,5 +821,31 @@ mod destination_change_tests {
         let hardware = idle_hardware_with_connected_robot("leader").with_active_work(true);
 
         assert_eq!(hardware.admission(), DestinationChangeAdmission::Busy,);
+    }
+
+    #[test]
+    fn failed_opportunistic_recovery_keeps_the_catalog_degraded() {
+        let bootstrap = BootstrapState::new();
+        bootstrap.degraded(false, "run Test connection");
+
+        assert!(!ProjectRecoveryPublication::new(false).publish_to(&bootstrap));
+        assert_eq!(
+            bootstrap.current(),
+            BackendReadiness::new(
+                BackendReadinessState::Degraded,
+                false,
+                "run Test connection"
+            )
+        );
+    }
+
+    #[test]
+    fn successful_project_recovery_makes_the_catalog_ready() {
+        let bootstrap = BootstrapState::new();
+        bootstrap.degraded(false, "run Test connection");
+
+        assert!(ProjectRecoveryPublication::new(true).publish_to(&bootstrap));
+        assert_eq!(bootstrap.current().state(), BackendReadinessState::Ready);
+        assert!(bootstrap.current().catalog_available());
     }
 }

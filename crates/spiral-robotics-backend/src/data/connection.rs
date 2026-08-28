@@ -7,7 +7,9 @@ use spiral_robotics_storage::{
     StudioPreferencesStore,
 };
 
-use super::{DataSettingsSnapshot, SpiralDestinationSettings, UpdateDataSettingsCommand};
+use super::{
+    DataSettingsSnapshot, DataSettingsUpdate, SpiralDestinationSettings, UpdateDataSettingsCommand,
+};
 use crate::OperationError;
 use crate::rollout::manager::RolloutManager;
 use crate::sync::MutexRecovery;
@@ -37,6 +39,39 @@ pub(crate) struct ProjectStateManagers {
 pub(crate) struct WorkflowStateManagers {
     workflow: Arc<WorkflowManager>,
     workflow_agent: Arc<WorkflowAgentManager>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProjectStateReload {
+    Required,
+    Opportunistic,
+    Unnecessary,
+}
+
+impl ProjectStateReload {
+    fn for_settings_update(connection_changed: bool, catalog_was_available: bool) -> Self {
+        if connection_changed {
+            Self::Required
+        } else if catalog_was_available {
+            Self::Unnecessary
+        } else {
+            Self::Opportunistic
+        }
+    }
+
+    fn resolve(self, reload: Result<(), OperationError>) -> Result<bool, OperationError> {
+        match (self, reload) {
+            (Self::Required, Ok(())) | (Self::Opportunistic, Ok(())) => Ok(true),
+            (Self::Required, Err(error)) => Err(error),
+            (Self::Opportunistic, Err(error)) => {
+                tracing::warn!(
+                    "settings were saved while project-state recovery remained unavailable: {error}"
+                );
+                Ok(false)
+            }
+            (Self::Unnecessary, _) => Ok(false),
+        }
+    }
 }
 
 impl SpiralConnectionStores {
@@ -115,7 +150,7 @@ impl SpiralConnectionController {
         &self,
         command: UpdateDataSettingsCommand,
         catalog_was_available: bool,
-    ) -> Result<DataSettingsSnapshot, OperationError> {
+    ) -> Result<DataSettingsUpdate, OperationError> {
         let _transition = self.transition.lock().await;
         let previous_connection = self.current.recover_lock().clone();
         let current_credentials = previous_connection.credentials().cloned();
@@ -206,13 +241,31 @@ impl SpiralConnectionController {
         }
         self.stores.preferences.replace(staged_preferences);
 
-        if connection_changed || !catalog_was_available {
-            self.reload_project_state().await?;
-        }
-        Ok(self.settings())
+        let reload =
+            ProjectStateReload::for_settings_update(connection_changed, catalog_was_available);
+        let project_state_rehydrated = match reload {
+            ProjectStateReload::Unnecessary => false,
+            reload => reload.resolve(self.reload_project_state().await)?,
+        };
+        Ok(DataSettingsUpdate::new(
+            self.settings(),
+            project_state_rehydrated,
+        ))
+    }
+
+    pub(crate) async fn recover_project_state(&self) -> Result<(), OperationError> {
+        let _transition = self.transition.lock().await;
+        self.reload_project_state().await
     }
 
     async fn reload_project_state(&self) -> Result<(), OperationError> {
+        let preferences = self
+            .stores
+            .storage
+            .load_studio_preferences()
+            .await
+            .map_err(OperationError::External)?;
+        self.stores.preferences.replace(preferences);
         self.activities
             .training
             .reload_from_storage()
@@ -235,5 +288,37 @@ impl SpiralConnectionController {
             .reload_from_storage()
             .await
             .map_err(OperationError::External)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connection_changes_keep_project_reload_failures_hard() {
+        let failure = OperationError::External("rollout relation unavailable".to_owned());
+        assert_eq!(
+            ProjectStateReload::for_settings_update(true, false).resolve(Ok(())),
+            Ok(true)
+        );
+        assert_eq!(
+            ProjectStateReload::for_settings_update(true, false).resolve(Err(failure.clone())),
+            Err(failure)
+        );
+    }
+
+    #[test]
+    fn degraded_unchanged_connections_keep_saved_settings_when_reload_fails() {
+        assert_eq!(
+            ProjectStateReload::for_settings_update(false, false).resolve(Err(
+                OperationError::External("rollout relation unavailable".to_owned())
+            )),
+            Ok(false)
+        );
+        assert_eq!(
+            ProjectStateReload::for_settings_update(false, false).resolve(Ok(())),
+            Ok(true)
+        );
     }
 }

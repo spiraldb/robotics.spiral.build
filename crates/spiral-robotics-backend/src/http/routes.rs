@@ -68,8 +68,9 @@ use crate::data::seek::{
     SeekableEpisode,
 };
 use crate::data::{
-    ConnectionCheck, DataCatalogPort, DataSettingsSnapshot, QueryColumn as CapabilityQueryColumn,
-    QueryCommand, QueryResult as CapabilityQueryResult, QueryValue, UpdateDataSettingsCommand,
+    ConnectionCheck, DataCatalogPort, DataSettingsSnapshot, DataSettingsUpdate,
+    QueryColumn as CapabilityQueryColumn, QueryCommand, QueryResult as CapabilityQueryResult,
+    QueryValue, TestConnectionCommand, UpdateDataSettingsCommand,
 };
 use crate::recording::{
     RecordingActions, RecordingContext, RecordingPort, RecordingResult, ReplayActions,
