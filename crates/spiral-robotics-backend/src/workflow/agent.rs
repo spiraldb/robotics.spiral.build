@@ -28,6 +28,7 @@ use crate::workflow::provider::{
     ProviderToolCall,
 };
 use spiral_robotics_storage::StorageManager;
+use spiral_robotics_storage::workflow_documents::StoredWorkflowDocument;
 
 const MAX_PUBLIC_MESSAGES: usize = MAX_WORKFLOW_AGENT_MESSAGES_PER_CONVERSATION;
 const MAX_PROVIDER_MESSAGES: usize = 80;
@@ -290,6 +291,24 @@ impl AgentDocument {
         let document = Self::default();
         document.validate()?;
         Ok(document)
+    }
+
+    fn persisted(&self) -> Result<StoredWorkflowDocument, String> {
+        serde_json::to_string(self)
+            .map(|payload| StoredWorkflowDocument::new(AGENT_DOCUMENT_SCHEMA_VERSION, payload))
+            .map_err(|error| format!("encoding Assistant history: {error}"))
+    }
+
+    /// Accept the current Assistant document version. A version this build
+    /// does not implement is refused rather than replaced.
+    fn supported_payload(stored: &StoredWorkflowDocument) -> Result<&str, String> {
+        match stored.version() {
+            AGENT_DOCUMENT_SCHEMA_VERSION => Ok(stored.payload()),
+            version => Err(format!(
+                "Assistant history uses document version {version}, which this Studio build \
+                 cannot read. Update Studio to open this project."
+            )),
+        }
     }
 
     fn restored(mut self, interruption_detail: &str) -> Result<(AgentDocument, bool), String> {
@@ -896,14 +915,8 @@ impl WorkflowAgentManager {
     }
 
     pub(crate) async fn hydrate_from_storage(&self) -> Result<(), String> {
-        let loaded = self
-            .inner
-            .services
-            .storage
-            .load_workflow_agent_snapshot_json()
-            .await;
-        let raw_snapshot = match loaded {
-            Ok(document) => document,
+        let stored = match self.stored_document().await {
+            Ok(stored) => stored,
             Err(error) => {
                 self.install_unavailable_scope(&error);
                 return Err(error);
@@ -911,7 +924,7 @@ impl WorkflowAgentManager {
         };
         let document = match self
             .prepare_or_reset_document(
-                raw_snapshot.as_deref(),
+                stored.as_deref(),
                 "Studio restarted before this Assistant turn finished. Retry the turn.",
             )
             .await
@@ -930,14 +943,8 @@ impl WorkflowAgentManager {
     }
 
     pub(crate) async fn reload_from_storage(&self) -> Result<(), String> {
-        let raw_snapshot = match self
-            .inner
-            .services
-            .storage
-            .load_workflow_agent_snapshot_json()
-            .await
-        {
-            Ok(document) => document,
+        let stored = match self.stored_document().await {
+            Ok(stored) => stored,
             Err(error) => {
                 self.install_unavailable_scope(&error);
                 return Err(error);
@@ -945,7 +952,7 @@ impl WorkflowAgentManager {
         };
         let document = match self
             .prepare_or_reset_document(
-                raw_snapshot.as_deref(),
+                stored.as_deref(),
                 "The active Spiral project changed during an Assistant turn. Retry the turn.",
             )
             .await
@@ -967,6 +974,19 @@ impl WorkflowAgentManager {
         Ok(())
     }
 
+    /// Read the persisted Assistant payload, refusing a document version this
+    /// build cannot read instead of replacing it.
+    async fn stored_document(&self) -> Result<Option<String>, String> {
+        self.inner
+            .services
+            .storage
+            .load_workflow_agent_document()
+            .await?
+            .as_ref()
+            .map(|stored| AgentDocument::supported_payload(stored).map(str::to_owned))
+            .transpose()
+    }
+
     async fn prepare_or_reset_document(
         &self,
         raw_snapshot: Option<&str>,
@@ -985,7 +1005,7 @@ impl WorkflowAgentManager {
                     self.inner
                         .services
                         .storage
-                        .reset_workflow_agent_document(raw_snapshot, &fresh)
+                        .reset_workflow_agent_document(raw_snapshot, &fresh.persisted()?)
                         .await?;
                 } else {
                     self.persist_document(&fresh).await?;
@@ -2326,7 +2346,7 @@ impl WorkflowAgentManager {
         self.inner
             .services
             .storage
-            .save_workflow_agent_document(document)
+            .save_workflow_agent_document(&document.persisted()?)
             .await
     }
 
@@ -3354,6 +3374,27 @@ mod tests {
         }
     }
 
+    /// The stored Assistant row declares its own encoding. A newer version is
+    /// refused so a conversation history is never replaced by an empty one.
+    #[test]
+    fn a_stored_assistant_document_round_trips_and_refuses_a_newer_version() {
+        let document = AgentDocument::default();
+        let stored = document.persisted().expect("the document encodes");
+        assert_eq!(stored.version(), AGENT_DOCUMENT_SCHEMA_VERSION);
+        assert_eq!(
+            AgentDocument::supported_payload(&stored).unwrap(),
+            stored.payload()
+        );
+
+        let newer = StoredWorkflowDocument::new(
+            AGENT_DOCUMENT_SCHEMA_VERSION + 1,
+            stored.payload().to_owned(),
+        );
+        let error = AgentDocument::supported_payload(&newer).unwrap_err();
+        assert!(error.contains("document version 3"), "{error}");
+        assert!(error.contains("Update Studio"), "{error}");
+    }
+
     #[test]
     fn incompatible_or_schema_less_history_resets_to_a_usable_current_document() {
         let current = AgentDocument::default();
@@ -3384,7 +3425,7 @@ mod tests {
     }
 
     #[test]
-    fn future_or_empty_current_documents_never_migrate_as_legacy() {
+    fn future_or_empty_current_documents_restore_safely() {
         let (fresh, changed) = AgentDocument::restored_optional(None, "restart").unwrap();
         assert!(
             changed,

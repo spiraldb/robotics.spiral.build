@@ -12,7 +12,7 @@
   "sql": "SELECT * FROM fixture",
   "state_column": "state",
   "action_column": "action",
-  "spiral_schema_version": 7,
+  "spiral_schema_version": 8,
   "device": "cpu",
   "initialization": "random",
   "steps": 10,

@@ -1,5 +1,6 @@
 //! Project storage: SpiralDB access, schemas, queries, ingestion, and transfer.
 
+mod arrow_rows;
 pub mod bundle;
 pub mod checkpoints;
 mod database;
@@ -8,11 +9,14 @@ pub mod episodes;
 pub mod ingestion;
 mod manager;
 mod project_store;
+mod rollout_runs;
 mod schema;
 mod settings;
 mod spiral_database;
 mod sql;
+mod training_runs;
 pub mod video;
+pub mod workflow_documents;
 
 // Keep the cross-crate storage boundary flat and explicit. The modules behind
 // these exports describe implementation mechanisms, not product features.
@@ -30,6 +34,9 @@ pub use schema::{
 };
 pub use settings::{
     BackendStateStore, ServiceEndpoint, SpiralConnectionSettings, SpiralCredentials,
-    StoredStudioPreferences, StudioPreferencesStore,
+    StoredStudioPreferences, StoredTrainingRuntimePreference, StoredVideoPreference,
+    StudioPreferencesStore,
 };
 pub use sql::SpiralSql;
+
+pub(crate) const LEGACY_PROJECT_ERROR: &str = "this project was created by an older Studio and its storage format is no longer readable — start a fresh project";

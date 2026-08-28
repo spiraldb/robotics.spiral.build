@@ -40,9 +40,8 @@ use crate::sync::MutexRecovery;
 use spiral_robotics_hardware::{
     HardwareHandle, HardwareState, ModeSelection, PolicyGoals, RobotTelemetry,
 };
-use spiral_robotics_storage::StorageManager;
-use spiral_robotics_storage::StudioPreferencesStore;
 use spiral_robotics_storage::checkpoints::{CheckpointArtifact, CheckpointKey, CheckpointStore};
+use spiral_robotics_storage::{StorageManager, StudioPreferencesStore};
 
 const INPUT_STALE_AFTER: Duration = Duration::from_millis(350);
 const INITIAL_CAMERA_TIMEOUT: Duration = Duration::from_secs(5);
@@ -471,7 +470,7 @@ impl RolloutManager {
         tokio::spawn(async move {
             while changes.changed().await.is_ok() {
                 let snapshot = changes.borrow_and_update().clone();
-                if let Err(error) = persistence_storage.save_rollout_snapshot(&snapshot).await {
+                if let Err(error) = persistence_storage.save_rollout_session(&snapshot).await {
                     tracing::error!("could not persist rollout state: {error}");
                 }
             }
@@ -497,7 +496,23 @@ impl RolloutManager {
     }
 
     pub(crate) async fn reload_from_storage(&self) -> Result<(), String> {
-        let snapshot: ContractRolloutSnapshot = self.storage.load_rollout_snapshot().await?;
+        if self.lifecycle.active.recover_lock().is_some() {
+            return Err("cannot reload rollout history while a session is active".to_owned());
+        }
+        let snapshot = self
+            .storage
+            .load_rollout_session()
+            .await?
+            .unwrap_or_default();
+        // Install under the same lock `start()` holds for admission, so a
+        // session admitted while storage was being read is never overwritten
+        // by this older snapshot.
+        let active = self.lifecycle.active.recover_lock();
+        if active.is_some() {
+            return Err(
+                "a rollout session started while reloading; keeping the live session".to_owned(),
+            );
+        }
         self.lifecycle
             .state
             .send_replace(snapshot.restored_after_restart());

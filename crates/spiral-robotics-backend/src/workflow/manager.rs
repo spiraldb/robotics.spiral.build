@@ -27,6 +27,15 @@ use crate::workflow::model::{
     ModelRunContext, ModelRunEvent, ModelRunFailure, ModelRunRequest, ModelRunResult,
 };
 use spiral_robotics_storage::StorageManager;
+use spiral_robotics_storage::workflow_documents::StoredWorkflowDocument;
+
+/// Version of the persisted Workflow document encoding.
+///
+/// The graph is still evolving and is deliberately not decomposed into node
+/// and edge relations yet, so its persisted form is one versioned payload.
+/// Bump this constant when the payload's shape changes and retain explicit
+/// readers for any older document versions that remain supported.
+const WORKFLOW_DOCUMENT_VERSION: u32 = 1;
 
 /// Persistence is a backend implementation detail. The shared API exposes the
 /// graph and observation, while the manager decides that they commit together.
@@ -64,6 +73,39 @@ impl WorkflowDocument {
 
     fn snapshot_mut(&mut self) -> &mut WorkflowRunSnapshot {
         &mut self.snapshot
+    }
+
+    fn persisted(&self) -> Result<StoredWorkflowDocument, String> {
+        serde_json::to_string(self)
+            .map(|payload| StoredWorkflowDocument::new(WORKFLOW_DOCUMENT_VERSION, payload))
+            .map_err(|error| format!("encoding the Workflow document: {error}"))
+    }
+
+    /// Decode a persisted Workflow document whose declared version this build
+    /// implements. Newer versions are refused and never replaced.
+    fn restored(stored: &StoredWorkflowDocument) -> Result<Self, String> {
+        match stored.version() {
+            WORKFLOW_DOCUMENT_VERSION => {}
+            version => {
+                return Err(format!(
+                    "The saved Workflow uses document version {version}, which this Studio build \
+                     cannot read. Update Studio to open this project."
+                ));
+            }
+        }
+        // A payload whose version is understood but whose bytes are damaged is
+        // the one case that still starts from an empty Workflow. Nothing is
+        // written back, so the damaged document survives for inspection until
+        // the operator saves over it.
+        Ok(
+            serde_json::from_str(stored.payload()).unwrap_or_else(|error: serde_json::Error| {
+                tracing::warn!(
+                    "the saved Workflow document could not be decoded ({error}); starting an \
+                     empty Workflow"
+                );
+                Self::default()
+            }),
+        )
     }
 }
 
@@ -313,13 +355,25 @@ impl WorkflowManager {
     /// Restore the saved graph and latest snapshot. Local SQL execution is not
     /// resumable, so an in-flight snapshot becomes explicitly interrupted.
     pub(crate) async fn hydrate_from_storage(&self) -> Result<(), String> {
-        let document = self.inner.storage.load_workflow_document().await?;
+        let document = self.stored_document().await?;
         self.install_hydrated_document(document).await
     }
 
     pub(crate) async fn reload_from_storage(&self) -> Result<(), String> {
-        let document = self.inner.storage.load_workflow_document().await?;
+        let document = self.stored_document().await?;
         self.install_hydrated_document(document).await
+    }
+
+    async fn stored_document(&self) -> Result<WorkflowDocument, String> {
+        self.inner
+            .storage
+            .load_workflow_document()
+            .await?
+            .as_ref()
+            .map_or_else(
+                || Ok(WorkflowDocument::default()),
+                WorkflowDocument::restored,
+            )
     }
 
     async fn install_hydrated_document(
@@ -348,7 +402,10 @@ impl WorkflowManager {
                     node.set_error(Some(interruption.clone()));
                 }
             }
-            self.inner.storage.save_workflow_document(&document).await?;
+            self.inner
+                .storage
+                .save_workflow_document(&document.persisted()?)
+                .await?;
         }
         *self.inner.document.recover_lock() = document;
         self.inner.identity.advance_scope();
@@ -503,7 +560,7 @@ impl WorkflowManager {
         let candidate = WorkflowDocument::new(workflow, snapshot);
         self.inner
             .storage
-            .save_workflow_document(&candidate)
+            .save_workflow_document(&candidate.persisted().map_err(OperationError::External)?)
             .await
             .map_err(OperationError::External)?;
         let response = self.state_response(&candidate);
@@ -540,7 +597,7 @@ impl WorkflowManager {
         let candidate = WorkflowDocument::new(document.workflow().clone(), snapshot.clone());
         self.inner
             .storage
-            .save_workflow_document(&candidate)
+            .save_workflow_document(&candidate.persisted().map_err(OperationError::External)?)
             .await
             .map_err(OperationError::External)?;
         *self.inner.document.recover_lock() = candidate;
@@ -1326,7 +1383,10 @@ impl WorkflowManager {
         {
             return outcome;
         }
-        self.inner.storage.save_workflow_document(document).await
+        self.inner
+            .storage
+            .save_workflow_document(&document.persisted()?)
+            .await
     }
 
     fn require_scope(&self, requested_scope_id: &str) -> Result<(), OperationError> {
@@ -1627,6 +1687,36 @@ mod tests {
     use spiral_robotics_storage::SpiralSql;
     use spiral_robotics_storage::video::{VideoSegment, VideoSize, VideoTiming};
     use spiral_robotics_storage::{BackendStateStore, ServiceEndpoint, SpiralConnectionSettings};
+
+    /// The stored document declares its own encoding. A newer version is
+    /// refused so an operator's saved graph is never replaced by an empty one.
+    #[test]
+    fn a_stored_workflow_document_round_trips_and_refuses_a_newer_version() {
+        let document = WorkflowDocument::default();
+        let stored = document.persisted().expect("the document encodes");
+        assert_eq!(stored.version(), WORKFLOW_DOCUMENT_VERSION);
+        assert_eq!(WorkflowDocument::restored(&stored).unwrap(), document);
+
+        let newer =
+            StoredWorkflowDocument::new(WORKFLOW_DOCUMENT_VERSION + 1, stored.payload().to_owned());
+        let error = WorkflowDocument::restored(&newer).unwrap_err();
+        assert!(error.contains("document version 2"), "{error}");
+        assert!(error.contains("Update Studio"), "{error}");
+    }
+
+    /// A payload whose version is understood but whose bytes no longer parse
+    /// is the one case that still starts from an empty Workflow.
+    #[test]
+    fn an_undecodable_workflow_payload_of_a_known_version_starts_empty() {
+        let obsolete = StoredWorkflowDocument::new(
+            WORKFLOW_DOCUMENT_VERSION,
+            r#"{"concepts":["cube"]}"#.to_owned(),
+        );
+        assert_eq!(
+            WorkflowDocument::restored(&obsolete).unwrap(),
+            WorkflowDocument::default()
+        );
+    }
 
     #[test]
     fn revision_increment_alone_does_not_stale_a_result() {

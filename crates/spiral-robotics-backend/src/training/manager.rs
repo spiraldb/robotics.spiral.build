@@ -204,7 +204,10 @@ impl TrainingManager {
 
     /// Restore persisted history after the HTTP listener is already serving.
     pub(crate) async fn hydrate_from_storage(&self) -> Result<(), String> {
-        let mut snapshot: TrainingSnapshot = self.inner.storage.load_training_snapshot().await?;
+        // Hold the admission gate: a training start racing bootstrap must not
+        // be overwritten by this install.
+        let _mutation = self.inner.runtime.mutation.lock().await;
+        let mut snapshot = self.restored_snapshot().await?;
         let run_registry = snapshot.run_registry()?;
         let retained = run_registry
             .retained_ids()
@@ -251,13 +254,26 @@ impl TrainingManager {
     }
 
     pub(crate) async fn reload_from_storage(&self) -> Result<(), String> {
+        let _mutation = self.inner.runtime.mutation.lock().await;
         if !self.inner.runtime.controls.recover_lock().is_empty() {
             return Err("cannot reload training history while a run is active".to_owned());
         }
-        let snapshot: TrainingSnapshot = self.inner.storage.load_training_snapshot().await?;
+        let snapshot = self.restored_snapshot().await?;
         snapshot.run_registry()?;
-        *self.inner.snapshot.recover_lock() = snapshot;
+        // Readiness describes the live runtime, not the project's history, so
+        // a project change keeps the value the process already computed.
+        let mut current = self.inner.snapshot.recover_lock();
+        *current = TrainingSnapshot::new(current.readiness().clone(), snapshot.runs().to_vec());
         Ok(())
+    }
+
+    async fn restored_snapshot(&self) -> Result<TrainingSnapshot, String> {
+        let runs = self.inner.storage.load_training_history().await?;
+        Ok(TrainingSnapshot::new(TrainingReadiness::default(), runs))
+    }
+
+    async fn persist(&self, snapshot: &TrainingSnapshot) -> Result<(), String> {
+        self.inner.storage.save_training_history(snapshot).await
     }
 
     /// Capture the initial state and subscribe to later changes as one ordered
@@ -371,10 +387,7 @@ impl TrainingManager {
             candidate.apply(update.clone());
             candidate
         };
-        self.inner
-            .storage
-            .save_training_snapshot(&candidate)
-            .await?;
+        self.persist(&candidate).await?;
         *self.inner.snapshot.recover_lock() = candidate;
         let _ = self.inner.updates.send(update);
         Ok(())
@@ -824,10 +837,7 @@ impl TrainingManager {
         let mut candidate = self.inner.snapshot.recover_lock().clone();
         candidate.apply(update.clone());
         if persist {
-            self.inner
-                .storage
-                .save_training_snapshot(&candidate)
-                .await?;
+            self.persist(&candidate).await?;
         }
         *self.inner.snapshot.recover_lock() = candidate;
         let _ = self.inner.updates.send(update);
@@ -914,9 +924,7 @@ impl TrainingCoordinatorPort for TrainingManager {
         let (candidate, update) = self
             .admitted_snapshot(&snapshot, run)
             .map_err(OperationError::conflict)?;
-        self.inner
-            .storage
-            .save_training_snapshot(&candidate)
+        self.persist(&candidate)
             .await
             .map_err(OperationError::External)?;
         *self.inner.snapshot.recover_lock() = candidate;

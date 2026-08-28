@@ -98,7 +98,6 @@ impl ActInputConfig {
     const fn default_pretrained_backbone() -> bool {
         true
     }
-    #[cfg(any(test, feature = "test-support"))]
     pub fn new(
         camera_streams: Vec<String>,
         image_size: (usize, usize),
@@ -111,6 +110,11 @@ impl ActInputConfig {
             video_decoder: video_decoder.into(),
             pretrained_backbone: true,
         }
+    }
+
+    pub const fn with_pretrained_backbone(mut self, pretrained_backbone: bool) -> Self {
+        self.pretrained_backbone = pretrained_backbone;
+        self
     }
 }
 
@@ -136,7 +140,6 @@ impl ActArchitectureConfig {
         // first layer's output. LeRobot preserves that effective architecture.
         1
     }
-    #[cfg(any(test, feature = "test-support"))]
     pub const fn new(hidden_dim: usize, latent_dim: usize, layers: ActLayerCounts) -> Self {
         Self {
             hidden_dim,
@@ -160,7 +163,6 @@ impl ActAttentionConfig {
     const fn default_kl_weight() -> f64 {
         10.0
     }
-    #[cfg(any(test, feature = "test-support"))]
     pub const fn new(attention_heads: usize, feedforward_dim: usize, kl_weight: f64) -> Self {
         Self {
             attention_heads,
@@ -245,7 +247,6 @@ impl ActTrainingConfig {
     pub const fn kl_weight(&self) -> f64 {
         self.attention.kl_weight
     }
-    #[cfg(any(test, feature = "test-support"))]
     pub fn new(
         input: ActInputConfig,
         architecture: ActArchitectureConfig,
@@ -465,6 +466,9 @@ impl StartTrainingRequest {
     }
     pub const fn set_checkpoint_every(&mut self, checkpoint_every: u64) {
         self.optimization.checkpoint_every = checkpoint_every;
+    }
+    pub const fn set_seed(&mut self, seed: u64) {
+        self.optimization.seed = seed;
     }
     pub const fn set_chunk_size(&mut self, chunk_size: usize) {
         self.optimization.chunk_size = chunk_size;
@@ -694,6 +698,9 @@ impl TrainingMetricPoint {
     pub const fn learning_rate(&self) -> f64 {
         self.progress.learning_rate
     }
+    pub const fn elapsed_seconds(&self) -> f64 {
+        self.progress.elapsed_seconds
+    }
     pub const fn transfer_bytes_per_second(&self) -> f64 {
         self.resources.transfer_bytes_per_second
     }
@@ -776,6 +783,12 @@ impl TrainingCheckpoint {
     pub const fn step(&self) -> u64 {
         self.step
     }
+    pub const fn created_ms(&self) -> i64 {
+        self.created_ms
+    }
+    pub const fn byte_size(&self) -> u64 {
+        self.byte_size
+    }
     pub const fn validation_loss(&self) -> Option<f64> {
         self.validation_loss
     }
@@ -808,6 +821,10 @@ impl TrainingSource {
         Self {
             dataset_id: dataset_id.into(),
         }
+    }
+
+    pub fn dataset_id(&self) -> &str {
+        &self.dataset_id
     }
 }
 
@@ -1000,9 +1017,14 @@ impl TrainingRun {
     pub fn logs(&self) -> &[String] {
         &self.history.logs
     }
-    #[cfg(any(test, feature = "test-support"))]
+    pub const fn started_ms(&self) -> i64 {
+        self.lifecycle.started_ms
+    }
     pub const fn finished_ms(&self) -> Option<i64> {
         self.lifecycle.finished_ms
+    }
+    pub const fn source(&self) -> &TrainingSource {
+        &self.identity.source
     }
 }
 
@@ -1279,7 +1301,6 @@ impl TrainingMetricPoint {
 }
 
 impl ActLayerCounts {
-    #[cfg(any(test, feature = "test-support"))]
     pub const fn new(encoder: usize, variational_encoder: usize, decoder: usize) -> Self {
         Self {
             encoder,
@@ -1290,7 +1311,6 @@ impl ActLayerCounts {
 }
 
 impl TrainingRunHistory {
-    #[cfg(any(test, feature = "test-support"))]
     pub fn new(
         metrics: Vec<TrainingMetricPoint>,
         checkpoints: Vec<TrainingCheckpoint>,

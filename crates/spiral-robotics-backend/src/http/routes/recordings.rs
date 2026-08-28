@@ -1,5 +1,5 @@
 use super::*;
-use crate::adapters::hardware::{HardwareApiProjection as _, RecordingArmProjection as _};
+use crate::adapters::hardware::RecordingArmProjection as _;
 use crate::data::catalog_lease::CatalogLeaseToken;
 use crate::recording::{RecordingDraftRequest, ReplayTrajectoryRequest};
 use spiral_robotics_hardware::ModeSelection as HardwareModeSelection;
@@ -850,8 +850,7 @@ impl AppState {
                                 .map(|name| {
                                     limits
                                         .and_then(|limits| limits.get(name))
-                                        .copied()
-                                        .map(|limits| limits.to_api())
+                                        .map(JointMotorLimits::from)
                                         .unwrap_or_default()
                                 })
                                 .collect(),
@@ -889,8 +888,7 @@ impl AppState {
         episode: &str,
         wanted: &[String],
     ) -> Result<Option<VideoCapture>, OperationError> {
-        let video_settings = self.preferences().get().video().clone();
-        if video_settings.enabled() {
+        if self.preferences().get().video().enabled() {
             let snapshot = self.snapshot().await;
             let camera_status = snapshot
                 .cameras()

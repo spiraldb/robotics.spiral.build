@@ -22,13 +22,19 @@ pub(crate) enum Table {
     Robots,
     StudioSettings,
     TrainingRuns,
+    TrainingRunMetrics,
+    TrainingRunCheckpoints,
     RolloutRuns,
     WorkflowRuns,
 }
 
 impl Table {
     /// Relations shown in the Data schema browser.
-    pub(crate) const ALL: [Self; 11] = [
+    ///
+    /// Ordered so a parent relation always precedes the child relations that
+    /// reference it; bundle import walks this order and deletion walks its
+    /// reverse.
+    pub(crate) const ALL: [Self; 13] = [
         Self::Datasets,
         Self::Episodes,
         Self::EpisodeStreams,
@@ -38,6 +44,8 @@ impl Table {
         Self::Robots,
         Self::StudioSettings,
         Self::TrainingRuns,
+        Self::TrainingRunMetrics,
+        Self::TrainingRunCheckpoints,
         Self::RolloutRuns,
         Self::WorkflowRuns,
     ];
@@ -61,6 +69,8 @@ impl Table {
             Self::Robots => "robots",
             Self::StudioSettings => "studio_settings",
             Self::TrainingRuns => "training_runs",
+            Self::TrainingRunMetrics => "training_run_metrics",
+            Self::TrainingRunCheckpoints => "training_run_checkpoints",
             Self::RolloutRuns => "rollout_runs",
             Self::WorkflowRuns => "workflow_runs",
         }
@@ -69,86 +79,6 @@ impl Table {
     /// Qualify this owned table inside a configured dataset.
     pub(crate) fn qualified_name(self, dataset: &str) -> String {
         format!("{dataset}.{}", self.name())
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn columns(self) -> &'static [&'static str] {
-        match self {
-            Self::Datasets => &[
-                column::DATASET_ID,
-                column::NAME,
-                column::CREATED_MS,
-                column::DESCRIPTION,
-            ],
-            Self::Episodes => &[
-                column::EPISODE_ID,
-                column::DATASET_ID,
-                column::SCHEMA_VERSION,
-                column::STARTED_MS,
-                column::SAMPLE_HZ,
-                column::SOURCE,
-                column::NOTE,
-                column::FRAMES,
-                column::DURATION_NS,
-                column::MAX_FOLLOW_ERROR_DEGREES,
-                column::DISCARDED,
-                column::METADATA_JSON,
-            ],
-            Self::EpisodeStreams => &[
-                column::EPISODE_ID,
-                column::STREAM_ID,
-                column::MODALITY,
-                column::ROBOT_TYPE,
-                column::JOINT_NAMES,
-                column::CAMERA_ID,
-                column::WIDTH,
-                column::HEIGHT,
-                column::FPS,
-            ],
-            Self::JointSamples => &[
-                column::EPISODE_ID,
-                column::STREAM_ID,
-                column::SAMPLE_INDEX,
-                column::EPISODE_TIME_NS,
-                column::STATE_VALID,
-                column::ACTION_VALID,
-                column::STATE_POSITION,
-                column::ACTION_POSITION,
-                column::RAW_POSITION,
-                column::VELOCITY,
-                column::EFFORT,
-                column::FOLLOW_ERROR_DEGREES,
-            ],
-            Self::VideoAssets => &[
-                column::EPISODE_ID,
-                column::STREAM_ID,
-                column::SEGMENT_INDEX,
-                column::TIMELINE_OFFSET_NS,
-                column::CAMERA_ID,
-                column::PAYLOAD,
-                column::BYTE_SIZE,
-                column::WIDTH,
-                column::HEIGHT,
-                column::FPS,
-                column::FRAMES,
-                column::MEDIA_RELATION,
-            ],
-            Self::TrainingCheckpoints => &[
-                column::RUN_ID,
-                column::RUN_NAME,
-                column::POLICY,
-                column::STEP,
-                column::CREATED_MS,
-                column::VALIDATION_LOSS,
-                column::CONFIG_JSON,
-                column::CHECKPOINT,
-            ],
-            Self::Robots => &[column::ROBOT_ID, column::CONFIG_JSON, column::UPDATED_MS],
-            Self::StudioSettings => &[column::KEY, column::VALUE_JSON, column::UPDATED_MS],
-            Self::TrainingRuns | Self::RolloutRuns | Self::WorkflowRuns => {
-                &[column::RUN_ID, column::SNAPSHOT_JSON, column::UPDATED_MS]
-            }
-        }
     }
 }
 
@@ -160,36 +90,103 @@ impl fmt::Display for Table {
 
 /// Persisted and query-result column names.
 pub(crate) mod column {
+    pub(crate) const ACTION_COLUMN: &str = "action_column";
     pub(crate) const ACTION_VALID: &str = "action_valid";
     pub(crate) const ACTION_POSITION: &str = "action_position";
+    pub(crate) const ARROW_ENCODE_MS: &str = "arrow_encode_ms";
+    pub(crate) const ATTENTION_HEADS: &str = "attention_heads";
+    pub(crate) const BATCH_SIZE: &str = "batch_size";
     pub(crate) const BYTE_SIZE: &str = "byte_size";
     pub(crate) const CAMERA_ID: &str = "camera_id";
+    pub(crate) const CAMERA_STREAMS: &str = "camera_streams";
     pub(crate) const CHECKPOINT: &str = "checkpoint";
+    pub(crate) const CHECKPOINT_EVERY: &str = "checkpoint_every";
+    pub(crate) const CHECKPOINT_STEP: &str = "checkpoint_step";
+    pub(crate) const CHUNK_SIZE: &str = "chunk_size";
+    pub(crate) const COMMAND_COUNT: &str = "command_count";
+    /// Dataset selected by the operator in a training run's start request.
+    /// Deliberately distinct from [`DATASET_ID`], which only ever links an
+    /// episode to its owning dataset row.
+    pub(crate) const CONFIG_DATASET_ID: &str = "config_dataset_id";
     pub(crate) const CONFIG_JSON: &str = "config_json";
+    pub(crate) const CPU_PERCENT: &str = "cpu_percent";
     pub(crate) const CREATED_MS: &str = "created_ms";
+    pub(crate) const CURRENT_STEP: &str = "current_step";
     pub(crate) const DATASET_ID: &str = "dataset_id";
+    pub(crate) const DECODER_LAYERS: &str = "decoder_layers";
     pub(crate) const DESCRIPTION: &str = "description";
+    pub(crate) const DEVICE: &str = "device";
+    pub(crate) const DEVICE_COPY_MS: &str = "device_copy_ms";
     pub(crate) const DISCARDED: &str = "discarded";
+    pub(crate) const DOCUMENT_VERSION: &str = "document_version";
     pub(crate) const DURATION_NS: &str = "duration_ns";
+    pub(crate) const DURATION_SECONDS: &str = "duration_seconds";
     pub(crate) const EFFORT: &str = "effort";
+    pub(crate) const ELAPSED_SECONDS: &str = "elapsed_seconds";
+    pub(crate) const ENCODER_LAYERS: &str = "encoder_layers";
     pub(crate) const EPISODE_ID: &str = "episode_id";
     pub(crate) const EPISODE_TIME_NS: &str = "episode_time_ns";
+    pub(crate) const EVENT: &str = "event";
+    pub(crate) const EXAMPLES_PER_SECOND: &str = "examples_per_second";
+    pub(crate) const FEEDFORWARD_DIM: &str = "feedforward_dim";
+    pub(crate) const FINISHED_MS: &str = "finished_ms";
     pub(crate) const FOLLOW_ERROR_DEGREES: &str = "follow_error_degrees";
     pub(crate) const FPS: &str = "fps";
     pub(crate) const FRAMES: &str = "frames";
+    pub(crate) const GPU_PERCENT: &str = "gpu_percent";
     pub(crate) const HEIGHT: &str = "height";
+    pub(crate) const HIDDEN_DIM: &str = "hidden_dim";
+    pub(crate) const IMAGE_HEIGHT: &str = "image_height";
+    pub(crate) const IMAGE_WIDTH: &str = "image_width";
+    pub(crate) const INFERENCE_COUNT: &str = "inference_count";
+    pub(crate) const INFERENCE_READY: &str = "inference_ready";
     pub(crate) const JOINT_NAMES: &str = "joint_names";
+    pub(crate) const KL_WEIGHT: &str = "kl_weight";
+    pub(crate) const LAST_LATENCY_MS: &str = "last_latency_ms";
+    pub(crate) const LAST_MODEL_MS: &str = "last_model_ms";
+    pub(crate) const LATENT_DIM: &str = "latent_dim";
+    pub(crate) const LEARNING_RATE: &str = "learning_rate";
+    /// Torque ceiling one motor reports for itself, captured with the take.
+    /// The `LIMIT_` prefix separates a motor's own configured threshold from
+    /// the value actually measured during the recording.
+    pub(crate) const LIMIT_MAX_LOAD: &str = "limit_max_load";
+    pub(crate) const LIMIT_MAX_TEMPERATURE_CELSIUS: &str = "limit_max_temperature_celsius";
+    pub(crate) const LIMIT_MAX_VOLTAGE_VOLTS: &str = "limit_max_voltage_volts";
+    pub(crate) const LIMIT_MIN_VOLTAGE_VOLTS: &str = "limit_min_voltage_volts";
+    pub(crate) const LOADER_MS: &str = "loader_ms";
+    pub(crate) const LOGS: &str = "logs";
     pub(crate) const MAX_FOLLOW_ERROR_DEGREES: &str = "max_follow_error_degrees";
-    pub(crate) const METADATA_JSON: &str = "metadata_json";
+    pub(crate) const MAX_LATENCY_MS: &str = "max_latency_ms";
+    pub(crate) const MEAN_LATENCY_MS: &str = "mean_latency_ms";
+    pub(crate) const MEMORY_BYTES: &str = "memory_bytes";
+    pub(crate) const MESSAGE: &str = "message";
     pub(crate) const MEDIA_RELATION: &str = "media_relation";
+    /// Lowest supply voltage measured on a motor across the whole take. See
+    /// [`LIMIT_MIN_VOLTAGE_VOLTS`] for the motor's own configured floor.
+    pub(crate) const MIN_VOLTAGE_VOLTS: &str = "min_voltage_volts";
+    pub(crate) const MISSED_DEADLINES: &str = "missed_deadlines";
     pub(crate) const MODALITY: &str = "modality";
+    pub(crate) const MODEL_MS: &str = "model_ms";
     pub(crate) const NAME: &str = "name";
     pub(crate) const NOTE: &str = "note";
+    pub(crate) const ORDINAL: &str = "ordinal";
     pub(crate) const PAYLOAD: &str = "payload";
+    pub(crate) const PEAK_CURRENT_AMPS: &str = "peak_current_amps";
+    pub(crate) const PEAK_LOAD: &str = "peak_load";
+    pub(crate) const PEAK_TEMPERATURE_CELSIUS: &str = "peak_temperature_celsius";
+    pub(crate) const PHASE: &str = "phase";
     pub(crate) const POLICY: &str = "policy";
+    pub(crate) const PRETRAINED_BACKBONE: &str = "pretrained_backbone";
+    pub(crate) const QUERY_SQL: &str = "query_sql";
     pub(crate) const RAW_POSITION: &str = "raw_position";
+    pub(crate) const RECOMMENDED_ACTION_STEPS: &str = "recommended_action_steps";
+    /// Start of one omitted wall-clock interval, on the gap-free episode clock.
+    /// Parallel to [`RECORDING_GAP_DURATION_NS`]; both lists are equal length.
+    pub(crate) const RECORDING_GAP_AFTER_NS: &str = "recording_gap_after_ns";
+    pub(crate) const RECORDING_GAP_DURATION_NS: &str = "recording_gap_duration_ns";
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) const REPLAY_POSITION: &str = "replay_position";
+    pub(crate) const ROBOT: &str = "robot";
     pub(crate) const ROBOT_TYPE: &str = "robot_type";
     pub(crate) const ROBOT_ID: &str = "robot_id";
     pub(crate) const RUN_ID: &str = "run_id";
@@ -197,18 +194,36 @@ pub(crate) mod column {
     pub(crate) const SAMPLE_HZ: &str = "sample_hz";
     pub(crate) const SAMPLE_INDEX: &str = "sample_index";
     pub(crate) const SCHEMA_VERSION: &str = "schema_version";
+    pub(crate) const SEED: &str = "seed";
     pub(crate) const SEGMENT_INDEX: &str = "segment_index";
+    pub(crate) const SESSION_ID: &str = "session_id";
     pub(crate) const SOURCE: &str = "source";
+    /// Dataset a training run actually drew its episodes from, captured when
+    /// the run started. See [`CONFIG_DATASET_ID`].
+    pub(crate) const SOURCE_DATASET_ID: &str = "source_dataset_id";
     pub(crate) const STARTED_MS: &str = "started_ms";
+    /// Motor temperature measured as the take opened. See
+    /// [`PEAK_TEMPERATURE_CELSIUS`] for the extreme reached during it.
+    pub(crate) const START_TEMPERATURE_CELSIUS: &str = "start_temperature_celsius";
+    pub(crate) const START_VOLTAGE_VOLTS: &str = "start_voltage_volts";
     pub(crate) const SNAPSHOT_JSON: &str = "snapshot_json";
+    pub(crate) const STATE_COLUMN: &str = "state_column";
     pub(crate) const STATE_VALID: &str = "state_valid";
     pub(crate) const STATE_POSITION: &str = "state_position";
     pub(crate) const STEP: &str = "step";
+    pub(crate) const STEPS: &str = "steps";
     pub(crate) const STREAM_ID: &str = "stream_id";
     pub(crate) const TIMELINE_OFFSET_NS: &str = "timeline_offset_ns";
+    pub(crate) const TRAIN_LOSS: &str = "train_loss";
+    pub(crate) const TRANSFER_BYTES_PER_SECOND: &str = "transfer_bytes_per_second";
+    pub(crate) const UPLOAD_MS: &str = "upload_ms";
+    pub(crate) const VAE_ENCODER_LAYERS: &str = "vae_encoder_layers";
     pub(crate) const VALIDATION_LOSS: &str = "validation_loss";
+    pub(crate) const VALIDATION_SPLIT: &str = "validation_split";
     pub(crate) const VALUE_JSON: &str = "value_json";
     pub(crate) const VELOCITY: &str = "velocity";
+    pub(crate) const VIDEO_DECODER: &str = "video_decoder";
+    pub(crate) const WARNING: &str = "warning";
     pub(crate) const WIDTH: &str = "width";
     pub(crate) const KEY: &str = "key";
     pub(crate) const UPDATED_MS: &str = "updated_ms";
@@ -250,28 +265,71 @@ impl StorageSchema {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bundle::ManagedRelationSchema as _;
+
+    /// What a relation actually holds, read from the one production Arrow
+    /// schema that both the database writes and a bundle validates against.
+    fn persisted_columns(table: Table) -> Vec<String> {
+        table
+            .managed_relation_schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().clone())
+            .collect()
+    }
 
     #[test]
     fn every_persisted_table_declares_unique_columns() {
         for table in Table::ALL {
-            let mut columns = table.columns().to_vec();
+            let declared = persisted_columns(table);
+            let mut columns = declared.clone();
             columns.sort_unstable();
             columns.dedup();
-            assert_eq!(columns.len(), table.columns().len(), "{table}");
+            assert_eq!(columns.len(), declared.len(), "{table}");
         }
     }
 
     #[test]
     fn episodes_reference_the_dataset_table() {
-        assert_eq!(Table::Datasets.columns().first(), Some(&column::DATASET_ID));
-        assert_eq!(Table::Episodes.columns().get(1), Some(&column::DATASET_ID));
+        assert_eq!(
+            persisted_columns(Table::Datasets)
+                .first()
+                .map(String::as_str),
+            Some(column::DATASET_ID)
+        );
+        assert_eq!(
+            persisted_columns(Table::Episodes)
+                .get(1)
+                .map(String::as_str),
+            Some(column::DATASET_ID)
+        );
         for table in Table::ALL {
             if table != Table::Datasets && table != Table::Episodes {
                 assert!(
-                    !table.columns().contains(&column::DATASET_ID),
+                    !persisted_columns(table)
+                        .iter()
+                        .any(|column| column == column::DATASET_ID),
                     "{table} must reach datasets through episodes"
                 );
             }
+        }
+    }
+
+    /// The api crate's `ManagedTable` is the browser-facing listing of these
+    /// relations; a mismatch means the Data schema browser lies about what the
+    /// database holds. This is the only place the published listing is pinned,
+    /// so it compares against the production Arrow schemas themselves rather
+    /// than against a second hand-written column list.
+    #[test]
+    fn the_managed_catalog_mirrors_the_persisted_relations() {
+        use spiral_robotics_api::catalog::ManagedTable;
+
+        let persisted: Vec<&str> = Table::ALL.iter().map(|table| table.name()).collect();
+        let published: Vec<&str> = ManagedTable::ALL.iter().map(|table| table.name()).collect();
+        assert_eq!(published, persisted, "relation names and browser order");
+
+        for (table, managed) in Table::ALL.into_iter().zip(ManagedTable::ALL) {
+            assert_eq!(managed.columns(), persisted_columns(table), "{table}");
         }
     }
 

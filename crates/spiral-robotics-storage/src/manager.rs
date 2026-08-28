@@ -18,17 +18,18 @@ use base64::Engine as _;
 use futures::StreamExt as _;
 use image::codecs::jpeg::JpegEncoder;
 use image::{DynamicImage, ImageFormat};
-use serde::Serialize;
-use serde::de::DeserializeOwned;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use sha2::{Digest as _, Sha256};
 use spiral_robotics_api::recording::DatasetSummary;
 use spiral_robotics_api::relations::{
     CatalogRelation, QueryColumn, RelationCatalog, SpiralQueryResponse,
 };
+use spiral_robotics_api::rollout::RolloutSnapshot;
 use spiral_robotics_api::settings::ConnectionTestResponse;
 use spiral_robotics_api::sql::QualifiedRelation;
+use spiral_robotics_api::training::{TrainingRun, TrainingSnapshot};
 
+use crate::LEGACY_PROJECT_ERROR;
 use crate::bundle;
 use crate::checkpoints::{CheckpointArtifact, CheckpointFuture, CheckpointKey, CheckpointStore};
 use crate::database::{DatabaseCommand, DatabaseSession, RelationKind, RelationName};
@@ -37,9 +38,18 @@ use crate::episode_schema::{
 };
 use crate::episodes::FullEpisode;
 use crate::project_store::{ProjectConnection, ProjectStore};
+use crate::rollout_runs::StoredRolloutSession;
 use crate::settings::{SpiralConnectionSettings, StoredStudioPreferences};
 use crate::sql::{ReadOnlyQueryMode, SpiralSql};
+use crate::training_runs::{
+    StoredTrainingCheckpoint, StoredTrainingHistory, StoredTrainingMetric, TrainingHistoryAssembly,
+    TrainingRunRow,
+};
 use crate::video::{VideoAsset, VideoAssetKey, VideoByteRange};
+use crate::workflow_documents::{
+    StoredWorkflowDocument, WorkflowDocumentKey, WorkflowDocumentReplacement, WorkflowDocumentRow,
+    WorkflowDocumentSchema,
+};
 
 const MAX_QUERY_ROWS: usize = 1_000;
 const MAX_QUERY_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
@@ -136,72 +146,33 @@ impl QueryRows {
     }
 }
 
-#[derive(Clone, Copy)]
-struct JsonDocumentKey<'a> {
-    table: Table,
-    key: &'a str,
+/// One Workflow document write, optionally guarded by the payload the caller
+/// expects to still be durable.
+struct WorkflowDocumentWrite<'a> {
+    key: WorkflowDocumentKey,
+    document: &'a StoredWorkflowDocument,
+    expected_payload: Option<&'a str>,
 }
 
-impl<'a> JsonDocumentKey<'a> {
-    const fn new(table: Table, key: &'a str) -> Self {
-        Self { table, key }
-    }
-}
-
-struct JsonDocumentTarget {
-    table: Table,
-    relation: String,
-    key: String,
-}
-
-impl JsonDocumentTarget {
-    fn new(table: Table, relation: impl Into<String>, key: impl Into<String>) -> Self {
+impl<'a> WorkflowDocumentWrite<'a> {
+    const fn new(key: WorkflowDocumentKey, document: &'a StoredWorkflowDocument) -> Self {
         Self {
-            table,
-            relation: relation.into(),
-            key: key.into(),
+            key,
+            document,
+            expected_payload: None,
         }
+    }
+
+    const fn replacing(mut self, expected_payload: &'a str) -> Self {
+        self.expected_payload = Some(expected_payload);
+        self
     }
 }
 
-struct JsonDocumentWrite {
-    target: JsonDocumentTarget,
-    json: String,
-}
-
-impl JsonDocumentWrite {
-    fn new(target: JsonDocumentTarget, json: String) -> Self {
-        Self { target, json }
-    }
-
-    async fn save(self, connection: &mut ProjectConnection) -> Result<(), String> {
-        let Self { target, json } = self;
-        if connection.table_exists(&target.relation).await? {
-            connection
-                .execute_delete_sql(&format!(
-                    "DELETE FROM {} WHERE {} = {}",
-                    target.relation,
-                    db::RUN_ID,
-                    SpiralSql::string_literal(&target.key)
-                ))
-                .await?;
-        }
-        let schema = Arc::new(Schema::new(vec![
-            Field::new(db::RUN_ID, DataType::Utf8, false),
-            Field::new(db::SNAPSHOT_JSON, DataType::Utf8, false),
-            Field::new(db::UPDATED_MS, DataType::Int64, false),
-        ]));
-        let batch = RecordBatch::try_new(
-            schema,
-            vec![
-                Arc::new(StringArray::from(vec![target.key])) as ArrayRef,
-                Arc::new(StringArray::from(vec![json])) as ArrayRef,
-                Arc::new(Int64Array::from(vec![StorageClock::unix_millis()])) as ArrayRef,
-            ],
-        )
-        .map_err(|error| format!("building {} snapshot batch: {error}", target.table))?;
-        connection.ingest_batch(&target.relation, batch).await
-    }
+/// How one current-schema relation answered a read.
+enum RelationalRead {
+    Rows(ProjectConnection),
+    Absent,
 }
 
 pub struct StorageManager {
@@ -317,150 +288,233 @@ impl StorageManager {
             .await
     }
 
-    pub async fn load_training_snapshot<T>(&self) -> Result<T, String>
-    where
-        T: DeserializeOwned + Default + Serialize,
-    {
-        if !self.is_configured() {
-            return Ok(T::default());
+    /// Read the durable training history.
+    pub async fn load_training_history(&self) -> Result<Vec<TrainingRun>, String> {
+        let namespace = self.project_store.namespace().to_owned();
+        let runs = Table::TrainingRuns.qualified_name(&namespace);
+        let mut connection = match self.relational_reader(&runs, db::ORDINAL).await? {
+            RelationalRead::Rows(connection) => connection,
+            RelationalRead::Absent => return Ok(Vec::new()),
+        };
+        let rows = connection
+            .relation_rows(&runs, TrainingRunRow::decode)
+            .await?;
+        let metrics = connection
+            .optional_relation_rows(
+                &Table::TrainingRunMetrics.qualified_name(&namespace),
+                StoredTrainingMetric::decode,
+            )
+            .await?;
+        let checkpoints = connection
+            .optional_relation_rows(
+                &Table::TrainingRunCheckpoints.qualified_name(&namespace),
+                StoredTrainingCheckpoint::decode,
+            )
+            .await?;
+        Ok(TrainingHistoryAssembly::new(rows, metrics, checkpoints)
+            .finish()
+            .restored())
+    }
+
+    /// Replace the complete training history.
+    ///
+    /// All three relations are replaced inside one transaction so a run row
+    /// and its metric or checkpoint rows can never disagree about which runs
+    /// are retained.
+    pub async fn save_training_history(&self, snapshot: &TrainingSnapshot) -> Result<(), String> {
+        let namespace = self.project_store.namespace().to_owned();
+        let batches = StoredTrainingHistory::stored(snapshot).batches()?;
+        let mut connection = self.project_store.connect().await?;
+        connection.ensure_dataset_namespace(&namespace).await?;
+        connection.begin_transaction().await?;
+        let mutation = async {
+            for (table, batch) in batches {
+                connection
+                    .replace_batches(&table.qualified_name(&namespace), vec![batch])
+                    .await?;
+            }
+            Ok(())
         }
-        self.load_json_document(Table::TrainingRuns, "training_history")
+        .await;
+        connection
+            .finish_transaction(mutation, "training history")
             .await
     }
 
-    pub async fn save_training_snapshot<T: Serialize>(&self, value: &T) -> Result<(), String> {
-        self.save_json_document(
-            JsonDocumentKey::new(Table::TrainingRuns, "training_history"),
-            value,
+    /// Read the one durable rollout session.
+    pub async fn load_rollout_session(&self) -> Result<Option<RolloutSnapshot>, String> {
+        let relation = Table::RolloutRuns.qualified_name(self.project_store.namespace());
+        let mut connection = match self.relational_reader(&relation, db::SESSION_ID).await? {
+            RelationalRead::Rows(connection) => connection,
+            RelationalRead::Absent => return Ok(None),
+        };
+        let sessions = connection
+            .relation_rows(&relation, StoredRolloutSession::decode)
+            .await?;
+        Ok(sessions.last().map(StoredRolloutSession::restored))
+    }
+
+    /// Open a current-schema relation for reading, refusing the pre-schema-8
+    /// `snapshot_json` document shape without reading or modifying its rows.
+    async fn relational_reader(
+        &self,
+        relation: &str,
+        current_shape_column: &str,
+    ) -> Result<RelationalRead, String> {
+        if !self.is_configured() {
+            return Ok(RelationalRead::Absent);
+        }
+        let mut connection = self.project_store.connect().await?;
+        let Some(schema) = connection.relation_schema(relation).await? else {
+            return Ok(RelationalRead::Absent);
+        };
+        if schema.field_with_name(db::SNAPSHOT_JSON).is_ok()
+            && schema.field_with_name(current_shape_column).is_err()
+        {
+            return Err(LEGACY_PROJECT_ERROR.to_owned());
+        }
+        Ok(RelationalRead::Rows(connection))
+    }
+
+    /// Replace the durable rollout session. A snapshot that never named a
+    /// session clears the relation, so a project that has never run a policy
+    /// and a project whose history was cleared read back identically.
+    pub async fn save_rollout_session(&self, snapshot: &RolloutSnapshot) -> Result<(), String> {
+        let namespace = self.project_store.namespace().to_owned();
+        let session = StoredRolloutSession::stored(snapshot);
+        let batch = StoredRolloutSession::batch(session.as_ref(), StorageClock::unix_millis())?;
+        let mut connection = self.project_store.connect().await?;
+        connection.ensure_dataset_namespace(&namespace).await?;
+        connection
+            .replace_batches(&Table::RolloutRuns.qualified_name(&namespace), vec![batch])
+            .await
+    }
+
+    pub async fn load_workflow_document(&self) -> Result<Option<StoredWorkflowDocument>, String> {
+        self.load_workflow_key(WorkflowDocumentKey::Graph).await
+    }
+
+    pub async fn save_workflow_document(
+        &self,
+        document: &StoredWorkflowDocument,
+    ) -> Result<(), String> {
+        self.save_workflow_key(WorkflowDocumentWrite::new(
+            WorkflowDocumentKey::Graph,
+            document,
+        ))
+        .await
+    }
+
+    pub async fn load_workflow_agent_document(
+        &self,
+    ) -> Result<Option<StoredWorkflowDocument>, String> {
+        self.load_workflow_key(WorkflowDocumentKey::Assistant).await
+    }
+
+    pub async fn save_workflow_agent_document(
+        &self,
+        document: &StoredWorkflowDocument,
+    ) -> Result<(), String> {
+        self.save_workflow_key(WorkflowDocumentWrite::new(
+            WorkflowDocumentKey::Assistant,
+            document,
+        ))
+        .await
+    }
+
+    /// Replace an unreadable Assistant document only when the durable payload
+    /// is still exactly the one Studio inspected. The compare and the
+    /// replacement share one catalog transaction, so a newer document from
+    /// another Studio cannot be overwritten.
+    pub async fn reset_workflow_agent_document(
+        &self,
+        expected_payload: &str,
+        document: &StoredWorkflowDocument,
+    ) -> Result<(), String> {
+        self.save_workflow_key(
+            WorkflowDocumentWrite::new(WorkflowDocumentKey::Assistant, document)
+                .replacing(expected_payload),
         )
         .await
     }
 
-    pub async fn load_rollout_snapshot<T>(&self) -> Result<T, String>
-    where
-        T: DeserializeOwned + Default,
-    {
-        if !self.is_configured() {
-            return Ok(T::default());
-        }
-        self.load_json_document(Table::RolloutRuns, "rollout_history")
-            .await
-    }
-
-    pub async fn save_rollout_snapshot<T: Serialize>(&self, value: &T) -> Result<(), String> {
-        self.save_json_document(
-            JsonDocumentKey::new(Table::RolloutRuns, "rollout_history"),
-            value,
-        )
-        .await
-    }
-
-    pub async fn load_workflow_document<T>(&self) -> Result<T, String>
-    where
-        T: DeserializeOwned + Default + Serialize,
-    {
-        if !self.is_configured() {
-            return Ok(T::default());
-        }
-        self.load_json_document_resetting_incompatible(Table::WorkflowRuns, "default")
-            .await
-    }
-
-    pub async fn save_workflow_document<T: Serialize>(&self, value: &T) -> Result<(), String> {
-        self.save_json_document(JsonDocumentKey::new(Table::WorkflowRuns, "default"), value)
-            .await
-    }
-
-    pub async fn load_workflow_agent_snapshot_json(&self) -> Result<Option<String>, String> {
+    async fn load_workflow_key(
+        &self,
+        key: WorkflowDocumentKey,
+    ) -> Result<Option<StoredWorkflowDocument>, String> {
         if !self.is_configured() {
             return Ok(None);
         }
-        self.load_json_document_raw_optional(Table::WorkflowRuns, "agent:default")
+        let relation = Table::WorkflowRuns.qualified_name(self.project_store.namespace());
+        let mut connection = self.project_store.connect().await?;
+        self.ensure_current_workflow_relation(&mut connection, &relation)
+            .await?;
+        Ok(connection
+            .optional_relation_rows(&relation, WorkflowDocumentSchema::decode)
+            .await?
+            .into_iter()
+            .find(|row| row.matches(key))
+            .map(WorkflowDocumentRow::into_document))
+    }
+
+    /// Rewrite the Workflow document relation with one key replaced.
+    ///
+    /// Studio keeps at most one row per document key, so the whole relation is
+    /// read, amended, and replaced inside a single transaction. That keeps the
+    /// other key intact.
+    async fn save_workflow_key(&self, write: WorkflowDocumentWrite<'_>) -> Result<(), String> {
+        let namespace = self.project_store.namespace().to_owned();
+        let relation = Table::WorkflowRuns.qualified_name(&namespace);
+        let mut connection = self.project_store.connect_exclusive().await?;
+        self.ensure_current_workflow_relation(&mut connection, &relation)
+            .await?;
+        connection.ensure_dataset_namespace(&namespace).await?;
+        connection.begin_transaction().await?;
+        let mutation = async {
+            let existing = WorkflowDocumentReplacement::new(
+                connection
+                    .optional_relation_rows(&relation, WorkflowDocumentSchema::decode)
+                    .await?,
+            );
+            if let Some(expected) = write.expected_payload {
+                let matches = existing.current(write.key).is_some_and(|current| {
+                    Sha256::digest(current.payload().as_bytes()).as_slice()
+                        == Sha256::digest(expected.as_bytes()).as_slice()
+                });
+                if !matches {
+                    return Err(
+                        "Assistant history changed before reset. Reload the current project."
+                            .to_owned(),
+                    );
+                }
+            }
+            let rows = existing.replaced(WorkflowDocumentRow::new(
+                write.key.persisted().to_owned(),
+                write.document.clone(),
+                StorageClock::unix_millis(),
+            ));
+            connection
+                .replace_batches(&relation, vec![WorkflowDocumentSchema::batch(&rows)?])
+                .await
+        }
+        .await;
+        connection
+            .finish_transaction(mutation, "Workflow history")
             .await
     }
 
-    pub async fn save_workflow_agent_document<T: Serialize>(
+    async fn ensure_current_workflow_relation(
         &self,
-        value: &T,
+        connection: &mut ProjectConnection,
+        relation: &str,
     ) -> Result<(), String> {
-        let namespace = self.project_store.namespace().to_owned();
-        let relation = Table::WorkflowRuns.qualified_name(&namespace);
-        let json = serde_json::to_string(value)
-            .map_err(|error| format!("encoding Workflow runs snapshot: {error}"))?;
-        let mut connection = self.project_store.connect_exclusive().await?;
-        connection.ensure_dataset_namespace(&namespace).await?;
-        connection.begin_transaction().await?;
-        let mutation = JsonDocumentWrite::new(
-            JsonDocumentTarget::new(Table::WorkflowRuns, &relation, "agent:default"),
-            json,
-        )
-        .save(&mut connection)
-        .await;
-        match mutation {
-            Ok(()) => connection.commit().await,
-            Err(error) => match connection.rollback().await {
-                Ok(()) => Err(error),
-                Err(rollback) => {
-                    connection.discard();
-                    Err(format!(
-                        "{error}; rolling back Assistant history also failed: {rollback}; connection discarded"
-                    ))
-                }
-            },
+        let Some(schema) = connection.relation_schema(relation).await? else {
+            return Ok(());
+        };
+        if schema.fields().len() == 3 && schema.field_with_name(db::DOCUMENT_VERSION).is_err() {
+            return Err(LEGACY_PROJECT_ERROR.to_owned());
         }
-    }
-
-    /// Replace an incompatible prototype Assistant document only when the
-    /// durable raw snapshot is still exactly the one Studio inspected. The
-    /// compare and replacement share one catalog transaction, so a newer
-    /// document from another Studio cannot be overwritten.
-    pub async fn reset_workflow_agent_document<T: Serialize>(
-        &self,
-        expected_raw_snapshot: &str,
-        value: &T,
-    ) -> Result<(), String> {
-        let namespace = self.project_store.namespace().to_owned();
-        let relation = Table::WorkflowRuns.qualified_name(&namespace);
-        let expected_digest = Sha256::digest(expected_raw_snapshot.as_bytes()).to_vec();
-        let json = serde_json::to_string(value)
-            .map_err(|error| format!("encoding reset Assistant history: {error}"))?;
-        let mut connection = self.project_store.connect_exclusive().await?;
-        connection.begin_transaction().await?;
-        let mutation = async {
-            match connection
-                .load_json_document_raw_optional(&relation, "agent:default")
-                .await?
-            {
-                Some(current)
-                    if Sha256::digest(current.as_bytes()).as_slice()
-                        == expected_digest.as_slice() =>
-                {
-                    JsonDocumentWrite::new(
-                        JsonDocumentTarget::new(Table::WorkflowRuns, &relation, "agent:default"),
-                        json,
-                    )
-                    .save(&mut connection)
-                    .await
-                }
-                _ => Err(
-                    "Assistant history changed before reset. Reload the current project."
-                        .to_owned(),
-                ),
-            }
-        }
-        .await;
-        match mutation {
-            Ok(()) => connection.commit().await,
-            Err(error) => match connection.rollback().await {
-                Ok(()) => Err(error),
-                Err(rollback) => {
-                    connection.discard();
-                    Err(format!(
-                        "{error}; rolling back Assistant reset also failed: {rollback}; connection discarded"
-                    ))
-                }
-            },
-        }
+        Ok(())
     }
 
     pub async fn load_studio_preferences(&self) -> Result<StoredStudioPreferences, String> {
@@ -569,133 +623,6 @@ impl StorageManager {
                     bytes,
                 ),
             )
-            .await
-    }
-
-    async fn load_json_document<T>(&self, table: Table, key: &str) -> Result<T, String>
-    where
-        T: DeserializeOwned + Default,
-    {
-        let relation = table.qualified_name(self.project_store.namespace());
-        let key = SpiralSql::string_literal(key);
-        let mut connection = self.project_store.connect().await?;
-        if !connection.table_exists(&relation).await? {
-            return Ok(T::default());
-        }
-        let result = connection
-            .query_rows(
-                &format!(
-                    "SELECT {} FROM {relation} WHERE {} = {key} ORDER BY {} DESC LIMIT 1",
-                    db::SNAPSHOT_JSON,
-                    db::RUN_ID,
-                    db::UPDATED_MS,
-                ),
-                1,
-            )
-            .await?;
-        let Some(value) = result
-            .rows()
-            .first()
-            .and_then(|row| row.get(db::SNAPSHOT_JSON))
-            .and_then(JsonValue::as_str)
-        else {
-            return Ok(T::default());
-        };
-        serde_json::from_str(value).map_err(|error| format!("decoding {table} snapshot: {error}"))
-    }
-
-    async fn load_json_document_raw_optional(
-        &self,
-        table: Table,
-        key: &str,
-    ) -> Result<Option<String>, String> {
-        let relation = table.qualified_name(self.project_store.namespace());
-        let key = key.to_owned();
-        let mut connection = self.project_store.connect().await?;
-        connection
-            .load_json_document_raw_optional(&relation, &key)
-            .await
-    }
-
-    /// Workflow wire shapes are prototype-owned rather than a compatibility
-    /// surface. Replace an obsolete snapshot with the current empty document
-    /// in one transaction so every later hydration sees the same truth.
-    async fn load_json_document_resetting_incompatible<T>(
-        &self,
-        table: Table,
-        key: &str,
-    ) -> Result<T, String>
-    where
-        T: DeserializeOwned + Default + Serialize,
-    {
-        let relation = table.qualified_name(self.project_store.namespace());
-        let key = key.to_owned();
-        let mut connection = self.project_store.connect_exclusive().await?;
-        if !connection.table_exists(&relation).await? {
-            return Ok(T::default());
-        }
-        let result = connection
-            .query_rows(
-                &format!(
-                    "SELECT {} FROM {relation} WHERE {} = {} ORDER BY {} DESC LIMIT 1",
-                    db::SNAPSHOT_JSON,
-                    db::RUN_ID,
-                    SpiralSql::string_literal(&key),
-                    db::UPDATED_MS,
-                ),
-                1,
-            )
-            .await?;
-        let Some(value) = result
-            .rows()
-            .first()
-            .and_then(|row| row.get(db::SNAPSHOT_JSON))
-            .and_then(JsonValue::as_str)
-        else {
-            return Ok(T::default());
-        };
-        let (document, incompatible) = value.decode_json_or_default();
-        if !incompatible {
-            return Ok(document);
-        }
-
-        let json = serde_json::to_string(&document)
-            .map_err(|error| format!("encoding reset {table} snapshot: {error}"))?;
-        connection.begin_transaction().await?;
-        let mutation = JsonDocumentWrite::new(JsonDocumentTarget::new(table, &relation, key), json)
-            .save(&mut connection)
-            .await;
-        match mutation {
-            Ok(()) => connection.commit().await.map(|()| document),
-            Err(error) => match connection.rollback().await {
-                Ok(()) => Err(error),
-                Err(rollback) => {
-                    connection.discard();
-                    Err(format!(
-                        "{error}; rolling back obsolete Workflow history reset also failed: {rollback}; connection discarded"
-                    ))
-                }
-            },
-        }
-    }
-
-    async fn save_json_document<T: Serialize>(
-        &self,
-        document: JsonDocumentKey<'_>,
-        value: &T,
-    ) -> Result<(), String> {
-        let namespace = self.project_store.namespace().to_owned();
-        let target = JsonDocumentTarget::new(
-            document.table,
-            document.table.qualified_name(&namespace),
-            document.key,
-        );
-        let json = serde_json::to_string(value)
-            .map_err(|error| format!("encoding {} snapshot: {error}", document.table))?;
-        let mut connection = self.project_store.connect().await?;
-        connection.ensure_dataset_namespace(&namespace).await?;
-        JsonDocumentWrite::new(target, json)
-            .save(&mut connection)
             .await
     }
 
@@ -1014,49 +941,71 @@ impl StorageManager {
 }
 
 impl ProjectConnection {
-    async fn load_json_document_raw_optional(
+    /// Materialize a whole owned relation. Every relation read this way is
+    /// bounded by product rules — retained runs, one rollout session, two
+    /// Workflow documents — so streaming would only add ceremony.
+    pub(crate) async fn read_batches(&mut self, sql: &str) -> Result<Vec<RecordBatch>, String> {
+        let mut records = self
+            .execute(DatabaseCommand::statement(sql))
+            .await
+            .and_then(crate::DatabaseOutput::into_records)
+            .map_err(|error| format!("reading Spiral rows: {error}"))?;
+        let mut batches = Vec::new();
+        while let Some(batch) = records.next().await {
+            batches.push(batch.map_err(|error| format!("reading Spiral rows: {error}"))?);
+        }
+        Ok(batches)
+    }
+
+    /// Decode every row of an owned relation that is known to exist. One
+    /// mechanism serves training runs and their child rows, the rollout
+    /// session, and the Workflow documents.
+    async fn relation_rows<T>(
         &mut self,
         relation: &str,
-        key: &str,
-    ) -> Result<Option<String>, String> {
-        if !self.table_exists(relation).await? {
-            return Ok(None);
+        decode: fn(&RecordBatch, usize) -> Result<T, String>,
+    ) -> Result<Vec<T>, String> {
+        let mut rows = Vec::new();
+        for batch in self
+            .read_batches(&format!("SELECT * FROM {relation}"))
+            .await?
+        {
+            for row in 0..batch.num_rows() {
+                rows.push(decode(&batch, row)?);
+            }
         }
-        let result = self
-            .query_rows(
-                &format!(
-                    "SELECT {} FROM {relation} WHERE {} = {} ORDER BY {} DESC LIMIT 1",
-                    db::SNAPSHOT_JSON,
-                    db::RUN_ID,
-                    SpiralSql::string_literal(key),
-                    db::UPDATED_MS,
-                ),
-                1,
-            )
-            .await?;
-        Ok(result
-            .rows()
-            .first()
-            .and_then(|row| row.get(db::SNAPSHOT_JSON))
-            .and_then(JsonValue::as_str)
-            .map(str::to_owned))
+        Ok(rows)
     }
-}
 
-trait JsonDocumentDecode {
-    fn decode_json_or_default<T>(&self) -> (T, bool)
-    where
-        T: DeserializeOwned + Default;
-}
+    /// The same read, for a relation a project may never have created.
+    async fn optional_relation_rows<T>(
+        &mut self,
+        relation: &str,
+        decode: fn(&RecordBatch, usize) -> Result<T, String>,
+    ) -> Result<Vec<T>, String> {
+        if !self.table_exists(relation).await? {
+            return Ok(Vec::new());
+        }
+        self.relation_rows(relation, decode).await
+    }
 
-impl JsonDocumentDecode for str {
-    fn decode_json_or_default<T>(&self) -> (T, bool)
-    where
-        T: DeserializeOwned + Default,
-    {
-        match serde_json::from_str(self) {
-            Ok(document) => (document, false),
-            Err(_) => (T::default(), true),
+    /// Commit a mutation, or roll it back and keep both failures visible.
+    pub(crate) async fn finish_transaction(
+        &mut self,
+        mutation: Result<(), String>,
+        label: &str,
+    ) -> Result<(), String> {
+        match mutation {
+            Ok(()) => self.commit().await,
+            Err(error) => match self.rollback().await {
+                Ok(()) => Err(error),
+                Err(rollback) => {
+                    self.discard();
+                    Err(format!(
+                        "{error}; rolling back {label} also failed: {rollback}; connection discarded"
+                    ))
+                }
+            },
         }
     }
 }
@@ -1151,7 +1100,7 @@ impl<'a> EpisodeReplacement<'a> {
                 &Table::EpisodeStreams.qualified_name(namespace),
                 episode
                     .start()
-                    .streams_batch()
+                    .streams_batch(episode.completion())
                     .map_err(|error| error.to_string())?,
             )
             .await?;
@@ -2319,10 +2268,10 @@ impl CheckpointArtifact {
     }
 }
 
-struct StorageClock;
+pub(crate) struct StorageClock;
 
 impl StorageClock {
-    fn unix_millis() -> i64 {
+    pub(crate) fn unix_millis() -> i64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -2339,42 +2288,32 @@ mod tests {
 
     use arrow_array::builder::{FixedSizeListBuilder, Int32Builder, ListBuilder, UInt8Builder};
 
-    #[derive(Debug, Default, PartialEq, serde::Deserialize)]
-    struct CurrentPrototypeDocument {
-        features: Vec<String>,
-    }
-
-    #[test]
-    fn obsolete_workflow_json_resets_once_instead_of_poisoning_bootstrap() {
-        let (document, incompatible) =
-            r#"{"concepts":["cube"]}"#.decode_json_or_default::<CurrentPrototypeDocument>();
-        assert!(incompatible);
-        assert_eq!(document, CurrentPrototypeDocument::default());
-
-        let (document, incompatible) = r#"{"features":["is_cube_feature"]}"#
-            .decode_json_or_default::<CurrentPrototypeDocument>();
-        assert!(!incompatible);
-        assert_eq!(document.features, ["is_cube_feature"]);
-    }
-
+    /// The two relations whose native column types differ from the portable
+    /// shape a bundle carries still have to agree on their column names.
     #[test]
     fn backend_owned_arrow_schemas_match_the_shared_contract() {
-        assert_eq!(
-            TrainingCheckpointStorage::schema()
+        use crate::bundle::ManagedRelationSchema as _;
+
+        for (table, schema) in [
+            (
+                Table::TrainingCheckpoints,
+                TrainingCheckpointStorage::schema(),
+            ),
+            (Table::VideoAssets, VideoAssetStorage::schema()),
+        ] {
+            let native = schema
                 .fields()
                 .iter()
-                .map(|field| field.name().as_str())
-                .collect::<Vec<_>>(),
-            Table::TrainingCheckpoints.columns(),
-        );
-        assert_eq!(
-            VideoAssetStorage::schema()
+                .map(|field| field.name().clone())
+                .collect::<Vec<_>>();
+            let managed = table
+                .managed_relation_schema()
                 .fields()
                 .iter()
-                .map(|field| field.name().as_str())
-                .collect::<Vec<_>>(),
-            Table::VideoAssets.columns(),
-        );
+                .map(|field| field.name().clone())
+                .collect::<Vec<_>>();
+            assert_eq!(native, managed, "{table}");
+        }
     }
 
     #[test]

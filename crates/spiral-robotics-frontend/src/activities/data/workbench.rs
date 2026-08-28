@@ -14,7 +14,7 @@ use crate::components::interaction::{
 };
 use dioxus::prelude::*;
 use gloo_net::http::Method;
-use spiral_robotics_api::catalog::{ManagedTable as Table, QueryPreset};
+use spiral_robotics_api::catalog::ManagedTable as Table;
 use spiral_robotics_api::datasets::{
     EpisodeImportSummary, HuggingFaceDatasetFormat, HuggingFaceDatasetImportSummary,
     HuggingFaceDatasetInspection, HuggingFaceDatasetRequest,
@@ -946,7 +946,7 @@ impl SchemaRelationSummary {
                     label: table.name().to_owned(),
                     description: table.description().to_owned(),
                     columns: table.columns().join(", "),
-                    sql: table.preset().scoped_sql(namespace, dataset_id),
+                    sql: table.scoped_sql(namespace, dataset_id),
                 })
                 .collect();
         };
@@ -980,7 +980,7 @@ impl SchemaRelationSummary {
                         .collect::<Vec<_>>()
                         .join(", "),
                     sql: managed
-                        .map(|table| table.preset().scoped_sql(namespace, dataset_id))
+                        .map(|table| table.scoped_sql(namespace, dataset_id))
                         .unwrap_or_else(|| format!("SELECT * FROM {} LIMIT 100", relation.name())),
                 }
             })
@@ -988,61 +988,48 @@ impl SchemaRelationSummary {
     }
 }
 
+/// The workbench narrows a relation's default query to the selected dataset
+/// wherever the relation can reach one; the rest keep the shared preset.
 pub(crate) trait QueryPresetSql {
     fn scoped_sql(self, namespace: &str, dataset_id: &str) -> String;
 }
 
-impl QueryPresetSql for QueryPreset {
+impl QueryPresetSql for Table {
     fn scoped_sql(self, namespace: &str, dataset_id: &str) -> String {
         let dataset_id = dataset_id.replace('\'', "''");
         let episodes = Table::Episodes.qualified_name(namespace);
-        let relation = self.table().qualified_name(namespace);
+        let relation = self.qualified_name(namespace);
         match self {
-            QueryPreset::Datasets => self.sql(namespace),
-            QueryPreset::Episodes => format!(
+            Table::Episodes => format!(
                 "SELECT * FROM {relation} WHERE dataset_id = '{dataset_id}' ORDER BY started_ms DESC LIMIT 100"
             ),
-            QueryPreset::EpisodeStreams => format!(
+            Table::EpisodeStreams => format!(
                 "SELECT s.* FROM {relation} AS s JOIN {episodes} AS e ON e.episode_id = s.episode_id WHERE e.dataset_id = '{dataset_id}' ORDER BY s.episode_id DESC, s.stream_id LIMIT 100"
             ),
-            QueryPreset::JointSamples => format!(
+            Table::JointSamples => format!(
                 "SELECT j.* FROM {relation} AS j JOIN {episodes} AS e ON e.episode_id = j.episode_id WHERE e.dataset_id = '{dataset_id}' ORDER BY j.episode_id DESC, j.stream_id, j.sample_index LIMIT 100"
             ),
-            QueryPreset::VideoAssets => format!(
+            Table::VideoAssets => format!(
                 "SELECT v.episode_id, v.stream_id, v.segment_index, v.camera_id, v.byte_size, v.width, v.height, v.fps, v.frames FROM {relation} AS v JOIN {episodes} AS e ON e.episode_id = v.episode_id WHERE e.dataset_id = '{dataset_id}' ORDER BY v.episode_id DESC, v.stream_id, v.segment_index LIMIT 100"
             ),
-            QueryPreset::TrainingCheckpoints
-            | QueryPreset::Robots
-            | QueryPreset::StudioSettings
-            | QueryPreset::TrainingRuns
-            | QueryPreset::RolloutRuns
-            | QueryPreset::WorkflowRuns => self.sql(namespace),
+            Table::Datasets
+            | Table::TrainingCheckpoints
+            | Table::Robots
+            | Table::StudioSettings
+            | Table::TrainingRuns
+            | Table::TrainingRunMetrics
+            | Table::TrainingRunCheckpoints
+            | Table::RolloutRuns
+            | Table::WorkflowRuns => self.sql(namespace),
         }
     }
 }
 
 trait ManagedTablePresentation {
-    fn preset(self) -> QueryPreset;
     fn description(self) -> &'static str;
 }
 
 impl ManagedTablePresentation for Table {
-    fn preset(self) -> QueryPreset {
-        match self {
-            Table::Datasets => QueryPreset::Datasets,
-            Table::Episodes => QueryPreset::Episodes,
-            Table::EpisodeStreams => QueryPreset::EpisodeStreams,
-            Table::JointSamples => QueryPreset::JointSamples,
-            Table::VideoAssets => QueryPreset::VideoAssets,
-            Table::TrainingCheckpoints => QueryPreset::TrainingCheckpoints,
-            Table::Robots => QueryPreset::Robots,
-            Table::StudioSettings => QueryPreset::StudioSettings,
-            Table::TrainingRuns => QueryPreset::TrainingRuns,
-            Table::RolloutRuns => QueryPreset::RolloutRuns,
-            Table::WorkflowRuns => QueryPreset::WorkflowRuns,
-        }
-    }
-
     fn description(self) -> &'static str {
         match self {
             Table::Datasets => "Dataset identity and metadata",
@@ -1053,7 +1040,9 @@ impl ManagedTablePresentation for Table {
             Table::TrainingCheckpoints => "Saved checkpoints by training run",
             Table::Robots => "Robot configuration and hardware assignments",
             Table::StudioSettings => "Persistent Studio preferences",
-            Table::TrainingRuns => "Training lifecycle and metric history",
+            Table::TrainingRuns => "Training run configuration and lifecycle",
+            Table::TrainingRunMetrics => "Per-step metrics for each training run",
+            Table::TrainingRunCheckpoints => "Checkpoint history for each training run",
             Table::RolloutRuns => "Policy rollout lifecycle and outcomes",
             Table::WorkflowRuns => "Saved Workflow graph and latest run snapshot",
         }
@@ -1190,15 +1179,15 @@ mod tests {
     #[test]
     fn presets_are_scoped_to_the_current_dataset() {
         assert_eq!(
-            QueryPreset::JointSamples.scoped_sql("training", "pick-place"),
+            Table::JointSamples.scoped_sql("training", "pick-place"),
             "SELECT j.* FROM training.joint_samples AS j JOIN training.episodes AS e ON e.episode_id = j.episode_id WHERE e.dataset_id = 'pick-place' ORDER BY j.episode_id DESC, j.stream_id, j.sample_index LIMIT 100"
         );
         assert_eq!(
-            QueryPreset::Episodes.scoped_sql("training", "pick-'place"),
+            Table::Episodes.scoped_sql("training", "pick-'place"),
             "SELECT * FROM training.episodes WHERE dataset_id = 'pick-''place' ORDER BY started_ms DESC LIMIT 100"
         );
         assert_eq!(
-            QueryPreset::VideoAssets.scoped_sql("training", "pick-place"),
+            Table::VideoAssets.scoped_sql("training", "pick-place"),
             "SELECT v.episode_id, v.stream_id, v.segment_index, v.camera_id, v.byte_size, v.width, v.height, v.fps, v.frames FROM training.video_assets AS v JOIN training.episodes AS e ON e.episode_id = v.episode_id WHERE e.dataset_id = 'pick-place' ORDER BY v.episode_id DESC, v.stream_id, v.segment_index LIMIT 100"
         );
     }

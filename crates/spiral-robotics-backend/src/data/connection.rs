@@ -2,7 +2,6 @@
 
 use std::sync::{Arc, Mutex};
 
-use spiral_robotics_api::settings::{TrainingRuntimeSettings, VideoSettings};
 use spiral_robotics_storage::{
     BackendStateStore, SpiralConnectionSettings, SpiralCredentials, StorageManager,
     StudioPreferencesStore,
@@ -165,10 +164,7 @@ impl SpiralConnectionController {
         let staged_preferences = self
             .stores
             .preferences
-            .stage_update(
-                TrainingRuntimeSettings::new(command.training_endpoint()),
-                VideoSettings::new(command.video_enabled()),
-            )
+            .stage_update(command.training_endpoint(), command.video_enabled())
             .map_err(OperationError::InvalidInput)?;
 
         self.stores

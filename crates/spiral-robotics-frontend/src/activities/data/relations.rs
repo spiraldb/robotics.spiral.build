@@ -171,6 +171,8 @@ impl ProjectRelationScope<'_> {
             Table::StudioSettings,
             Table::TrainingCheckpoints,
             Table::TrainingRuns,
+            Table::TrainingRunMetrics,
+            Table::TrainingRunCheckpoints,
             Table::RolloutRuns,
             Table::WorkflowRuns,
         ]

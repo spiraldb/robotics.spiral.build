@@ -16,16 +16,19 @@ use spiral_robotics_api::recording::{
     EpisodeArm, EpisodeAssessment, EpisodeIdentity as EpisodeInfoIdentity, EpisodeInfo,
     EpisodeTimeline, RecordingGap,
 };
-use spiral_robotics_api::robots::MotorLimits;
 use spiral_robotics_hardware::Calibration;
 use spiral_robotics_hardware::{
-    ArmConditionSummary as HardwareArmConditionSummary, CompletedRecording, RecordingCompletion,
-    RecordingGap as HardwareRecordingGap, RecordingWriter,
+    ArmConditionSummary as HardwareArmConditionSummary, CompletedRecording,
+    MotorLimits as HardwareMotorLimits, RecordingCompletion, RecordingGap as HardwareRecordingGap,
+    RecordingWriter,
 };
 pub use spiral_robotics_hardware::{EpisodeCheckpoint, Sample};
 
-use crate::episode_schema::{JointSampleRows, SpiralEpisodeEncoder};
-use crate::project_store::ProjectStore;
+use crate::LEGACY_PROJECT_ERROR;
+use crate::episode_schema::{
+    EpisodeStreamCatalog, EpisodeStreamRow, JointSampleRows, SpiralEpisodeEncoder, StoredEpisodeRow,
+};
+use crate::project_store::{ProjectConnection, ProjectStore};
 use crate::sql::SpiralSql;
 use crate::video::{VideoAssetMetadata, VideoSegment, VideoSize, VideoTiming};
 
@@ -97,12 +100,81 @@ impl fmt::Display for EpisodeError {
 
 impl std::error::Error for EpisodeError {}
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+/// The limits one motor reports for itself, captured with the take.
+///
+/// Storage owns this shape because it is persisted: the equivalent wire type
+/// exposes only its temperature ceiling, so a stored row could never be read
+/// back through it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct JointMotorLimits {
+    max_temperature_celsius: Option<f64>,
+    min_voltage_volts: Option<f64>,
+    max_voltage_volts: Option<f64>,
+    /// Configured torque ceiling as a fraction of the motor's rated torque.
+    max_load: Option<f64>,
+}
+
+impl JointMotorLimits {
+    pub(crate) const fn new(
+        max_temperature_celsius: Option<f64>,
+        voltage: JointVoltageRange,
+        max_load: Option<f64>,
+    ) -> Self {
+        Self {
+            max_temperature_celsius,
+            min_voltage_volts: voltage.minimum,
+            max_voltage_volts: voltage.maximum,
+            max_load,
+        }
+    }
+
+    pub(crate) const fn max_temperature_celsius(self) -> Option<f64> {
+        self.max_temperature_celsius
+    }
+    pub(crate) const fn min_voltage_volts(self) -> Option<f64> {
+        self.min_voltage_volts
+    }
+    pub(crate) const fn max_voltage_volts(self) -> Option<f64> {
+        self.max_voltage_volts
+    }
+    pub(crate) const fn max_load(self) -> Option<f64> {
+        self.max_load
+    }
+}
+
+/// The lower and upper supply voltages one motor accepts.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct JointVoltageRange {
+    minimum: Option<f64>,
+    maximum: Option<f64>,
+}
+
+impl JointVoltageRange {
+    pub(crate) const fn new(minimum: Option<f64>, maximum: Option<f64>) -> Self {
+        Self { minimum, maximum }
+    }
+}
+
+impl From<&HardwareMotorLimits> for JointMotorLimits {
+    fn from(limits: &HardwareMotorLimits) -> Self {
+        Self::new(
+            limits.max_temperature_celsius(),
+            JointVoltageRange::new(limits.min_voltage_volts(), limits.max_voltage_volts()),
+            limits.max_load(),
+        )
+    }
+}
+
+/// What one arm's motors were like as a take opened.
+///
+/// Every vector is parallel to the arm's declared joint order, so a value at
+/// index `j` belongs to joint `j`.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ArmCondition {
     arm: String,
     temperature_celsius: Vec<Option<f64>>,
     voltage_volts: Vec<Option<f64>>,
-    limits: Vec<MotorLimits>,
+    limits: Vec<JointMotorLimits>,
 }
 
 impl ArmCondition {
@@ -125,29 +197,48 @@ impl ArmCondition {
         self
     }
 
-    pub fn with_limits(mut self, limits: Vec<MotorLimits>) -> Self {
+    pub fn with_limits(mut self, limits: Vec<JointMotorLimits>) -> Self {
         self.limits = limits;
         self
     }
+
+    pub(crate) fn arm(&self) -> &str {
+        &self.arm
+    }
+    pub(crate) fn temperature_celsius(&self) -> &[Option<f64>] {
+        &self.temperature_celsius
+    }
+    pub(crate) fn voltage_volts(&self) -> &[Option<f64>] {
+        &self.voltage_volts
+    }
+    pub(crate) fn limits(&self) -> &[JointMotorLimits] {
+        &self.limits
+    }
+
+    /// True when nothing was actually measured, so storage writes null columns
+    /// instead of inventing an all-empty observation.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.temperature_celsius.is_empty()
+            && self.voltage_volts.is_empty()
+            && self.limits.is_empty()
+    }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug)]
 pub struct EpisodeStart {
-    #[serde(flatten)]
     identity: EpisodeIdentity,
-    #[serde(flatten)]
     recording: EpisodeRecordingMetadata,
     arms: Vec<EpisodeArm>,
     condition: Vec<ArmCondition>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug)]
 struct EpisodeIdentity {
     id: String,
     dataset_id: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug)]
 struct EpisodeRecordingMetadata {
     started_ms: i64,
     sample_hz: f64,
@@ -217,6 +308,11 @@ impl EpisodeStart {
     pub fn arms(&self) -> &[EpisodeArm] {
         &self.arms
     }
+    /// Opening motor readings, at most one entry per arm and only for arms
+    /// whose hardware answered while the take was opening.
+    pub(crate) fn condition(&self) -> &[ArmCondition] {
+        &self.condition
+    }
 }
 
 /// Inputs supplied by the recording workflow before storage assigns identity
@@ -265,16 +361,51 @@ impl<'a> RobotPlaybackRequest<'a> {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+/// A deliberate pause in an otherwise continuous recording session.
+///
+/// `after_seconds` is expressed on the gap-free active timeline. Storage owns
+/// this shape because it is persisted: the equivalent wire type exposes no
+/// accessors, so a stored gap could never be read back through it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct EpisodeRecordingGap {
+    after_seconds: f64,
+    duration_seconds: f64,
+}
+
+impl EpisodeRecordingGap {
+    pub(crate) const fn new(after_seconds: f64, duration_seconds: f64) -> Self {
+        Self {
+            after_seconds,
+            duration_seconds,
+        }
+    }
+
+    pub(crate) const fn after_seconds(self) -> f64 {
+        self.after_seconds
+    }
+
+    pub(crate) const fn duration_seconds(self) -> f64 {
+        self.duration_seconds
+    }
+
+    fn to_api(self) -> RecordingGap {
+        RecordingGap::new(self.after_seconds, self.duration_seconds)
+    }
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct EpisodeCompletion {
     duration_seconds: f64,
-    recording_gaps: Vec<RecordingGap>,
+    recording_gaps: Vec<EpisodeRecordingGap>,
     max_follow_error_degrees: Option<f64>,
     discarded: bool,
     condition: Vec<ArmConditionSummary>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+/// The extremes one arm's motors reached across a whole take.
+///
+/// Every vector is parallel to the arm's declared joint order.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct ArmConditionSummary {
     arm: String,
     peak_temperature_celsius: Vec<Option<f64>>,
@@ -283,22 +414,109 @@ pub(crate) struct ArmConditionSummary {
     peak_current_amps: Vec<Option<f64>>,
 }
 
+impl ArmConditionSummary {
+    pub(crate) fn new(arm: String) -> Self {
+        Self {
+            arm,
+            peak_temperature_celsius: Vec::new(),
+            min_voltage_volts: Vec::new(),
+            peak_load: Vec::new(),
+            peak_current_amps: Vec::new(),
+        }
+    }
+
+    pub(crate) fn with_extremes(
+        mut self,
+        temperature: ArmConditionThermalExtremes,
+        effort: ArmConditionEffortExtremes,
+    ) -> Self {
+        self.peak_temperature_celsius = temperature.peak_temperature_celsius;
+        self.min_voltage_volts = temperature.min_voltage_volts;
+        self.peak_load = effort.peak_load;
+        self.peak_current_amps = effort.peak_current_amps;
+        self
+    }
+
+    pub(crate) fn arm(&self) -> &str {
+        &self.arm
+    }
+    pub(crate) fn peak_temperature_celsius(&self) -> &[Option<f64>] {
+        &self.peak_temperature_celsius
+    }
+    pub(crate) fn min_voltage_volts(&self) -> &[Option<f64>] {
+        &self.min_voltage_volts
+    }
+    pub(crate) fn peak_load(&self) -> &[Option<f64>] {
+        &self.peak_load
+    }
+    pub(crate) fn peak_current_amps(&self) -> &[Option<f64>] {
+        &self.peak_current_amps
+    }
+
+    /// True when nothing was actually measured; see [`ArmCondition::is_empty`].
+    pub(crate) fn is_empty(&self) -> bool {
+        self.peak_temperature_celsius.is_empty()
+            && self.min_voltage_volts.is_empty()
+            && self.peak_load.is_empty()
+            && self.peak_current_amps.is_empty()
+    }
+}
+
+/// Per-joint thermal and supply extremes for one arm.
+pub(crate) struct ArmConditionThermalExtremes {
+    peak_temperature_celsius: Vec<Option<f64>>,
+    min_voltage_volts: Vec<Option<f64>>,
+}
+
+impl ArmConditionThermalExtremes {
+    pub(crate) const fn new(
+        peak_temperature_celsius: Vec<Option<f64>>,
+        min_voltage_volts: Vec<Option<f64>>,
+    ) -> Self {
+        Self {
+            peak_temperature_celsius,
+            min_voltage_volts,
+        }
+    }
+}
+
+/// Per-joint mechanical extremes for one arm.
+pub(crate) struct ArmConditionEffortExtremes {
+    peak_load: Vec<Option<f64>>,
+    peak_current_amps: Vec<Option<f64>>,
+}
+
+impl ArmConditionEffortExtremes {
+    pub(crate) const fn new(
+        peak_load: Vec<Option<f64>>,
+        peak_current_amps: Vec<Option<f64>>,
+    ) -> Self {
+        Self {
+            peak_load,
+            peak_current_amps,
+        }
+    }
+}
+
 impl From<&HardwareArmConditionSummary> for ArmConditionSummary {
     fn from(summary: &HardwareArmConditionSummary) -> Self {
-        Self {
-            arm: summary.arm().to_owned(),
-            peak_temperature_celsius: summary.peak_temperature_celsius().to_vec(),
-            min_voltage_volts: summary.min_voltage_volts().to_vec(),
-            peak_load: summary.peak_load().to_vec(),
-            peak_current_amps: summary.peak_current_amps().to_vec(),
-        }
+        Self::new(summary.arm().to_owned()).with_extremes(
+            ArmConditionThermalExtremes::new(
+                summary.peak_temperature_celsius().to_vec(),
+                summary.min_voltage_volts().to_vec(),
+            ),
+            ArmConditionEffortExtremes::new(
+                summary.peak_load().to_vec(),
+                summary.peak_current_amps().to_vec(),
+            ),
+        )
     }
 }
 
 impl EpisodeCompletion {
     pub(crate) fn new(
         duration_seconds: f64,
-        recording_gaps: Vec<RecordingGap>,
+        recording_gaps: Vec<EpisodeRecordingGap>,
         condition: Vec<ArmConditionSummary>,
     ) -> Self {
         Self {
@@ -327,7 +545,7 @@ impl EpisodeCompletion {
         self.duration_seconds
     }
 
-    pub(crate) fn recording_gaps(&self) -> &[RecordingGap] {
+    pub(crate) fn recording_gaps(&self) -> &[EpisodeRecordingGap] {
         &self.recording_gaps
     }
 
@@ -337,6 +555,12 @@ impl EpisodeCompletion {
 
     pub(crate) const fn discarded(&self) -> bool {
         self.discarded
+    }
+
+    /// Closing motor extremes, at most one entry per arm. See
+    /// [`EpisodeStart::condition`].
+    pub(crate) fn condition(&self) -> &[ArmConditionSummary] {
+        &self.condition
     }
 }
 
@@ -464,7 +688,8 @@ impl TimelineSample {
 pub struct EpisodeStore {
     project_store: Arc<ProjectStore>,
     completed: Arc<Mutex<BTreeMap<String, FullEpisode>>>,
-    last_issue: Mutex<Option<String>>,
+    /// What the last catalog read could not do.
+    catalog_issues: Mutex<Vec<String>>,
     seek_sequence: AtomicU64,
     latest_seek: Mutex<BTreeMap<String, u64>>,
     seek_gate: tokio::sync::Mutex<()>,
@@ -475,7 +700,7 @@ impl EpisodeStore {
         Self {
             project_store,
             completed: Arc::new(Mutex::new(BTreeMap::new())),
-            last_issue: Mutex::new(None),
+            catalog_issues: Mutex::new(Vec::new()),
             seek_sequence: AtomicU64::new(0),
             latest_seek: Mutex::new(BTreeMap::new()),
             seek_gate: tokio::sync::Mutex::new(()),
@@ -483,19 +708,19 @@ impl EpisodeStore {
     }
 
     pub async fn list(&self) -> Vec<EpisodeInfo> {
-        match self.try_list().await {
-            Ok(episodes) => {
-                *self.last_issue.lock_unpoisoned() = None;
-                episodes
+        match self.read_catalog().await {
+            Ok(read) => {
+                *self.catalog_issues.lock_unpoisoned() = read.warnings.clone();
+                read.summaries()
             }
             Err(error) => {
-                *self.last_issue.lock_unpoisoned() = Some(error.to_string());
+                *self.catalog_issues.lock_unpoisoned() = vec![error.to_string()];
                 Vec::new()
             }
         }
     }
     pub fn issues(&self) -> Vec<String> {
-        self.last_issue.lock_unpoisoned().iter().cloned().collect()
+        self.catalog_issues.lock_unpoisoned().clone()
     }
     pub async fn get(&self, id: &str) -> Result<EpisodeInfo, EpisodeError> {
         EpisodeId::try_from(id).map_err(|_| EpisodeError::InvalidId(id.to_owned()))?;
@@ -508,45 +733,22 @@ impl EpisodeStore {
 
     pub(crate) async fn full_episode(&self, id: &str) -> Result<FullEpisode, EpisodeError> {
         EpisodeId::try_from(id).map_err(|_| EpisodeError::InvalidId(id.to_owned()))?;
-        let episodes = Table::Episodes.qualified_name(self.project_store.namespace());
         let samples = Table::JointSamples.qualified_name(self.project_store.namespace());
-        let episode_value = SpiralSql::string_literal(id);
         let sample_query = SpiralSql::episode_samples(self.project_store.namespace(), id);
         let mut connection = self
             .project_store
             .connect()
             .await
             .map_err(EpisodeError::Invalid)?;
-        if !connection
-            .table_exists(&episodes)
-            .await
-            .map_err(EpisodeError::Invalid)?
-        {
-            return Err(EpisodeError::NotFound(id.to_owned()));
-        }
-        let metadata = connection
-            .query_rows(
-                &format!(
-                    "SELECT {} FROM {episodes} WHERE {} = {episode_value} LIMIT 1",
-                    db::METADATA_JSON,
-                    db::EPISODE_ID
-                ),
-                1,
-            )
-            .await
-            .map_err(EpisodeError::Invalid)?;
-        let row = metadata
-            .rows()
-            .first()
-            .ok_or_else(|| EpisodeError::NotFound(id.to_owned()))?;
-        let metadata = row
-            .get(db::METADATA_JSON)
-            .and_then(JsonValue::as_str)
-            .ok_or_else(|| EpisodeError::Invalid(format!("episode {id:?} has no metadata")))?;
-        let (start, completion): (EpisodeStart, EpisodeCompletion) = serde_json::from_str(metadata)
-            .map_err(|error| {
-                EpisodeError::Invalid(format!("episode {id:?} metadata is invalid: {error}"))
-            })?;
+        let read =
+            EpisodeCatalogRead::load(&mut connection, self.project_store.namespace(), Some(id))
+                .await?;
+        let (start, completion, _) = read
+            .episodes
+            .into_iter()
+            .next()
+            .ok_or_else(|| EpisodeError::NotFound(id.to_owned()))?
+            .into_parts();
         let rows = if connection
             .table_exists(&samples)
             .await
@@ -815,36 +1017,18 @@ impl EpisodeStore {
     }
 
     async fn try_list(&self) -> Result<Vec<EpisodeInfo>, EpisodeError> {
-        let relation = Table::Episodes.qualified_name(self.project_store.namespace());
+        self.read_catalog().await.map(EpisodeCatalogRead::summaries)
+    }
+
+    /// Read every episode without modifying persisted data.
+    async fn read_catalog(&self) -> Result<EpisodeCatalogRead, EpisodeError> {
+        let namespace = self.project_store.namespace().to_owned();
         let mut connection = self
             .project_store
             .connect()
             .await
             .map_err(EpisodeError::Invalid)?;
-        if !connection
-            .table_exists(&relation)
-            .await
-            .map_err(EpisodeError::Invalid)?
-        {
-            return Ok(Vec::new());
-        }
-        let result = connection
-            .query_rows(
-                &format!(
-                    "SELECT {}, {} FROM {relation} ORDER BY {}",
-                    db::METADATA_JSON,
-                    db::FRAMES,
-                    db::STARTED_MS
-                ),
-                100_000,
-            )
-            .await
-            .map_err(EpisodeError::Invalid)?;
-        result
-            .into_rows()
-            .into_iter()
-            .map(|row| row.episode_summary().map_err(EpisodeError::Invalid))
-            .collect()
+        EpisodeCatalogRead::load(&mut connection, &namespace, None).await
     }
 
     async fn replace_samples(&self, episode: &FullEpisode) -> Result<(), EpisodeError> {
@@ -1022,7 +1206,7 @@ impl RecordingWriter for EpisodeWriter {
             self,
             EpisodeCompletion::new(
                 completion.duration_seconds(),
-                completion.recording_gaps().to_api(),
+                completion.recording_gaps().to_stored(),
                 completion
                     .condition()
                     .iter()
@@ -1045,7 +1229,7 @@ impl RecordingWriter for EpisodeWriter {
             *self,
             EpisodeCompletion::new(
                 completion.duration_seconds(),
-                completion.recording_gaps().to_api(),
+                completion.recording_gaps().to_stored(),
                 completion
                     .condition()
                     .iter()
@@ -1061,13 +1245,13 @@ impl RecordingWriter for EpisodeWriter {
 }
 
 trait RecordingGapProjection {
-    fn to_api(&self) -> Vec<RecordingGap>;
+    fn to_stored(&self) -> Vec<EpisodeRecordingGap>;
 }
 
 impl RecordingGapProjection for [HardwareRecordingGap] {
-    fn to_api(&self) -> Vec<RecordingGap> {
+    fn to_stored(&self) -> Vec<EpisodeRecordingGap> {
         self.iter()
-            .map(|gap| RecordingGap::new(gap.after_seconds(), gap.duration_seconds()))
+            .map(|gap| EpisodeRecordingGap::new(gap.after_seconds(), gap.duration_seconds()))
             .collect()
     }
 }
@@ -1323,7 +1507,14 @@ impl EpisodeStart {
                 .with_source(start.source());
         let timeline =
             EpisodeTimeline::new(frames, completion.duration_seconds(), start.sample_hz())
-                .with_recording_gaps(completion.recording_gaps().to_vec())
+                .with_recording_gaps(
+                    completion
+                        .recording_gaps()
+                        .iter()
+                        .copied()
+                        .map(EpisodeRecordingGap::to_api)
+                        .collect(),
+                )
                 .with_started_ms(start.started_ms());
         let assessment = EpisodeAssessment::new(
             completion.discarded(),
@@ -1424,13 +1615,122 @@ impl SampleLocation<'_> {
     }
 }
 
+/// One read of the persisted episode relations.
+///
+/// Episodes and their stream declarations are read together because an
+/// episode's arms live in the stream relation: neither half is a complete
+/// record on its own.
+#[derive(Clone, Debug, Default)]
+struct EpisodeCatalogRead {
+    episodes: Vec<StoredEpisodeRow>,
+    warnings: Vec<String>,
+}
+
+impl EpisodeCatalogRead {
+    async fn load(
+        connection: &mut ProjectConnection,
+        namespace: &str,
+        episode_id: Option<&str>,
+    ) -> Result<Self, EpisodeError> {
+        let episodes = Table::Episodes.qualified_name(namespace);
+        if !connection
+            .table_exists(&episodes)
+            .await
+            .map_err(EpisodeError::Invalid)?
+        {
+            return Ok(Self::default());
+        }
+        let schema = connection
+            .relation_schema(&episodes)
+            .await
+            .map_err(EpisodeError::Invalid)?
+            .ok_or_else(|| EpisodeError::Invalid("episode relation disappeared".to_owned()))?;
+        if schema.field_with_name("metadata_json").is_ok() {
+            return Err(EpisodeError::Invalid(LEGACY_PROJECT_ERROR.to_owned()));
+        }
+        let streams = Self::load_streams(connection, namespace, episode_id).await?;
+        let mut rows = Vec::new();
+        for batch in connection
+            .read_batches(&format!(
+                "SELECT * FROM {episodes}{}",
+                Self::filter(episode_id)
+            ))
+            .await
+            .map_err(EpisodeError::Invalid)?
+        {
+            for row in 0..batch.num_rows() {
+                rows.push(
+                    StoredEpisodeRow::decode(&batch, row, &streams)
+                        .map_err(EpisodeError::Invalid)?,
+                );
+            }
+        }
+        rows.sort_by(|left, right| {
+            left.start()
+                .started_ms()
+                .cmp(&right.start().started_ms())
+                .then_with(|| left.start().id().cmp(right.start().id()))
+        });
+
+        Ok(Self {
+            episodes: rows,
+            warnings: Vec::new(),
+        })
+    }
+
+    async fn load_streams(
+        connection: &mut ProjectConnection,
+        namespace: &str,
+        episode_id: Option<&str>,
+    ) -> Result<EpisodeStreamCatalog, EpisodeError> {
+        let relation = Table::EpisodeStreams.qualified_name(namespace);
+        if !connection
+            .table_exists(&relation)
+            .await
+            .map_err(EpisodeError::Invalid)?
+        {
+            return Ok(EpisodeStreamCatalog::default());
+        }
+        let mut rows = Vec::new();
+        for batch in connection
+            .read_batches(&format!(
+                "SELECT * FROM {relation}{}",
+                Self::filter(episode_id)
+            ))
+            .await
+            .map_err(EpisodeError::Invalid)?
+        {
+            for row in 0..batch.num_rows() {
+                rows.push(EpisodeStreamRow::decode(&batch, row).map_err(EpisodeError::Invalid)?);
+            }
+        }
+        Ok(EpisodeStreamCatalog::new(rows))
+    }
+
+    fn filter(episode_id: Option<&str>) -> String {
+        episode_id.map_or_else(String::new, |id| {
+            format!(
+                " WHERE {} = {}",
+                db::EPISODE_ID,
+                SpiralSql::string_literal(id)
+            )
+        })
+    }
+
+    fn summaries(self) -> Vec<EpisodeInfo> {
+        self.episodes
+            .iter()
+            .map(|row| row.start().summary(row.completion(), row.frames()))
+            .collect()
+    }
+}
+
 trait EpisodeJsonRow {
     fn string(&self, name: &str) -> Result<&str, String>;
     fn u64(&self, name: &str) -> Result<u64, String>;
     fn i64s(&self, name: &str) -> Result<Vec<i64>, String>;
     fn optional_f64s(&self, name: &str) -> Result<Vec<Option<f64>>, String>;
     fn optional_optional_f64s(&self, name: &str) -> Result<Option<Vec<Option<f64>>>, String>;
-    fn episode_summary(&self) -> Result<EpisodeInfo, String>;
     fn video_metadata(&self) -> Result<VideoAssetMetadata, String>;
 }
 
@@ -1483,16 +1783,6 @@ impl EpisodeJsonRow for JsonMap<String, JsonValue> {
             None | Some(JsonValue::Null) => Ok(None),
             Some(_) => self.optional_f64s(name).map(Some),
         }
-    }
-
-    fn episode_summary(&self) -> Result<EpisodeInfo, String> {
-        let metadata = self
-            .get(db::METADATA_JSON)
-            .and_then(JsonValue::as_str)
-            .ok_or_else(|| "episode row has no metadata_json".to_owned())?;
-        let (start, completion): (EpisodeStart, EpisodeCompletion) =
-            serde_json::from_str(metadata).map_err(|error| error.to_string())?;
-        Ok(start.summary(&completion, self.u64(db::FRAMES)?))
     }
 
     fn video_metadata(&self) -> Result<VideoAssetMetadata, String> {

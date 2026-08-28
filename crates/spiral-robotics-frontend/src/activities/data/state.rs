@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use dioxus::prelude::*;
 use gloo_net::http::Method;
-use spiral_robotics_api::catalog::QueryPreset;
+use spiral_robotics_api::catalog::ManagedTable;
 use spiral_robotics_api::recording::{DatasetSummary, EpisodeCatalogResponse, EpisodeInfo};
 use spiral_robotics_api::relations::SpiralQueryRequest;
 
@@ -132,7 +132,7 @@ impl DataController {
     /// Create the Data state owned by the Studio session. None of these
     /// signals depends on the Data workbench being mounted.
     pub(crate) fn use_controller(namespace: &str, dataset_id: &str) -> Self {
-        let initial_sql = QueryPreset::Episodes.scoped_sql(namespace, dataset_id);
+        let initial_sql = ManagedTable::Episodes.scoped_sql(namespace, dataset_id);
         let sql_value = initial_sql.clone();
         let selected_episode = use_signal(|| None::<String>);
         let episode_catalog = use_signal(EpisodeCatalogState::default);
@@ -424,7 +424,7 @@ impl DataController {
 
     fn sync_dataset(mut self, namespace: &str, dataset_id: &str) {
         let previous = self.draft.generated_sql.peek().to_owned();
-        let next = QueryPreset::Episodes.scoped_sql(namespace, dataset_id);
+        let next = ManagedTable::Episodes.scoped_sql(namespace, dataset_id);
         if previous == next {
             return;
         }

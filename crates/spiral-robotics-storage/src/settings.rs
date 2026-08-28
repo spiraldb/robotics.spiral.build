@@ -10,9 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
-use spiral_robotics_api::settings::{
-    DEFAULT_SPIRAL_ENDPOINT, DEFAULT_SPIRAL_SPFS_ENDPOINT, TrainingRuntimeSettings, VideoSettings,
-};
+use spiral_robotics_api::settings::{DEFAULT_SPIRAL_ENDPOINT, DEFAULT_SPIRAL_SPFS_ENDPOINT};
 use url::Url;
 
 const BACKEND_STATE_FILE: &str = "backend-state.json";
@@ -265,24 +263,72 @@ impl BackendStateStore {
     }
 }
 
+/// Storage-owned persisted form of the Studio preferences document.
+///
+/// These field names are the durable `value_json` format for
+/// [`crate::schema::Table::StudioSettings`]. They are deliberately independent
+/// of the wire crate's settings types, so a contract rename can never change
+/// what an existing project's preferences mean; a test pins the serialized
+/// shape and another pins the defaults to the wire defaults.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct StoredStudioPreferences {
     #[serde(default)]
-    training: TrainingRuntimeSettings,
+    training: StoredTrainingRuntimePreference,
     #[serde(default)]
-    video: VideoSettings,
+    video: StoredVideoPreference,
 }
 
 impl StoredStudioPreferences {
-    pub(crate) const fn new(training: TrainingRuntimeSettings, video: VideoSettings) -> Self {
+    pub(crate) const fn new(
+        training: StoredTrainingRuntimePreference,
+        video: StoredVideoPreference,
+    ) -> Self {
         Self { training, video }
     }
 
-    pub const fn training(&self) -> &TrainingRuntimeSettings {
+    pub const fn training(&self) -> &StoredTrainingRuntimePreference {
         &self.training
     }
-    pub const fn video(&self) -> &VideoSettings {
+    pub const fn video(&self) -> &StoredVideoPreference {
         &self.video
+    }
+}
+
+/// Persisted training-runtime preference: the endpoint future sessions dial.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct StoredTrainingRuntimePreference {
+    endpoint: String,
+}
+
+impl Default for StoredTrainingRuntimePreference {
+    fn default() -> Self {
+        Self {
+            endpoint: "http://127.0.0.1:50051".to_owned(),
+        }
+    }
+}
+
+impl StoredTrainingRuntimePreference {
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+}
+
+/// Persisted camera-capture preference.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct StoredVideoPreference {
+    enabled: bool,
+}
+
+impl Default for StoredVideoPreference {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+impl StoredVideoPreference {
+    pub const fn enabled(&self) -> bool {
+        self.enabled
     }
 }
 
@@ -301,14 +347,19 @@ impl StudioPreferencesStore {
         self.current.lock_unpoisoned().clone()
     }
 
+    /// Validate raw preference edits into the persisted form.
     pub fn stage_update(
         &self,
-        mut training: TrainingRuntimeSettings,
-        video: VideoSettings,
+        training_endpoint: &str,
+        video_enabled: bool,
     ) -> Result<StoredStudioPreferences, String> {
-        let endpoint = training.endpoint().trim().to_owned();
-        training.set_endpoint(ServiceEndpoint::training_runtime(&endpoint)?.into_string());
-        Ok(StoredStudioPreferences::new(training, video))
+        let endpoint = ServiceEndpoint::training_runtime(training_endpoint.trim())?.into_string();
+        Ok(StoredStudioPreferences::new(
+            StoredTrainingRuntimePreference { endpoint },
+            StoredVideoPreference {
+                enabled: video_enabled,
+            },
+        ))
     }
 
     pub fn replace(&self, preferences: StoredStudioPreferences) -> StoredStudioPreferences {
@@ -447,18 +498,43 @@ mod tests {
     #[test]
     fn training_runtime_requires_an_http_or_https_endpoint() {
         let store = StudioPreferencesStore::new(StoredStudioPreferences::default());
-        let invalid = TrainingRuntimeSettings::new("ftp://runtime.example");
         assert!(
             store
-                .stage_update(invalid, VideoSettings::default())
+                .stage_update("ftp://runtime.example", true)
                 .unwrap_err()
                 .contains("http:// or https://")
         );
 
-        let valid = TrainingRuntimeSettings::new(" http://runtime.example:50051 ");
         let staged = store
-            .stage_update(valid, VideoSettings::default())
+            .stage_update(" http://runtime.example:50051 ", false)
             .expect("HTTP runtime endpoint is accepted");
-        assert_eq!(staged.training.endpoint(), "http://runtime.example:50051");
+        assert_eq!(staged.training().endpoint(), "http://runtime.example:50051");
+        assert!(!staged.video().enabled());
+    }
+
+    /// The persisted document format is storage's, not the wire crate's: these
+    /// bytes are what every existing project already holds.
+    #[test]
+    fn the_preferences_document_format_is_frozen() {
+        let json = serde_json::to_string(&StoredStudioPreferences::default()).unwrap();
+        assert_eq!(
+            json,
+            r#"{"training":{"endpoint":"http://127.0.0.1:50051"},"video":{"enabled":true}}"#
+        );
+    }
+
+    /// A fresh project and a fresh browser session must agree on defaults.
+    #[test]
+    fn stored_preference_defaults_match_the_wire_defaults() {
+        use spiral_robotics_api::settings::{TrainingRuntimeSettings, VideoSettings};
+
+        assert_eq!(
+            StoredTrainingRuntimePreference::default().endpoint(),
+            TrainingRuntimeSettings::default().endpoint()
+        );
+        assert_eq!(
+            StoredVideoPreference::default().enabled(),
+            VideoSettings::default().enabled()
+        );
     }
 }

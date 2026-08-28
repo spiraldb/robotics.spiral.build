@@ -25,9 +25,14 @@ use spiral_robotics_api::workflow::{
     WorkflowFeatureApplicability, WorkflowFeatureDefinition,
 };
 
+use crate::arrow_rows::ArrowColumns;
+use crate::episode_schema::EpisodeSchema;
 use crate::manager::VideoAssetRecordBatch as _;
 use crate::project_store::ProjectConnection;
+use crate::rollout_runs::RolloutRunSchema;
 use crate::sql::SpiralSql;
+use crate::training_runs::TrainingRunSchema;
+use crate::workflow_documents::WorkflowDocumentSchema;
 
 const PROJECT_MAGIC: &[u8; 8] = b"SPRPROJ1";
 const EPISODES_MAGIC: &[u8; 8] = b"SPREPS01";
@@ -546,6 +551,12 @@ impl BundleSpec {
                 .execute_query(query)
                 .await
                 .map_err(|error| format!("reading {} relation {relation}: {error}", self.label))?;
+            // A bundle must only ever hold shapes its own importer accepts.
+            if let Some(table) = self.table_named(&relation) {
+                table
+                    .validate_managed_relation_schema(records.schema().as_ref(), self.label)
+                    .map_err(|error| format!("{error}; relation {relation} is not exportable"))?;
+            }
             let occupied = Self::encoded_entries_size(&entries)
                 .saturating_add(self.magic.len() + 4 + MAX_MANIFEST_BYTES + 2);
             let payload_limit = self
@@ -1338,7 +1349,12 @@ impl BundleSpec {
     }
 }
 
-trait ManagedRelationSchema {
+/// The storage-side source of truth for what each managed relation holds.
+///
+/// Every persisted column name and semantic type is declared exactly once,
+/// here or in the encoder module this delegates to, so a bundle, a drift test,
+/// and the database can never disagree about a relation's shape.
+pub(crate) trait ManagedRelationSchema {
     fn managed_relation_schema(self) -> Schema;
 
     fn validate_managed_relation_schema(self, schema: &Schema, label: &str) -> Result<(), String>;
@@ -1394,71 +1410,22 @@ impl ManagedRelationSchema for Table {
         let table = self;
         let text = |name, nullable| Field::new(name, DataType::Utf8, nullable);
         let timestamp = |name| Field::new(name, DataType::Int64, false);
-        let snapshot = || {
-            vec![
-                text(column::RUN_ID, false),
-                text(column::SNAPSHOT_JSON, false),
-                timestamp(column::UPDATED_MS),
-            ]
-        };
         let fields = match table {
-            Table::Datasets => vec![
-                text(column::DATASET_ID, false),
-                text(column::NAME, false),
-                timestamp(column::CREATED_MS),
-                text(column::DESCRIPTION, true),
-            ],
-            Table::Episodes => vec![
-                text(column::EPISODE_ID, false),
-                text(column::DATASET_ID, false),
-                Field::new(column::SCHEMA_VERSION, DataType::UInt32, false),
-                timestamp(column::STARTED_MS),
-                Field::new(column::SAMPLE_HZ, DataType::Float64, false),
-                text(column::SOURCE, false),
-                text(column::NOTE, true),
-                Field::new(column::FRAMES, DataType::UInt64, false),
-                Field::new(column::DURATION_NS, DataType::UInt64, false),
-                Field::new(column::MAX_FOLLOW_ERROR_DEGREES, DataType::Float64, true),
-                Field::new(column::DISCARDED, DataType::Boolean, false),
-                text(column::METADATA_JSON, false),
-            ],
-            Table::EpisodeStreams => vec![
-                text(column::EPISODE_ID, false),
-                text(column::STREAM_ID, false),
-                text(column::MODALITY, false),
-                text(column::ROBOT_TYPE, true),
-                Field::new(
-                    column::JOINT_NAMES,
-                    DataType::List(Arc::new(Field::new("item", DataType::Utf8, false))),
-                    true,
-                ),
-                text(column::CAMERA_ID, true),
-                Field::new(column::WIDTH, DataType::UInt32, true),
-                Field::new(column::HEIGHT, DataType::UInt32, true),
-                Field::new(column::FPS, DataType::UInt32, true),
-            ],
-            Table::JointSamples => {
-                let float_list =
-                    || DataType::List(Arc::new(Field::new("item", DataType::Float64, true)));
-                vec![
-                    text(column::EPISODE_ID, false),
-                    text(column::STREAM_ID, false),
-                    Field::new(column::SAMPLE_INDEX, DataType::UInt64, false),
-                    Field::new(column::EPISODE_TIME_NS, DataType::UInt64, false),
-                    Field::new(column::STATE_VALID, DataType::Boolean, false),
-                    Field::new(column::ACTION_VALID, DataType::Boolean, false),
-                    Field::new(column::STATE_POSITION, float_list(), false),
-                    Field::new(column::ACTION_POSITION, float_list(), true),
-                    Field::new(
-                        column::RAW_POSITION,
-                        DataType::List(Arc::new(Field::new("item", DataType::Int64, false))),
-                        false,
-                    ),
-                    Field::new(column::VELOCITY, float_list(), true),
-                    Field::new(column::EFFORT, float_list(), true),
-                    Field::new(column::FOLLOW_ERROR_DEGREES, DataType::Float64, true),
-                ]
-            }
+            // Relations whose rows are built by a storage-owned encoder keep
+            // exactly one schema definition, so a bundle can never validate
+            // against a stale copy of it.
+            Table::Datasets => EpisodeSchema::datasets().owned_fields(),
+            Table::Episodes => EpisodeSchema::episodes().owned_fields(),
+            Table::EpisodeStreams => EpisodeSchema::episode_streams().owned_fields(),
+            Table::JointSamples => EpisodeSchema::joint_samples().owned_fields(),
+            Table::TrainingRuns => TrainingRunSchema::runs().owned_fields(),
+            Table::TrainingRunMetrics => TrainingRunSchema::metrics().owned_fields(),
+            Table::TrainingRunCheckpoints => TrainingRunSchema::checkpoints().owned_fields(),
+            Table::RolloutRuns => RolloutRunSchema::session().owned_fields(),
+            Table::WorkflowRuns => WorkflowDocumentSchema::documents().owned_fields(),
+            // A packaged MP4 travels as portable Arrow binary; the database
+            // holds the same column as a native Spiral Blob, so this shape is
+            // the bundle's own and is declared here.
             Table::VideoAssets => vec![
                 text(column::EPISODE_ID, false),
                 text(column::STREAM_ID, false),
@@ -1493,9 +1460,21 @@ impl ManagedRelationSchema for Table {
                 text(column::VALUE_JSON, false),
                 timestamp(column::UPDATED_MS),
             ],
-            Table::TrainingRuns | Table::RolloutRuns | Table::WorkflowRuns => snapshot(),
         };
         Schema::new(fields)
+    }
+}
+
+trait OwnedSchemaFields {
+    fn owned_fields(&self) -> Vec<Field>;
+}
+
+impl OwnedSchemaFields for Schema {
+    fn owned_fields(&self) -> Vec<Field> {
+        self.fields()
+            .iter()
+            .map(|field| field.as_ref().clone())
+            .collect()
     }
 }
 
@@ -2254,13 +2233,7 @@ impl WorkflowCacheValidator<'_> {
 
 impl WorkflowCacheKey {
     fn from_batch(batch: &RecordBatch, row: usize) -> Result<WorkflowCacheKey, String> {
-        let text = |name: &str| {
-            batch
-                .column_by_name(name)
-                .and_then(|column| WorkflowArrow::string_value(column.as_ref(), row))
-                .map(str::to_owned)
-                .ok_or_else(|| format!("Workflow feature cache key {name:?} is null or invalid"))
-        };
+        let columns = ArrowColumns::new(batch, "Workflow feature cache key");
         let u32_value = |name: &str| {
             batch
                 .column_by_name(name)
@@ -2278,8 +2251,8 @@ impl WorkflowCacheKey {
                 .ok_or_else(|| format!("Workflow feature cache key {name:?} is null or invalid"))
         };
         Ok(WorkflowCacheKey {
-            episode_id: text("episode_id")?,
-            stream_id: text("stream_id")?,
+            episode_id: columns.text("episode_id", row)?.to_owned(),
+            stream_id: columns.text("stream_id", row)?.to_owned(),
             segment_index: u32_value("segment_index")?,
             frame_index: u64_value("frame_index")?,
             episode_time_ns: u64_value("episode_time_ns")?,
@@ -3030,6 +3003,28 @@ mod tests {
         arrow_payload_batches(std::slice::from_ref(batch))
     }
 
+    /// The relation's production columns, all retyped as nulls, so a decode
+    /// test exercises the validator on a correctly named but wrongly typed
+    /// payload.
+    fn null_typed_batch(table: Table, rows: usize) -> RecordBatch {
+        let names = table
+            .managed_relation_schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().clone())
+            .collect::<Vec<_>>();
+        record_batch(
+            names
+                .iter()
+                .map(|name| Field::new(name, DataType::Null, true))
+                .collect(),
+            names
+                .iter()
+                .map(|_| Arc::new(NullArray::new(rows)) as ArrayRef)
+                .collect(),
+        )
+    }
+
     fn arrow_payload_batches(batches: &[RecordBatch]) -> Vec<u8> {
         let mut payload = Vec::new();
         {
@@ -3188,19 +3183,7 @@ mod tests {
 
     #[test]
     fn managed_decode_rejects_repeated_null_batches_at_the_total_row_bound() {
-        let rows = 250_001;
-        let batch = record_batch(
-            Table::Datasets
-                .columns()
-                .iter()
-                .map(|name| Field::new(*name, DataType::Null, true))
-                .collect(),
-            Table::Datasets
-                .columns()
-                .iter()
-                .map(|_| Arc::new(NullArray::new(rows)) as ArrayRef)
-                .collect(),
-        );
+        let batch = null_typed_batch(Table::Datasets, 250_001);
         let payload = arrow_payload_batches(&[batch.clone(), batch.clone(), batch.clone(), batch]);
         assert!(payload.len() < 16 * 1_024);
 
@@ -3222,10 +3205,9 @@ mod tests {
             .iter()
             .map(|field| field.as_ref().clone())
             .collect::<Vec<_>>();
-        let payload = Table::VideoAssets
-            .columns()
+        let payload = fields
             .iter()
-            .position(|name| *name == column::PAYLOAD)
+            .position(|field| field.name() == column::PAYLOAD)
             .expect("video assets contain a payload field");
         fields[payload] = Field::new(column::PAYLOAD, DataType::BinaryView, false);
 
@@ -3236,18 +3218,7 @@ mod tests {
 
     #[test]
     fn managed_decode_rejects_semantically_wrong_field_types() {
-        let batch = record_batch(
-            Table::Datasets
-                .columns()
-                .iter()
-                .map(|name| Field::new(*name, DataType::Null, true))
-                .collect(),
-            Table::Datasets
-                .columns()
-                .iter()
-                .map(|_| Arc::new(NullArray::new(1)) as ArrayRef)
-                .collect(),
-        );
+        let batch = null_typed_batch(Table::Datasets, 1);
 
         let error = PROJECT_SPEC
             .decode_entries(vec![(Table::Datasets, arrow_payload(&batch))])
@@ -3424,31 +3395,6 @@ mod tests {
     }
 
     #[test]
-    fn project_agent_history_rejects_legacy_and_future_shapes() {
-        let legacy = serde_json::json!({
-            "revision": 1,
-            "session": {
-                "workflow_id": "default",
-                "revision": 1,
-                "phase": "idle",
-                "messages": [agent_message("legacy-message")],
-                "updated_ms": 1
-            },
-            "provider_messages": [{"role": "user", "content": "Inspect relations"}]
-        });
-        assert!(
-            BundleAgentDocumentV2::validate_json(&legacy.to_string())
-                .unwrap_err()
-                .contains("current document shape")
-        );
-        assert!(
-            BundleAgentDocumentV2::validate_json(&serde_json::json!({"future": []}).to_string())
-                .unwrap_err()
-                .contains("current document shape")
-        );
-    }
-
-    #[test]
     fn project_decode_rejects_invalid_agent_history_before_restore_planning() {
         let invalid = serde_json::json!({
             "schema_version": 2,
@@ -3460,11 +3406,15 @@ mod tests {
         let workflow_runs = record_batch(
             vec![
                 Field::new("run_id", DataType::Utf8, false),
+                Field::new("document_version", DataType::UInt32, false),
                 Field::new("snapshot_json", DataType::Utf8, false),
                 Field::new("updated_ms", DataType::Int64, false),
             ],
             vec![
                 Arc::new(StringArray::from(vec!["agent:default"])) as ArrayRef,
+                Arc::new(UInt32Array::from(vec![
+                    WORKFLOW_AGENT_DOCUMENT_SCHEMA_VERSION as u32,
+                ])) as ArrayRef,
                 Arc::new(StringArray::from(vec![invalid])) as ArrayRef,
                 Arc::new(Int64Array::from(vec![1])) as ArrayRef,
             ],
@@ -4634,13 +4584,13 @@ mod tests {
         profile_event("studio.reload_preferences", preferences_start, (0, 0));
         let training_start = Instant::now();
         storage
-            .load_training_snapshot::<spiral_robotics_api::training::TrainingSnapshot>()
+            .load_training_history()
             .await
             .expect("profiled training reload must succeed");
         profile_event("studio.reload_training", training_start, (0, 0));
         let rollout_start = Instant::now();
         storage
-            .load_rollout_snapshot::<spiral_robotics_api::rollout::RolloutSnapshot>()
+            .load_rollout_session()
             .await
             .expect("profiled rollout reload must succeed");
         profile_event("studio.reload_rollout", rollout_start, (0, 0));

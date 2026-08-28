@@ -64,7 +64,7 @@ flowchart TD
 
 - **PERSIST-015** Relations must use stable semantic IDs for ownership.
 - **PERSIST-016** The episode relation must include identity, sample rate, frame
-  count, duration, and discarded state.
+  count, duration, discarded state, and the intervals omitted from its timeline.
 - **PERSIST-017** The joint-sample relation must include episode, stream, sample
   index, episode time, state, and optional action, velocity, and effort.
 - **PERSIST-018** SO-ARM101 state and action vectors must contain six ordered
@@ -81,6 +81,31 @@ flowchart TD
   color channels.
 - **PERSIST-022** Persisted vectors must use typed Arrow-compatible columns, not
   JSON strings.
+- **PERSIST-022a** Training-run and rollout history must be relations of typed
+  rows owned by the storage crate, never a serialized Studio wire type. The
+  training run relation must carry each retained run's identity, selected
+  dataset, policy configuration, optimizer schedule, and lifecycle; its metric
+  and checkpoint rows must live in child relations keyed by `run_id`; and one
+  rollout row must record the latest policy session keyed by `session_id`.
+  Every persisted enumeration spelling must be declared by storage and mapped
+  at the backend boundary.
+- **PERSIST-022b** A persisted document that is not yet decomposed into
+  relations must declare the version of its encoding in its own column. A
+  reader that meets a version it does not implement must refuse it with an
+  actionable error and must not modify the operator's document. Only a payload
+  of a known version that no longer parses may fall back to an empty document.
+- **PERSIST-022c** Nothing persisted under an episode may be a serialized
+  Studio wire type. An episode's arms, per-joint motor condition, and recording
+  gaps must be typed columns of the episode and episode-stream relations, and
+  the stream relation must fix each arm's frame order rather than relying on
+  physical row order. A pre-schema-8 episode relation is not decoded or
+  migrated.
+- **PERSIST-022d** A reader that encounters a legacy storage format it does not
+  implement must refuse it with an actionable error telling the operator to
+  start a fresh project. Detection must never modify, delete, hide, or replace
+  the stored data. Episode catalog failures must use the catalog issues channel;
+  training, rollout, and Workflow failures must use their hydration error
+  paths, leaving current-format projects fully usable.
 - **PERSIST-023** Table names, column names, and SQL value encoding must be
   centralized at the Spiral persistence boundary.
 - **PERSIST-024** Product storage must preserve real table semantics for
@@ -267,5 +292,4 @@ flowchart TD
 ## Current gap
 
 Ordered checksummed `schema_migrations` are not implemented yet. The current
-adapter rejects project files with a different schema version; this does not
-redefine the accepted migration behavior above.
+adapter refuses unsupported storage formats without modifying them.

@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use crate::schema::{SCHEMA_VERSION, column as db};
-use arrow_array::builder::{Float64Builder, Int64Builder, ListBuilder, StringBuilder};
+use arrow_array::builder::{Float64Builder, Int64Builder, ListBuilder};
 use arrow_array::{
     ArrayRef, BooleanArray, Float64Array, Int64Array, RecordBatch, StringArray, UInt32Array,
     UInt64Array,
@@ -15,8 +15,32 @@ use arrow_array::{
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use spiral_robotics_api::recording::EpisodeArm;
 
-use crate::episodes::{EpisodeCompletion, EpisodeError, EpisodeStart, Sample};
+use crate::arrow_rows::{
+    ArrowColumns, ListColumnBuilder as _, OptionalFloatListColumn, StringListColumn,
+    UnsignedListColumn,
+};
+use crate::episodes::{
+    ArmCondition, ArmConditionEffortExtremes, ArmConditionSummary, ArmConditionThermalExtremes,
+    EpisodeCompletion, EpisodeError, EpisodeRecordingGap, EpisodeStart, JointMotorLimits,
+    JointVoltageRange, Sample,
+};
 use crate::video::VideoSize;
+
+const NANOSECONDS_PER_SECOND: f64 = 1_000_000_000.0;
+
+/// Per-joint condition channels, in the order their columns are written.
+const CONDITION_COLUMNS: [&str; 10] = [
+    db::START_TEMPERATURE_CELSIUS,
+    db::START_VOLTAGE_VOLTS,
+    db::LIMIT_MAX_TEMPERATURE_CELSIUS,
+    db::LIMIT_MIN_VOLTAGE_VOLTS,
+    db::LIMIT_MAX_VOLTAGE_VOLTS,
+    db::LIMIT_MAX_LOAD,
+    db::PEAK_TEMPERATURE_CELSIUS,
+    db::MIN_VOLTAGE_VOLTS,
+    db::PEAK_LOAD,
+    db::PEAK_CURRENT_AMPS,
+];
 
 pub(crate) struct EpisodeSchema;
 
@@ -31,7 +55,7 @@ impl EpisodeSchema {
         ]))
     }
 
-    fn episodes() -> SchemaRef {
+    pub(crate) fn episodes() -> SchemaRef {
         Arc::new(Schema::new(vec![
             Field::new(db::EPISODE_ID, DataType::Utf8, false),
             Field::new(db::DATASET_ID, DataType::Utf8, false),
@@ -44,29 +68,43 @@ impl EpisodeSchema {
             Field::new(db::DURATION_NS, DataType::UInt64, false),
             Field::new(db::MAX_FOLLOW_ERROR_DEGREES, DataType::Float64, true),
             Field::new(db::DISCARDED, DataType::Boolean, false),
-            Field::new(db::METADATA_JSON, DataType::Utf8, false),
-        ]))
-    }
-
-    fn episode_streams() -> SchemaRef {
-        Arc::new(Schema::new(vec![
-            Field::new(db::EPISODE_ID, DataType::Utf8, false),
-            Field::new(db::STREAM_ID, DataType::Utf8, false),
-            Field::new(db::MODALITY, DataType::Utf8, false),
-            Field::new(db::ROBOT_TYPE, DataType::Utf8, true),
             Field::new(
-                db::JOINT_NAMES,
-                DataType::List(Arc::new(Field::new("item", DataType::Utf8, false))),
-                true,
+                db::RECORDING_GAP_AFTER_NS,
+                UnsignedListColumn::data_type(),
+                false,
             ),
-            Field::new(db::CAMERA_ID, DataType::Utf8, true),
-            Field::new(db::WIDTH, DataType::UInt32, true),
-            Field::new(db::HEIGHT, DataType::UInt32, true),
-            Field::new(db::FPS, DataType::UInt32, true),
+            Field::new(
+                db::RECORDING_GAP_DURATION_NS,
+                UnsignedListColumn::data_type(),
+                false,
+            ),
         ]))
     }
 
-    fn joint_samples() -> SchemaRef {
+    pub(crate) fn episode_streams() -> SchemaRef {
+        let condition = CONDITION_COLUMNS
+            .into_iter()
+            .map(|name| Field::new(name, OptionalFloatListColumn::data_type(), true));
+        Arc::new(Schema::new(
+            [
+                Field::new(db::EPISODE_ID, DataType::Utf8, false),
+                Field::new(db::STREAM_ID, DataType::Utf8, false),
+                Field::new(db::ORDINAL, DataType::UInt32, false),
+                Field::new(db::MODALITY, DataType::Utf8, false),
+                Field::new(db::ROBOT_TYPE, DataType::Utf8, true),
+                Field::new(db::JOINT_NAMES, StringListColumn::data_type(), true),
+                Field::new(db::CAMERA_ID, DataType::Utf8, true),
+                Field::new(db::WIDTH, DataType::UInt32, true),
+                Field::new(db::HEIGHT, DataType::UInt32, true),
+                Field::new(db::FPS, DataType::UInt32, true),
+            ]
+            .into_iter()
+            .chain(condition)
+            .collect::<Vec<_>>(),
+        ))
+    }
+
+    pub(crate) fn joint_samples() -> SchemaRef {
         let nullable_f64_list =
             || DataType::List(Arc::new(Field::new("item", DataType::Float64, true)));
         Arc::new(Schema::new(vec![
@@ -162,6 +200,10 @@ impl VideoStreamProperties {
             fps,
         }
     }
+
+    fn camera_id(&self) -> &str {
+        &self.camera_id
+    }
 }
 
 impl VideoStreamRow {
@@ -254,31 +296,126 @@ impl SpiralEpisodeEncoder {
     }
 }
 
-/// Build the single row that makes an episode visible to readers.
-impl EpisodeCompletion {
-    pub(crate) fn episode_batch(
-        &self,
-        start: &EpisodeStart,
+/// One row of [`crate::schema::Table::Episodes`], decoded from typed columns.
+///
+/// The relation is the whole record: arms come from the episode's joint stream
+/// rows, and every other field is a column of the episode row itself. Nothing
+/// is read out of a serialized wire type.
+#[derive(Clone, Debug)]
+pub(crate) struct StoredEpisodeRow {
+    start: EpisodeStart,
+    completion: EpisodeCompletion,
+    frames: u64,
+}
+
+impl StoredEpisodeRow {
+    pub(crate) const fn new(
+        start: EpisodeStart,
+        completion: EpisodeCompletion,
         frames: u64,
-    ) -> Result<RecordBatch, EpisodeError> {
-        let duration_ns =
-            EpisodeTimestamp::nanoseconds(self.duration_seconds(), "episode duration")?;
-        let metadata = serde_json::to_string(&(start, self)).map_err(|error| {
-            EpisodeError::invalid(format!("encoding episode metadata: {error}"))
-        })?;
+    ) -> Self {
+        Self {
+            start,
+            completion,
+            frames,
+        }
+    }
+
+    pub(crate) const fn start(&self) -> &EpisodeStart {
+        &self.start
+    }
+
+    pub(crate) const fn completion(&self) -> &EpisodeCompletion {
+        &self.completion
+    }
+
+    pub(crate) const fn frames(&self) -> u64 {
+        self.frames
+    }
+
+    pub(crate) fn into_parts(self) -> (EpisodeStart, EpisodeCompletion, u64) {
+        (self.start, self.completion, self.frames)
+    }
+
+    pub(crate) fn decode(
+        batch: &RecordBatch,
+        row: usize,
+        streams: &EpisodeStreamCatalog,
+    ) -> Result<Self, String> {
+        let columns = ArrowColumns::new(batch, "episode");
+        let id = columns.text(db::EPISODE_ID, row)?.to_owned();
+        let start = EpisodeStart::new(id.clone(), columns.text(db::DATASET_ID, row)?.to_owned())
+            .with_timing(
+                columns.timestamp(db::STARTED_MS, row)?,
+                columns.float(db::SAMPLE_HZ, row)?,
+            )
+            .with_source(
+                columns.text(db::SOURCE, row)?.to_owned(),
+                columns.optional_text(db::NOTE, row)?.map(str::to_owned),
+            )
+            .with_arms(streams.arms(&id), streams.start_condition(&id));
+        let gaps = RecordingGapColumns::decode(&columns, row)?;
+        let completion = EpisodeCompletion::new(
+            columns.unsigned(db::DURATION_NS, row)? as f64 / NANOSECONDS_PER_SECOND,
+            gaps,
+            streams.completion_condition(&id),
+        )
+        .with_max_follow_error_degrees(columns.optional_float(db::MAX_FOLLOW_ERROR_DEGREES, row)?)
+        .with_discarded(columns.boolean(db::DISCARDED, row)?);
+        Ok(Self {
+            start,
+            completion,
+            frames: columns.unsigned(db::FRAMES, row)?,
+        })
+    }
+
+    /// Encode whole episode rows stamped with the current [`SCHEMA_VERSION`].
+    pub(crate) fn batch(rows: &[Self]) -> Result<RecordBatch, EpisodeError> {
+        let mut after_ns = UnsignedListColumn::builder();
+        let mut duration_ns = UnsignedListColumn::builder();
+        let mut durations = Vec::with_capacity(rows.len());
+        for row in rows {
+            let gaps = RecordingGapColumns::encode(row.completion.recording_gaps())?;
+            after_ns.append_optional_list(Some(gaps.after_ns()));
+            duration_ns.append_optional_list(Some(gaps.duration_ns()));
+            durations.push(EpisodeTimestamp::nanoseconds(
+                row.completion.duration_seconds(),
+                "episode duration",
+            )?);
+        }
         let columns: Vec<ArrayRef> = vec![
-            Arc::new(StringArray::from(vec![start.id()])),
-            Arc::new(StringArray::from(vec![start.dataset_id()])),
-            Arc::new(UInt32Array::from(vec![SCHEMA_VERSION])),
-            Arc::new(Int64Array::from(vec![start.started_ms()])),
-            Arc::new(Float64Array::from(vec![start.sample_hz()])),
-            Arc::new(StringArray::from(vec![start.source()])),
-            Arc::new(StringArray::from(vec![start.note()])),
-            Arc::new(UInt64Array::from(vec![frames])),
-            Arc::new(UInt64Array::from(vec![duration_ns])),
-            Arc::new(Float64Array::from(vec![self.max_follow_error_degrees()])),
-            Arc::new(BooleanArray::from(vec![self.discarded()])),
-            Arc::new(StringArray::from(vec![metadata])),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|row| row.start.id()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|row| row.start.dataset_id()),
+            )),
+            Arc::new(UInt32Array::from(vec![SCHEMA_VERSION; rows.len()])),
+            Arc::new(Int64Array::from_iter_values(
+                rows.iter().map(|row| row.start.started_ms()),
+            )),
+            Arc::new(Float64Array::from_iter_values(
+                rows.iter().map(|row| row.start.sample_hz()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|row| row.start.source()),
+            )),
+            Arc::new(StringArray::from_iter(
+                rows.iter().map(|row| row.start.note()),
+            )),
+            Arc::new(UInt64Array::from_iter_values(
+                rows.iter().map(|row| row.frames),
+            )),
+            Arc::new(UInt64Array::from(durations)),
+            Arc::new(Float64Array::from_iter(
+                rows.iter()
+                    .map(|row| row.completion.max_follow_error_degrees()),
+            )),
+            Arc::new(BooleanArray::from_iter(
+                rows.iter().map(|row| Some(row.completion.discarded())),
+            )),
+            Arc::new(after_ns.finish()),
+            Arc::new(duration_ns.finish()),
         ];
         RecordBatch::try_new(EpisodeSchema::episodes(), columns).map_err(|error| {
             EpisodeError::invalid(format!("building Spiral episode batch: {error}"))
@@ -286,40 +423,454 @@ impl EpisodeCompletion {
     }
 }
 
-/// Describe every joint stream before its samples are appended.
-impl EpisodeStart {
-    pub(crate) fn streams_batch(&self) -> Result<RecordBatch, EpisodeError> {
-        let start = self;
-        let mut joint_names = ListBuilder::new(StringBuilder::new())
-            .with_field(Arc::new(Field::new("item", DataType::Utf8, false)));
-        for arm in start.arms() {
-            for joint in arm.joints() {
-                joint_names.values().append_value(joint);
-            }
-            joint_names.append(true);
+/// Build the single row that makes an episode visible to readers.
+impl EpisodeCompletion {
+    pub(crate) fn episode_batch(
+        &self,
+        start: &EpisodeStart,
+        frames: u64,
+    ) -> Result<RecordBatch, EpisodeError> {
+        StoredEpisodeRow::batch(&[StoredEpisodeRow::new(start.clone(), self.clone(), frames)])
+    }
+}
+
+/// The two parallel gap lists an episode row carries.
+struct RecordingGapColumns {
+    after_ns: Vec<u64>,
+    duration_ns: Vec<u64>,
+}
+
+impl RecordingGapColumns {
+    fn after_ns(&self) -> &[u64] {
+        &self.after_ns
+    }
+
+    fn duration_ns(&self) -> &[u64] {
+        &self.duration_ns
+    }
+
+    fn encode(gaps: &[EpisodeRecordingGap]) -> Result<Self, EpisodeError> {
+        Ok(Self {
+            after_ns: gaps
+                .iter()
+                .map(|gap| {
+                    EpisodeTimestamp::nanoseconds(gap.after_seconds(), "recording gap start")
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            duration_ns: gaps
+                .iter()
+                .map(|gap| {
+                    EpisodeTimestamp::nanoseconds(gap.duration_seconds(), "recording gap duration")
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        })
+    }
+
+    fn decode(columns: &ArrowColumns<'_>, row: usize) -> Result<Vec<EpisodeRecordingGap>, String> {
+        let after = columns.unsigned_list(db::RECORDING_GAP_AFTER_NS, row)?;
+        let duration = columns.unsigned_list(db::RECORDING_GAP_DURATION_NS, row)?;
+        if after.len() != duration.len() {
+            return Err(format!(
+                "stored episode has {} recording gap starts but {} durations",
+                after.len(),
+                duration.len()
+            ));
         }
-        let columns: Vec<ArrayRef> = vec![
+        Ok(after
+            .into_iter()
+            .zip(duration)
+            .map(|(after, duration)| {
+                EpisodeRecordingGap::new(
+                    after as f64 / NANOSECONDS_PER_SECOND,
+                    duration as f64 / NANOSECONDS_PER_SECOND,
+                )
+            })
+            .collect())
+    }
+}
+
+/// Which kind of data one episode stream carries.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StreamModality {
+    Joint,
+    Video,
+}
+
+impl StreamModality {
+    const fn persisted(self) -> &'static str {
+        match self {
+            Self::Joint => "joint",
+            Self::Video => "video",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "joint" => Ok(Self::Joint),
+            "video" => Ok(Self::Video),
+            other => Err(format!("stored stream modality {other:?} is not known")),
+        }
+    }
+}
+
+/// Identity of one stream inside one episode.
+///
+/// `ordinal` is the stream's position within its own modality. Joint streams
+/// are reconstructed in that order because it is the order their values appear
+/// in every recorded frame.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct EpisodeStreamKey {
+    episode_id: String,
+    stream_id: String,
+    ordinal: u32,
+}
+
+impl EpisodeStreamKey {
+    pub(crate) const fn new(episode_id: String, stream_id: String, ordinal: u32) -> Self {
+        Self {
+            episode_id,
+            stream_id,
+            ordinal,
+        }
+    }
+}
+
+/// One row of [`crate::schema::Table::EpisodeStreams`] in either modality.
+#[derive(Clone, Debug)]
+pub(crate) struct EpisodeStreamRow {
+    key: EpisodeStreamKey,
+    modality: StreamModality,
+    robot_type: Option<String>,
+    joints: Option<Vec<String>>,
+    start: Option<ArmCondition>,
+    peak: Option<ArmConditionSummary>,
+    video: Option<VideoStreamProperties>,
+}
+
+impl EpisodeStreamRow {
+    pub(crate) fn joint(key: EpisodeStreamKey, arm: &EpisodeArm) -> Self {
+        Self {
+            key,
+            modality: StreamModality::Joint,
+            robot_type: arm.robot_type().map(str::to_owned),
+            joints: Some(arm.joints().to_vec()),
+            start: None,
+            peak: None,
+            video: None,
+        }
+    }
+
+    pub(crate) fn video(key: EpisodeStreamKey, properties: VideoStreamProperties) -> Self {
+        Self {
+            key,
+            modality: StreamModality::Video,
+            robot_type: None,
+            joints: None,
+            start: None,
+            peak: None,
+            video: Some(properties),
+        }
+    }
+
+    /// Attach the motor readings recorded for this arm. An observation that
+    /// measured nothing is dropped so the columns stay null rather than
+    /// claiming an all-empty reading.
+    pub(crate) fn with_condition(
+        mut self,
+        start: Option<&ArmCondition>,
+        peak: Option<&ArmConditionSummary>,
+    ) -> Self {
+        self.start = start.filter(|value| !value.is_empty()).cloned();
+        self.peak = peak.filter(|value| !value.is_empty()).cloned();
+        self
+    }
+
+    fn arm(&self) -> EpisodeArm {
+        EpisodeArm::new(
+            self.key.stream_id.clone(),
+            self.robot_type.clone(),
+            self.joints.clone().unwrap_or_default(),
+        )
+    }
+
+    fn limit_column(&self, read: fn(JointMotorLimits) -> Option<f64>) -> Option<Vec<Option<f64>>> {
+        self.start
+            .as_ref()
+            .map(|start| start.limits().iter().copied().map(read).collect())
+    }
+
+    fn condition_columns(&self) -> [Option<Vec<Option<f64>>>; 10] {
+        let start = |read: fn(&ArmCondition) -> &[Option<f64>]| {
+            self.start.as_ref().map(|value| read(value).to_vec())
+        };
+        let peak = |read: fn(&ArmConditionSummary) -> &[Option<f64>]| {
+            self.peak.as_ref().map(|value| read(value).to_vec())
+        };
+        [
+            start(ArmCondition::temperature_celsius),
+            start(ArmCondition::voltage_volts),
+            self.limit_column(JointMotorLimits::max_temperature_celsius),
+            self.limit_column(JointMotorLimits::min_voltage_volts),
+            self.limit_column(JointMotorLimits::max_voltage_volts),
+            self.limit_column(JointMotorLimits::max_load),
+            peak(ArmConditionSummary::peak_temperature_celsius),
+            peak(ArmConditionSummary::min_voltage_volts),
+            peak(ArmConditionSummary::peak_load),
+            peak(ArmConditionSummary::peak_current_amps),
+        ]
+    }
+
+    pub(crate) fn decode(batch: &RecordBatch, row: usize) -> Result<Self, String> {
+        let columns = ArrowColumns::new(batch, "episode stream");
+        let modality = StreamModality::parse(columns.text(db::MODALITY, row)?)?;
+        let channel = |name: &str| columns.optional_float_list(name, row);
+        let start = StreamConditionColumns::start(
+            columns.text(db::STREAM_ID, row)?,
+            [
+                channel(CONDITION_COLUMNS[0])?,
+                channel(CONDITION_COLUMNS[1])?,
+                channel(CONDITION_COLUMNS[2])?,
+                channel(CONDITION_COLUMNS[3])?,
+                channel(CONDITION_COLUMNS[4])?,
+                channel(CONDITION_COLUMNS[5])?,
+            ],
+        );
+        let peak = StreamConditionColumns::peak(
+            columns.text(db::STREAM_ID, row)?,
+            [
+                channel(CONDITION_COLUMNS[6])?,
+                channel(CONDITION_COLUMNS[7])?,
+                channel(CONDITION_COLUMNS[8])?,
+                channel(CONDITION_COLUMNS[9])?,
+            ],
+        );
+        let video = match modality {
+            StreamModality::Joint => None,
+            StreamModality::Video => Some(VideoStreamProperties::new(
+                columns
+                    .optional_text(db::CAMERA_ID, row)?
+                    .unwrap_or_default()
+                    .to_owned(),
+                VideoSize::new(
+                    columns.optional_unsigned(db::WIDTH, row)?.unwrap_or(0) as u32,
+                    columns.optional_unsigned(db::HEIGHT, row)?.unwrap_or(0) as u32,
+                ),
+                columns.optional_unsigned(db::FPS, row)?.unwrap_or(0) as u32,
+            )),
+        };
+        Ok(Self {
+            key: EpisodeStreamKey::new(
+                columns.text(db::EPISODE_ID, row)?.to_owned(),
+                columns.text(db::STREAM_ID, row)?.to_owned(),
+                columns.ordinal(db::ORDINAL, row)?,
+            ),
+            modality,
+            robot_type: columns
+                .optional_text(db::ROBOT_TYPE, row)?
+                .map(str::to_owned),
+            joints: matches!(modality, StreamModality::Joint)
+                .then(|| columns.text_list(db::JOINT_NAMES, row))
+                .transpose()?,
+            start,
+            peak,
+            video,
+        })
+    }
+}
+
+/// Assemble the per-joint condition columns of one stream back into the arm
+/// observations they were written from.
+struct StreamConditionColumns;
+
+impl StreamConditionColumns {
+    fn start(arm: &str, channels: [Option<Vec<Option<f64>>>; 6]) -> Option<ArmCondition> {
+        let [
+            temperature,
+            voltage,
+            max_temperature,
+            min_voltage,
+            max_voltage,
+            max_load,
+        ] = channels;
+        let limits = [&max_temperature, &min_voltage, &max_voltage, &max_load]
+            .into_iter()
+            .flatten()
+            .map(Vec::len)
+            .max()
+            .unwrap_or(0);
+        let limits = (0..limits)
+            .map(|index| {
+                let read = |channel: &Option<Vec<Option<f64>>>| {
+                    channel
+                        .as_ref()
+                        .and_then(|values| values.get(index).copied().flatten())
+                };
+                JointMotorLimits::new(
+                    read(&max_temperature),
+                    JointVoltageRange::new(read(&min_voltage), read(&max_voltage)),
+                    read(&max_load),
+                )
+            })
+            .collect::<Vec<_>>();
+        let condition = ArmCondition::new(arm.to_owned())
+            .with_measurements(temperature.unwrap_or_default(), voltage.unwrap_or_default())
+            .with_limits(limits);
+        (!condition.is_empty()).then_some(condition)
+    }
+
+    fn peak(arm: &str, channels: [Option<Vec<Option<f64>>>; 4]) -> Option<ArmConditionSummary> {
+        let [temperature, voltage, load, current] = channels;
+        let summary = ArmConditionSummary::new(arm.to_owned()).with_extremes(
+            ArmConditionThermalExtremes::new(
+                temperature.unwrap_or_default(),
+                voltage.unwrap_or_default(),
+            ),
+            ArmConditionEffortExtremes::new(load.unwrap_or_default(), current.unwrap_or_default()),
+        );
+        (!summary.is_empty()).then_some(summary)
+    }
+}
+
+/// Describe every stream of an episode in one keyed relation.
+pub(crate) trait EpisodeStreamRows {
+    fn batch(&self) -> Result<RecordBatch, EpisodeError>;
+}
+
+impl EpisodeStreamRows for [EpisodeStreamRow] {
+    fn batch(&self) -> Result<RecordBatch, EpisodeError> {
+        let rows = self;
+        let mut joint_names = StringListColumn::builder();
+        for row in rows {
+            joint_names.append_optional_list(row.joints.as_deref());
+        }
+        let mut condition = std::array::from_fn::<_, 10, _>(|_| OptionalFloatListColumn::builder());
+        for row in rows {
+            for (builder, values) in condition.iter_mut().zip(row.condition_columns()) {
+                builder.append_optional_list(values.as_deref());
+            }
+        }
+        let video = |read: fn(&VideoStreamProperties) -> u32| {
+            UInt32Array::from_iter(rows.iter().map(|row| row.video.as_ref().map(&read)))
+        };
+        let columns: Vec<ArrayRef> = [
             Arc::new(StringArray::from_iter_values(
-                start.arms().iter().map(|_| start.id()),
+                rows.iter().map(|row| row.key.episode_id.as_str()),
+            )) as ArrayRef,
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|row| row.key.stream_id.as_str()),
+            )),
+            Arc::new(UInt32Array::from_iter_values(
+                rows.iter().map(|row| row.key.ordinal),
             )),
             Arc::new(StringArray::from_iter_values(
-                start.arms().iter().map(EpisodeArm::id),
-            )),
-            Arc::new(StringArray::from_iter_values(
-                start.arms().iter().map(|_| "joint"),
+                rows.iter().map(|row| row.modality.persisted()),
             )),
             Arc::new(StringArray::from_iter(
-                start.arms().iter().map(EpisodeArm::robot_type),
+                rows.iter().map(|row| row.robot_type.as_deref()),
             )),
             Arc::new(joint_names.finish()),
-            Arc::new(StringArray::from(vec![None::<&str>; start.arms().len()])),
-            Arc::new(UInt32Array::from(vec![None; start.arms().len()])),
-            Arc::new(UInt32Array::from(vec![None; start.arms().len()])),
-            Arc::new(UInt32Array::from(vec![None; start.arms().len()])),
-        ];
+            Arc::new(StringArray::from_iter(rows.iter().map(|row| {
+                row.video.as_ref().map(VideoStreamProperties::camera_id)
+            }))),
+            Arc::new(video(|properties| properties.size.width())),
+            Arc::new(video(|properties| properties.size.height())),
+            Arc::new(video(|properties| properties.fps)),
+        ]
+        .into_iter()
+        .chain(
+            condition
+                .into_iter()
+                .map(|mut builder| Arc::new(builder.finish()) as ArrayRef),
+        )
+        .collect();
         RecordBatch::try_new(EpisodeSchema::episode_streams(), columns).map_err(|error| {
             EpisodeError::invalid(format!("building Spiral stream batch: {error}"))
         })
+    }
+}
+
+/// Every stream row a read observed, indexed back to its episode.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct EpisodeStreamCatalog {
+    rows: Vec<EpisodeStreamRow>,
+}
+
+impl EpisodeStreamCatalog {
+    pub(crate) const fn new(rows: Vec<EpisodeStreamRow>) -> Self {
+        Self { rows }
+    }
+
+    /// One episode's joint streams, in the order their values appear in a frame.
+    fn joint_streams(&self, episode_id: &str) -> Vec<&EpisodeStreamRow> {
+        let mut streams = self
+            .rows
+            .iter()
+            .filter(|row| row.key.episode_id == episode_id && row.modality == StreamModality::Joint)
+            .collect::<Vec<_>>();
+        streams.sort_by(|left, right| {
+            left.key
+                .ordinal
+                .cmp(&right.key.ordinal)
+                .then_with(|| left.key.stream_id.cmp(&right.key.stream_id))
+        });
+        streams
+    }
+
+    pub(crate) fn arms(&self, episode_id: &str) -> Vec<EpisodeArm> {
+        self.joint_streams(episode_id)
+            .into_iter()
+            .map(EpisodeStreamRow::arm)
+            .collect()
+    }
+
+    pub(crate) fn start_condition(&self, episode_id: &str) -> Vec<ArmCondition> {
+        self.joint_streams(episode_id)
+            .into_iter()
+            .filter_map(|row| row.start.clone())
+            .collect()
+    }
+
+    pub(crate) fn completion_condition(&self, episode_id: &str) -> Vec<ArmConditionSummary> {
+        self.joint_streams(episode_id)
+            .into_iter()
+            .filter_map(|row| row.peak.clone())
+            .collect()
+    }
+}
+
+/// Describe every joint stream before its samples are appended.
+impl EpisodeStart {
+    pub(crate) fn stream_rows(&self, completion: &EpisodeCompletion) -> Vec<EpisodeStreamRow> {
+        self.arms()
+            .iter()
+            .enumerate()
+            .map(|(index, arm)| {
+                EpisodeStreamRow::joint(
+                    EpisodeStreamKey::new(
+                        self.id().to_owned(),
+                        arm.id().to_owned(),
+                        u32::try_from(index).unwrap_or(u32::MAX),
+                    ),
+                    arm,
+                )
+                .with_condition(
+                    self.condition()
+                        .iter()
+                        .find(|entry| entry.arm() == arm.id()),
+                    completion
+                        .condition()
+                        .iter()
+                        .find(|entry| entry.arm() == arm.id()),
+                )
+            })
+            .collect()
+    }
+
+    pub(crate) fn streams_batch(
+        &self,
+        completion: &EpisodeCompletion,
+    ) -> Result<RecordBatch, EpisodeError> {
+        self.stream_rows(completion).batch()
     }
 }
 
@@ -330,38 +881,20 @@ pub(crate) trait VideoStreamRows {
 
 impl VideoStreamRows for [VideoStreamRow] {
     fn batch(&self) -> Result<RecordBatch, EpisodeError> {
-        let rows = self;
-        let mut joint_names = ListBuilder::new(StringBuilder::new())
-            .with_field(Arc::new(Field::new("item", DataType::Utf8, false)));
-        for _ in rows {
-            joint_names.append(false);
-        }
-        let columns: Vec<ArrayRef> = vec![
-            Arc::new(StringArray::from_iter_values(
-                rows.iter().map(|row| row.episode_id.as_str()),
-            )),
-            Arc::new(StringArray::from_iter_values(
-                rows.iter().map(|row| row.stream_id.as_str()),
-            )),
-            Arc::new(StringArray::from_iter_values(rows.iter().map(|_| "video"))),
-            Arc::new(StringArray::from(vec![None::<&str>; rows.len()])),
-            Arc::new(joint_names.finish()),
-            Arc::new(StringArray::from_iter_values(
-                rows.iter().map(|row| row.properties.camera_id.as_str()),
-            )),
-            Arc::new(UInt32Array::from_iter_values(
-                rows.iter().map(|row| row.properties.size.width()),
-            )),
-            Arc::new(UInt32Array::from_iter_values(
-                rows.iter().map(|row| row.properties.size.height()),
-            )),
-            Arc::new(UInt32Array::from_iter_values(
-                rows.iter().map(|row| row.properties.fps),
-            )),
-        ];
-        RecordBatch::try_new(EpisodeSchema::episode_streams(), columns).map_err(|error| {
-            EpisodeError::invalid(format!("building Spiral video stream batch: {error}"))
-        })
+        self.iter()
+            .enumerate()
+            .map(|(index, row)| {
+                EpisodeStreamRow::video(
+                    EpisodeStreamKey::new(
+                        row.episode_id.clone(),
+                        row.stream_id.clone(),
+                        u32::try_from(index).unwrap_or(u32::MAX),
+                    ),
+                    row.properties.clone(),
+                )
+            })
+            .collect::<Vec<_>>()
+            .batch()
     }
 }
 
@@ -573,29 +1106,11 @@ impl EpisodeTimestamp {
 
 #[cfg(test)]
 mod tests {
-    use crate::schema::Table;
 
     use arrow_array::{Array as _, Float64Array, ListArray, StringArray, UInt64Array};
     use spiral_robotics_api::recording::EpisodeArm;
 
     use super::*;
-
-    #[test]
-    fn persisted_arrow_schemas_match_the_shared_contract() {
-        for (table, schema) in [
-            (Table::Datasets, EpisodeSchema::datasets()),
-            (Table::Episodes, EpisodeSchema::episodes()),
-            (Table::EpisodeStreams, EpisodeSchema::episode_streams()),
-            (Table::JointSamples, EpisodeSchema::joint_samples()),
-        ] {
-            let actual = schema
-                .fields()
-                .iter()
-                .map(|field| field.name().as_str())
-                .collect::<Vec<_>>();
-            assert_eq!(actual, table.columns(), "{table}");
-        }
-    }
 
     fn start() -> EpisodeStart {
         EpisodeStart::new("episode_000042".to_owned(), "default".to_owned())
@@ -749,7 +1264,9 @@ mod tests {
 
     #[test]
     fn stream_rows_keep_joint_order() {
-        let batch = start().streams_batch().unwrap();
+        let batch = start()
+            .streams_batch(&EpisodeCompletion::new(0.0, Vec::new(), Vec::new()))
+            .unwrap();
         let joint_names = batch
             .column_by_name("joint_names")
             .unwrap()
@@ -780,5 +1297,102 @@ mod tests {
             .downcast_ref::<StringArray>()
             .unwrap();
         assert_eq!(modality.value(0), "video");
+    }
+
+    fn condition() -> Vec<ArmCondition> {
+        vec![
+            ArmCondition::new("follower".to_owned())
+                .with_measurements(vec![Some(31.5), None], vec![Some(11.9), Some(12.0)])
+                .with_limits(vec![
+                    JointMotorLimits::new(
+                        Some(70.0),
+                        JointVoltageRange::new(Some(9.0), Some(14.0)),
+                        Some(0.8),
+                    ),
+                    JointMotorLimits::default(),
+                ]),
+        ]
+    }
+
+    fn condition_summary() -> Vec<ArmConditionSummary> {
+        vec![
+            ArmConditionSummary::new("follower".to_owned()).with_extremes(
+                ArmConditionThermalExtremes::new(
+                    vec![Some(36.0), Some(35.0)],
+                    vec![Some(11.5), Some(11.6)],
+                ),
+                ArmConditionEffortExtremes::new(vec![Some(0.4), None], vec![Some(1.1), Some(1.2)]),
+            ),
+        ]
+    }
+
+    fn populated() -> StoredEpisodeRow {
+        StoredEpisodeRow::new(
+            start().with_arms(start().arms().to_vec(), condition()),
+            EpisodeCompletion::new(
+                2.5,
+                vec![EpisodeRecordingGap::new(1.0, 0.25)],
+                condition_summary(),
+            )
+            .with_max_follow_error_degrees(Some(1.25))
+            .with_discarded(true),
+            150,
+        )
+    }
+
+    /// Read one episode back out of the two relations that hold it.
+    fn reread(row: &StoredEpisodeRow) -> StoredEpisodeRow {
+        let streams = row.start().stream_rows(row.completion()).batch().unwrap();
+        let streams = EpisodeStreamCatalog::new(
+            (0..streams.num_rows())
+                .map(|index| EpisodeStreamRow::decode(&streams, index).unwrap())
+                .collect(),
+        );
+        let episodes = StoredEpisodeRow::batch(std::slice::from_ref(row)).unwrap();
+        StoredEpisodeRow::decode(&episodes, 0, &streams).unwrap()
+    }
+
+    /// Everything the metadata blob used to carry now survives as columns.
+    #[test]
+    fn a_populated_episode_round_trips_through_typed_columns() {
+        let original = populated();
+        let restored = reread(&original);
+
+        assert_eq!(restored.start().id(), "episode_000042");
+        assert_eq!(restored.start().dataset_id(), "default");
+        assert_eq!(restored.start().started_ms(), 1_700_000_000_000);
+        assert_eq!(restored.start().sample_hz(), 60.0);
+        assert_eq!(restored.start().source(), "teleoperation");
+        assert_eq!(restored.start().note(), Some("pick cube"));
+        assert_eq!(restored.frames(), 150);
+        assert_eq!(restored.start().arms(), original.start().arms());
+        assert_eq!(restored.start().condition(), condition());
+        assert_eq!(restored.completion().duration_seconds(), 2.5);
+        assert_eq!(
+            restored.completion().recording_gaps(),
+            [EpisodeRecordingGap::new(1.0, 0.25)]
+        );
+        assert_eq!(restored.completion().max_follow_error_degrees(), Some(1.25));
+        assert!(restored.completion().discarded());
+        assert_eq!(restored.completion().condition(), condition_summary());
+    }
+
+    /// A take whose motors never answered writes null condition columns rather
+    /// than an all-empty observation, and reads back as no observation at all.
+    #[test]
+    fn an_episode_without_motor_telemetry_stores_null_condition_columns() {
+        let bare = StoredEpisodeRow::new(
+            start(),
+            EpisodeCompletion::new(0.0, Vec::new(), Vec::new()),
+            0,
+        );
+        let batch = bare.start().stream_rows(bare.completion()).batch().unwrap();
+        for name in CONDITION_COLUMNS {
+            assert!(batch.column_by_name(name).unwrap().is_null(0), "{name}");
+        }
+        let restored = reread(&bare);
+        assert_eq!(restored.start().condition(), []);
+        assert_eq!(restored.completion().condition(), []);
+        assert_eq!(restored.completion().recording_gaps(), []);
     }
 }

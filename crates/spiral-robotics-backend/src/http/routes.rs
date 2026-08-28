@@ -115,7 +115,7 @@ use spiral_robotics_storage::StorageManager;
 use spiral_robotics_storage::StudioPreferencesStore;
 use spiral_robotics_storage::episodes::{
     ArmCondition, EpisodeError, EpisodeInspection, EpisodeRecordingRequest, EpisodeStore,
-    EpisodeWriter, RobotPlaybackRequest,
+    EpisodeWriter, JointMotorLimits, RobotPlaybackRequest,
 };
 use spiral_robotics_storage::video::{VideoAssetKey, VideoByteRange};
 
