@@ -733,7 +733,6 @@ impl EpisodeStore {
 
     pub(crate) async fn full_episode(&self, id: &str) -> Result<FullEpisode, EpisodeError> {
         EpisodeId::try_from(id).map_err(|_| EpisodeError::InvalidId(id.to_owned()))?;
-        let samples = Table::JointSamples.qualified_name(self.project_store.namespace());
         let sample_query = SpiralSql::episode_samples(self.project_store.namespace(), id);
         let mut connection = self
             .project_store
@@ -749,24 +748,16 @@ impl EpisodeStore {
             .next()
             .ok_or_else(|| EpisodeError::NotFound(id.to_owned()))?
             .into_parts();
-        let rows = if connection
-            .table_exists(&samples)
+        let result = connection
+            .query_rows(&sample_query, MAX_EPISODE_ROWS)
             .await
-            .map_err(EpisodeError::Invalid)?
-        {
-            let result = connection
-                .query_rows(&sample_query, MAX_EPISODE_ROWS)
-                .await
-                .map_err(EpisodeError::Invalid)?;
-            if result.truncated() {
-                return Err(EpisodeError::Invalid(format!(
-                    "episode {id:?} exceeds the supported row limit"
-                )));
-            }
-            result.into_rows()
-        } else {
-            Vec::new()
-        };
+            .map_err(EpisodeError::Invalid)?;
+        if result.truncated() {
+            return Err(EpisodeError::Invalid(format!(
+                "episode {id:?} exceeds the supported row limit"
+            )));
+        }
+        let rows = result.into_rows();
         let decoded = start.decode_samples(rows).map_err(EpisodeError::Invalid)?;
         Ok(FullEpisode {
             start,
@@ -1001,13 +992,6 @@ impl EpisodeStore {
             .connect()
             .await
             .map_err(EpisodeError::Invalid)?;
-        if !connection
-            .table_exists(&relation)
-            .await
-            .map_err(EpisodeError::Invalid)?
-        {
-            return Ok(Vec::new());
-        }
         let result = connection.query_rows(&format!("SELECT {}, {}, {}, {}, {}, {}, {}, {} FROM {relation} WHERE {} = {id} ORDER BY {}, {}", db::STREAM_ID, db::CAMERA_ID, db::WIDTH, db::HEIGHT, db::FPS, db::FRAMES, db::SEGMENT_INDEX, db::TIMELINE_OFFSET_NS, db::EPISODE_ID, db::STREAM_ID, db::SEGMENT_INDEX), 10_000).await.map_err(EpisodeError::Invalid)?;
         result
             .into_rows()
@@ -1633,18 +1617,15 @@ impl EpisodeCatalogRead {
         episode_id: Option<&str>,
     ) -> Result<Self, EpisodeError> {
         let episodes = Table::Episodes.qualified_name(namespace);
-        if !connection
-            .table_exists(&episodes)
-            .await
-            .map_err(EpisodeError::Invalid)?
-        {
-            return Ok(Self::default());
-        }
         let schema = connection
             .relation_schema(&episodes)
             .await
             .map_err(EpisodeError::Invalid)?
-            .ok_or_else(|| EpisodeError::Invalid("episode relation disappeared".to_owned()))?;
+            .ok_or_else(|| {
+                EpisodeError::Invalid(format!(
+                    "managed Spiral relation {episodes} is missing; run Settings → SpiralDB → Test connection to provision it"
+                ))
+            })?;
         if schema.field_with_name("metadata_json").is_ok() {
             return Err(EpisodeError::Invalid(LEGACY_PROJECT_ERROR.to_owned()));
         }
@@ -1684,13 +1665,6 @@ impl EpisodeCatalogRead {
         episode_id: Option<&str>,
     ) -> Result<EpisodeStreamCatalog, EpisodeError> {
         let relation = Table::EpisodeStreams.qualified_name(namespace);
-        if !connection
-            .table_exists(&relation)
-            .await
-            .map_err(EpisodeError::Invalid)?
-        {
-            return Ok(EpisodeStreamCatalog::default());
-        }
         let mut rows = Vec::new();
         for batch in connection
             .read_batches(&format!(

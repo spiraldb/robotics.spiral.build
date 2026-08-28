@@ -335,12 +335,11 @@ struct ImportCollision<'a> {
 impl ImportCollision<'_> {
     async fn refuse(self, connection: &mut ProjectConnection) -> Result<(), String> {
         let datasets = Table::Datasets.qualified_name(self.namespace);
-        if connection.table_exists(&datasets).await?
-            && !connection
-                .query_rows(&SpiralSql::dataset_exists(&datasets, self.dataset_id), 1)
-                .await?
-                .rows()
-                .is_empty()
+        if !connection
+            .query_rows(&SpiralSql::dataset_exists(&datasets, self.dataset_id), 1)
+            .await?
+            .rows()
+            .is_empty()
         {
             return Err(format!(
                 "dataset {:?} already exists; choose another dataset ID",
@@ -500,7 +499,6 @@ impl StorageManager {
         let dataset_id = inspection.dataset_id().to_owned();
         let mut warnings = inspection.warnings().to_vec();
         let mut connection = self.project_store().connect_exclusive().await?;
-        connection.ensure_dataset_namespace(&namespace).await?;
         if let Err(error) = connection.begin_transaction().await {
             connection.discard();
             return Err(format!(

@@ -295,12 +295,7 @@ impl EpisodeBundle {
             dataset_id,
         } = selection;
         EpisodeBundle::validate_dataset_id(dataset_id)?;
-        let datasets = Table::Datasets.qualified_name(namespace);
         let episodes = Table::Episodes.qualified_name(namespace);
-        if !connection.table_exists(&datasets).await? || !connection.table_exists(&episodes).await?
-        {
-            return Err(format!("dataset {dataset_id:?} has no episodes to export"));
-        }
         let dataset = SpiralSql::string_literal(dataset_id);
         let episode_ids = format!(
             "SELECT {episode_id} FROM {episodes} WHERE {dataset_id_column} = {dataset}",
@@ -310,9 +305,6 @@ impl EpisodeBundle {
         let mut queries = Vec::new();
         for table in EPISODE_TABLES {
             let relation = table.qualified_name(namespace);
-            if !connection.table_exists(&relation).await? {
-                continue;
-            }
             let query = match table {
                 Table::Datasets | Table::Episodes => format!(
                     "SELECT * FROM {relation} WHERE {} = {dataset}",
@@ -506,9 +498,6 @@ impl ProjectBundle {
         let mut queries = Vec::new();
         for table in Table::ALL {
             let relation = table.qualified_name(namespace);
-            if !connection.table_exists(&relation).await? {
-                continue;
-            }
             let query = if table == Table::VideoAssets {
                 BundleSpec::portable_video_assets_query(&relation, None)
             } else {
@@ -718,6 +707,7 @@ impl ProjectBundle {
     ) -> Result<ProjectImportSummary, String> {
         let BundleSource { namespace, bytes } = source;
         let decoded = ProjectBundle::decode_entries(PROJECT_SPEC.parse_raw(bytes)?)?;
+        let decoded = ProjectBundle::with_empty_managed_relations(decoded);
         let fixed_relations = decoded
             .iter()
             .filter_map(|entry| match &entry.relation {
@@ -749,27 +739,6 @@ impl ProjectBundle {
             .begin_bundle_transaction("project import")
             .await?;
         let outcome = async {
-            // Retire only relations absent from the incoming project. Relations in
-            // the bundle are atomically replaced below through hosted Arbor. All
-            // namespace swaps remain staged in this one project transaction, so a
-            // reader observes either the old project or the complete replacement.
-            for table in Table::ALL.into_iter().rev() {
-                if decoded
-                    .iter()
-                    .any(|entry| entry.relation == ProjectRelation::Managed(table))
-                {
-                    continue;
-                }
-                let relation = table.qualified_name(namespace);
-                if connection.table_exists(&relation).await? {
-                    connection
-                        .execute_update_sql(&format!("DROP TABLE {relation}"))
-                        .await
-                        .map_err(|error| {
-                            format!("clearing project relation {relation}: {error}")
-                        })?;
-                }
-            }
             for relation in &workflow_plan.retire_caches {
                 if connection.table_exists(relation).await? {
                     connection
@@ -806,7 +775,13 @@ impl ProjectBundle {
                 summary.record_relation(
                     batches.iter().map(RecordBatch::num_rows).sum::<usize>() as u64
                 );
-                connection.replace_batches(&relation, batches).await?;
+                if matches!(entry.relation, ProjectRelation::Managed(_)) {
+                    connection.replace_batches(&relation, batches).await?;
+                } else {
+                    connection
+                        .replace_or_create_batches(&relation, batches)
+                        .await?;
+                }
             }
             Ok(summary)
         }
@@ -822,10 +797,11 @@ impl ProjectBundle {
             );
             return Ok(summary);
         }
-        // Native ingest can create a relation inside the import transaction, but
-        // Spiral's SQL binder cannot resolve that new relation until the commit is
-        // published. Keep the project_store's exclusive checkout while reconciling
-        // the derived MP4 resources immediately after the durable rows commit.
+        // Dynamic Workflow relations may be created inside the import
+        // transaction, and Spiral's SQL binder cannot resolve a new relation
+        // until the commit is published. Keep the project_store's exclusive
+        // checkout while reconciling derived MP4 resources immediately after
+        // the durable rows commit.
         if let Err(error) = EpisodeBundle::reconcile_project_video_dataset(
             connection,
             namespace,
@@ -838,6 +814,29 @@ impl ProjectBundle {
             ));
         }
         Ok(summary)
+    }
+
+    fn with_empty_managed_relations(
+        mut decoded: Vec<DecodedProjectRelation>,
+    ) -> Vec<DecodedProjectRelation> {
+        let mut complete = Vec::new();
+        for table in Table::ALL {
+            if let Some(index) = decoded
+                .iter()
+                .position(|entry| entry.relation == ProjectRelation::Managed(table))
+            {
+                complete.push(decoded.remove(index));
+            } else {
+                complete.push(DecodedProjectRelation {
+                    relation: ProjectRelation::Managed(table),
+                    batches: vec![RecordBatch::new_empty(Arc::new(
+                        table.managed_relation_schema(),
+                    ))],
+                });
+            }
+        }
+        complete.append(&mut decoded);
+        complete
     }
 }
 
@@ -859,12 +858,6 @@ impl EpisodeBundle {
         let video_episode_ids = EpisodeBundle::video_episode_ids(&decoded)?;
         let existing_video_episodes = connection.stored_video_episode_ids(namespace).await?;
         EpisodeBundle::reject_existing_episodes(connection, namespace, &episode_ids).await?;
-        connection.ensure_dataset_namespace(namespace).await?;
-        if !video_episode_ids.is_empty() {
-            connection
-                .ensure_video_assets_blob_relation(namespace)
-                .await?;
-        }
         if !existing_video_episodes.is_empty()
             && !connection.video_dataset_exists(namespace).await?
         {
@@ -878,12 +871,11 @@ impl EpisodeBundle {
             .await?;
         let outcome = async {
             let datasets = Table::Datasets.qualified_name(namespace);
-            let dataset_exists = connection.table_exists(&datasets).await?
-                && !connection
-                    .query_rows(&SpiralSql::dataset_exists(&datasets, dataset_id), 1)
-                    .await?
-                    .rows()
-                    .is_empty();
+            let dataset_exists = !connection
+                .query_rows(&SpiralSql::dataset_exists(&datasets, dataset_id), 1)
+                .await?
+                .rows()
+                .is_empty();
             let mut imported_rows = 0_u64;
             for (table, batches) in decoded {
                 if table == Table::Datasets && dataset_exists {
@@ -2659,9 +2651,6 @@ impl EpisodeBundle {
         episode_ids: &[String],
     ) -> Result<(), String> {
         let episodes = Table::Episodes.qualified_name(namespace);
-        if !connection.table_exists(&episodes).await? {
-            return Ok(());
-        }
         for chunk in episode_ids.chunks(100) {
             let candidates = chunk
                 .iter()
@@ -3565,14 +3554,22 @@ mod tests {
     }
 
     #[test]
-    fn empty_project_envelope_is_valid() {
+    fn empty_project_envelope_restores_every_managed_relation_as_empty() {
         let bundle = envelope(manifest(Vec::new()), &[]);
         assert_eq!(PROJECT_SPEC.parse(&bundle).unwrap(), Vec::new());
-        assert!(
-            ProjectBundle::decode_entries(PROJECT_SPEC.parse_raw(&bundle).unwrap())
-                .unwrap()
-                .is_empty()
-        );
+        let decoded =
+            ProjectBundle::decode_entries(PROJECT_SPEC.parse_raw(&bundle).unwrap()).unwrap();
+        let complete = ProjectBundle::with_empty_managed_relations(decoded);
+        assert_eq!(complete.len(), Table::ALL.len());
+        for (entry, table) in complete.iter().zip(Table::ALL) {
+            assert_eq!(entry.relation, ProjectRelation::Managed(table));
+            assert_eq!(entry.batches.len(), 1);
+            assert_eq!(entry.batches[0].num_rows(), 0);
+            assert_eq!(
+                entry.batches[0].schema().as_ref(),
+                &table.managed_relation_schema()
+            );
+        }
     }
 
     #[test]
@@ -4128,16 +4125,14 @@ mod tests {
         let project_store = configured_project_store(project, namespace);
         let _cleanup = TestNamespace::new(project_store.clone());
         let storage = StorageManager::new(project_store.clone());
+        let readiness = storage.test_spiral().await;
+        assert!(readiness.ok(), "{}", readiness.message());
 
         {
             let mut connection = project_store
                 .connect_exclusive()
                 .await
                 .expect("the exported Spiral project must connect");
-            connection
-                .ensure_dataset_namespace(project_store.namespace())
-                .await
-                .expect("the exported Spiral namespace must exist");
             connection
                 .ingest_batch(
                     &Table::StudioSettings.qualified_name(project_store.namespace()),
@@ -4159,12 +4154,11 @@ mod tests {
             .await
             .expect("exporting the Spiral project must succeed");
         let exported_payloads = relation_payloads(&exported);
-        assert_eq!(
-            exported_payloads.keys().cloned().collect::<Vec<_>>(),
-            vec![
-                Table::StudioSettings.name().to_owned(),
-                Table::TrainingCheckpoints.name().to_owned(),
-            ]
+        assert_eq!(exported_payloads.len(), Table::ALL.len());
+        assert!(
+            Table::ALL
+                .iter()
+                .all(|table| exported_payloads.contains_key(table.name()))
         );
 
         {
@@ -4172,20 +4166,21 @@ mod tests {
                 .connect_exclusive()
                 .await
                 .expect("the replacement Spiral project must connect");
-            drop_studio_relations(&mut connection, project_store.namespace())
-                .await
-                .expect("the exported relations must clear");
             connection
-                .ingest_batch(
+                .replace_batches(
                     &Table::StudioSettings.qualified_name(project_store.namespace()),
-                    settings_batch("replacement-setting", r#"{"source":"replacement"}"#, 20),
+                    vec![settings_batch(
+                        "replacement-setting",
+                        r#"{"source":"replacement"}"#,
+                        20,
+                    )],
                 )
                 .await
                 .expect("the replacement setting must save");
             connection
-                .ingest_batch(
+                .replace_batches(
                     &Table::RolloutRuns.qualified_name(project_store.namespace()),
-                    snapshot_batch("replacement-run"),
+                    vec![snapshot_batch("replacement-run")],
                 )
                 .await
                 .expect("the replacement rollout must save");
@@ -4201,7 +4196,7 @@ mod tests {
             .import_project_bundle(&exported)
             .await
             .expect("importing the Spiral project must succeed");
-        assert_eq!(summary.relations(), 2);
+        assert_eq!(summary.relations(), Table::ALL.len() as u64);
         assert_eq!(summary.rows(), 2);
 
         let restored = storage
@@ -4213,11 +4208,14 @@ mod tests {
             .connect()
             .await
             .expect("the restored Spiral project must connect");
+        let rollout = Table::RolloutRuns.qualified_name(project_store.namespace());
         assert!(
-            !connection
-                .table_exists(&Table::RolloutRuns.qualified_name(project_store.namespace()))
+            connection
+                .query_rows(&format!("SELECT * FROM {rollout}"), 1)
                 .await
                 .expect("checking overwrite semantics must succeed")
+                .rows()
+                .is_empty()
         );
         drop(connection);
         _cleanup.cleanup().await;
@@ -4239,15 +4237,13 @@ mod tests {
         let project_store = configured_project_store(project, namespace);
         let _cleanup = TestNamespace::new(project_store.clone());
         let storage = StorageManager::new(project_store.clone());
+        let readiness = storage.test_spiral().await;
+        assert!(readiness.ok(), "{}", readiness.message());
 
         let mut connection = project_store
             .connect_exclusive()
             .await
             .expect("the source episode project must connect");
-        connection
-            .ensure_dataset_namespace(project_store.namespace())
-            .await
-            .expect("the source episode namespace must exist");
         EpisodeSeed::new(project_store.namespace(), "source", "episode_exported")
             .with_started_ms(10)
             .save(&mut connection)
@@ -4265,15 +4261,19 @@ mod tests {
             .into_iter()
             .map(|(table, _)| table)
             .collect::<Vec<_>>();
-        assert_eq!(exported_relations, vec![Table::Datasets, Table::Episodes]);
+        assert_eq!(exported_relations, EPISODE_TABLES);
 
+        let empty_project = PROJECT_SPEC
+            .build(Vec::new())
+            .expect("the empty project bundle must build");
+        storage
+            .import_project_bundle(&empty_project)
+            .await
+            .expect("the source project rows must clear without dropping relations");
         let mut connection = project_store
             .connect_exclusive()
             .await
             .expect("the target episode project must connect");
-        drop_studio_relations(&mut connection, project_store.namespace())
-            .await
-            .expect("the source episode relations must clear");
         EpisodeSeed::new(project_store.namespace(), "target", "episode_existing")
             .with_started_ms(20)
             .save(&mut connection)
@@ -4337,6 +4337,8 @@ mod tests {
         let project_store = configured_project_store(project, namespace);
         let _cleanup = TestNamespace::new(project_store.clone());
         let storage = StorageManager::new(project_store.clone());
+        let readiness = storage.test_spiral().await;
+        assert!(readiness.ok(), "{}", readiness.message());
         let episode_id = "episode_video_import";
         let start = EpisodeStart::new(episode_id.to_owned(), "video-transfer".to_owned())
             .with_timing(10, 2.0)
@@ -4365,10 +4367,6 @@ mod tests {
             .await
             .expect("the video project must connect");
         connection
-            .ensure_dataset_namespace(project_store.namespace())
-            .await
-            .expect("the video project namespace must exist");
-        connection
             .ingest_batch(
                 &Table::Datasets.qualified_name(project_store.namespace()),
                 start
@@ -4389,27 +4387,26 @@ mod tests {
         connection
             .ingest_batch(
                 &Table::VideoAssets.qualified_name(project_store.namespace()),
-                video_asset_batch(episode_id, &mp4),
+                EpisodeBundle::prepare_video_asset_import(
+                    video_asset_batch(episode_id, &mp4),
+                    project_store.namespace(),
+                )
+                .expect("the portable video fixture must normalize to Blob"),
             )
             .await
             .expect("the video asset must save");
-        connection
-            .ensure_video_assets_blob_relation(project_store.namespace())
-            .await
-            .expect("legacy Binary video rows must migrate to Blob without derived resources");
         drop(connection);
         let exported = storage
             .export_project_bundle()
             .await
             .expect("exporting the video project must succeed");
-        let mut connection = project_store
-            .connect_exclusive()
-            .await
-            .expect("the video project must reconnect");
-        drop_studio_relations(&mut connection, project_store.namespace())
+        let empty_project = PROJECT_SPEC
+            .build(Vec::new())
+            .expect("the empty project bundle must build");
+        storage
+            .import_project_bundle(&empty_project)
             .await
             .expect("clearing the relational fixture before import must succeed");
-        drop(connection);
 
         let first_import = storage
             .import_project_bundle(&exported)
@@ -4551,16 +4548,15 @@ mod tests {
         let project_store = configured_project_store(project, namespace);
         profile_event("studio.repository_config", repository_start, (0, 0));
         let cleanup = TestNamespace::new(project_store.clone());
+        let storage = StorageManager::new(project_store.clone());
 
         let namespace_start = Instant::now();
+        let readiness = storage.test_spiral().await;
+        assert!(readiness.ok(), "{}", readiness.message());
         let mut connection = project_store
             .connect_exclusive()
             .await
             .expect("the profiling project must connect");
-        connection
-            .ensure_dataset_namespace(project_store.namespace())
-            .await
-            .expect("the profiling namespace must be created");
         profile_event("spiral.setup_namespace", namespace_start, (0, 0));
 
         let exclusive_start = Instant::now();
@@ -4575,7 +4571,6 @@ mod tests {
             (summary.rows() as usize, bytes.len()),
         );
 
-        let storage = StorageManager::new(project_store.clone());
         let preferences_start = Instant::now();
         storage
             .load_studio_preferences()
@@ -4654,15 +4649,14 @@ mod tests {
         );
         let project_store = configured_project_store(project, namespace);
         let cleanup = TestNamespace::new(project_store.clone());
+        let storage = StorageManager::new(project_store.clone());
+        let readiness = storage.test_spiral().await;
+        assert!(readiness.ok(), "{}", readiness.message());
 
         let mut connection = project_store
             .connect_exclusive()
             .await
             .expect("the scoped profiling project must connect");
-        connection
-            .ensure_dataset_namespace(project_store.namespace())
-            .await
-            .expect("the scoped profiling namespace must exist");
         for (label, table, row_limit) in [
             ("dataset_1", Table::Datasets, 1),
             ("joint_0", Table::JointSamples, 0),
@@ -4690,6 +4684,7 @@ mod tests {
 
             ProfileWrite::new(label, "ingest_missing_autocommit", &autocommit_target)
                 .with_batches(&batches, (rows, encoded_bytes))
+                .creating_if_missing()
                 .write_autocommit(&mut connection)
                 .await
                 .expect("the missing autocommit profile write must succeed");
@@ -4700,12 +4695,14 @@ mod tests {
                 .expect("the existing autocommit profile write must succeed");
             ProfileWrite::new(label, "ingest_missing", &ingest_target)
                 .with_batches(&batches, (rows, encoded_bytes))
+                .creating_if_missing()
                 .write_transaction(&mut connection)
                 .await
                 .expect("the missing ingest profile write must succeed");
             ProfileWrite::new(label, "replace_missing", &target)
                 .with_batches(&batches, (rows, encoded_bytes))
                 .with_replace()
+                .creating_if_missing()
                 .write_transaction(&mut connection)
                 .await
                 .expect("the missing replacement profile write must succeed");
@@ -4762,6 +4759,7 @@ mod tests {
         batches: &'a [RecordBatch],
         metrics: (usize, usize),
         replace: bool,
+        create_if_missing: bool,
     }
 
     impl<'a> ProfileWrite<'a> {
@@ -4773,6 +4771,7 @@ mod tests {
                 batches: &[],
                 metrics: (0, 0),
                 replace: false,
+                create_if_missing: false,
             }
         }
 
@@ -4787,11 +4786,26 @@ mod tests {
             self
         }
 
+        fn creating_if_missing(mut self) -> Self {
+            self.create_if_missing = true;
+            self
+        }
+
         async fn write_autocommit(self, connection: &mut ProjectConnection) -> Result<(), String> {
             let write_start = Instant::now();
-            connection
-                .ingest_batches(self.target, self.batches.to_vec())
-                .await?;
+            if self.create_if_missing && self.replace {
+                connection
+                    .replace_or_create_batches(self.target, self.batches.to_vec())
+                    .await?;
+            } else if self.create_if_missing {
+                connection
+                    .create_or_append_batches(self.target, self.batches.to_vec())
+                    .await?;
+            } else {
+                connection
+                    .ingest_batches(self.target, self.batches.to_vec())
+                    .await?;
+            }
             let write_seconds = write_start.elapsed().as_secs_f64();
             let (rows, bytes) = self.metrics;
             let label = self.label;
@@ -4808,7 +4822,15 @@ mod tests {
             let begin_seconds = begin_start.elapsed().as_secs_f64();
 
             let write_start = Instant::now();
-            if self.replace {
+            if self.create_if_missing && self.replace {
+                connection
+                    .replace_or_create_batches(self.target, self.batches.to_vec())
+                    .await?;
+            } else if self.create_if_missing {
+                connection
+                    .create_or_append_batches(self.target, self.batches.to_vec())
+                    .await?;
+            } else if self.replace {
                 connection
                     .replace_batches(self.target, self.batches.to_vec())
                     .await?;
@@ -4900,6 +4922,17 @@ mod tests {
             );
             decoded.append(&mut relation);
         }
+        for table in Table::ALL {
+            if decoded.iter().any(|(incoming, _)| *incoming == table) {
+                continue;
+            }
+            decoded.push((
+                table,
+                vec![RecordBatch::new_empty(Arc::new(
+                    table.managed_relation_schema(),
+                ))],
+            ));
+        }
         EpisodeBundle::sort_relations(&mut decoded, &Table::ALL);
         if let Some(limit) = profile_usize("SPIRAL_PROFILE_VIDEO_LIMIT") {
             limit_relation_rows(&mut decoded, Table::VideoAssets, limit);
@@ -4920,31 +4953,6 @@ mod tests {
         profile_event("spiral.transaction_begin", transaction_start, (0, 0));
 
         let outcome = async {
-            for table in Table::ALL.into_iter().rev() {
-                if decoded.iter().any(|(incoming, _)| *incoming == table) {
-                    continue;
-                }
-                let relation = table.qualified_name(namespace);
-                let exists_start = Instant::now();
-                let exists = connection.table_exists(&relation).await?;
-                profile_event(
-                    &format!("spiral.table_exists.{}", table.name()),
-                    exists_start,
-                    (0, 0),
-                );
-                if exists {
-                    let drop_start = Instant::now();
-                    connection
-                        .execute_update_sql(&format!("DROP TABLE {relation}"))
-                        .await?;
-                    profile_event(
-                        &format!("spiral.drop_relation.{}", table.name()),
-                        drop_start,
-                        (0, 0),
-                    );
-                }
-            }
-
             let video_chunk_rows = profile_usize("SPIRAL_PROFILE_VIDEO_CHUNK_ROWS");
             let mut summary = ProjectImportSummary::default();
             for (table, batches) in decoded {
@@ -5353,11 +5361,9 @@ mod tests {
         connection.drop_video_dataset(namespace).await?;
         for table in Table::ALL.into_iter().rev() {
             let relation = table.qualified_name(namespace);
-            if connection.table_exists(&relation).await? {
-                connection
-                    .execute_update_sql(&format!("DROP TABLE {relation}"))
-                    .await?;
-            }
+            connection
+                .execute_update_sql(&format!("DROP TABLE IF EXISTS {relation}"))
+                .await?;
         }
         Ok(())
     }
@@ -5375,11 +5381,9 @@ mod tests {
             let namespace = self.project_store.namespace().to_owned();
             if let Ok(mut connection) = self.project_store.connect_exclusive().await {
                 let _ = drop_studio_relations(&mut connection, &namespace).await;
-                if connection.table_exists(&namespace).await.unwrap_or(false) {
-                    let _ = connection
-                        .execute_update_sql(&format!("DROP TABLE {namespace}"))
-                        .await;
-                }
+                let _ = connection
+                    .execute_update_sql(&format!("DROP TABLE IF EXISTS {namespace}"))
+                    .await;
             }
         }
     }

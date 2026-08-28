@@ -181,7 +181,8 @@ impl BatchIngestion {
 pub enum IngestMode {
     Append,
     CreateOrAppend,
-    Replace,
+    ReplaceExisting,
+    ReplaceOrCreate,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

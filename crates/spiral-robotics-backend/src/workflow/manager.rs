@@ -2102,7 +2102,7 @@ mod tests {
             .await
             .expect("the Workflow seed namespace must exist");
         connection
-            .ingest_batch(&target, batch)
+            .replace_or_create_batches(&target, vec![batch])
             .await
             .expect("seeding the Workflow relation must succeed");
         drop(connection);
@@ -2273,11 +2273,11 @@ mod tests {
             .await
             .expect("the video Workflow namespace must exist");
         connection
-            .ingest_batch(&media_target, media_batch)
+            .replace_or_create_batches(&media_target, vec![media_batch])
             .await
             .expect("the video manifest must save");
         connection
-            .replace_batches(&empty_target, vec![empty_batch])
+            .replace_or_create_batches(&empty_target, vec![empty_batch])
             .await
             .expect("the empty video manifest must save");
         connection
@@ -2720,15 +2720,9 @@ mod tests {
             const MAX_ATTEMPTS: usize = 32;
             for attempt in 1..=MAX_ATTEMPTS {
                 let mut connection = self.project_store.connect_exclusive().await?;
-                let result: Result<(), String> = async {
-                    if connection.table_exists(relation).await? {
-                        connection
-                            .execute_update_sql(&format!("DROP TABLE {relation}"))
-                            .await?;
-                    }
-                    Ok(())
-                }
-                .await;
+                let result = connection
+                    .execute_update_sql(&format!("DROP TABLE IF EXISTS {relation}"))
+                    .await;
                 match result {
                     Ok(()) => return Ok(()),
                     Err(error)

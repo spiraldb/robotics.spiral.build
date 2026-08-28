@@ -1656,12 +1656,10 @@ impl<'a> FeaturePublication<'a> {
         let relation = self.relation.to_owned();
         let batches = self.cache.record_batches()?;
         let registry_batch = self.registry.record_batch()?;
-        let namespace = relation
+        relation
             .split_once('.')
-            .map(|(namespace, _)| namespace)
             .ok_or_else(|| "Workflow feature cache relation was not qualified.".to_owned())?;
         let mut connection = project_store.connect_exclusive().await?;
-        connection.ensure_dataset_namespace(namespace).await?;
         if let Err(error) = connection.begin_transaction().await {
             connection.discard();
             return Err(format!(
@@ -1669,10 +1667,13 @@ impl<'a> FeaturePublication<'a> {
             ));
         }
 
-        let mutation = match connection.replace_batches(&relation, batches).await {
+        let mutation = match connection
+            .replace_or_create_batches(&relation, batches)
+            .await
+        {
             Ok(()) => {
                 connection
-                    .replace_batches(FEATURE_REGISTRY_RELATION, vec![registry_batch])
+                    .replace_or_create_batches(FEATURE_REGISTRY_RELATION, vec![registry_batch])
                     .await
             }
             Err(error) => Err(error),
@@ -3525,7 +3526,7 @@ mod tests {
             .await
             .expect("the golden image namespace must exist");
         connection
-            .ingest_batch(&seed_relation, batch)
+            .replace_or_create_batches(&seed_relation, vec![batch])
             .await
             .expect("seeding the golden image relation must succeed");
         drop(connection);
@@ -3640,7 +3641,7 @@ mod tests {
             {
                 Ok(()) if registry_existed => {
                     connection
-                        .replace_batches(FEATURE_REGISTRY_RELATION, vec![registry_batch])
+                        .replace_or_create_batches(FEATURE_REGISTRY_RELATION, vec![registry_batch])
                         .await
                 }
                 Ok(()) => {
@@ -3681,17 +3682,13 @@ mod tests {
             let namespace = self.namespace.clone();
             let mut connection = self.project_store.connect_exclusive().await?;
             for relation in relations {
-                if connection.table_exists(&relation).await? {
-                    connection
-                        .execute_update_sql(&format!("DROP TABLE {relation}"))
-                        .await?;
-                }
-            }
-            if connection.table_exists(&namespace).await? {
                 connection
-                    .execute_update_sql(&format!("DROP TABLE {namespace}"))
+                    .execute_update_sql(&format!("DROP TABLE IF EXISTS {relation}"))
                     .await?;
             }
+            connection
+                .execute_update_sql(&format!("DROP TABLE IF EXISTS {namespace}"))
+                .await?;
             Ok(())
         }
     }

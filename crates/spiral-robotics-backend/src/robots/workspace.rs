@@ -485,18 +485,12 @@ impl RobotWorkspace {
             .connect_exclusive()
             .await
             .map_err(WorkspaceError::Invalid)?;
-        if connection
-            .table_exists(&relation)
+        connection
+            .execute_delete_sql(&format!(
+                "DELETE FROM {relation} WHERE {ROBOT_IDENTIFIER_COLUMN} = {id}"
+            ))
             .await
-            .map_err(WorkspaceError::Invalid)?
-        {
-            connection
-                .execute_update_sql(&format!(
-                    "DELETE FROM {relation} WHERE {ROBOT_IDENTIFIER_COLUMN} = {id}"
-                ))
-                .await
-                .map_err(WorkspaceError::Invalid)?;
-        }
+            .map_err(WorkspaceError::Invalid)?;
         Ok(())
     }
 
@@ -507,13 +501,6 @@ impl RobotWorkspace {
             .connect()
             .await
             .map_err(WorkspaceError::Invalid)?;
-        if !connection
-            .table_exists(&relation)
-            .await
-            .map_err(WorkspaceError::Invalid)?
-        {
-            return Ok(Vec::new());
-        }
         let mut records_stream = connection
             .execute_query(format!(
                 "SELECT {}, {} FROM {relation} ORDER BY {}",
@@ -562,21 +549,11 @@ impl RobotWorkspace {
             .await
             .map_err(WorkspaceError::Invalid)?;
         connection
-            .ensure_dataset_namespace(&namespace)
+            .execute_delete_sql(&format!(
+                "DELETE FROM {relation} WHERE {ROBOT_IDENTIFIER_COLUMN} = {id_sql}"
+            ))
             .await
             .map_err(WorkspaceError::Invalid)?;
-        if connection
-            .table_exists(&relation)
-            .await
-            .map_err(WorkspaceError::Invalid)?
-        {
-            connection
-                .execute_delete_sql(&format!(
-                    "DELETE FROM {relation} WHERE {ROBOT_IDENTIFIER_COLUMN} = {id_sql}"
-                ))
-                .await
-                .map_err(WorkspaceError::Invalid)?;
-        }
         let schema = Arc::new(Schema::new(vec![
             Field::new(ROBOT_IDENTIFIER_COLUMN, DataType::Utf8, false),
             Field::new(ROBOT_CONFIGURATION_COLUMN, DataType::Utf8, false),

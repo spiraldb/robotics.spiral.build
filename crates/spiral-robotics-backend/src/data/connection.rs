@@ -160,46 +160,49 @@ impl SpiralConnectionController {
             ));
         }
 
-        let previous_preferences = self.stores.preferences.get();
         let staged_preferences = self
             .stores
             .preferences
             .stage_update(command.training_endpoint(), command.video_enabled())
             .map_err(OperationError::InvalidInput)?;
 
-        self.stores
-            .storage
-            .save_studio_preferences(&staged_preferences)
-            .await
-            .map_err(OperationError::External)?;
         if connection_changed {
+            // A recovery switch must not depend on the old project remaining
+            // reachable. Drain and install the new scoped connection before
+            // writing project-owned preferences through it.
+            self.stores
+                .storage
+                .configure_connection(next_connection.clone())
+                .await
+                .map_err(OperationError::InvalidInput)?;
             if let Err(error) = self
                 .stores
                 .storage
-                .configure_connection(next_connection.clone())
+                .save_studio_preferences(&staged_preferences)
                 .await
             {
                 let _ = self
                     .stores
                     .storage
-                    .save_studio_preferences(&previous_preferences)
+                    .configure_connection(previous_connection.clone())
                     .await;
-                return Err(OperationError::InvalidInput(error));
+                return Err(OperationError::External(error));
             }
             if let Err(error) = self.stores.backend_state.save_connection(&next_connection) {
                 let _ = self
                     .stores
                     .storage
-                    .configure_connection(previous_connection.clone())
-                    .await;
-                let _ = self
-                    .stores
-                    .storage
-                    .save_studio_preferences(&previous_preferences)
+                    .configure_connection(previous_connection)
                     .await;
                 return Err(OperationError::Internal(error));
             }
             *self.current.recover_lock() = next_connection;
+        } else {
+            self.stores
+                .storage
+                .save_studio_preferences(&staged_preferences)
+                .await
+                .map_err(OperationError::External)?;
         }
         self.stores.preferences.replace(staged_preferences);
 

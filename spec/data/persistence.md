@@ -41,7 +41,14 @@ The product does not reconcile a second local source of truth.
   environment variables or require a Studio restart. The namespace remains
   process bootstrap configuration, and
   individual domain operations must not accept or reconstruct alternate
-  destinations.
+  destinations. Settings → SpiralDB is the only flow allowed to create the
+  Studio-managed namespace or its relations. Testing the active connection
+  must verify connectivity and the complete managed relation set, create the
+  namespace and every missing managed relation from its statically declared
+  Arrow schema, and report whether all relations were already present or name
+  every relation it created. Installing a changed destination must install the
+  new scoped connection, run the same provisioning and Binary-to-Blob
+  readiness work, and only then write project-owned preferences through it.
 - **PERSIST-014** Stored SpiralDB credentials must remain in the backend and
   must not be returned to the browser.
 
@@ -110,6 +117,14 @@ flowchart TD
   centralized at the Spiral persistence boundary.
 - **PERSIST-024** Product storage must preserve real table semantics for
   [SQL Query](query.md).
+- **PERSIST-024a** Outside Settings → SpiralDB destination provisioning, every
+  Studio reader and writer must assume the complete managed relation set
+  exists with its compile-time schema. A missing managed relation must be an
+  actionable error that identifies the missing target; it must never become an
+  empty/default read, a skipped operation, or lazy relation creation. Ordinary
+  appends and replacements must require an existing relation. Derived MP4
+  resources, the Workflow feature registry and feature caches, and
+  legacy-format schema inspection retain their explicit dynamic lifecycles.
 
 ## Portable transfer files
 
@@ -121,11 +136,13 @@ flowchart TD
   names, and exact ordered columns before replacing project data.
 - **PERSIST-028** Import must replace the active project in one exclusive
   transaction and roll back on failure. Each included relation must be installed
-  from its single Arrow stream with native `Replace` ingestion; Studio must not clear an
-  included relation with `DELETE` and then append its replacement rows.
-  Incremental episode import and live recording remain create-append operations.
-  Studio-owned relations absent from the file must be removed, and import must
-  not stage through the local filesystem. Before the exclusive
+  from its single Arrow stream with native existing-relation `Replace`
+  ingestion; Studio must not clear an included relation with `DELETE` and then
+  append its replacement rows. Incremental episode import and live recording
+  append only to provisioned relations. A Studio-owned relation absent from
+  the file must be replaced with an empty relation using its statically
+  declared schema, never dropped or created by import. Import must not stage
+  through the local filesystem. Before the exclusive
   operation returns, imported video assets must be retargeted to the active
   namespace and its single managed MP4 dataset must be created or refreshed
   once from all committed durable rows. The shared dataset and source view must
@@ -163,7 +180,12 @@ flowchart TD
   endpoint, selected project ID, and optional client ID and client secret. It
   must use atomic replacement and private
   permissions and must never contain robots, episodes, media, runs,
-  checkpoints, project preferences, a write spool, or cached Spiral rows.
+  checkpoints, project preferences, a write spool, or cached Spiral rows. A
+  live destination switch must drain and install the requested scoped
+  connection before writing project-owned preferences or committing this
+  bootstrap file, so recovery never depends on the previous project's catalog
+  remaining available. A new-destination preference or bootstrap-write failure
+  must restore the previous in-memory connection.
 - **PERSIST-032** Whole-project import and export must live in Settings →
   SpiralDB, separate from episode transfer in Data.
 - **PERSIST-033** Data must export the selected dataset's metadata, episodes,
@@ -210,7 +232,12 @@ flowchart TD
   project's authenticated catalog through the same native async database trait
   used by ordinary project-store work. Only after that succeeds may it hydrate
   project-owned preferences and run history, and those independent loads must
-  run concurrently rather than delaying listener startup.
+  run concurrently rather than delaying listener startup. Prewarm must verify
+  the managed namespace and complete relation set without creating anything.
+  If either is missing, startup must degrade with an actionable instruction to
+  run Settings → SpiralDB → Test connection. The PERSIST-040
+  Binary-to-Blob migration remains destination-readiness work and may run only
+  after the managed relation set has passed that verification.
 - **PERSIST-039** The storage crate must own the current relational schema in a
   machine-readable version file beside its schema implementation and
   changelog. Rust consumers must generate their constant from that file.
@@ -258,11 +285,13 @@ flowchart TD
 - **PERSIST-TEST-004** A real-SpiralDB project-transfer test must export a
   namespace containing relational JSON and binary checkpoint data, replace it
   with conflicting data, import the exported bundle, and prove that the
-  exported state is restored exactly. Relations and rows created only after
-  export must be absent after import. A real-SpiralDB video-transfer regression
-  must also begin with only durable MP4 rows, prove import rebuilds the managed
-  MP4 output and can read an indexed frame, then re-import the same project and
-  prove the output is atomically replaced rather than rejected or duplicated.
+  exported state is restored exactly. Rows created only after export must be
+  absent after import, while every managed relation must remain present and a
+  relation omitted from the imported file must be empty. A real-SpiralDB
+  video-transfer regression must also begin with only durable MP4 rows, prove
+  import rebuilds the managed MP4 output and can read an indexed frame, then
+  re-import the same project and prove the output is atomically replaced rather
+  than rejected or duplicated.
   Its MP4 fixture must exceed Spiral's inline-Blob threshold and prove the
   imported payload has a provider URI and that `spql.io.read_bytes` returns an
   exact requested byte slice.

@@ -367,6 +367,21 @@ impl ProjectStore {
         Ok(())
     }
 
+    /// Install one configured destination and retain the exclusive project
+    /// lease for its readiness work.
+    pub(crate) async fn configure_scoped_connection(
+        &self,
+        connection_settings: SpiralConnectionSettings,
+    ) -> Result<ProjectConnection, String> {
+        let operation = self.async_operation_gate.clone().write_owned().await;
+        self.database
+            .configure(connection_settings.clone())
+            .map_err(|error| error.to_string())?;
+        *self.connection_settings.write_unpoisoned() = connection_settings;
+        self.open_connection(ProjectOperationLease::Exclusive { _lease: operation })
+            .await
+    }
+
     pub fn namespace(&self) -> &str {
         &self.namespace
     }

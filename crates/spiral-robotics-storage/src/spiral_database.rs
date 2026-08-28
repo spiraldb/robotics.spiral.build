@@ -278,7 +278,7 @@ impl SpiralConnection {
             .await
             .map_err(DatabaseError::from_external)?
             .is_some();
-        if mode == IngestMode::Append && !exists {
+        if matches!(mode, IngestMode::Append | IngestMode::ReplaceExisting) && !exists {
             return Err(DatabaseError::new(
                 DatabaseErrorKind::NotFound,
                 format!("relation {:?} does not exist", relation.as_str()),
@@ -311,7 +311,7 @@ impl SpiralConnection {
                 self.create_table(TableCreation::new(target, plan, false), options)
                     .await
             }
-            IngestMode::Replace => {
+            IngestMode::ReplaceExisting | IngestMode::ReplaceOrCreate => {
                 self.create_table(TableCreation::new(target, plan, true), options)
                     .await
             }

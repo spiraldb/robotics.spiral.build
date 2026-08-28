@@ -31,6 +31,7 @@ use spiral_robotics_api::training::{TrainingRun, TrainingSnapshot};
 
 use crate::LEGACY_PROJECT_ERROR;
 use crate::bundle;
+use crate::bundle::ManagedRelationSchema as _;
 use crate::checkpoints::{CheckpointArtifact, CheckpointFuture, CheckpointKey, CheckpointStore};
 use crate::database::{DatabaseCommand, DatabaseSession, RelationKind, RelationName};
 use crate::episode_schema::{
@@ -172,7 +173,142 @@ impl<'a> WorkflowDocumentWrite<'a> {
 /// How one current-schema relation answered a read.
 enum RelationalRead {
     Rows(ProjectConnection),
-    Absent,
+    Unconfigured,
+}
+
+struct ManagedRelationProvisioning {
+    namespace_created: bool,
+    created_relations: Vec<Table>,
+}
+
+impl ManagedRelationProvisioning {
+    fn describe(&self, namespace: &str) -> String {
+        let count = self.created_relations.len();
+        if count == 0 {
+            if self.namespace_created {
+                return format!(
+                    "created namespace {namespace} · all {} managed relations present",
+                    Table::ALL.len()
+                );
+            }
+            return format!("all {} managed relations present", Table::ALL.len());
+        }
+        let relations = self
+            .created_relations
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        if self.namespace_created {
+            format!("created namespace {namespace} plus {count} missing relations: {relations}")
+        } else {
+            format!("created {count} missing relations: {relations}")
+        }
+    }
+}
+
+struct ManagedRelationProvisioner<'a> {
+    connection: &'a mut ProjectConnection,
+    namespace: &'a str,
+}
+
+impl<'a> ManagedRelationProvisioner<'a> {
+    const fn new(connection: &'a mut ProjectConnection, namespace: &'a str) -> Self {
+        Self {
+            connection,
+            namespace,
+        }
+    }
+
+    async fn provision(mut self) -> Result<ManagedRelationProvisioning, String> {
+        let namespace_created = self.ensure_namespace().await?;
+        let created_relations = self.missing_relations().await?;
+        for table in &created_relations {
+            self.connection
+                .create_managed_relation(self.namespace, *table)
+                .await?;
+        }
+        self.connection
+            .ensure_video_assets_blob_relation(self.namespace)
+            .await?;
+        Ok(ManagedRelationProvisioning {
+            namespace_created,
+            created_relations,
+        })
+    }
+
+    async fn verify(mut self) -> Result<(), String> {
+        self.verify_namespace().await?;
+        let missing = self.missing_relations().await?;
+        if missing.is_empty() {
+            self.connection
+                .ensure_video_assets_blob_relation(self.namespace)
+                .await?;
+            return Ok(());
+        }
+        let relations = missing
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        Err(format!(
+            "SpiralDB namespace {} is missing managed relations: {relations}. Run Settings → SpiralDB → Test connection to provision them.",
+            self.namespace
+        ))
+    }
+
+    async fn ensure_namespace(&mut self) -> Result<bool, String> {
+        let existed = self.namespace_is_ready().await?;
+        if !existed {
+            self.connection
+                .ensure_dataset_namespace(self.namespace)
+                .await?;
+        }
+        Ok(!existed)
+    }
+
+    async fn verify_namespace(&mut self) -> Result<(), String> {
+        if self.namespace_is_ready().await? {
+            return Ok(());
+        }
+        Err(format!(
+            "SpiralDB namespace {} is missing. Run Settings → SpiralDB → Test connection to provision it and its {} managed relations.",
+            self.namespace,
+            Table::ALL.len(),
+        ))
+    }
+
+    async fn namespace_is_ready(&mut self) -> Result<bool, String> {
+        match self.connection.relation_schema(self.namespace).await {
+            Ok(Some(schema))
+                if schema
+                    .field_with_name(spiral::DATASET_NAMESPACE_MARKER)
+                    .is_ok() =>
+            {
+                Ok(true)
+            }
+            Ok(Some(_)) => Err(format!(
+                "SpiralDB namespace {} exists but is not managed by Spiral Robotics; choose a new namespace or remove that resource",
+                self.namespace
+            )),
+            Ok(None) => Ok(false),
+            Err(error) => Err(format!(
+                "checking SpiralDB namespace {}: {error}",
+                self.namespace
+            )),
+        }
+    }
+
+    async fn missing_relations(&mut self) -> Result<Vec<Table>, String> {
+        let mut missing = Vec::new();
+        for table in Table::ALL {
+            let relation = table.qualified_name(self.namespace);
+            if !self.connection.table_exists(&relation).await? {
+                missing.push(table);
+            }
+        }
+        Ok(missing)
+    }
 }
 
 pub struct StorageManager {
@@ -218,55 +354,52 @@ impl StorageManager {
 
     pub async fn prewarm(&self) -> Result<(), String> {
         self.project_store.prewarm().await?;
-        self.ensure_async_video_assets_blob_relation().await
-    }
-
-    async fn ensure_async_video_assets_blob_relation(&self) -> Result<(), String> {
-        let assets = Table::VideoAssets.qualified_name(self.project_store.namespace());
-        let target = RelationName::parse(&assets).map_err(|error| error.to_string())?;
-        let mut connection = self.project_store.connect().await?;
-        let Some(schema) = connection
-            .table_schema(target)
+        let mut connection = self.project_store.connect_exclusive().await?;
+        ManagedRelationProvisioner::new(&mut connection, self.project_store.namespace())
+            .verify()
             .await
-            .map_err(|error| error.to_string())?
-        else {
-            return Ok(());
-        };
-        let payload = schema
-            .field_with_name(db::PAYLOAD)
-            .map_err(|error| format!("stored video assets are missing {}: {error}", db::PAYLOAD))?;
-        if payload
-            .metadata()
-            .get(EXTENSION_TYPE_NAME_KEY)
-            .is_some_and(|name| name == BLOB_EXTENSION_NAME)
-        {
-            return Ok(());
-        }
-        if !matches!(
-            payload.data_type(),
-            DataType::Binary | DataType::LargeBinary | DataType::BinaryView
-        ) {
-            return Err(format!(
-                "stored video asset {} must be a Spiral Blob or Arrow binary, got {}",
-                db::PAYLOAD,
-                payload.data_type(),
-            ));
-        }
-        connection
-            .execute(DatabaseCommand::statement(
-                SpiralSql::migrate_video_assets_to_blob(&assets),
-            ))
-            .await
-            .and_then(crate::DatabaseOutput::into_summary)
-            .map(|_| ())
-            .map_err(|error| format!("migrating video assets from Binary to Blob: {error}"))
     }
 
     pub async fn configure_connection(
         &self,
         settings: SpiralConnectionSettings,
     ) -> Result<(), String> {
-        self.project_store.configure_connection(settings).await
+        if settings.project_id().is_none() {
+            return self.project_store.configure_connection(settings).await;
+        }
+        let previous = self.project_store.connection_settings();
+        let mut connection = match self
+            .project_store
+            .configure_scoped_connection(settings)
+            .await
+        {
+            Ok(connection) => connection,
+            Err(error) => {
+                return self.restore_previous_connection(previous, error).await;
+            }
+        };
+        let provisioning =
+            ManagedRelationProvisioner::new(&mut connection, self.project_store.namespace())
+                .provision()
+                .await;
+        drop(connection);
+        if let Err(error) = provisioning {
+            return self.restore_previous_connection(previous, error).await;
+        }
+        Ok(())
+    }
+
+    async fn restore_previous_connection(
+        &self,
+        previous: SpiralConnectionSettings,
+        error: String,
+    ) -> Result<(), String> {
+        match self.project_store.configure_connection(previous).await {
+            Ok(()) => Err(error),
+            Err(rollback) => Err(format!(
+                "{error}; restoring the previous Spiral destination also failed: {rollback}"
+            )),
+        }
     }
 
     pub fn namespace(&self) -> &str {
@@ -294,19 +427,19 @@ impl StorageManager {
         let runs = Table::TrainingRuns.qualified_name(&namespace);
         let mut connection = match self.relational_reader(&runs, db::ORDINAL).await? {
             RelationalRead::Rows(connection) => connection,
-            RelationalRead::Absent => return Ok(Vec::new()),
+            RelationalRead::Unconfigured => return Ok(Vec::new()),
         };
         let rows = connection
             .relation_rows(&runs, TrainingRunRow::decode)
             .await?;
         let metrics = connection
-            .optional_relation_rows(
+            .relation_rows(
                 &Table::TrainingRunMetrics.qualified_name(&namespace),
                 StoredTrainingMetric::decode,
             )
             .await?;
         let checkpoints = connection
-            .optional_relation_rows(
+            .relation_rows(
                 &Table::TrainingRunCheckpoints.qualified_name(&namespace),
                 StoredTrainingCheckpoint::decode,
             )
@@ -325,7 +458,6 @@ impl StorageManager {
         let namespace = self.project_store.namespace().to_owned();
         let batches = StoredTrainingHistory::stored(snapshot).batches()?;
         let mut connection = self.project_store.connect().await?;
-        connection.ensure_dataset_namespace(&namespace).await?;
         connection.begin_transaction().await?;
         let mutation = async {
             for (table, batch) in batches {
@@ -346,7 +478,7 @@ impl StorageManager {
         let relation = Table::RolloutRuns.qualified_name(self.project_store.namespace());
         let mut connection = match self.relational_reader(&relation, db::SESSION_ID).await? {
             RelationalRead::Rows(connection) => connection,
-            RelationalRead::Absent => return Ok(None),
+            RelationalRead::Unconfigured => return Ok(None),
         };
         let sessions = connection
             .relation_rows(&relation, StoredRolloutSession::decode)
@@ -362,12 +494,14 @@ impl StorageManager {
         current_shape_column: &str,
     ) -> Result<RelationalRead, String> {
         if !self.is_configured() {
-            return Ok(RelationalRead::Absent);
+            return Ok(RelationalRead::Unconfigured);
         }
         let mut connection = self.project_store.connect().await?;
-        let Some(schema) = connection.relation_schema(relation).await? else {
-            return Ok(RelationalRead::Absent);
-        };
+        let schema = connection.relation_schema(relation).await?.ok_or_else(|| {
+            format!(
+                "managed Spiral relation {relation} is missing; run Settings → SpiralDB → Test connection to provision it"
+            )
+        })?;
         if schema.field_with_name(db::SNAPSHOT_JSON).is_ok()
             && schema.field_with_name(current_shape_column).is_err()
         {
@@ -384,7 +518,6 @@ impl StorageManager {
         let session = StoredRolloutSession::stored(snapshot);
         let batch = StoredRolloutSession::batch(session.as_ref(), StorageClock::unix_millis())?;
         let mut connection = self.project_store.connect().await?;
-        connection.ensure_dataset_namespace(&namespace).await?;
         connection
             .replace_batches(&Table::RolloutRuns.qualified_name(&namespace), vec![batch])
             .await
@@ -450,7 +583,7 @@ impl StorageManager {
         self.ensure_current_workflow_relation(&mut connection, &relation)
             .await?;
         Ok(connection
-            .optional_relation_rows(&relation, WorkflowDocumentSchema::decode)
+            .relation_rows(&relation, WorkflowDocumentSchema::decode)
             .await?
             .into_iter()
             .find(|row| row.matches(key))
@@ -468,12 +601,11 @@ impl StorageManager {
         let mut connection = self.project_store.connect_exclusive().await?;
         self.ensure_current_workflow_relation(&mut connection, &relation)
             .await?;
-        connection.ensure_dataset_namespace(&namespace).await?;
         connection.begin_transaction().await?;
         let mutation = async {
             let existing = WorkflowDocumentReplacement::new(
                 connection
-                    .optional_relation_rows(&relation, WorkflowDocumentSchema::decode)
+                    .relation_rows(&relation, WorkflowDocumentSchema::decode)
                     .await?,
             );
             if let Some(expected) = write.expected_payload {
@@ -508,9 +640,11 @@ impl StorageManager {
         connection: &mut ProjectConnection,
         relation: &str,
     ) -> Result<(), String> {
-        let Some(schema) = connection.relation_schema(relation).await? else {
-            return Ok(());
-        };
+        let schema = connection.relation_schema(relation).await?.ok_or_else(|| {
+            format!(
+                "managed Spiral relation {relation} is missing; run Settings → SpiralDB → Test connection to provision it"
+            )
+        })?;
         if schema.fields().len() == 3 && schema.field_with_name(db::DOCUMENT_VERSION).is_err() {
             return Err(LEGACY_PROJECT_ERROR.to_owned());
         }
@@ -523,9 +657,6 @@ impl StorageManager {
         }
         let relation = Table::StudioSettings.qualified_name(self.project_store.namespace());
         let mut connection = self.project_store.connect().await?;
-        if !connection.table_exists(&relation).await? {
-            return Ok(StoredStudioPreferences::default());
-        }
         let result = connection
             .query_rows(
                 &format!(
@@ -557,18 +688,12 @@ impl StorageManager {
         let json = serde_json::to_string(preferences)
             .map_err(|error| format!("encoding Studio preferences: {error}"))?;
         let mut connection = self.project_store.connect().await?;
-        connection.ensure_dataset_namespace(&namespace).await?;
         connection
-            .ensure_video_assets_blob_relation(&namespace)
+            .execute_delete_sql(&format!(
+                "DELETE FROM {relation} WHERE {} = 'preferences'",
+                db::KEY
+            ))
             .await?;
-        if connection.table_exists(&relation).await? {
-            connection
-                .execute_delete_sql(&format!(
-                    "DELETE FROM {relation} WHERE {} = 'preferences'",
-                    db::KEY
-                ))
-                .await?;
-        }
         let schema = Arc::new(Schema::new(vec![
             Field::new(db::KEY, DataType::Utf8, false),
             Field::new(db::VALUE_JSON, DataType::Utf8, false),
@@ -636,24 +761,24 @@ impl StorageManager {
             );
         }
         let catalog_project = project.clone();
-        let table_filter = Table::Episodes.qualified_name(self.project_store.namespace());
-        let catalog_check = async {
-            let mut connection = self.project_store.connect().await?;
-            let relation = RelationName::parse(table_filter).map_err(|error| error.to_string())?;
-            let _ = connection
-                .table_schema(relation)
+        let provisioning = async {
+            let mut connection = self.project_store.connect_exclusive().await?;
+            ManagedRelationProvisioner::new(&mut connection, self.project_store.namespace())
+                .provision()
                 .await
-                .map_err(|error| error.to_string())?;
-            Ok::<(), String>(())
         }
         .await;
-        if let Err(error) = catalog_check {
-            return ConnectionTestResponse::new(false, error);
-        }
+        let provisioning = match provisioning {
+            Ok(provisioning) => provisioning,
+            Err(error) => return ConnectionTestResponse::new(false, error),
+        };
 
         ConnectionTestResponse::new(
             true,
-            format!("Connected to {endpoint} · project {catalog_project}"),
+            format!(
+                "Connected to {endpoint} · project {catalog_project} · {}",
+                provisioning.describe(self.project_store.namespace())
+            ),
         )
     }
 
@@ -671,15 +796,6 @@ impl StorageManager {
     pub async fn datasets(&self) -> Result<Vec<DatasetSummary>, String> {
         let relation = Table::Datasets.qualified_name(self.project_store.namespace());
         let mut connection = self.project_store.connect().await?;
-        let target = RelationName::parse(&relation).map_err(|error| error.to_string())?;
-        if connection
-            .table_schema(target)
-            .await
-            .map_err(|error| error.to_string())?
-            .is_none()
-        {
-            return Ok(Vec::new());
-        }
         let sql = format!(
             "SELECT {id}, {name}, {created}, {description} FROM {relation} ORDER BY {created}, {id}",
             id = db::DATASET_ID,
@@ -812,15 +928,6 @@ impl StorageManager {
     async fn delete_checkpoint_artifacts(&self, run_id: String) -> Result<(), String> {
         let target = Table::TrainingCheckpoints.qualified_name(self.project_store.namespace());
         let mut connection = self.project_store.connect().await?;
-        let relation = RelationName::parse(&target).map_err(|error| error.to_string())?;
-        if connection
-            .table_schema(relation)
-            .await
-            .map_err(|error| error.to_string())?
-            .is_none()
-        {
-            return Ok(());
-        }
         connection
             .execute(DatabaseCommand::statement(SpiralSql::delete_training_run(
                 &target, &run_id,
@@ -977,18 +1084,6 @@ impl ProjectConnection {
         Ok(rows)
     }
 
-    /// The same read, for a relation a project may never have created.
-    async fn optional_relation_rows<T>(
-        &mut self,
-        relation: &str,
-        decode: fn(&RecordBatch, usize) -> Result<T, String>,
-    ) -> Result<Vec<T>, String> {
-        if !self.table_exists(relation).await? {
-            return Ok(Vec::new());
-        }
-        self.relation_rows(relation, decode).await
-    }
-
     /// Commit a mutation, or roll it back and keep both failures visible.
     pub(crate) async fn finish_transaction(
         &mut self,
@@ -1045,12 +1140,6 @@ impl<'a> EpisodeReplacement<'a> {
             episode,
             videos,
         } = self;
-        connection.ensure_dataset_namespace(namespace).await?;
-        if !videos.is_empty() {
-            connection
-                .ensure_video_assets_blob_relation(namespace)
-                .await?;
-        }
         let had_video = connection
             .episode_has_video_assets(namespace, episode.start().id())
             .await?;
@@ -1338,9 +1427,6 @@ impl ProjectConnection {
         let connection = self;
         for table in Table::EPISODE_RELATIONS {
             let target = table.qualified_name(namespace);
-            if !connection.table_exists(&target).await? {
-                continue;
-            }
             connection
                 .execute_delete_sql(&SpiralSql::delete_episode(&target, episode_id))
                 .await
@@ -1357,9 +1443,6 @@ impl ProjectConnection {
         const MAX_VIDEO_EPISODES: usize = 100_000;
 
         let assets = Table::VideoAssets.qualified_name(namespace);
-        if !connection.table_exists(&assets).await? {
-            return Ok(BTreeSet::new());
-        }
         let result = connection
             .query_rows(
                 &format!(
@@ -1393,9 +1476,6 @@ impl ProjectConnection {
     ) -> Result<bool, String> {
         let connection = self;
         let assets = Table::VideoAssets.qualified_name(namespace);
-        if !connection.table_exists(&assets).await? {
-            return Ok(false);
-        }
         let result = connection.query_rows(
         &format!(
             "SELECT {episode_column} FROM {assets} WHERE {episode_column} = {episode_id} LIMIT 1",
@@ -1426,9 +1506,6 @@ impl ProjectConnection {
 
     async fn table_has_dataset(&mut self, target: &str, dataset_id: &str) -> Result<bool, String> {
         let connection = self;
-        if !connection.table_exists(target).await? {
-            return Ok(false);
-        }
         let result = connection
             .query_rows(&SpiralSql::dataset_exists(target, dataset_id), 1)
             .await?;
@@ -1451,13 +1528,49 @@ impl ProjectConnection {
             .await
     }
 
-    /// Atomically replace one complete Arbor relation from a single Arrow stream.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn create_or_append_batches(
+        &mut self,
+        target: &str,
+        batches: Vec<RecordBatch>,
+    ) -> Result<(), String> {
+        BatchWrite::new(target, batches, BatchWriteMode::CreateOrAppend)
+            .save(self)
+            .await
+    }
+
+    /// Atomically replace one complete, already provisioned Arbor relation from
+    /// a single Arrow stream.
     pub async fn replace_batches(
         &mut self,
         target: &str,
         batches: Vec<RecordBatch>,
     ) -> Result<(), String> {
-        BatchWrite::new(target, batches, BatchWriteMode::Replace)
+        BatchWrite::new(target, batches, BatchWriteMode::ReplaceExisting)
+            .save(self)
+            .await
+    }
+
+    /// Replace one derived relation, creating it when its lifecycle has not
+    /// materialized it yet.
+    pub async fn replace_or_create_batches(
+        &mut self,
+        target: &str,
+        batches: Vec<RecordBatch>,
+    ) -> Result<(), String> {
+        BatchWrite::new(target, batches, BatchWriteMode::ReplaceOrCreate)
+            .save(self)
+            .await
+    }
+
+    async fn create_managed_relation(
+        &mut self,
+        namespace: &str,
+        table: Table,
+    ) -> Result<(), String> {
+        let batch = RecordBatch::new_empty(Arc::new(table.managed_relation_schema()));
+        let target = table.qualified_name(namespace);
+        BatchWrite::new(&target, vec![batch], BatchWriteMode::CreateOrAppend)
             .save(self)
             .await
     }
@@ -1466,7 +1579,9 @@ impl ProjectConnection {
 #[derive(Clone, Copy)]
 enum BatchWriteMode {
     Append,
-    Replace,
+    CreateOrAppend,
+    ReplaceExisting,
+    ReplaceOrCreate,
 }
 
 struct BatchWrite<'a> {
@@ -1490,10 +1605,11 @@ impl<'a> BatchWrite<'a> {
         };
         let relation = RelationName::parse(self.target)
             .map_err(|error| format!("configuring native ingest for {}: {error}", self.target))?;
-        let mode = if matches!(self.mode, BatchWriteMode::Replace) {
-            crate::IngestMode::Replace
-        } else {
-            crate::IngestMode::CreateOrAppend
+        let mode = match self.mode {
+            BatchWriteMode::Append => crate::IngestMode::Append,
+            BatchWriteMode::CreateOrAppend => crate::IngestMode::CreateOrAppend,
+            BatchWriteMode::ReplaceExisting => crate::IngestMode::ReplaceExisting,
+            BatchWriteMode::ReplaceOrCreate => crate::IngestMode::ReplaceOrCreate,
         };
         let batches = futures::stream::iter(self.batches.into_iter().map(Ok)).boxed();
         let command = DatabaseCommand::ingest(crate::BatchIngestion::new(
@@ -1506,8 +1622,13 @@ impl<'a> BatchWrite<'a> {
             .await
             .and_then(crate::DatabaseOutput::into_summary)
             .map_err(|error| {
-                if matches!(self.mode, BatchWriteMode::Replace) {
+                if matches!(
+                    self.mode,
+                    BatchWriteMode::ReplaceExisting | BatchWriteMode::ReplaceOrCreate
+                ) {
                     format!("replacing Spiral table {}: {error}", self.target)
+                } else if matches!(self.mode, BatchWriteMode::CreateOrAppend) {
+                    format!("creating Spiral table {}: {error}", self.target)
                 } else {
                     format!("ingesting Spiral table {}: {error}", self.target)
                 }
@@ -1784,7 +1905,9 @@ impl ProjectConnection {
         let connection = self;
         let assets = Table::VideoAssets.qualified_name(namespace);
         let Some(schema) = connection.relation_schema(&assets).await? else {
-            return Ok(());
+            return Err(format!(
+                "managed Spiral relation {assets} is missing; run Settings → SpiralDB → Test connection to provision it"
+            ));
         };
         let payload = schema
             .field_with_name(db::PAYLOAD)
@@ -2287,6 +2410,27 @@ mod tests {
     use std::collections::HashMap;
 
     use arrow_array::builder::{FixedSizeListBuilder, Int32Builder, ListBuilder, UInt8Builder};
+
+    #[test]
+    fn provisioning_summary_reports_present_and_created_relations() {
+        let present = ManagedRelationProvisioning {
+            namespace_created: false,
+            created_relations: Vec::new(),
+        };
+        assert_eq!(
+            present.describe("spiral_robotics"),
+            "all 13 managed relations present"
+        );
+
+        let created = ManagedRelationProvisioning {
+            namespace_created: true,
+            created_relations: vec![Table::Datasets, Table::Episodes],
+        };
+        assert_eq!(
+            created.describe("spiral_robotics"),
+            "created namespace spiral_robotics plus 2 missing relations: datasets, episodes"
+        );
+    }
 
     /// The two relations whose native column types differ from the portable
     /// shape a bundle carries still have to agree on their column names.
