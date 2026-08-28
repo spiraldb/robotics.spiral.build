@@ -10,7 +10,6 @@ use spiral_robotics_api::rollout::{
 };
 use spiral_robotics_api::training::{TrainingCheckpoint, TrainingRun, TrainingSnapshot};
 
-use crate::activities::rollout::state::rollout_controller;
 use crate::client::http as api;
 use crate::format::LossPresentation;
 use crate::shell::notifications::MessageSource;
@@ -72,7 +71,7 @@ impl RobotFleet for [RobotSummary] {
 #[component]
 pub(crate) fn RolloutWorkbench() -> Element {
     let studio = studio();
-    let controller = rollout_controller();
+    let controller = studio.rollout_controller();
     let mut pending_action = use_signal(|| None::<PendingRolloutAction>);
     let snapshot = studio.snapshot().read().to_owned();
     let training = studio.training().read().to_owned();

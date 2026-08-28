@@ -39,6 +39,10 @@ pub(super) fn RobotPanel() -> Element {
     let studio = studio();
     let robots = studio.snapshot().read().robots().to_owned();
     let focused = studio.focused();
+    let mut ports =
+        use_resource(|| async { api::Http::get::<Vec<SerialPortSummary>>("/api/ports").await });
+    let port_catalog =
+        PortCatalogState::new(ports.read_unchecked().to_owned(), move |()| ports.restart());
 
     rsx! {
         div { class: "flex flex-col",
@@ -46,8 +50,11 @@ pub(super) fn RobotPanel() -> Element {
                 for (index, robot) in robots.iter().cloned().enumerate() {
                     RobotEntry {
                         key: "{robot.id()}",
-                        focused: focused.as_ref().is_some_and(|chosen| chosen.id() == robot.id()),
-                        accent: ScenePalette::accent_css(index),
+                        state: RobotEntryState::new(
+                            focused.as_ref().is_some_and(|chosen| chosen.id() == robot.id()),
+                            ScenePalette::accent_css(index),
+                            port_catalog.clone(),
+                        ),
                         robot,
                     }
                 }
@@ -67,7 +74,12 @@ pub(super) fn RobotPanel() -> Element {
 /// so a two-arm bench can have both open at once — which is exactly when it is
 /// needed, since setting up the second arm means comparing it to the first.
 #[component]
-fn RobotEntry(robot: RobotSummary, focused: bool, accent: &'static str) -> Element {
+fn RobotEntry(robot: RobotSummary, state: RobotEntryState) -> Element {
+    let RobotEntryState {
+        focused,
+        accent,
+        port_catalog,
+    } = state;
     let studio = studio();
     let mut chosen = studio.selection();
     // Open on whatever still needs attention. An arm that is wired up and
@@ -132,8 +144,25 @@ fn RobotEntry(robot: RobotSummary, focused: bool, accent: &'static str) -> Eleme
                 }
             }
             if open() {
-                RobotSetup { robot: robot.clone() }
+                RobotSetup { robot: robot.clone(), port_catalog }
             }
+        }
+    }
+}
+
+#[derive(Clone, PartialEq)]
+struct RobotEntryState {
+    focused: bool,
+    accent: &'static str,
+    port_catalog: PortCatalogState,
+}
+
+impl RobotEntryState {
+    const fn new(focused: bool, accent: &'static str, port_catalog: PortCatalogState) -> Self {
+        Self {
+            focused,
+            accent,
+            port_catalog,
         }
     }
 }
@@ -293,17 +322,11 @@ fn ImportRobotConfiguration() -> Element {
 
 /// Everything about one arm stored in its SpiralDB configuration row.
 #[component]
-fn RobotSetup(robot: RobotSummary) -> Element {
+fn RobotSetup(robot: RobotSummary, port_catalog: PortCatalogState) -> Element {
     let studio = studio();
     let telemetry = studio.robot_telemetry(robot.id());
     let progress = telemetry.and_then(|robot| robot.calibration().cloned());
     let connected = robot.connection().connected();
-    // One scan shared by the picker and the identify workflow, so they can
-    // never disagree about which ports exist or which are already taken.
-    let mut ports =
-        use_resource(|| async { api::Http::get::<Vec<SerialPortSummary>>("/api/ports").await });
-    let scan = ports.read_unchecked().to_owned();
-
     rsx! {
         div { class: "device-setup",
             // The connection used to get a row of its own reading "Motor bus
@@ -340,9 +363,9 @@ fn RobotSetup(robot: RobotSummary) -> Element {
                 PortSection {
                     robot: robot.clone(),
                     state: PortSectionState::new(
-                        scan,
+                        port_catalog.scan.clone(),
                         progress.is_some(),
-                        move |()| ports.restart(),
+                        move |()| port_catalog.on_rescan.call(()),
                     ),
                 }
             }
@@ -403,6 +426,21 @@ impl RobotConnectionErrorPresentation for str {
 
 /// The result of the shared serial-port scan: still running, failed, or done.
 type PortScan = Option<Result<Vec<SerialPortSummary>, String>>;
+
+#[derive(Clone, PartialEq)]
+struct PortCatalogState {
+    scan: PortScan,
+    on_rescan: EventHandler<()>,
+}
+
+impl PortCatalogState {
+    fn new(scan: PortScan, on_rescan: impl FnMut(()) + 'static) -> Self {
+        Self {
+            scan,
+            on_rescan: EventHandler::new(on_rescan),
+        }
+    }
+}
 
 #[component]
 fn ConnectionAction(robot: RobotSummary, sweeping: bool) -> Element {

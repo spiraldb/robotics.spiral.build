@@ -11,10 +11,9 @@ use spiral_robotics_api::robots::ModeSelection;
 
 use crate::activities::data::query_result::QueryResultView;
 use crate::activities::data::relations::RelationsPanel;
-use crate::activities::data::state::{DataController, EpisodeDataState, data_controller};
+use crate::activities::data::state::{DataController, EpisodeDataState};
 use crate::activities::data::workbench::{EpisodeIdPresentation, EpisodesPanel, QueryPanel};
 use crate::activities::live::workbench::LiveWorkbench;
-use crate::activities::rollout::state::rollout_controller;
 use crate::activities::rollout::workspace::{
     InferencePanel, RobotFleet, RolloutWorkbench, TrainingSnapshotRollout,
 };
@@ -35,12 +34,10 @@ use crate::shell::activity::{
 };
 #[cfg(test)]
 use crate::shell::layout::PanelLayoutDefinition;
-use crate::shell::routes::StudioConfiguration;
 use crate::shell::state::Studio;
 
 use episode_data::{
-    EpisodeInspectionCache, EpisodePlaybackTime, EpisodePreview, EpisodePreviewRequest,
-    EpisodePreviewSignals,
+    EpisodePlaybackTime, EpisodePreview, EpisodePreviewRequest, EpisodePreviewSignals,
 };
 
 #[derive(Clone, PartialEq)]
@@ -75,12 +72,12 @@ impl ScreenWorkspaceDefinition {
 #[component]
 pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
     let studio = crate::shell::state::studio();
-    let data = data_controller();
-    let configuration = StudioConfiguration::current();
+    let data = studio.data_controller();
+    let configuration = studio.configuration();
     let dataset = configuration.dataset();
     let selected_dataset = studio.selected_dataset().read().to_owned();
     let spiral_query_available = configuration.spiral_query_available();
-    let timeline = crate::panels::timeline::state::timeline_controller();
+    let timeline = studio.timeline_controller();
     let mut playhead = timeline.playhead_signal();
     #[cfg(feature = "web")]
     let mut sampled_preview_slot = use_signal(|| None::<(String, u64)>);
@@ -88,9 +85,8 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
     let mut preview_tick_seconds = timeline.preview_tick_signal();
     let follow_live = timeline.follow_live_signal();
     let mut robot_sync_target = timeline.robot_sync_target_signal();
-    let mut episode_preview_state = use_signal(|| None::<RecordedSource<EpisodePreview>>);
-    let mut episode_preview_revision = use_signal(|| 0_u64);
-    let episode_data_cache = use_signal(EpisodeInspectionCache::default);
+    let (mut episode_preview_state, mut episode_preview_revision, episode_data_cache) =
+        EpisodePreviewSignals::use_signals().into_signals();
     let mut sampled_replay_slot = use_signal(|| None::<(String, u64)>);
     let mut automatic_preview_target = use_signal(|| None::<(String, u64)>);
     let mut interactive_preview_target = use_signal(|| None::<(String, u64)>);
@@ -895,7 +891,7 @@ impl Studio {
             return Vec::new();
         };
         if activity == Activity::Rollout {
-            let selected_key = rollout_controller().checkpoint();
+            let selected_key = self.rollout_controller().checkpoint();
             let roles = self
                 .training()
                 .read()

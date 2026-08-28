@@ -7,14 +7,19 @@ use spiral_robotics_api::recording::{RecordingProgress, ReplayProgress};
 use spiral_robotics_api::relations::RelationCatalog;
 use spiral_robotics_api::robots::{ModeSelection, RobotSummary, RobotTelemetry, TelemetryFrame};
 use spiral_robotics_api::rollout::RolloutSnapshot;
+use spiral_robotics_api::settings::DataSettings;
 use spiral_robotics_api::status::StudioSnapshot;
 use spiral_robotics_api::training::TrainingSnapshot;
 
+use crate::activities::data::state::DataController;
+use crate::activities::rollout::state::RolloutController;
+use crate::activities::training::state::TrainingController;
 use crate::activities::workflow::state::WorkflowController;
 use crate::client::http as api;
 #[cfg(all(feature = "web", target_arch = "wasm32"))]
 use crate::client::http::StudioEvent;
 use crate::panels::timeline::signals::SignalStore;
+use crate::panels::timeline::state::TimelineController;
 use crate::shell::notifications::{
     MessageAction, MessageNotice, MessageSeverity, MessageSource, NotificationCenterState,
 };
@@ -87,21 +92,22 @@ impl RobotSelection for [RobotSummary] {
     }
 }
 
-/// Shared frontend state. Live state follows the server event stream; Data
-/// activity state is owned by its controller rather than this shell state.
+/// Shared frontend state. Session-lived feature controllers are nested here;
+/// route and component interaction state remains with the mounted view.
 #[derive(Clone, Copy)]
 pub(crate) struct Studio {
-    snapshot: Signal<StudioSnapshot>,
-    telemetry: Signal<TelemetryFrame>,
     backend: BackendSignals,
+    project: StudioProjectResources,
     data: StudioDataSignals,
-    relation_catalog: Resource<Result<RelationCatalog, String>>,
+    controllers: StudioControllers,
     notifications: Signal<NotificationCenterState>,
     interaction: StudioInteractionSignals,
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct BackendSignals {
+struct BackendSignals {
+    snapshot: Signal<StudioSnapshot>,
+    telemetry: Signal<TelemetryFrame>,
     /// Backend-owned lifecycle and metric history for remote policy training.
     training: Signal<TrainingSnapshot>,
     /// Backend-owned remote inference and motor-control lifecycle.
@@ -114,7 +120,23 @@ pub(crate) struct BackendSignals {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct StudioDataSignals {
+struct StudioProjectResources {
+    settings: Resource<Result<DataSettings, String>>,
+    configuration: Memo<StudioConfiguration>,
+    relation_catalog: Resource<Result<RelationCatalog, String>>,
+}
+
+#[derive(Clone, Copy)]
+struct StudioControllers {
+    data: DataController,
+    workflow: WorkflowController,
+    training: TrainingController,
+    rollout: RolloutController,
+    timeline: TimelineController,
+}
+
+#[derive(Clone, Copy)]
+struct StudioDataSignals {
     /// Dataset row used by capture, import, Data filtering, and new Training
     /// runs. This is distinct from the configured Spiral namespace.
     selected_dataset: Signal<String>,
@@ -133,6 +155,123 @@ struct StudioInteractionSignals {
     pointed: Signal<Option<Selection>>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct StudioConfiguration {
+    dataset: String,
+    spiral_query_available: bool,
+}
+
+impl Default for StudioConfiguration {
+    fn default() -> Self {
+        Self {
+            dataset: "spiral_robotics".to_owned(),
+            spiral_query_available: false,
+        }
+    }
+}
+
+impl StudioConfiguration {
+    pub(crate) fn dataset(&self) -> &str {
+        &self.dataset
+    }
+
+    pub(crate) const fn spiral_query_available(&self) -> bool {
+        self.spiral_query_available
+    }
+}
+
+impl BackendSignals {
+    fn use_signals() -> Self {
+        Self {
+            snapshot: use_signal(StudioSnapshot::default),
+            telemetry: use_signal(TelemetryFrame::default),
+            training: use_signal(TrainingSnapshot::default),
+            rollout: use_signal(RolloutSnapshot::default),
+            live: use_signal(|| false),
+            last_event_ms: use_signal(|| 0.0),
+            // Keep the server's first render identical to the browser's first
+            // render; the browser clock starts with the client tasks below.
+            clock_ms: use_signal(|| 0.0),
+        }
+    }
+}
+
+impl StudioProjectResources {
+    fn use_resources() -> Self {
+        let settings =
+            use_resource(|| async { api::Http::get::<DataSettings>("/api/settings/data").await });
+        let settings_result = settings.read_unchecked().to_owned();
+        let loaded_settings = settings_result
+            .as_ref()
+            .and_then(|result| result.as_ref().ok())
+            .cloned();
+        let configuration = use_memo(use_reactive((&loaded_settings,), move |(settings,)| {
+            StudioConfiguration {
+                dataset: settings
+                    .as_ref()
+                    .map(|settings| settings.spiral().namespace().to_owned())
+                    .filter(|dataset| !dataset.trim().is_empty())
+                    .unwrap_or_else(|| "spiral_robotics".to_owned()),
+                spiral_query_available: settings
+                    .as_ref()
+                    .is_some_and(|settings| !settings.spiral().project_id().trim().is_empty()),
+            }
+        }));
+        let query_available = configuration().spiral_query_available;
+        let relation_catalog = use_resource(use_reactive(
+            (&query_available,),
+            move |(query_available,)| async move {
+                if query_available {
+                    api::Http::get::<RelationCatalog>("/api/spiral/relations").await
+                } else {
+                    Ok(RelationCatalog::default())
+                }
+            },
+        ));
+        Self {
+            settings,
+            configuration,
+            relation_catalog,
+        }
+    }
+
+    fn current_configuration(&self) -> StudioConfiguration {
+        (self.configuration)()
+    }
+}
+
+impl StudioDataSignals {
+    fn use_signals() -> Self {
+        Self {
+            selected_dataset: use_signal(|| "default".to_owned()),
+            recording_signals: use_signal(SignalStore::default),
+        }
+    }
+}
+
+impl StudioInteractionSignals {
+    fn use_signals() -> Self {
+        Self {
+            selected: use_signal(|| None),
+            pointed: use_signal(|| None),
+        }
+    }
+}
+
+impl StudioControllers {
+    fn use_controllers(project: StudioProjectResources, data: StudioDataSignals) -> Self {
+        let configuration = project.current_configuration();
+        let selected_dataset = data.selected_dataset.read().to_owned();
+        Self {
+            data: DataController::use_controller(&configuration.dataset, &selected_dataset),
+            workflow: WorkflowController::use_controller(project.relation_catalog),
+            training: TrainingController::use_controller(&configuration.dataset, &selected_dataset),
+            rollout: RolloutController::use_controller(),
+            timeline: TimelineController::use_controller(),
+        }
+    }
+}
+
 impl Studio {
     fn now_ms() -> f64 {
         #[cfg(all(feature = "web", target_arch = "wasm32"))]
@@ -146,11 +285,11 @@ impl Studio {
     }
 
     pub(crate) const fn snapshot(self) -> Signal<StudioSnapshot> {
-        self.snapshot
+        self.backend.snapshot
     }
 
     pub(crate) const fn telemetry(self) -> Signal<TelemetryFrame> {
-        self.telemetry
+        self.backend.telemetry
     }
 
     pub(crate) const fn training(self) -> Signal<TrainingSnapshot> {
@@ -194,68 +333,70 @@ impl Studio {
         self.data.recording_signals
     }
 
+    pub(crate) fn configuration(&self) -> StudioConfiguration {
+        self.project.current_configuration()
+    }
+
+    pub(crate) fn settings_result(&self) -> Option<Result<DataSettings, String>> {
+        self.project.settings.read_unchecked().to_owned()
+    }
+
+    pub(crate) fn refresh_settings(mut self) {
+        self.project.settings.restart();
+    }
+
     pub(crate) fn relation_catalog_result(&self) -> Option<Result<RelationCatalog, String>> {
-        self.relation_catalog.read_unchecked().to_owned()
+        self.project.relation_catalog.read_unchecked().to_owned()
     }
 
     pub(crate) fn relation_catalog(&self) -> Option<RelationCatalog> {
         self.relation_catalog_result().and_then(Result::ok)
     }
 
-    pub(crate) fn relation_catalog_error(&self) -> Option<String> {
-        self.relation_catalog_result().and_then(Result::err)
+    pub(crate) fn refresh_relation_catalog(mut self) {
+        self.project.relation_catalog.restart();
     }
 
-    pub(crate) fn refresh_relation_catalog(mut self) {
-        self.relation_catalog.restart();
+    pub(crate) const fn data_controller(self) -> DataController {
+        self.controllers.data
+    }
+
+    pub(crate) const fn workflow_controller(self) -> WorkflowController {
+        self.controllers.workflow
+    }
+
+    pub(crate) const fn training_controller(self) -> TrainingController {
+        self.controllers.training
+    }
+
+    pub(crate) const fn rollout_controller(self) -> RolloutController {
+        self.controllers.rollout
+    }
+
+    pub(crate) const fn timeline_controller(self) -> TimelineController {
+        self.controllers.timeline
     }
 
     /// Create the shared state and its project-scoped catalog resource.
-    pub(crate) fn use_studio(query_available: bool) -> Self {
-        // Hooks own the lifetime of every signal. The context publishes only
-        // their handles; it does not construct unscoped reactive state inside
-        // a provider closure.
-        let snapshot = use_signal(StudioSnapshot::default);
-        let telemetry = use_signal(TelemetryFrame::default);
-        let training = use_signal(TrainingSnapshot::default);
-        let rollout = use_signal(RolloutSnapshot::default);
-        let live = use_signal(|| false);
-        let last_event_ms = use_signal(|| 0.0);
-        let clock_ms = use_signal(|| 0.0);
+    pub(crate) fn use_studio() -> Self {
+        let backend = BackendSignals::use_signals();
+        let project = StudioProjectResources::use_resources();
+        let data = StudioDataSignals::use_signals();
+        let controllers = StudioControllers::use_controllers(project, data);
         let notifications = use_signal(NotificationCenterState::default);
-        let selected = use_signal(|| None);
-        let pointed = use_signal(|| None);
-        let selected_dataset = use_signal(|| "default".to_owned());
-        let recording_signals = use_signal(SignalStore::default);
-        let relation_catalog = use_resource(use_reactive(
-            (&query_available,),
-            move |(query_available,)| async move {
-                if query_available {
-                    api::Http::get::<RelationCatalog>("/api/spiral/relations").await
-                } else {
-                    Ok(RelationCatalog::default())
-                }
-            },
-        ));
+        let interaction = StudioInteractionSignals::use_signals();
+        // Hooks own the lifetime of every nested umbrella. The context
+        // publishes their handles only after the complete session exists.
         let studio = use_context_provider(|| Self {
-            snapshot,
-            telemetry,
-            backend: BackendSignals {
-                training,
-                rollout,
-                live,
-                last_event_ms,
-                // Keep the server's first render identical to the browser's first
-                // render; the browser clock starts with the client tasks below.
-                clock_ms,
-            },
-            data: StudioDataSignals {
-                selected_dataset,
-                recording_signals,
-            },
-            relation_catalog,
+            backend,
+            project,
+            data,
+            controllers,
             notifications,
-            interaction: StudioInteractionSignals { selected, pointed },
+            interaction,
+        });
+        use_future(move || async move {
+            studio.workflow_controller().load(studio).await;
         });
         let mut default_selection = studio.selection();
         use_effect(move || {
@@ -289,7 +430,8 @@ impl Studio {
 
     /// Follow the one backend stream and hand feature events directly to the
     /// controller that owns their accepted state.
-    pub(crate) fn use_event_stream(self, workflow: WorkflowController) {
+    pub(crate) fn use_event_stream(self) {
+        let workflow = self.workflow_controller();
         #[cfg(not(all(feature = "web", target_arch = "wasm32")))]
         let _ = workflow;
         #[cfg(all(feature = "web", target_arch = "wasm32"))]
@@ -311,7 +453,9 @@ impl Studio {
                         StudioEvent::TrainingSnapshot(value) => training.set(*value),
                         StudioEvent::TrainingUpdate(update) => training.write().apply(*update),
                         StudioEvent::Rollout(value) => rollout.set(*value),
-                        StudioEvent::WorkflowState(value) => workflow.accept_streamed_state(*value),
+                        StudioEvent::WorkflowState(value) => {
+                            workflow.accept_streamed_state(*value, studio)
+                        }
                         StudioEvent::WorkflowAgent(value) => workflow.accept_streamed_agent(*value),
                         StudioEvent::Telemetry(frame) => {
                             if frame.recording().is_some() || recording_signals.peek().live() {
@@ -333,7 +477,8 @@ impl Studio {
         if !self.controls_available() {
             return None;
         }
-        self.telemetry
+        self.backend
+            .telemetry
             .read()
             .robots()
             .iter()
@@ -345,7 +490,7 @@ impl Studio {
     pub(crate) fn controls_available(&self) -> bool {
         let age = self.telemetry_age_seconds();
         (self.backend.live)()
-            && self.snapshot.read().readiness().catalog_available()
+            && self.backend.snapshot.read().readiness().catalog_available()
             && age.is_finite()
             && age < 2.5
     }
@@ -365,7 +510,7 @@ impl Studio {
     /// deleted robot from leaving the panels pointed at nothing, without an
     /// effect that writes the signal it reads.
     pub(crate) fn focused(&self) -> Option<RobotSummary> {
-        let robots = self.snapshot.read();
+        let robots = self.backend.snapshot.read();
         let chosen = self.interaction.selected.read();
         chosen
             .as_ref()
@@ -388,7 +533,7 @@ impl Studio {
     /// follower" is a thing an operator learns in the first minute and relies on
     /// while looking at the bench rather than the screen.
     pub(crate) fn position_of(&self, id: &str) -> usize {
-        let snapshot = self.snapshot.read();
+        let snapshot = self.backend.snapshot.read();
         let kind = snapshot
             .robots()
             .iter()
@@ -417,17 +562,18 @@ impl Studio {
     /// recording that is still running is exactly what an operator needs to know
     /// about while the link is unreliable.
     pub(crate) fn recording(&self) -> Option<RecordingProgress> {
-        self.telemetry.read().recording().cloned()
+        self.backend.telemetry.read().recording().cloned()
     }
 
     /// The episode being played back right now.
     pub(crate) fn replay(&self) -> Option<ReplayProgress> {
-        self.telemetry.read().replay().cloned()
+        self.backend.telemetry.read().replay().cloned()
     }
 
     /// Robots whose motor bus is currently open.
     pub(crate) fn connected_robots(&self) -> Vec<RobotSummary> {
-        self.snapshot
+        self.backend
+            .snapshot
             .read()
             .robots()
             .iter()
@@ -438,12 +584,12 @@ impl Studio {
 
     /// The mode the studio is in.
     pub(crate) fn mode(&self) -> ModeSelection {
-        self.snapshot.read().mode().selection().to_owned()
+        self.backend.snapshot.read().mode().selection().to_owned()
     }
 
     /// Whether the configured mode is actually running.
     pub(crate) fn mode_active(&self) -> bool {
-        self.snapshot.read().mode().active()
+        self.backend.snapshot.read().mode().active()
     }
 
     /// True when `id` is the robot the operator is driving by hand.

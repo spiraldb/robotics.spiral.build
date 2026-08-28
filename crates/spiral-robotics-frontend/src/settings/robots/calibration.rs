@@ -21,7 +21,7 @@ pub(super) fn CalibrationSection(
     progress: Option<CalibrationProgress>,
 ) -> Element {
     let studio = studio();
-    let data = crate::activities::data::state::data_controller();
+    let data = studio.data_controller();
     let mut confirming_reapply = use_signal(|| false);
     let reapplying = use_signal(|| false);
     let mut command = use_signal(|| None::<&'static str>);

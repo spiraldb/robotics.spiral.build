@@ -11,7 +11,6 @@ use spiral_robotics_api::relations::{
 };
 
 use crate::activities::data::query_result::{QueryExecutionPresentation, QueryState};
-use crate::activities::data::state::data_controller;
 use crate::client::http as api;
 use crate::shell::state::studio;
 
@@ -183,7 +182,7 @@ impl ProjectRelationScope<'_> {
 #[component]
 pub(crate) fn RelationsPanel(namespace: String, query_available: bool) -> Element {
     let studio = studio();
-    let controller = data_controller();
+    let controller = studio.data_controller();
     let mut selected = use_signal(|| None::<String>);
     let count_namespace = namespace.clone();
     let mut counts = use_resource(move || {

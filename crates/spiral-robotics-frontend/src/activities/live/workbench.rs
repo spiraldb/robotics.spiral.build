@@ -2,7 +2,6 @@
 
 use std::collections::BTreeSet;
 
-use crate::activities::data::state::data_controller;
 use crate::components::interaction::{
     Action, ActionPurpose, ActionVariant, BlockingConfirmation, ConfirmationCopy,
     ConfirmationDismissal, ConfirmationResponse, ModeAction, ModeGroup,
@@ -45,7 +44,7 @@ pub(crate) fn LiveWorkbench(on_action: EventHandler<LiveAction>) -> Element {
 #[component]
 fn CaptureSection() -> Element {
     let studio = studio();
-    let data = data_controller();
+    let data = studio.data_controller();
     let mut selected_dataset = studio.selected_dataset();
     let recording = studio.recording();
     let dataset_ids = data

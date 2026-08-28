@@ -15,19 +15,14 @@ pub(crate) struct RolloutController {
     duration_draft: Signal<String>,
 }
 
-pub(crate) fn use_rollout_controller() -> RolloutController {
-    let controller = RolloutController {
-        checkpoint: use_signal(|| None),
-        duration_draft: use_signal(|| DEFAULT_ROLLOUT_DURATION_SECONDS.to_string()),
-    };
-    use_context_provider(|| controller)
-}
-
-pub(crate) fn rollout_controller() -> RolloutController {
-    use_context::<RolloutController>()
-}
-
 impl RolloutController {
+    pub(crate) fn use_controller() -> Self {
+        Self {
+            checkpoint: use_signal(|| None),
+            duration_draft: use_signal(|| DEFAULT_ROLLOUT_DURATION_SECONDS.to_string()),
+        }
+    }
+
     pub(crate) fn checkpoint(&self) -> Option<String> {
         self.checkpoint.read().to_owned()
     }

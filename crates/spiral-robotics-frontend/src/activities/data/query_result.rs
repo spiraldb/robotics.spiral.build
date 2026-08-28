@@ -1,10 +1,10 @@
 //! Query execution snapshots and the shared result viewer.
 
-use crate::activities::data::state::data_controller;
 use crate::client::http::EpisodeApiPath;
 use crate::components::interaction::{
     Action, ActionAuxiliaryHandlers, ActionPurpose, ActionVariant, BrowserFocus, CloseIcon,
 };
+use crate::shell::state::studio;
 use dioxus::prelude::*;
 use spiral_robotics_api::relations::{QueryColumn, SpiralQueryResponse};
 
@@ -88,7 +88,7 @@ pub(crate) enum QueryState {
 
 #[component]
 pub(crate) fn QueryResultView() -> Element {
-    let controller = data_controller();
+    let controller = studio().data_controller();
     let tabs = controller.query_tabs();
     let active_id = controller.active_query();
     let active = active_id

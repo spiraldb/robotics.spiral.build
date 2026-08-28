@@ -50,23 +50,18 @@ pub(crate) struct TimelineController {
     preview_tick_seconds: Signal<Option<f64>>,
 }
 
-pub(crate) fn use_timeline_controller() -> TimelineController {
-    let controller = TimelineController {
-        playhead: use_signal(|| 0.0),
-        preview: use_signal(PreviewTransport::default),
-        follow_live: use_signal(|| true),
-        robot_sync_target: use_signal(|| None),
-        #[cfg(feature = "web")]
-        preview_tick_seconds: use_signal(|| None),
-    };
-    use_context_provider(|| controller)
-}
-
-pub(crate) fn timeline_controller() -> TimelineController {
-    use_context::<TimelineController>()
-}
-
 impl TimelineController {
+    pub(crate) fn use_controller() -> Self {
+        Self {
+            playhead: use_signal(|| 0.0),
+            preview: use_signal(PreviewTransport::default),
+            follow_live: use_signal(|| true),
+            robot_sync_target: use_signal(|| None),
+            #[cfg(feature = "web")]
+            preview_tick_seconds: use_signal(|| None),
+        }
+    }
+
     pub(crate) const fn playhead_signal(self) -> Signal<f64> {
         self.playhead
     }

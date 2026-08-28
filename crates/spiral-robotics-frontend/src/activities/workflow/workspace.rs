@@ -18,7 +18,7 @@ use spiral_robotics_api::workflow::{
 use crate::activities::data::query_result::{QueryExecutionPresentation, QueryState};
 use crate::activities::workflow::state::{
     ASSISTANT_PANEL_ID, AgentDraftKey, AgentPendingCommand, CANVAS_PANEL_ID, ModelFeatureTarget,
-    NODE_PANEL_ID, RESULTS_PANEL_ID, WorkflowNodeData, WorkflowPendingCommand, workflow_controller,
+    NODE_PANEL_ID, RESULTS_PANEL_ID, WorkflowNodeData, WorkflowPendingCommand,
 };
 use crate::components::icons::{
     FitViewIcon, ModelNodeIcon, QueryNodeIcon, ResultNodeIcon, TableNodeIcon, WorkflowIcon,
@@ -48,7 +48,7 @@ enum AssistantInline {
 
 #[component]
 pub(crate) fn WorkflowWorkspace() -> Element {
-    let controller = workflow_controller();
+    let controller = studio().workflow_controller();
     let panels = vec![
         Panel::new(
             ASSISTANT_PANEL_ID,
@@ -116,8 +116,8 @@ impl WorkflowWorkspaceLayout {
 
 #[component]
 fn WorkflowAssistant() -> Element {
-    let controller = workflow_controller();
     let studio = studio();
+    let controller = studio.workflow_controller();
     let state = controller.agent_state();
     let mut follow_latest = use_signal(|| true);
     let mut show_latest_action = use_signal(|| false);
@@ -763,7 +763,7 @@ impl AssistantMarkdownLine for str {
 
 #[component]
 fn WorkflowNodeInspector() -> Element {
-    let controller = workflow_controller();
+    let controller = studio().workflow_controller();
     let selected = controller.selected_node_data();
     let relations = controller.relations();
     let snapshot_active = controller.snapshot().phase().active();
@@ -1081,7 +1081,7 @@ fn WorkflowNodeInspector() -> Element {
 }
 
 fn node_validation_issues(node_id: &str) -> Element {
-    let validation = workflow_controller().validation();
+    let validation = studio().workflow_controller().validation();
     let issues = validation
         .errors()
         .iter()
@@ -1103,8 +1103,8 @@ fn node_validation_issues(node_id: &str) -> Element {
 
 #[component]
 fn WorkflowCanvas() -> Element {
-    let controller = workflow_controller();
     let studio = studio();
+    let controller = studio.workflow_controller();
     let nodes = controller.nodes();
     let edges = controller.edges();
     let flow = use_flow_handle::<WorkflowNodeData>();
@@ -1485,8 +1485,8 @@ fn node_kind_icon(kind: WorkflowNodeKind) -> Element {
 
 #[component]
 fn WorkflowResults() -> Element {
-    let controller = workflow_controller();
     let studio = studio();
+    let controller = studio.workflow_controller();
     let snapshot = controller.snapshot();
     let run_reason = controller.run_disabled_reason();
     let can_run_again = matches!(
@@ -1900,16 +1900,13 @@ mod tests {
         let state = include_str!("state.rs");
         let workspace = include_str!("workspace.rs");
         let production_workspace = workspace.split_once("#[cfg(test)]").unwrap().0;
-        let routes = include_str!("../../shell/routes.rs");
+        let studio = include_str!("../../shell/state.rs");
         assert!(state.contains("agent_drafts: Signal<BTreeMap<AgentDraftKey, String>>"));
         assert!(state.contains("agent_drafts: use_signal(BTreeMap::new)"));
         assert!(workspace.contains("let mut drafts = controller.agent_drafts()"));
         assert!(!production_workspace.contains("use_signal(BTreeMap::<String, String>::new)"));
-        assert!(
-            routes.find("use_workflow_controller();").unwrap()
-                < routes.find("Outlet::<StudioRoute>").unwrap(),
-            "the shell-owned controller must outlive the routed Workflow view"
-        );
+        assert!(studio.contains("workflow: WorkflowController"));
+        assert!(studio.contains("workflow: WorkflowController::use_controller"));
     }
 
     #[test]

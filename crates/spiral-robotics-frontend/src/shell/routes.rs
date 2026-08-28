@@ -2,20 +2,12 @@
 
 use crate::components::interaction::BrowserFocus;
 use dioxus::prelude::*;
-use spiral_robotics_api::settings::DataSettings;
 
-use crate::activities::data::state::use_data_controller;
-use crate::activities::rollout::state::use_rollout_controller;
-use crate::activities::training::state::use_training_controller;
 use crate::activities::training::workspace::TrainingWorkspace;
-use crate::activities::workflow::state::use_workflow_controller;
 use crate::activities::workflow::workspace::WorkflowWorkspace;
-use crate::client::http as api;
-use crate::panels::timeline::state::use_timeline_controller;
 use crate::settings::panel::SettingsPanel;
 use crate::shell::activity::Activity;
 use crate::shell::frame::{ActivityRail, StatusBar};
-use crate::shell::navigation::{ShellAction, use_shell_controller};
 use crate::shell::state::Studio;
 use crate::shell::workspace::EpisodeWorkspace;
 
@@ -37,6 +29,25 @@ pub(crate) enum StudioRoute {
     Training {},
     #[route("/rollout")]
     Rollout {},
+}
+
+#[derive(Clone, Copy)]
+struct StudioShellSignals {
+    settings_open: Signal<bool>,
+    settings_busy: Signal<bool>,
+    settings_was_open: Signal<bool>,
+    project_setup_prompted: Signal<bool>,
+}
+
+impl StudioShellSignals {
+    fn use_signals() -> Self {
+        Self {
+            settings_open: use_signal(|| false),
+            settings_busy: use_signal(|| false),
+            settings_was_open: use_signal(|| false),
+            project_setup_prompted: use_signal(|| false),
+        }
+    }
 }
 
 impl StudioRoute {
@@ -61,35 +72,6 @@ impl StudioRoute {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct StudioConfiguration {
-    dataset: String,
-    spiral_query_available: bool,
-}
-
-impl Default for StudioConfiguration {
-    fn default() -> Self {
-        Self {
-            dataset: "spiral_robotics".to_owned(),
-            spiral_query_available: false,
-        }
-    }
-}
-
-impl StudioConfiguration {
-    pub(crate) fn current() -> Self {
-        use_context::<Memo<Self>>()()
-    }
-
-    pub(crate) fn dataset(&self) -> &str {
-        &self.dataset
-    }
-
-    pub(crate) const fn spiral_query_available(&self) -> bool {
-        self.spiral_query_available
-    }
-}
-
 #[component]
 pub(crate) fn StudioRouter() -> Element {
     rsx! { Router::<StudioRoute> {} }
@@ -99,14 +81,17 @@ pub(crate) fn StudioRouter() -> Element {
 /// runs, messages, and long-running backend commands survive navigation.
 #[component]
 fn StudioShell() -> Element {
+    let studio = Studio::use_studio();
     let route = use_route::<StudioRoute>();
     let activity = route.activity();
     let navigator = use_navigator();
-    let shell = use_shell_controller();
-    let mut settings_busy = use_signal(|| false);
-    let mut settings =
-        use_resource(|| async { api::Http::get::<DataSettings>("/api/settings/data").await });
-    let settings_result = settings.read_unchecked().to_owned();
+    let StudioShellSignals {
+        mut settings_open,
+        mut settings_busy,
+        mut settings_was_open,
+        mut project_setup_prompted,
+    } = StudioShellSignals::use_signals();
+    let settings_result = studio.settings_result();
     let loaded_settings = settings_result
         .as_ref()
         .and_then(|result| result.as_ref().ok())
@@ -115,32 +100,10 @@ fn StudioShell() -> Element {
         .as_ref()
         .and_then(|result| result.as_ref().err())
         .cloned();
-    let configuration = use_memo(use_reactive((&loaded_settings,), move |(settings,)| {
-        StudioConfiguration {
-            dataset: settings
-                .as_ref()
-                .map(|settings| settings.spiral().namespace().to_owned())
-                .filter(|dataset| !dataset.trim().is_empty())
-                .unwrap_or_else(|| "spiral_robotics".to_owned()),
-            spiral_query_available: settings
-                .as_ref()
-                .is_some_and(|settings| !settings.spiral().project_id().trim().is_empty()),
-        }
-    }));
-    use_context_provider(|| configuration);
-    let configuration_value = configuration();
-    let studio = Studio::use_studio(configuration_value.spiral_query_available);
-
-    let selected_dataset = studio.selected_dataset().read().to_owned();
-    let data = use_data_controller(&configuration_value.dataset, &selected_dataset);
-    let workflow = use_workflow_controller();
-    studio.use_event_stream(workflow);
-    use_training_controller(&configuration_value.dataset, &selected_dataset);
-    use_rollout_controller();
-    let timeline = use_timeline_controller();
-    let settings_open = shell.settings_open();
-    let mut settings_was_open = use_signal(|| false);
-    let mut project_setup_prompted = use_signal(|| false);
+    let data = studio.data_controller();
+    studio.use_event_stream();
+    let timeline = studio.timeline_controller();
+    let settings_are_open = settings_open();
     use_effect(use_reactive((&loaded_settings,), move |(settings,)| {
         if settings
             .as_ref()
@@ -148,23 +111,26 @@ fn StudioShell() -> Element {
             && !project_setup_prompted()
         {
             project_setup_prompted.set(true);
-            shell.dispatch(ShellAction::OpenSettings);
+            settings_open.set(true);
         }
     }));
-    use_effect(use_reactive((&settings_open,), move |(settings_open,)| {
-        let was_open = settings_was_open();
-        if !settings_open && was_open {
-            BrowserFocus::after_render("settings-rail-trigger".to_owned());
-        }
-        if was_open != settings_open {
-            settings_was_open.set(settings_open);
-        }
-    }));
+    use_effect(use_reactive(
+        (&settings_are_open,),
+        move |(settings_are_open,)| {
+            let was_open = settings_was_open();
+            if !settings_are_open && was_open {
+                BrowserFocus::after_render("settings-rail-trigger".to_owned());
+            }
+            if was_open != settings_are_open {
+                settings_was_open.set(settings_are_open);
+            }
+        },
+    ));
 
     rsx! {
         document::Stylesheet { href: TAILWIND }
         document::Script { src: ECHARTS_RUNTIME }
-        document::Title { if settings_open { "Spiral Robotics Studio · Settings" } else { "Spiral Robotics Studio · {activity.label()}" } }
+        document::Title { if settings_are_open { "Spiral Robotics Studio · Settings" } else { "Spiral Robotics Studio · {activity.label()}" } }
         document::Link { rel: "icon", href: FAVICON }
         document::Meta { name: "color-scheme", content: "light" }
 
@@ -172,8 +138,8 @@ fn StudioShell() -> Element {
             class: "studio-shell studio-shell-v2",
             tabindex: "-1",
             onkeydown: move |event| {
-                if event.key() == Key::Escape && shell.settings_open() && !settings_busy() {
-                    shell.dispatch(ShellAction::CloseSettings);
+                if event.key() == Key::Escape && settings_open() && !settings_busy() {
+                    settings_open.set(false);
                 }
             },
             div {
@@ -182,17 +148,17 @@ fn StudioShell() -> Element {
                     ActivityRail {
                         state: crate::shell::frame::ActivityRailState::new(
                             activity,
-                            settings_open,
+                            settings_are_open,
                         ),
                         on_activity: move |next| {
                             timeline.stop_preview();
                             studio.notifications().write().close();
-                            shell.dispatch(ShellAction::CloseSettings);
+                            settings_open.set(false);
                             navigator.push(StudioRoute::for_activity(next));
                         },
-                        on_settings: move |_| shell.dispatch(ShellAction::OpenSettings),
+                        on_settings: move |_| settings_open.set(true),
                     }
-                    if settings_open {
+                    if settings_are_open {
                         SettingsPanel {
                             state: crate::settings::panel::SettingsLoadState::new(
                                 loaded_settings.clone(),
@@ -201,11 +167,11 @@ fn StudioShell() -> Element {
                             handlers: crate::settings::panel::SettingsPanelHandlers::new(
                                 move |_| {
                                     if !settings_busy() {
-                                        shell.dispatch(ShellAction::CloseSettings);
+                                        settings_open.set(false);
                                     }
                                 },
                                 move |_| {
-                                    settings.restart();
+                                    studio.refresh_settings();
                                     studio.refresh_relation_catalog();
                                     data.invalidate_episode_catalog();
                                 },

@@ -38,6 +38,10 @@
   or assigning the first port to a newly created robot must automatically try
   to connect it. A missing or unavailable bus must leave the durable robot in
   place and expose its disconnected or error state for recovery.
+- **SETUP-014** The mounted Robots settings view must own one serial-port catalog
+  resource shared by every robot row. Expanding additional rows must not issue
+  duplicate catalog scans; explicit Identify operations may take their own
+  before/after snapshots.
 
 ## Related features
 

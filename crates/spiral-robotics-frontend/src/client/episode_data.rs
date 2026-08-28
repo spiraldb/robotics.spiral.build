@@ -197,6 +197,14 @@ pub(crate) struct EpisodePreviewSignals {
 }
 
 impl EpisodePreviewSignals {
+    pub(crate) fn use_signals() -> Self {
+        Self {
+            state: use_signal(|| None),
+            revision: use_signal(|| 0),
+            cache: use_signal(EpisodeInspectionCache::default),
+        }
+    }
+
     pub(crate) const fn new(
         state: Signal<Option<RecordedSource<EpisodePreview>>>,
         revision: Signal<u64>,

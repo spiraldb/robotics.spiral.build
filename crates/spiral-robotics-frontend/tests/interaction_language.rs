@@ -152,7 +152,72 @@ fn workflow_backend_state_has_one_frontend_owner() {
     assert!(studio.contains("workflow.accept_streamed_state"));
     assert!(studio.contains("workflow.accept_streamed_agent"));
     assert!(workflow.contains("pub(crate) fn accepted_state"));
-    assert!(frame.contains("workflow_controller().accepted_state()"));
+    assert!(frame.contains("studio.workflow_controller().accepted_state()"));
+}
+
+#[test]
+fn studio_is_the_only_session_context_and_owns_session_lived_controllers() {
+    let frontend = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let source_root = frontend.join("src");
+    let studio = fs::read_to_string(source_root.join("shell/state.rs"))
+        .expect("Studio state source should be readable");
+    let providers = files_with_extension(&source_root, "rs")
+        .into_iter()
+        .flat_map(|path| {
+            let source = fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("could not read {}: {error}", path.display()));
+            source
+                .match_indices("use_context_provider")
+                .map(move |(offset, _)| (path.clone(), offset))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        providers.len(),
+        1,
+        "only Studio may publish session context"
+    );
+    assert!(providers[0].0.ends_with("src/shell/state.rs"));
+    for controller in [
+        "data: DataController",
+        "workflow: WorkflowController",
+        "training: TrainingController",
+        "rollout: RolloutController",
+        "timeline: TimelineController",
+    ] {
+        assert!(
+            studio.contains(controller),
+            "Studio is missing session controller {controller:?}",
+        );
+    }
+    assert!(studio.contains("settings: Resource<Result<DataSettings, String>>"));
+    assert!(studio.contains("configuration: Memo<StudioConfiguration>"));
+}
+
+#[test]
+fn serial_port_catalog_is_owned_once_by_the_robots_view() {
+    let frontend = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let robots = fs::read_to_string(frontend.join("src/settings/robots/mod.rs"))
+        .expect("Robot settings source should be readable");
+    let robot_panel = robots
+        .split_once("pub(super) fn RobotPanel")
+        .expect("RobotPanel should exist")
+        .1
+        .split_once("fn RobotEntry")
+        .expect("RobotEntry should follow RobotPanel")
+        .0;
+    let robot_setup = robots
+        .split_once("fn RobotSetup")
+        .expect("RobotSetup should exist")
+        .1
+        .split_once("trait RobotTypePresentation")
+        .expect("RobotSetup should precede presentation helpers")
+        .0;
+
+    assert!(robot_panel.contains("use_resource"));
+    assert!(robot_panel.contains("PortCatalogState::new"));
+    assert!(!robot_setup.contains("use_resource"));
 }
 
 #[test]

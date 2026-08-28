@@ -44,10 +44,11 @@ allowing visualization panels to be arranged spatially.
 - **STUDIO-071** Feature state must have one authoritative frontend owner at
   the narrowest lifetime that still survives its operations. The shared event
   stream must route Workflow and Assistant snapshots directly into the
-  shell-lived `WorkflowController`; Studio shell state must not retain a second
-  copy, and the status bar must read a controller projection. Values derived
-  from a Dioxus resource, including stable Studio configuration, must remain
-  derived rather than being synchronized into another writable signal.
+  `WorkflowController` nested in `Studio`; `Studio` must not retain a second
+  snapshot copy, and the status bar must read the controller projection.
+  Values derived from a Dioxus resource, including stable Studio configuration,
+  must remain derived rather than being synchronized into another writable
+  signal.
 - **STUDIO-072** One backend Spiral connection controller must own the active
   endpoint, SpFS endpoint, project, and credentials plus their durable
   bootstrap update. It must perform destination replacement, preference save,
@@ -62,6 +63,11 @@ allowing visualization panels to be arranged spatially.
   useful lifetime: Data Relations owns its combined exact-count query, table
   selection, and five-row preview; individual panels own only transient
   interaction state.
+- **STUDIO-074** `Studio` must be the frontend's only session context. Settings
+  and project resources plus Data, Workflow, Training, Rollout, and Timeline
+  controllers must be nested under that umbrella rather than published as
+  sibling contexts. Route-only and component-only interaction state must stay
+  at the mounted route or component that owns its lifetime.
 
 ## Panel workspace
 

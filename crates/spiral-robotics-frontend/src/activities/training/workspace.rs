@@ -23,7 +23,6 @@ use spiral_robotics_api::training::{
     TrainingMetricPoint, TrainingReadiness, TrainingRun, TrainingRunPhase,
 };
 
-use crate::activities::training::state::training_controller;
 use crate::components::charts::{
     COLOR_CPU, COLOR_GPU, COLOR_INK_FAINT, COLOR_LINE, COLOR_MEMORY, COLOR_SELECTED, COLOR_SURFACE,
     COLOR_THROUGHPUT, COLOR_TRAIN, COLOR_TRANSFER, COLOR_VALIDATION, CharmingChart, ChartPoints,
@@ -39,7 +38,7 @@ const TRAINING_CHART_POINT_BUDGET: usize = 1_200;
 pub(crate) fn TrainingWorkspace() -> Element {
     let studio = studio();
     let dataset_id = studio.selected_dataset().read().to_owned();
-    let controller = training_controller();
+    let controller = studio.training_controller();
     let snapshot = studio.training().read().to_owned();
     let run_names = snapshot
         .runs()
@@ -183,9 +182,9 @@ fn TrainingRunControl(
     active_run: Option<TrainingRun>,
 ) -> Element {
     let studio = studio();
-    let data = crate::activities::data::state::data_controller();
+    let data = studio.data_controller();
     let mut selected_dataset = studio.selected_dataset();
-    let controller = training_controller();
+    let controller = studio.training_controller();
     let request = controller.request();
     let dataset_ids = data
         .episodes()
@@ -545,7 +544,7 @@ fn TrainingRunControl(
 
 #[component]
 fn TrainingHistory(history: Vec<TrainingRun>) -> Element {
-    let controller = training_controller();
+    let controller = studio().training_controller();
     let selected_run = controller.selected_run();
     let confirming_delete = use_signal(|| None::<String>);
     rsx! {
@@ -574,7 +573,7 @@ fn TrainingHistoryRow(
     mut confirming_delete: Signal<Option<String>>,
 ) -> Element {
     let studio = studio();
-    let controller = training_controller();
+    let controller = studio.training_controller();
     let deleting_run = controller.deleting();
     let deleting = deleting_run.as_deref() == Some(run.id());
     let delete_disabled = run.phase().active() || deleting_run.is_some();

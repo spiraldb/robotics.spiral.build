@@ -23,7 +23,6 @@ use spiral_robotics_api::recording::EpisodeInfo;
 use spiral_robotics_api::relations::RelationCatalog;
 
 use crate::activities::data::query_result::DEFAULT_QUERY_ROWS;
-use crate::activities::data::state::data_controller;
 use crate::client::http as api;
 use crate::format::ClockPresentation;
 use crate::shell::state::studio;
@@ -35,7 +34,7 @@ const QUERY_ROW_OPTIONS: [usize; 5] = [25, 100, 250, 500, 1_000];
 #[component]
 pub(crate) fn EpisodesPanel(namespace: String) -> Element {
     let studio = studio();
-    let data = data_controller();
+    let data = studio.data_controller();
     let importing = use_signal(|| false);
     let mut adding_data = use_signal(|| false);
     let mut confirming_delete = use_signal(|| None::<String>);
@@ -339,21 +338,70 @@ impl ImportWarningsPresentation for [String] {
     }
 }
 
+#[derive(Clone, Copy)]
+struct HuggingFaceImportState {
+    source: HuggingFaceSourceSignals,
+    operation: HuggingFaceOperationSignals,
+}
+
+#[derive(Clone, Copy)]
+struct HuggingFaceSourceSignals {
+    format: Signal<HuggingFaceDatasetFormat>,
+    repository: Signal<String>,
+    revision: Signal<String>,
+}
+
+#[derive(Clone, Copy)]
+struct HuggingFaceOperationSignals {
+    inspecting: Signal<bool>,
+    importing: Signal<bool>,
+    inspection: Signal<Option<HuggingFaceDatasetInspection>>,
+    imported: Signal<Option<HuggingFaceDatasetImportSummary>>,
+    error: Signal<Option<String>>,
+}
+
+impl HuggingFaceImportState {
+    fn use_state() -> Self {
+        Self {
+            source: HuggingFaceSourceSignals {
+                format: use_signal(|| HuggingFaceDatasetFormat::LeRobot),
+                repository: use_signal(String::new),
+                revision: use_signal(|| "main".to_owned()),
+            },
+            operation: HuggingFaceOperationSignals {
+                inspecting: use_signal(|| false),
+                importing: use_signal(|| false),
+                inspection: use_signal(|| None),
+                imported: use_signal(|| None),
+                error: use_signal(|| None),
+            },
+        }
+    }
+}
+
 /// Inspect-then-import flow for immutable Hugging Face snapshots. The panel is
 /// inline because it belongs to the selected dataset and should not obscure
 /// either the episode catalog or Query while an import is being prepared.
 #[component]
 fn HuggingFaceImport(dataset_id: String, on_close: EventHandler<()>) -> Element {
     let studio = studio();
-    let controller = data_controller();
-    let mut format = use_signal(|| HuggingFaceDatasetFormat::LeRobot);
-    let mut repository = use_signal(String::new);
-    let mut revision = use_signal(|| "main".to_owned());
-    let inspecting = use_signal(|| false);
-    let importing = use_signal(|| false);
-    let mut inspection = use_signal(|| None::<HuggingFaceDatasetInspection>);
-    let mut imported = use_signal(|| None::<HuggingFaceDatasetImportSummary>);
-    let mut error = use_signal(|| None::<String>);
+    let controller = studio.data_controller();
+    let HuggingFaceImportState {
+        source:
+            HuggingFaceSourceSignals {
+                mut format,
+                mut repository,
+                mut revision,
+            },
+        operation:
+            HuggingFaceOperationSignals {
+                inspecting,
+                importing,
+                mut inspection,
+                mut imported,
+                mut error,
+            },
+    } = HuggingFaceImportState::use_state();
 
     let request = HuggingFaceDatasetRequest::new(dataset_id.clone(), repository().trim(), format())
         .with_revision(revision().trim());
@@ -634,7 +682,7 @@ impl ByteCountPresentation for u64 {
 #[component]
 pub(crate) fn QueryPanel(namespace: String, dataset_id: String, query_available: bool) -> Element {
     let studio = studio();
-    let controller = data_controller();
+    let controller = studio.data_controller();
     let relation_result = studio.relation_catalog_result();
     let relation_error = relation_result
         .as_ref()

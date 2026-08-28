@@ -43,47 +43,6 @@ struct TrainingCommandSignals {
     deleting: Signal<Option<String>>,
 }
 
-pub(crate) fn use_training_controller(namespace: &str, dataset_id: &str) -> TrainingController {
-    let initial_sql =
-        spiral::ManagedTable::Datasets.training_sql_for_dataset(namespace, dataset_id);
-    let request_sql = initial_sql.clone();
-    let request_dataset = dataset_id.to_owned();
-    let controller = TrainingController {
-        draft: TrainingDraftSignals {
-            request: use_signal(move || {
-                StartTrainingRequest::for_dataset("act-run-001", request_dataset, request_sql)
-            }),
-            generated_sql: use_signal(move || initial_sql),
-            automatic_run_name: use_signal(|| true),
-        },
-        history: TrainingHistorySignals {
-            selected_run: use_signal(|| None),
-            opened_runs: use_signal(Vec::new),
-        },
-        commands: TrainingCommandSignals {
-            starting: use_signal(|| false),
-            stopping: use_signal(|| None),
-            deleting: use_signal(|| None),
-        },
-    };
-    let namespace_dependency = namespace.to_owned();
-    let dataset_dependency = dataset_id.to_owned();
-    use_effect(use_reactive(
-        (&namespace_dependency, &dataset_dependency),
-        move |(namespace, dataset_id)| {
-            controller.sync_dataset(DatasetSync {
-                namespace: &namespace,
-                dataset_id: &dataset_id,
-            })
-        },
-    ));
-    use_context_provider(|| controller)
-}
-
-pub(crate) fn training_controller() -> TrainingController {
-    use_context::<TrainingController>()
-}
-
 struct DatasetSync<'a> {
     namespace: &'a str,
     dataset_id: &'a str,
@@ -101,6 +60,43 @@ impl TrainingRunIdentity {
 }
 
 impl TrainingController {
+    pub(crate) fn use_controller(namespace: &str, dataset_id: &str) -> Self {
+        let initial_sql =
+            spiral::ManagedTable::Datasets.training_sql_for_dataset(namespace, dataset_id);
+        let request_sql = initial_sql.clone();
+        let request_dataset = dataset_id.to_owned();
+        let controller = Self {
+            draft: TrainingDraftSignals {
+                request: use_signal(move || {
+                    StartTrainingRequest::for_dataset("act-run-001", request_dataset, request_sql)
+                }),
+                generated_sql: use_signal(move || initial_sql),
+                automatic_run_name: use_signal(|| true),
+            },
+            history: TrainingHistorySignals {
+                selected_run: use_signal(|| None),
+                opened_runs: use_signal(Vec::new),
+            },
+            commands: TrainingCommandSignals {
+                starting: use_signal(|| false),
+                stopping: use_signal(|| None),
+                deleting: use_signal(|| None),
+            },
+        };
+        let namespace_dependency = namespace.to_owned();
+        let dataset_dependency = dataset_id.to_owned();
+        use_effect(use_reactive(
+            (&namespace_dependency, &dataset_dependency),
+            move |(namespace, dataset_id)| {
+                controller.sync_dataset(DatasetSync {
+                    namespace: &namespace,
+                    dataset_id: &dataset_id,
+                })
+            },
+        ));
+        controller
+    }
+
     fn sync_dataset(mut self, dataset: DatasetSync<'_>) {
         let previous = self.draft.generated_sql.peek().to_owned();
         let next = spiral::ManagedTable::Datasets

@@ -12,7 +12,6 @@ use spiral_robotics_api::settings::{
     ConnectionTestResponse, DataSettings, SpiralConnectionUpdate, UpdateDataSettingsRequest,
 };
 
-use crate::activities::data::state::data_controller;
 use crate::client::http as api;
 use crate::settings::robots::RobotPanel;
 use crate::shell::notifications::MessageSource;
@@ -63,6 +62,60 @@ impl SettingsPanelHandlers {
     }
 }
 
+#[derive(Clone, Copy)]
+struct SettingsPanelState {
+    draft: SettingsDraftSignals,
+    operations: SettingsOperationSignals,
+    initial_focus_set: Signal<bool>,
+}
+
+#[derive(Clone, Copy)]
+struct SettingsDraftSignals {
+    current: Signal<DataSettings>,
+    client_secret: Signal<String>,
+    section: Signal<SettingsSection>,
+}
+
+#[derive(Clone, Copy)]
+struct SettingsOperationSignals {
+    saving: Signal<bool>,
+    testing: Signal<bool>,
+    transferring_project: Signal<bool>,
+    test_result: Signal<Option<ConnectionTestResponse>>,
+    save_error: Signal<Option<String>>,
+    project_transfer: ProjectTransferSignals,
+}
+
+#[derive(Clone, Copy)]
+struct ProjectTransferSignals {
+    pending_file: Signal<Option<dioxus::html::FileData>>,
+    error: Signal<Option<String>>,
+}
+
+impl SettingsPanelState {
+    fn use_state(initial: DataSettings, section: SettingsSection) -> Self {
+        Self {
+            draft: SettingsDraftSignals {
+                current: use_signal(move || initial),
+                client_secret: use_signal(String::new),
+                section: use_signal(move || section),
+            },
+            operations: SettingsOperationSignals {
+                saving: use_signal(|| false),
+                testing: use_signal(|| false),
+                transferring_project: use_signal(|| false),
+                test_result: use_signal(|| None),
+                save_error: use_signal(|| None),
+                project_transfer: ProjectTransferSignals {
+                    pending_file: use_signal(|| None),
+                    error: use_signal(|| None),
+                },
+            },
+            initial_focus_set: use_signal(|| false),
+        }
+    }
+}
+
 #[component]
 pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHandlers) -> Element {
     let SettingsLoadState {
@@ -81,19 +134,30 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
     } else {
         SettingsSection::Robots
     };
-    let mut current = use_signal(move || initial_value);
-    let mut client_secret = use_signal(String::new);
-    let mut section = use_signal(move || initial_section);
-    let mut saving = use_signal(|| false);
-    let mut testing = use_signal(|| false);
-    let transferring_project = use_signal(|| false);
-    let mut test_result = use_signal(|| None::<ConnectionTestResponse>);
-    let mut save_error = use_signal(|| None::<String>);
-    let mut pending_project_file = use_signal(|| None::<dioxus::html::FileData>);
-    let mut project_transfer_error = use_signal(|| None::<String>);
-    let mut initial_focus_set = use_signal(|| false);
+    let SettingsPanelState {
+        draft:
+            SettingsDraftSignals {
+                mut current,
+                mut client_secret,
+                mut section,
+            },
+        operations:
+            SettingsOperationSignals {
+                mut saving,
+                mut testing,
+                transferring_project,
+                mut test_result,
+                mut save_error,
+                project_transfer:
+                    ProjectTransferSignals {
+                        pending_file: mut pending_project_file,
+                        error: mut project_transfer_error,
+                    },
+            },
+        mut initial_focus_set,
+    } = SettingsPanelState::use_state(initial_value, initial_section);
     let studio = studio();
-    let data = data_controller();
+    let data = studio.data_controller();
 
     use_effect(move || {
         if !initial_focus_set() {

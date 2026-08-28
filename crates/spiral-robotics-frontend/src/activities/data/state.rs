@@ -128,93 +128,89 @@ struct QueryExecutionSignals {
     next_query_id: Signal<u64>,
 }
 
-/// Create the Data controller once at the shell boundary and publish it to the
-/// activity view. None of this state depends on the workbench being mounted.
-pub(crate) fn use_data_controller(namespace: &str, dataset_id: &str) -> DataController {
-    let initial_sql = QueryPreset::Episodes.scoped_sql(namespace, dataset_id);
-    let sql_value = initial_sql.clone();
-    let selected_episode = use_signal(|| None::<String>);
-    let episode_catalog = use_signal(EpisodeCatalogState::default);
-    let episode_loader = use_resource(move || {
-        let selected = selected_episode();
-        let source = selected.and_then(|episode| {
-            episode_catalog
-                .peek()
-                .episodes
-                .iter()
-                .find(|entry| entry.info.id() == episode)
-                .map(|entry| {
-                    (
-                        episode,
-                        entry.info.frames(),
-                        entry.full_data.as_ref().map(Arc::clone),
-                    )
-                })
-        });
-        async move {
-            let (episode, expected_frames, cached) = source?;
-            let result = match cached {
-                Some(data) => Ok(data),
-                None => EpisodeData::load(&episode).await,
-            }
-            .and_then(|data| {
-                if data.info().id() == episode && data.info().frames() == expected_frames {
-                    Ok(data)
-                } else {
-                    Err(format!(
-                        "Episode data did not match the selected catalog entry (expected {episode} with {expected_frames} frames, received {} with {} frames).",
-                        data.info().id(),
-                        data.info().frames(),
-                    ))
-                }
-            });
-            Some(EpisodeLoadResult {
-                episode,
-                expected_frames,
-                result,
-            })
-        }
-    });
-    let controller = DataController {
-        selected_episode,
-        episode_catalog,
-        episode_loader,
-        draft: QueryDraftSignals {
-            sql: use_signal(move || sql_value),
-            generated_sql: use_signal(move || initial_sql),
-            max_rows: use_signal(|| DEFAULT_QUERY_ROWS),
-        },
-        execution: QueryExecutionSignals {
-            query_tabs: use_signal(Vec::new),
-            active_query: use_signal(|| None),
-            active_request: use_signal(|| None),
-            next_query_id: use_signal(|| 1),
-        },
-    };
-    use_effect(move || {
-        if episode_loader.state().cloned() != UseResourceState::Ready {
-            return;
-        }
-        let loaded = episode_loader.read();
-        let Some(Some(loaded)) = loaded.as_ref() else {
-            return;
-        };
-        controller.cache_episode_data(loaded);
-    });
-    let namespace_dependency = namespace.to_owned();
-    let dataset_dependency = dataset_id.to_owned();
-    use_effect(use_reactive(
-        (&namespace_dependency, &dataset_dependency),
-        move |(namespace, dataset_id)| controller.sync_dataset(&namespace, &dataset_id),
-    ));
-    use_context_provider(|| controller)
-}
-
-pub(crate) fn data_controller() -> DataController {
-    use_context::<DataController>()
-}
-
 impl DataController {
+    /// Create the Data state owned by the Studio session. None of these
+    /// signals depends on the Data workbench being mounted.
+    pub(crate) fn use_controller(namespace: &str, dataset_id: &str) -> Self {
+        let initial_sql = QueryPreset::Episodes.scoped_sql(namespace, dataset_id);
+        let sql_value = initial_sql.clone();
+        let selected_episode = use_signal(|| None::<String>);
+        let episode_catalog = use_signal(EpisodeCatalogState::default);
+        let episode_loader = use_resource(move || {
+            let selected = selected_episode();
+            let source = selected.and_then(|episode| {
+                episode_catalog
+                    .peek()
+                    .episodes
+                    .iter()
+                    .find(|entry| entry.info.id() == episode)
+                    .map(|entry| {
+                        (
+                            episode,
+                            entry.info.frames(),
+                            entry.full_data.as_ref().map(Arc::clone),
+                        )
+                    })
+            });
+            async move {
+                let (episode, expected_frames, cached) = source?;
+                let result = match cached {
+                    Some(data) => Ok(data),
+                    None => EpisodeData::load(&episode).await,
+                }
+                .and_then(|data| {
+                    if data.info().id() == episode && data.info().frames() == expected_frames {
+                        Ok(data)
+                    } else {
+                        Err(format!(
+                            "Episode data did not match the selected catalog entry (expected {episode} with {expected_frames} frames, received {} with {} frames).",
+                            data.info().id(),
+                            data.info().frames(),
+                        ))
+                    }
+                });
+                Some(EpisodeLoadResult {
+                    episode,
+                    expected_frames,
+                    result,
+                })
+            }
+        });
+        let controller = Self {
+            selected_episode,
+            episode_catalog,
+            episode_loader,
+            draft: QueryDraftSignals {
+                sql: use_signal(move || sql_value),
+                generated_sql: use_signal(move || initial_sql),
+                max_rows: use_signal(|| DEFAULT_QUERY_ROWS),
+            },
+            execution: QueryExecutionSignals {
+                query_tabs: use_signal(Vec::new),
+                active_query: use_signal(|| None),
+                active_request: use_signal(|| None),
+                next_query_id: use_signal(|| 1),
+            },
+        };
+        use_effect(move || {
+            if episode_loader.state().cloned() != UseResourceState::Ready {
+                return;
+            }
+            let loaded = episode_loader.read();
+            let Some(Some(loaded)) = loaded.as_ref() else {
+                return;
+            };
+            controller.cache_episode_data(loaded);
+        });
+        let namespace_dependency = namespace.to_owned();
+        let dataset_dependency = dataset_id.to_owned();
+        use_effect(use_reactive(
+            (&namespace_dependency, &dataset_dependency),
+            move |(namespace, dataset_id)| controller.sync_dataset(&namespace, &dataset_id),
+        ));
+        controller
+    }
+
     pub(crate) fn selected_episode(&self) -> Option<String> {
         self.selected_episode.read().to_owned()
     }

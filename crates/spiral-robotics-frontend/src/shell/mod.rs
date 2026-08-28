@@ -3,7 +3,6 @@
 pub(crate) mod activity;
 pub(crate) mod frame;
 pub(crate) mod layout;
-mod navigation;
 pub(crate) mod notifications;
 pub(crate) mod routes;
 pub(crate) mod state;

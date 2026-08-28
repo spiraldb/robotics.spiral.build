@@ -22,7 +22,7 @@ use spiral_robotics_api::workflow::{
 
 use crate::client::http as api;
 use crate::shell::notifications::MessageSource;
-use crate::shell::state::{Studio, studio};
+use crate::shell::state::Studio;
 
 pub(crate) const ASSISTANT_PANEL_ID: &str = "workflow-assistant";
 pub(crate) const NODE_PANEL_ID: &str = "workflow-node";
@@ -259,7 +259,7 @@ pub(crate) struct WorkflowController {
     document: WorkflowDocumentSignals,
     lifecycle: WorkflowLifecycleSignals,
     assistant: WorkflowAssistantSignals,
-    studio: Studio,
+    relation_catalog: Resource<Result<RelationCatalog, String>>,
 }
 
 #[derive(Clone, Copy)]
@@ -291,51 +291,45 @@ struct WorkflowAssistantSignals {
     agent_drafts: Signal<BTreeMap<AgentDraftKey, String>>,
 }
 
-pub(crate) fn use_workflow_controller() -> WorkflowController {
-    let studio = studio();
-    let initial = WorkflowStateResponse::from_workflow("", WorkflowSpec::default());
-    let initial_spec = initial.workflow().to_owned();
-    let initial_nodes = initial_spec.graph_nodes(initial.snapshot(), &[]);
-    let initial_edges = initial_spec.graph_edges(initial.snapshot());
-    let controller = WorkflowController {
-        graph: WorkflowGraphSignals {
-            nodes: use_signal(move || initial_nodes),
-            edges: use_signal(move || initial_edges),
-            ui: use_signal(WorkflowUiState::default),
-        },
-        document: WorkflowDocumentSignals {
-            server: use_signal(move || initial),
-            draft: use_signal(move || initial_spec),
-        },
-        lifecycle: WorkflowLifecycleSignals {
-            loaded: use_signal(|| false),
-            command: use_signal(|| None),
-            load_error: use_signal(|| None),
-        },
-        assistant: WorkflowAssistantSignals {
-            agent: use_signal(WorkflowAgentStateResponse::default),
-            agent_loaded: use_signal(|| false),
-            agent_command: use_signal(|| None),
-            agent_error: use_signal(|| None),
-            agent_drafts: use_signal(BTreeMap::new),
-        },
-        studio,
-    };
-    use_future(move || async move {
-        controller.load(studio).await;
-    });
-    use_effect(move || {
-        let _catalog_result = studio.relation_catalog_result();
-        controller.sync_graph();
-    });
-    use_context_provider(|| controller)
-}
-
-pub(crate) fn workflow_controller() -> WorkflowController {
-    use_context::<WorkflowController>()
-}
-
 impl WorkflowController {
+    pub(crate) fn use_controller(
+        relation_catalog: Resource<Result<RelationCatalog, String>>,
+    ) -> Self {
+        let initial = WorkflowStateResponse::from_workflow("", WorkflowSpec::default());
+        let initial_spec = initial.workflow().to_owned();
+        let initial_nodes = initial_spec.graph_nodes(initial.snapshot(), &[]);
+        let initial_edges = initial_spec.graph_edges(initial.snapshot());
+        let controller = Self {
+            graph: WorkflowGraphSignals {
+                nodes: use_signal(move || initial_nodes),
+                edges: use_signal(move || initial_edges),
+                ui: use_signal(WorkflowUiState::default),
+            },
+            document: WorkflowDocumentSignals {
+                server: use_signal(move || initial),
+                draft: use_signal(move || initial_spec),
+            },
+            lifecycle: WorkflowLifecycleSignals {
+                loaded: use_signal(|| false),
+                command: use_signal(|| None),
+                load_error: use_signal(|| None),
+            },
+            assistant: WorkflowAssistantSignals {
+                agent: use_signal(WorkflowAgentStateResponse::default),
+                agent_loaded: use_signal(|| false),
+                agent_command: use_signal(|| None),
+                agent_error: use_signal(|| None),
+                agent_drafts: use_signal(BTreeMap::new),
+            },
+            relation_catalog,
+        };
+        use_effect(move || {
+            let _catalog_result = relation_catalog.read_unchecked().to_owned();
+            controller.sync_graph();
+        });
+        controller
+    }
+
     pub(crate) const fn nodes(self) -> Signal<Vec<Node<WorkflowNodeData>>> {
         self.graph.nodes
     }
@@ -366,7 +360,12 @@ impl WorkflowController {
     }
 
     pub(crate) fn relation_limitation(&self) -> Option<String> {
-        if let Some(error) = self.studio.relation_catalog_error() {
+        if let Some(error) = self
+            .relation_catalog
+            .read_unchecked()
+            .as_ref()
+            .and_then(|result| result.as_ref().err())
+        {
             return Some(format!(
                 "The Studio relation catalog is unavailable: {error}"
             ));
@@ -1075,10 +1074,17 @@ impl WorkflowController {
         }
     }
 
-    async fn load(mut self, studio: Studio) {
+    pub(crate) async fn load(mut self, studio: Studio) {
         let workflow_bootstrap_scope = self.document.server.peek().scope_id().to_owned();
         let state_loaded = match api::Http::get::<WorkflowStateResponse>("/api/workflow").await {
-            Ok(state) => self.reconcile_state_bootstrap(state, &workflow_bootstrap_scope),
+            Ok(state) => self
+                .reconcile_state_bootstrap(state, &workflow_bootstrap_scope)
+                .is_some_and(|scope_changed| {
+                    if scope_changed {
+                        studio.refresh_relation_catalog();
+                    }
+                    true
+                }),
             Err(error) => {
                 if !*self.lifecycle.loaded.peek() {
                     self.lifecycle.load_error.set(Some(error.clone()));
@@ -1142,7 +1148,6 @@ impl WorkflowController {
         let keep_local_draft = !scope_changed
             && *self.document.draft.peek() != *self.document.server.peek().workflow();
         if scope_changed {
-            self.studio.refresh_relation_catalog();
             self.graph.ui.set(WorkflowUiState::default());
             self.lifecycle.command.set(None);
         }
@@ -1157,8 +1162,10 @@ impl WorkflowController {
     }
 
     #[cfg(all(feature = "web", target_arch = "wasm32"))]
-    pub(crate) fn accept_streamed_state(self, state: WorkflowStateResponse) {
-        self.reconcile_state(state);
+    pub(crate) fn accept_streamed_state(self, state: WorkflowStateResponse, studio: Studio) {
+        if self.reconcile_state(state) {
+            studio.refresh_relation_catalog();
+        }
     }
 
     fn reconcile_state_command(
@@ -1185,14 +1192,13 @@ impl WorkflowController {
         self,
         state: WorkflowStateResponse,
         requested_scope_id: &str,
-    ) -> bool {
+    ) -> Option<bool> {
         let current = self.document.server.peek();
         if current.scope_id() != requested_scope_id && state.scope_id() != current.scope_id() {
-            return false;
+            return None;
         }
         drop(current);
-        self.reconcile_state(state);
-        true
+        Some(self.reconcile_state(state))
     }
 
     fn reconcile_agent(mut self, state: WorkflowAgentStateResponse) {
@@ -1292,8 +1298,11 @@ impl WorkflowController {
 
     fn scoped_relation_catalog(&self) -> Option<RelationCatalog> {
         let current_scope_id = self.document.server.peek().scope_id().to_owned();
-        self.studio
-            .relation_catalog()
+        self.relation_catalog
+            .read_unchecked()
+            .as_ref()
+            .and_then(|result| result.as_ref().ok())
+            .cloned()
             .filter(|catalog| catalog.matches_scope(&current_scope_id, &current_scope_id))
     }
 }
