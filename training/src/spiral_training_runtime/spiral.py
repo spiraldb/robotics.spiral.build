@@ -250,10 +250,18 @@ class SpiralActDataset:
                 "checkpoint": pa.array([payload], type=pa.large_binary()),
             }
         )
-        with self.connection.cursor() as cursor:
-            cursor.adbc_ingest(
-                f"{self.namespace}.training_checkpoints", table, mode="create_append"
-            )
+        try:
+            with self.connection.cursor() as cursor:
+                cursor.adbc_ingest(
+                    f"{self.namespace}.training_checkpoints", table, mode="append"
+                )
+        except Exception as error:
+            raise RuntimeRequestError(
+                "Spiral checkpoint write failed: "
+                f"{error}. Run Settings → SpiralDB → Test connection to provision "
+                "the managed relations.",
+                422,
+            ) from error
 
     def _query(self, sql: str) -> pa.Table:
         try:

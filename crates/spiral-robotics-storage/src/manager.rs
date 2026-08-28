@@ -170,12 +170,6 @@ impl<'a> WorkflowDocumentWrite<'a> {
     }
 }
 
-/// How one current-schema relation answered a read.
-enum RelationalRead {
-    Rows(ProjectConnection),
-    Unconfigured,
-}
-
 struct ManagedRelationProvisioning {
     namespace_created: bool,
     created_relations: Vec<Table>,
@@ -222,7 +216,7 @@ impl<'a> ManagedRelationProvisioner<'a> {
 
     async fn provision(mut self) -> Result<ManagedRelationProvisioning, String> {
         let namespace_created = self.ensure_namespace().await?;
-        let created_relations = self.missing_relations().await?;
+        let created_relations = self.relation_readiness().await?;
         for table in &created_relations {
             self.connection
                 .create_managed_relation(self.namespace, *table)
@@ -239,7 +233,7 @@ impl<'a> ManagedRelationProvisioner<'a> {
 
     async fn verify(mut self) -> Result<(), String> {
         self.verify_namespace().await?;
-        let missing = self.missing_relations().await?;
+        let missing = self.relation_readiness().await?;
         if missing.is_empty() {
             self.connection
                 .ensure_video_assets_blob_relation(self.namespace)
@@ -299,15 +293,92 @@ impl<'a> ManagedRelationProvisioner<'a> {
         }
     }
 
-    async fn missing_relations(&mut self) -> Result<Vec<Table>, String> {
+    async fn relation_readiness(&mut self) -> Result<Vec<Table>, String> {
         let mut missing = Vec::new();
         for table in Table::ALL {
             let relation = table.qualified_name(self.namespace);
-            if !self.connection.table_exists(&relation).await? {
-                missing.push(table);
+            match self.connection.relation_schema(&relation).await {
+                Ok(Some(schema)) => {
+                    Self::validate_existing_relation(table, &relation, &schema)?;
+                }
+                Ok(None) => missing.push(table),
+                Err(error) => {
+                    return Err(format!("checking Spiral table {relation}: {error}"));
+                }
             }
         }
         Ok(missing)
+    }
+
+    fn validate_existing_relation(
+        table: Table,
+        relation: &str,
+        schema: &Schema,
+    ) -> Result<(), String> {
+        if Self::is_known_legacy_schema(table, schema) {
+            return Err(LEGACY_PROJECT_ERROR.to_owned());
+        }
+        let schema = Self::portable_validation_schema(table, schema);
+        table
+            .validate_managed_relation_schema(&schema, "SpiralDB destination")
+            .map_err(|error| {
+                format!(
+                    "{error}; existing managed relation {relation} was not modified. Choose a fresh namespace or remove that relation, then run Settings → SpiralDB → Test connection."
+                )
+            })
+    }
+
+    fn is_known_legacy_schema(table: Table, schema: &Schema) -> bool {
+        match table {
+            Table::Episodes => schema.field_with_name("metadata_json").is_ok(),
+            Table::TrainingRuns => {
+                schema.field_with_name(db::SNAPSHOT_JSON).is_ok()
+                    && schema.field_with_name(db::ORDINAL).is_err()
+            }
+            Table::RolloutRuns => {
+                schema.field_with_name(db::SNAPSHOT_JSON).is_ok()
+                    && schema.field_with_name(db::SESSION_ID).is_err()
+            }
+            Table::WorkflowRuns => {
+                schema.fields().len() == 3 && schema.field_with_name(db::DOCUMENT_VERSION).is_err()
+            }
+            _ => false,
+        }
+    }
+
+    /// A portable project bundle stores video payloads as Arrow Binary, while
+    /// a ready SpiralDB relation exposes the same field as its native Blob
+    /// extension. Normalize only that declared semantic variance before using
+    /// the shared portable-schema validator.
+    fn portable_validation_schema(table: Table, schema: &Schema) -> Schema {
+        if table != Table::VideoAssets {
+            return schema.clone();
+        }
+        let expected = table.managed_relation_schema();
+        let mut fields = schema
+            .fields()
+            .iter()
+            .map(|field| field.as_ref().clone())
+            .collect::<Vec<_>>();
+        for field in &mut fields {
+            let native_blob = field.name() == db::PAYLOAD
+                && matches!(field.data_type(), DataType::Struct(_))
+                && field
+                    .metadata()
+                    .get(EXTENSION_TYPE_NAME_KEY)
+                    .is_some_and(|name| name == BLOB_EXTENSION_NAME);
+            if native_blob {
+                let expected_payload = expected
+                    .field_with_name(db::PAYLOAD)
+                    .expect("the managed video schema declares its payload");
+                *field = Field::new(
+                    expected_payload.name(),
+                    expected_payload.data_type().clone(),
+                    field.is_nullable(),
+                );
+            }
+        }
+        Schema::new_with_metadata(fields, schema.metadata().clone())
     }
 }
 
@@ -423,12 +494,12 @@ impl StorageManager {
 
     /// Read the durable training history.
     pub async fn load_training_history(&self) -> Result<Vec<TrainingRun>, String> {
+        if !self.is_configured() {
+            return Ok(Vec::new());
+        }
         let namespace = self.project_store.namespace().to_owned();
         let runs = Table::TrainingRuns.qualified_name(&namespace);
-        let mut connection = match self.relational_reader(&runs, db::ORDINAL).await? {
-            RelationalRead::Rows(connection) => connection,
-            RelationalRead::Unconfigured => return Ok(Vec::new()),
-        };
+        let mut connection = self.project_store.connect().await?;
         let rows = connection
             .relation_rows(&runs, TrainingRunRow::decode)
             .await?;
@@ -475,39 +546,15 @@ impl StorageManager {
 
     /// Read the one durable rollout session.
     pub async fn load_rollout_session(&self) -> Result<Option<RolloutSnapshot>, String> {
+        if !self.is_configured() {
+            return Ok(None);
+        }
         let relation = Table::RolloutRuns.qualified_name(self.project_store.namespace());
-        let mut connection = match self.relational_reader(&relation, db::SESSION_ID).await? {
-            RelationalRead::Rows(connection) => connection,
-            RelationalRead::Unconfigured => return Ok(None),
-        };
+        let mut connection = self.project_store.connect().await?;
         let sessions = connection
             .relation_rows(&relation, StoredRolloutSession::decode)
             .await?;
         Ok(sessions.last().map(StoredRolloutSession::restored))
-    }
-
-    /// Open a current-schema relation for reading, refusing the pre-schema-8
-    /// `snapshot_json` document shape without reading or modifying its rows.
-    async fn relational_reader(
-        &self,
-        relation: &str,
-        current_shape_column: &str,
-    ) -> Result<RelationalRead, String> {
-        if !self.is_configured() {
-            return Ok(RelationalRead::Unconfigured);
-        }
-        let mut connection = self.project_store.connect().await?;
-        let schema = connection.relation_schema(relation).await?.ok_or_else(|| {
-            format!(
-                "managed Spiral relation {relation} is missing; run Settings → SpiralDB → Test connection to provision it"
-            )
-        })?;
-        if schema.field_with_name(db::SNAPSHOT_JSON).is_ok()
-            && schema.field_with_name(current_shape_column).is_err()
-        {
-            return Err(LEGACY_PROJECT_ERROR.to_owned());
-        }
-        Ok(RelationalRead::Rows(connection))
     }
 
     /// Replace the durable rollout session. A snapshot that never named a
@@ -580,8 +627,6 @@ impl StorageManager {
         }
         let relation = Table::WorkflowRuns.qualified_name(self.project_store.namespace());
         let mut connection = self.project_store.connect().await?;
-        self.ensure_current_workflow_relation(&mut connection, &relation)
-            .await?;
         Ok(connection
             .relation_rows(&relation, WorkflowDocumentSchema::decode)
             .await?
@@ -599,8 +644,6 @@ impl StorageManager {
         let namespace = self.project_store.namespace().to_owned();
         let relation = Table::WorkflowRuns.qualified_name(&namespace);
         let mut connection = self.project_store.connect_exclusive().await?;
-        self.ensure_current_workflow_relation(&mut connection, &relation)
-            .await?;
         connection.begin_transaction().await?;
         let mutation = async {
             let existing = WorkflowDocumentReplacement::new(
@@ -633,22 +676,6 @@ impl StorageManager {
         connection
             .finish_transaction(mutation, "Workflow history")
             .await
-    }
-
-    async fn ensure_current_workflow_relation(
-        &self,
-        connection: &mut ProjectConnection,
-        relation: &str,
-    ) -> Result<(), String> {
-        let schema = connection.relation_schema(relation).await?.ok_or_else(|| {
-            format!(
-                "managed Spiral relation {relation} is missing; run Settings → SpiralDB → Test connection to provision it"
-            )
-        })?;
-        if schema.fields().len() == 3 && schema.field_with_name(db::DOCUMENT_VERSION).is_err() {
-            return Err(LEGACY_PROJECT_ERROR.to_owned());
-        }
-        Ok(())
     }
 
     pub async fn load_studio_preferences(&self) -> Result<StoredStudioPreferences, String> {
@@ -694,11 +721,7 @@ impl StorageManager {
                 db::KEY
             ))
             .await?;
-        let schema = Arc::new(Schema::new(vec![
-            Field::new(db::KEY, DataType::Utf8, false),
-            Field::new(db::VALUE_JSON, DataType::Utf8, false),
-            Field::new(db::UPDATED_MS, DataType::Int64, false),
-        ]));
+        let schema = Arc::new(Table::StudioSettings.managed_relation_schema());
         let batch = RecordBatch::try_new(
             schema,
             vec![
@@ -2433,9 +2456,10 @@ mod tests {
     }
 
     /// The two relations whose native column types differ from the portable
-    /// shape a bundle carries still have to agree on their column names.
+    /// shape a bundle carries still have to satisfy readiness validation and
+    /// agree on their column names.
     #[test]
-    fn backend_owned_arrow_schemas_match_the_shared_contract() {
+    fn readiness_accepts_the_declared_native_schema_variances() {
         use crate::bundle::ManagedRelationSchema as _;
 
         for (table, schema) in [
@@ -2457,7 +2481,82 @@ mod tests {
                 .map(|field| field.name().clone())
                 .collect::<Vec<_>>();
             assert_eq!(native, managed, "{table}");
+            ManagedRelationProvisioner::validate_existing_relation(
+                table,
+                &table.qualified_name("spiral_robotics"),
+                schema.as_ref(),
+            )
+            .unwrap_or_else(|error| panic!("{table}: {error}"));
         }
+    }
+
+    #[test]
+    fn readiness_accepts_legacy_video_binary_before_blob_migration() {
+        let table = Table::VideoAssets;
+        ManagedRelationProvisioner::validate_existing_relation(
+            table,
+            &table.qualified_name("spiral_robotics"),
+            &table.managed_relation_schema(),
+        )
+        .expect("portable Binary remains valid input to the readiness migration");
+    }
+
+    #[test]
+    fn readiness_refuses_known_legacy_relation_shapes_with_project_guidance() {
+        let legacy_document = || {
+            Schema::new(vec![
+                Field::new(db::RUN_ID, DataType::Utf8, false),
+                Field::new(db::SNAPSHOT_JSON, DataType::Utf8, false),
+                Field::new(db::UPDATED_MS, DataType::Int64, false),
+            ])
+        };
+        let legacy_relations = [
+            (
+                Table::Episodes,
+                Schema::new(vec![Field::new("metadata_json", DataType::Utf8, false)]),
+            ),
+            (Table::TrainingRuns, legacy_document()),
+            (Table::RolloutRuns, legacy_document()),
+            (Table::WorkflowRuns, legacy_document()),
+        ];
+
+        for (table, schema) in legacy_relations {
+            let error = ManagedRelationProvisioner::validate_existing_relation(
+                table,
+                &table.qualified_name("spiral_robotics"),
+                &schema,
+            )
+            .unwrap_err();
+            assert_eq!(error, LEGACY_PROJECT_ERROR, "{table}");
+        }
+    }
+
+    #[test]
+    fn readiness_reports_actionable_schema_mismatches_without_modification() {
+        let table = Table::StudioSettings;
+        let relation = table.qualified_name("spiral_robotics");
+        let mut fields = table
+            .managed_relation_schema()
+            .fields()
+            .iter()
+            .map(|field| field.as_ref().clone())
+            .collect::<Vec<_>>();
+        fields[1] = Field::new(db::VALUE_JSON, DataType::UInt64, false);
+
+        let error = ManagedRelationProvisioner::validate_existing_relation(
+            table,
+            &relation,
+            &Schema::new(fields),
+        )
+        .unwrap_err();
+
+        assert!(error.contains(&relation), "{error}");
+        assert!(error.contains("was not modified"), "{error}");
+        assert!(
+            error.contains("Settings → SpiralDB → Test connection"),
+            "{error}"
+        );
+        assert!(!error.contains(LEGACY_PROJECT_ERROR), "{error}");
     }
 
     #[test]

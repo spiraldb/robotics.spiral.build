@@ -4,6 +4,11 @@
 //! owns persisted relation names, columns, and schema-drift checks.
 
 use std::fmt;
+use std::sync::Arc;
+
+use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray};
+
+use crate::bundle::ManagedRelationSchema as _;
 
 include!(concat!(env!("OUT_DIR"), "/storage_schema_version.rs"));
 
@@ -245,6 +250,23 @@ impl StorageSchema {
         Table::Robots.qualified_name(namespace)
     }
 
+    /// Build one robot-configuration row against the managed relation schema.
+    pub fn robot_configuration_batch(
+        robot_identifier: String,
+        configuration_json: String,
+        updated_millis: i64,
+    ) -> Result<RecordBatch, String> {
+        RecordBatch::try_new(
+            Arc::new(Table::Robots.managed_relation_schema()),
+            vec![
+                Arc::new(StringArray::from(vec![robot_identifier])) as ArrayRef,
+                Arc::new(StringArray::from(vec![configuration_json])) as ArrayRef,
+                Arc::new(Int64Array::from(vec![updated_millis])) as ArrayRef,
+            ],
+        )
+        .map_err(|error| error.to_string())
+    }
+
     /// Whether a value is safe to interpolate as an unquoted SQL identifier.
     pub fn is_identifier(value: &str) -> bool {
         spiral_robotics_api::sql::UnquotedSqlIdentifier::try_from(value).is_ok()
@@ -265,7 +287,6 @@ impl StorageSchema {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bundle::ManagedRelationSchema as _;
 
     /// What a relation actually holds, read from the one production Arrow
     /// schema that both the database writes and a bundle validates against.

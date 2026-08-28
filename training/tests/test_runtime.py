@@ -474,7 +474,37 @@ def test_checkpoint_ingest_keeps_namespace_in_the_table_path() -> None:
     table_name, table, options = calls[0]
     assert table_name == "spiral_robotics.training_checkpoints"
     assert table.num_rows == 1
-    assert options == {"mode": "create_append"}
+    assert options == {"mode": "append"}
+
+
+def test_checkpoint_ingest_reports_an_unprovisioned_relation() -> None:
+    class Cursor:
+        def __enter__(self) -> Cursor:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def adbc_ingest(
+            self, _table_name: str, _table: pa.Table, **_options: object
+        ) -> None:
+            raise RuntimeError("unknown table spiral_robotics.training_checkpoints")
+
+    class Connection:
+        def cursor(self) -> Cursor:
+            return Cursor()
+
+    dataset = object.__new__(SpiralActDataset)
+    dataset.namespace = "spiral_robotics"
+    dataset.connection = Connection()
+
+    with pytest.raises(RuntimeRequestError) as failure:
+        dataset.write_checkpoint("run-id", "run-name", 1, 123, None, "{}", b"checkpoint")
+
+    assert failure.value.status_code == 422
+    assert "unknown table spiral_robotics.training_checkpoints" in str(failure.value)
+    assert "Settings → SpiralDB → Test connection" in str(failure.value)
+    assert isinstance(failure.value.__cause__, RuntimeError)
 
 
 def test_job_api_owns_data_training_and_checkpoint_lifecycle(

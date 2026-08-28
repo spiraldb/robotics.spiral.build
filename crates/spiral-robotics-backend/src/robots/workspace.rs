@@ -9,10 +9,7 @@ use crate::sync::MutexRecovery;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::OperationError;
-use arrow_array::{
-    ArrayRef, Int64Array, LargeStringArray, RecordBatch, StringArray, StringViewArray,
-};
-use arrow_schema::{DataType, Field, Schema};
+use arrow_array::{LargeStringArray, StringArray, StringViewArray};
 use futures::StreamExt as _;
 use serde_json::{Map, Value};
 use spiral_robotics_api::robots::{
@@ -20,8 +17,7 @@ use spiral_robotics_api::robots::{
 };
 use spiral_robotics_hardware::{Calibration, MotorSpec};
 use spiral_robotics_storage::{
-    ProjectStore, ROBOT_CONFIGURATION_COLUMN, ROBOT_IDENTIFIER_COLUMN, ROBOT_UPDATED_MILLIS_COLUMN,
-    StorageSchema,
+    ProjectStore, ROBOT_CONFIGURATION_COLUMN, ROBOT_IDENTIFIER_COLUMN, StorageSchema,
 };
 
 use super::calibration::CalibrationUpdate;
@@ -541,7 +537,6 @@ impl RobotWorkspace {
         let namespace = self.project_store.namespace().to_owned();
         let relation = StorageSchema::robot_configuration_relation(&namespace);
         let config_json = config.to_pretty_json()?;
-        let id_owned = id.to_owned();
         let id_sql = SpiralSql::string_literal(id);
         let mut connection = self
             .project_store
@@ -554,20 +549,12 @@ impl RobotWorkspace {
             ))
             .await
             .map_err(WorkspaceError::Invalid)?;
-        let schema = Arc::new(Schema::new(vec![
-            Field::new(ROBOT_IDENTIFIER_COLUMN, DataType::Utf8, false),
-            Field::new(ROBOT_CONFIGURATION_COLUMN, DataType::Utf8, false),
-            Field::new(ROBOT_UPDATED_MILLIS_COLUMN, DataType::Int64, false),
-        ]));
-        let batch = RecordBatch::try_new(
-            schema,
-            vec![
-                Arc::new(StringArray::from(vec![id_owned])) as ArrayRef,
-                Arc::new(StringArray::from(vec![config_json])) as ArrayRef,
-                Arc::new(Int64Array::from(vec![SystemTime::now().unix_millis()])) as ArrayRef,
-            ],
+        let batch = StorageSchema::robot_configuration_batch(
+            id.to_owned(),
+            config_json,
+            SystemTime::now().unix_millis(),
         )
-        .map_err(|error| WorkspaceError::Invalid(error.to_string()))?;
+        .map_err(WorkspaceError::Invalid)?;
         connection
             .ingest_batch(&relation, batch)
             .await

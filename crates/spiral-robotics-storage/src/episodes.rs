@@ -24,7 +24,6 @@ use spiral_robotics_hardware::{
 };
 pub use spiral_robotics_hardware::{EpisodeCheckpoint, Sample};
 
-use crate::LEGACY_PROJECT_ERROR;
 use crate::episode_schema::{
     EpisodeStreamCatalog, EpisodeStreamRow, JointSampleRows, SpiralEpisodeEncoder, StoredEpisodeRow,
 };
@@ -1617,18 +1616,6 @@ impl EpisodeCatalogRead {
         episode_id: Option<&str>,
     ) -> Result<Self, EpisodeError> {
         let episodes = Table::Episodes.qualified_name(namespace);
-        let schema = connection
-            .relation_schema(&episodes)
-            .await
-            .map_err(EpisodeError::Invalid)?
-            .ok_or_else(|| {
-                EpisodeError::Invalid(format!(
-                    "managed Spiral relation {episodes} is missing; run Settings → SpiralDB → Test connection to provision it"
-                ))
-            })?;
-        if schema.field_with_name("metadata_json").is_ok() {
-            return Err(EpisodeError::Invalid(LEGACY_PROJECT_ERROR.to_owned()));
-        }
         let streams = Self::load_streams(connection, namespace, episode_id).await?;
         let mut rows = Vec::new();
         for batch in connection
