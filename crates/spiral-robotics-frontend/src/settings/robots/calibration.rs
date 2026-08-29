@@ -21,22 +21,13 @@ pub(super) fn CalibrationSection(
     progress: Option<CalibrationProgress>,
 ) -> Element {
     let studio = studio();
-    let data = studio.data_controller();
     let mut confirming_reapply = use_signal(|| false);
     let reapplying = use_signal(|| false);
     let mut command = use_signal(|| None::<&'static str>);
     let id = robot.id().to_owned();
     let recalibrate_id = id.clone();
-    let matching_episodes = data
-        .episodes()
-        .into_iter()
-        .filter(|episode| episode.arms().iter().any(|arm| arm.id() == robot.id()))
-        .count();
-    let reapply_title = if matching_episodes == 0 {
-        "No recorded episodes contain this arm"
-    } else {
-        "Recalculate recorded joint state from raw encoder positions using this calibration"
-    };
+    let reapply_title =
+        "Recalculate recorded joint state from raw encoder positions using this calibration";
     let calibration_title = if !connected {
         "Connect the arm first"
     } else if robot.calibrated() {
@@ -47,7 +38,7 @@ pub(super) fn CalibrationSection(
     let reapply_confirm_label = if reapplying() {
         "Applying…".to_owned()
     } else {
-        format!("Apply to {matching_episodes} takes")
+        "Apply to recorded takes".to_owned()
     };
 
     let Some(progress) = progress else {
@@ -59,7 +50,7 @@ pub(super) fn CalibrationSection(
                         Action {
                             id: "reapply-calibration-{robot.id()}",
                             purpose: ActionPurpose::Apply,
-                            disabled: reapplying() || command().is_some() || matching_episodes == 0,
+                            disabled: reapplying() || command().is_some(),
                             title: reapply_title,
                             onclick: move |_| confirming_reapply.set(true),
                             "Reapply calibration"
@@ -92,9 +83,7 @@ pub(super) fn CalibrationSection(
                         title: format!("Apply {} calibration to recorded takes?", robot.id()),
                         consequence: "Recorded actions and raw encoder positions are preserved. Measured joint state will be replaced.".to_owned(),
                         copy: ConfirmationCopy::new(
-                            format!(
-                                "Recalculate measured joint state in {matching_episodes} recorded takes using this calibration."
-                            ),
+                            "Recalculate measured joint state in every recorded take containing this arm using this calibration.",
                             reapply_confirm_label,
                             "Keep recorded data",
                         ),

@@ -11,9 +11,20 @@ fn bootstrap_lifecycle_controls_catalog_admission() {
         BackendReadinessState::Bootstrapping
     );
     assert!(state.catalog_unavailable().is_some());
+    assert!(state.storage_unavailable().is_some());
+
+    state.hydrating_services("loading run history");
+    assert_eq!(
+        state.current().state(),
+        BackendReadinessState::Bootstrapping
+    );
+    assert!(state.current().storage_available());
+    assert!(state.storage_unavailable().is_none());
+    assert!(state.catalog_unavailable().is_some());
 
     state.ready();
     assert_eq!(state.current().state(), BackendReadinessState::Ready);
+    assert!(state.current().storage_available());
     assert!(state.catalog_unavailable().is_none());
 
     state.degraded(false, "authentication expired");
@@ -64,6 +75,7 @@ fn feature_routers_preserve_every_public_path_exactly_once() {
         "/robots/{id}/calibration/cancel",
         "/robots/{id}/calibration/reapply",
         "/mode",
+        "/datasets",
         "/episodes",
         "/episodes/record",
         "/episodes/record/pause",

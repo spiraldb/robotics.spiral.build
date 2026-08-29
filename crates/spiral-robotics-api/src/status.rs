@@ -41,7 +41,12 @@ pub enum BackendReadinessState {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct BackendReadiness {
     state: BackendReadinessState,
-    /// True only when catalog-dependent requests may safely be admitted.
+    /// True once the configured SpiralDB session has been warmed enough for
+    /// independent dataset and episode reads.
+    #[serde(default)]
+    storage_available: bool,
+    /// True once preferences and run managers are hydrated and the complete
+    /// catalog-dependent API may safely be admitted.
     catalog_available: bool,
     /// Short operator-facing description of the current phase or problem.
     detail: String,
@@ -51,6 +56,7 @@ impl Default for BackendReadiness {
     fn default() -> Self {
         Self {
             state: BackendReadinessState::Bootstrapping,
+            storage_available: false,
             catalog_available: false,
             detail: "Starting Studio services".to_owned(),
         }
@@ -65,12 +71,22 @@ impl BackendReadiness {
     ) -> Self {
         Self {
             state,
+            storage_available: catalog_available,
             catalog_available,
             detail: detail.into(),
         }
     }
+    /// Mark the SpiralDB read boundary ready while the remaining Studio
+    /// services continue hydrating.
+    pub fn with_storage_available(mut self) -> Self {
+        self.storage_available = true;
+        self
+    }
     pub const fn state(&self) -> BackendReadinessState {
         self.state
+    }
+    pub const fn storage_available(&self) -> bool {
+        self.storage_available
     }
     pub const fn catalog_available(&self) -> bool {
         self.catalog_available
@@ -197,6 +213,20 @@ mod tests {
     use crate::rollout::*;
     use crate::settings::*;
     use crate::training::*;
+
+    #[test]
+    fn storage_reads_can_be_ready_while_services_are_still_hydrating() {
+        let readiness = BackendReadiness::new(
+            BackendReadinessState::Bootstrapping,
+            false,
+            "Loading Studio preferences and run history",
+        )
+        .with_storage_available();
+
+        assert!(readiness.storage_available());
+        assert!(!readiness.catalog_available());
+        assert_eq!(readiness.state(), BackendReadinessState::Bootstrapping);
+    }
 
     #[test]
     fn act_defaults_match_current_lerobot_architecture() {

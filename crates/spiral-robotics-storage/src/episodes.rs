@@ -9,12 +9,13 @@ use std::thread::JoinHandle;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::schema::{Table, column as db};
+use futures::future;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use spiral_robotics_api::identity::EpisodeId;
 use spiral_robotics_api::recording::{
     EpisodeArm, EpisodeAssessment, EpisodeIdentity as EpisodeInfoIdentity, EpisodeInfo,
-    EpisodeTimeline, RecordingGap,
+    EpisodeListItem, EpisodeTimeline, RecordingGap,
 };
 use spiral_robotics_hardware::Calibration;
 use spiral_robotics_hardware::{
@@ -707,7 +708,27 @@ impl EpisodeStore {
     }
 
     pub async fn list(&self) -> Vec<EpisodeInfo> {
-        match self.read_catalog().await {
+        self.list_selected(EpisodeCatalogSelection::All).await
+    }
+
+    pub async fn list_in_dataset(&self, dataset_id: &str) -> Vec<EpisodeListItem> {
+        match self
+            .read_catalog(EpisodeCatalogSelection::Dataset(dataset_id))
+            .await
+        {
+            Ok(read) => {
+                *self.catalog_issues.lock_unpoisoned() = read.warnings.clone();
+                read.list_items()
+            }
+            Err(error) => {
+                *self.catalog_issues.lock_unpoisoned() = vec![error.to_string()];
+                Vec::new()
+            }
+        }
+    }
+
+    async fn list_selected(&self, selection: EpisodeCatalogSelection<'_>) -> Vec<EpisodeInfo> {
+        match self.read_catalog(selection).await {
             Ok(read) => {
                 *self.catalog_issues.lock_unpoisoned() = read.warnings.clone();
                 read.summaries()
@@ -732,21 +753,41 @@ impl EpisodeStore {
 
     pub(crate) async fn full_episode(&self, id: &str) -> Result<FullEpisode, EpisodeError> {
         EpisodeId::try_from(id).map_err(|_| EpisodeError::InvalidId(id.to_owned()))?;
-        let sample_query = SpiralSql::episode_samples(self.project_store.namespace(), id);
-        let mut connection = self
-            .project_store
-            .connect()
+        self.load_episode(id, EpisodeCatalogSelection::Episode(id))
             .await
-            .map_err(EpisodeError::Invalid)?;
-        let read =
-            EpisodeCatalogRead::load(&mut connection, self.project_store.namespace(), Some(id))
-                .await?;
+    }
+
+    async fn load_episode(
+        &self,
+        id: &str,
+        selection: EpisodeCatalogSelection<'_>,
+    ) -> Result<FullEpisode, EpisodeError> {
+        let (read, rows) =
+            future::try_join(self.read_catalog(selection), self.read_sample_rows(id)).await?;
         let (start, completion, _) = read
             .episodes
             .into_iter()
             .next()
             .ok_or_else(|| EpisodeError::NotFound(id.to_owned()))?
             .into_parts();
+        let decoded = start.decode_samples(rows).map_err(EpisodeError::Invalid)?;
+        Ok(FullEpisode {
+            start,
+            samples: decoded,
+            completion,
+        })
+    }
+
+    async fn read_sample_rows(
+        &self,
+        id: &str,
+    ) -> Result<Vec<JsonMap<String, JsonValue>>, EpisodeError> {
+        let sample_query = SpiralSql::episode_samples(self.project_store.namespace(), id);
+        let mut connection = self
+            .project_store
+            .connect()
+            .await
+            .map_err(EpisodeError::Invalid)?;
         let result = connection
             .query_rows(&sample_query, MAX_EPISODE_ROWS)
             .await
@@ -756,21 +797,19 @@ impl EpisodeStore {
                 "episode {id:?} exceeds the supported row limit"
             )));
         }
-        let rows = result.into_rows();
-        let decoded = start.decode_samples(rows).map_err(EpisodeError::Invalid)?;
-        Ok(FullEpisode {
-            start,
-            samples: decoded,
-            completion,
-        })
+        Ok(result.into_rows())
     }
 
     pub async fn inspection(&self, id: &str) -> Result<EpisodeInspection, EpisodeError> {
-        let episode = self.full_episode(id).await?;
+        EpisodeId::try_from(id).map_err(|_| EpisodeError::InvalidId(id.to_owned()))?;
+        let (episode, videos) = future::try_join(
+            self.load_episode(id, EpisodeCatalogSelection::Inspection(id)),
+            self.video_metadata_for_existing(id),
+        )
+        .await?;
         let summary = episode
             .start
             .summary(&episode.completion, episode.samples.len() as u64);
-        let videos = self.video_metadata_for_existing(id).await?;
         Ok(EpisodeInspection {
             episode,
             summary,
@@ -1000,18 +1039,17 @@ impl EpisodeStore {
     }
 
     async fn try_list(&self) -> Result<Vec<EpisodeInfo>, EpisodeError> {
-        self.read_catalog().await.map(EpisodeCatalogRead::summaries)
+        self.read_catalog(EpisodeCatalogSelection::All)
+            .await
+            .map(EpisodeCatalogRead::summaries)
     }
 
     /// Read every episode without modifying persisted data.
-    async fn read_catalog(&self) -> Result<EpisodeCatalogRead, EpisodeError> {
-        let namespace = self.project_store.namespace().to_owned();
-        let mut connection = self
-            .project_store
-            .connect()
-            .await
-            .map_err(EpisodeError::Invalid)?;
-        EpisodeCatalogRead::load(&mut connection, &namespace, None).await
+    async fn read_catalog(
+        &self,
+        selection: EpisodeCatalogSelection<'_>,
+    ) -> Result<EpisodeCatalogRead, EpisodeError> {
+        EpisodeCatalogRead::load(&self.project_store, selection).await
     }
 
     async fn replace_samples(&self, episode: &FullEpisode) -> Result<(), EpisodeError> {
@@ -1603,6 +1641,77 @@ impl SampleLocation<'_> {
 /// Episodes and their stream declarations are read together because an
 /// episode's arms live in the stream relation: neither half is a complete
 /// record on its own.
+#[derive(Clone, Copy)]
+enum EpisodeCatalogSelection<'a> {
+    All,
+    Dataset(&'a str),
+    Episode(&'a str),
+    Inspection(&'a str),
+}
+
+impl EpisodeCatalogSelection<'_> {
+    fn episodes_sql(self, namespace: &str) -> String {
+        let relation = Table::Episodes.qualified_name(namespace);
+        match self {
+            Self::All => format!("SELECT * FROM {relation}"),
+            Self::Dataset(dataset_id) => format!(
+                "SELECT * FROM {relation} WHERE {} = {}",
+                db::DATASET_ID,
+                SpiralSql::string_literal(dataset_id)
+            ),
+            Self::Episode(episode_id) | Self::Inspection(episode_id) => format!(
+                "SELECT * FROM {relation} WHERE {} = {}",
+                db::EPISODE_ID,
+                SpiralSql::string_literal(episode_id)
+            ),
+        }
+    }
+
+    fn streams_sql(self, namespace: &str) -> String {
+        let streams = Table::EpisodeStreams.qualified_name(namespace);
+        let projection = format!(
+            "s.{0} AS {0}, s.{1} AS {1}, s.{2} AS {2}, s.{3} AS {3}, s.{4} AS {4}, s.{5} AS {5}",
+            db::EPISODE_ID,
+            db::STREAM_ID,
+            db::ORDINAL,
+            db::MODALITY,
+            db::ROBOT_TYPE,
+            db::JOINT_NAMES,
+        );
+        match self {
+            Self::All => format!(
+                "SELECT {projection} FROM {streams} AS s WHERE s.{} = 'joint'",
+                db::MODALITY
+            ),
+            Self::Dataset(_) => unreachable!("dataset listings do not read episode streams"),
+            Self::Episode(episode_id) => format!(
+                "SELECT * FROM {streams} WHERE {} = {}",
+                db::EPISODE_ID,
+                SpiralSql::string_literal(episode_id)
+            ),
+            Self::Inspection(episode_id) => format!(
+                "SELECT {projection} FROM {streams} AS s WHERE s.{} = {} AND s.{} = 'joint'",
+                db::EPISODE_ID,
+                SpiralSql::string_literal(episode_id),
+                db::MODALITY,
+            ),
+        }
+    }
+
+    fn decode_stream(
+        self,
+        batch: &arrow_array::RecordBatch,
+        row: usize,
+    ) -> Result<EpisodeStreamRow, String> {
+        match self {
+            Self::Episode(_) => EpisodeStreamRow::decode(batch, row),
+            Self::All | Self::Dataset(_) | Self::Inspection(_) => {
+                EpisodeStreamRow::decode_catalog(batch, row)
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 struct EpisodeCatalogRead {
     episodes: Vec<StoredEpisodeRow>,
@@ -1611,21 +1720,40 @@ struct EpisodeCatalogRead {
 
 impl EpisodeCatalogRead {
     async fn load(
-        connection: &mut ProjectConnection,
-        namespace: &str,
-        episode_id: Option<&str>,
+        project_store: &ProjectStore,
+        selection: EpisodeCatalogSelection<'_>,
     ) -> Result<Self, EpisodeError> {
-        let episodes = Table::Episodes.qualified_name(namespace);
-        let streams = Self::load_streams(connection, namespace, episode_id).await?;
+        let namespace = project_store.namespace();
+        let streams = async {
+            if matches!(selection, EpisodeCatalogSelection::Dataset(_)) {
+                return Ok(EpisodeStreamCatalog::default());
+            }
+            let mut connection = project_store
+                .connect()
+                .await
+                .map_err(EpisodeError::Invalid)?;
+            Self::load_streams(&mut connection, namespace, selection).await
+        };
+        let episode_batches = async {
+            let mut connection = project_store
+                .connect()
+                .await
+                .map_err(EpisodeError::Invalid)?;
+            connection
+                .read_batches(&selection.episodes_sql(namespace))
+                .await
+                .map_err(EpisodeError::Invalid)
+        };
+        let (streams, episode_batches) = future::try_join(streams, episode_batches).await?;
+        Self::decode(episode_batches, streams)
+    }
+
+    fn decode(
+        episode_batches: Vec<arrow_array::RecordBatch>,
+        streams: EpisodeStreamCatalog,
+    ) -> Result<Self, EpisodeError> {
         let mut rows = Vec::new();
-        for batch in connection
-            .read_batches(&format!(
-                "SELECT * FROM {episodes}{}",
-                Self::filter(episode_id)
-            ))
-            .await
-            .map_err(EpisodeError::Invalid)?
-        {
+        for batch in episode_batches {
             for row in 0..batch.num_rows() {
                 rows.push(
                     StoredEpisodeRow::decode(&batch, row, &streams)
@@ -1649,39 +1777,36 @@ impl EpisodeCatalogRead {
     async fn load_streams(
         connection: &mut ProjectConnection,
         namespace: &str,
-        episode_id: Option<&str>,
+        selection: EpisodeCatalogSelection<'_>,
     ) -> Result<EpisodeStreamCatalog, EpisodeError> {
-        let relation = Table::EpisodeStreams.qualified_name(namespace);
         let mut rows = Vec::new();
         for batch in connection
-            .read_batches(&format!(
-                "SELECT * FROM {relation}{}",
-                Self::filter(episode_id)
-            ))
+            .read_batches(&selection.streams_sql(namespace))
             .await
             .map_err(EpisodeError::Invalid)?
         {
             for row in 0..batch.num_rows() {
-                rows.push(EpisodeStreamRow::decode(&batch, row).map_err(EpisodeError::Invalid)?);
+                rows.push(
+                    selection
+                        .decode_stream(&batch, row)
+                        .map_err(EpisodeError::Invalid)?,
+                );
             }
         }
         Ok(EpisodeStreamCatalog::new(rows))
-    }
-
-    fn filter(episode_id: Option<&str>) -> String {
-        episode_id.map_or_else(String::new, |id| {
-            format!(
-                " WHERE {} = {}",
-                db::EPISODE_ID,
-                SpiralSql::string_literal(id)
-            )
-        })
     }
 
     fn summaries(self) -> Vec<EpisodeInfo> {
         self.episodes
             .iter()
             .map(|row| row.start().summary(row.completion(), row.frames()))
+            .collect()
+    }
+
+    fn list_items(self) -> Vec<EpisodeListItem> {
+        self.episodes
+            .iter()
+            .map(|row| EpisodeListItem::from(&row.start().summary(row.completion(), row.frames())))
             .collect()
     }
 }
@@ -1799,5 +1924,30 @@ impl<T> UnpoisonedMutex<T> for Mutex<T> {
     fn lock_unpoisoned(&self) -> std::sync::MutexGuard<'_, T> {
         self.lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inspection_reads_only_the_selected_joint_stream_layout() {
+        let sql =
+            EpisodeCatalogSelection::Inspection("episode_000052").streams_sql("spiral_robotics");
+
+        assert!(sql.contains("episode_id = 'episode_000052'"));
+        assert!(sql.contains("modality = 'joint'"));
+        assert!(sql.contains("joint_names"));
+        assert!(!sql.contains("camera_id"));
+        assert!(!sql.contains("temperature_celsius"));
+    }
+
+    #[test]
+    fn complete_episode_reads_retain_condition_and_video_columns() {
+        let sql = EpisodeCatalogSelection::Episode("episode_000052").streams_sql("spiral_robotics");
+
+        assert!(sql.starts_with("SELECT *"));
+        assert!(sql.contains("episode_id = 'episode_000052'"));
     }
 }

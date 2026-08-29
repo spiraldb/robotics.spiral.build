@@ -19,8 +19,9 @@ use spiral_robotics_api::datasets::{
     EpisodeImportSummary, HuggingFaceDatasetFormat, HuggingFaceDatasetImportSummary,
     HuggingFaceDatasetInspection, HuggingFaceDatasetRequest,
 };
-use spiral_robotics_api::recording::EpisodeInfo;
+use spiral_robotics_api::recording::EpisodeListItem;
 use spiral_robotics_api::relations::RelationCatalog;
+use spiral_robotics_api::status::BackendReadinessState;
 
 use crate::activities::data::query_result::DEFAULT_QUERY_ROWS;
 use crate::client::http as api;
@@ -40,11 +41,40 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
     let mut confirming_delete = use_signal(|| None::<String>);
     let mut deleting_episode = use_signal(|| None::<String>);
 
-    // The catalog belongs to Data and is loaded only when this view first
-    // mounts. The controller survives route changes, so returning is instant.
+    // Load the tiny dataset index before choosing which episode subset to read.
     use_effect(move || {
-        if !data.episodes_loaded() && !data.episodes_loading() {
-            studio.run_utility("", data.refresh_episode_catalog());
+        let storage_available = studio.snapshot().read().readiness().storage_available();
+        if storage_available
+            && !data.datasets_loaded()
+            && !data.datasets_loading()
+            && data.dataset_catalog_error().is_none()
+        {
+            studio.run_utility("", data.load_datasets());
+        }
+    });
+
+    // Preserve a known selection; otherwise initialize deterministically from
+    // the default dataset or the first stored dataset.
+    use_effect(move || {
+        let current = studio.selected_dataset().read().trim().to_owned();
+        if let Some(dataset_id) = data.initialize_dataset_selection(&current) {
+            studio.selected_dataset().set(dataset_id);
+        }
+    });
+
+    // Episode rows are requested only for the active dataset. The request is
+    // restarted when the shared selection changes.
+    use_effect(move || {
+        let dataset_id = studio.selected_dataset().read().trim().to_owned();
+        let storage_available = studio.snapshot().read().readiness().storage_available();
+        if storage_available
+            && data.datasets_loaded()
+            && spiral_robotics_api::identity::DatasetId::is_canonical(&dataset_id)
+            && !data.episodes_loaded(&dataset_id)
+            && !data.episodes_loading(&dataset_id)
+            && data.episode_catalog_error(&dataset_id).is_none()
+        {
+            studio.run_utility("", data.load_episodes(dataset_id));
         }
     });
 
@@ -55,11 +85,7 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
     // this effect forever when a dataset has no episodes.
     use_effect(move || {
         let dataset_id = studio.selected_dataset().read().trim().to_owned();
-        let episodes = data
-            .episodes()
-            .into_iter()
-            .filter(|episode| episode.dataset_id() == dataset_id)
-            .collect::<Vec<_>>();
+        let episodes = data.episodes(&dataset_id);
         let current = data.selected_episode();
         let next = episodes.reconciled_selection(current.as_deref());
         if current != next {
@@ -69,26 +95,26 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
 
     let dataset_id = studio.selected_dataset().read().trim().to_owned();
     let dataset_valid = spiral_robotics_api::identity::DatasetId::is_canonical(&dataset_id);
-    let all_episodes = data.episodes();
-    let dataset_ids = all_episodes
-        .iter()
-        .map(|episode| episode.dataset_id().to_owned())
-        .chain(
-            data.datasets()
-                .into_iter()
-                .map(|dataset| dataset.id().to_owned()),
-        )
+    let dataset_ids = data
+        .datasets()
+        .into_iter()
+        .map(|dataset| dataset.id().to_owned())
         .chain(std::iter::once(dataset_id.clone()))
         .collect::<BTreeSet<_>>();
-    let episodes = all_episodes
-        .into_iter()
-        .filter(|episode| episode.dataset_id() == dataset_id)
-        .collect::<Vec<_>>();
+    let episodes = data.episodes(&dataset_id);
     let selected = data.selected_episode();
-    let catalog_loading = data.episodes_loading();
-    let catalog_loaded = data.episodes_loaded();
-    let catalog_error = data.episode_catalog_error();
-    let catalog_issues = data.episode_catalog_issues();
+    let datasets_loading = data.datasets_loading();
+    let catalog_loading = data.episodes_loading(&dataset_id);
+    let catalog_loaded = data.episodes_loaded(&dataset_id);
+    let dataset_error = data.dataset_catalog_error();
+    let catalog_error = data.episode_catalog_error(&dataset_id);
+    let catalog_issues = data.episode_catalog_issues(&dataset_id);
+    let backend_readiness = studio.snapshot().read().readiness().clone();
+    let storage_available = backend_readiness.storage_available();
+    let storage_starting =
+        !storage_available && backend_readiness.state() == BackendReadinessState::Bootstrapping;
+    let storage_readiness_detail = backend_readiness.detail().to_owned();
+    let reload_dataset_id = dataset_id.clone();
     let import_dataset_id = dataset_id.clone();
     let confirming_delete_id = confirming_delete.read().to_owned();
     let deleting_episode_id = deleting_episode.read().to_owned();
@@ -118,7 +144,7 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
                     }
                     if dataset_valid && !catalog_loaded {
                         p { class: "truncate text-[10px] text-ink-faint",
-                            if catalog_loading { "Loading episodes…" } else { "Episodes not loaded" }
+                            if storage_starting { "Connecting to SpiralDB…" } else if !storage_available { "Catalog unavailable" } else if datasets_loading { "Loading datasets…" } else if catalog_loading { "Loading episodes…" } else { "Episodes not loaded" }
                             " · {namespace}"
                         }
                     } else if dataset_valid {
@@ -134,12 +160,12 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
                     Action {
                         purpose: ActionPurpose::Refresh,
                         variant: ActionVariant::Icon,
-                        aria_label: if catalog_loading { "Refreshing episodes" } else { "Refresh episodes" },
-                        title: "Refresh episodes and storage status",
-                        disabled: catalog_loading,
-                        aria_busy: catalog_loading,
+                        aria_label: if datasets_loading || catalog_loading { "Reloading datasets and episodes" } else { "Reload datasets and episodes" },
+                        title: "Reload datasets, then episodes for the selected dataset",
+                        disabled: datasets_loading || catalog_loading || !dataset_valid || !storage_available,
+                        aria_busy: datasets_loading || catalog_loading,
                         onclick: move |_| {
-                            studio.run_utility("", data.refresh_episode_catalog());
+                            studio.run_utility("", data.reload_dataset(reload_dataset_id.clone()));
                         },
                         RefreshIcon {}
                     }
@@ -155,7 +181,7 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
                         variant: if adding_data() { ActionVariant::Solid } else { ActionVariant::Outline },
                         aria_pressed: adding_data(),
                         title: "Import a public Hugging Face dataset into native Spiral relations",
-                        disabled: !dataset_valid,
+                        disabled: !dataset_valid || !storage_available,
                         onclick: move |_| adding_data.toggle(),
                         if adding_data() { "Adding data" } else { "Add data" }
                     }
@@ -163,7 +189,7 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
                         purpose: ActionPurpose::Import,
                         variant: ActionVariant::Outline,
                         title: "Import episodes into the selected dataset; existing episode IDs are never replaced",
-                        disabled: importing() || !dataset_valid,
+                        disabled: importing() || !dataset_valid || !storage_available,
                         aria_busy: importing(),
                         input: FileInput::new(
                             ".spiral-episodes,application/vnd.spiral-robotics.episodes",
@@ -178,7 +204,7 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
                                             "application/vnd.spiral-robotics.episodes",
                                         )
                                         .await?;
-                                        data.refresh_episode_catalog().await?;
+                                        data.reload_dataset(target_dataset).await?;
                                         Ok::<_, String>(result)
                                     })
                                     .await
@@ -228,7 +254,7 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
                 }
             }
 
-            if adding_data() && dataset_valid {
+            if adding_data() && dataset_valid && storage_available {
                 HuggingFaceImport {
                     key: "{dataset_id}",
                     dataset_id: dataset_id.clone(),
@@ -237,6 +263,12 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
             }
 
             div { class: "min-h-0 flex-1 overflow-y-auto",
+                if let Some(error) = dataset_error {
+                    div { class: "mx-2 mt-2 rounded bg-danger-soft px-2 py-1.5 text-[11px] text-danger", role: "alert",
+                        strong { class: "block font-medium", "Datasets unavailable" }
+                        span { "{error}" }
+                    }
+                }
                 if let Some(error) = catalog_error {
                     div { class: "mx-2 mt-2 rounded bg-danger-soft px-2 py-1.5 text-[11px] text-danger", role: "alert",
                         strong { class: "block font-medium", "Episodes unavailable" }
@@ -254,10 +286,12 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
                 if !catalog_loaded {
                     div { class: "px-3 py-8 text-center", "aria-live": "polite",
                         strong { class: "block text-[12px] font-medium text-ink",
-                            if catalog_loading { "Loading episodes…" } else { "Episodes not loaded" }
+                            if storage_starting { "Connecting to SpiralDB…" } else if !storage_available { "Datasets unavailable" } else if datasets_loading { "Loading datasets…" } else if catalog_loading { "Loading episodes…" } else { "Episodes not loaded" }
                         }
-                        if !catalog_loading {
-                            p { class: "mt-1 text-[11px] text-ink-faint", "Use Refresh to try again." }
+                        if storage_starting || !storage_available {
+                            p { class: "mt-1 text-[11px] text-ink-faint", "{storage_readiness_detail}" }
+                        } else if !datasets_loading && !catalog_loading {
+                            p { class: "mt-1 text-[11px] text-ink-faint", "Reload datasets and episodes to try again." }
                         }
                     }
                 } else if episodes.is_empty() {
@@ -286,7 +320,7 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
                                     ),
                                 },
                                 actions: EpisodeRowActions {
-                                    on_select: EventHandler::new(move |chosen: EpisodeInfo| {
+                                    on_select: EventHandler::new(move |chosen: EpisodeListItem| {
                                         if deleting_episode.peek().is_none() {
                                             confirming_delete.set(None);
                                         }
@@ -588,6 +622,7 @@ fn HuggingFaceImport(dataset_id: String, on_close: EventHandler<()>) -> Element 
                                         source.format(),
                                     )
                                     .with_revision(source.resolved_revision());
+                                    let imported_dataset_id = source.dataset_id().to_owned();
                                     error.set(None);
                                     studio.run_utility("", async move {
                                         let Some(outcome) = SingleFlight::run(
@@ -617,9 +652,9 @@ fn HuggingFaceImport(dataset_id: String, on_close: EventHandler<()>) -> Element 
                                                     ),
                                                 );
                                                 imported.set(Some(summary.clone()));
-                                                controller.refresh_episode_catalog().await.map_err(|problem| {
+                                                controller.reload_dataset(imported_dataset_id).await.map_err(|problem| {
                                                     format!(
-                                                        "Dataset imported successfully, but Studio could not refresh the catalog: {problem}"
+                                                        "Dataset imported successfully, but Studio could not reload its episodes: {problem}"
                                                     )
                                                 })?;
                                                 Ok(())
@@ -846,13 +881,17 @@ impl EpisodeDeletionState {
 
 #[derive(Clone, PartialEq)]
 struct EpisodeRowActions {
-    on_select: EventHandler<EpisodeInfo>,
+    on_select: EventHandler<EpisodeListItem>,
     on_delete: EventHandler<String>,
     on_cancel_delete: EventHandler<()>,
 }
 
 #[component]
-fn EpisodeRow(episode: EpisodeInfo, state: EpisodeRowState, actions: EpisodeRowActions) -> Element {
+fn EpisodeRow(
+    episode: EpisodeListItem,
+    state: EpisodeRowState,
+    actions: EpisodeRowActions,
+) -> Element {
     let delete_title = "Delete this episode from SpiralDB";
 
     rsx! {
@@ -1050,12 +1089,12 @@ impl ManagedTablePresentation for Table {
 }
 
 trait EpisodeSelection {
-    fn preferred(&self) -> Option<&EpisodeInfo>;
+    fn preferred(&self) -> Option<&EpisodeListItem>;
     fn reconciled_selection(&self, current: Option<&str>) -> Option<String>;
 }
 
-impl EpisodeSelection for [EpisodeInfo] {
-    fn preferred(&self) -> Option<&EpisodeInfo> {
+impl EpisodeSelection for [EpisodeListItem] {
+    fn preferred(&self) -> Option<&EpisodeListItem> {
         self.iter()
             .rev()
             .find(|episode| episode.usable() && !episode.discarded())
@@ -1122,19 +1161,21 @@ impl EpisodeIdPresentation for str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spiral_robotics_api::recording::{EpisodeAssessment, EpisodeIdentity, EpisodeTimeline};
+    use spiral_robotics_api::recording::{
+        EpisodeAssessment, EpisodeIdentity, EpisodeInfo, EpisodeTimeline,
+    };
 
-    fn episode(id: &str, usable: bool, discarded: bool) -> EpisodeInfo {
-        EpisodeInfo::new(
+    fn episode(id: &str, usable: bool, discarded: bool) -> EpisodeListItem {
+        EpisodeListItem::from(&EpisodeInfo::new(
             EpisodeIdentity::new(id, "default", Vec::new()).with_source("test"),
             EpisodeTimeline::new(1, 1.0, 60.0),
             EpisodeAssessment::new(discarded, None, (!usable).then(|| "unavailable".to_owned())),
-        )
+        ))
     }
 
     #[test]
     fn episode_selection_reconciliation_is_stable_when_the_dataset_is_empty() {
-        let episodes = Vec::<EpisodeInfo>::new();
+        let episodes = Vec::<EpisodeListItem>::new();
         assert_eq!(episodes.reconciled_selection(None), None);
         assert_eq!(episodes.reconciled_selection(Some("deleted")), None);
     }

@@ -972,8 +972,12 @@ fn episode_catalog_is_loaded_explicitly_from_spiral() {
         fs::read_to_string(crates.join("spiral-robotics-frontend/src/activities/data/state.rs"))
             .expect("Data controller source");
     assert!(
-        frontend_state.contains("api::Http::get::<EpisodeCatalogResponse>(\"/api/episodes\")"),
-        "the Data controller must load episodes as one explicit catalog"
+        frontend_state.contains("api::Http::get::<DatasetCatalogResponse>(\"/api/datasets\")"),
+        "the Data controller must load the dataset index separately"
+    );
+    assert!(
+        frontend_state.contains("format!(\"/api/episodes?dataset_id={dataset_id}\")"),
+        "the Data controller must scope its explicit episode catalog to one dataset"
     );
     let studio_state =
         fs::read_to_string(crates.join("spiral-robotics-frontend/src/shell/state.rs"))

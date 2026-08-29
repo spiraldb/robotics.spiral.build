@@ -6,9 +6,18 @@ use spiral_robotics_hardware::ModeSelection as HardwareModeSelection;
 use spiral_robotics_storage::episodes::EpisodeArmCollection as _;
 
 impl AppState {
+    /// Storage-only episode reads can start as soon as SpiralDB is warm; they
+    /// do not depend on preferences or any hydrated run manager.
+    pub(super) fn recording_storage_router() -> Router<Self> {
+        Router::new()
+            .route("/datasets", get(Self::list_datasets))
+            .route("/episodes", get(Self::list_episodes))
+            .route("/episodes/{id}/inspection", get(Self::episode_inspection))
+            .route("/episodes/{id}/videos/{stream}", get(Self::episode_video))
+    }
+
     pub(super) fn recording_router() -> Router<Self> {
         Router::new()
-            .route("/episodes", get(Self::list_episodes))
             .route("/episodes/record", post(Self::start_recording))
             .route("/episodes/record/pause", post(Self::set_recording_paused))
             .route("/episodes/record/stop", post(Self::stop_recording))
@@ -18,9 +27,7 @@ impl AppState {
                 "/episodes/{id}",
                 axum::routing::delete(Self::delete_episode),
             )
-            .route("/episodes/{id}/inspection", get(Self::episode_inspection))
             .route("/episodes/{id}/seek", post(Self::seek_episode))
-            .route("/episodes/{id}/videos/{stream}", get(Self::episode_video))
     }
 }
 
@@ -377,6 +384,11 @@ impl ReplayPort for RecordingHttpAdapter<'_> {
 }
 
 /// SpiralDB and control-state adapter for episode catalog actions.
+#[derive(Debug, Deserialize)]
+struct EpisodeCatalogQuery {
+    dataset_id: String,
+}
+
 pub(super) struct EpisodeHttpAdapter<'a> {
     state: &'a AppState,
 }
@@ -414,8 +426,8 @@ impl EpisodeCatalogPort for EpisodeHttpAdapter<'_> {
 }
 
 impl EpisodeQueryPort for EpisodeHttpAdapter<'_> {
-    async fn episodes(&self) -> Vec<EpisodeInfo> {
-        self.state.episodes().list().await
+    async fn episodes(&self, dataset_id: &str) -> Vec<EpisodeListItem> {
+        self.state.episodes().list_in_dataset(dataset_id).await
     }
 
     async fn ensure_episode_exists(&self, episode: &str) -> Result<(), OperationError> {
@@ -431,13 +443,12 @@ impl EpisodeQueryPort for EpisodeHttpAdapter<'_> {
         &self,
         episode: String,
     ) -> Result<EpisodeInspectionSnapshot, OperationError> {
-        let inspection = self
-            .state
-            .episodes()
-            .inspection(&episode)
-            .await
-            .map_err(OperationError::from)?;
-        Ok(inspection.into_snapshot(self.state.workspace()).await)
+        let inspection = self.state.episodes().inspection(&episode);
+        let saved_robots = self.state.workspace().list();
+        let (inspection, saved_robots) = tokio::join!(inspection, saved_robots);
+        Ok(inspection
+            .map_err(OperationError::from)?
+            .into_snapshot(&saved_robots))
     }
 }
 
@@ -447,15 +458,14 @@ impl EpisodeQueryPort for EpisodeHttpAdapter<'_> {
 /// transposition hangs off the stored value as a local extension trait rather
 /// than a `From` impl.
 trait InspectionProjection {
-    async fn into_snapshot(self, workspace: &RobotWorkspace) -> EpisodeInspectionSnapshot;
+    fn into_snapshot(self, saved_robots: &[RobotRecord]) -> EpisodeInspectionSnapshot;
 }
 
 impl InspectionProjection for EpisodeInspection {
-    async fn into_snapshot(self, workspace: &RobotWorkspace) -> EpisodeInspectionSnapshot {
+    fn into_snapshot(self, saved_robots: &[RobotRecord]) -> EpisodeInspectionSnapshot {
         let inspection = self;
         let (episode, summary, videos) = inspection.into_parts();
         let samples = episode.samples();
-        let saved_robots = workspace.list().await;
         let arms = episode
             .start()
             .arms()
@@ -712,7 +722,22 @@ impl PhysicalSeekPort for SeekHttpAdapter<'_> {
 }
 
 impl AppState {
-    async fn list_episodes(State(state): State<Self>) -> Json<EpisodeCatalogResponse> {
+    async fn list_datasets(
+        State(state): State<Self>,
+    ) -> Result<Json<DatasetCatalogResponse>, Failure> {
+        state
+            .storage()
+            .datasets()
+            .await
+            .map(DatasetCatalogResponse::new)
+            .map(Json)
+            .map_err(Failure::catalog_read)
+    }
+
+    async fn list_episodes(
+        State(state): State<Self>,
+        Query(query): Query<EpisodeCatalogQuery>,
+    ) -> Result<Json<EpisodeCatalogResponse>, Failure> {
         // A paused take has a readable SpiralDB checkpoint. Hide its catalog row
         // here because live recording state is delivered through telemetry.
         let recording = state
@@ -722,20 +747,13 @@ impl AppState {
             .as_ref()
             .map(|progress| progress.episode().to_owned());
         let episodes = EpisodeQueries::new(&EpisodeHttpAdapter::catalog(&state))
-            .list()
-            .await
+            .list(query.dataset_id)
+            .await?
             .into_iter()
             .filter(|episode| Some(episode.id()) != recording.as_deref())
             .collect();
-        let mut issues = state.episodes().issues();
-        let datasets = match state.storage().datasets().await {
-            Ok(datasets) => datasets,
-            Err(error) => {
-                issues.push(format!("dataset catalog: {error}"));
-                Vec::new()
-            }
-        };
-        Json(EpisodeCatalogResponse::new(datasets, episodes, issues))
+        let issues = state.episodes().issues();
+        Ok(Json(EpisodeCatalogResponse::new(episodes, issues)))
     }
 
     /// Begin a take.

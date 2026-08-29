@@ -676,6 +676,30 @@ impl EpisodeStreamRow {
             video,
         })
     }
+
+    /// Decode the columns needed to assemble an episode-list row. Conditions
+    /// and video properties are deliberately absent from the catalog query.
+    pub(crate) fn decode_catalog(batch: &RecordBatch, row: usize) -> Result<Self, String> {
+        let columns = ArrowColumns::new(batch, "episode stream catalog");
+        let modality = StreamModality::parse(columns.text(db::MODALITY, row)?)?;
+        Ok(Self {
+            key: EpisodeStreamKey::new(
+                columns.text(db::EPISODE_ID, row)?.to_owned(),
+                columns.text(db::STREAM_ID, row)?.to_owned(),
+                columns.ordinal(db::ORDINAL, row)?,
+            ),
+            modality,
+            robot_type: columns
+                .optional_text(db::ROBOT_TYPE, row)?
+                .map(str::to_owned),
+            joints: matches!(modality, StreamModality::Joint)
+                .then(|| columns.text_list(db::JOINT_NAMES, row))
+                .transpose()?,
+            start: None,
+            peak: None,
+            video: None,
+        })
+    }
 }
 
 /// Assemble the per-joint condition columns of one stream back into the arm
@@ -1277,6 +1301,22 @@ mod tests {
         let leader = leader.as_any().downcast_ref::<StringArray>().unwrap();
         assert_eq!(leader.value(0), "shoulder");
         assert_eq!(leader.value(1), "elbow");
+    }
+
+    #[test]
+    fn catalog_streams_decode_without_condition_or_video_columns() {
+        let full_batch = start()
+            .streams_batch(&EpisodeCompletion::new(0.0, Vec::new(), Vec::new()))
+            .unwrap();
+        let catalog_batch = full_batch.project(&[0, 1, 2, 3, 4, 5]).unwrap();
+
+        let stream = EpisodeStreamRow::decode_catalog(&catalog_batch, 0).unwrap();
+
+        assert_eq!(stream.arm().id(), "leader");
+        assert_eq!(stream.arm().joints(), ["shoulder", "elbow"]);
+        assert!(stream.start.is_none());
+        assert!(stream.peak.is_none());
+        assert!(stream.video.is_none());
     }
 
     #[test]

@@ -10,7 +10,7 @@ use futures::{FutureExt as _, StreamExt as _, TryStreamExt as _};
 use parking_lot::RwLock;
 use spiral_client::SpiralClientOptions;
 use spiral_client::authn::ClientCredentials;
-use spiral_config::ClientSettings;
+use spiral_config::{ClientSettings, FragmentsCacheEnabled, MutableConfig as _};
 use spiral_defaults::default_session_with_client_options;
 use spiral_engine::catalog::{
     CatalogEntryRequest, RelationCatalogSessionExt as _, RelationName as SpiralRelationName,
@@ -63,7 +63,10 @@ impl SpiralDatabase {
     }
 
     fn create_session(settings: &SpiralConnectionSettings) -> DatabaseResult<SpiralSession> {
-        let client_settings = ClientSettings::load().map_err(DatabaseError::from_external)?;
+        let mut client_settings = ClientSettings::load().map_err(DatabaseError::from_external)?;
+        client_settings
+            .set::<FragmentsCacheEnabled>(true)
+            .map_err(DatabaseError::from_external)?;
         let api_url = Url::parse(settings.endpoint()).map_err(DatabaseError::from_external)?;
         let spfs_url =
             Url::parse(settings.spfs_endpoint()).map_err(DatabaseError::from_external)?;

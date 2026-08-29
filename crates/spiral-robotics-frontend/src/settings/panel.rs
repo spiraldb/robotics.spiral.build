@@ -487,7 +487,7 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
                                 )
                                 .await?;
                                 data.set_selected_episode(None);
-                                data.invalidate_episode_catalog();
+                                data.invalidate_catalogs();
                                 let settings = api::Http::send_json::<(), DataSettings>(
                                     Method::GET,
                                     "/api/settings/data",

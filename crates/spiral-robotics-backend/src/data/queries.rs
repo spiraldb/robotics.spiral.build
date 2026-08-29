@@ -1,11 +1,11 @@
 //! Read-only episode catalog use cases and delivery-neutral projections.
 
 use crate::OperationError;
-use spiral_robotics_api::identity::EpisodeId;
-use spiral_robotics_api::recording::{EpisodeInfo, EpisodeInspectionSnapshot};
+use spiral_robotics_api::identity::{DatasetId, EpisodeId};
+use spiral_robotics_api::recording::{EpisodeInspectionSnapshot, EpisodeListItem};
 
 pub(crate) trait EpisodeQueryPort: Send + Sync {
-    async fn episodes(&self) -> Vec<EpisodeInfo>;
+    async fn episodes(&self, dataset_id: &str) -> Vec<EpisodeListItem>;
     async fn ensure_episode_exists(&self, episode: &str) -> Result<(), OperationError>;
     async fn inspection(
         &self,
@@ -33,8 +33,18 @@ impl<'a, P: EpisodeQueryPort + ?Sized> EpisodeQueries<'a, P> {
         self.port.ensure_episode_exists(&episode).await
     }
 
-    pub(crate) async fn list(&self) -> Vec<EpisodeInfo> {
-        self.port.episodes().await
+    pub(crate) async fn list(
+        &self,
+        dataset_id: String,
+    ) -> Result<Vec<EpisodeListItem>, OperationError> {
+        let dataset_id = DatasetId::try_from(dataset_id.as_str())
+            .map(String::from)
+            .map_err(|_| {
+                OperationError::invalid_input(
+                    "a dataset ID must contain 1–96 letters, numbers, '.', '_' or '-'",
+                )
+            })?;
+        Ok(self.port.episodes(&dataset_id).await)
     }
 
     pub(crate) async fn inspection(
@@ -64,8 +74,11 @@ mod tests {
     }
 
     impl EpisodeQueryPort for Queries {
-        async fn episodes(&self) -> Vec<EpisodeInfo> {
-            self.calls.lock().unwrap().push("list".to_owned());
+        async fn episodes(&self, dataset_id: &str) -> Vec<EpisodeListItem> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("list:{dataset_id}"));
             Vec::new()
         }
 
@@ -90,6 +103,8 @@ mod tests {
     async fn read_queries_validate_and_bound_selection_before_exactly_one_port_call() {
         let queries = Queries::default();
         let episode_queries = EpisodeQueries::new(&queries);
+        assert!(episode_queries.list("pick-place".to_owned()).await.is_ok());
+        assert!(episode_queries.list("../dataset".to_owned()).await.is_err());
         assert!(
             episode_queries
                 .inspection("episode_000001".to_owned())
@@ -120,7 +135,11 @@ mod tests {
         );
         assert_eq!(
             queries.calls.lock().unwrap().as_slice(),
-            ["inspection:episode_000001", "exists:episode_000001"]
+            [
+                "list:pick-place",
+                "inspection:episode_000001",
+                "exists:episode_000001"
+            ]
         );
     }
 }

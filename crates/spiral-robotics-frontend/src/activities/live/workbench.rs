@@ -47,10 +47,15 @@ fn CaptureSection() -> Element {
     let data = studio.data_controller();
     let mut selected_dataset = studio.selected_dataset();
     let recording = studio.recording();
+    use_effect(move || {
+        if !data.datasets_loaded() && !data.datasets_loading() {
+            studio.run_utility("", data.load_datasets());
+        }
+    });
     let dataset_ids = data
-        .episodes()
+        .datasets()
         .into_iter()
-        .map(|episode| episode.dataset_id().to_owned())
+        .map(|dataset| dataset.id().to_owned())
         .chain(std::iter::once(selected_dataset.read().to_owned()))
         .collect::<BTreeSet<_>>();
 

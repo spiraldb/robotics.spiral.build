@@ -10,7 +10,10 @@ use std::sync::Arc;
 use dioxus::prelude::*;
 use gloo_net::http::Method;
 use spiral_robotics_api::catalog::ManagedTable;
-use spiral_robotics_api::recording::{DatasetSummary, EpisodeCatalogResponse, EpisodeInfo};
+use spiral_robotics_api::identity::DatasetId;
+use spiral_robotics_api::recording::{
+    DatasetCatalogResponse, DatasetSummary, EpisodeCatalogResponse, EpisodeInfo, EpisodeListItem,
+};
 use spiral_robotics_api::relations::SpiralQueryRequest;
 
 use crate::activities::data::query_result::{
@@ -43,6 +46,7 @@ impl ActiveQuery {
 #[derive(Clone, Copy)]
 pub(crate) struct DataController {
     selected_episode: Signal<Option<String>>,
+    dataset_catalog: Signal<DatasetCatalogState>,
     episode_catalog: Signal<EpisodeCatalogState>,
     episode_loader: Resource<Option<EpisodeLoadResult>>,
     draft: QueryDraftSignals,
@@ -57,13 +61,24 @@ struct EpisodeLoadResult {
 }
 
 #[derive(Clone, Debug, Default)]
-struct EpisodeCatalogState {
+struct DatasetCatalogState {
     datasets: Vec<DatasetSummary>,
+    loading: bool,
+    loaded: bool,
+    selection_initialized: bool,
+    error: Option<String>,
+    request_sequence: u64,
+}
+
+#[derive(Clone, Debug, Default)]
+struct EpisodeCatalogState {
+    dataset_id: Option<String>,
     episodes: Vec<EpisodeEntry>,
     issues: Vec<String>,
     loading: bool,
     loaded: bool,
     error: Option<String>,
+    request_sequence: u64,
 }
 
 /// One catalog record and the full data loaded for that same stable identity.
@@ -71,7 +86,7 @@ struct EpisodeCatalogState {
 /// different selected episode.
 #[derive(Clone, Debug)]
 struct EpisodeEntry {
-    info: EpisodeInfo,
+    summary: EpisodeListItem,
     full_data: Option<Arc<EpisodeData>>,
 }
 
@@ -97,18 +112,18 @@ impl PartialEq for EpisodeDataState {
 }
 
 impl EpisodeEntry {
-    fn new(info: EpisodeInfo) -> Self {
+    fn new(summary: EpisodeListItem) -> Self {
         Self {
-            info,
+            summary,
             full_data: None,
         }
     }
 
-    fn replace_info(mut self, info: EpisodeInfo) -> Self {
-        if self.info.frames() != info.frames() {
+    fn replace_summary(mut self, summary: EpisodeListItem) -> Self {
+        if self.summary.frames() != summary.frames() {
             self.full_data = None;
         }
-        self.info = info;
+        self.summary = summary;
         self
     }
 }
@@ -135,6 +150,7 @@ impl DataController {
         let initial_sql = ManagedTable::Episodes.scoped_sql(namespace, dataset_id);
         let sql_value = initial_sql.clone();
         let selected_episode = use_signal(|| None::<String>);
+        let dataset_catalog = use_signal(DatasetCatalogState::default);
         let episode_catalog = use_signal(EpisodeCatalogState::default);
         let episode_loader = use_resource(move || {
             let selected = selected_episode();
@@ -143,11 +159,11 @@ impl DataController {
                     .peek()
                     .episodes
                     .iter()
-                    .find(|entry| entry.info.id() == episode)
+                    .find(|entry| entry.summary.id() == episode)
                     .map(|entry| {
                         (
                             episode,
-                            entry.info.frames(),
+                            entry.summary.frames(),
                             entry.full_data.as_ref().map(Arc::clone),
                         )
                     })
@@ -178,6 +194,7 @@ impl DataController {
         });
         let controller = Self {
             selected_episode,
+            dataset_catalog,
             episode_catalog,
             episode_loader,
             draft: QueryDraftSignals {
@@ -233,11 +250,11 @@ impl DataController {
         let Some(entry) = catalog
             .episodes
             .iter_mut()
-            .find(|entry| entry.info.id() == loaded.episode)
+            .find(|entry| entry.summary.id() == loaded.episode)
         else {
             return;
         };
-        if entry.info.frames() != loaded.expected_frames
+        if entry.summary.frames() != loaded.expected_frames
             || data.info().id() != loaded.episode
             || data.info().frames() != loaded.expected_frames
             || entry
@@ -250,13 +267,16 @@ impl DataController {
         entry.full_data = Some(Arc::clone(data));
     }
 
-    /// Every recorded take known to the Data activity, oldest first.
-    pub(crate) fn episodes(&self) -> Vec<EpisodeInfo> {
-        self.episode_catalog
-            .read()
+    /// Every recorded take in the requested, currently loaded dataset.
+    pub(crate) fn episodes(&self, dataset_id: &str) -> Vec<EpisodeListItem> {
+        let catalog = self.episode_catalog.read();
+        if catalog.dataset_id.as_deref() != Some(dataset_id) {
+            return Vec::new();
+        }
+        catalog
             .episodes
             .iter()
-            .map(|entry| entry.info.clone())
+            .map(|entry| entry.summary.clone())
             .collect()
     }
 
@@ -266,8 +286,9 @@ impl DataController {
             .read()
             .episodes
             .iter()
-            .find(|entry| Some(entry.info.id()) == selected.as_deref())
-            .map(|entry| entry.info.clone())
+            .find(|entry| Some(entry.summary.id()) == selected.as_deref())
+            .and_then(|entry| entry.full_data.as_ref())
+            .map(|data| data.info().clone())
     }
 
     pub(crate) fn selected_episode_data(&self) -> Option<EpisodeDataState> {
@@ -276,11 +297,11 @@ impl DataController {
         let entry = catalog
             .episodes
             .iter()
-            .find(|entry| Some(entry.info.id()) == selected.as_deref())?;
+            .find(|entry| Some(entry.summary.id()) == selected.as_deref())?;
         if let Some(data) = &entry.full_data {
             return Some(EpisodeDataState::Ready(Arc::clone(data)));
         }
-        let expected_frames = entry.info.frames();
+        let expected_frames = entry.summary.frames();
         drop(catalog);
 
         if self.episode_loader.state().cloned() == UseResourceState::Pending {
@@ -308,7 +329,7 @@ impl DataController {
             .write()
             .episodes
             .iter_mut()
-            .find(|entry| entry.info.id() == episode)
+            .find(|entry| entry.summary.id() == episode)
         {
             entry.full_data = None;
         }
@@ -316,53 +337,143 @@ impl DataController {
     }
 
     pub(crate) fn datasets(&self) -> Vec<DatasetSummary> {
-        self.episode_catalog.read().datasets.clone()
+        self.dataset_catalog.read().datasets.clone()
     }
 
-    pub(crate) fn episodes_loading(&self) -> bool {
-        self.episode_catalog.read().loading
+    pub(crate) fn datasets_loading(&self) -> bool {
+        self.dataset_catalog.read().loading
     }
 
-    pub(crate) fn episodes_loaded(&self) -> bool {
-        self.episode_catalog.read().loaded
+    pub(crate) fn datasets_loaded(&self) -> bool {
+        self.dataset_catalog.read().loaded
     }
 
-    pub(crate) fn episode_catalog_error(&self) -> Option<String> {
-        self.episode_catalog.read().error.clone()
+    pub(crate) fn dataset_catalog_error(&self) -> Option<String> {
+        self.dataset_catalog.read().error.clone()
     }
 
-    pub(crate) fn episode_catalog_issues(&self) -> Vec<String> {
-        self.episode_catalog.read().issues.clone()
-    }
-
-    /// Replace the Data activity's catalog while retaining full data only when
-    /// the stable episode identity and persisted frame count still match.
-    pub(crate) async fn refresh_episode_catalog(mut self) -> Result<(), String> {
+    pub(crate) fn initialize_dataset_selection(mut self, current: &str) -> Option<String> {
+        let mut catalog = self.dataset_catalog.write();
+        if !catalog.loaded || catalog.selection_initialized {
+            return None;
+        }
+        catalog.selection_initialized = true;
+        if catalog
+            .datasets
+            .iter()
+            .any(|dataset| dataset.id() == current)
         {
-            let mut catalog = self.episode_catalog.write();
+            return None;
+        }
+        catalog
+            .datasets
+            .iter()
+            .find(|dataset| dataset.id() == "default")
+            .or_else(|| catalog.datasets.first())
+            .map(|dataset| dataset.id().to_owned())
+    }
+
+    pub(crate) fn episodes_loading(&self, dataset_id: &str) -> bool {
+        let catalog = self.episode_catalog.read();
+        catalog.dataset_id.as_deref() == Some(dataset_id) && catalog.loading
+    }
+
+    pub(crate) fn episodes_loaded(&self, dataset_id: &str) -> bool {
+        let catalog = self.episode_catalog.read();
+        catalog.dataset_id.as_deref() == Some(dataset_id) && catalog.loaded
+    }
+
+    pub(crate) fn episode_catalog_error(&self, dataset_id: &str) -> Option<String> {
+        let catalog = self.episode_catalog.read();
+        (catalog.dataset_id.as_deref() == Some(dataset_id))
+            .then(|| catalog.error.clone())
+            .flatten()
+    }
+
+    pub(crate) fn episode_catalog_issues(&self, dataset_id: &str) -> Vec<String> {
+        let catalog = self.episode_catalog.read();
+        if catalog.dataset_id.as_deref() == Some(dataset_id) {
+            catalog.issues.clone()
+        } else {
+            Vec::new()
+        }
+    }
+
+    pub(crate) async fn load_datasets(mut self) -> Result<(), String> {
+        let request_sequence = {
+            let mut catalog = self.dataset_catalog.write();
+            catalog.request_sequence += 1;
             catalog.loading = true;
             catalog.error = None;
-        }
-        match api::Http::get::<EpisodeCatalogResponse>("/api/episodes").await {
+            catalog.request_sequence
+        };
+        match api::Http::get::<DatasetCatalogResponse>("/api/datasets").await {
             Ok(response) => {
-                let (datasets, episodes, issues) = response.into_parts();
-                let previous = std::mem::take(&mut self.episode_catalog.write().episodes);
+                let mut catalog = self.dataset_catalog.write();
+                if catalog.request_sequence != request_sequence {
+                    return Ok(());
+                }
+                catalog.datasets = response.into_datasets();
+                catalog.loading = false;
+                catalog.loaded = true;
+                Ok(())
+            }
+            Err(error) => {
+                let mut catalog = self.dataset_catalog.write();
+                if catalog.request_sequence != request_sequence {
+                    return Ok(());
+                }
+                catalog.loading = false;
+                catalog.error = Some(error.clone());
+                Err(format!("Could not load datasets: {error}"))
+            }
+        }
+    }
+
+    /// Replace one dataset's episode catalog while retaining full data only
+    /// when the stable episode identity and persisted frame count still match.
+    pub(crate) async fn load_episodes(mut self, dataset_id: String) -> Result<(), String> {
+        let dataset_id = DatasetId::try_from(dataset_id.as_str())
+            .map(String::from)
+            .map_err(|_| "Could not load episodes: the dataset ID is invalid.".to_owned())?;
+        let request_sequence = {
+            let mut catalog = self.episode_catalog.write();
+            catalog.request_sequence += 1;
+            if catalog.dataset_id.as_deref() != Some(dataset_id.as_str()) {
+                catalog.dataset_id = Some(dataset_id.clone());
+                catalog.episodes.clear();
+                catalog.issues.clear();
+                catalog.loaded = false;
+            }
+            catalog.loading = true;
+            catalog.error = None;
+            catalog.request_sequence
+        };
+        let path = format!("/api/episodes?dataset_id={dataset_id}");
+        match api::Http::get::<EpisodeCatalogResponse>(&path).await {
+            Ok(response) => {
+                let (episodes, issues) = response.into_parts();
+                let mut catalog = self.episode_catalog.write();
+                if catalog.request_sequence != request_sequence
+                    || catalog.dataset_id.as_deref() != Some(dataset_id.as_str())
+                {
+                    return Ok(());
+                }
+                let previous = std::mem::take(&mut catalog.episodes);
                 let entries = episodes
                     .into_iter()
-                    .map(|info| {
+                    .map(|summary| {
                         if let Some(entry) = previous
                             .iter()
-                            .find(|entry| entry.info.id() == info.id())
+                            .find(|entry| entry.summary.id() == summary.id())
                             .cloned()
                         {
-                            entry.replace_info(info)
+                            entry.replace_summary(summary)
                         } else {
-                            EpisodeEntry::new(info)
+                            EpisodeEntry::new(summary)
                         }
                     })
                     .collect();
-                let mut catalog = self.episode_catalog.write();
-                catalog.datasets = datasets;
                 catalog.episodes = entries;
                 catalog.issues = issues;
                 catalog.loading = false;
@@ -375,32 +486,48 @@ impl DataController {
             }
             Err(error) => {
                 let mut catalog = self.episode_catalog.write();
+                if catalog.request_sequence != request_sequence
+                    || catalog.dataset_id.as_deref() != Some(dataset_id.as_str())
+                {
+                    return Ok(());
+                }
                 catalog.loading = false;
                 catalog.error = Some(error.clone());
-                Err(format!("Could not refresh the episode catalog: {error}"))
+                Err(format!(
+                    "Could not load episodes for dataset {dataset_id}: {error}"
+                ))
             }
         }
     }
 
+    pub(crate) async fn reload_dataset(self, dataset_id: String) -> Result<(), String> {
+        self.load_datasets().await?;
+        self.load_episodes(dataset_id).await
+    }
+
     /// Apply the authoritative response from a known episode mutation.
     pub(crate) fn upsert_episode(mut self, info: EpisodeInfo) {
-        let selected = self.selected_episode.peek().as_deref() == Some(info.id());
+        let summary = EpisodeListItem::from(&info);
+        if self.episode_catalog.peek().dataset_id.as_deref() != Some(summary.dataset_id()) {
+            return;
+        }
+        let selected = self.selected_episode.peek().as_deref() == Some(summary.id());
         let mut catalog = self.episode_catalog.write();
         if let Some(index) = catalog
             .episodes
             .iter()
-            .position(|entry| entry.info.id() == info.id())
+            .position(|entry| entry.summary.id() == summary.id())
         {
             let existing = catalog.episodes.remove(index);
-            catalog.episodes.push(existing.replace_info(info));
+            catalog.episodes.push(existing.replace_summary(summary));
         } else {
-            catalog.episodes.push(EpisodeEntry::new(info));
+            catalog.episodes.push(EpisodeEntry::new(summary));
         }
         catalog.episodes.sort_by(|left, right| {
-            left.info
+            left.summary
                 .started_ms()
-                .cmp(&right.info.started_ms())
-                .then_with(|| left.info.id().cmp(right.info.id()))
+                .cmp(&right.summary.started_ms())
+                .then_with(|| left.summary.id().cmp(right.summary.id()))
         });
         drop(catalog);
         if selected {
@@ -412,14 +539,24 @@ impl DataController {
         self.episode_catalog
             .write()
             .episodes
-            .retain(|entry| entry.info.id() != episode);
+            .retain(|entry| entry.summary.id() != episode);
     }
 
-    pub(crate) fn invalidate_episode_catalog(mut self) {
-        let mut catalog = self.episode_catalog.write();
-        catalog.loaded = false;
-        catalog.error = None;
-        catalog.issues.clear();
+    pub(crate) fn invalidate_catalogs(mut self) {
+        let mut datasets = self.dataset_catalog.write();
+        datasets.request_sequence += 1;
+        datasets.loading = false;
+        datasets.loaded = false;
+        datasets.selection_initialized = false;
+        datasets.error = None;
+        drop(datasets);
+
+        let mut episodes = self.episode_catalog.write();
+        episodes.request_sequence += 1;
+        episodes.loading = false;
+        episodes.loaded = false;
+        episodes.error = None;
+        episodes.issues.clear();
     }
 
     fn sync_dataset(mut self, namespace: &str, dataset_id: &str) {

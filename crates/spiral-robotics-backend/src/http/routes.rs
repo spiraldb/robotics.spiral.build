@@ -29,11 +29,12 @@ use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use spiral_robotics_api::recording::{
-    EpisodeArmOptionalChannels, EpisodeArmScalarSamples, EpisodeAssessment, EpisodeCatalogResponse,
-    EpisodeIdentity, EpisodeInfo, EpisodeInspectionArm, EpisodeInspectionSnapshot,
-    EpisodeOptionalFrameMatrix, EpisodeTimeline, EpisodeVideoAssetMetadata, EpisodeVideoFormat,
-    EpisodeVideoIdentity, EpisodeVideoTimeline, SetRecordingPausedRequest, SetReplayPausedRequest,
-    StartRecordingRequest, StartReplayRequest, StopRecordingRequest,
+    DatasetCatalogResponse, EpisodeArmOptionalChannels, EpisodeArmScalarSamples, EpisodeAssessment,
+    EpisodeCatalogResponse, EpisodeIdentity, EpisodeInfo, EpisodeInspectionArm,
+    EpisodeInspectionSnapshot, EpisodeListItem, EpisodeOptionalFrameMatrix, EpisodeTimeline,
+    EpisodeVideoAssetMetadata, EpisodeVideoFormat, EpisodeVideoIdentity, EpisodeVideoTimeline,
+    SetRecordingPausedRequest, SetReplayPausedRequest, StartRecordingRequest, StartReplayRequest,
+    StopRecordingRequest,
 };
 use spiral_robotics_api::relations::{SpiralQueryRequest, SpiralQueryResponse};
 use spiral_robotics_api::robots::{
@@ -362,12 +363,23 @@ impl BootstrapState {
         self.current.borrow().clone()
     }
 
+    fn subscribe(&self) -> tokio::sync::watch::Receiver<BackendReadiness> {
+        self.current.subscribe()
+    }
+
     pub(crate) fn bootstrapping(&self, detail: impl Into<String>) {
         self.current.send_replace(BackendReadiness::new(
             BackendReadinessState::Bootstrapping,
             false,
             detail,
         ));
+    }
+
+    pub(crate) fn hydrating_services(&self, detail: impl Into<String>) {
+        self.current.send_replace(
+            BackendReadiness::new(BackendReadinessState::Bootstrapping, false, detail)
+                .with_storage_available(),
+        );
     }
 
     pub(crate) fn ready(&self) {
@@ -389,6 +401,11 @@ impl BootstrapState {
     fn catalog_unavailable(&self) -> Option<String> {
         let current = self.current();
         (!current.catalog_available()).then(|| current.detail().to_owned())
+    }
+
+    fn storage_unavailable(&self) -> Option<String> {
+        let current = self.current();
+        (!current.storage_available()).then(|| current.detail().to_owned())
     }
 }
 
@@ -512,6 +529,16 @@ impl Failure {
         Self(StatusCode::CONFLICT, message.into())
     }
 
+    fn catalog_read(message: impl Into<String>) -> Self {
+        let message = message.into();
+        let status = if spiral_robotics_storage::ProjectStore::is_unavailable_error(&message) {
+            StatusCode::SERVICE_UNAVAILABLE
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        };
+        Self(status, message)
+    }
+
     fn unavailable(message: impl Into<String>) -> Self {
         Self(StatusCode::SERVICE_UNAVAILABLE, message.into())
     }
@@ -576,6 +603,9 @@ impl From<OperationError> for Failure {
 /// Build the studio's API routes.
 impl AppState {
     pub(crate) fn api_router(self) -> Router {
+        let storage_routes = Self::recording_storage_router().route_layer(
+            middleware::from_fn_with_state(self.clone(), Self::require_storage_ready),
+        );
         let catalog_routes = Router::new()
             .merge(Self::data_catalog_router())
             .merge(Self::device_catalog_router())
@@ -590,9 +620,23 @@ impl AppState {
         Router::new()
             .merge(Self::data_bootstrap_router())
             .merge(Self::device_bootstrap_router())
+            .merge(storage_routes)
             .merge(catalog_routes)
             .route("/events", get(Self::events))
             .with_state(self)
+    }
+
+    async fn require_storage_ready(
+        State(state): State<Self>,
+        request: Request,
+        next: Next,
+    ) -> Result<Response, Failure> {
+        match state.bootstrap().storage_unavailable() {
+            Some(detail) => Err(Failure::unavailable(format!(
+                "SpiralDB storage is not ready: {detail}"
+            ))),
+            None => Ok(next.run(request).await),
+        }
     }
 
     async fn require_catalog_ready(
@@ -682,6 +726,7 @@ impl AppState {
             let mut snapshot_timer = tokio::time::interval(SNAPSHOT_INTERVAL);
             snapshot_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut telemetry_timer = tokio::time::interval(TELEMETRY_INTERVAL);
+            let mut readiness = state.bootstrap().subscribe();
             let (initial_training, mut training) = state.training().subscription();
             let (initial_workflow, mut workflow) = state.workflow().subscription();
             let mut last_workflow = initial_workflow.clone();
@@ -719,6 +764,19 @@ impl AppState {
 
             loop {
                 tokio::select! {
+                    changed = readiness.changed() => {
+                        if changed.is_err() {
+                            break;
+                        }
+                        let snapshot = state.snapshot().await;
+                        if last_snapshot.as_ref() == Some(&snapshot) {
+                            continue;
+                        }
+                        last_snapshot = Some(snapshot.clone());
+                        if let Ok(event) = Event::default().event("state").json_data(&snapshot) {
+                            yield Ok(event);
+                        }
+                    }
                     _ = snapshot_timer.tick() => {
                         let snapshot = state.snapshot().await;
                         if last_snapshot.as_ref() == Some(&snapshot) {

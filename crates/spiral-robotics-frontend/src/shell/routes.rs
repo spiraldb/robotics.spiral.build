@@ -173,7 +173,7 @@ fn StudioShell() -> Element {
                                 move |_| {
                                     studio.refresh_settings();
                                     studio.refresh_relation_catalog();
-                                    data.invalidate_episode_catalog();
+                                    data.invalidate_catalogs();
                                 },
                                 move |busy| settings_busy.set(busy),
                             ),

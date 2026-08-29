@@ -186,10 +186,15 @@ fn TrainingRunControl(
     let mut selected_dataset = studio.selected_dataset();
     let controller = studio.training_controller();
     let request = controller.request();
+    use_effect(move || {
+        if !data.datasets_loaded() && !data.datasets_loading() {
+            studio.run_utility("", data.load_datasets());
+        }
+    });
     let dataset_ids = data
-        .episodes()
+        .datasets()
         .into_iter()
-        .map(|episode| episode.dataset_id().to_owned())
+        .map(|dataset| dataset.id().to_owned())
         .chain(std::iter::once(dataset_id.clone()))
         .collect::<BTreeSet<_>>();
     let starting = controller.starting();

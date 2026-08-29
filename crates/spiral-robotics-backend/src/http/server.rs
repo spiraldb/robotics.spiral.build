@@ -491,7 +491,7 @@ impl AppState {
         }
 
         self.bootstrap()
-            .bootstrapping("Loading Studio preferences and run history");
+            .hydrating_services("Loading Studio preferences and run history");
         let preferences = {
             let state = self.clone();
             async move {
