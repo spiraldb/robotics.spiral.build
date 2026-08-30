@@ -5,7 +5,7 @@ use std::io::{self, Cursor, Read as _};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::schema::{self as spiral, Table, column};
+use crate::db::{self as spiral, DatabaseBundleSection, ManagedRelationSchema, Table, column};
 use arrow_array::{
     Array as _, ArrayRef, Float32Array, LargeStringArray, ListArray, RecordBatch, StringArray,
     StringViewArray, UInt32Array, UInt64Array,
@@ -25,14 +25,14 @@ use spiral_robotics_api::workflow::{
     WorkflowFeatureApplicability, WorkflowFeatureDefinition,
 };
 
-use crate::arrow_rows::ArrowColumns;
-use crate::episode_schema::EpisodeSchema;
-use crate::manager::VideoAssetRecordBatch as _;
-use crate::project_store::ProjectConnection;
-use crate::rollout_runs::RolloutRunSchema;
-use crate::sql::SpiralSql;
-use crate::training_runs::TrainingRunSchema;
-use crate::workflow_documents::WorkflowDocumentSchema;
+use crate::db::ArrowColumns;
+use crate::db::ProjectConnection;
+use crate::db::SpiralSql;
+use crate::episodes::EpisodeBundleSection;
+use crate::rollout_runs::RolloutBundleSection;
+use crate::settings::StudioPreferenceBundleSection;
+use crate::training::TrainingBundleSection;
+use crate::workflow_documents::WorkflowDocumentBundleSection;
 
 const PROJECT_MAGIC: &[u8; 8] = b"SPRPROJ1";
 const EPISODES_MAGIC: &[u8; 8] = b"SPREPS01";
@@ -246,24 +246,24 @@ impl ProjectBundle {
 
 pub struct EpisodeBundle;
 
-pub(crate) struct BundleSource<'a> {
+pub(super) struct BundleSource<'a> {
     namespace: &'a str,
     bytes: &'a [u8],
 }
 
 impl<'a> BundleSource<'a> {
-    pub(crate) const fn new(namespace: &'a str, bytes: &'a [u8]) -> Self {
+    pub(super) const fn new(namespace: &'a str, bytes: &'a [u8]) -> Self {
         Self { namespace, bytes }
     }
 }
 
-pub(crate) struct EpisodeBundleSelection<'a> {
+pub(super) struct EpisodeBundleSelection<'a> {
     namespace: &'a str,
     dataset_id: &'a str,
 }
 
 impl<'a> EpisodeBundleSelection<'a> {
-    pub(crate) const fn new(namespace: &'a str, dataset_id: &'a str) -> Self {
+    pub(super) const fn new(namespace: &'a str, dataset_id: &'a str) -> Self {
         Self {
             namespace,
             dataset_id,
@@ -271,13 +271,13 @@ impl<'a> EpisodeBundleSelection<'a> {
     }
 }
 
-pub(crate) struct EpisodeBundleImport<'a> {
+pub(super) struct EpisodeBundleImport<'a> {
     selection: EpisodeBundleSelection<'a>,
     bytes: &'a [u8],
 }
 
 impl<'a> EpisodeBundleImport<'a> {
-    pub(crate) const fn new(selection: EpisodeBundleSelection<'a>, bytes: &'a [u8]) -> Self {
+    pub(super) const fn new(selection: EpisodeBundleSelection<'a>, bytes: &'a [u8]) -> Self {
         Self { selection, bytes }
     }
 }
@@ -285,7 +285,7 @@ impl<'a> EpisodeBundleImport<'a> {
 impl EpisodeBundle {
     pub const MAX_BYTES: usize = ProjectBundle::MAX_BYTES;
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) async fn export(
+    pub(super) async fn export(
         &self,
         connection: &mut ProjectConnection,
         selection: EpisodeBundleSelection<'_>,
@@ -303,7 +303,7 @@ impl EpisodeBundle {
             dataset_id_column = column::DATASET_ID,
         );
         let mut queries = Vec::new();
-        for table in EPISODE_TABLES {
+        for table in EpisodeBundleSection::RELATIONS {
             let relation = table.qualified_name(namespace);
             let query = match table {
                 Table::Datasets | Table::Episodes => format!(
@@ -336,14 +336,6 @@ impl EpisodeBundle {
     }
 }
 
-const EPISODE_TABLES: [Table; 5] = [
-    Table::Datasets,
-    Table::Episodes,
-    Table::EpisodeStreams,
-    Table::JointSamples,
-    Table::VideoAssets,
-];
-
 #[derive(Clone, Copy)]
 struct BundleSpec {
     magic: &'static [u8; 8],
@@ -365,7 +357,7 @@ const EPISODES_SPEC: BundleSpec = BundleSpec {
     magic: EPISODES_MAGIC,
     format: EPISODES_FORMAT,
     label: "episode bundle",
-    tables: &EPISODE_TABLES,
+    tables: &EpisodeBundleSection::RELATIONS,
     max_bytes: EpisodeBundle::MAX_BYTES,
 };
 
@@ -490,13 +482,13 @@ impl WorkflowBundleRegistry {
 }
 
 impl ProjectBundle {
-    pub(crate) async fn export(
+    pub(super) async fn export(
         &self,
         connection: &mut ProjectConnection,
         namespace: &str,
     ) -> Result<Vec<u8>, String> {
         let mut queries = Vec::new();
-        for table in Table::ALL {
+        for table in ManagedRelationCatalog::tables() {
             let relation = table.qualified_name(namespace);
             let query = if table == Table::VideoAssets {
                 BundleSpec::portable_video_assets_query(&relation, None)
@@ -542,8 +534,7 @@ impl BundleSpec {
                 .map_err(|error| format!("reading {} relation {relation}: {error}", self.label))?;
             // A bundle must only ever hold shapes its own importer accepts.
             if let Some(table) = self.table_named(&relation) {
-                table
-                    .validate_managed_relation_schema(records.schema().as_ref(), self.label)
+                ManagedRelationCatalog::validate(table, records.schema().as_ref(), self.label)
                     .map_err(|error| format!("{error}; relation {relation} is not exportable"))?;
             }
             let occupied = Self::encoded_entries_size(&entries)
@@ -700,7 +691,7 @@ impl BundleSpec {
 }
 
 impl ProjectBundle {
-    pub(crate) async fn import(
+    pub(super) async fn import(
         &self,
         connection: &mut ProjectConnection,
         source: BundleSource<'_>,
@@ -820,7 +811,7 @@ impl ProjectBundle {
         mut decoded: Vec<DecodedProjectRelation>,
     ) -> Vec<DecodedProjectRelation> {
         let mut complete = Vec::new();
-        for table in Table::ALL {
+        for table in ManagedRelationCatalog::tables() {
             if let Some(index) = decoded
                 .iter()
                 .position(|entry| entry.relation == ProjectRelation::Managed(table))
@@ -830,7 +821,7 @@ impl ProjectBundle {
                 complete.push(DecodedProjectRelation {
                     relation: ProjectRelation::Managed(table),
                     batches: vec![RecordBatch::new_empty(Arc::new(
-                        table.managed_relation_schema(),
+                        ManagedRelationCatalog::schema(table),
                     ))],
                 });
             }
@@ -841,7 +832,7 @@ impl ProjectBundle {
 }
 
 impl EpisodeBundle {
-    pub(crate) async fn import(
+    pub(super) async fn import(
         &self,
         connection: &mut ProjectConnection,
         request: EpisodeBundleImport<'_>,
@@ -853,7 +844,7 @@ impl EpisodeBundle {
         } = selection;
         EpisodeBundle::validate_dataset_id(dataset_id)?;
         let mut decoded = EPISODES_SPEC.decode_entries(EPISODES_SPEC.parse(bytes)?)?;
-        EpisodeBundle::sort_relations(&mut decoded, &EPISODE_TABLES);
+        EpisodeBundle::sort_relations(&mut decoded, &EpisodeBundleSection::RELATIONS);
         let episode_ids = EpisodeBundle::validate_relations(&decoded)?;
         let video_episode_ids = EpisodeBundle::video_episode_ids(&decoded)?;
         let existing_video_episodes = connection.stored_video_episode_ids(namespace).await?;
@@ -1334,180 +1325,78 @@ impl BundleSpec {
         for (table, payload) in entries {
             let batches = budget.decode(ArrowPayload::new(table.name(), payload, self.label))?;
             let schema = batches[0].schema();
-            table.validate_managed_relation_schema(schema.as_ref(), self.label)?;
+            ManagedRelationCatalog::validate(table, schema.as_ref(), self.label)?;
             decoded.push((table, batches));
         }
         Ok(decoded)
     }
 }
 
-/// The storage-side source of truth for what each managed relation holds.
+/// Composes the schema sections owned by each feature.
 ///
-/// Every persisted column name and semantic type is declared exactly once,
-/// here or in the encoder module this delegates to, so a bundle, a drift test,
-/// and the database can never disagree about a relation's shape.
-pub(crate) trait ManagedRelationSchema {
-    fn managed_relation_schema(self) -> Schema;
+/// The transfer mechanism iterates feature implementations and never declares
+/// a feature relation's columns itself.
+pub(crate) struct ManagedRelationCatalog;
 
-    fn validate_managed_relation_schema(self, schema: &Schema, label: &str) -> Result<(), String>;
-
-    fn managed_relation_field_matches(self, actual: &Field, expected: &Field) -> bool;
-}
-
-impl ManagedRelationSchema for Table {
-    fn validate_managed_relation_schema(self, schema: &Schema, label: &str) -> Result<(), String> {
-        let expected = self.managed_relation_schema();
-        if !schema.metadata().is_empty() {
-            return Err(format!(
-                "{label} relation {self} has unsupported schema metadata"
-            ));
-        }
-        if schema.fields().len() != expected.fields().len() {
-            return Err(format!(
-                "{label} relation {self} has {} columns; expected {}",
-                schema.fields().len(),
-                expected.fields().len(),
-            ));
-        }
-        for (actual, expected) in schema.fields().iter().zip(expected.fields()) {
-            if !self.managed_relation_field_matches(actual, expected) {
-                return Err(format!(
-                    "{label} relation {self} field {:?} has type {} (nullable {}); expected semantic type {} (nullable {})",
-                    actual.name(),
-                    actual.data_type(),
-                    actual.is_nullable(),
-                    expected.data_type(),
-                    expected.is_nullable(),
-                ));
-            }
-        }
-        Ok(())
+impl ManagedRelationCatalog {
+    pub(crate) fn tables() -> Vec<Table> {
+        let database = DatabaseBundleSection;
+        let episodes = EpisodeBundleSection;
+        let settings = StudioPreferenceBundleSection;
+        let training = TrainingBundleSection;
+        let rollout = RolloutBundleSection;
+        let workflow = WorkflowDocumentBundleSection;
+        let sections: [&dyn ManagedRelationSchema; 6] = [
+            &database, &episodes, &settings, &training, &rollout, &workflow,
+        ];
+        let mut tables = sections
+            .into_iter()
+            .flat_map(ManagedRelationSchema::relations)
+            .copied()
+            .collect::<Vec<_>>();
+        tables.sort_by_key(|table| {
+            Table::ALL
+                .iter()
+                .position(|candidate| candidate == table)
+                .unwrap_or(usize::MAX)
+        });
+        tables
     }
 
-    fn managed_relation_field_matches(self, actual: &Field, expected: &Field) -> bool {
-        let portable_video_payload_is_required = self == Table::VideoAssets
-            && actual.name() == column::PAYLOAD
-            && expected.name() == column::PAYLOAD
-            && !actual.is_nullable()
-            && expected.is_nullable();
-        (portable_video_payload_is_required || actual.is_nullable() == expected.is_nullable())
-            && actual.name() == expected.name()
-            && actual.metadata() == expected.metadata()
-            && actual
-                .data_type()
-                .matches_managed_data_type(expected.data_type())
+    pub(crate) fn schema(table: Table) -> Schema {
+        let database = DatabaseBundleSection;
+        let episodes = EpisodeBundleSection;
+        let settings = StudioPreferenceBundleSection;
+        let training = TrainingBundleSection;
+        let rollout = RolloutBundleSection;
+        let workflow = WorkflowDocumentBundleSection;
+        let sections: [&dyn ManagedRelationSchema; 6] = [
+            &database, &episodes, &settings, &training, &rollout, &workflow,
+        ];
+        sections
+            .into_iter()
+            .find_map(|section| section.managed_relation_schema(table))
+            .unwrap_or_else(|| panic!("managed relation {table} has no owning schema section"))
     }
 
-    fn managed_relation_schema(self) -> Schema {
-        let table = self;
-        let text = |name, nullable| Field::new(name, DataType::Utf8, nullable);
-        let timestamp = |name| Field::new(name, DataType::Int64, false);
-        let fields = match table {
-            // Relations whose rows are built by a storage-owned encoder keep
-            // exactly one schema definition, so a bundle can never validate
-            // against a stale copy of it.
-            Table::Datasets => EpisodeSchema::datasets().owned_fields(),
-            Table::Episodes => EpisodeSchema::episodes().owned_fields(),
-            Table::EpisodeStreams => EpisodeSchema::episode_streams().owned_fields(),
-            Table::JointSamples => EpisodeSchema::joint_samples().owned_fields(),
-            Table::TrainingRuns => TrainingRunSchema::runs().owned_fields(),
-            Table::TrainingRunMetrics => TrainingRunSchema::metrics().owned_fields(),
-            Table::TrainingRunCheckpoints => TrainingRunSchema::checkpoints().owned_fields(),
-            Table::RolloutRuns => RolloutRunSchema::session().owned_fields(),
-            Table::WorkflowRuns => WorkflowDocumentSchema::documents().owned_fields(),
-            // A packaged MP4 travels as portable Arrow binary; the database
-            // holds the same column as a native Spiral Blob, so this shape is
-            // the bundle's own and is declared here.
-            Table::VideoAssets => vec![
-                text(column::EPISODE_ID, false),
-                text(column::STREAM_ID, false),
-                Field::new(column::SEGMENT_INDEX, DataType::UInt32, false),
-                Field::new(column::TIMELINE_OFFSET_NS, DataType::UInt64, true),
-                text(column::CAMERA_ID, false),
-                Field::new(column::PAYLOAD, DataType::Binary, true),
-                Field::new(column::BYTE_SIZE, DataType::UInt64, false),
-                Field::new(column::WIDTH, DataType::UInt32, false),
-                Field::new(column::HEIGHT, DataType::UInt32, false),
-                Field::new(column::FPS, DataType::UInt32, false),
-                Field::new(column::FRAMES, DataType::UInt64, false),
-                text(column::MEDIA_RELATION, false),
-            ],
-            Table::TrainingCheckpoints => vec![
-                text(column::RUN_ID, false),
-                text(column::RUN_NAME, false),
-                text(column::POLICY, false),
-                Field::new(column::STEP, DataType::UInt64, false),
-                timestamp(column::CREATED_MS),
-                Field::new(column::VALIDATION_LOSS, DataType::Float64, true),
-                text(column::CONFIG_JSON, false),
-                Field::new(column::CHECKPOINT, DataType::LargeBinary, false),
-            ],
-            Table::Robots => vec![
-                text(column::ROBOT_ID, false),
-                text(column::CONFIG_JSON, false),
-                timestamp(column::UPDATED_MS),
-            ],
-            Table::StudioSettings => vec![
-                text(column::KEY, false),
-                text(column::VALUE_JSON, false),
-                timestamp(column::UPDATED_MS),
-            ],
-        };
-        Schema::new(fields)
-    }
-}
-
-trait OwnedSchemaFields {
-    fn owned_fields(&self) -> Vec<Field>;
-}
-
-impl OwnedSchemaFields for Schema {
-    fn owned_fields(&self) -> Vec<Field> {
-        self.fields()
-            .iter()
-            .map(|field| field.as_ref().clone())
-            .collect()
-    }
-}
-
-trait ManagedFieldCompatibility {
-    fn matches_managed_field(&self, expected: &Field) -> bool;
-}
-
-impl ManagedFieldCompatibility for Field {
-    fn matches_managed_field(&self, expected: &Field) -> bool {
-        self.name() == expected.name()
-            && self.is_nullable() == expected.is_nullable()
-            && self.metadata() == expected.metadata()
-            && self
-                .data_type()
-                .matches_managed_data_type(expected.data_type())
-    }
-}
-
-trait ManagedDataTypeCompatibility {
-    fn matches_managed_data_type(&self, expected: &DataType) -> bool;
-}
-
-impl ManagedDataTypeCompatibility for DataType {
-    fn matches_managed_data_type(&self, expected: &DataType) -> bool {
-        match expected {
-            DataType::Utf8 => matches!(
-                self,
-                DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
-            ),
-            DataType::Binary | DataType::LargeBinary => matches!(
-                self,
-                DataType::Binary | DataType::LargeBinary | DataType::BinaryView
-            ),
-            DataType::List(expected_child) => {
-                let DataType::List(actual_child) = self else {
-                    return false;
-                };
-                actual_child.matches_managed_field(expected_child)
-            }
-            _ => self == expected,
-        }
+    pub(crate) fn validate(table: Table, schema: &Schema, label: &str) -> Result<(), String> {
+        let database = DatabaseBundleSection;
+        let episodes = EpisodeBundleSection;
+        let settings = StudioPreferenceBundleSection;
+        let training = TrainingBundleSection;
+        let rollout = RolloutBundleSection;
+        let workflow = WorkflowDocumentBundleSection;
+        let sections: [&dyn ManagedRelationSchema; 6] = [
+            &database, &episodes, &settings, &training, &rollout, &workflow,
+        ];
+        sections
+            .into_iter()
+            .find_map(|section| section.validate_managed_relation_schema(table, schema, label))
+            .unwrap_or_else(|| {
+                Err(format!(
+                    "managed relation {table} has no owning schema section"
+                ))
+            })
     }
 }
 
@@ -1553,7 +1442,7 @@ impl ProjectBundle {
         }
 
         let mut decoded = Vec::new();
-        for table in Table::ALL {
+        for table in ManagedRelationCatalog::tables() {
             if let Some(payload) = payloads.remove(table.name()) {
                 let mut relation =
                     PROJECT_SPEC.decode_entries_with_budget(vec![(table, payload)], &mut budget)?;
@@ -2642,7 +2531,10 @@ impl EpisodeBundle {
         batch: RecordBatch,
         namespace: &str,
     ) -> Result<RecordBatch, String> {
-        EpisodeBundle::retarget_video_media_relations(batch.normalize_video_asset()?, namespace)
+        EpisodeBundle::retarget_video_media_relations(
+            EpisodeBundleSection::normalize_video_asset(batch)?,
+            namespace,
+        )
     }
 
     async fn reject_existing_episodes(
@@ -2934,9 +2826,9 @@ mod tests {
     use arrow_schema::{DataType, Field, Schema};
 
     use super::*;
-    use crate::episodes::{EpisodeCompletion, EpisodeStart, EpisodeStore};
+    use crate::db::ProjectStore;
+    use crate::episodes::{EpisodeFixture, EpisodeStore};
     use crate::manager::StorageManager;
-    use crate::project_store::ProjectStore;
     use crate::settings::{BackendStateStore, ServiceEndpoint, SpiralConnectionSettings};
 
     fn envelope(manifest: Manifest, entries: &[(&str, &[u8])]) -> Vec<u8> {
@@ -2996,8 +2888,7 @@ mod tests {
     /// test exercises the validator on a correctly named but wrongly typed
     /// payload.
     fn null_typed_batch(table: Table, rows: usize) -> RecordBatch {
-        let names = table
-            .managed_relation_schema()
+        let names = ManagedRelationCatalog::schema(table)
             .fields()
             .iter()
             .map(|field| field.name().clone())
@@ -3188,8 +3079,7 @@ mod tests {
 
     #[test]
     fn managed_schema_accepts_required_binary_view_for_portable_video_payload() {
-        let mut fields = Table::VideoAssets
-            .managed_relation_schema()
+        let mut fields = ManagedRelationCatalog::schema(Table::VideoAssets)
             .fields()
             .iter()
             .map(|field| field.as_ref().clone())
@@ -3200,9 +3090,12 @@ mod tests {
             .expect("video assets contain a payload field");
         fields[payload] = Field::new(column::PAYLOAD, DataType::BinaryView, false);
 
-        Table::VideoAssets
-            .validate_managed_relation_schema(&Schema::new(fields), PROJECT_SPEC.label)
-            .expect("a required portable payload safely satisfies the nullable binary contract");
+        ManagedRelationCatalog::validate(
+            Table::VideoAssets,
+            &Schema::new(fields),
+            PROJECT_SPEC.label,
+        )
+        .expect("a required portable payload safely satisfies the nullable binary contract");
     }
 
     #[test]
@@ -3567,7 +3460,7 @@ mod tests {
             assert_eq!(entry.batches[0].num_rows(), 0);
             assert_eq!(
                 entry.batches[0].schema().as_ref(),
-                &table.managed_relation_schema()
+                &ManagedRelationCatalog::schema(table)
             );
         }
     }
@@ -4240,16 +4133,11 @@ mod tests {
         let readiness = storage.test_spiral().await;
         assert!(readiness.ok(), "{}", readiness.message());
 
-        let mut connection = project_store
-            .connect_exclusive()
-            .await
-            .expect("the source episode project must connect");
         EpisodeSeed::new(project_store.namespace(), "source", "episode_exported")
             .with_started_ms(10)
-            .save(&mut connection)
+            .save(&storage)
             .await
             .expect("seeding the source episode must succeed");
-        drop(connection);
 
         let exported = storage
             .export_episode_bundle("source")
@@ -4261,7 +4149,7 @@ mod tests {
             .into_iter()
             .map(|(table, _)| table)
             .collect::<Vec<_>>();
-        assert_eq!(exported_relations, EPISODE_TABLES);
+        assert_eq!(exported_relations, EpisodeBundleSection::RELATIONS);
 
         let empty_project = PROJECT_SPEC
             .build(Vec::new())
@@ -4270,16 +4158,11 @@ mod tests {
             .import_project_bundle(&empty_project)
             .await
             .expect("the source project rows must clear without dropping relations");
-        let mut connection = project_store
-            .connect_exclusive()
-            .await
-            .expect("the target episode project must connect");
         EpisodeSeed::new(project_store.namespace(), "target", "episode_existing")
             .with_started_ms(20)
-            .save(&mut connection)
+            .save(&storage)
             .await
             .expect("seeding the target dataset must succeed");
-        drop(connection);
 
         let summary = storage
             .import_episode_bundle("target", &exported)
@@ -4340,18 +4223,15 @@ mod tests {
         let readiness = storage.test_spiral().await;
         assert!(readiness.ok(), "{}", readiness.message());
         let episode_id = "episode_video_import";
-        let start = EpisodeStart::new(episode_id.to_owned(), "video-transfer".to_owned())
+        let episode = EpisodeFixture::new(episode_id, "video-transfer")
             .with_timing(10, 2.0)
-            .with_source("transfer-e2e".to_owned(), None)
-            .with_arms(
-                vec![spiral_robotics_api::recording::EpisodeArm::new(
-                    "follower",
-                    Some("test".to_owned()),
-                    vec!["joint".to_owned()],
-                )],
-                Vec::new(),
-            );
-        let completion = EpisodeCompletion::new(1.0, Vec::new(), Vec::new());
+            .with_arms(vec![spiral_robotics_api::recording::EpisodeArm::new(
+                "follower",
+                Some("test".to_owned()),
+                vec!["joint".to_owned()],
+            )])
+            .with_duration_seconds(1.0)
+            .into_episode();
         let mut mp4 = test_mp4();
         // A valid top-level `free` box makes the fixture large enough to cross
         // Spiral's managed-Blob outlining threshold without making FFmpeg
@@ -4362,28 +4242,14 @@ mod tests {
         mp4.resize(mp4.len() + free_box_size as usize - 8, 0);
         assert!(mp4.len() > 256 * 1024);
 
+        storage
+            .commit_episode(&episode, &[])
+            .await
+            .expect("the video episode must save");
         let mut connection = project_store
             .connect_exclusive()
             .await
             .expect("the video project must connect");
-        connection
-            .ingest_batch(
-                &Table::Datasets.qualified_name(project_store.namespace()),
-                start
-                    .dataset_batch()
-                    .expect("the video dataset batch must build"),
-            )
-            .await
-            .expect("the video dataset row must save");
-        connection
-            .ingest_batch(
-                &Table::Episodes.qualified_name(project_store.namespace()),
-                completion
-                    .episode_batch(&start, 0)
-                    .expect("the video episode batch must build"),
-            )
-            .await
-            .expect("the video episode row must save");
         connection
             .ingest_batch(
                 &Table::VideoAssets.qualified_name(project_store.namespace()),
@@ -4469,12 +4335,12 @@ mod tests {
         let range = connection
             .run_binary_query(&SpiralSql::video_asset_range(
                 project_store.namespace(),
-                &crate::video::VideoAssetKey::new(
+                &crate::episodes::video::VideoAssetKey::new(
                     episode_id.to_owned(),
                     "camera.main".to_owned(),
                     Some(0),
                 ),
-                crate::video::VideoByteRange::new(512, 1024),
+                crate::episodes::video::VideoByteRange::new(512, 1024),
             ))
             .await
             .expect("the video Blob range must load");
@@ -4929,7 +4795,7 @@ mod tests {
             decoded.push((
                 table,
                 vec![RecordBatch::new_empty(Arc::new(
-                    table.managed_relation_schema(),
+                    ManagedRelationCatalog::schema(table),
                 ))],
             ));
         }
@@ -5261,25 +5127,12 @@ mod tests {
             self
         }
 
-        async fn save(self, connection: &mut ProjectConnection) -> Result<(), String> {
-            let start = EpisodeStart::new(self.episode_id.to_owned(), self.dataset_id.to_owned())
+        async fn save(self, storage: &StorageManager) -> Result<(), String> {
+            let episode = EpisodeFixture::new(self.episode_id, self.dataset_id)
                 .with_timing(self.started_ms, 60.0)
-                .with_source("transfer-e2e".to_owned(), None);
-            let completion = EpisodeCompletion::new(0.0, Vec::new(), Vec::new());
-            connection
-                .ingest_batch(
-                    &Table::Datasets.qualified_name(self.namespace),
-                    start.dataset_batch().map_err(|error| error.to_string())?,
-                )
-                .await?;
-            connection
-                .ingest_batch(
-                    &Table::Episodes.qualified_name(self.namespace),
-                    completion
-                        .episode_batch(&start, 0)
-                        .map_err(|error| error.to_string())?,
-                )
-                .await
+                .into_episode();
+            debug_assert_eq!(storage.namespace(), self.namespace);
+            storage.commit_episode(&episode, &[]).await
         }
     }
 

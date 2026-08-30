@@ -16,8 +16,58 @@ use spiral_robotics_api::rollout::{
     RolloutIdentity, RolloutLifecycle, RolloutMetrics, RolloutPhase, RolloutSnapshot,
 };
 
-use crate::arrow_rows::ArrowColumns;
-use crate::schema::column as db;
+use crate::db::ArrowColumns;
+use crate::db::column as db;
+use crate::db::{ManagedRelationSchema, Table};
+use crate::db::{ProjectStore, StorageClock};
+
+/// Rollout relations contributed to project bundles.
+pub(crate) struct RolloutBundleSection;
+
+impl ManagedRelationSchema for RolloutBundleSection {
+    fn relations(&self) -> &'static [Table] {
+        &[Table::RolloutRuns]
+    }
+
+    fn managed_relation_schema(&self, table: Table) -> Option<Schema> {
+        (table == Table::RolloutRuns).then(|| RolloutRunSchema::session().as_ref().clone())
+    }
+}
+
+/// Durable rollout-session operations for one project.
+pub(crate) struct RolloutSessionPersistence<'a> {
+    project_store: &'a ProjectStore,
+}
+
+impl<'a> RolloutSessionPersistence<'a> {
+    pub(crate) const fn new(project_store: &'a ProjectStore) -> Self {
+        Self { project_store }
+    }
+
+    pub(crate) async fn load(&self) -> Result<Option<RolloutSnapshot>, String> {
+        if !self.project_store.is_configured() {
+            return Ok(None);
+        }
+        let relation = Table::RolloutRuns.qualified_name(self.project_store.namespace());
+        let mut connection = self.project_store.connect().await?;
+        let sessions = connection
+            .relation_rows(&relation, StoredRolloutSession::decode)
+            .await?;
+        Ok(sessions.last().map(StoredRolloutSession::restored))
+    }
+
+    pub(crate) async fn save(&self, snapshot: &RolloutSnapshot) -> Result<(), String> {
+        let session = StoredRolloutSession::stored(snapshot);
+        let batch = StoredRolloutSession::batch(session.as_ref(), StorageClock::unix_millis())?;
+        let mut connection = self.project_store.connect().await?;
+        connection
+            .replace_batches(
+                &Table::RolloutRuns.qualified_name(self.project_store.namespace()),
+                vec![batch],
+            )
+            .await
+    }
+}
 
 /// Lifecycle state recorded with a rollout session.
 ///
@@ -113,7 +163,7 @@ struct StoredRolloutMetrics {
 
 /// The one durable rollout row, keyed by its session identity.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct StoredRolloutSession {
+struct StoredRolloutSession {
     session_id: String,
     selection: StoredRolloutSelection,
     lifecycle: StoredRolloutLifecycle,
@@ -123,7 +173,7 @@ pub(crate) struct StoredRolloutSession {
 impl StoredRolloutSession {
     /// A snapshot that never named a session has nothing durable to say, so it
     /// clears the relation instead of writing an identity-free row.
-    pub(crate) fn stored(snapshot: &RolloutSnapshot) -> Option<Self> {
+    fn stored(snapshot: &RolloutSnapshot) -> Option<Self> {
         let metrics = snapshot.metrics();
         Some(Self {
             session_id: snapshot.session_id()?.to_owned(),
@@ -152,7 +202,7 @@ impl StoredRolloutSession {
         })
     }
 
-    pub(crate) fn restored(&self) -> RolloutSnapshot {
+    fn restored(&self) -> RolloutSnapshot {
         RolloutSnapshot::new(
             RolloutIdentity::new(
                 Some(self.session_id.clone()),
@@ -178,11 +228,11 @@ impl StoredRolloutSession {
     }
 }
 
-/// Arrow schema for [`crate::schema::Table::RolloutRuns`].
-pub(crate) struct RolloutRunSchema;
+/// Arrow schema for the managed `rollout_runs` relation.
+struct RolloutRunSchema;
 
 impl RolloutRunSchema {
-    pub(crate) fn session() -> SchemaRef {
+    fn session() -> SchemaRef {
         Arc::new(Schema::new(vec![
             Field::new(db::SESSION_ID, DataType::Utf8, false),
             Field::new(db::RUN_ID, DataType::Utf8, true),
@@ -210,7 +260,7 @@ impl StoredRolloutSession {
     /// Encode the latest session as the relation's only row. A session-free
     /// state encodes zero rows, so an empty relation and a never-run project
     /// read back identically.
-    pub(crate) fn batch(session: Option<&Self>, updated_ms: i64) -> Result<RecordBatch, String> {
+    fn batch(session: Option<&Self>, updated_ms: i64) -> Result<RecordBatch, String> {
         let rows = session.into_iter().collect::<Vec<_>>();
         let columns: Vec<ArrayRef> = vec![
             Arc::new(StringArray::from_iter_values(
@@ -272,7 +322,7 @@ impl StoredRolloutSession {
             .map_err(|error| format!("building rollout session batch: {error}"))
     }
 
-    pub(crate) fn decode(batch: &RecordBatch, row: usize) -> Result<Self, String> {
+    fn decode(batch: &RecordBatch, row: usize) -> Result<Self, String> {
         let columns = ArrowColumns::new(batch, "rollout session");
         Ok(Self {
             session_id: columns.text(db::SESSION_ID, row)?.to_owned(),

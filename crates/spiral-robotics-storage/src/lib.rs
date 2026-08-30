@@ -1,42 +1,62 @@
 //! Project storage: SpiralDB access, schemas, queries, ingestion, and transfer.
 
-mod arrow_rows;
-pub mod bundle;
-pub mod checkpoints;
-mod database;
-mod episode_schema;
+mod db;
 pub mod episodes;
-pub mod ingestion;
 mod manager;
-mod project_store;
 mod rollout_runs;
-mod schema;
 mod settings;
-mod spiral_database;
-mod sql;
-mod training_runs;
-pub mod video;
+mod training;
+mod transfer;
 pub mod workflow_documents;
+
+pub mod bundle {
+    //! Portable single-file snapshots of the Studio-owned Spiral namespace.
+
+    pub use crate::transfer::{
+        EpisodeBundle, ProjectBundle, SIGLIP_BASE_MODEL_ID, SIGLIP_BASE_REPOSITORY,
+        SIGLIP_BASE_REVISION, WORKFLOW_FEATURE_REGISTRY_RELATION,
+    };
+}
+
+pub mod checkpoints {
+    //! Application-owned boundary for immutable training artifacts.
+
+    pub use crate::training::{
+        CheckpointArtifact, CheckpointFuture, CheckpointKey, CheckpointStore,
+    };
+}
+
+pub mod ingestion {
+    //! Hugging Face discovery and Spiral-native dataset materialization.
+
+    pub use crate::transfer::HuggingFaceDatasetDiscovery;
+}
+
+pub mod video {
+    //! Persisted video values shared by camera capture and episode storage.
+
+    pub use crate::episodes::video::*;
+}
 
 // Keep the cross-crate storage boundary flat and explicit. The modules behind
 // these exports describe implementation mechanisms, not product features.
-pub use database::{
+pub use db::SpiralSql;
+pub use db::{
     BatchIngestion, Database, DatabaseCommand, DatabaseConnection, DatabaseError,
     DatabaseErrorKind, DatabaseFuture, DatabaseOutput, DatabaseResult, DatabaseSession,
     DatabaseTransaction, ExecutionSummary, IngestMode, RecordBatchStream, RelationKind,
     RelationMetadata, RelationName, SqlStatement,
 };
-pub use manager::StorageManager;
-pub use project_store::{ProjectConnection, ProjectStore};
-pub use schema::{
+pub use db::{ProjectConnection, ProjectStore};
+pub use db::{
     ROBOT_CONFIGURATION_COLUMN, ROBOT_IDENTIFIER_COLUMN, ROBOT_UPDATED_MILLIS_COLUMN,
     SCHEMA_VERSION, StorageSchema,
 };
+pub use manager::StorageManager;
 pub use settings::{
     BackendStateStore, ServiceEndpoint, SpiralConnectionSettings, SpiralCredentials,
     StoredStudioPreferences, StoredTrainingRuntimePreference, StoredVideoPreference,
     StudioPreferencesStore,
 };
-pub use sql::SpiralSql;
 
 pub(crate) const LEGACY_PROJECT_ERROR: &str = "this project was created by an older Studio and its storage format is no longer readable — start a fresh project";

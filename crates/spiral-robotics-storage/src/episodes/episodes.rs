@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::schema::{Table, column as db};
+use crate::db::{Table, column as db};
 use futures::future;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
@@ -17,6 +17,7 @@ use spiral_robotics_api::recording::{
     EpisodeArm, EpisodeAssessment, EpisodeIdentity as EpisodeInfoIdentity, EpisodeInfo,
     EpisodeListItem, EpisodeTimeline, RecordingGap,
 };
+use spiral_robotics_api::sql::QualifiedRelation;
 use spiral_robotics_hardware::Calibration;
 use spiral_robotics_hardware::{
     ArmConditionSummary as HardwareArmConditionSummary, CompletedRecording,
@@ -25,18 +26,20 @@ use spiral_robotics_hardware::{
 };
 pub use spiral_robotics_hardware::{EpisodeCheckpoint, Sample};
 
-use crate::episode_schema::{
-    EpisodeStreamCatalog, EpisodeStreamRow, JointSampleRows, SpiralEpisodeEncoder, StoredEpisodeRow,
+use super::episode_schema::{
+    EpisodeStreamCatalog, EpisodeStreamRow, JointSampleRows, SpiralEpisodeEncoder,
+    StoredEpisodeRow, VideoStreamProperties, VideoStreamRow, VideoStreamRows,
 };
-use crate::project_store::{ProjectConnection, ProjectStore};
-use crate::sql::SpiralSql;
-use crate::video::{VideoAssetMetadata, VideoSegment, VideoSize, VideoTiming};
+use super::video::{VideoAsset, VideoAssetMetadata, VideoSegment, VideoSize, VideoTiming};
+use crate::db::SpiralSql;
+use crate::db::{ProjectConnection, ProjectStore};
 
 const SAMPLE_QUEUE_DEPTH: usize = 2_048;
 /// Hard storage limit for a single recorded episode.
 pub const MAX_EPISODE_FRAMES: u64 = 1_000_000;
 const MAX_EPISODE_ROWS: usize = MAX_EPISODE_FRAMES as usize * 16;
 const NO_SAMPLE_TIMESTAMP_BITS: u64 = u64::MAX;
+const JOINT_BATCH_ROWS: usize = 512;
 
 type NormalizedPose = BTreeMap<String, f64>;
 pub type TimelineJointValues = BTreeMap<String, Option<f64>>;
@@ -80,7 +83,7 @@ pub enum EpisodeError {
 }
 
 impl EpisodeError {
-    pub(crate) fn invalid(message: impl Into<String>) -> Self {
+    pub(super) fn invalid(message: impl Into<String>) -> Self {
         Self::Invalid(message.into())
     }
 }
@@ -115,7 +118,7 @@ pub struct JointMotorLimits {
 }
 
 impl JointMotorLimits {
-    pub(crate) const fn new(
+    pub(super) const fn new(
         max_temperature_celsius: Option<f64>,
         voltage: JointVoltageRange,
         max_load: Option<f64>,
@@ -128,29 +131,29 @@ impl JointMotorLimits {
         }
     }
 
-    pub(crate) const fn max_temperature_celsius(self) -> Option<f64> {
+    pub(super) const fn max_temperature_celsius(self) -> Option<f64> {
         self.max_temperature_celsius
     }
-    pub(crate) const fn min_voltage_volts(self) -> Option<f64> {
+    pub(super) const fn min_voltage_volts(self) -> Option<f64> {
         self.min_voltage_volts
     }
-    pub(crate) const fn max_voltage_volts(self) -> Option<f64> {
+    pub(super) const fn max_voltage_volts(self) -> Option<f64> {
         self.max_voltage_volts
     }
-    pub(crate) const fn max_load(self) -> Option<f64> {
+    pub(super) const fn max_load(self) -> Option<f64> {
         self.max_load
     }
 }
 
 /// The lower and upper supply voltages one motor accepts.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(crate) struct JointVoltageRange {
+pub(super) struct JointVoltageRange {
     minimum: Option<f64>,
     maximum: Option<f64>,
 }
 
 impl JointVoltageRange {
-    pub(crate) const fn new(minimum: Option<f64>, maximum: Option<f64>) -> Self {
+    pub(super) const fn new(minimum: Option<f64>, maximum: Option<f64>) -> Self {
         Self { minimum, maximum }
     }
 }
@@ -202,22 +205,22 @@ impl ArmCondition {
         self
     }
 
-    pub(crate) fn arm(&self) -> &str {
+    pub(super) fn arm(&self) -> &str {
         &self.arm
     }
-    pub(crate) fn temperature_celsius(&self) -> &[Option<f64>] {
+    pub(super) fn temperature_celsius(&self) -> &[Option<f64>] {
         &self.temperature_celsius
     }
-    pub(crate) fn voltage_volts(&self) -> &[Option<f64>] {
+    pub(super) fn voltage_volts(&self) -> &[Option<f64>] {
         &self.voltage_volts
     }
-    pub(crate) fn limits(&self) -> &[JointMotorLimits] {
+    pub(super) fn limits(&self) -> &[JointMotorLimits] {
         &self.limits
     }
 
     /// True when nothing was actually measured, so storage writes null columns
     /// instead of inventing an all-empty observation.
-    pub(crate) fn is_empty(&self) -> bool {
+    pub(super) fn is_empty(&self) -> bool {
         self.temperature_celsius.is_empty()
             && self.voltage_volts.is_empty()
             && self.limits.is_empty()
@@ -247,7 +250,7 @@ struct EpisodeRecordingMetadata {
 }
 
 impl EpisodeStart {
-    pub(crate) fn new(id: String, dataset_id: String) -> Self {
+    pub(super) fn new(id: String, dataset_id: String) -> Self {
         Self {
             identity: EpisodeIdentity { id, dataset_id },
             recording: EpisodeRecordingMetadata {
@@ -261,13 +264,13 @@ impl EpisodeStart {
         }
     }
 
-    pub(crate) fn with_timing(mut self, started_ms: i64, sample_hz: f64) -> Self {
+    pub(super) fn with_timing(mut self, started_ms: i64, sample_hz: f64) -> Self {
         self.recording.started_ms = started_ms;
         self.recording.sample_hz = sample_hz;
         self
     }
 
-    pub(crate) fn with_current_timing(self, sample_hz: f64) -> Self {
+    pub(super) fn with_current_timing(self, sample_hz: f64) -> Self {
         let started_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|value| value.as_millis().min(i64::MAX as u128) as i64)
@@ -275,34 +278,34 @@ impl EpisodeStart {
         self.with_timing(started_ms, sample_hz)
     }
 
-    pub(crate) fn with_source(mut self, source: String, note: Option<String>) -> Self {
+    pub(super) fn with_source(mut self, source: String, note: Option<String>) -> Self {
         self.recording.source = source;
         self.recording.note = note;
         self
     }
 
-    pub(crate) fn with_arms(mut self, arms: Vec<EpisodeArm>, condition: Vec<ArmCondition>) -> Self {
+    pub(super) fn with_arms(mut self, arms: Vec<EpisodeArm>, condition: Vec<ArmCondition>) -> Self {
         self.arms = arms;
         self.condition = condition;
         self
     }
 
-    pub(crate) fn id(&self) -> &str {
+    pub(super) fn id(&self) -> &str {
         &self.identity.id
     }
-    pub(crate) fn dataset_id(&self) -> &str {
+    pub(super) fn dataset_id(&self) -> &str {
         &self.identity.dataset_id
     }
-    pub(crate) const fn started_ms(&self) -> i64 {
+    pub(super) const fn started_ms(&self) -> i64 {
         self.recording.started_ms
     }
-    pub(crate) const fn sample_hz(&self) -> f64 {
+    pub(super) const fn sample_hz(&self) -> f64 {
         self.recording.sample_hz
     }
-    pub(crate) fn source(&self) -> &str {
+    pub(super) fn source(&self) -> &str {
         &self.recording.source
     }
-    pub(crate) fn note(&self) -> Option<&str> {
+    pub(super) fn note(&self) -> Option<&str> {
         self.recording.note.as_deref()
     }
     pub fn arms(&self) -> &[EpisodeArm] {
@@ -310,7 +313,7 @@ impl EpisodeStart {
     }
     /// Opening motor readings, at most one entry per arm and only for arms
     /// whose hardware answered while the take was opening.
-    pub(crate) fn condition(&self) -> &[ArmCondition] {
+    pub(super) fn condition(&self) -> &[ArmCondition] {
         &self.condition
     }
 }
@@ -367,24 +370,24 @@ impl<'a> RobotPlaybackRequest<'a> {
 /// this shape because it is persisted: the equivalent wire type exposes no
 /// accessors, so a stored gap could never be read back through it.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(crate) struct EpisodeRecordingGap {
+pub(super) struct EpisodeRecordingGap {
     after_seconds: f64,
     duration_seconds: f64,
 }
 
 impl EpisodeRecordingGap {
-    pub(crate) const fn new(after_seconds: f64, duration_seconds: f64) -> Self {
+    pub(super) const fn new(after_seconds: f64, duration_seconds: f64) -> Self {
         Self {
             after_seconds,
             duration_seconds,
         }
     }
 
-    pub(crate) const fn after_seconds(self) -> f64 {
+    pub(super) const fn after_seconds(self) -> f64 {
         self.after_seconds
     }
 
-    pub(crate) const fn duration_seconds(self) -> f64 {
+    pub(super) const fn duration_seconds(self) -> f64 {
         self.duration_seconds
     }
 
@@ -394,7 +397,7 @@ impl EpisodeRecordingGap {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct EpisodeCompletion {
+pub(super) struct EpisodeCompletion {
     duration_seconds: f64,
     recording_gaps: Vec<EpisodeRecordingGap>,
     max_follow_error_degrees: Option<f64>,
@@ -406,7 +409,7 @@ pub(crate) struct EpisodeCompletion {
 ///
 /// Every vector is parallel to the arm's declared joint order.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct ArmConditionSummary {
+pub(super) struct ArmConditionSummary {
     arm: String,
     peak_temperature_celsius: Vec<Option<f64>>,
     min_voltage_volts: Vec<Option<f64>>,
@@ -415,7 +418,7 @@ pub(crate) struct ArmConditionSummary {
 }
 
 impl ArmConditionSummary {
-    pub(crate) fn new(arm: String) -> Self {
+    pub(super) fn new(arm: String) -> Self {
         Self {
             arm,
             peak_temperature_celsius: Vec::new(),
@@ -425,7 +428,7 @@ impl ArmConditionSummary {
         }
     }
 
-    pub(crate) fn with_extremes(
+    pub(super) fn with_extremes(
         mut self,
         temperature: ArmConditionThermalExtremes,
         effort: ArmConditionEffortExtremes,
@@ -437,24 +440,24 @@ impl ArmConditionSummary {
         self
     }
 
-    pub(crate) fn arm(&self) -> &str {
+    pub(super) fn arm(&self) -> &str {
         &self.arm
     }
-    pub(crate) fn peak_temperature_celsius(&self) -> &[Option<f64>] {
+    pub(super) fn peak_temperature_celsius(&self) -> &[Option<f64>] {
         &self.peak_temperature_celsius
     }
-    pub(crate) fn min_voltage_volts(&self) -> &[Option<f64>] {
+    pub(super) fn min_voltage_volts(&self) -> &[Option<f64>] {
         &self.min_voltage_volts
     }
-    pub(crate) fn peak_load(&self) -> &[Option<f64>] {
+    pub(super) fn peak_load(&self) -> &[Option<f64>] {
         &self.peak_load
     }
-    pub(crate) fn peak_current_amps(&self) -> &[Option<f64>] {
+    pub(super) fn peak_current_amps(&self) -> &[Option<f64>] {
         &self.peak_current_amps
     }
 
     /// True when nothing was actually measured; see [`ArmCondition::is_empty`].
-    pub(crate) fn is_empty(&self) -> bool {
+    pub(super) fn is_empty(&self) -> bool {
         self.peak_temperature_celsius.is_empty()
             && self.min_voltage_volts.is_empty()
             && self.peak_load.is_empty()
@@ -463,13 +466,13 @@ impl ArmConditionSummary {
 }
 
 /// Per-joint thermal and supply extremes for one arm.
-pub(crate) struct ArmConditionThermalExtremes {
+pub(super) struct ArmConditionThermalExtremes {
     peak_temperature_celsius: Vec<Option<f64>>,
     min_voltage_volts: Vec<Option<f64>>,
 }
 
 impl ArmConditionThermalExtremes {
-    pub(crate) const fn new(
+    pub(super) const fn new(
         peak_temperature_celsius: Vec<Option<f64>>,
         min_voltage_volts: Vec<Option<f64>>,
     ) -> Self {
@@ -481,13 +484,13 @@ impl ArmConditionThermalExtremes {
 }
 
 /// Per-joint mechanical extremes for one arm.
-pub(crate) struct ArmConditionEffortExtremes {
+pub(super) struct ArmConditionEffortExtremes {
     peak_load: Vec<Option<f64>>,
     peak_current_amps: Vec<Option<f64>>,
 }
 
 impl ArmConditionEffortExtremes {
-    pub(crate) const fn new(
+    pub(super) const fn new(
         peak_load: Vec<Option<f64>>,
         peak_current_amps: Vec<Option<f64>>,
     ) -> Self {
@@ -514,7 +517,7 @@ impl From<&HardwareArmConditionSummary> for ArmConditionSummary {
 }
 
 impl EpisodeCompletion {
-    pub(crate) fn new(
+    pub(super) fn new(
         duration_seconds: f64,
         recording_gaps: Vec<EpisodeRecordingGap>,
         condition: Vec<ArmConditionSummary>,
@@ -528,7 +531,7 @@ impl EpisodeCompletion {
         }
     }
 
-    pub(crate) const fn with_max_follow_error_degrees(
+    pub(super) const fn with_max_follow_error_degrees(
         mut self,
         max_follow_error_degrees: Option<f64>,
     ) -> Self {
@@ -536,30 +539,30 @@ impl EpisodeCompletion {
         self
     }
 
-    pub(crate) const fn with_discarded(mut self, discarded: bool) -> Self {
+    pub(super) const fn with_discarded(mut self, discarded: bool) -> Self {
         self.discarded = discarded;
         self
     }
 
-    pub(crate) const fn duration_seconds(&self) -> f64 {
+    pub(super) const fn duration_seconds(&self) -> f64 {
         self.duration_seconds
     }
 
-    pub(crate) fn recording_gaps(&self) -> &[EpisodeRecordingGap] {
+    pub(super) fn recording_gaps(&self) -> &[EpisodeRecordingGap] {
         &self.recording_gaps
     }
 
-    pub(crate) const fn max_follow_error_degrees(&self) -> Option<f64> {
+    pub(super) const fn max_follow_error_degrees(&self) -> Option<f64> {
         self.max_follow_error_degrees
     }
 
-    pub(crate) const fn discarded(&self) -> bool {
+    pub(super) const fn discarded(&self) -> bool {
         self.discarded
     }
 
     /// Closing motor extremes, at most one entry per arm. See
     /// [`EpisodeStart::condition`].
-    pub(crate) fn condition(&self) -> &[ArmConditionSummary] {
+    pub(super) fn condition(&self) -> &[ArmConditionSummary] {
         &self.condition
     }
 }
@@ -572,6 +575,18 @@ pub struct FullEpisode {
 }
 
 impl FullEpisode {
+    #[cfg(test)]
+    pub(super) fn fixture_without_samples(
+        start: EpisodeStart,
+        completion: EpisodeCompletion,
+    ) -> Self {
+        Self {
+            start,
+            samples: Vec::new(),
+            completion,
+        }
+    }
+
     pub const fn start(&self) -> &EpisodeStart {
         &self.start
     }
@@ -584,7 +599,7 @@ impl FullEpisode {
             .summary(&self.completion, self.samples.len() as u64)
     }
 
-    pub(crate) const fn completion(&self) -> &EpisodeCompletion {
+    pub(super) const fn completion(&self) -> &EpisodeCompletion {
         &self.completion
     }
 }
@@ -751,7 +766,7 @@ impl EpisodeStore {
             .ok_or_else(|| EpisodeError::NotFound(id.to_owned()))
     }
 
-    pub(crate) async fn full_episode(&self, id: &str) -> Result<FullEpisode, EpisodeError> {
+    async fn full_episode(&self, id: &str) -> Result<FullEpisode, EpisodeError> {
         EpisodeId::try_from(id).map_err(|_| EpisodeError::InvalidId(id.to_owned()))?;
         self.load_episode(id, EpisodeCatalogSelection::Episode(id))
             .await
@@ -817,7 +832,7 @@ impl EpisodeStore {
         })
     }
 
-    pub(crate) async fn next_id(&self) -> Result<String, EpisodeError> {
+    async fn next_id(&self) -> Result<String, EpisodeError> {
         let highest = self
             .try_list()
             .await?
@@ -1131,7 +1146,7 @@ enum WriterMessage {
     },
 }
 
-pub(crate) trait EpisodeWriteSession: Send {
+trait EpisodeWriteSession: Send {
     fn start(&self) -> &EpisodeStart;
     fn push(&self, sample: Sample) -> bool;
     fn checkpoint(&self, completion: EpisodeCompletion) -> Result<EpisodeCheckpoint, String>;
@@ -1144,7 +1159,7 @@ pub struct EpisodeWriter {
 }
 
 impl EpisodeWriter {
-    pub(crate) fn from_session(session: impl EpisodeWriteSession + 'static) -> Self {
+    fn from_session(session: impl EpisodeWriteSession + 'static) -> Self {
         Self {
             session: Box::new(session),
         }
@@ -1186,25 +1201,22 @@ impl EpisodeWriter {
     pub fn id(&self) -> &str {
         self.session.start().id()
     }
-    pub(crate) fn dataset_id(&self) -> &str {
+    fn dataset_id(&self) -> &str {
         self.session.start().dataset_id()
     }
     pub fn started_ms(&self) -> i64 {
         self.session.start().started_ms()
     }
-    pub(crate) fn push(&self, sample: Sample) -> bool {
+    fn push(&self, sample: Sample) -> bool {
         self.session.push(sample)
     }
-    pub(crate) fn checkpoint(
-        &self,
-        completion: EpisodeCompletion,
-    ) -> Result<EpisodeCheckpoint, String> {
+    fn checkpoint(&self, completion: EpisodeCompletion) -> Result<EpisodeCheckpoint, String> {
         self.session.checkpoint(completion)
     }
-    pub(crate) fn failure(&self) -> Option<String> {
+    fn failure(&self) -> Option<String> {
         self.session.failure()
     }
-    pub(crate) fn finish(self, completion: EpisodeCompletion) -> Result<EpisodeInfo, EpisodeError> {
+    fn finish(self, completion: EpisodeCompletion) -> Result<EpisodeInfo, EpisodeError> {
         self.session.finish(completion)
     }
 }
@@ -1949,5 +1961,391 @@ mod tests {
 
         assert!(sql.starts_with("SELECT *"));
         assert!(sql.contains("episode_id = 'episode_000052'"));
+    }
+}
+
+/// Complete episode replacement operations for one project.
+pub(crate) struct EpisodePersistence<'a> {
+    project_store: &'a ProjectStore,
+}
+
+impl<'a> EpisodePersistence<'a> {
+    pub(crate) const fn new(project_store: &'a ProjectStore) -> Self {
+        Self { project_store }
+    }
+
+    pub(crate) async fn commit(
+        &self,
+        episode: &FullEpisode,
+        videos: &[VideoAsset],
+    ) -> Result<(), String> {
+        let mut connection = self.project_store.connect().await?;
+        EpisodeReplacement::new(self.project_store.namespace(), episode, videos)
+            .save(&mut connection)
+            .await
+    }
+}
+
+struct EpisodeReplacement<'a> {
+    namespace: &'a str,
+    episode: &'a FullEpisode,
+    videos: &'a [VideoAsset],
+}
+
+impl<'a> EpisodeReplacement<'a> {
+    const fn new(namespace: &'a str, episode: &'a FullEpisode, videos: &'a [VideoAsset]) -> Self {
+        Self {
+            namespace,
+            episode,
+            videos,
+        }
+    }
+
+    async fn save(self, connection: &mut ProjectConnection) -> Result<(), String> {
+        let Self {
+            namespace,
+            episode,
+            videos,
+        } = self;
+        let had_video = connection
+            .episode_has_video_assets(namespace, episode.start().id())
+            .await?;
+        let video_rows_changed = had_video || !videos.is_empty();
+        let dataset_exists = if video_rows_changed {
+            connection.video_dataset_exists(namespace).await?
+        } else {
+            false
+        };
+        let previous_video_episodes = if video_rows_changed {
+            connection.stored_video_episode_ids(namespace).await?
+        } else {
+            BTreeSet::new()
+        };
+        let has_video_rows = !videos.is_empty()
+            || previous_video_episodes
+                .iter()
+                .any(|episode_id| episode_id != episode.start().id());
+        if !dataset_exists && !previous_video_episodes.is_empty() && has_video_rows {
+            connection
+                .retarget_stored_video_media_relations(namespace)
+                .await?;
+        }
+        // Replacement is idempotent. Clear any earlier complete row and partial
+        // children before writing, so a retry after a process or network failure
+        // can finish without duplicating already-landed rows.
+        connection
+            .clear_episode_rows_only(namespace, episode.start().id())
+            .await?;
+        let datasets = Table::Datasets.qualified_name(namespace);
+        if !connection
+            .table_has_dataset(&datasets, episode.start().dataset_id())
+            .await?
+        {
+            connection
+                .ingest_batch(
+                    &datasets,
+                    episode
+                        .start()
+                        .dataset_batch()
+                        .map_err(|error| error.to_string())?,
+                )
+                .await?;
+        }
+        connection
+            .ingest_batch(
+                &Table::EpisodeStreams.qualified_name(namespace),
+                episode
+                    .start()
+                    .streams_batch(episode.completion())
+                    .map_err(|error| error.to_string())?,
+            )
+            .await?;
+        if !videos.is_empty() {
+            let streams = videos
+                .iter()
+                .map(|video| {
+                    (
+                        video.stream_id().to_owned(),
+                        VideoStreamRow::new(
+                            episode.start().id().to_owned(),
+                            video.stream_id().to_owned(),
+                            VideoStreamProperties::new(
+                                video.camera_id().to_owned(),
+                                video.size(),
+                                video.timing().fps(),
+                            ),
+                        ),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>()
+                .into_values()
+                .collect::<Vec<_>>();
+            connection
+                .ingest_batch(
+                    &Table::EpisodeStreams.qualified_name(namespace),
+                    streams.batch().map_err(|error| error.to_string())?,
+                )
+                .await?;
+        }
+        let mut encoder = SpiralEpisodeEncoder::new(episode.start().clone())
+            .map_err(|error| error.to_string())?;
+        let mut rows = Vec::new();
+        for sample in episode.samples() {
+            rows.extend(encoder.encode(sample).map_err(|error| error.to_string())?);
+            if rows.len() >= JOINT_BATCH_ROWS {
+                let batch = rows.batch().map_err(|error| error.to_string())?;
+                connection
+                    .ingest_batch(&Table::JointSamples.qualified_name(namespace), batch)
+                    .await?;
+                rows.clear();
+            }
+        }
+        if !rows.is_empty() {
+            let batch = rows.batch().map_err(|error| error.to_string())?;
+            connection
+                .ingest_batch(&Table::JointSamples.qualified_name(namespace), batch)
+                .await?;
+        }
+        if !videos.is_empty() {
+            let media_relation = SpiralSql::video_dataset_output(namespace);
+            let batch = VideoAsset::storage_publication_batch(
+                episode.start().id(),
+                videos,
+                &media_relation,
+            )?;
+            connection
+                .ingest_batch(&Table::VideoAssets.qualified_name(namespace), batch)
+                .await?;
+        }
+        if video_rows_changed {
+            if has_video_rows {
+                connection
+                    .rebuild_video_dataset_internal(namespace, dataset_exists)
+                    .await?;
+            } else {
+                connection.drop_video_dataset(namespace).await?;
+            }
+        }
+        // Inserted last: readers never see an episode whose streams or media only
+        // partially arrived.
+        connection
+            .ingest_batch(
+                &Table::Episodes.qualified_name(namespace),
+                episode
+                    .completion()
+                    .episode_batch(episode.start(), encoder.frames())
+                    .map_err(|error| error.to_string())?,
+            )
+            .await?;
+        Ok(())
+    }
+}
+
+/// Rebuild the namespace's one managed MP4 index from all durable `video_assets` rows.
+///
+/// The output is deliberately refreshed even when the Dataset already exists.
+/// Project import replaces those source rows in place, so merely observing an
+/// existing output does not prove that its video index matches the imported
+/// payloads.
+impl ProjectConnection {
+    pub(crate) async fn rebuild_video_dataset_internal(
+        &mut self,
+        namespace: &str,
+        dataset_exists: bool,
+    ) -> Result<(), String> {
+        let connection = self;
+        // One unfiltered view and Dataset cover the whole Studio namespace. The
+        // output preserves episode and stream IDs, so consumers select individual
+        // media without multiplying catalog resources by episode count.
+        let sources = SpiralSql::video_sources_relation(namespace);
+        let assets = Table::VideoAssets.qualified_name(namespace);
+        let dataset = SpiralSql::video_dataset_relation(namespace);
+        connection
+            .execute_update_sql(&SpiralSql::create_video_sources(&sources, &assets))
+            .await
+            .map_err(|error| format!("creating Spiral video source view: {error}"))?;
+        if !dataset_exists {
+            connection
+                .execute_update_sql(&SpiralSql::create_video_dataset(&dataset, &sources))
+                .await
+                .map_err(|error| format!("creating Spiral MP4 dataset: {error}"))?;
+        }
+        connection
+            .execute_update_sql(&SpiralSql::refresh_dataset(&dataset))
+            .await
+            .map_err(|error| format!("refreshing Spiral MP4 dataset: {error}"))
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn rebuild_video_dataset(
+        &mut self,
+        namespace: &str,
+        dataset_exists: bool,
+    ) -> Result<(), String> {
+        self.rebuild_video_dataset_internal(namespace, dataset_exists)
+            .await
+    }
+
+    pub(crate) async fn video_dataset_exists(&mut self, namespace: &str) -> Result<bool, String> {
+        let connection = self;
+        let dataset = SpiralSql::video_dataset_relation(namespace);
+        match connection
+            .query_rows(&format!("DESCRIBE {dataset}"), 1)
+            .await
+        {
+            Ok(_) => Ok(true),
+            Err(error)
+                if error.contains("unknown resource")
+                    || error.contains("does not exist")
+                    || error.contains("unknown relation") =>
+            {
+                Ok(false)
+            }
+            Err(error) => Err(format!("checking Spiral MP4 dataset: {error}")),
+        }
+    }
+
+    pub(crate) async fn drop_video_dataset(&mut self, namespace: &str) -> Result<(), String> {
+        let connection = self;
+        let dataset = SpiralSql::video_dataset_relation(namespace);
+        QualifiedRelation::try_from(dataset.as_str())
+            .map_err(|error| format!("refusing to drop an invalid Spiral MP4 Dataset: {error}"))?;
+        connection
+            .execute_update_sql(&SpiralSql::drop_video_dataset_sql(&dataset))
+            .await
+            .map_err(|error| format!("dropping Spiral MP4 dataset with CASCADE: {error}"))?;
+        connection
+            .execute_update_sql(&SpiralSql::drop_video_sources(
+                &SpiralSql::video_sources_relation(namespace),
+            ))
+            .await
+            .map_err(|error| format!("dropping Spiral video source view: {error}"))
+    }
+
+    pub(crate) async fn clear_episode_rows(
+        &mut self,
+        namespace: &str,
+        episode_id: &str,
+    ) -> Result<(), String> {
+        let connection = self;
+        let previous_video_episodes = connection.stored_video_episode_ids(namespace).await?;
+        let had_video = previous_video_episodes.contains(episode_id);
+        let dataset_exists = if had_video {
+            connection.video_dataset_exists(namespace).await?
+        } else {
+            false
+        };
+        if had_video && !dataset_exists && previous_video_episodes.len() > 1 {
+            connection
+                .retarget_stored_video_media_relations(namespace)
+                .await?;
+        }
+        connection
+            .clear_episode_rows_only(namespace, episode_id)
+            .await?;
+        if !had_video {
+            return Ok(());
+        }
+        if previous_video_episodes.len() == 1 {
+            connection.drop_video_dataset(namespace).await?;
+        } else {
+            connection
+                .rebuild_video_dataset_internal(namespace, dataset_exists)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn clear_episode_rows_only(
+        &mut self,
+        namespace: &str,
+        episode_id: &str,
+    ) -> Result<(), String> {
+        let connection = self;
+        for table in super::EpisodeBundleSection::DELETION_RELATIONS {
+            let target = table.qualified_name(namespace);
+            connection
+                .execute_delete_sql(&SpiralSql::delete_episode(&target, episode_id))
+                .await
+                .map_err(|error| format!("clearing prior Spiral rows in {target}: {error}"))?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn stored_video_episode_ids(
+        &mut self,
+        namespace: &str,
+    ) -> Result<BTreeSet<String>, String> {
+        let connection = self;
+        const MAX_VIDEO_EPISODES: usize = 100_000;
+
+        let assets = Table::VideoAssets.qualified_name(namespace);
+        let result = connection
+            .query_rows(
+                &format!(
+                    "SELECT DISTINCT {episode_id} FROM {assets}",
+                    episode_id = db::EPISODE_ID
+                ),
+                MAX_VIDEO_EPISODES,
+            )
+            .await?;
+        if result.truncated() {
+            return Err(format!(
+                "project has more than {MAX_VIDEO_EPISODES} video episodes; refusing incomplete video-resource reconciliation"
+            ));
+        }
+        result
+            .into_rows()
+            .into_iter()
+            .map(|row| {
+                row.get(db::EPISODE_ID)
+                    .and_then(JsonValue::as_str)
+                    .map(str::to_owned)
+                    .ok_or_else(|| "stored video asset has no valid episode ID".to_owned())
+            })
+            .collect()
+    }
+
+    async fn episode_has_video_assets(
+        &mut self,
+        namespace: &str,
+        episode_id: &str,
+    ) -> Result<bool, String> {
+        let connection = self;
+        let assets = Table::VideoAssets.qualified_name(namespace);
+        let result = connection.query_rows(
+        &format!(
+            "SELECT {episode_column} FROM {assets} WHERE {episode_column} = {episode_id} LIMIT 1",
+            episode_column = db::EPISODE_ID,
+            episode_id = SpiralSql::string_literal(episode_id),
+        ),
+        1,
+    ).await?;
+        Ok(!result.rows().is_empty())
+    }
+
+    pub(crate) async fn retarget_stored_video_media_relations(
+        &mut self,
+        namespace: &str,
+    ) -> Result<(), String> {
+        let connection = self;
+        let assets = Table::VideoAssets.qualified_name(namespace);
+        let output = SpiralSql::video_dataset_output(namespace);
+        connection
+            .execute_update_sql(&format!(
+                "UPDATE {assets} SET {media_relation} = {output}",
+                media_relation = db::MEDIA_RELATION,
+                output = SpiralSql::string_literal(&output),
+            ))
+            .await
+            .map_err(|error| format!("retargeting stored video media relations: {error}"))
+    }
+
+    async fn table_has_dataset(&mut self, target: &str, dataset_id: &str) -> Result<bool, String> {
+        let connection = self;
+        let result = connection
+            .query_rows(&SpiralSql::dataset_exists(target, dataset_id), 1)
+            .await?;
+        Ok(!result.rows().is_empty())
     }
 }

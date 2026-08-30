@@ -9,11 +9,102 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
+use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray};
+use arrow_schema::{DataType, Field, Schema};
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use spiral_robotics_api::settings::{DEFAULT_SPIRAL_ENDPOINT, DEFAULT_SPIRAL_SPFS_ENDPOINT};
 use url::Url;
 
+use crate::db::{ManagedRelationSchema, Table, column as db};
+use crate::db::{ProjectStore, StorageClock};
+
 const BACKEND_STATE_FILE: &str = "backend-state.json";
+
+/// Studio preference relations contributed to project bundles.
+pub(crate) struct StudioPreferenceBundleSection;
+
+impl ManagedRelationSchema for StudioPreferenceBundleSection {
+    fn relations(&self) -> &'static [Table] {
+        &[Table::StudioSettings]
+    }
+
+    fn managed_relation_schema(&self, table: Table) -> Option<Schema> {
+        (table == Table::StudioSettings).then(|| {
+            Schema::new(vec![
+                Field::new(db::KEY, DataType::Utf8, false),
+                Field::new(db::VALUE_JSON, DataType::Utf8, false),
+                Field::new(db::UPDATED_MS, DataType::Int64, false),
+            ])
+        })
+    }
+}
+
+/// Project-owned Studio preference persistence.
+pub(crate) struct StudioPreferencePersistence<'a> {
+    project_store: &'a ProjectStore,
+}
+
+impl<'a> StudioPreferencePersistence<'a> {
+    pub(crate) const fn new(project_store: &'a ProjectStore) -> Self {
+        Self { project_store }
+    }
+
+    pub(crate) async fn load(&self) -> Result<StoredStudioPreferences, String> {
+        if !self.project_store.is_configured() {
+            return Ok(StoredStudioPreferences::default());
+        }
+        let relation = Table::StudioSettings.qualified_name(self.project_store.namespace());
+        let mut connection = self.project_store.connect().await?;
+        let result = connection
+            .query_rows(
+                &format!(
+                    "SELECT {} FROM {relation} WHERE {} = 'preferences' ORDER BY {} DESC LIMIT 1",
+                    db::VALUE_JSON,
+                    db::KEY,
+                    db::UPDATED_MS,
+                ),
+                1,
+            )
+            .await?;
+        let Some(value) = result
+            .rows()
+            .first()
+            .and_then(|row| row.get(db::VALUE_JSON))
+            .and_then(JsonValue::as_str)
+        else {
+            return Ok(StoredStudioPreferences::default());
+        };
+        serde_json::from_str(value).map_err(|error| format!("decoding Studio preferences: {error}"))
+    }
+
+    pub(crate) async fn save(&self, preferences: &StoredStudioPreferences) -> Result<(), String> {
+        let relation = Table::StudioSettings.qualified_name(self.project_store.namespace());
+        let json = serde_json::to_string(preferences)
+            .map_err(|error| format!("encoding Studio preferences: {error}"))?;
+        let mut connection = self.project_store.connect().await?;
+        connection
+            .execute_delete_sql(&format!(
+                "DELETE FROM {relation} WHERE {} = 'preferences'",
+                db::KEY
+            ))
+            .await?;
+        let schema = StudioPreferenceBundleSection
+            .managed_relation_schema(Table::StudioSettings)
+            .expect("the settings section owns Studio settings");
+        let batch = RecordBatch::try_new(
+            schema.into(),
+            vec![
+                std::sync::Arc::new(StringArray::from(vec!["preferences"])) as ArrayRef,
+                std::sync::Arc::new(StringArray::from(vec![json])) as ArrayRef,
+                std::sync::Arc::new(Int64Array::from(vec![StorageClock::unix_millis()]))
+                    as ArrayRef,
+            ],
+        )
+        .map_err(|error| format!("building Studio preferences batch: {error}"))?;
+        connection.ingest_batch(&relation, batch).await
+    }
+}
 
 #[derive(Clone, Default, Deserialize, Eq, PartialEq, Serialize)]
 struct BackendState {
@@ -266,7 +357,7 @@ impl BackendStateStore {
 /// Storage-owned persisted form of the Studio preferences document.
 ///
 /// These field names are the durable `value_json` format for
-/// [`crate::schema::Table::StudioSettings`]. They are deliberately independent
+/// the managed `studio_settings` relation. They are deliberately independent
 /// of the wire crate's settings types, so a contract rename can never change
 /// what an existing project's preferences mean; a test pins the serialized
 /// shape and another pins the defaults to the wire defaults.

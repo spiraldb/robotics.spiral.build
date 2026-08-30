@@ -8,7 +8,7 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::schema::Table;
+use crate::db::Table;
 use arrow_array::{
     ArrayRef, BinaryViewArray, RecordBatch, StringArray, StringViewArray, StructArray, UInt64Array,
 };
@@ -25,10 +25,10 @@ use spiral_robotics_api::datasets::{
 };
 use url::Url;
 
-use super::manager::StorageManager;
-use super::project_store::ProjectConnection;
-use super::sql::SpiralSql;
-use crate::episode_schema::EpisodeSchema;
+use crate::db::ProjectConnection;
+use crate::db::SpiralSql;
+use crate::episodes::EpisodeBundleSection;
+use crate::manager::StorageManager;
 
 const HUGGING_FACE_ORIGIN: &str = "https://huggingface.co";
 const MAX_TREE_PAGES: usize = 100;
@@ -606,7 +606,7 @@ trait HuggingFaceDatasetRequestValidation {
 
 impl HuggingFaceDatasetRequestValidation for HuggingFaceDatasetRequest {
     fn validate_for_discovery(&self) -> Result<(), String> {
-        if !crate::schema::StorageSchema::is_dataset_id(self.dataset_id()) {
+        if !crate::db::StorageSchema::is_dataset_id(self.dataset_id()) {
             return Err(
                 "dataset ID must contain 1–96 letters, numbers, '.', '_' or '-'".to_owned(),
             );
@@ -734,7 +734,7 @@ impl HuggingFaceInspectionStorage for HuggingFaceDatasetInspection {
             self.resolved_revision()
         );
         RecordBatch::try_new(
-            EpisodeSchema::datasets(),
+            EpisodeBundleSection::dataset_schema(),
             vec![
                 Arc::new(StringArray::from(vec![self.dataset_id()])) as ArrayRef,
                 Arc::new(StringArray::from(vec![self.dataset_id()])) as ArrayRef,

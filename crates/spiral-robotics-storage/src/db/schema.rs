@@ -7,13 +7,12 @@ use std::fmt;
 use std::sync::Arc;
 
 use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray};
-
-use crate::bundle::ManagedRelationSchema as _;
+use arrow_schema::{DataType, Field, Schema};
 
 include!(concat!(env!("OUT_DIR"), "/storage_schema_version.rs"));
 
 /// Marker used to distinguish Spiral Robotics' managed dataset namespace resource.
-pub(crate) const DATASET_NAMESPACE_MARKER: &str = "_spiral_robotics_dataset_key_v1";
+pub(super) const DATASET_NAMESPACE_MARKER: &str = "_spiral_robotics_dataset_key_v1";
 
 /// Stable persisted relations owned by Spiral Robotics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -55,14 +54,6 @@ impl Table {
         Self::WorkflowRuns,
     ];
 
-    /// Relations published for each episode, in safe deletion order.
-    pub(crate) const EPISODE_RELATIONS: [Self; 4] = [
-        Self::Episodes,
-        Self::JointSamples,
-        Self::EpisodeStreams,
-        Self::VideoAssets,
-    ];
-
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::Datasets => "datasets",
@@ -90,6 +81,150 @@ impl Table {
 impl fmt::Display for Table {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.name())
+    }
+}
+
+/// One feature's contribution to the managed relational schema.
+///
+/// The database layer owns validation semantics, while each feature owns the
+/// concrete Arrow layouts for its relations. Transfer and provisioning compose
+/// these sections without teaching this layer about product features.
+pub(crate) trait ManagedRelationSchema {
+    fn relations(&self) -> &'static [Table];
+
+    fn managed_relation_schema(&self, table: Table) -> Option<Schema>;
+
+    fn validate_managed_relation_schema(
+        &self,
+        table: Table,
+        schema: &Schema,
+        label: &str,
+    ) -> Option<Result<(), String>> {
+        let expected = self.managed_relation_schema(table)?;
+        Some(ManagedRelationDefinition::new(table, expected).validate(schema, label))
+    }
+}
+
+struct ManagedRelationDefinition {
+    table: Table,
+    schema: Schema,
+}
+
+impl ManagedRelationDefinition {
+    const fn new(table: Table, schema: Schema) -> Self {
+        Self { table, schema }
+    }
+
+    fn validate(&self, schema: &Schema, label: &str) -> Result<(), String> {
+        if !schema.metadata().is_empty() {
+            return Err(format!(
+                "{label} relation {} has unsupported schema metadata",
+                self.table
+            ));
+        }
+        if schema.fields().len() != self.schema.fields().len() {
+            return Err(format!(
+                "{label} relation {} has {} columns; expected {}",
+                self.table,
+                schema.fields().len(),
+                self.schema.fields().len(),
+            ));
+        }
+        for (actual, expected) in schema.fields().iter().zip(self.schema.fields()) {
+            if !self.field_matches(actual, expected) {
+                return Err(format!(
+                    "{label} relation {} field {:?} has type {} (nullable {}); expected semantic type {} (nullable {})",
+                    self.table,
+                    actual.name(),
+                    actual.data_type(),
+                    actual.is_nullable(),
+                    expected.data_type(),
+                    expected.is_nullable(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn field_matches(&self, actual: &Field, expected: &Field) -> bool {
+        let portable_video_payload_is_required = self.table == Table::VideoAssets
+            && actual.name() == column::PAYLOAD
+            && expected.name() == column::PAYLOAD
+            && !actual.is_nullable()
+            && expected.is_nullable();
+        (portable_video_payload_is_required || actual.is_nullable() == expected.is_nullable())
+            && actual.name() == expected.name()
+            && actual.metadata() == expected.metadata()
+            && actual
+                .data_type()
+                .matches_managed_data_type(expected.data_type())
+    }
+}
+
+trait ManagedFieldCompatibility {
+    fn matches_managed_field(&self, expected: &Field) -> bool;
+}
+
+impl ManagedFieldCompatibility for Field {
+    fn matches_managed_field(&self, expected: &Field) -> bool {
+        self.name() == expected.name()
+            && self.is_nullable() == expected.is_nullable()
+            && self.metadata() == expected.metadata()
+            && self
+                .data_type()
+                .matches_managed_data_type(expected.data_type())
+    }
+}
+
+trait ManagedDataTypeCompatibility {
+    fn matches_managed_data_type(&self, expected: &DataType) -> bool;
+}
+
+impl ManagedDataTypeCompatibility for DataType {
+    fn matches_managed_data_type(&self, expected: &DataType) -> bool {
+        match expected {
+            DataType::Utf8 => matches!(
+                self,
+                DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+            ),
+            DataType::Binary | DataType::LargeBinary => matches!(
+                self,
+                DataType::Binary | DataType::LargeBinary | DataType::BinaryView
+            ),
+            DataType::List(expected_child) => {
+                let DataType::List(actual_child) = self else {
+                    return false;
+                };
+                actual_child.matches_managed_field(expected_child)
+            }
+            _ => self == expected,
+        }
+    }
+}
+
+/// Relations owned by the database mechanism rather than a product feature.
+pub(crate) struct DatabaseBundleSection;
+
+impl DatabaseBundleSection {
+    const RELATIONS: [Table; 1] = [Table::Robots];
+}
+
+impl ManagedRelationSchema for DatabaseBundleSection {
+    fn relations(&self) -> &'static [Table] {
+        &Self::RELATIONS
+    }
+
+    fn managed_relation_schema(&self, table: Table) -> Option<Schema> {
+        let text = |name, nullable| Field::new(name, DataType::Utf8, nullable);
+        let timestamp = |name| Field::new(name, DataType::Int64, false);
+        match table {
+            Table::Robots => Some(Schema::new(vec![
+                text(column::ROBOT_ID, false),
+                text(column::CONFIG_JSON, false),
+                timestamp(column::UPDATED_MS),
+            ])),
+            _ => None,
+        }
     }
 }
 
@@ -257,7 +392,11 @@ impl StorageSchema {
         updated_millis: i64,
     ) -> Result<RecordBatch, String> {
         RecordBatch::try_new(
-            Arc::new(Table::Robots.managed_relation_schema()),
+            Arc::new(
+                DatabaseBundleSection
+                    .managed_relation_schema(Table::Robots)
+                    .expect("the database section owns the robot relation"),
+            ),
             vec![
                 Arc::new(StringArray::from(vec![robot_identifier])) as ArrayRef,
                 Arc::new(StringArray::from(vec![configuration_json])) as ArrayRef,
@@ -291,8 +430,7 @@ mod tests {
     /// What a relation actually holds, read from the one production Arrow
     /// schema that both the database writes and a bundle validates against.
     fn persisted_columns(table: Table) -> Vec<String> {
-        table
-            .managed_relation_schema()
+        crate::transfer::ManagedRelationCatalog::schema(table)
             .fields()
             .iter()
             .map(|field| field.name().clone())

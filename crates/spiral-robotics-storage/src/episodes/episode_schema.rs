@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use crate::schema::{SCHEMA_VERSION, column as db};
+use crate::db::{SCHEMA_VERSION, column as db};
 use arrow_array::builder::{Float64Builder, Int64Builder, ListBuilder};
 use arrow_array::{
     ArrayRef, BooleanArray, Float64Array, Int64Array, RecordBatch, StringArray, UInt32Array,
@@ -15,16 +15,16 @@ use arrow_array::{
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use spiral_robotics_api::recording::EpisodeArm;
 
-use crate::arrow_rows::{
-    ArrowColumns, ListColumnBuilder as _, OptionalFloatListColumn, StringListColumn,
-    UnsignedListColumn,
-};
-use crate::episodes::{
+use super::episodes::{
     ArmCondition, ArmConditionEffortExtremes, ArmConditionSummary, ArmConditionThermalExtremes,
     EpisodeCompletion, EpisodeError, EpisodeRecordingGap, EpisodeStart, JointMotorLimits,
     JointVoltageRange, Sample,
 };
-use crate::video::VideoSize;
+use super::video::VideoSize;
+use crate::db::{
+    ArrowColumns, ListColumnBuilder as _, OptionalFloatListColumn, StringListColumn,
+    UnsignedListColumn,
+};
 
 const NANOSECONDS_PER_SECOND: f64 = 1_000_000_000.0;
 
@@ -42,11 +42,11 @@ const CONDITION_COLUMNS: [&str; 10] = [
     db::PEAK_CURRENT_AMPS,
 ];
 
-pub(crate) struct EpisodeSchema;
+pub(super) struct EpisodeSchema;
 
 impl EpisodeSchema {
-    /// Schema for [`crate::schema::Table::Datasets`].
-    pub(crate) fn datasets() -> SchemaRef {
+    /// Schema for the managed `datasets` relation.
+    pub(super) fn datasets() -> SchemaRef {
         Arc::new(Schema::new(vec![
             Field::new(db::DATASET_ID, DataType::Utf8, false),
             Field::new(db::NAME, DataType::Utf8, false),
@@ -55,7 +55,7 @@ impl EpisodeSchema {
         ]))
     }
 
-    pub(crate) fn episodes() -> SchemaRef {
+    pub(super) fn episodes() -> SchemaRef {
         Arc::new(Schema::new(vec![
             Field::new(db::EPISODE_ID, DataType::Utf8, false),
             Field::new(db::DATASET_ID, DataType::Utf8, false),
@@ -81,7 +81,7 @@ impl EpisodeSchema {
         ]))
     }
 
-    pub(crate) fn episode_streams() -> SchemaRef {
+    pub(super) fn episode_streams() -> SchemaRef {
         let condition = CONDITION_COLUMNS
             .into_iter()
             .map(|name| Field::new(name, OptionalFloatListColumn::data_type(), true));
@@ -104,7 +104,7 @@ impl EpisodeSchema {
         ))
     }
 
-    pub(crate) fn joint_samples() -> SchemaRef {
+    pub(super) fn joint_samples() -> SchemaRef {
         let nullable_f64_list =
             || DataType::List(Arc::new(Field::new("item", DataType::Float64, true)));
         Arc::new(Schema::new(vec![
@@ -131,7 +131,7 @@ impl EpisodeSchema {
 /// Build the owning dataset row. Dataset IDs double as their initial display
 /// name until richer dataset metadata is edited in a future workflow.
 impl EpisodeStart {
-    pub(crate) fn dataset_batch(&self) -> Result<RecordBatch, EpisodeError> {
+    pub(super) fn dataset_batch(&self) -> Result<RecordBatch, EpisodeError> {
         let start = self;
         let columns: Vec<ArrayRef> = vec![
             Arc::new(StringArray::from(vec![start.dataset_id()])),
@@ -145,9 +145,9 @@ impl EpisodeStart {
     }
 }
 
-/// One row destined for [`crate::schema::Table::JointSamples`].
+/// One row destined for the managed `joint_samples` relation.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct JointSampleRow {
+pub(super) struct JointSampleRow {
     key: JointSampleKey,
     validity: SampleValidity,
     state: JointStateValues,
@@ -179,21 +179,21 @@ struct JointStateValues {
 
 /// Camera stream metadata stored beside joint stream descriptions.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct VideoStreamRow {
+pub(super) struct VideoStreamRow {
     episode_id: String,
     stream_id: String,
     properties: VideoStreamProperties,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct VideoStreamProperties {
+pub(super) struct VideoStreamProperties {
     camera_id: String,
     size: VideoSize,
     fps: u32,
 }
 
 impl VideoStreamProperties {
-    pub(crate) fn new(camera_id: String, size: VideoSize, fps: u32) -> Self {
+    pub(super) fn new(camera_id: String, size: VideoSize, fps: u32) -> Self {
         Self {
             camera_id,
             size,
@@ -207,7 +207,7 @@ impl VideoStreamProperties {
 }
 
 impl VideoStreamRow {
-    pub(crate) fn new(
+    pub(super) fn new(
         episode_id: String,
         stream_id: String,
         properties: VideoStreamProperties,
@@ -225,13 +225,13 @@ impl VideoStreamRow {
 /// Every control frame receives one `sample_index`; every arm in that frame
 /// receives a row with the same index. The resulting stable key is
 /// `(episode_id, stream_id, sample_index)`.
-pub(crate) struct SpiralEpisodeEncoder {
+pub(super) struct SpiralEpisodeEncoder {
     start: EpisodeStart,
     next_sample_index: u64,
 }
 
 impl SpiralEpisodeEncoder {
-    pub(crate) fn new(start: EpisodeStart) -> Result<Self, EpisodeError> {
+    pub(super) fn new(start: EpisodeStart) -> Result<Self, EpisodeError> {
         if start.arms().is_empty() {
             return Err(EpisodeError::invalid(
                 "a Spiral episode needs at least one arm stream",
@@ -243,12 +243,12 @@ impl SpiralEpisodeEncoder {
         })
     }
 
-    pub(crate) fn frames(&self) -> u64 {
+    pub(super) fn frames(&self) -> u64 {
         self.next_sample_index
     }
 
     /// Convert one control frame without performing I/O.
-    pub(crate) fn encode(&mut self, sample: &Sample) -> Result<Vec<JointSampleRow>, EpisodeError> {
+    pub(super) fn encode(&mut self, sample: &Sample) -> Result<Vec<JointSampleRow>, EpisodeError> {
         sample.validate_for(&self.start)?;
         let episode_time_ns = EpisodeTimestamp::nanoseconds(sample.seconds(), "sample time")?;
         let sample_index = self.next_sample_index;
@@ -296,20 +296,20 @@ impl SpiralEpisodeEncoder {
     }
 }
 
-/// One row of [`crate::schema::Table::Episodes`], decoded from typed columns.
+/// One row of the managed `episodes` relation, decoded from typed columns.
 ///
 /// The relation is the whole record: arms come from the episode's joint stream
 /// rows, and every other field is a column of the episode row itself. Nothing
 /// is read out of a serialized wire type.
 #[derive(Clone, Debug)]
-pub(crate) struct StoredEpisodeRow {
+pub(super) struct StoredEpisodeRow {
     start: EpisodeStart,
     completion: EpisodeCompletion,
     frames: u64,
 }
 
 impl StoredEpisodeRow {
-    pub(crate) const fn new(
+    pub(super) const fn new(
         start: EpisodeStart,
         completion: EpisodeCompletion,
         frames: u64,
@@ -321,23 +321,23 @@ impl StoredEpisodeRow {
         }
     }
 
-    pub(crate) const fn start(&self) -> &EpisodeStart {
+    pub(super) const fn start(&self) -> &EpisodeStart {
         &self.start
     }
 
-    pub(crate) const fn completion(&self) -> &EpisodeCompletion {
+    pub(super) const fn completion(&self) -> &EpisodeCompletion {
         &self.completion
     }
 
-    pub(crate) const fn frames(&self) -> u64 {
+    pub(super) const fn frames(&self) -> u64 {
         self.frames
     }
 
-    pub(crate) fn into_parts(self) -> (EpisodeStart, EpisodeCompletion, u64) {
+    pub(super) fn into_parts(self) -> (EpisodeStart, EpisodeCompletion, u64) {
         (self.start, self.completion, self.frames)
     }
 
-    pub(crate) fn decode(
+    pub(super) fn decode(
         batch: &RecordBatch,
         row: usize,
         streams: &EpisodeStreamCatalog,
@@ -370,7 +370,7 @@ impl StoredEpisodeRow {
     }
 
     /// Encode whole episode rows stamped with the current [`SCHEMA_VERSION`].
-    pub(crate) fn batch(rows: &[Self]) -> Result<RecordBatch, EpisodeError> {
+    pub(super) fn batch(rows: &[Self]) -> Result<RecordBatch, EpisodeError> {
         let mut after_ns = UnsignedListColumn::builder();
         let mut duration_ns = UnsignedListColumn::builder();
         let mut durations = Vec::with_capacity(rows.len());
@@ -425,7 +425,7 @@ impl StoredEpisodeRow {
 
 /// Build the single row that makes an episode visible to readers.
 impl EpisodeCompletion {
-    pub(crate) fn episode_batch(
+    pub(super) fn episode_batch(
         &self,
         start: &EpisodeStart,
         frames: u64,
@@ -491,7 +491,7 @@ impl RecordingGapColumns {
 
 /// Which kind of data one episode stream carries.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum StreamModality {
+pub(super) enum StreamModality {
     Joint,
     Video,
 }
@@ -519,14 +519,14 @@ impl StreamModality {
 /// are reconstructed in that order because it is the order their values appear
 /// in every recorded frame.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct EpisodeStreamKey {
+pub(super) struct EpisodeStreamKey {
     episode_id: String,
     stream_id: String,
     ordinal: u32,
 }
 
 impl EpisodeStreamKey {
-    pub(crate) const fn new(episode_id: String, stream_id: String, ordinal: u32) -> Self {
+    pub(super) const fn new(episode_id: String, stream_id: String, ordinal: u32) -> Self {
         Self {
             episode_id,
             stream_id,
@@ -535,9 +535,9 @@ impl EpisodeStreamKey {
     }
 }
 
-/// One row of [`crate::schema::Table::EpisodeStreams`] in either modality.
+/// One row of the managed `episode_streams` relation in either modality.
 #[derive(Clone, Debug)]
-pub(crate) struct EpisodeStreamRow {
+pub(super) struct EpisodeStreamRow {
     key: EpisodeStreamKey,
     modality: StreamModality,
     robot_type: Option<String>,
@@ -548,7 +548,7 @@ pub(crate) struct EpisodeStreamRow {
 }
 
 impl EpisodeStreamRow {
-    pub(crate) fn joint(key: EpisodeStreamKey, arm: &EpisodeArm) -> Self {
+    pub(super) fn joint(key: EpisodeStreamKey, arm: &EpisodeArm) -> Self {
         Self {
             key,
             modality: StreamModality::Joint,
@@ -560,7 +560,7 @@ impl EpisodeStreamRow {
         }
     }
 
-    pub(crate) fn video(key: EpisodeStreamKey, properties: VideoStreamProperties) -> Self {
+    pub(super) fn video(key: EpisodeStreamKey, properties: VideoStreamProperties) -> Self {
         Self {
             key,
             modality: StreamModality::Video,
@@ -575,7 +575,7 @@ impl EpisodeStreamRow {
     /// Attach the motor readings recorded for this arm. An observation that
     /// measured nothing is dropped so the columns stay null rather than
     /// claiming an all-empty reading.
-    pub(crate) fn with_condition(
+    pub(super) fn with_condition(
         mut self,
         start: Option<&ArmCondition>,
         peak: Option<&ArmConditionSummary>,
@@ -620,7 +620,7 @@ impl EpisodeStreamRow {
         ]
     }
 
-    pub(crate) fn decode(batch: &RecordBatch, row: usize) -> Result<Self, String> {
+    pub(super) fn decode(batch: &RecordBatch, row: usize) -> Result<Self, String> {
         let columns = ArrowColumns::new(batch, "episode stream");
         let modality = StreamModality::parse(columns.text(db::MODALITY, row)?)?;
         let channel = |name: &str| columns.optional_float_list(name, row);
@@ -679,7 +679,7 @@ impl EpisodeStreamRow {
 
     /// Decode the columns needed to assemble an episode-list row. Conditions
     /// and video properties are deliberately absent from the catalog query.
-    pub(crate) fn decode_catalog(batch: &RecordBatch, row: usize) -> Result<Self, String> {
+    pub(super) fn decode_catalog(batch: &RecordBatch, row: usize) -> Result<Self, String> {
         let columns = ArrowColumns::new(batch, "episode stream catalog");
         let modality = StreamModality::parse(columns.text(db::MODALITY, row)?)?;
         Ok(Self {
@@ -756,7 +756,7 @@ impl StreamConditionColumns {
 }
 
 /// Describe every stream of an episode in one keyed relation.
-pub(crate) trait EpisodeStreamRows {
+pub(super) trait EpisodeStreamRows {
     fn batch(&self) -> Result<RecordBatch, EpisodeError>;
 }
 
@@ -815,12 +815,12 @@ impl EpisodeStreamRows for [EpisodeStreamRow] {
 
 /// Every stream row a read observed, indexed back to its episode.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct EpisodeStreamCatalog {
+pub(super) struct EpisodeStreamCatalog {
     rows: Vec<EpisodeStreamRow>,
 }
 
 impl EpisodeStreamCatalog {
-    pub(crate) const fn new(rows: Vec<EpisodeStreamRow>) -> Self {
+    pub(super) const fn new(rows: Vec<EpisodeStreamRow>) -> Self {
         Self { rows }
     }
 
@@ -840,21 +840,21 @@ impl EpisodeStreamCatalog {
         streams
     }
 
-    pub(crate) fn arms(&self, episode_id: &str) -> Vec<EpisodeArm> {
+    pub(super) fn arms(&self, episode_id: &str) -> Vec<EpisodeArm> {
         self.joint_streams(episode_id)
             .into_iter()
             .map(EpisodeStreamRow::arm)
             .collect()
     }
 
-    pub(crate) fn start_condition(&self, episode_id: &str) -> Vec<ArmCondition> {
+    pub(super) fn start_condition(&self, episode_id: &str) -> Vec<ArmCondition> {
         self.joint_streams(episode_id)
             .into_iter()
             .filter_map(|row| row.start.clone())
             .collect()
     }
 
-    pub(crate) fn completion_condition(&self, episode_id: &str) -> Vec<ArmConditionSummary> {
+    pub(super) fn completion_condition(&self, episode_id: &str) -> Vec<ArmConditionSummary> {
         self.joint_streams(episode_id)
             .into_iter()
             .filter_map(|row| row.peak.clone())
@@ -864,7 +864,7 @@ impl EpisodeStreamCatalog {
 
 /// Describe every joint stream before its samples are appended.
 impl EpisodeStart {
-    pub(crate) fn stream_rows(&self, completion: &EpisodeCompletion) -> Vec<EpisodeStreamRow> {
+    pub(super) fn stream_rows(&self, completion: &EpisodeCompletion) -> Vec<EpisodeStreamRow> {
         self.arms()
             .iter()
             .enumerate()
@@ -890,7 +890,7 @@ impl EpisodeStart {
             .collect()
     }
 
-    pub(crate) fn streams_batch(
+    pub(super) fn streams_batch(
         &self,
         completion: &EpisodeCompletion,
     ) -> Result<RecordBatch, EpisodeError> {
@@ -899,7 +899,7 @@ impl EpisodeStart {
 }
 
 /// Describe camera streams using the same keyed stream table as robot joints.
-pub(crate) trait VideoStreamRows {
+pub(super) trait VideoStreamRows {
     fn batch(&self) -> Result<RecordBatch, EpisodeError>;
 }
 
@@ -923,7 +923,7 @@ impl VideoStreamRows for [VideoStreamRow] {
 }
 
 /// Convert rows into a batch suitable for native Arrow-stream ingestion.
-pub(crate) trait JointSampleRows {
+pub(super) trait JointSampleRows {
     fn batch(&self) -> Result<RecordBatch, EpisodeError>;
 }
 

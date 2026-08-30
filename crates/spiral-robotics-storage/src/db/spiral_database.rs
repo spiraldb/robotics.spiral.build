@@ -33,7 +33,7 @@ use vortex_array::{ArrayRef, VortexSessionExecute as _};
 use vortex_arrow::ArrowSessionExt as _;
 use vortex_error::{VortexResult, vortex_bail, vortex_err};
 
-use crate::database::{
+use super::database::{
     BatchIngestion, Database, DatabaseCommand, DatabaseConnection, DatabaseError,
     DatabaseErrorKind, DatabaseFuture, DatabaseOutput, DatabaseResult, DatabaseSession,
     DatabaseTransaction, ExecutionSummary, IngestMode, RecordBatchStream, RelationKind,
@@ -45,18 +45,18 @@ const QUERY_BATCH_CAPACITY: usize = 16;
 const SPIRALDB_CATALOG: &str = "spiraldb";
 
 /// Configured database entry point held by application state.
-pub(crate) struct SpiralDatabase {
+pub(super) struct SpiralDatabase {
     session: RwLock<SpiralSession>,
 }
 
 impl SpiralDatabase {
-    pub(crate) fn new(settings: SpiralConnectionSettings) -> DatabaseResult<Self> {
+    pub(super) fn new(settings: SpiralConnectionSettings) -> DatabaseResult<Self> {
         Ok(Self {
             session: RwLock::new(Self::create_session(&settings)?),
         })
     }
 
-    pub(crate) fn configure(&self, settings: SpiralConnectionSettings) -> DatabaseResult<()> {
+    pub(super) fn configure(&self, settings: SpiralConnectionSettings) -> DatabaseResult<()> {
         let session = Self::create_session(&settings)?;
         *self.session.write() = session;
         Ok(())

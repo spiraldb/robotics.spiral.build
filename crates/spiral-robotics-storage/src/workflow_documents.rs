@@ -13,9 +13,156 @@ use std::sync::Arc;
 
 use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray, UInt32Array};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
+use sha2::{Digest as _, Sha256};
 
-use crate::arrow_rows::ArrowColumns;
-use crate::schema::column as db;
+use crate::db::ArrowColumns;
+use crate::db::column as db;
+use crate::db::{ManagedRelationSchema, Table};
+use crate::db::{ProjectStore, StorageClock};
+
+/// Workflow document relations contributed to project bundles.
+pub(crate) struct WorkflowDocumentBundleSection;
+
+impl ManagedRelationSchema for WorkflowDocumentBundleSection {
+    fn relations(&self) -> &'static [Table] {
+        &[Table::WorkflowRuns]
+    }
+
+    fn managed_relation_schema(&self, table: Table) -> Option<Schema> {
+        (table == Table::WorkflowRuns).then(|| WorkflowDocumentSchema::documents().as_ref().clone())
+    }
+}
+
+/// Workflow document operations for one project.
+pub(crate) struct WorkflowDocumentPersistence<'a> {
+    project_store: &'a ProjectStore,
+}
+
+impl<'a> WorkflowDocumentPersistence<'a> {
+    pub(crate) const fn new(project_store: &'a ProjectStore) -> Self {
+        Self { project_store }
+    }
+
+    pub(crate) async fn load_graph(&self) -> Result<Option<StoredWorkflowDocument>, String> {
+        self.load(WorkflowDocumentKey::Graph).await
+    }
+
+    pub(crate) async fn save_graph(&self, document: &StoredWorkflowDocument) -> Result<(), String> {
+        self.save(WorkflowDocumentWrite::new(
+            WorkflowDocumentKey::Graph,
+            document,
+        ))
+        .await
+    }
+
+    pub(crate) async fn load_assistant(&self) -> Result<Option<StoredWorkflowDocument>, String> {
+        self.load(WorkflowDocumentKey::Assistant).await
+    }
+
+    pub(crate) async fn save_assistant(
+        &self,
+        document: &StoredWorkflowDocument,
+    ) -> Result<(), String> {
+        self.save(WorkflowDocumentWrite::new(
+            WorkflowDocumentKey::Assistant,
+            document,
+        ))
+        .await
+    }
+
+    /// Replace an unreadable Assistant document only when its durable payload
+    /// is still the one the caller inspected.
+    pub(crate) async fn reset_assistant(
+        &self,
+        expected_payload: &str,
+        document: &StoredWorkflowDocument,
+    ) -> Result<(), String> {
+        self.save(
+            WorkflowDocumentWrite::new(WorkflowDocumentKey::Assistant, document)
+                .replacing(expected_payload),
+        )
+        .await
+    }
+
+    async fn load(
+        &self,
+        key: WorkflowDocumentKey,
+    ) -> Result<Option<StoredWorkflowDocument>, String> {
+        if !self.project_store.is_configured() {
+            return Ok(None);
+        }
+        let relation = Table::WorkflowRuns.qualified_name(self.project_store.namespace());
+        let mut connection = self.project_store.connect().await?;
+        Ok(connection
+            .relation_rows(&relation, WorkflowDocumentSchema::decode)
+            .await?
+            .into_iter()
+            .find(|row| row.matches(key))
+            .map(WorkflowDocumentRow::into_document))
+    }
+
+    /// Rewrite the document relation with one key replaced, preserving the
+    /// other document in the same transaction.
+    async fn save(&self, write: WorkflowDocumentWrite<'_>) -> Result<(), String> {
+        let relation = Table::WorkflowRuns.qualified_name(self.project_store.namespace());
+        let mut connection = self.project_store.connect_exclusive().await?;
+        connection.begin_transaction().await?;
+        let mutation = async {
+            let existing = WorkflowDocumentReplacement::new(
+                connection
+                    .relation_rows(&relation, WorkflowDocumentSchema::decode)
+                    .await?,
+            );
+            if let Some(expected) = write.expected_payload {
+                let matches = existing.current(write.key).is_some_and(|current| {
+                    Sha256::digest(current.payload().as_bytes()).as_slice()
+                        == Sha256::digest(expected.as_bytes()).as_slice()
+                });
+                if !matches {
+                    return Err(
+                        "Assistant history changed before reset. Reload the current project."
+                            .to_owned(),
+                    );
+                }
+            }
+            let rows = existing.replaced(WorkflowDocumentRow::new(
+                write.key.persisted().to_owned(),
+                write.document.clone(),
+                StorageClock::unix_millis(),
+            ));
+            connection
+                .replace_batches(&relation, vec![WorkflowDocumentSchema::batch(&rows)?])
+                .await
+        }
+        .await;
+        connection
+            .finish_transaction(mutation, "Workflow history")
+            .await
+    }
+}
+
+/// One Workflow document write, optionally guarded by the payload the caller
+/// expects to still be durable.
+struct WorkflowDocumentWrite<'a> {
+    key: WorkflowDocumentKey,
+    document: &'a StoredWorkflowDocument,
+    expected_payload: Option<&'a str>,
+}
+
+impl<'a> WorkflowDocumentWrite<'a> {
+    const fn new(key: WorkflowDocumentKey, document: &'a StoredWorkflowDocument) -> Self {
+        Self {
+            key,
+            document,
+            expected_payload: None,
+        }
+    }
+
+    const fn replacing(mut self, expected_payload: &'a str) -> Self {
+        self.expected_payload = Some(expected_payload);
+        self
+    }
+}
 
 /// One persisted Workflow document and the version of its encoding.
 ///
@@ -43,7 +190,7 @@ impl StoredWorkflowDocument {
 
 /// The closed set of documents Studio persists in the Workflow relation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum WorkflowDocumentKey {
+enum WorkflowDocumentKey {
     /// The saved graph together with its latest run observation.
     Graph,
     /// The Assistant conversation history.
@@ -51,7 +198,7 @@ pub(crate) enum WorkflowDocumentKey {
 }
 
 impl WorkflowDocumentKey {
-    pub(crate) const fn persisted(self) -> &'static str {
+    const fn persisted(self) -> &'static str {
         match self {
             Self::Graph => "default",
             Self::Assistant => "agent:default",
@@ -60,18 +207,14 @@ impl WorkflowDocumentKey {
 }
 
 /// One decoded row of the Workflow document relation.
-pub(crate) struct WorkflowDocumentRow {
+struct WorkflowDocumentRow {
     key: String,
     document: StoredWorkflowDocument,
     updated_ms: i64,
 }
 
 impl WorkflowDocumentRow {
-    pub(crate) const fn new(
-        key: String,
-        document: StoredWorkflowDocument,
-        updated_ms: i64,
-    ) -> Self {
+    const fn new(key: String, document: StoredWorkflowDocument, updated_ms: i64) -> Self {
         Self {
             key,
             document,
@@ -79,24 +222,24 @@ impl WorkflowDocumentRow {
         }
     }
 
-    pub(crate) fn matches(&self, key: WorkflowDocumentKey) -> bool {
+    fn matches(&self, key: WorkflowDocumentKey) -> bool {
         self.key == key.persisted()
     }
 
-    pub(crate) const fn document(&self) -> &StoredWorkflowDocument {
+    const fn document(&self) -> &StoredWorkflowDocument {
         &self.document
     }
 
-    pub(crate) fn into_document(self) -> StoredWorkflowDocument {
+    fn into_document(self) -> StoredWorkflowDocument {
         self.document
     }
 }
 
-/// Arrow schema for [`crate::schema::Table::WorkflowRuns`].
-pub(crate) struct WorkflowDocumentSchema;
+/// Arrow schema for the managed `workflow_runs` relation.
+struct WorkflowDocumentSchema;
 
 impl WorkflowDocumentSchema {
-    pub(crate) fn documents() -> SchemaRef {
+    fn documents() -> SchemaRef {
         Arc::new(Schema::new(vec![
             Field::new(db::RUN_ID, DataType::Utf8, false),
             Field::new(db::DOCUMENT_VERSION, DataType::UInt32, false),
@@ -108,7 +251,7 @@ impl WorkflowDocumentSchema {
     /// Encode every document in the relation as one replacement batch. Studio
     /// keeps at most one row per key, so the whole relation is small enough to
     /// rewrite atomically on every save.
-    pub(crate) fn batch(rows: &[WorkflowDocumentRow]) -> Result<RecordBatch, String> {
+    fn batch(rows: &[WorkflowDocumentRow]) -> Result<RecordBatch, String> {
         let columns: Vec<ArrayRef> = vec![
             Arc::new(StringArray::from_iter_values(
                 rows.iter().map(|row| row.key.as_str()),
@@ -127,7 +270,7 @@ impl WorkflowDocumentSchema {
             .map_err(|error| format!("building Workflow document batch: {error}"))
     }
 
-    pub(crate) fn decode(batch: &RecordBatch, row: usize) -> Result<WorkflowDocumentRow, String> {
+    fn decode(batch: &RecordBatch, row: usize) -> Result<WorkflowDocumentRow, String> {
         let columns = ArrowColumns::new(batch, "Workflow document");
         Ok(WorkflowDocumentRow::new(
             columns.text(db::RUN_ID, row)?.to_owned(),
@@ -143,16 +286,16 @@ impl WorkflowDocumentSchema {
 }
 
 /// Replace one key's document inside the relation's other rows.
-pub(crate) struct WorkflowDocumentReplacement {
+struct WorkflowDocumentReplacement {
     rows: Vec<WorkflowDocumentRow>,
 }
 
 impl WorkflowDocumentReplacement {
-    pub(crate) const fn new(rows: Vec<WorkflowDocumentRow>) -> Self {
+    const fn new(rows: Vec<WorkflowDocumentRow>) -> Self {
         Self { rows }
     }
 
-    pub(crate) fn current(&self, key: WorkflowDocumentKey) -> Option<&StoredWorkflowDocument> {
+    fn current(&self, key: WorkflowDocumentKey) -> Option<&StoredWorkflowDocument> {
         self.rows
             .iter()
             .find(|row| row.matches(key))
@@ -160,7 +303,7 @@ impl WorkflowDocumentReplacement {
     }
 
     /// Swap in one row, keeping every other document key untouched.
-    pub(crate) fn replaced(mut self, row: WorkflowDocumentRow) -> Vec<WorkflowDocumentRow> {
+    fn replaced(mut self, row: WorkflowDocumentRow) -> Vec<WorkflowDocumentRow> {
         self.rows.retain(|existing| existing.key != row.key);
         self.rows.push(row);
         self.rows.sort_by(|left, right| left.key.cmp(&right.key));

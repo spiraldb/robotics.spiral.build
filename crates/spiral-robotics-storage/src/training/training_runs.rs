@@ -21,8 +21,69 @@ use spiral_robotics_api::training::{
     TrainingRunLifecycle, TrainingRunPhase, TrainingSnapshot, TrainingSource, TrainingStageTimings,
 };
 
-use crate::arrow_rows::{ArrowColumns, ListColumnBuilder as _, StringListColumn};
-use crate::schema::{Table, column as db};
+use crate::db::ProjectStore;
+use crate::db::{ArrowColumns, ListColumnBuilder as _, StringListColumn};
+use crate::db::{Table, column as db};
+
+/// Durable training-history operations for one project.
+pub(crate) struct TrainingHistoryPersistence<'a> {
+    project_store: &'a ProjectStore,
+}
+
+impl<'a> TrainingHistoryPersistence<'a> {
+    pub(crate) const fn new(project_store: &'a ProjectStore) -> Self {
+        Self { project_store }
+    }
+
+    pub(crate) async fn load(&self) -> Result<Vec<TrainingRun>, String> {
+        if !self.project_store.is_configured() {
+            return Ok(Vec::new());
+        }
+        let namespace = self.project_store.namespace();
+        let mut connection = self.project_store.connect().await?;
+        let rows = connection
+            .relation_rows(
+                &Table::TrainingRuns.qualified_name(namespace),
+                TrainingRunRow::decode,
+            )
+            .await?;
+        let metrics = connection
+            .relation_rows(
+                &Table::TrainingRunMetrics.qualified_name(namespace),
+                StoredTrainingMetric::decode,
+            )
+            .await?;
+        let checkpoints = connection
+            .relation_rows(
+                &Table::TrainingRunCheckpoints.qualified_name(namespace),
+                StoredTrainingCheckpoint::decode,
+            )
+            .await?;
+        Ok(TrainingHistoryAssembly::new(rows, metrics, checkpoints)
+            .finish()
+            .restored())
+    }
+
+    /// Replace all three history relations in one transaction.
+    pub(crate) async fn save(&self, snapshot: &TrainingSnapshot) -> Result<(), String> {
+        let namespace = self.project_store.namespace();
+        let batches = StoredTrainingHistory::stored(snapshot).batches()?;
+        let mut connection = self.project_store.connect().await?;
+        connection.begin_transaction().await?;
+        let mutation = async {
+            for (table, batch) in batches {
+                connection
+                    .replace_batches(&table.qualified_name(namespace), vec![batch])
+                    .await?;
+            }
+            Ok(())
+        }
+        .await;
+        connection
+            .finish_transaction(mutation, "training history")
+            .await
+    }
+}
 
 /// Policy family recorded with a training run.
 ///
@@ -285,7 +346,7 @@ struct StoredTrainingTimings {
 
 /// One metric point together with the utilization sampled alongside it.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct StoredTrainingMetric {
+struct StoredTrainingMetric {
     progress: StoredTrainingProgress,
     resources: StoredTrainingResources,
     timings: StoredTrainingTimings,
@@ -348,7 +409,7 @@ impl StoredTrainingMetric {
 
 /// One inference checkpoint published by a run.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct StoredTrainingCheckpoint {
+struct StoredTrainingCheckpoint {
     step: u64,
     created_ms: i64,
     validation_loss: Option<f64>,
@@ -505,7 +566,7 @@ impl StoredTrainingRun {
 
 /// The complete persisted training history, newest run first.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct StoredTrainingHistory {
+struct StoredTrainingHistory {
     runs: Vec<StoredTrainingRun>,
 }
 
@@ -515,7 +576,7 @@ impl StoredTrainingHistory {
     /// Readiness is live service state, not history, so it is never stored: a
     /// restored snapshot always keeps the readiness the process already
     /// computed.
-    pub(crate) fn stored(snapshot: &TrainingSnapshot) -> Self {
+    fn stored(snapshot: &TrainingSnapshot) -> Self {
         Self {
             runs: snapshot
                 .runs()
@@ -525,16 +586,16 @@ impl StoredTrainingHistory {
         }
     }
 
-    pub(crate) fn restored(&self) -> Vec<TrainingRun> {
+    fn restored(&self) -> Vec<TrainingRun> {
         self.runs.iter().map(StoredTrainingRun::restored).collect()
     }
 }
 
 /// Arrow schemas for the three relations that hold one training history.
-pub(crate) struct TrainingRunSchema;
+pub(super) struct TrainingRunSchema;
 
 impl TrainingRunSchema {
-    pub(crate) fn runs() -> SchemaRef {
+    pub(super) fn runs() -> SchemaRef {
         Arc::new(Schema::new(vec![
             Field::new(db::RUN_ID, DataType::Utf8, false),
             Field::new(db::ORDINAL, DataType::UInt32, false),
@@ -575,7 +636,7 @@ impl TrainingRunSchema {
         ]))
     }
 
-    pub(crate) fn metrics() -> SchemaRef {
+    pub(super) fn metrics() -> SchemaRef {
         Arc::new(Schema::new(vec![
             Field::new(db::RUN_ID, DataType::Utf8, false),
             Field::new(db::STEP, DataType::UInt64, false),
@@ -597,7 +658,7 @@ impl TrainingRunSchema {
         ]))
     }
 
-    pub(crate) fn checkpoints() -> SchemaRef {
+    pub(super) fn checkpoints() -> SchemaRef {
         Arc::new(Schema::new(vec![
             Field::new(db::RUN_ID, DataType::Utf8, false),
             Field::new(db::STEP, DataType::UInt64, false),
@@ -616,7 +677,7 @@ impl StoredTrainingHistory {
     /// order they must be written. Run order is preserved in `ordinal` so the
     /// newest-first display order survives a relational round trip without
     /// depending on physical row order.
-    pub(crate) fn batches(&self) -> Result<[(Table, RecordBatch); 3], String> {
+    fn batches(&self) -> Result<[(Table, RecordBatch); 3], String> {
         let runs = self.runs.as_slice();
         let ordinals = (0..runs.len())
             .map(u32::try_from)
@@ -880,13 +941,13 @@ impl StoredTrainingHistory {
 }
 
 /// One decoded run row before its child rows are attached.
-pub(crate) struct TrainingRunRow {
+struct TrainingRunRow {
     ordinal: u32,
     run: StoredTrainingRun,
 }
 
 impl TrainingRunRow {
-    pub(crate) fn decode(batch: &RecordBatch, row: usize) -> Result<Self, String> {
+    fn decode(batch: &RecordBatch, row: usize) -> Result<Self, String> {
         let columns = ArrowColumns::new(batch, "training run");
         Ok(Self {
             ordinal: columns.ordinal(db::ORDINAL, row)?,
@@ -954,7 +1015,7 @@ impl TrainingRunRow {
 }
 
 impl StoredTrainingMetric {
-    pub(crate) fn decode(batch: &RecordBatch, row: usize) -> Result<(String, Self), String> {
+    fn decode(batch: &RecordBatch, row: usize) -> Result<(String, Self), String> {
         let columns = ArrowColumns::new(batch, "training metric");
         let metric = Self {
             progress: StoredTrainingProgress {
@@ -985,7 +1046,7 @@ impl StoredTrainingMetric {
 }
 
 impl StoredTrainingCheckpoint {
-    pub(crate) fn decode(batch: &RecordBatch, row: usize) -> Result<(String, Self), String> {
+    fn decode(batch: &RecordBatch, row: usize) -> Result<(String, Self), String> {
         let columns = ArrowColumns::new(batch, "training checkpoint");
         let checkpoint = Self {
             step: columns.unsigned(db::STEP, row)?,
@@ -1001,14 +1062,14 @@ impl StoredTrainingCheckpoint {
 }
 
 /// Assemble decoded run rows and their child rows into one ordered history.
-pub(crate) struct TrainingHistoryAssembly {
+struct TrainingHistoryAssembly {
     rows: Vec<TrainingRunRow>,
     metrics: Vec<(String, StoredTrainingMetric)>,
     checkpoints: Vec<(String, StoredTrainingCheckpoint)>,
 }
 
 impl TrainingHistoryAssembly {
-    pub(crate) const fn new(
+    const fn new(
         rows: Vec<TrainingRunRow>,
         metrics: Vec<(String, StoredTrainingMetric)>,
         checkpoints: Vec<(String, StoredTrainingCheckpoint)>,
@@ -1022,7 +1083,7 @@ impl TrainingHistoryAssembly {
 
     /// Child rows arrive unordered; sort each run's metrics and checkpoints by
     /// step so a reader sees the same monotonic series it wrote.
-    pub(crate) fn finish(self) -> StoredTrainingHistory {
+    fn finish(self) -> StoredTrainingHistory {
         let Self {
             mut rows,
             metrics,
