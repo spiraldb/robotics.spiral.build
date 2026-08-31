@@ -186,7 +186,7 @@ fn TrainingRunControl(
     let data = studio.data_controller();
     let mut selected_dataset = studio.selected_dataset();
     let controller = studio.training_controller();
-    let request = controller.request();
+    let config = controller.config();
     use_effect(move || {
         if !data.datasets_loaded() && !data.datasets_loading() {
             studio.run_utility("", data.load_datasets());
@@ -230,20 +230,20 @@ fn TrainingRunControl(
     }
     if !runtime_devices
         .iter()
-        .any(|(value, _)| value == request.device())
+        .any(|(value, _)| value == config.device())
     {
-        runtime_devices.push((request.device().to_owned(), request.device().to_owned()));
+        runtime_devices.push((config.device().to_owned(), config.device().to_owned()));
     }
-    let camera_summary = if request.act().camera_streams().is_empty() {
+    let camera_summary = if config.act().camera_streams().is_empty() {
         "All available".to_owned()
     } else {
         format!(
             "{} · {}",
-            request.act().camera_streams().len(),
-            request.act().camera_streams().join(", ")
+            config.act().camera_streams().len(),
+            config.act().camera_streams().join(", ")
         )
     };
-    let validation_percent = request.validation_split() * 100.0;
+    let validation_percent = config.validation_split() * 100.0;
 
     rsx! {
         div { class: "training-control",
@@ -348,11 +348,11 @@ fn TrainingRunControl(
                 label { class: "training-field training-field-wide",
                     span { "Device" }
                     select {
-                        value: request.device().to_owned(),
+                        value: config.device().to_owned(),
                         disabled: active_run.is_some() || readiness.runtime().is_none(),
                         onchange: move |event| {
                             let value = event.value();
-                            controller.edit_request(move |request| request.set_device(value));
+                            controller.edit_config(move |config| config.set_device(value));
                         },
                         for (value, label) in runtime_devices {
                             option { value: "{value}", "{label}" }
@@ -369,7 +369,7 @@ fn TrainingRunControl(
                     label { class: "training-field",
                         span { "Run name" }
                         input {
-                            value: request.run_name().to_owned(),
+                            value: config.run_name().to_owned(),
                             disabled: active_run.is_some(),
                             oninput: move |event| {
                                 controller.set_run_name(event.value());
@@ -380,10 +380,10 @@ fn TrainingRunControl(
                         span { "Steps" }
                         input {
                             r#type: "number", min: "1", step: "100",
-                            value: "{request.steps()}",
+                            value: "{config.steps()}",
                             disabled: active_run.is_some(),
                             oninput: move |event| if let Ok(value) = event.value().parse() {
-                                controller.edit_request(move |request| request.set_steps(value));
+                                controller.edit_config(move |config| config.set_steps(value));
                             },
                         }
                     }
@@ -398,10 +398,10 @@ fn TrainingRunControl(
                         span { "Batch" }
                         input {
                             r#type: "number", min: "1",
-                            value: "{request.batch_size()}",
+                            value: "{config.batch_size()}",
                             disabled: active_run.is_some(),
                             oninput: move |event| if let Ok(value) = event.value().parse() {
-                                controller.edit_request(move |request| request.set_batch_size(value));
+                                controller.edit_config(move |config| config.set_batch_size(value));
                             },
                         }
                     }
@@ -413,7 +413,7 @@ fn TrainingRunControl(
                             value: "{validation_percent}",
                             disabled: active_run.is_some(),
                             oninput: move |event| if let Ok(value) = event.value().parse::<f64>() {
-                                controller.edit_request(move |request| request.set_validation_split(value / 100.0));
+                                controller.edit_config(move |config| config.set_validation_split(value / 100.0));
                             },
                         }
                     }
@@ -421,10 +421,10 @@ fn TrainingRunControl(
                         span { "Action horizon" }
                         input {
                             r#type: "number", min: "1", max: "256",
-                            value: "{request.chunk_size()}",
+                            value: "{config.chunk_size()}",
                             disabled: active_run.is_some(),
                             oninput: move |event| if let Ok(value) = event.value().parse() {
-                                controller.edit_request(move |request| request.set_chunk_size(value));
+                                controller.edit_config(move |config| config.set_chunk_size(value));
                             },
                         }
                     }
@@ -432,10 +432,10 @@ fn TrainingRunControl(
                         span { "Learning rate" }
                         input {
                             r#type: "number", min: "0", step: "0.00001",
-                            value: "{request.learning_rate()}",
+                            value: "{config.learning_rate()}",
                             disabled: active_run.is_some(),
                             oninput: move |event| if let Ok(value) = event.value().parse() {
-                                controller.edit_request(move |request| request.set_learning_rate(value));
+                                controller.edit_config(move |config| config.set_learning_rate(value));
                             },
                         }
                     }
@@ -443,10 +443,10 @@ fn TrainingRunControl(
                         span { "Checkpoint interval" }
                         input {
                             r#type: "number", min: "1", step: "100",
-                            value: "{request.checkpoint_every()}",
+                            value: "{config.checkpoint_every()}",
                             disabled: active_run.is_some(),
                             oninput: move |event| if let Ok(value) = event.value().parse() {
-                                controller.edit_request(move |request| request.set_checkpoint_every(value));
+                                controller.edit_config(move |config| config.set_checkpoint_every(value));
                             },
                         }
                     }
@@ -455,33 +455,33 @@ fn TrainingRunControl(
                     textarea {
                         "aria-label": "Training data query",
                         spellcheck: "false",
-                        value: request.sql().to_owned(),
+                        value: config.sql().to_owned(),
                         disabled: active_run.is_some(),
                         oninput: move |event| {
                             let value = event.value();
-                            controller.edit_request(move |request| request.set_sql(value));
+                            controller.edit_config(move |config| config.set_sql(value));
                         },
                     }
                     div { class: "training-column-row",
                         label { class: "training-field",
                             span { "State column" }
                             input {
-                                value: request.state_column().to_owned(),
+                                value: config.state_column().to_owned(),
                                 disabled: active_run.is_some(),
                                 oninput: move |event| {
                                     let value = event.value();
-                                    controller.edit_request(move |request| request.set_state_column(value));
+                                    controller.edit_config(move |config| config.set_state_column(value));
                                 },
                             }
                         }
                         label { class: "training-field",
                             span { "Action column" }
                             input {
-                                value: request.action_column().to_owned(),
+                                value: config.action_column().to_owned(),
                                 disabled: active_run.is_some(),
                                 oninput: move |event| {
                                     let value = event.value();
-                                    controller.edit_request(move |request| request.set_action_column(value));
+                                    controller.edit_config(move |config| config.set_action_column(value));
                                 },
                             }
                         }
@@ -490,7 +490,7 @@ fn TrainingRunControl(
                         label { class: "training-field training-field-wide",
                             span { "Camera streams" }
                             input {
-                                value: request.act().camera_streams().join(", "),
+                                value: config.act().camera_streams().join(", "),
                                 placeholder: "All available",
                                 disabled: active_run.is_some(),
                                 oninput: move |event| {
@@ -500,7 +500,7 @@ fn TrainingRunControl(
                                         .filter(|stream| !stream.is_empty())
                                         .map(str::to_owned)
                                         .collect();
-                                    controller.edit_request(move |request| request.act_mut().set_camera_streams(streams));
+                                    controller.edit_config(move |config| config.act_mut().set_camera_streams(streams));
                                 },
                             }
                         }
@@ -508,10 +508,10 @@ fn TrainingRunControl(
                             span { "Image width (0 = source)" }
                             input {
                                 r#type: "number", min: "0", max: "1024", step: "1",
-                                value: "{request.act().image_width()}",
+                                value: "{config.act().image_width()}",
                                 disabled: active_run.is_some(),
                                 oninput: move |event| if let Ok(value) = event.value().parse() {
-                                    controller.edit_request(move |request| request.act_mut().set_image_width(value));
+                                    controller.edit_config(move |config| config.act_mut().set_image_width(value));
                                 },
                             }
                         }
@@ -519,10 +519,10 @@ fn TrainingRunControl(
                             span { "Image height (0 = source)" }
                             input {
                                 r#type: "number", min: "0", max: "1024", step: "1",
-                                value: "{request.act().image_height()}",
+                                value: "{config.act().image_height()}",
                                 disabled: active_run.is_some(),
                                 oninput: move |event| if let Ok(value) = event.value().parse() {
-                                    controller.edit_request(move |request| request.act_mut().set_image_height(value));
+                                    controller.edit_config(move |config| config.act_mut().set_image_height(value));
                                 },
                             }
                         }

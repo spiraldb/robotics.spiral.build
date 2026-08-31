@@ -298,12 +298,7 @@ impl AppState {
                 .runs()
                 .iter()
                 .any(|run| run.phase().active())
-            || RolloutActions::new(&super::training_rollout::RolloutHttpAdapter::new(
-                self.rollout().clone(),
-            ))
-            .snapshot()
-            .phase()
-            .active()
+            || self.rollout().snapshot().phase().active()
             || self.workflow().is_active()
             || self.workflow_agent().is_active()
     }
@@ -714,12 +709,7 @@ impl AppState {
                 ));
             }
             let hardware = state.hardware().state();
-            let rollout_is_active = RolloutActions::new(
-                &super::training_rollout::RolloutHttpAdapter::new(state.rollout().clone()),
-            )
-            .snapshot()
-            .phase()
-            .active();
+            let rollout_is_active = state.rollout().snapshot().phase().active();
             let current_robot_ids = state.workspace().try_list().await.ok().map(|records| {
                 records
                     .into_iter()

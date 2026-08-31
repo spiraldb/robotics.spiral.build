@@ -3,3 +3,4 @@
 pub(crate) mod commands;
 pub(crate) mod episode_data;
 pub(crate) mod http;
+pub(crate) mod server_fns;

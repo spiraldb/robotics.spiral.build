@@ -8,10 +8,7 @@ use futures_util::FutureExt as _;
 use image::imageops::FilterType;
 use safetensors::SafeTensors;
 use serde::Deserialize;
-use spiral_robotics_api::rollout::{
-    RolloutPhase as ContractRolloutPhase, RolloutSnapshot as ContractRolloutSnapshot,
-    StartRolloutRequest,
-};
+use spiral_robotics_api::rollout::{RolloutConfig, RolloutPhase, RolloutSnapshot};
 use spiral_robotics_inference::{
     ActionChunk, ImageDimensions, ImageFrame, InferenceInput, Policy, PolicyLoader,
 };
@@ -34,7 +31,6 @@ use crate::rollout::policy::{
 use crate::rollout::service::{
     CleanupResult, CompletionReason, ControlDecision, ControlObservation, ExecutionOutcome,
     InferenceTiming, PolicyCadence, RolloutAdmission, RolloutCoordinator, RolloutEventPort,
-    RolloutRequest, RolloutSnapshot,
 };
 use crate::sync::MutexRecovery;
 use spiral_robotics_hardware::{
@@ -121,15 +117,15 @@ struct ActiveRollout {
 
 struct RolloutRun {
     session: String,
-    request: StartRolloutRequest,
+    config: RolloutConfig,
     stop: watch::Receiver<bool>,
 }
 
 impl RolloutRun {
-    fn new(session: String, request: StartRolloutRequest, stop: watch::Receiver<bool>) -> Self {
+    fn new(session: String, config: RolloutConfig, stop: watch::Receiver<bool>) -> Self {
         Self {
             session,
-            request,
+            config,
             stop,
         }
     }
@@ -151,15 +147,14 @@ impl ActiveRollout {
 }
 
 struct WatchRolloutEvents {
-    state: watch::Sender<ContractRolloutSnapshot>,
-    persistence: watch::Sender<ContractRolloutSnapshot>,
+    state: watch::Sender<RolloutSnapshot>,
+    persistence: watch::Sender<RolloutSnapshot>,
 }
 
 impl RolloutEventPort for WatchRolloutEvents {
     fn publish(&self, snapshot: &RolloutSnapshot) {
-        let snapshot = ContractRolloutSnapshot::from(snapshot.clone());
         self.state.send_replace(snapshot.clone());
-        self.persistence.send_replace(snapshot);
+        self.persistence.send_replace(snapshot.clone());
     }
 }
 
@@ -436,7 +431,7 @@ impl RolloutHardwareResources {
 }
 
 struct RolloutLifecycle {
-    state: watch::Sender<ContractRolloutSnapshot>,
+    state: watch::Sender<RolloutSnapshot>,
     coordinator: Mutex<RolloutCoordinator>,
     active: Mutex<Option<ActiveRollout>>,
     session_ids: StableIdSequence,
@@ -464,7 +459,7 @@ impl RolloutManager {
     ) -> Arc<Self> {
         // Persisted state is hydrated after the listener starts. Constructing
         // the manager must not put Spiral I/O on the server's critical path.
-        let initial = ContractRolloutSnapshot::default();
+        let initial = RolloutSnapshot::default();
         let (persistence, mut changes) = watch::channel(initial.clone());
         let persistence_storage = storage.clone();
         tokio::spawn(async move {
@@ -519,18 +514,18 @@ impl RolloutManager {
         Ok(())
     }
 
-    pub(crate) fn snapshot(&self) -> ContractRolloutSnapshot {
+    pub(crate) fn snapshot(&self) -> RolloutSnapshot {
         self.lifecycle.state.borrow().clone()
     }
 
-    pub(crate) fn subscribe(&self) -> watch::Receiver<ContractRolloutSnapshot> {
+    pub(crate) fn subscribe(&self) -> watch::Receiver<RolloutSnapshot> {
         self.lifecycle.state.subscribe()
     }
 
     pub(crate) async fn start(
         self: &Arc<Self>,
-        request: StartRolloutRequest,
-    ) -> Result<ContractRolloutSnapshot, String> {
+        config: RolloutConfig,
+    ) -> Result<RolloutSnapshot, String> {
         let mut active = self.lifecycle.active.recover_lock();
         let (session, created_ms) = self
             .lifecycle
@@ -544,14 +539,14 @@ impl RolloutManager {
             .admit(RolloutAdmission::new(
                 session.clone(),
                 created_ms,
-                RolloutRequest::from(request.clone()),
+                config.clone(),
             ))?;
         // Spawn and publish the task handle while holding the same mutex used
         // by shutdown. Once an active session is observable its cleanup task
         // is therefore always joinable; there is no `active + task=None`
         // window for graceful shutdown to miss.
         let manager = self.clone();
-        let run = RolloutRun::new(session.clone(), request, stop_receiver);
+        let run = RolloutRun::new(session.clone(), config, stop_receiver);
         let task = tokio::spawn(async move {
             manager.run_and_finish(run).await;
         });
@@ -628,11 +623,11 @@ impl RolloutManager {
     async fn run_session(&self, run: RolloutRun) -> Result<ExecutionOutcome, String> {
         let RolloutRun {
             session,
-            request,
+            config,
             mut stop,
         } = run;
         let session = session.as_str();
-        let artifact = request.load_checkpoint(self.storage.as_ref()).await;
+        let artifact = config.load_checkpoint(self.storage.as_ref()).await;
         if *stop.borrow() {
             return self
                 .lifecycle
@@ -642,7 +637,7 @@ impl RolloutManager {
         }
         let artifact = artifact?;
         let manifest = artifact.manifest()?;
-        manifest.validate_for(&request, artifact.config_json())?;
+        manifest.validate_for(&config, artifact.config_json())?;
         let (config_json, payload) = artifact.into_parts();
         let model_artifact =
             spiral_robotics_inference::ModelArtifact::from_bytes(config_json, payload)
@@ -657,12 +652,12 @@ impl RolloutManager {
         let record = self
             .hardware
             .workspace
-            .get(request.robot())
+            .get(config.robot())
             .await
             .map_err(|error| error.to_string())?;
         let connection = hardware_state
             .connections()
-            .get(request.robot())
+            .get(config.robot())
             .cloned()
             .unwrap_or_default();
         let summary = record.summary(connection.to_api());
@@ -765,7 +760,7 @@ impl RolloutManager {
         self.hardware
             .hardware
             .set_mode(ModeSelection::Policy {
-                robot: request.robot().to_owned(),
+                robot: config.robot().to_owned(),
                 session: session.to_owned(),
             })
             .await?;
@@ -773,7 +768,7 @@ impl RolloutManager {
         match PolicyAdmissionWait::new(
             &mut hardware_updates,
             &mut stop,
-            ExpectedPolicyOwner::new(request.robot(), session),
+            ExpectedPolicyOwner::new(config.robot(), session),
         )
         .wait()
         .await?
@@ -814,7 +809,7 @@ impl RolloutManager {
         if let Some(outcome) = self.classify_control(session, &initial_hardware)? {
             return Ok(outcome);
         }
-        let initial_robot = initial_hardware.policy_robot(request.robot())?;
+        let initial_robot = initial_hardware.policy_robot(config.robot())?;
         initial_robot.require_healthy_for_policy()?;
         cameras.require_fresh()?;
         let initial_state = initial_robot.policy_observation_state(&joint_names)?;
@@ -859,7 +854,7 @@ impl RolloutManager {
         // received. It is consumed only if that chunk runs completely dry.
         let mut must_go_when_empty = true;
         let deadline =
-            TokioInstant::now() + Duration::from_secs(u64::from(request.duration_seconds()));
+            TokioInstant::now() + Duration::from_secs(u64::from(config.duration_seconds()));
         let mut ticker = tokio::time::interval(period);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut last_hardware_sequence = 0_u64;
@@ -874,7 +869,7 @@ impl RolloutManager {
                 }
                 _ = tokio::time::sleep_until(deadline) => {
                     return Ok(ExecutionOutcome::Completed(CompletionReason::DurationReached {
-                        duration_seconds: request.duration_seconds(),
+                        duration_seconds: config.duration_seconds(),
                     }));
                 }
                 _ = ticker.tick() => {}
@@ -890,7 +885,7 @@ impl RolloutManager {
             if let Some(outcome) = self.classify_control(session, &hardware)? {
                 return Ok(outcome);
             }
-            let robot = hardware.policy_robot(request.robot())?;
+            let robot = hardware.policy_robot(config.robot())?;
             robot.require_healthy_for_policy()?;
             cameras.require_fresh()?;
 
@@ -954,7 +949,7 @@ impl RolloutManager {
                 let goals =
                     spiral_robotics_hardware::JointGoals::try_from(prepared.goals().clone())
                         .map_err(|error| error.to_string())?;
-                let goals = PolicyGoals::new(request.robot().to_owned(), session.to_owned(), goals)
+                let goals = PolicyGoals::new(config.robot().to_owned(), session.to_owned(), goals)
                     .map_err(|error| error.to_string())?;
                 self.hardware.hardware.set_policy_goals(goals).await?;
                 self.lifecycle
@@ -978,7 +973,7 @@ impl RolloutManager {
                 if let Some(outcome) = self.classify_control(session, &refreshed)? {
                     return Ok(outcome);
                 }
-                let refreshed_robot = refreshed.policy_robot(request.robot())?;
+                let refreshed_robot = refreshed.policy_robot(config.robot())?;
                 refreshed_robot.require_healthy_for_policy()?;
                 cameras.require_fresh()?;
                 let state = refreshed_robot.policy_observation_state(&joint_names)?;
@@ -1032,7 +1027,7 @@ trait RestoredRolloutSnapshot {
     fn restored_after_restart(self) -> Self;
 }
 
-impl RestoredRolloutSnapshot for ContractRolloutSnapshot {
+impl RestoredRolloutSnapshot for RolloutSnapshot {
     fn restored_after_restart(self) -> Self {
         if self.phase().active() {
             let finished_ms = Some(
@@ -1048,7 +1043,7 @@ impl RestoredRolloutSnapshot for ContractRolloutSnapshot {
             .with_robot(self.robot().map(str::to_owned))
             .with_checkpoint(self.checkpoint_step())
             .with_duration(self.duration_seconds())
-            .with_lifecycle(ContractRolloutPhase::Failed, self.started_ms())
+            .with_lifecycle(RolloutPhase::Failed, self.started_ms())
             .with_completion(
                 finished_ms,
                 Some("Studio stopped before this rollout completed.".to_owned()),
@@ -1173,7 +1168,7 @@ trait RolloutCheckpointRequest {
     ) -> Result<CheckpointArtifact, String>;
 }
 
-impl RolloutCheckpointRequest for StartRolloutRequest {
+impl RolloutCheckpointRequest for RolloutConfig {
     async fn load_checkpoint(
         &self,
         checkpoint_store: &dyn CheckpointStore,
@@ -1206,12 +1201,16 @@ impl CheckpointManifest for CheckpointArtifact {
 }
 
 impl ArtifactManifest {
-    fn validate_for(&self, request: &StartRolloutRequest, config: &[u8]) -> Result<(), String> {
+    fn validate_for(
+        &self,
+        rollout_config: &RolloutConfig,
+        model_config_bytes: &[u8],
+    ) -> Result<(), String> {
         ArtifactIdentity::new(&self.format, &self.artifact, &self.run_id)
             .with_artifact(self.step, &self.tensor_namespace)
-            .validate_for(request.run_id(), request.checkpoint_step())
+            .validate_for(rollout_config.run_id(), rollout_config.checkpoint_step())
             .map_err(|error| error.to_string())?;
-        let stored_config: serde_json::Value = serde_json::from_slice(config)
+        let stored_config: serde_json::Value = serde_json::from_slice(model_config_bytes)
             .map_err(|error| format!("stored native model config is invalid: {error}"))?;
         if stored_config != self.model_config {
             return Err(
@@ -1506,7 +1505,7 @@ mod tests {
         TargetRobotContract,
     };
     use bytes::Bytes;
-    use spiral_robotics_api::rollout::StartRolloutRequest;
+    use spiral_robotics_api::rollout::RolloutConfig;
     use spiral_robotics_inference::{
         ActionChunk, ActionChunkShape, ActionChunkSpecification, InferenceInput, InferenceStats,
         ObservationSpecification, Policy, PolicyKind, PolicySpecification,
@@ -1789,10 +1788,9 @@ mod tests {
             )
             .unwrap(),
         };
-        let request =
-            StartRolloutRequest::new("run-from-project-a", 20_000, "follower").with_duration(30);
+        let config = RolloutConfig::new("run-from-project-a", 20_000, "follower").with_duration(30);
 
-        let loaded = request
+        let loaded = config
             .load_checkpoint(&checkpoint_store)
             .await
             .expect("the fake checkpoint_store has no Settings dependency");
@@ -1837,12 +1835,12 @@ mod tests {
     #[test]
     fn rollout_accepts_the_native_training_artifact_contract() {
         let model_config = serde_json::json!({"type": "act"});
-        let request = StartRolloutRequest::new("run-1", 10, "follower").with_duration(30);
+        let rollout_config = RolloutConfig::new("run-1", 10, "follower").with_duration(30);
         let manifest = ArtifactManifest {
             format: ACT_ARTIFACT_FORMAT.to_owned(),
             artifact: "inference".to_owned(),
-            run_id: request.run_id().to_owned(),
-            step: request.checkpoint_step(),
+            run_id: rollout_config.run_id().to_owned(),
+            step: rollout_config.checkpoint_step(),
             data_contract: ArtifactDataContract {
                 observations: ArtifactObservationContract {
                     value_space: "centered_normalized".to_owned(),
@@ -1862,7 +1860,7 @@ mod tests {
             tensor_namespace: ACT_TENSOR_NAMESPACE.to_owned(),
         };
         let config = serde_json::to_vec(&model_config).unwrap();
-        assert!(manifest.validate_for(&request, &config).is_ok());
+        assert!(manifest.validate_for(&rollout_config, &config).is_ok());
     }
 
     #[test]

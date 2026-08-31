@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use spiral_robotics_api::settings::ConnectionTestResponse;
 use spiral_robotics_api::training::{
-    MAX_TRAINING_HISTORY_RUNS, StartTrainingRequest, TrainingCheckpoint, TrainingMetricPoint,
+    MAX_TRAINING_HISTORY_RUNS, TrainingCheckpoint, TrainingConfig, TrainingMetricPoint,
     TrainingReadiness, TrainingRun, TrainingRunPhase, TrainingRuntimeInfo, TrainingSnapshot,
     TrainingSource, TrainingUpdate,
 };
@@ -61,19 +61,15 @@ struct RemoteReplayState {
 
 struct RemoteJobSnapshot<'a> {
     run_id: &'a str,
-    request: &'a StartTrainingRequest,
+    config: &'a TrainingConfig,
     snapshot: &'a TrainingJobSnapshot,
 }
 
 impl<'a> RemoteJobSnapshot<'a> {
-    fn new(
-        run_id: &'a str,
-        request: &'a StartTrainingRequest,
-        snapshot: &'a TrainingJobSnapshot,
-    ) -> Self {
+    fn new(run_id: &'a str, config: &'a TrainingConfig, snapshot: &'a TrainingJobSnapshot) -> Self {
         Self {
             run_id,
-            request,
+            config,
             snapshot,
         }
     }
@@ -308,8 +304,8 @@ impl TrainingManager {
         }
     }
 
-    pub(crate) async fn start(&self, request: StartTrainingRequest) -> Result<TrainingRun, String> {
-        self.coordinate_training_start(request)
+    pub(crate) async fn start(&self, config: TrainingConfig) -> Result<TrainingRun, String> {
+        self.coordinate_training_start(config)
             .await
             .map_err(|error| error.to_string())
     }
@@ -399,7 +395,7 @@ impl TrainingManager {
     }
 
     async fn run_backend(&self, launch: TrainingLaunch, cancel: Arc<AtomicBool>) {
-        let (run_id, request) = launch.into_parts();
+        let (run_id, config) = launch.into_parts();
         let credentials = self.inner.storage.spiral_credentials();
         let spiral = SpiralJobConnection::new(
             SpiralServiceEndpoints::new(
@@ -420,54 +416,54 @@ impl TrainingManager {
         let data = TrainingDataSelection::new(
             spiral,
             TrainingDataQuery::new(
-                request.sql().to_owned(),
+                config.sql().to_owned(),
                 TrainingDataColumns::new(
-                    request.state_column().to_owned(),
-                    request.action_column().to_owned(),
+                    config.state_column().to_owned(),
+                    config.action_column().to_owned(),
                 ),
                 spiral_robotics_storage::SCHEMA_VERSION,
             ),
         );
-        let initialization = if request.act().pretrained_backbone() {
+        let initialization = if config.act().pretrained_backbone() {
             TrainingInitialization::PretrainedBackbone
         } else {
             TrainingInitialization::Random
         };
         let schedule = TrainingSchedule::new(
             TrainingProgress::new(
-                request.steps(),
-                request.batch_size(),
-                request.validation_split(),
+                config.steps(),
+                config.batch_size(),
+                config.validation_split(),
             ),
-            TrainingOptimizer::new(request.learning_rate(), request.seed()),
-            TrainingCheckpointSchedule::new(request.checkpoint_every(), request.chunk_size()),
+            TrainingOptimizer::new(config.learning_rate(), config.seed()),
+            TrainingCheckpointSchedule::new(config.checkpoint_every(), config.chunk_size()),
         );
         let act = ActTrainingJobConfig::new(
             ActTrainingInput::new(
-                request.act().camera_streams().to_vec(),
-                TrainingImageSize::new(request.act().image_width(), request.act().image_height()),
-                request.act().video_decoder().to_owned(),
+                config.act().camera_streams().to_vec(),
+                TrainingImageSize::new(config.act().image_width(), config.act().image_height()),
+                config.act().video_decoder().to_owned(),
             ),
             ActTrainingArchitecture::new(
                 ActModelDimensions::new(
-                    request.act().hidden_dim(),
-                    request.act().latent_dim(),
-                    request.act().feedforward_dim(),
+                    config.act().hidden_dim(),
+                    config.act().latent_dim(),
+                    config.act().feedforward_dim(),
                 ),
-                request.act().attention_heads(),
+                config.act().attention_heads(),
                 ActLayerCounts::new(
-                    request.act().encoder_layers(),
-                    request.act().vae_encoder_layers(),
-                    request.act().decoder_layers(),
+                    config.act().encoder_layers(),
+                    config.act().vae_encoder_layers(),
+                    config.act().decoder_layers(),
                 ),
             ),
-            request.act().kl_weight(),
+            config.act().kl_weight(),
         );
         let job_request = TrainingJobRequest::new(
-            TrainingJobIdentity::new(run_id.clone(), request.run_name().to_owned()),
+            TrainingJobIdentity::new(run_id.clone(), config.run_name().to_owned()),
             data,
             TrainingJobPlan::new(
-                TrainingRuntimeSelection::new(request.device().to_owned(), initialization),
+                TrainingRuntimeSelection::new(config.device().to_owned(), initialization),
                 schedule,
                 act,
             ),
@@ -540,7 +536,7 @@ impl TrainingManager {
         loop {
             if let Err(error) = self
                 .apply_remote_job_snapshot(
-                    RemoteJobSnapshot::new(&run_id, &request, &snapshot),
+                    RemoteJobSnapshot::new(&run_id, &config, &snapshot),
                     &mut replay,
                 )
                 .await
@@ -632,7 +628,7 @@ impl TrainingManager {
     ) -> Result<(), String> {
         let RemoteJobSnapshot {
             run_id,
-            request,
+            config,
             snapshot,
         } = remote;
         if snapshot.job_id() != run_id {
@@ -641,14 +637,14 @@ impl TrainingManager {
         if !replay.configured
             && let Some(resolved) = snapshot.resolved()
         {
-            let mut resolved_request = request.clone();
-            resolved_request
+            let mut resolved_config = config.clone();
+            resolved_config
                 .act_mut()
                 .set_camera_streams(resolved.camera_streams().to_vec());
             self.apply_update(
                 TrainingUpdate::RunConfigured {
                     run_id: run_id.to_owned(),
-                    config: Box::new(resolved_request),
+                    config: Box::new(resolved_config),
                 },
                 true,
             )
@@ -898,7 +894,7 @@ impl TrainingCoordinatorPort for TrainingManager {
 
     async fn validate_training_query(
         &self,
-        _command: &StartTrainingRequest,
+        _command: &TrainingConfig,
     ) -> Result<(), OperationError> {
         // The worker owns the Spiral connection and validates the immutable
         // query while resolving its data contract. Studio does not execute the
@@ -1078,7 +1074,7 @@ mod tests {
     use super::*;
 
     fn run(id: &str, phase: TrainingRunPhase, current_step: u64) -> TrainingRun {
-        TrainingRun::starting(id, StartTrainingRequest::default())
+        TrainingRun::starting(id, TrainingConfig::default())
             .with_source(TrainingSource::default())
             .with_phase(phase, current_step)
             .with_started_ms(1)

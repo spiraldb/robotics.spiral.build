@@ -46,13 +46,12 @@ fn temporary_unavailability_includes_a_retry_hint() {
 }
 
 #[test]
-fn feature_routers_preserve_every_public_path_exactly_once() {
+fn feature_routers_preserve_every_legacy_rest_path_exactly_once() {
     let sources = [
         include_str!("../routes.rs"),
         include_str!("data.rs"),
         include_str!("devices.rs"),
         include_str!("recordings.rs"),
-        include_str!("training_rollout.rs"),
         include_str!("workflow.rs"),
     ]
     .join("\n");
@@ -93,11 +92,6 @@ fn feature_routers_preserve_every_public_path_exactly_once() {
         "/spiral/relations",
         "/project/export",
         "/project/import",
-        "/training/runs",
-        "/training/runs/{id}",
-        "/training/runs/{id}/stop",
-        "/rollout",
-        "/rollout/stop",
         "/workflow",
         "/workflow/command",
         "/workflow/agent",

@@ -8,11 +8,10 @@
 use std::sync::Arc;
 
 use spiral_robotics_api::rollout::{
-    MAX_ROLLOUT_DURATION_SECONDS, RolloutSnapshot as ContractRolloutSnapshot,
+    MAX_ROLLOUT_DURATION_SECONDS, RolloutConfig, RolloutMetrics, RolloutPhase, RolloutSnapshot,
 };
 
 use super::policy::{ControlOwner, ExpectedPolicyOwner, PolicyOwnership};
-use crate::OperationError;
 
 pub(crate) const MIN_ROLLOUT_DURATION_SECONDS: u32 = 1;
 
@@ -29,222 +28,9 @@ impl RolloutDuration {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct RolloutRequest {
-    run_id: String,
-    checkpoint_step: u64,
-    robot: String,
-    duration_seconds: u32,
-}
-
-impl RolloutRequest {
-    pub(crate) fn new(run_id: String, checkpoint_step: u64, robot: String) -> Self {
-        Self {
-            run_id,
-            checkpoint_step,
-            robot,
-            duration_seconds: 0,
-        }
-    }
-
-    pub(crate) fn with_duration(mut self, duration_seconds: u32) -> Self {
-        self.duration_seconds = duration_seconds;
-        self
-    }
-
-    pub(crate) fn run_id(&self) -> &str {
-        &self.run_id
-    }
-
-    pub(crate) fn checkpoint_step(&self) -> u64 {
-        self.checkpoint_step
-    }
-
-    pub(crate) fn robot(&self) -> &str {
-        &self.robot
-    }
-
-    pub(crate) fn duration_seconds(&self) -> u32 {
-        self.duration_seconds
-    }
-
-    fn validate_for_session(&self, session: &str) -> Result<(), String> {
-        if session.trim().is_empty() || session.trim() != session {
-            return Err("policy session id must be non-empty and trimmed".to_owned());
-        }
-        if self.run_id.trim().is_empty()
-            || self.run_id.trim() != self.run_id
-            || self.robot.trim().is_empty()
-            || self.robot.trim() != self.robot
-        {
-            return Err("rollout run and robot ids must be non-empty and trimmed".to_owned());
-        }
-        if self.checkpoint_step == 0 {
-            return Err("rollout checkpoint step must be positive".to_owned());
-        }
-        if RolloutDuration::new(self.duration_seconds).is_none() {
-            return Err("rollout duration is outside the approved safety window".to_owned());
-        }
-        Ok(())
-    }
-}
-
-/// Publication seam. Delivery adapters map this semantic snapshot to their
-/// own DTO or event protocol.
+/// Publication seam between lifecycle decisions and state/persistence watchers.
 pub(crate) trait RolloutEventPort: Send + Sync {
     fn publish(&self, snapshot: &RolloutSnapshot);
-}
-
-/// Capability-facing execution seam implemented by the backend runtime.
-/// The runtime may use Tokio, model libraries, cameras, and hardware drivers,
-/// but only semantic rollout state crosses this boundary.
-pub(crate) trait RolloutSessionPort: Send + Sync {
-    fn snapshot(&self) -> ContractRolloutSnapshot;
-
-    async fn start(
-        &self,
-        request: RolloutRequest,
-    ) -> Result<ContractRolloutSnapshot, OperationError>;
-
-    async fn stop(&self) -> Result<(), OperationError>;
-}
-
-pub(crate) struct RolloutActions<'a, P: ?Sized> {
-    port: &'a P,
-}
-
-impl<'a, P: RolloutSessionPort + ?Sized> RolloutActions<'a, P> {
-    pub(crate) fn new(port: &'a P) -> Self {
-        Self { port }
-    }
-
-    pub(crate) fn snapshot(&self) -> ContractRolloutSnapshot {
-        self.port.snapshot()
-    }
-
-    pub(crate) async fn start(
-        &self,
-        request: RolloutRequest,
-    ) -> Result<ContractRolloutSnapshot, OperationError> {
-        self.port.start(request).await
-    }
-
-    pub(crate) async fn stop(&self) -> Result<(), OperationError> {
-        self.port.stop().await
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum RolloutPhase {
-    #[default]
-    Idle,
-    Loading,
-    WarmingUp,
-    Running,
-    Stopping,
-    Failed,
-}
-
-#[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct RolloutMetrics {
-    inference_count: u64,
-    command_count: u64,
-    missed_deadlines: u64,
-    last_latency_ms: Option<f64>,
-    last_model_ms: Option<f64>,
-    mean_latency_ms: Option<f64>,
-    max_latency_ms: Option<f64>,
-}
-
-impl RolloutMetrics {
-    pub(crate) fn inference_count(&self) -> u64 {
-        self.inference_count
-    }
-
-    pub(crate) fn command_count(&self) -> u64 {
-        self.command_count
-    }
-
-    pub(crate) fn missed_deadlines(&self) -> u64 {
-        self.missed_deadlines
-    }
-
-    pub(crate) fn last_latency_ms(&self) -> Option<f64> {
-        self.last_latency_ms
-    }
-
-    pub(crate) fn last_model_ms(&self) -> Option<f64> {
-        self.last_model_ms
-    }
-
-    pub(crate) fn mean_latency_ms(&self) -> Option<f64> {
-        self.mean_latency_ms
-    }
-
-    pub(crate) fn max_latency_ms(&self) -> Option<f64> {
-        self.max_latency_ms
-    }
-}
-
-#[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct RolloutSnapshot {
-    identity: RolloutIdentity,
-    lifecycle: RolloutLifecycle,
-    metrics: RolloutMetrics,
-}
-
-#[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct RolloutIdentity {
-    session_id: Option<String>,
-    run_id: Option<String>,
-    checkpoint_step: Option<u64>,
-    robot: Option<String>,
-    duration_seconds: Option<u32>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct RolloutLifecycle {
-    phase: RolloutPhase,
-    started_ms: Option<i64>,
-    finished_ms: Option<i64>,
-    message: Option<String>,
-    warning: Option<String>,
-}
-
-impl RolloutSnapshot {
-    pub(crate) fn phase(&self) -> RolloutPhase {
-        self.lifecycle.phase
-    }
-    pub(crate) fn session_id(&self) -> Option<&str> {
-        self.identity.session_id.as_deref()
-    }
-    pub(crate) fn run_id(&self) -> Option<&str> {
-        self.identity.run_id.as_deref()
-    }
-    pub(crate) fn checkpoint_step(&self) -> Option<u64> {
-        self.identity.checkpoint_step
-    }
-    pub(crate) fn robot(&self) -> Option<&str> {
-        self.identity.robot.as_deref()
-    }
-    pub(crate) fn duration_seconds(&self) -> Option<u32> {
-        self.identity.duration_seconds
-    }
-    pub(crate) fn started_ms(&self) -> Option<i64> {
-        self.lifecycle.started_ms
-    }
-    pub(crate) fn finished_ms(&self) -> Option<i64> {
-        self.lifecycle.finished_ms
-    }
-    pub(crate) fn message(&self) -> Option<&str> {
-        self.lifecycle.message.as_deref()
-    }
-    pub(crate) fn warning(&self) -> Option<&str> {
-        self.lifecycle.warning.as_deref()
-    }
-    pub(crate) fn metrics(&self) -> &RolloutMetrics {
-        &self.metrics
-    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -294,16 +80,36 @@ pub(crate) struct CleanupTicket {
 pub(crate) struct RolloutAdmission {
     session: String,
     started_ms: i64,
-    request: RolloutRequest,
+    config: RolloutConfig,
 }
 
 impl RolloutAdmission {
-    pub(crate) fn new(session: String, started_ms: i64, request: RolloutRequest) -> Self {
+    pub(crate) fn new(session: String, started_ms: i64, config: RolloutConfig) -> Self {
         Self {
             session,
             started_ms,
-            request,
+            config,
         }
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.session.trim().is_empty() || self.session.trim() != self.session {
+            return Err("policy session id must be non-empty and trimmed".to_owned());
+        }
+        if self.config.run_id().trim().is_empty()
+            || self.config.run_id().trim() != self.config.run_id()
+            || self.config.robot().trim().is_empty()
+            || self.config.robot().trim() != self.config.robot()
+        {
+            return Err("rollout run and robot ids must be non-empty and trimmed".to_owned());
+        }
+        if self.config.checkpoint_step() == 0 {
+            return Err("rollout checkpoint step must be positive".to_owned());
+        }
+        if RolloutDuration::new(self.config.duration_seconds()).is_none() {
+            return Err("rollout duration is outside the approved safety window".to_owned());
+        }
+        Ok(())
     }
 }
 
@@ -384,7 +190,7 @@ enum SessionPhase {
 
 struct ActiveSession {
     session: String,
-    request: RolloutRequest,
+    config: RolloutConfig,
     phase: SessionPhase,
     stop_requested: bool,
     stop_stage: Option<StopStage>,
@@ -415,37 +221,28 @@ impl RolloutCoordinator {
     }
 
     pub(crate) fn admit(&mut self, admission: RolloutAdmission) -> Result<RolloutSnapshot, String> {
+        admission.validate()?;
         let RolloutAdmission {
             session,
             started_ms,
-            request,
+            config,
         } = admission;
-        request.validate_for_session(&session)?;
         if let Some(active) = &self.active {
             return Err(format!(
                 "policy session {:?} is already active",
                 active.session
             ));
         }
-        self.snapshot = RolloutSnapshot {
-            identity: RolloutIdentity {
-                session_id: Some(session.clone()),
-                run_id: Some(request.run_id.clone()),
-                checkpoint_step: Some(request.checkpoint_step),
-                robot: Some(request.robot.clone()),
-                duration_seconds: Some(request.duration_seconds),
-            },
-            lifecycle: RolloutLifecycle {
-                phase: RolloutPhase::Loading,
-                started_ms: Some(started_ms),
-                message: Some("Loading checkpoint…".to_owned()),
-                ..RolloutLifecycle::default()
-            },
-            metrics: RolloutMetrics::default(),
-        };
+        self.snapshot =
+            RolloutSnapshot::new(Some(session.clone()), Some(config.run_id().to_owned()))
+                .with_robot(Some(config.robot().to_owned()))
+                .with_checkpoint(Some(config.checkpoint_step()))
+                .with_duration(Some(config.duration_seconds()))
+                .with_lifecycle(RolloutPhase::Loading, Some(started_ms))
+                .with_completion(None, Some("Loading checkpoint…".to_owned()));
         self.active = Some(ActiveSession {
             session,
-            request,
+            config,
             phase: SessionPhase::Loading,
             stop_requested: false,
             stop_stage: None,
@@ -468,9 +265,10 @@ impl RolloutCoordinator {
         });
         active.stop_requested = true;
         active.phase = SessionPhase::Stopping;
-        self.snapshot.lifecycle.phase = RolloutPhase::Stopping;
-        self.snapshot.lifecycle.message =
-            Some("Stopping after the current control cycle…".to_owned());
+        self.set_lifecycle(
+            RolloutPhase::Stopping,
+            "Stopping after the current control cycle…",
+        );
         self.publish();
         Ok(())
     }
@@ -505,9 +303,10 @@ impl RolloutCoordinator {
             ));
         }
         self.session_mut(session)?.phase = SessionPhase::WarmingUp;
-        self.snapshot.lifecycle.phase = RolloutPhase::WarmingUp;
-        self.snapshot.lifecycle.message =
-            Some("Preparing policy and waiting for cameras…".to_owned());
+        self.set_lifecycle(
+            RolloutPhase::WarmingUp,
+            "Preparing policy and waiting for cameras…",
+        );
         self.publish();
         Ok(true)
     }
@@ -526,8 +325,16 @@ impl RolloutCoordinator {
                 "policy session {session:?} cannot publish warmup metrics outside warmup"
             ));
         }
-        self.snapshot.metrics.last_latency_ms = timing.finite_latency_ms();
-        self.snapshot.metrics.last_model_ms = timing.finite_model_ms();
+        let metrics = self.snapshot.metrics();
+        self.snapshot = self.snapshot.clone().with_metrics(
+            RolloutMetrics::new(
+                metrics.inference_count(),
+                metrics.command_count(),
+                metrics.missed_deadlines(),
+            )
+            .with_latest_timings(timing.finite_latency_ms(), timing.finite_model_ms())
+            .with_latency_summary(metrics.mean_latency_ms(), metrics.max_latency_ms()),
+        );
         self.publish();
         Ok(())
     }
@@ -543,8 +350,10 @@ impl RolloutCoordinator {
             ));
         }
         self.session_mut(session)?.phase = SessionPhase::AwaitingControl;
-        self.snapshot.lifecycle.phase = RolloutPhase::WarmingUp;
-        self.snapshot.lifecycle.message = Some("Waiting for exclusive policy control…".to_owned());
+        self.set_lifecycle(
+            RolloutPhase::WarmingUp,
+            "Waiting for exclusive policy control…",
+        );
         self.publish();
         Ok(true)
     }
@@ -563,17 +372,19 @@ impl RolloutCoordinator {
                 "policy session {session:?} cannot run before control admission"
             ));
         }
-        let duration = active.request.duration_seconds;
+        let duration = active.config.duration_seconds();
         let PolicyCadence {
             sample_hz,
             action_steps,
         } = cadence;
         self.session_mut(session)?.phase = SessionPhase::Running;
-        self.snapshot.lifecycle.phase = RolloutPhase::Running;
-        self.snapshot.lifecycle.message = Some(format!(
+        self.set_lifecycle(
+            RolloutPhase::Running,
+            format!(
             "Controlling the follower at {sample_hz:.1} Hz · {action_steps} actions per observation · {} maximum.",
             duration.rollout_duration_label()
-        ));
+            ),
+        );
         self.publish();
         Ok(true)
     }
@@ -586,7 +397,7 @@ impl RolloutCoordinator {
         let active = self.session(session)?;
         match observation.owner.assess(
             observation.hardware_error,
-            ExpectedPolicyOwner::new(&active.request.robot, session),
+            ExpectedPolicyOwner::new(active.config.robot(), session),
         ) {
             Ok(PolicyOwnership::Retained) => Ok(ControlDecision::Continue),
             Ok(PolicyOwnership::Replaced(message)) => Ok(ControlDecision::Finish(
@@ -617,17 +428,24 @@ impl RolloutCoordinator {
         if !latency_ms.is_finite() || latency_ms < 0.0 || !model_ms.is_finite() || model_ms < 0.0 {
             return Err("rollout latency metrics must be finite and non-negative".to_owned());
         }
-        let metrics = &mut self.snapshot.metrics;
-        let previous = metrics.mean_latency_ms.unwrap_or(0.0) * metrics.inference_count as f64;
-        metrics.inference_count += 1;
-        metrics.last_latency_ms = Some(latency_ms);
-        metrics.last_model_ms = Some(model_ms);
-        metrics.mean_latency_ms = Some((previous + latency_ms) / metrics.inference_count as f64);
-        metrics.max_latency_ms = Some(
-            metrics
-                .max_latency_ms
-                .map_or(latency_ms, |maximum| maximum.max(latency_ms)),
+        let metrics = self.snapshot.metrics();
+        let previous = metrics.mean_latency_ms().unwrap_or(0.0) * metrics.inference_count() as f64;
+        let inference_count = metrics.inference_count() + 1;
+        let metrics = RolloutMetrics::new(
+            inference_count,
+            metrics.command_count(),
+            metrics.missed_deadlines(),
+        )
+        .with_latest_timings(Some(latency_ms), Some(model_ms))
+        .with_latency_summary(
+            Some((previous + latency_ms) / inference_count as f64),
+            Some(
+                metrics
+                    .max_latency_ms()
+                    .map_or(latency_ms, |maximum| maximum.max(latency_ms)),
+            ),
         );
+        self.snapshot = self.snapshot.clone().with_metrics(metrics);
         self.publish();
         Ok(())
     }
@@ -646,8 +464,16 @@ impl RolloutCoordinator {
                 "policy session {session:?} cannot publish commands while not running"
             ));
         }
-        self.snapshot.metrics.command_count += 1;
-        self.snapshot.metrics.missed_deadlines += u64::from(missed_deadline);
+        let metrics = self.snapshot.metrics();
+        self.snapshot = self.snapshot.clone().with_metrics(
+            RolloutMetrics::new(
+                metrics.inference_count(),
+                metrics.command_count() + 1,
+                metrics.missed_deadlines() + u64::from(missed_deadline),
+            )
+            .with_latest_timings(metrics.last_latency_ms(), metrics.last_model_ms())
+            .with_latency_summary(metrics.mean_latency_ms(), metrics.max_latency_ms()),
+        );
         self.publish();
         Ok(())
     }
@@ -666,10 +492,10 @@ impl RolloutCoordinator {
                 "policy session {session:?} cannot publish action warnings while not running"
             ));
         }
-        if self.snapshot.lifecycle.warning.as_deref() == Some(warning.as_str()) {
+        if self.snapshot.warning() == Some(warning.as_str()) {
             return Ok(false);
         }
-        self.snapshot.lifecycle.warning = Some(warning);
+        self.snapshot = self.snapshot.clone().with_warning(Some(warning));
         self.publish();
         Ok(true)
     }
@@ -688,9 +514,10 @@ impl RolloutCoordinator {
         active.cleanup_requested = true;
         active.pending_outcome = Some(outcome);
         active.phase = SessionPhase::Stopping;
-        self.snapshot.lifecycle.phase = RolloutPhase::Stopping;
-        self.snapshot.lifecycle.message =
-            Some("Returning hardware control to a safe hold…".to_owned());
+        self.set_lifecycle(
+            RolloutPhase::Stopping,
+            "Returning hardware control to a safe hold…",
+        );
         self.publish();
         Ok(CleanupTicket {
             session: session.to_owned(),
@@ -716,9 +543,11 @@ impl RolloutCoordinator {
             )
         })?;
         let (phase, message) = outcome.terminal_state(result.cleanup);
-        self.snapshot.lifecycle.phase = phase;
-        self.snapshot.lifecycle.finished_ms = Some(result.finished_ms);
-        self.snapshot.lifecycle.message = Some(message);
+        self.snapshot = self
+            .snapshot
+            .clone()
+            .with_lifecycle(phase, self.snapshot.started_ms())
+            .with_completion(Some(result.finished_ms), Some(message));
         self.publish();
         self.active = None;
         Ok(self.snapshot.clone())
@@ -736,6 +565,14 @@ impl RolloutCoordinator {
             .as_mut()
             .filter(|active| active.session == session)
             .ok_or_else(|| format!("policy session {session:?} is not active"))
+    }
+
+    fn set_lifecycle(&mut self, phase: RolloutPhase, message: impl Into<String>) {
+        self.snapshot = self
+            .snapshot
+            .clone()
+            .with_lifecycle(phase, self.snapshot.started_ms())
+            .with_completion(self.snapshot.finished_ms(), Some(message.into()));
     }
 
     fn publish(&self) {
@@ -797,8 +634,8 @@ mod tests {
         }
     }
 
-    fn request() -> RolloutRequest {
-        RolloutRequest::new("run-1".to_owned(), 10, "follower".to_owned()).with_duration(30)
+    fn config() -> RolloutConfig {
+        RolloutConfig::new("run-1", 10, "follower").with_duration(30)
     }
 
     fn coordinator() -> (Arc<Events>, RolloutCoordinator) {
@@ -820,7 +657,7 @@ mod tests {
                 coordinator.lock().unwrap().admit(RolloutAdmission::new(
                     session.to_owned(),
                     100,
-                    request(),
+                    config(),
                 ))
             })
         });
@@ -836,11 +673,7 @@ mod tests {
     fn stop_before_control_admission_never_becomes_running() {
         let (_events, mut coordinator) = coordinator();
         coordinator
-            .admit(RolloutAdmission::new(
-                "session-1".to_owned(),
-                100,
-                request(),
-            ))
+            .admit(RolloutAdmission::new("session-1".to_owned(), 100, config()))
             .unwrap();
         coordinator.warming_up("session-1").unwrap();
         coordinator.awaiting_control("session-1").unwrap();
@@ -860,11 +693,7 @@ mod tests {
     fn stop_while_loading_is_classified_before_model_execution() {
         let (_events, mut coordinator) = coordinator();
         coordinator
-            .admit(RolloutAdmission::new(
-                "session-1".to_owned(),
-                100,
-                request(),
-            ))
+            .admit(RolloutAdmission::new("session-1".to_owned(), 100, config()))
             .unwrap();
 
         coordinator.request_stop().unwrap();
@@ -880,11 +709,7 @@ mod tests {
     fn snapshot_tracks_semantic_lifecycle_and_metrics() {
         let (events, mut coordinator) = coordinator();
         coordinator
-            .admit(RolloutAdmission::new(
-                "session-1".to_owned(),
-                100,
-                request(),
-            ))
+            .admit(RolloutAdmission::new("session-1".to_owned(), 100, config()))
             .unwrap();
         coordinator.warming_up("session-1").unwrap();
         coordinator
@@ -903,11 +728,11 @@ mod tests {
         coordinator.record_command("session-1", true).unwrap();
 
         assert_eq!(coordinator.snapshot.phase(), RolloutPhase::Running);
-        assert_eq!(coordinator.snapshot.metrics.inference_count, 2);
-        assert_eq!(coordinator.snapshot.metrics.command_count, 1);
-        assert_eq!(coordinator.snapshot.metrics.missed_deadlines, 1);
-        assert_eq!(coordinator.snapshot.metrics.mean_latency_ms, Some(15.0));
-        assert_eq!(coordinator.snapshot.metrics.max_latency_ms, Some(20.0));
+        assert_eq!(coordinator.snapshot.metrics().inference_count(), 2);
+        assert_eq!(coordinator.snapshot.metrics().command_count(), 1);
+        assert_eq!(coordinator.snapshot.metrics().missed_deadlines(), 1);
+        assert_eq!(coordinator.snapshot.metrics().mean_latency_ms(), Some(15.0));
+        assert_eq!(coordinator.snapshot.metrics().max_latency_ms(), Some(20.0));
         assert!(
             events
                 .0
@@ -922,11 +747,7 @@ mod tests {
     fn action_clamp_warning_is_visible_without_stopping_the_rollout() {
         let (events, mut coordinator) = coordinator();
         coordinator
-            .admit(RolloutAdmission::new(
-                "session-1".to_owned(),
-                100,
-                request(),
-            ))
+            .admit(RolloutAdmission::new("session-1".to_owned(), 100, config()))
             .unwrap();
         coordinator.warming_up("session-1").unwrap();
         coordinator.awaiting_control("session-1").unwrap();
@@ -958,11 +779,7 @@ mod tests {
     fn healthy_external_control_loss_is_completion_but_hardware_loss_is_failure() {
         let (_events, mut coordinator) = coordinator();
         coordinator
-            .admit(RolloutAdmission::new(
-                "session-1".to_owned(),
-                100,
-                request(),
-            ))
+            .admit(RolloutAdmission::new("session-1".to_owned(), 100, config()))
             .unwrap();
         coordinator.warming_up("session-1").unwrap();
         coordinator.awaiting_control("session-1").unwrap();
@@ -1002,11 +819,7 @@ mod tests {
     fn executor_failure_is_terminal_only_after_cleanup() {
         let (events, mut coordinator) = coordinator();
         coordinator
-            .admit(RolloutAdmission::new(
-                "session-1".to_owned(),
-                100,
-                request(),
-            ))
+            .admit(RolloutAdmission::new("session-1".to_owned(), 100, config()))
             .unwrap();
         let ticket = coordinator
             .begin_cleanup(
@@ -1045,11 +858,7 @@ mod tests {
     fn cleanup_is_issued_and_consumed_exactly_once() {
         let (_events, mut coordinator) = coordinator();
         coordinator
-            .admit(RolloutAdmission::new(
-                "session-1".to_owned(),
-                100,
-                request(),
-            ))
+            .admit(RolloutAdmission::new("session-1".to_owned(), 100, config()))
             .unwrap();
         let ticket = coordinator
             .begin_cleanup(
@@ -1085,11 +894,7 @@ mod tests {
     fn cleanup_failure_cannot_report_a_successful_rollout() {
         let (_events, mut coordinator) = coordinator();
         coordinator
-            .admit(RolloutAdmission::new(
-                "session-1".to_owned(),
-                100,
-                request(),
-            ))
+            .admit(RolloutAdmission::new("session-1".to_owned(), 100, config()))
             .unwrap();
         let ticket = coordinator
             .begin_cleanup(

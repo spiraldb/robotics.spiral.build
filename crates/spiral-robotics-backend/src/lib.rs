@@ -18,7 +18,9 @@ mod robots;
 mod rollout;
 mod sync;
 mod training;
+mod training_rollout;
 mod workflow;
 
 pub(crate) use error::OperationError;
 pub use http::server::StudioServer;
+pub use training_rollout::{TrainingRolloutCommands, TrainingRolloutFailure};

@@ -16,7 +16,7 @@ use arrow_array::{
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use spiral_robotics_api::training::{
     ActArchitectureConfig, ActAttentionConfig, ActInputConfig, ActLayerCounts, ActTrainingConfig,
-    StartTrainingRequest, TrainingCheckpoint, TrainingMetricPoint, TrainingPolicy, TrainingRun,
+    TrainingCheckpoint, TrainingConfig, TrainingMetricPoint, TrainingPolicy, TrainingRun,
     TrainingRunPhase, TrainingSnapshot, TrainingSource,
 };
 
@@ -523,13 +523,13 @@ impl StoredTrainingRun {
             .with_logs(self.history.logs.clone())
     }
 
-    fn restored_config(&self) -> StartTrainingRequest {
+    fn restored_config(&self) -> TrainingConfig {
         // Both policy enums have the single ACT variant today; the match keeps
         // a future storage variant from silently restoring as the default.
         match self.selection.policy {
             StoredTrainingPolicy::Act => {}
         }
-        let mut config = StartTrainingRequest::for_dataset(
+        let mut config = TrainingConfig::for_dataset(
             &self.identity.run_name,
             &self.selection.dataset_id,
             &self.selection.query_sql,
@@ -1245,7 +1245,7 @@ mod tests {
     }
 
     fn populated_run() -> TrainingRun {
-        let mut config = StartTrainingRequest::for_dataset("act-run", "pick-place", "SELECT 1");
+        let mut config = TrainingConfig::for_dataset("act-run", "pick-place", "SELECT 1");
         config.set_device("cpu");
         config.set_state_column("observation.state");
         config.set_action_column("action");
@@ -1360,7 +1360,7 @@ mod tests {
     /// added to the contract without a mapping here fails this test.
     #[test]
     fn a_populated_snapshot_round_trips_through_storage_rows() {
-        let bare = TrainingRun::starting("train-2", StartTrainingRequest::default())
+        let bare = TrainingRun::starting("train-2", TrainingConfig::default())
             .with_source(TrainingSource::default())
             .with_started_ms(1_650_000);
         let snapshot =
@@ -1390,7 +1390,7 @@ mod tests {
     /// live stream showed, and no measurement is fabricated.
     #[test]
     fn a_diverged_metric_round_trips_as_nan_instead_of_becoming_a_measurement() {
-        let run = TrainingRun::starting("train-nan", StartTrainingRequest::default())
+        let run = TrainingRun::starting("train-nan", TrainingConfig::default())
             .with_source(TrainingSource::default())
             .with_phase(TrainingRunPhase::Failed, 1)
             .with_started_ms(5)

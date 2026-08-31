@@ -6,7 +6,7 @@
 
 use crate::OperationError;
 use spiral_robotics_api::training::{
-    StartTrainingRequest, TrainingReadiness, TrainingRun, TrainingRunPhase, TrainingSource,
+    TrainingConfig, TrainingReadiness, TrainingRun, TrainingRunPhase, TrainingSource,
 };
 
 const STARTING_MESSAGE: &str = "Opening SpiralDB and starting the remote training job…";
@@ -21,7 +21,7 @@ pub(crate) struct TrainingRunIdentity {
 /// Immutable input handed to the remote-job adapter after admission.
 pub(crate) struct TrainingLaunch {
     run_id: String,
-    command: StartTrainingRequest,
+    command: TrainingConfig,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -32,7 +32,7 @@ pub(crate) struct RunStateChange {
 }
 
 impl TrainingLaunch {
-    pub(crate) fn new(run_id: impl Into<String>, command: StartTrainingRequest) -> Self {
+    pub(crate) fn new(run_id: impl Into<String>, command: TrainingConfig) -> Self {
         Self {
             run_id: run_id.into(),
             command,
@@ -43,7 +43,7 @@ impl TrainingLaunch {
         &self.run_id
     }
 
-    pub(crate) fn into_parts(self) -> (String, StartTrainingRequest) {
+    pub(crate) fn into_parts(self) -> (String, TrainingConfig) {
         (self.run_id, self.command)
     }
 }
@@ -121,17 +121,15 @@ pub(crate) trait TrainingRunPort: Send + Sync {
 pub(crate) trait TrainingCoordinatorPort: TrainingRunPort {
     async fn refresh_training_readiness(&self) -> TrainingReadiness;
     fn resolve_training_source(&self, dataset_id: &str) -> Result<TrainingSource, OperationError>;
-    async fn validate_training_query(
-        &self,
-        command: &StartTrainingRequest,
-    ) -> Result<(), OperationError>;
+    async fn validate_training_query(&self, command: &TrainingConfig)
+    -> Result<(), OperationError>;
     fn next_training_identity(&self) -> TrainingRunIdentity;
     async fn admit_training_run(&self, run: TrainingRun) -> Result<(), OperationError>;
     fn launch_training_runtime(&self, launch: TrainingLaunch) -> Result<(), OperationError>;
 
     async fn coordinate_training_start(
         &self,
-        command: StartTrainingRequest,
+        command: TrainingConfig,
     ) -> Result<TrainingRun, OperationError> {
         let readiness = self.refresh_training_readiness().await;
         if !readiness.ready() {
@@ -233,7 +231,7 @@ mod tests {
         }
         async fn validate_training_query(
             &self,
-            _command: &StartTrainingRequest,
+            _command: &TrainingConfig,
         ) -> Result<(), OperationError> {
             self.push("validate");
             if self.fail == Some("validate") {
@@ -261,19 +259,18 @@ mod tests {
         }
     }
 
-    fn command() -> StartTrainingRequest {
-        let mut request =
-            StartTrainingRequest::for_dataset("run", "dataset", "SELECT * FROM episodes");
-        request.set_state_column("state");
-        request.set_action_column("action");
-        request.set_device("cpu");
-        request.set_steps(10);
-        request.set_batch_size(1);
-        request.set_validation_split(0.1);
-        request.set_learning_rate(0.001);
-        request.set_checkpoint_every(5);
-        request.set_chunk_size(4);
-        *request.act_mut() = spiral_robotics_api::training::ActTrainingConfig::new(
+    fn command() -> TrainingConfig {
+        let mut config = TrainingConfig::for_dataset("run", "dataset", "SELECT * FROM episodes");
+        config.set_state_column("state");
+        config.set_action_column("action");
+        config.set_device("cpu");
+        config.set_steps(10);
+        config.set_batch_size(1);
+        config.set_validation_split(0.1);
+        config.set_learning_rate(0.001);
+        config.set_checkpoint_every(5);
+        config.set_chunk_size(4);
+        *config.act_mut() = spiral_robotics_api::training::ActTrainingConfig::new(
             spiral_robotics_api::training::ActInputConfig::new(
                 vec!["front".to_owned()],
                 (32, 32),
@@ -286,7 +283,7 @@ mod tests {
             ),
             spiral_robotics_api::training::ActAttentionConfig::new(4, 64, 1.0),
         );
-        request
+        config
     }
 
     #[tokio::test]

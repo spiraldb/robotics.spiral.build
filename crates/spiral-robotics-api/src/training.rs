@@ -258,12 +258,6 @@ impl ActTrainingConfig {
             attention,
         }
     }
-
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn with_camera_streams(mut self, camera_streams: Vec<String>) -> Self {
-        self.input.camera_streams = camera_streams;
-        self
-    }
 }
 
 /// Authoritative lifecycle of one backend-owned native training run.
@@ -298,7 +292,7 @@ impl TrainingRunPhase {
 
 /// Everything needed to reproduce one run. Spiral is the only sample source.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct StartTrainingRequest {
+pub struct TrainingConfig {
     #[serde(flatten)]
     selection: TrainingDataSelection,
     #[serde(flatten)]
@@ -334,7 +328,7 @@ pub(crate) struct TrainingOptimizationConfig {
     /// Fraction of covered episodes held out from optimizer updates.
     ///
     /// Missing values deserialize to zero so historical run records keep their
-    /// original no-validation semantics. Newly created requests default to 10%.
+    /// original no-validation semantics. Newly created configurations default to 10%.
     #[serde(default)]
     validation_split: f64,
     #[serde(default = "TrainingOptimizationConfig::default_learning_rate")]
@@ -347,7 +341,7 @@ pub(crate) struct TrainingOptimizationConfig {
     seed: u64,
 }
 
-impl Default for StartTrainingRequest {
+impl Default for TrainingConfig {
     fn default() -> Self {
         Self {
             selection: TrainingDataSelection {
@@ -373,7 +367,7 @@ impl Default for StartTrainingRequest {
     }
 }
 
-impl StartTrainingRequest {
+impl TrainingConfig {
     pub fn for_dataset(
         run_name: impl Into<String>,
         dataset_id: impl Into<String>,
@@ -931,7 +925,7 @@ pub struct TrainingRun {
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 struct TrainingRunIdentity {
     id: String,
-    config: StartTrainingRequest,
+    config: TrainingConfig,
     #[serde(default)]
     source: TrainingSource,
 }
@@ -953,7 +947,7 @@ struct TrainingRunHistory {
 }
 
 impl TrainingRun {
-    pub fn starting(id: impl Into<String>, config: StartTrainingRequest) -> Self {
+    pub fn starting(id: impl Into<String>, config: TrainingConfig) -> Self {
         Self {
             identity: TrainingRunIdentity {
                 id: id.into(),
@@ -1011,7 +1005,7 @@ impl TrainingRun {
     pub fn id(&self) -> &str {
         &self.identity.id
     }
-    pub const fn config(&self) -> &StartTrainingRequest {
+    pub const fn config(&self) -> &TrainingConfig {
         &self.identity.config
     }
     pub const fn phase(&self) -> TrainingRunPhase {
@@ -1092,7 +1086,7 @@ pub enum TrainingUpdate {
     },
     RunConfigured {
         run_id: String,
-        config: Box<StartTrainingRequest>,
+        config: Box<TrainingConfig>,
     },
     RunState {
         run_id: String,

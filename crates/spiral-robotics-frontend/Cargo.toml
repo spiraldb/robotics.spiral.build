@@ -10,11 +10,13 @@ workspace = true
 
 [features]
 default = []
+server = ["dioxus/server", "dep:spiral-robotics-backend"]
 web = ["charming/wasm", "dioxus/web"]
 
 [dependencies]
 charming = { version = "0.6.0", default-features = false }
 spiral-robotics-api.workspace = true
+spiral-robotics-backend = { workspace = true, optional = true }
 spiral-robotics-viewport.workspace = true
 dioxus = { workspace = true, features = [
     "asset",

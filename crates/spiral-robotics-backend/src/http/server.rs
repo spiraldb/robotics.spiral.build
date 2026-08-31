@@ -16,6 +16,7 @@ use crate::robots::workspace::RobotWorkspace;
 use crate::rollout::manager::{RolloutHardwareResources, RolloutManager};
 use crate::training::manager::TrainingManager;
 use crate::training::remote::ConfiguredHttpTrainingBackend;
+use crate::training_rollout::TrainingRolloutCommands;
 use crate::workflow::agent::WorkflowAgentManager;
 use crate::workflow::manager::WorkflowManager;
 use clap::Parser;
@@ -348,6 +349,8 @@ impl ServerStartup {
         let activities =
             AppActivityManagers::new(training.clone(), rollout.clone(), workflow_managers);
         let platform = AppPlatformResources::new(connection, preferences, BootstrapState::new());
+        let training_rollout_commands =
+            TrainingRolloutCommands::new(training.clone(), rollout.clone());
         let state = AppState::new(
             catalog,
             robotics,
@@ -367,8 +370,11 @@ impl ServerStartup {
         );
         let video_monitor = tokio::spawn(state.clone().monitor_video_recording());
         let cleanup_state = state.clone();
+        // Dioxus 0.7.10's server-only extractors read the request context;
+        // ServeConfig context providers are installed only in the SSR VirtualDom.
         let app = dioxus::server::router(app)
             .nest("/api", state.api_router())
+            .layer(axum::Extension(training_rollout_commands))
             .layer(tower_http::trace::TraceLayer::new_for_http());
 
         // Both the server and this task observe the same edge. The server begins

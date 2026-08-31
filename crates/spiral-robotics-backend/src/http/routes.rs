@@ -8,7 +8,6 @@
 mod data;
 mod devices;
 mod recordings;
-mod training_rollout;
 mod workflow;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -22,7 +21,7 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{get, post};
 use axum::{Json, body::Body};
 use bytes::{BufMut, Bytes, BytesMut};
 use futures_util::{Stream, StreamExt};
@@ -41,7 +40,6 @@ use spiral_robotics_api::robots::{
     IdentifyPortRequest, IdentifyPortResponse, ModeSelection, PortSettings, RobotSummary,
     SerialPortSummary, UpdateRobotRequest,
 };
-use spiral_robotics_api::rollout::{RolloutSnapshot, StartRolloutRequest};
 use spiral_robotics_api::settings::{
     ConnectionTestResponse, DataSettings, SpiralSettings as ContractSpiralSettings,
     UpdateDataSettingsRequest, VideoSettings,
@@ -49,7 +47,6 @@ use spiral_robotics_api::settings::{
 use spiral_robotics_api::status::{
     ApiError, BackendReadiness, BackendReadinessState, StudioSnapshot,
 };
-use spiral_robotics_api::training::{StartTrainingRequest, TrainingRun};
 use spiral_robotics_hardware::{Calibration, MotorSpec, SerialPortCatalog};
 
 use crate::OperationError;
@@ -100,15 +97,7 @@ use crate::robots::service::{
 };
 use crate::robots::workspace::{RobotRecord, RobotWorkspace, WorkspaceError};
 use crate::rollout::manager::RolloutManager;
-use crate::rollout::service::{
-    RolloutActions, RolloutPhase as CapabilityRolloutPhase, RolloutRequest, RolloutSessionPort,
-    RolloutSnapshot as CapabilityRolloutSnapshot,
-};
 use crate::training::manager::TrainingManager;
-use crate::training::service::{
-    DeleteTrainingRunCommand, TrainingActions, TrainingCheckpointStatus, TrainingPort,
-    TrainingRunActivity, TrainingRunStatus,
-};
 use crate::workflow::agent::WorkflowAgentManager;
 use crate::workflow::manager::WorkflowManager;
 use spiral_robotics_hardware::{HardwareHandle, HardwareState, RobotSpec};
@@ -609,7 +598,6 @@ impl AppState {
             .merge(Self::data_catalog_router())
             .merge(Self::device_catalog_router())
             .merge(Self::recording_router())
-            .merge(Self::training_rollout_router())
             .merge(Self::workflow_router())
             .route_layer(middleware::from_fn_with_state(
                 self.clone(),

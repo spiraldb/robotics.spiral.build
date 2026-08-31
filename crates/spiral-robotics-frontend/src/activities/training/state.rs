@@ -7,12 +7,11 @@
 use std::collections::BTreeSet;
 
 use dioxus::prelude::*;
-use gloo_net::http::Method;
-use spiral_robotics_api::training::{StartTrainingRequest, TrainingRun};
+use spiral_robotics_api::training::TrainingConfig;
 
 use crate::activities::data::catalog as spiral;
 use crate::activities::data::sql_draft::GeneratedSqlDraft;
-use crate::client::http as api;
+use crate::client::server_fns;
 use crate::shell::notifications::MessageSource;
 use crate::shell::state::Studio;
 
@@ -25,7 +24,7 @@ pub(crate) struct TrainingController {
 
 #[derive(Clone, Copy)]
 struct TrainingDraftSignals {
-    request: Signal<StartTrainingRequest>,
+    config: Signal<TrainingConfig>,
     generated_sql: Signal<String>,
     automatic_run_name: Signal<bool>,
 }
@@ -63,12 +62,12 @@ impl TrainingController {
     pub(crate) fn use_controller(namespace: &str, dataset_id: &str) -> Self {
         let initial_sql =
             spiral::ManagedTable::Datasets.training_sql_for_dataset(namespace, dataset_id);
-        let request_sql = initial_sql.clone();
-        let request_dataset = dataset_id.to_owned();
+        let config_sql = initial_sql.clone();
+        let config_dataset = dataset_id.to_owned();
         let controller = Self {
             draft: TrainingDraftSignals {
-                request: use_signal(move || {
-                    StartTrainingRequest::for_dataset("act-run-001", request_dataset, request_sql)
+                config: use_signal(move || {
+                    TrainingConfig::for_dataset("act-run-001", config_dataset, config_sql)
                 }),
                 generated_sql: use_signal(move || initial_sql),
                 automatic_run_name: use_signal(|| true),
@@ -101,40 +100,37 @@ impl TrainingController {
         let previous = self.draft.generated_sql.peek().to_owned();
         let next = spiral::ManagedTable::Datasets
             .training_sql_for_dataset(dataset.namespace, dataset.dataset_id);
-        self.draft
-            .request
-            .write()
-            .set_dataset_id(dataset.dataset_id);
+        self.draft.config.write().set_dataset_id(dataset.dataset_id);
         if previous == next {
             return;
         }
         {
-            let mut request = self.draft.request.write();
-            let mut sql = request.sql().to_owned();
+            let mut config = self.draft.config.write();
+            let mut sql = config.sql().to_owned();
             if sql.rebase_generated(&previous, &next) {
-                request.set_sql(sql);
+                config.set_sql(sql);
             }
         }
         self.draft.generated_sql.set(next);
     }
 
-    pub(crate) fn request(&self) -> StartTrainingRequest {
-        self.draft.request.read().to_owned()
+    pub(crate) fn config(&self) -> TrainingConfig {
+        self.draft.config.read().to_owned()
     }
 
-    pub(crate) fn edit_request(mut self, edit: impl FnOnce(&mut StartTrainingRequest)) {
-        edit(&mut self.draft.request.write());
+    pub(crate) fn edit_config(mut self, edit: impl FnOnce(&mut TrainingConfig)) {
+        edit(&mut self.draft.config.write());
     }
 
     pub(crate) fn set_run_name(mut self, value: String) {
         self.draft.automatic_run_name.set(false);
-        self.draft.request.write().set_run_name(value);
+        self.draft.config.write().set_run_name(value);
     }
 
     pub(crate) fn sync_automatic_run_name(mut self, existing_names: &[String]) {
         if self.draft.automatic_run_name.peek().to_owned() {
             self.draft
-                .request
+                .config
                 .write()
                 .set_run_name(existing_names.next_default_run_name());
         }
@@ -187,19 +183,16 @@ impl TrainingController {
             return;
         }
         self.commands.starting.set(true);
-        let request = (self.draft.request)();
+        let config = (self.draft.config)();
         let mut starting = self.commands.starting;
         let mut selected_run = self.history.selected_run;
         let mut opened_runs = self.history.opened_runs;
-        let mut request_signal = self.draft.request;
+        let mut config_signal = self.draft.config;
         let mut automatic_run_name = self.draft.automatic_run_name;
         spawn(async move {
-            let result = api::Http::send_json::<_, TrainingRun>(
-                Method::POST,
-                "/api/training/runs",
-                Some(&request),
-            )
-            .await;
+            let result = server_fns::start_training_run(config)
+                .await
+                .map_err(|error| error.to_string());
             starting.set(false);
             match result {
                 Ok(run) => {
@@ -216,7 +209,7 @@ impl TrainingController {
                     {
                         existing_names.push(run.config().run_name().to_owned());
                     }
-                    request_signal
+                    config_signal
                         .write()
                         .set_run_name(existing_names.next_default_run_name());
                     automatic_run_name.set(true);
@@ -237,7 +230,9 @@ impl TrainingController {
         self.commands.stopping.set(Some(id.clone()));
         let mut stopping = self.commands.stopping;
         studio.run_utility("Stop requested.", async move {
-            let result = api::Http::post(&format!("/api/training/runs/{id}/stop")).await;
+            let result = server_fns::stop_training_run(id)
+                .await
+                .map_err(|error| error.to_string());
             stopping.set(None);
             result
         });
@@ -248,13 +243,15 @@ impl TrainingController {
             return;
         }
         self.commands.deleting.set(Some(run.id.clone()));
-        let path = format!("/api/training/runs/{}", run.id);
         let deleted_id = run.id.clone();
+        let run_id = run.id.clone();
         let mut deleting = self.commands.deleting;
         let mut selected_run = self.history.selected_run;
         let mut opened_runs = self.history.opened_runs;
         studio.run_utility(format!("Deleted run {}.", run.name), async move {
-            let result = api::Http::send::<()>(Method::DELETE, &path, None).await;
+            let result = server_fns::delete_training_run(run_id)
+                .await
+                .map_err(|error| error.to_string());
             deleting.set(None);
             if result.is_ok() {
                 let selected = selected_run.peek().to_owned();

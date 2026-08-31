@@ -3,12 +3,13 @@
 use std::collections::BTreeSet;
 
 use spiral_robotics_api::identity::DatasetId;
-use spiral_robotics_api::rollout::MAX_ROLLOUT_DURATION_SECONDS;
+use spiral_robotics_api::rollout::{MAX_ROLLOUT_DURATION_SECONDS, RolloutConfig};
 use spiral_robotics_api::sql::{ReadOnlyQuery, ReadOnlyQueryMode, UnquotedSqlIdentifier};
+use spiral_robotics_api::training::{TrainingConfig, TrainingRun, TrainingSnapshot};
 
 use crate::OperationError;
-use crate::rollout::service::{MIN_ROLLOUT_DURATION_SECONDS, RolloutDuration, RolloutRequest};
-use spiral_robotics_api::training::{StartTrainingRequest, TrainingRun as ContractTrainingRun};
+use crate::rollout::service::{MIN_ROLLOUT_DURATION_SECONDS, RolloutDuration};
+use crate::training::manager::TrainingManager;
 
 /// One image batch expanded to f32 model inputs must leave enough memory for
 /// model activations, optimizer state, and the hardware-control process itself.
@@ -27,7 +28,7 @@ const ACT_TRAINING_BYTES_PER_TRANSFORMER_PARAMETER: usize = 5 * std::mem::size_o
 struct ActTrainingResourceEstimate(Option<usize>);
 
 impl ActTrainingResourceEstimate {
-    fn for_command(command: &StartTrainingRequest, runtime_image_bytes: usize) -> Self {
+    fn for_command(command: &TrainingConfig, runtime_image_bytes: usize) -> Self {
         Self(command.estimated_act_resource_bytes(runtime_image_bytes))
     }
 
@@ -44,18 +45,6 @@ impl ActTrainingResourceEstimate {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct TrainingCheckpointStatus {
-    step: u64,
-    inference_ready: bool,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct TrainingRunStatus {
-    active: bool,
-    checkpoints: Vec<TrainingCheckpointStatus>,
-}
-
 /// Other live work that can still depend on a completed run's artifacts.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct TrainingRunActivity {
@@ -65,24 +54,6 @@ pub(crate) struct TrainingRunActivity {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DeleteTrainingRunCommand {
     run_id: String,
-}
-
-impl TrainingCheckpointStatus {
-    pub(crate) const fn new(step: u64, inference_ready: bool) -> Self {
-        Self {
-            step,
-            inference_ready,
-        }
-    }
-}
-
-impl TrainingRunStatus {
-    pub(crate) fn new(active: bool, checkpoints: Vec<TrainingCheckpointStatus>) -> Self {
-        Self {
-            active,
-            checkpoints,
-        }
-    }
 }
 
 impl TrainingRunActivity {
@@ -114,37 +85,30 @@ impl DeleteTrainingRunCommand {
     }
 }
 
-pub(crate) trait TrainingPort: Send + Sync {
-    fn training_run_status(&self, run_id: &str) -> Option<TrainingRunStatus>;
-
-    async fn start_training(
-        &self,
-        command: StartTrainingRequest,
-    ) -> Result<ContractTrainingRun, OperationError>;
-
-    async fn stop_training(&self, run_id: &str) -> Result<(), OperationError>;
-
-    async fn delete_training(&self, run_id: String) -> Result<(), OperationError>;
+pub(crate) struct TrainingActions<'a> {
+    training: &'a TrainingManager,
 }
 
-pub(crate) struct TrainingActions<'a, P: ?Sized> {
-    port: &'a P,
-}
-
-impl<'a, P: TrainingPort + ?Sized> TrainingActions<'a, P> {
-    pub(crate) fn new(port: &'a P) -> Self {
-        Self { port }
+impl<'a> TrainingActions<'a> {
+    pub(crate) fn new(training: &'a TrainingManager) -> Self {
+        Self { training }
     }
 
     pub(crate) async fn start(
         &self,
-        command: StartTrainingRequest,
-    ) -> Result<ContractTrainingRun, OperationError> {
-        self.port.start_training(command.validated()?).await
+        command: TrainingConfig,
+    ) -> Result<TrainingRun, OperationError> {
+        self.training
+            .start(command.validated()?)
+            .await
+            .map_err(OperationError::conflict)
     }
 
     pub(crate) async fn stop(&self, run_id: &str) -> Result<(), OperationError> {
-        self.port.stop_training(run_id).await
+        self.training
+            .stop(run_id)
+            .await
+            .map_err(OperationError::conflict)
     }
 
     pub(crate) async fn delete(
@@ -152,13 +116,33 @@ impl<'a, P: TrainingPort + ?Sized> TrainingActions<'a, P> {
         activity: TrainingRunActivity,
         command: DeleteTrainingRunCommand,
     ) -> Result<(), OperationError> {
+        let snapshot = self.training.snapshot();
+        let run_id = Self::admitted_deletion(&snapshot, activity, command)?;
+        self.training
+            .delete(&run_id)
+            .await
+            .map_err(OperationError::External)
+    }
+
+    pub(crate) fn admit_rollout(
+        &self,
+        command: RolloutConfig,
+    ) -> Result<RolloutConfig, OperationError> {
+        Self::admitted_rollout(&self.training.snapshot(), command)
+    }
+
+    fn admitted_deletion(
+        snapshot: &TrainingSnapshot,
+        activity: TrainingRunActivity,
+        command: DeleteTrainingRunCommand,
+    ) -> Result<String, OperationError> {
         let run_id = command.validated_run_id()?;
-        let Some(run) = self.port.training_run_status(&run_id) else {
+        let Some(run) = snapshot.runs().iter().find(|run| run.id() == run_id) else {
             return Err(OperationError::NotFound(format!(
                 "training run {run_id:?} is no longer available"
             )));
         };
-        if run.active {
+        if run.phase().active() {
             return Err(OperationError::Conflict(format!(
                 "training run {run_id:?} is still active; stop it before deleting it"
             )));
@@ -168,26 +152,30 @@ impl<'a, P: TrainingPort + ?Sized> TrainingActions<'a, P> {
                 "training run {run_id:?} is in use by Rollout; stop Rollout before deleting it"
             )));
         }
-        self.port.delete_training(run_id).await
+        Ok(run_id)
     }
 
-    pub(crate) fn admit_rollout(
-        &self,
-        command: RolloutRequest,
-    ) -> Result<RolloutRequest, OperationError> {
-        let command = command.validated()?;
-        let Some(run) = self.port.training_run_status(command.run_id()) else {
+    fn admitted_rollout(
+        snapshot: &TrainingSnapshot,
+        command: RolloutConfig,
+    ) -> Result<RolloutConfig, OperationError> {
+        let command = Self::validated_rollout(command)?;
+        let Some(run) = snapshot
+            .runs()
+            .iter()
+            .find(|run| run.id() == command.run_id())
+        else {
             return Err(OperationError::invalid_input(
                 "the selected training run is no longer available",
             ));
         };
-        if run.active {
+        if run.phase().active() {
             return Err(OperationError::invalid_input(
                 "stop or finish training before starting a rollout",
             ));
         }
-        if !run.checkpoints.iter().any(|checkpoint| {
-            checkpoint.step == command.checkpoint_step() && checkpoint.inference_ready
+        if !run.checkpoints().iter().any(|checkpoint| {
+            checkpoint.step() == command.checkpoint_step() && checkpoint.inference_ready()
         }) {
             return Err(OperationError::invalid_input(
                 "the selected checkpoint is no longer available",
@@ -195,20 +183,46 @@ impl<'a, P: TrainingPort + ?Sized> TrainingActions<'a, P> {
         }
         Ok(command)
     }
+
+    fn validated_rollout(command: RolloutConfig) -> Result<RolloutConfig, OperationError> {
+        let command = RolloutConfig::new(
+            command.run_id().trim().to_owned(),
+            command.checkpoint_step(),
+            command.robot().trim().to_owned(),
+        )
+        .with_duration(command.duration_seconds());
+        if command.run_id().is_empty() || command.robot().is_empty() {
+            return Err(OperationError::invalid_input(
+                "rollout requires a training run and target robot",
+            ));
+        }
+        if command.checkpoint_step() == 0 {
+            return Err(OperationError::invalid_input(
+                "checkpoint step must be greater than zero",
+            ));
+        }
+        if RolloutDuration::new(command.duration_seconds()).is_none() {
+            return Err(OperationError::invalid_input(format!(
+                "rollout duration_seconds must be between {} and {}",
+                MIN_ROLLOUT_DURATION_SECONDS, MAX_ROLLOUT_DURATION_SECONDS,
+            )));
+        }
+        Ok(command)
+    }
 }
 
-/// Admission rules for a training request.
+/// Admission rules for a training configuration.
 ///
-/// The wire type already carries every value an operator can set; these rules
-/// decide whether that combination may start a run. Keeping them on the request
-/// means no second copy of the request has to exist to hold them.
+/// The configuration already carries every value an operator can set; these
+/// rules decide whether that combination may start a run. Keeping them on the
+/// configuration means no second copy has to exist to hold them.
 trait StartTrainingAdmission: Sized {
     fn normalize_identifiers(&mut self);
     fn estimated_act_resource_bytes(&self, runtime_image_bytes: usize) -> Option<usize>;
     fn validated(self) -> Result<Self, OperationError>;
 }
 
-impl StartTrainingAdmission for StartTrainingRequest {
+impl StartTrainingAdmission for TrainingConfig {
     fn normalize_identifiers(&mut self) {
         let run_name = self.run_name().trim().to_owned();
         self.set_run_name(run_name);
@@ -455,103 +469,31 @@ impl StartTrainingAdmission for StartTrainingRequest {
     }
 }
 
-impl RolloutRequest {
-    fn validated(self) -> Result<Self, OperationError> {
-        let command = Self::new(
-            self.run_id().trim().to_owned(),
-            self.checkpoint_step(),
-            self.robot().trim().to_owned(),
-        )
-        .with_duration(self.duration_seconds());
-        if command.run_id().is_empty() || command.robot().is_empty() {
-            return Err(OperationError::invalid_input(
-                "rollout requires a training run and target robot",
-            ));
-        }
-        if command.checkpoint_step() == 0 {
-            return Err(OperationError::invalid_input(
-                "checkpoint step must be greater than zero",
-            ));
-        }
-        if RolloutDuration::new(command.duration_seconds()).is_none() {
-            return Err(OperationError::invalid_input(format!(
-                "rollout duration_seconds must be between {} and {}",
-                MIN_ROLLOUT_DURATION_SECONDS, MAX_ROLLOUT_DURATION_SECONDS,
-            )));
-        }
-        Ok(command)
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
     use super::*;
+    use spiral_robotics_api::training::{TrainingCheckpoint, TrainingRunPhase};
 
-    struct FakeTraining {
-        run: Option<TrainingRunStatus>,
-        starts: Mutex<Vec<StartTrainingRequest>>,
-        stops: Mutex<Vec<String>>,
-        deletes: Mutex<Vec<String>>,
+    fn rollout_command() -> RolloutConfig {
+        RolloutConfig::new("run-1", 20_000, "follower").with_duration(30)
     }
 
-    impl TrainingPort for FakeTraining {
-        fn training_run_status(&self, _: &str) -> Option<TrainingRunStatus> {
-            self.run.clone()
-        }
-
-        async fn start_training(
-            &self,
-            command: StartTrainingRequest,
-        ) -> Result<ContractTrainingRun, OperationError> {
-            self.starts.lock().unwrap().push(command.clone());
-            Ok(training_run(command))
-        }
-
-        async fn stop_training(&self, run_id: &str) -> Result<(), OperationError> {
-            self.stops.lock().unwrap().push(run_id.to_owned());
-            Ok(())
-        }
-
-        async fn delete_training(&self, run_id: String) -> Result<(), OperationError> {
-            self.deletes.lock().unwrap().push(run_id);
-            Ok(())
-        }
-    }
-
-    fn training(run: Option<TrainingRunStatus>) -> FakeTraining {
-        FakeTraining {
-            run,
-            starts: Mutex::new(Vec::new()),
-            stops: Mutex::new(Vec::new()),
-            deletes: Mutex::new(Vec::new()),
-        }
-    }
-
-    fn rollout_command() -> RolloutRequest {
-        RolloutRequest::new("run-1".to_owned(), 20_000, "follower".to_owned()).with_duration(30)
-    }
-
-    fn training_command() -> StartTrainingRequest {
-        let mut request = StartTrainingRequest::for_dataset(
-            " act-run ",
-            " demo ",
-            "SELECT state, action FROM samples",
-        );
-        request.set_state_column(" state ");
-        request.set_action_column(" action ");
-        request.set_device(" CPU ");
-        request.set_steps(1_000);
-        request.set_batch_size(8);
-        request.set_validation_split(0.1);
-        request.set_learning_rate(1.0e-5);
-        request.set_checkpoint_every(100);
-        request.set_chunk_size(16);
-        request
+    fn training_command() -> TrainingConfig {
+        let mut config =
+            TrainingConfig::for_dataset(" act-run ", " demo ", "SELECT state, action FROM samples");
+        config.set_state_column(" state ");
+        config.set_action_column(" action ");
+        config.set_device(" CPU ");
+        config.set_steps(1_000);
+        config.set_batch_size(8);
+        config.set_validation_split(0.1);
+        config.set_learning_rate(1.0e-5);
+        config.set_checkpoint_every(100);
+        config.set_chunk_size(16);
+        config
             .act_mut()
             .set_camera_streams(vec!["wrist".to_owned()]);
-        request
+        config
     }
 
     fn act_config(
@@ -569,44 +511,30 @@ mod tests {
         )
     }
 
-    fn training_run(config: StartTrainingRequest) -> ContractTrainingRun {
-        ContractTrainingRun::starting("run", config)
-            .with_source(spiral_robotics_api::training::TrainingSource::default())
-            .with_started_ms(1)
+    fn snapshot(run: Option<TrainingRun>) -> TrainingSnapshot {
+        TrainingSnapshot::new(Default::default(), run.into_iter().collect())
     }
 
-    #[tokio::test]
-    async fn training_validation_is_pure_and_normalizes_identifiers_before_delegating() {
-        let training = training(None);
-        TrainingActions::new(&training)
-            .start(training_command())
-            .await
-            .unwrap();
-        let starts = training.starts.lock().unwrap();
-        assert_eq!(starts[0].run_name(), "act-run");
-        assert_eq!(starts[0].dataset_id(), "demo");
-        assert_eq!(starts[0].state_column(), "state");
-        assert_eq!(starts[0].action_column(), "action");
-        assert_eq!(starts[0].device(), "CPU");
+    #[test]
+    fn training_validation_normalizes_identifiers() {
+        let command = training_command().validated().unwrap();
+        assert_eq!(command.run_name(), "act-run");
+        assert_eq!(command.dataset_id(), "demo");
+        assert_eq!(command.state_column(), "state");
+        assert_eq!(command.action_column(), "action");
+        assert_eq!(command.device(), "CPU");
     }
 
-    #[tokio::test]
-    async fn training_accepts_runtime_advertised_cuda_device_identifiers() {
+    #[test]
+    fn training_accepts_runtime_advertised_cuda_device_identifiers() {
         let mut command = training_command();
         command.set_device(" cuda:0 ");
 
-        let training = training(None);
-        TrainingActions::new(&training)
-            .start(command)
-            .await
-            .unwrap();
-
-        let starts = training.starts.lock().unwrap();
-        assert_eq!(starts[0].device(), "cuda:0");
+        assert_eq!(command.validated().unwrap().device(), "cuda:0");
     }
 
-    #[tokio::test]
-    async fn invalid_training_never_reaches_the_runtime_adapter() {
+    #[test]
+    fn invalid_training_is_rejected_by_admission() {
         let mut commands = Vec::new();
         let mut mutating = training_command();
         mutating.set_sql("DELETE FROM samples");
@@ -631,18 +559,16 @@ mod tests {
         invalid_validation_split.set_validation_split(0.75);
         commands.push(invalid_validation_split);
 
-        let training = training(None);
         for command in commands {
             assert!(matches!(
-                TrainingActions::new(&training).start(command).await,
+                command.validated(),
                 Err(OperationError::InvalidInput(_))
             ));
         }
-        assert!(training.starts.lock().unwrap().is_empty());
     }
 
-    #[tokio::test]
-    async fn expanded_image_batch_budget_is_checked_at_the_exact_boundary() {
+    #[test]
+    fn expanded_image_batch_budget_is_checked_at_the_exact_boundary() {
         let mut boundary = training_command();
         boundary.set_batch_size(85);
         boundary.set_chunk_size(1);
@@ -652,20 +578,11 @@ mod tests {
         boundary.act_mut().set_image_width(512);
         boundary.act_mut().set_image_height(512);
         // 85 × 1 × 3 × 512 × 512 × 4 = 255 MiB, under the 256 MiB cap.
-        let at_boundary = training(None);
-        TrainingActions::new(&at_boundary)
-            .start(boundary.clone())
-            .await
-            .unwrap();
+        boundary.clone().validated().unwrap();
 
         boundary.set_batch_size(86);
-        let over_budget = training(None);
-        let error = TrainingActions::new(&over_budget)
-            .start(boundary)
-            .await
-            .unwrap_err();
+        let error = boundary.validated().unwrap_err();
         assert!(error.message().contains("expanded f32 image batch"));
-        assert!(over_budget.starts.lock().unwrap().is_empty());
 
         let mut automatic = training_command();
         automatic.set_batch_size(11);
@@ -673,16 +590,12 @@ mod tests {
         automatic.act_mut().set_camera_streams(Vec::new());
         automatic.act_mut().set_image_width(512);
         automatic.act_mut().set_image_height(512);
-        let training = training(None);
-        let error = TrainingActions::new(&training)
-            .start(automatic)
-            .await
-            .unwrap_err();
+        let error = automatic.validated().unwrap_err();
         assert!(error.message().contains("expanded f32 image batch"));
     }
 
-    #[tokio::test]
-    async fn aggregate_act_budget_rejects_individually_valid_dimensions_before_runtime() {
+    #[test]
+    fn aggregate_act_budget_rejects_individually_valid_dimensions() {
         let mut command = training_command();
         command.set_batch_size(1);
         command.set_chunk_size(1);
@@ -695,13 +608,8 @@ mod tests {
             spiral_robotics_api::training::ActAttentionConfig::new(16, 16_384, 10.0),
         );
 
-        let training = training(None);
-        let error = TrainingActions::new(&training)
-            .start(command)
-            .await
-            .unwrap_err();
+        let error = command.validated().unwrap_err();
         assert!(error.message().contains("model and optimizer"));
-        assert!(training.starts.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -733,31 +641,40 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn malformed_rollout_is_rejected_before_training_or_runtime_lookup() {
-        let training = training(run(false, 20_000, true));
+    #[test]
+    fn malformed_rollout_is_rejected_before_training_lookup() {
+        let snapshot = snapshot(run(false, 20_000, true));
         for command in [
-            RolloutRequest::new(String::new(), 20_000, "follower".to_owned()).with_duration(30),
-            RolloutRequest::new("run-1".to_owned(), 0, "follower".to_owned()).with_duration(30),
-            RolloutRequest::new("run-1".to_owned(), 20_000, "follower".to_owned())
+            RolloutConfig::new(String::new(), 20_000, "follower").with_duration(30),
+            RolloutConfig::new("run-1", 0, "follower").with_duration(30),
+            RolloutConfig::new("run-1", 20_000, "follower")
                 .with_duration(MAX_ROLLOUT_DURATION_SECONDS + 1),
         ] {
             assert!(matches!(
-                TrainingActions::new(&training).admit_rollout(command),
+                TrainingActions::admitted_rollout(&snapshot, command),
                 Err(OperationError::InvalidInput(_))
             ));
         }
     }
 
-    fn run(active: bool, step: u64, inference_ready: bool) -> Option<TrainingRunStatus> {
-        Some(TrainingRunStatus::new(
-            active,
-            vec![TrainingCheckpointStatus::new(step, inference_ready)],
-        ))
+    fn run(active: bool, step: u64, inference_ready: bool) -> Option<TrainingRun> {
+        let phase = if active {
+            TrainingRunPhase::Running
+        } else {
+            TrainingRunPhase::Completed
+        };
+        Some(
+            TrainingRun::starting("run-1", TrainingConfig::default())
+                .with_phase(phase, step)
+                .with_checkpoints(vec![
+                    TrainingCheckpoint::new(step, 1).with_artifact(1, inference_ready),
+                ])
+                .with_started_ms(1),
+        )
     }
 
-    #[tokio::test]
-    async fn rollout_rejects_missing_active_or_unready_training_without_delegating() {
+    #[test]
+    fn rollout_rejects_missing_active_or_unready_training() {
         for (run, expected) in [
             (None, "no longer available"),
             (run(true, 20_000, true), "stop or finish"),
@@ -770,68 +687,58 @@ mod tests {
                 "checkpoint is no longer available",
             ),
         ] {
-            let training = training(run);
-            let error = TrainingActions::new(&training)
-                .admit_rollout(rollout_command())
-                .unwrap_err();
+            let error =
+                TrainingActions::admitted_rollout(&snapshot(run), rollout_command()).unwrap_err();
             assert!(error.message().contains(expected));
         }
     }
 
-    #[tokio::test]
-    async fn ready_rollout_returns_the_exact_admitted_semantic_command() {
-        let training = training(run(false, 20_000, true));
+    #[test]
+    fn ready_rollout_returns_the_exact_admitted_command() {
         let command = rollout_command();
 
         assert_eq!(
-            TrainingActions::new(&training).admit_rollout(command.clone()),
+            TrainingActions::admitted_rollout(&snapshot(run(false, 20_000, true)), command.clone(),),
             Ok(command)
         );
     }
 
-    #[tokio::test]
-    async fn deleting_a_run_rejects_training_and_rollout_activity() {
+    #[test]
+    fn deleting_a_run_rejects_training_and_rollout_activity() {
         let command = || DeleteTrainingRunCommand::new("run-1");
-        let active_training = training(run(true, 20_000, true));
-        let error = TrainingActions::new(&active_training)
-            .delete(TrainingRunActivity::default(), command())
-            .await
-            .unwrap_err();
+        let error = TrainingActions::admitted_deletion(
+            &snapshot(run(true, 20_000, true)),
+            TrainingRunActivity::default(),
+            command(),
+        )
+        .unwrap_err();
         assert!(matches!(error, OperationError::Conflict(_)));
-        assert!(active_training.deletes.lock().unwrap().is_empty());
 
-        let active_rollout = training(run(false, 20_000, true));
-        let error = TrainingActions::new(&active_rollout)
-            .delete(
-                TrainingRunActivity::new(Some("run-1".to_owned())),
-                command(),
-            )
-            .await
-            .unwrap_err();
+        let error = TrainingActions::admitted_deletion(
+            &snapshot(run(false, 20_000, true)),
+            TrainingRunActivity::new(Some("run-1".to_owned())),
+            command(),
+        )
+        .unwrap_err();
         assert!(matches!(error, OperationError::Conflict(_)));
-        assert!(active_rollout.deletes.lock().unwrap().is_empty());
     }
 
-    #[tokio::test]
-    async fn deleting_a_missing_run_is_not_found_and_an_idle_run_delegates_once() {
-        let missing = training(None);
-        let error = TrainingActions::new(&missing)
-            .delete(
-                TrainingRunActivity::default(),
-                DeleteTrainingRunCommand::new("run-1"),
-            )
-            .await
-            .unwrap_err();
+    #[test]
+    fn deleting_a_missing_run_is_not_found_and_an_idle_run_is_admitted() {
+        let error = TrainingActions::admitted_deletion(
+            &snapshot(None),
+            TrainingRunActivity::default(),
+            DeleteTrainingRunCommand::new("run-1"),
+        )
+        .unwrap_err();
         assert!(matches!(error, OperationError::NotFound(_)));
 
-        let idle = training(run(false, 20_000, true));
-        TrainingActions::new(&idle)
-            .delete(
-                TrainingRunActivity::default(),
-                DeleteTrainingRunCommand::new("run-1"),
-            )
-            .await
-            .unwrap();
-        assert_eq!(idle.deletes.lock().unwrap().as_slice(), ["run-1"]);
+        let run_id = TrainingActions::admitted_deletion(
+            &snapshot(run(false, 20_000, true)),
+            TrainingRunActivity::default(),
+            DeleteTrainingRunCommand::new("run-1"),
+        )
+        .unwrap();
+        assert_eq!(run_id, "run-1");
     }
 }

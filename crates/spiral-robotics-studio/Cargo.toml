@@ -15,6 +15,7 @@ server = [
     "dioxus/cli-config",
     "dioxus/server",
     "dep:spiral-robotics-backend",
+    "spiral-robotics-frontend/server",
 ]
 
 [dependencies]

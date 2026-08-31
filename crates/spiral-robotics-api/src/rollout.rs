@@ -8,16 +8,16 @@ pub const MAX_ROLLOUT_DURATION_SECONDS: u32 = 600;
 pub const MAX_ROLLOUT_ACTION_STEPS: usize = 20;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct StartRolloutRequest {
+pub struct RolloutConfig {
     run_id: String,
     checkpoint_step: u64,
     robot: String,
     /// Time spent actively applying policy actions, excluding load and warm-up.
-    #[serde(default = "StartRolloutRequest::default_duration_seconds")]
+    #[serde(default = "RolloutConfig::default_duration_seconds")]
     duration_seconds: u32,
 }
 
-impl StartRolloutRequest {
+impl RolloutConfig {
     const fn default_duration_seconds() -> u32 {
         DEFAULT_ROLLOUT_DURATION_SECONDS
     }

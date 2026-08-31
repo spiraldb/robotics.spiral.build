@@ -235,35 +235,35 @@ mod tests {
         assert_eq!(config.vae_encoder_layers(), 4);
         assert_eq!(config.decoder_layers(), 1);
         assert!(config.camera_streams().is_empty());
-        let request = StartTrainingRequest::default();
-        assert_eq!(request.batch_size(), 8);
-        assert_eq!(request.steps(), 100_000);
-        assert_eq!(request.checkpoint_every(), 20_000);
-        assert_eq!(request.seed(), 1_000);
-        assert_eq!(request.validation_split(), 0.1);
+        let config = TrainingConfig::default();
+        assert_eq!(config.batch_size(), 8);
+        assert_eq!(config.steps(), 100_000);
+        assert_eq!(config.checkpoint_every(), 20_000);
+        assert_eq!(config.seed(), 1_000);
+        assert_eq!(config.validation_split(), 0.1);
     }
 
     #[test]
-    fn historical_training_requests_keep_no_validation_semantics() {
-        let mut serialized_request = serde_json::to_value(StartTrainingRequest::default()).unwrap();
-        serialized_request
+    fn historical_training_configs_keep_no_validation_semantics() {
+        let mut serialized_config = serde_json::to_value(TrainingConfig::default()).unwrap();
+        serialized_config
             .as_object_mut()
             .unwrap()
             .remove("validation_split");
-        let request: StartTrainingRequest = serde_json::from_value(serialized_request).unwrap();
-        assert_eq!(request.validation_split(), 0.0);
+        let config: TrainingConfig = serde_json::from_value(serialized_config).unwrap();
+        assert_eq!(config.validation_split(), 0.0);
     }
 
     #[test]
-    fn older_rollout_requests_receive_the_safe_default_duration() {
-        let request: StartRolloutRequest = serde_json::from_value(serde_json::json!({
+    fn older_rollout_configs_receive_the_safe_default_duration() {
+        let config: RolloutConfig = serde_json::from_value(serde_json::json!({
             "run_id": "run-1",
             "checkpoint_step": 20_000,
             "robot": "follower"
         }))
         .expect("duration defaults for an older client");
 
-        assert_eq!(request.duration_seconds(), DEFAULT_ROLLOUT_DURATION_SECONDS);
+        assert_eq!(config.duration_seconds(), DEFAULT_ROLLOUT_DURATION_SECONDS);
     }
 
     #[test]
@@ -482,8 +482,7 @@ mod tests {
     }
 
     fn training_run(id: &str) -> TrainingRun {
-        TrainingRun::starting(id, StartTrainingRequest::default())
-            .with_source(TrainingSource::default())
+        TrainingRun::starting(id, TrainingConfig::default()).with_source(TrainingSource::default())
     }
 
     fn training_metric(step: u64, train_loss: f64) -> TrainingMetricPoint {
@@ -552,8 +551,8 @@ mod tests {
     fn resolved_training_configuration_updates_the_run_snapshot() {
         let mut snapshot =
             TrainingSnapshot::new(TrainingReadiness::default(), vec![training_run("run-a")]);
-        let mut config = StartTrainingRequest::default();
-        *config.act_mut() = ActTrainingConfig::default().with_camera_streams(vec![
+        let mut config = TrainingConfig::default();
+        config.act_mut().set_camera_streams(vec![
             "follower.camera.gripper".to_owned(),
             "follower.camera.top".to_owned(),
         ]);
@@ -569,7 +568,7 @@ mod tests {
         let mut snapshot = TrainingSnapshot::new(
             TrainingReadiness::default(),
             vec![
-                TrainingRun::starting("run-a", StartTrainingRequest::default())
+                TrainingRun::starting("run-a", TrainingConfig::default())
                     .with_source(TrainingSource::default())
                     .with_metrics(vec![TrainingMetricPoint::default()])
                     .with_checkpoints(vec![TrainingCheckpoint::default()])

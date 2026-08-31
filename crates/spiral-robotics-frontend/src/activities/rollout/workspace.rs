@@ -2,15 +2,14 @@
 
 use crate::components::interaction::{Action, ActionPurpose, ActionSize, ActionVariant};
 use dioxus::prelude::*;
-use gloo_net::http::Method;
 use spiral_robotics_api::robots::{CameraStatus, RobotSummary};
 use spiral_robotics_api::rollout::{
-    MAX_ROLLOUT_ACTION_STEPS, MAX_ROLLOUT_DURATION_SECONDS, RolloutPhase, RolloutSnapshot,
-    StartRolloutRequest,
+    MAX_ROLLOUT_ACTION_STEPS, MAX_ROLLOUT_DURATION_SECONDS, RolloutConfig, RolloutPhase,
+    RolloutSnapshot,
 };
 use spiral_robotics_api::training::{TrainingCheckpoint, TrainingRun, TrainingSnapshot};
 
-use crate::client::http as api;
+use crate::client::server_fns;
 use crate::format::LossPresentation;
 use crate::shell::notifications::MessageSource;
 use crate::shell::state::studio;
@@ -290,19 +289,16 @@ pub(crate) fn RolloutWorkbench() -> Element {
                                 };
                                 pending_action.set(Some(PendingRolloutAction::Start));
                                 let mut pending_action = pending_action;
-                                let request = StartRolloutRequest::new(
+                                let config = RolloutConfig::new(
                                     checkpoint.identity.run_id,
                                     checkpoint.step,
                                     robot.id(),
                                 )
                                 .with_duration(duration_seconds);
                                 spawn(async move {
-                                    let result = api::Http::send_json::<_, RolloutSnapshot>(
-                                        Method::POST,
-                                        "/api/rollout",
-                                        Some(&request),
-                                    )
-                                    .await;
+                                    let result = server_fns::start_rollout(config)
+                                        .await
+                                        .map_err(|error| error.to_string());
                                     if let Err(error) = result {
                                         studio.report_from(MessageSource::Rollout, error);
                                     }
@@ -332,7 +328,10 @@ pub(crate) fn RolloutWorkbench() -> Element {
                             pending_action.set(Some(PendingRolloutAction::Stop));
                             let mut pending_action = pending_action;
                             spawn(async move {
-                                if let Err(error) = api::Http::post("/api/rollout/stop").await {
+                                if let Err(error) = server_fns::stop_rollout()
+                                    .await
+                                    .map_err(|error| error.to_string())
+                                {
                                     studio.report_from(MessageSource::Rollout, error);
                                 }
                                 pending_action.set(None);
@@ -652,7 +651,7 @@ mod tests {
     };
     use spiral_robotics_api::rollout::{MAX_ROLLOUT_ACTION_STEPS, RolloutPhase, RolloutSnapshot};
     use spiral_robotics_api::training::{
-        StartTrainingRequest, TrainingCheckpoint, TrainingRun, TrainingRunPhase, TrainingSource,
+        TrainingCheckpoint, TrainingConfig, TrainingRun, TrainingRunPhase, TrainingSource,
     };
 
     use super::{
@@ -755,7 +754,7 @@ mod tests {
 
     #[test]
     fn rollout_lists_inference_ready_checkpoints_from_an_active_run() {
-        let run = TrainingRun::starting("active-run", StartTrainingRequest::default())
+        let run = TrainingRun::starting("active-run", TrainingConfig::default())
             .with_source(TrainingSource::default())
             .with_phase(TrainingRunPhase::Running, 0)
             .with_checkpoints(vec![
