@@ -21,11 +21,11 @@ use spiral_engine::logical::{
     LogicalPlan, Source as LogicalSource, SourceProvider, SourceProviderRef, SourceScanPushdown,
     SourceScanRequest,
 };
-use spiral_engine::physical::{DynSource, PhysicalNode, PhysicalNodeRef, PhysicalProps, Source};
+use spiral_engine::physical::{PhysicalNode, PhysicalNodeRef, PhysicalProps, Source};
 use spiral_engine::relation::Relation;
 use spiral_engine::sql::{CommandOutput, ConnectionCtx};
 use spiral_engine::statement::CreateTable;
-use spiral_engine::{EngineRuntime, Morsel, RelationMeta};
+use spiral_engine::{EngineRuntime, Morsel, MorselSequence, RelationMeta};
 use spiral_session::SpiralSession;
 use tokio::sync::Mutex;
 use url::Url;
@@ -474,7 +474,7 @@ impl ArrowStreamSource {
         let provider: SourceProviderRef = Arc::new(Self {
             session,
             schema,
-            metadata: RelationMeta::ordinal(dtype),
+            metadata: RelationMeta::unordered(dtype),
             batches: Arc::new(Mutex::new(Some(batches))),
         });
         Ok(LogicalPlan::source(
@@ -542,7 +542,7 @@ struct ArrowStreamGlobal {
 
 struct ArrowStreamState {
     batches: RecordBatchStream,
-    ordinal: u64,
+    next_sequence: u64,
 }
 
 impl PhysicalNode for ArrowStreamNode {
@@ -574,7 +574,7 @@ impl PhysicalNode for ArrowStreamNode {
         Ok(self)
     }
 
-    fn init_global(&self, _context: &QueryCtx) -> VortexResult<Self::Global> {
+    async fn init_global(&self, _context: &QueryCtx) -> VortexResult<Self::Global> {
         let batches = self
             .batches
             .try_lock()
@@ -584,13 +584,15 @@ impl PhysicalNode for ArrowStreamNode {
         Ok(ArrowStreamGlobal {
             state: Mutex::new(ArrowStreamState {
                 batches,
-                ordinal: 0,
+                next_sequence: 0,
             }),
         })
     }
 
-    fn as_source(&self) -> Option<&dyn DynSource> {
-        Some(self)
+    fn runtime_source_factory(
+        self: Arc<Self>,
+    ) -> Option<Arc<dyn spiral_engine::exec::RuntimeSourceFactory>> {
+        Some(spiral_engine::exec::typed_source_factory(self))
     }
 }
 
@@ -616,7 +618,6 @@ impl Source for ArrowStreamNode {
             return Ok(None);
         };
         let batch = batch.map_err(|error| vortex_err!("{error}"))?;
-        let row_count = batch.num_rows() as u64;
         let arrow_struct = StructArray::from(batch);
         let arrow_array: ArrowArrayRef = Arc::new(arrow_struct);
         let field = Field::new_struct("", self.schema.fields().clone(), false);
@@ -625,8 +626,11 @@ impl Source for ArrowStreamNode {
             .vortex()
             .arrow()
             .from_arrow_array(arrow_array, &field)?;
-        let start = state.ordinal;
-        state.ordinal = state.ordinal.saturating_add(row_count);
-        Ok(Some(Morsel::new(array, start..state.ordinal)))
+        let sequence = MorselSequence::new(state.next_sequence);
+        state.next_sequence = state
+            .next_sequence
+            .checked_add(1)
+            .ok_or_else(|| vortex_err!("Arrow input stream work sequence overflowed u64"))?;
+        Ok(Some(Morsel::new(array, sequence)))
     }
 }
