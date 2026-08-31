@@ -8,13 +8,14 @@ mod settings;
 mod training;
 mod transfer;
 pub mod workflow_documents;
+mod workflow_features;
 
 pub mod bundle {
     //! Portable single-file snapshots of the Studio-owned Spiral namespace.
 
     pub use crate::transfer::{
         EpisodeBundle, ProjectBundle, SIGLIP_BASE_MODEL_ID, SIGLIP_BASE_REPOSITORY,
-        SIGLIP_BASE_REVISION, WORKFLOW_FEATURE_REGISTRY_RELATION,
+        SIGLIP_BASE_REVISION,
     };
 }
 

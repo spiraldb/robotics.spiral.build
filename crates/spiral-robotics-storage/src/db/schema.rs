@@ -1,7 +1,9 @@
 //! Physical relational schema owned by the SpiralDB storage adapter.
 //!
 //! User-visible catalog vocabulary lives in `spiral-robotics-api`. This module
-//! owns persisted relation names, columns, and schema-drift checks.
+//! owns persisted relation names, namespace qualification, columns, and
+//! schema-drift checks. Feature modules contribute their concrete Arrow
+//! layouts through [`ManagedRelationSchema`].
 
 use std::fmt;
 use std::sync::Arc;
@@ -30,6 +32,7 @@ pub(crate) enum Table {
     TrainingRunCheckpoints,
     RolloutRuns,
     WorkflowRuns,
+    FeatureRegistry,
 }
 
 impl Table {
@@ -38,7 +41,7 @@ impl Table {
     /// Ordered so a parent relation always precedes the child relations that
     /// reference it; bundle import walks this order and deletion walks its
     /// reverse.
-    pub(crate) const ALL: [Self; 13] = [
+    pub(crate) const ALL: [Self; 14] = [
         Self::Datasets,
         Self::Episodes,
         Self::EpisodeStreams,
@@ -52,6 +55,7 @@ impl Table {
         Self::TrainingRunCheckpoints,
         Self::RolloutRuns,
         Self::WorkflowRuns,
+        Self::FeatureRegistry,
     ];
 
     pub(crate) const fn name(self) -> &'static str {
@@ -69,12 +73,13 @@ impl Table {
             Self::TrainingRunCheckpoints => "training_run_checkpoints",
             Self::RolloutRuns => "rollout_runs",
             Self::WorkflowRuns => "workflow_runs",
+            Self::FeatureRegistry => "feature_registry",
         }
     }
 
-    /// Qualify this owned table inside a configured dataset.
-    pub(crate) fn qualified_name(self, dataset: &str) -> String {
-        format!("{dataset}.{}", self.name())
+    /// Qualify this owned table inside the configured Studio namespace.
+    pub(crate) fn qualified_name(self, namespace: &str) -> String {
+        format!("{namespace}.{}", self.name())
     }
 }
 
@@ -385,6 +390,38 @@ impl StorageSchema {
         Table::Robots.qualified_name(namespace)
     }
 
+    /// Fully qualify the Workflow feature registry in the active namespace.
+    pub fn workflow_feature_registry_relation(namespace: &str) -> String {
+        Table::FeatureRegistry.qualified_name(namespace)
+    }
+
+    /// Derive and qualify a Workflow feature cache in the active namespace.
+    pub fn workflow_feature_cache_relation(namespace: &str, source_relation: &str) -> String {
+        format!(
+            "{namespace}.{}",
+            spiral_robotics_api::workflow::WorkflowFeatureApplicability::derived_cache_name(
+                source_relation
+            )
+        )
+    }
+
+    /// Whether a qualified cache name has the storage-owned physical shape
+    /// derived for this source relation.
+    pub(crate) fn is_workflow_feature_cache_relation(
+        relation: &str,
+        source_relation: &str,
+    ) -> bool {
+        let Some((namespace, name)) = relation.split_once('.') else {
+            return false;
+        };
+        !name.contains('.')
+            && Self::is_identifier(namespace)
+            && name
+                == spiral_robotics_api::workflow::WorkflowFeatureApplicability::derived_cache_name(
+                    source_relation,
+                )
+    }
+
     /// Build one robot-configuration row against the managed relation schema.
     pub fn robot_configuration_batch(
         robot_identifier: String,
@@ -508,5 +545,19 @@ mod tests {
             StorageSchema::identifier_component("episode-37"),
             StorageSchema::identifier_component("episode_37")
         );
+        assert_eq!(
+            StorageSchema::workflow_feature_registry_relation("studio"),
+            "studio.feature_registry"
+        );
+        let cache = StorageSchema::workflow_feature_cache_relation("studio", "media_frames");
+        assert_eq!(cache, "studio.features_media_frames");
+        assert!(StorageSchema::is_workflow_feature_cache_relation(
+            &cache,
+            "media_frames"
+        ));
+        assert!(!StorageSchema::is_workflow_feature_cache_relation(
+            "other.nested.features_media_frames",
+            "media_frames"
+        ));
     }
 }

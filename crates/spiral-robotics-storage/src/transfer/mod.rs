@@ -6,7 +6,7 @@ mod ingestion;
 pub(crate) use bundle::ManagedRelationCatalog;
 pub use bundle::{
     EpisodeBundle, ProjectBundle, SIGLIP_BASE_MODEL_ID, SIGLIP_BASE_REPOSITORY,
-    SIGLIP_BASE_REVISION, WORKFLOW_FEATURE_REGISTRY_RELATION,
+    SIGLIP_BASE_REVISION,
 };
 pub use ingestion::HuggingFaceDatasetDiscovery;
 

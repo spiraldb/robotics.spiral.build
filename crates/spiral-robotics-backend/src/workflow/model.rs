@@ -36,14 +36,13 @@ use spiral_robotics_api::workflow::{
 };
 use spiral_robotics_storage::bundle::{
     SIGLIP_BASE_MODEL_ID, SIGLIP_BASE_REPOSITORY, SIGLIP_BASE_REVISION,
-    WORKFLOW_FEATURE_REGISTRY_RELATION as FEATURE_REGISTRY_RELATION,
 };
 use tokenizers::Tokenizer;
 use tokenizers::utils::padding::{PaddingDirection, PaddingParams, PaddingStrategy};
 use tokenizers::utils::truncation::TruncationParams;
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
-use spiral_robotics_storage::ProjectStore;
+use spiral_robotics_storage::{ProjectStore, StorageSchema};
 
 const IMAGE_EXTENSION_NAME: &str = "spql.image.Image";
 const INPUT_PREFETCH_CHUNKS: usize = 2;
@@ -204,11 +203,14 @@ impl ModelRunContext {
             .scan(&project_store)
             .await?;
         let mut registry = FeatureRegistry::load(&project_store).await?;
-        let registry_changed = registry.register(FeatureRegistration::new(
-            &request.feature_cache_relation,
-            &request.features,
-            FeatureRegistryTimestamps::now_millis(),
-        ))?;
+        let registry_changed = registry.register(
+            FeatureRegistration::new(
+                &request.feature_cache_relation,
+                &request.features,
+                FeatureRegistryTimestamps::now_millis(),
+            ),
+            project_store.namespace(),
+        )?;
         let mut cache =
             FeatureCache::load(&project_store, &request.feature_cache_relation, &registry).await?;
         let (requested_indices, cache_schema_changed) = cache.merge_requested(&request.features)?;
@@ -592,7 +594,11 @@ struct FeatureRegistry {
 }
 
 impl FeatureRegistry {
-    fn register(&mut self, registration: FeatureRegistration<'_>) -> Result<bool, String> {
+    fn register(
+        &mut self,
+        registration: FeatureRegistration<'_>,
+        namespace: &str,
+    ) -> Result<bool, String> {
         let FeatureRegistration {
             cache_relation,
             requested,
@@ -626,7 +632,7 @@ impl FeatureRegistry {
                 ));
             }
             let entry = FeatureRegistryEntry::new(definition.clone(), cache_relation, now_ms);
-            entry.validate()?;
+            entry.validate(namespace)?;
             self.entries.insert(key, entry);
             changed = true;
         }
@@ -933,16 +939,14 @@ impl CandidateSchemaValidation for Schema {
 
 impl FeatureRegistry {
     async fn load(project_store: &ProjectStore) -> Result<Self, String> {
+        let relation = StorageSchema::workflow_feature_registry_relation(project_store.namespace());
         let mut connection = project_store.connect().await?;
-        let Some(schema) = connection
-            .relation_schema(FEATURE_REGISTRY_RELATION)
-            .await?
-        else {
+        let Some(schema) = connection.relation_schema(&relation).await? else {
             return Ok(FeatureRegistry::default());
         };
         Self::validate_schema(&schema)?;
         let mut reader = connection
-            .execute_query(format!("SELECT * FROM {FEATURE_REGISTRY_RELATION}"))
+            .execute_query(format!("SELECT * FROM {relation}"))
             .await?;
         let mut registry = FeatureRegistry::default();
         while let Some(batch) = reader.next().await {
@@ -1009,7 +1013,7 @@ impl FeatureRegistry {
                     ),
                 };
                 LoadedFeatureRegistryEntry::new(source_relation, feature_name, entry)
-                    .insert_into(&mut registry)?;
+                    .insert_into(&mut registry, project_store.namespace())?;
             }
         }
         Ok(registry)
@@ -1031,8 +1035,8 @@ impl LoadedFeatureRegistryEntry {
         }
     }
 
-    fn insert_into(self, registry: &mut FeatureRegistry) -> Result<(), String> {
-        self.entry.validate()?;
+    fn insert_into(self, registry: &mut FeatureRegistry, namespace: &str) -> Result<(), String> {
+        self.entry.validate(namespace)?;
         if registry
             .entries
             .contains_key(&(self.source_relation.clone(), self.feature_name.clone()))
@@ -1054,7 +1058,7 @@ impl LoadedFeatureRegistryEntry {
 }
 
 impl FeatureRegistryEntry {
-    fn validate(&self) -> Result<(), String> {
+    fn validate(&self, namespace: &str) -> Result<(), String> {
         QualifiedRelation::try_from(self.definition.applicability().source_relation()).map_err(
             |error| format!("Workflow feature registry source relation is unsafe: {error}"),
         )?;
@@ -1062,7 +1066,8 @@ impl FeatureRegistryEntry {
             format!("Workflow feature registry cache relation is unsafe: {error}")
         })?;
         if self.cache_relation
-            != spiral_robotics_api::workflow::WorkflowFeatureApplicability::derived_cache_relation(
+            != StorageSchema::workflow_feature_cache_relation(
+                namespace,
                 self.definition.applicability().source_relation(),
             )
         {
@@ -1654,6 +1659,8 @@ impl<'a> FeaturePublication<'a> {
 
     async fn replace(self, project_store: &ProjectStore) -> Result<(), String> {
         let relation = self.relation.to_owned();
+        let registry_relation =
+            StorageSchema::workflow_feature_registry_relation(project_store.namespace());
         let batches = self.cache.record_batches()?;
         let registry_batch = self.registry.record_batch()?;
         relation
@@ -1673,7 +1680,7 @@ impl<'a> FeaturePublication<'a> {
         {
             Ok(()) => {
                 connection
-                    .replace_or_create_batches(FEATURE_REGISTRY_RELATION, vec![registry_batch])
+                    .replace_batches(&registry_relation, vec![registry_batch])
                     .await
             }
             Err(error) => Err(error),
@@ -2482,7 +2489,11 @@ mod tests {
     use arrow_array::{ListArray, StructArray};
     use arrow_schema::Fields;
 
-    use spiral_robotics_storage::{BackendStateStore, ServiceEndpoint, SpiralConnectionSettings};
+    use spiral_robotics_storage::{
+        BackendStateStore, ServiceEndpoint, SpiralConnectionSettings, StorageManager,
+    };
+
+    const TEST_NAMESPACE: &str = "studio";
 
     fn image_field() -> Field {
         Field::new(
@@ -2746,7 +2757,7 @@ mod tests {
         let result = FeatureCacheHit::new(
             ModelRunRequest::new(
                 "SELECT * FROM candidates",
-                "workflow.features_dataset",
+                "studio.features_dataset",
                 vec![definition],
             ),
             CandidateScan {
@@ -2813,21 +2824,19 @@ mod tests {
 
         let mut incompatible_registry = FeatureRegistryEntry::new(
             loaded[0].definition.clone(),
-            spiral_robotics_api::workflow::WorkflowFeatureApplicability::derived_cache_relation(
-                "dataset.frames",
-            ),
+            StorageSchema::workflow_feature_cache_relation(TEST_NAMESPACE, "dataset.frames"),
             1,
         );
         incompatible_registry.producer.artifact_revision = "different-artifact-revision".to_owned();
         assert!(
             incompatible_registry
-                .validate()
+                .validate(TEST_NAMESPACE)
                 .unwrap_err()
                 .contains("incompatible producer provenance")
         );
         incompatible_registry.producer.artifact_revision = SIGLIP_BASE_REVISION.to_owned();
         incompatible_registry
-            .validate()
+            .validate(TEST_NAMESPACE)
             .expect("the registry retains exact producer provenance without field metadata");
     }
 
@@ -2858,12 +2867,8 @@ mod tests {
         assert_eq!(cache.rows[&key(0)][0], Some(0.75));
         assert_eq!(cache.rows[&key(4)][0], Some(0.75));
         assert_ne!(
-            spiral_robotics_api::workflow::WorkflowFeatureApplicability::derived_cache_relation(
-                "dataset_a.frames"
-            ),
-            spiral_robotics_api::workflow::WorkflowFeatureApplicability::derived_cache_relation(
-                "dataset_b.frames"
-            )
+            StorageSchema::workflow_feature_cache_relation(TEST_NAMESPACE, "dataset_a.frames"),
+            StorageSchema::workflow_feature_cache_relation(TEST_NAMESPACE, "dataset_b.frames")
         );
     }
 
@@ -2871,44 +2876,52 @@ mod tests {
     fn feature_registry_reuses_exact_definitions_and_rejects_same_name_conflicts() {
         let definition = feature("is_raining_feature", "raining", "dataset_a.frames");
         let cache_relation =
-            spiral_robotics_api::workflow::WorkflowFeatureApplicability::derived_cache_relation(
-                "dataset_a.frames",
-            );
+            StorageSchema::workflow_feature_cache_relation(TEST_NAMESPACE, "dataset_a.frames");
         let mut registry = FeatureRegistry::default();
         assert!(
             registry
-                .register(FeatureRegistration::new(
-                    &cache_relation,
-                    std::slice::from_ref(&definition),
-                    10,
-                ))
+                .register(
+                    FeatureRegistration::new(
+                        &cache_relation,
+                        std::slice::from_ref(&definition),
+                        10,
+                    ),
+                    TEST_NAMESPACE
+                )
                 .unwrap()
         );
         assert!(
             !registry
-                .register(FeatureRegistration::new(
-                    &cache_relation,
-                    std::slice::from_ref(&definition),
-                    20,
-                ))
+                .register(
+                    FeatureRegistration::new(
+                        &cache_relation,
+                        std::slice::from_ref(&definition),
+                        20,
+                    ),
+                    TEST_NAMESPACE
+                )
                 .unwrap()
         );
         let mut conflict = definition.clone();
         conflict.set_description("A different public meaning");
         assert!(
             registry
-                .register(FeatureRegistration::new(&cache_relation, &[conflict], 30))
+                .register(
+                    FeatureRegistration::new(&cache_relation, &[conflict], 30),
+                    TEST_NAMESPACE,
+                )
                 .unwrap_err()
                 .contains("incompatible definition")
         );
         let other_source = feature("is_raining_feature", "raining", "dataset_b.frames");
         let other_cache =
-            spiral_robotics_api::workflow::WorkflowFeatureApplicability::derived_cache_relation(
-                "dataset_b.frames",
-            );
+            StorageSchema::workflow_feature_cache_relation(TEST_NAMESPACE, "dataset_b.frames");
         assert!(
             registry
-                .register(FeatureRegistration::new(&other_cache, &[other_source], 40))
+                .register(
+                    FeatureRegistration::new(&other_cache, &[other_source], 40),
+                    TEST_NAMESPACE,
+                )
                 .unwrap()
         );
 
@@ -2972,10 +2985,7 @@ mod tests {
     #[test]
     fn loaded_feature_registry_rejects_rows_beyond_the_durable_bound() {
         let source = "dataset.frames";
-        let cache_relation =
-            spiral_robotics_api::workflow::WorkflowFeatureApplicability::derived_cache_relation(
-                source,
-            );
+        let cache_relation = StorageSchema::workflow_feature_cache_relation(TEST_NAMESPACE, source);
         let mut registry = FeatureRegistry::default();
         for index in 0..MAX_FEATURE_REGISTRY_ROWS {
             let definition = feature(
@@ -2995,7 +3005,7 @@ mod tests {
             feature_name,
             FeatureRegistryEntry::new(definition, cache_relation, 2),
         )
-        .insert_into(&mut registry)
+        .insert_into(&mut registry, TEST_NAMESPACE)
         .expect_err("a persisted registry above the durable bound must be rejected while loading");
         assert!(error.contains("4096 definitions"));
     }
@@ -3003,20 +3013,16 @@ mod tests {
     #[test]
     fn feature_registry_uses_the_contracts_character_limits_for_unicode_text() {
         let source = "dataset.frames";
-        let cache_relation =
-            spiral_robotics_api::workflow::WorkflowFeatureApplicability::derived_cache_relation(
-                source,
-            );
+        let cache_relation = StorageSchema::workflow_feature_cache_relation(TEST_NAMESPACE, source);
         let mut definition = feature("is_unicode_feature", "visual", source);
         definition.set_description("é".repeat(MAX_WORKFLOW_FEATURE_DESCRIPTION_LENGTH));
         definition.set_concept("雨".repeat(MAX_SIGLIP_CONCEPT_LENGTH));
         let mut registry = FeatureRegistry::default();
         registry
-            .register(FeatureRegistration::new(
-                &cache_relation,
-                std::slice::from_ref(&definition),
-                1,
-            ))
+            .register(
+                FeatureRegistration::new(&cache_relation, std::slice::from_ref(&definition), 1),
+                TEST_NAMESPACE,
+            )
             .expect("the registry must share the contract's character-count limits");
 
         let mut too_long = definition;
@@ -3024,7 +3030,10 @@ mod tests {
         too_long.set_description(format!("{}é", too_long.description()));
         assert!(
             registry
-                .register(FeatureRegistration::new(&cache_relation, &[too_long], 2))
+                .register(
+                    FeatureRegistration::new(&cache_relation, &[too_long], 2),
+                    TEST_NAMESPACE,
+                )
                 .unwrap_err()
                 .contains("invalid feature definition")
         );
@@ -3209,18 +3218,13 @@ mod tests {
         .expect("the Workflow registry connection must be valid")
         .with_credentials(stored.as_ref().and_then(BackendStateStore::credentials));
         let project_store = Arc::new(
-            ProjectStore::new(connection, "workflow".to_owned())
+            ProjectStore::new(connection, "spiral_robotics".to_owned())
                 .expect("the Workflow registry project store must be valid"),
         );
-        let mut connection = project_store
-            .connect()
-            .await
-            .expect("the Workflow registry must connect");
-        let registry_existed = connection
-            .table_exists(FEATURE_REGISTRY_RELATION)
-            .await
-            .expect("the Workflow registry catalog check must succeed");
-        drop(connection);
+        let readiness = StorageManager::new(project_store.clone())
+            .test_spiral()
+            .await;
+        assert!(readiness.ok(), "{}", readiness.message());
         let previous_registry = FeatureRegistry::load(&project_store)
             .await
             .expect("the existing Workflow registry must be readable");
@@ -3229,15 +3233,14 @@ mod tests {
             std::process::id(),
             FeatureRegistryTimestamps::now_millis()
         );
-        let cache_relation =
-            spiral_robotics_api::workflow::WorkflowFeatureApplicability::derived_cache_relation(
-                &source_relation,
-            );
+        let cache_relation = StorageSchema::workflow_feature_cache_relation(
+            project_store.namespace(),
+            &source_relation,
+        );
         let mut cleanup = RegistryRoundTripCleanup {
             project_store: project_store.clone(),
             cache_relation: cache_relation.clone(),
             previous_registry: previous_registry.clone(),
-            registry_existed,
             cleaned: false,
         };
         let definition = feature(
@@ -3248,11 +3251,10 @@ mod tests {
         let expected_registry_after_cleanup = previous_registry.clone();
         let mut registry = previous_registry;
         registry
-            .register(FeatureRegistration::new(
-                &cache_relation,
-                std::slice::from_ref(&definition),
-                42,
-            ))
+            .register(
+                FeatureRegistration::new(&cache_relation, std::slice::from_ref(&definition), 42),
+                project_store.namespace(),
+            )
             .expect("the test feature must register");
         let mut cache = FeatureCache::default();
         let (indices, _) = cache
@@ -3621,7 +3623,6 @@ mod tests {
         project_store: Arc<ProjectStore>,
         cache_relation: String,
         previous_registry: FeatureRegistry,
-        registry_existed: bool,
         cleaned: bool,
     }
 
@@ -3631,7 +3632,8 @@ mod tests {
                 return Ok(());
             }
             let cache_relation = self.cache_relation.clone();
-            let registry_existed = self.registry_existed;
+            let registry_relation =
+                StorageSchema::workflow_feature_registry_relation(self.project_store.namespace());
             let registry_batch = self.previous_registry.record_batch()?;
             let mut connection = self.project_store.connect_exclusive().await?;
             connection.begin_transaction().await?;
@@ -3639,16 +3641,9 @@ mod tests {
                 .execute_update_sql(&format!("DROP TABLE IF EXISTS {cache_relation}"))
                 .await
             {
-                Ok(()) if registry_existed => {
-                    connection
-                        .replace_or_create_batches(FEATURE_REGISTRY_RELATION, vec![registry_batch])
-                        .await
-                }
                 Ok(()) => {
                     connection
-                        .execute_update_sql(&format!(
-                            "DROP TABLE IF EXISTS {FEATURE_REGISTRY_RELATION}"
-                        ))
+                        .replace_batches(&registry_relation, vec![registry_batch])
                         .await
                 }
                 Err(error) => Err(error),

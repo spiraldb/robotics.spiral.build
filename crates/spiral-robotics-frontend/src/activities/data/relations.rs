@@ -162,7 +162,7 @@ impl ProjectRelationScope<'_> {
             || name == format!("{}_video_sources", self.namespace)
             || name == format!("{}.video", self.namespace)
             || name == format!("{}.video.assets", self.namespace)
-            || name.starts_with("workflow.")
+            || name.starts_with(&format!("{}.features_", self.namespace))
         {
             return false;
         }
@@ -175,6 +175,7 @@ impl ProjectRelationScope<'_> {
             Table::TrainingRunCheckpoints,
             Table::RolloutRuns,
             Table::WorkflowRuns,
+            Table::FeatureRegistry,
         ]
         .into_iter()
         .any(|table| name == table.qualified_name(self.namespace))
@@ -726,7 +727,7 @@ mod tests {
             "robotics.training_runs",
             "robotics.rollout_runs",
             "robotics.workflow_runs",
-            "workflow.feature_registry",
+            "robotics.feature_registry",
             "robotics.video.assets",
         ] {
             assert!(!scope.includes(&relation(hidden, &["id"])), "{hidden}");

@@ -1954,6 +1954,9 @@ impl NodeProjection<'_> {
             .map(|snapshot| snapshot.quarantine().to_owned())
             .unwrap_or_default();
         let model_snapshot = node_snapshot.and_then(|snapshot| snapshot.model().cloned());
+        let model_output_relation = node_snapshot
+            .and_then(WorkflowNodeSnapshot::output_relation)
+            .map(str::to_owned);
         let warnings = node_snapshot
             .map(|snapshot| snapshot.warnings().to_owned())
             .unwrap_or_default();
@@ -2012,7 +2015,7 @@ impl NodeProjection<'_> {
                     .filter(|name| !name.is_empty())
                     .map(str::to_owned)
                     .collect(),
-                feature_cache_relation: node.config().model_output_relation(),
+                feature_cache_relation: model_output_relation,
                 ..WorkflowNodeSource::default()
             },
             execution,
@@ -2327,8 +2330,8 @@ mod tests {
             "pick_place.camera_frames"
         );
         assert_eq!(
-            config.model_output_relation(),
-            Some(WorkflowFeatureApplicability::derived_cache_relation(
+            config.model_output_name(),
+            Some(WorkflowFeatureApplicability::derived_cache_name(
                 "pick_place.camera_frames"
             ))
         );

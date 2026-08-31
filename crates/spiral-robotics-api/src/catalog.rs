@@ -23,12 +23,13 @@ pub enum ManagedTable {
     TrainingRunCheckpoints,
     RolloutRuns,
     WorkflowRuns,
+    FeatureRegistry,
 }
 
 impl ManagedTable {
     /// Every managed relation, in the Data schema browser's display order —
     /// kept identical to storage's own relation order.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::Datasets,
         Self::Episodes,
         Self::EpisodeStreams,
@@ -42,6 +43,7 @@ impl ManagedTable {
         Self::TrainingRunCheckpoints,
         Self::RolloutRuns,
         Self::WorkflowRuns,
+        Self::FeatureRegistry,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -59,6 +61,7 @@ impl ManagedTable {
             Self::TrainingRunCheckpoints => "training_run_checkpoints",
             Self::RolloutRuns => "rollout_runs",
             Self::WorkflowRuns => "workflow_runs",
+            Self::FeatureRegistry => "feature_registry",
         }
     }
 
@@ -234,6 +237,22 @@ impl ManagedTable {
                 "updated_ms",
             ],
             Self::WorkflowRuns => &["run_id", "document_version", "snapshot_json", "updated_ms"],
+            Self::FeatureRegistry => &[
+                "source_relation",
+                "cache_relation",
+                "feature_name",
+                "description",
+                "concept",
+                "media_field",
+                "stream_ids",
+                "producer_model_id",
+                "producer_repository",
+                "artifact_revision",
+                "value_semantics",
+                "definition_version",
+                "created_at_ms",
+                "updated_at_ms",
+            ],
         }
     }
 
@@ -281,6 +300,9 @@ impl ManagedTable {
             }
             Self::RolloutRuns | Self::WorkflowRuns => {
                 format!("SELECT * FROM {relation} ORDER BY updated_ms DESC LIMIT 100")
+            }
+            Self::FeatureRegistry => {
+                format!("SELECT * FROM {relation} ORDER BY source_relation, feature_name LIMIT 100")
             }
         }
     }

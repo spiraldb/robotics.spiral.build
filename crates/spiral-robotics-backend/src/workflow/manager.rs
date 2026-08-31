@@ -26,16 +26,16 @@ use tokio::sync::{Mutex as AsyncMutex, broadcast, mpsc};
 use crate::workflow::model::{
     ModelRunContext, ModelRunEvent, ModelRunFailure, ModelRunRequest, ModelRunResult,
 };
-use spiral_robotics_storage::StorageManager;
 use spiral_robotics_storage::workflow_documents::StoredWorkflowDocument;
+use spiral_robotics_storage::{StorageManager, StorageSchema};
 
 /// Version of the persisted Workflow document encoding.
 ///
 /// The graph is still evolving and is deliberately not decomposed into node
 /// and edge relations yet, so its persisted form is one versioned payload.
-/// Bump this constant when the payload's shape changes and retain explicit
-/// readers for any older document versions that remain supported.
-const WORKFLOW_DOCUMENT_VERSION: u32 = 1;
+/// Bump this constant when the payload's shape or persisted relation naming
+/// changes. Unsupported versions are refused rather than rewritten.
+const WORKFLOW_DOCUMENT_VERSION: u32 = 2;
 
 /// Persistence is a backend implementation detail. The shared API exposes the
 /// graph and observation, while the manager decides that they commit together.
@@ -82,10 +82,16 @@ impl WorkflowDocument {
     }
 
     /// Decode a persisted Workflow document whose declared version this build
-    /// implements. Newer versions are refused and never replaced.
+    /// implements. Unsupported versions are refused and never replaced.
     fn restored(stored: &StoredWorkflowDocument) -> Result<Self, String> {
         match stored.version() {
             WORKFLOW_DOCUMENT_VERSION => {}
+            version if version < WORKFLOW_DOCUMENT_VERSION => {
+                return Err(format!(
+                    "The saved Workflow uses obsolete document version {version}, which this \
+                     Studio build cannot read. Start a fresh project."
+                ));
+            }
             version => {
                 return Err(format!(
                     "The saved Workflow uses document version {version}, which this Studio build \
@@ -921,7 +927,10 @@ impl WorkflowManager {
                         .await;
                         return;
                     };
-                    let Some(output_relation) = node.config().model_output_relation() else {
+                    let Some(output_relation) = node
+                        .config()
+                        .qualified_model_output(self.inner.storage.namespace())
+                    else {
                         self.finish_failed(
                             WorkflowFailure::new(
                                 &run_id,
@@ -1424,6 +1433,21 @@ impl WorkflowManager {
     fn state_response(&self, document: &WorkflowDocument) -> WorkflowStateResponse {
         let mut response = document.state_response();
         response.set_scope_id(self.scope_id());
+        let mut snapshot = response.snapshot().clone();
+        for node in document.workflow().nodes() {
+            let Some(node_snapshot) = snapshot
+                .nodes_mut()
+                .iter_mut()
+                .find(|candidate| candidate.node_id() == node.id())
+            else {
+                continue;
+            };
+            node_snapshot.set_output_relation(
+                node.config()
+                    .qualified_model_output(self.inner.storage.namespace()),
+            );
+        }
+        response.set_snapshot(snapshot);
         if let Some(error) = self
             .inner
             .persistence
@@ -1438,6 +1462,23 @@ impl WorkflowManager {
             response.set_snapshot(snapshot);
         }
         response
+    }
+}
+
+trait WorkflowNodeConfigStorageExt {
+    fn qualified_model_output(&self, namespace: &str) -> Option<String>;
+}
+
+impl WorkflowNodeConfigStorageExt for WorkflowNodeConfig {
+    fn qualified_model_output(&self, namespace: &str) -> Option<String> {
+        let Self::Model { features } = self else {
+            return None;
+        };
+        let source_relation = features.first()?.applicability().source_relation();
+        Some(StorageSchema::workflow_feature_cache_relation(
+            namespace,
+            source_relation,
+        ))
     }
 }
 
@@ -1691,7 +1732,7 @@ mod tests {
     /// The stored document declares its own encoding. A newer version is
     /// refused so an operator's saved graph is never replaced by an empty one.
     #[test]
-    fn a_stored_workflow_document_round_trips_and_refuses_a_newer_version() {
+    fn a_stored_workflow_document_round_trips_and_refuses_unsupported_versions() {
         let document = WorkflowDocument::default();
         let stored = document.persisted().expect("the document encodes");
         assert_eq!(stored.version(), WORKFLOW_DOCUMENT_VERSION);
@@ -1700,8 +1741,26 @@ mod tests {
         let newer =
             StoredWorkflowDocument::new(WORKFLOW_DOCUMENT_VERSION + 1, stored.payload().to_owned());
         let error = WorkflowDocument::restored(&newer).unwrap_err();
-        assert!(error.contains("document version 2"), "{error}");
+        assert!(
+            error.contains(&format!(
+                "document version {}",
+                WORKFLOW_DOCUMENT_VERSION + 1
+            )),
+            "{error}"
+        );
         assert!(error.contains("Update Studio"), "{error}");
+
+        let obsolete =
+            StoredWorkflowDocument::new(WORKFLOW_DOCUMENT_VERSION - 1, stored.payload().to_owned());
+        let error = WorkflowDocument::restored(&obsolete).unwrap_err();
+        assert!(
+            error.contains(&format!(
+                "obsolete document version {}",
+                WORKFLOW_DOCUMENT_VERSION - 1
+            )),
+            "{error}"
+        );
+        assert!(error.contains("Start a fresh project"), "{error}");
     }
 
     /// A payload whose version is understood but whose bytes no longer parse
@@ -1784,11 +1843,47 @@ mod tests {
             .unwrap()
             .config();
         assert_eq!(
-            config.model_output_relation(),
-            Some(WorkflowFeatureApplicability::derived_cache_relation(
+            config.model_output_name(),
+            Some(WorkflowFeatureApplicability::derived_cache_name(
                 "media.manifest"
             ))
         );
+        assert_eq!(
+            config.qualified_model_output("studio"),
+            Some(StorageSchema::workflow_feature_cache_relation(
+                "studio",
+                "media.manifest"
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn wire_snapshot_carries_the_namespace_qualified_model_output() {
+        let mut workflow = siglip_video_workflow("media.manifest", "model");
+        workflow.derive_model_outputs();
+        let document =
+            WorkflowDocument::new(workflow.clone(), WorkflowRunSnapshot::idle_for(&workflow));
+        let project_store = Arc::new(
+            ProjectStore::new(
+                SpiralConnectionSettings::new(
+                    "https://api.spiraldb.dev".to_owned(),
+                    "https://spfs.spiraldb.dev".to_owned(),
+                )
+                .expect("the unconfigured test connection is valid"),
+                "studio".to_owned(),
+            )
+            .expect("the unconfigured test project_store is valid"),
+        );
+        let manager = WorkflowManager::new(Arc::new(StorageManager::new(project_store)));
+        let response = manager.state_response(&document);
+        let output = response
+            .snapshot()
+            .nodes()
+            .iter()
+            .find(|node| node.node_id() == "model")
+            .and_then(WorkflowNodeSnapshot::output_relation);
+        let expected = StorageSchema::workflow_feature_cache_relation("studio", "media.manifest");
+        assert_eq!(output, Some(expected.as_str()));
     }
 
     #[test]
@@ -1949,7 +2044,8 @@ mod tests {
         workflow.derive_model_outputs();
         let mut previous = WorkflowRunSnapshot::idle_for(&workflow);
         let metadata = WorkflowModelRunMetadata::new("siglip-base", "revision")
-            .with_cache_relation(WorkflowFeatureApplicability::derived_cache_relation(
+            .with_cache_relation(StorageSchema::workflow_feature_cache_relation(
+                "studio",
                 "media.manifest",
             ))
             .with_features(Vec::new())
@@ -1994,8 +2090,8 @@ mod tests {
             .unwrap()
             .config();
         assert_eq!(
-            config.model_output_relation(),
-            Some(WorkflowFeatureApplicability::derived_cache_relation(
+            config.model_output_name(),
+            Some(WorkflowFeatureApplicability::derived_cache_name(
                 "media.manifest"
             ))
         );
@@ -2025,8 +2121,8 @@ mod tests {
             unreachable!()
         };
         assert_eq!(
-            config.model_output_relation(),
-            Some(WorkflowFeatureApplicability::derived_cache_relation(
+            config.model_output_name(),
+            Some(WorkflowFeatureApplicability::derived_cache_name(
                 "pick_place.camera_frames"
             ))
         );
@@ -2228,12 +2324,10 @@ mod tests {
         let output_relation = workflow
             .nodes()
             .iter()
-            .find_map(|node| node.config().model_output_relation())
+            .find_map(|node| node.config().qualified_model_output(&namespace))
             .expect("the server derivation must produce a Model output relation");
         let empty_output_relation =
-            spiral_robotics_api::workflow::WorkflowFeatureApplicability::derived_cache_relation(
-                &empty_relation,
-            );
+            StorageSchema::workflow_feature_cache_relation(&namespace, &empty_relation);
         // Install cleanup before the first catalog mutation so a seeding or
         // Dataset-build failure cannot strand a test namespace.
         let mut cleanup = WorkflowTestNamespace::new(
@@ -2244,7 +2338,7 @@ mod tests {
                 format!("{namespace}.workflow_runs"),
                 output_relation.clone(),
                 empty_output_relation,
-                "workflow.feature_registry".to_owned(),
+                StorageSchema::workflow_feature_registry_relation(&namespace),
             ],
             namespace.clone(),
             true,

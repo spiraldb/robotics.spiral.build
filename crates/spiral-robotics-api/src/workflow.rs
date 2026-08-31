@@ -3,6 +3,9 @@
 //! Workflow starts at relations already materialized in Spiral. External
 //! ingestion remains outside Workflow; executable Model nodes consume those
 //! relations and write server-derived relations for downstream Query nodes.
+//! This crate derives only the stable unqualified component of generated
+//! names; storage qualifies persisted relations inside Studio's configured
+//! namespace.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -175,17 +178,17 @@ impl WorkflowFeatureDefinition {
 }
 
 impl WorkflowFeatureApplicability {
-    /// Derive the server-owned feature cache relation for a source relation.
-    pub fn derived_cache_relation(source_relation: &str) -> String {
+    /// Derive the unqualified server-owned feature cache name component.
+    pub fn derived_cache_name(source_relation: &str) -> String {
         format!(
-            "workflow.features_{}",
+            "features_{}",
             crate::identity::SqlNameComponent::from(source_relation).as_str()
         )
     }
 
-    /// Derive this applicability's server-owned feature cache relation.
-    pub(crate) fn cache_relation(&self) -> String {
-        Self::derived_cache_relation(&self.source_relation)
+    /// Derive this applicability's server-owned feature cache name component.
+    fn cache_name(&self) -> String {
+        Self::derived_cache_name(&self.source_relation)
     }
 
     pub fn new(source_relation: impl Into<String>, media_field: impl Into<String>) -> Self {
@@ -232,16 +235,15 @@ impl WorkflowNodeConfig {
         }
     }
 
-    /// The writable relation is a pure server-owned derivation, never graph
-    /// input. A model with no authoritative feature source has no output and
-    /// will fail graph validation before run admission.
-    pub fn model_output_relation(&self) -> Option<String> {
+    /// The writable name component is a pure server-owned derivation, never
+    /// graph input. Storage adds the configured namespace before execution.
+    pub fn model_output_name(&self) -> Option<String> {
         let Self::Model { features } = self else {
             return None;
         };
         features
             .first()
-            .map(|feature| feature.applicability().cache_relation())
+            .map(|feature| feature.applicability().cache_name())
     }
 }
 
@@ -595,6 +597,8 @@ struct NodeOutcome {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 struct NodeArtifacts {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    output_relation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     model: Option<WorkflowModelRunMetadata>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     warnings: Vec<String>,
@@ -668,6 +672,9 @@ impl WorkflowNodeSnapshot {
     pub const fn model(&self) -> Option<&WorkflowModelRunMetadata> {
         self.artifacts.model.as_ref()
     }
+    pub fn output_relation(&self) -> Option<&str> {
+        self.artifacts.output_relation.as_deref()
+    }
     pub fn warnings(&self) -> &[String] {
         &self.artifacts.warnings
     }
@@ -694,6 +701,9 @@ impl WorkflowNodeSnapshot {
     }
     pub fn set_model(&mut self, model: Option<WorkflowModelRunMetadata>) {
         self.artifacts.model = model;
+    }
+    pub fn set_output_relation(&mut self, relation: Option<String>) {
+        self.artifacts.output_relation = relation;
     }
     pub fn warnings_mut(&mut self) -> &mut Vec<String> {
         &mut self.artifacts.warnings
@@ -2313,11 +2323,11 @@ mod tests {
     }
 
     #[test]
-    fn feature_cache_relation_is_server_owned_and_stable() {
+    fn feature_cache_name_is_server_owned_and_stable() {
         assert_eq!(
-            WorkflowFeatureApplicability::derived_cache_relation("pick/place"),
+            WorkflowFeatureApplicability::derived_cache_name("pick/place"),
             format!(
-                "workflow.features_{}",
+                "features_{}",
                 crate::identity::SqlNameComponent::from("pick/place").as_str()
             )
         );
@@ -2623,8 +2633,8 @@ mod tests {
             )],
         };
         assert_eq!(
-            config.model_output_relation(),
-            Some(WorkflowFeatureApplicability::derived_cache_relation(
+            config.model_output_name(),
+            Some(WorkflowFeatureApplicability::derived_cache_name(
                 "weather.camera_frames"
             ))
         );

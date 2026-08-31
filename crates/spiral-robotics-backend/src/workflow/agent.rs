@@ -27,8 +27,8 @@ use crate::workflow::provider::{
     OpenAiProvider, ProviderCompletion, ProviderConfig, ProviderMessage, ProviderResponse,
     ProviderToolCall,
 };
-use spiral_robotics_storage::StorageManager;
 use spiral_robotics_storage::workflow_documents::StoredWorkflowDocument;
+use spiral_robotics_storage::{StorageManager, StorageSchema};
 
 const MAX_PUBLIC_MESSAGES: usize = MAX_WORKFLOW_AGENT_MESSAGES_PER_CONVERSATION;
 const MAX_PROVIDER_MESSAGES: usize = 80;
@@ -1777,7 +1777,9 @@ impl WorkflowAgentManager {
                     "ok": true,
                     "workflow": saved.workflow(),
                     "validation": saved.validation(),
-                    "resolved_models": saved.workflow().resolved_models_for_agent(),
+                    "resolved_models": saved.workflow().resolved_models_for_agent(
+                        self.inner.services.storage.namespace()
+                    ),
                 })
                 .to_string())
             }
@@ -2382,7 +2384,7 @@ Use at most one `spql.video.frames` generator in each SELECT scope because gener
 
 Write SQL identifiers conservatively. Never use SQL keywords such as top, table, result, query, select, group, order, or window as unquoted relation, CTE, or table aliases; use descriptive aliases such as top_cam, gripper_cam, candidate_frames, and joint_state instead. Before saving a graph, inspect the complete generated SQL for reserved-word aliases and replace them.
 
-Define every requested Model feature explicitly with a safe descriptive name ending in _feature, a short human description, the SigLIP text concept, and applicability containing the source relation, candidate media field, and optional stream_ids. Inspect workflow.feature_registry with the ordinary relation/query tools before introducing a name: a compatible source-scoped definition is reused across workflows, while a conflicting same-name definition is rejected. The Model cache contains only the five stable identity fields plus nullable feature columns such as is_raining_feature or is_gripper_open_feature; it never contains decoded images. The backend reuses matching cells across workflows over the same source and fills only missing applicable feature cells. A final Query joins the candidate cohort, feature cache, and optional joint state, then may recover full-resolution image evidence from an actual managed media relation using only read-only Spiral functions and fields verified through the relation tools.
+Define every requested Model feature explicitly with a safe descriptive name ending in _feature, a short human description, the SigLIP text concept, and applicability containing the source relation, candidate media field, and optional stream_ids. Inspect the Studio namespace's feature_registry relation with the ordinary relation/query tools before introducing a name: a compatible source-scoped definition is reused across workflows, while a conflicting same-name definition is rejected. The Model cache contains only the five stable identity fields plus nullable feature columns such as is_raining_feature or is_gripper_open_feature; it never contains decoded images. The backend reuses matching cells across workflows over the same source and fills only missing applicable feature cells. A final Query joins the candidate cohort, feature cache, and optional joint state, then may recover full-resolution image evidence from an actual managed media relation using only read-only Spiral functions and fields verified through the relation tools.
 
 Never invent relations, columns, managed media values, model support, run state, or SPQL functions. Do not request or reveal provider credentials. Do not put binary, tensor, image, or full media payloads in the conversation. Keep final answers concise and structured: state what graph was saved or run, summarize bounded evidence, and point the user to the authoritative graph or Results."#;
 
@@ -2551,18 +2553,23 @@ impl WorkflowToolCatalog {
 }
 
 trait WorkflowSpecAgentExt {
-    fn resolved_models_for_agent(&self) -> Vec<Value>;
+    fn resolved_models_for_agent(&self, namespace: &str) -> Vec<Value>;
 }
 
 impl WorkflowSpecAgentExt for WorkflowSpec {
-    fn resolved_models_for_agent(&self) -> Vec<Value> {
+    fn resolved_models_for_agent(&self, namespace: &str) -> Vec<Value> {
         self.nodes()
             .iter()
             .filter_map(|node| match &node.config() {
                 WorkflowNodeConfig::Model { features } => Some(json!({
                     "node_id": node.id(),
                     "model_id": "siglip-base",
-                    "feature_cache_relation": node.config().model_output_relation(),
+                    "feature_cache_relation": features.first().map(|feature| {
+                        StorageSchema::workflow_feature_cache_relation(
+                            namespace,
+                            feature.applicability().source_relation(),
+                        )
+                    }),
                     "features": features,
                 })),
                 _ => None,
@@ -3303,7 +3310,7 @@ mod tests {
         assert!(SYSTEM_PROMPT.contains("fills only missing applicable feature cells"));
         assert!(SYSTEM_PROMPT.contains("never contains decoded images"));
         assert!(SYSTEM_PROMPT.contains("is_raining_feature"));
-        assert!(SYSTEM_PROMPT.contains("workflow.feature_registry"));
+        assert!(SYSTEM_PROMPT.contains("Studio namespace's feature_registry"));
         assert!(SYSTEM_PROMPT.contains("description, the SigLIP text concept"));
         assert!(SYSTEM_PROMPT.contains("conflicting same-name definition is rejected"));
         assert!(SYSTEM_PROMPT.contains("only read-only Spiral functions and fields verified"));

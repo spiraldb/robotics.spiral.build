@@ -3,7 +3,7 @@
   "api_version": 6,
   "api_revision": 0,
   "spiral_schema_minimum": 8,
-  "spiral_schema_maximum": 8,
+  "spiral_schema_maximum": 9,
   "id": "runtime.fixture",
   "display_name": "Fixture runtime",
   "runtime": "fixture/1.0",

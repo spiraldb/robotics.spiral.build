@@ -1,9 +1,8 @@
 //! Backend-only SQL construction and policy adaptation for SpiralDB.
 //!
-//! Owned relation and column names come from this module group's `schema`
-//! layer. Keeping
-//! string literals and dynamic-resource naming here makes every generated
-//! statement auditable. Raw user queries delegate to the framework-free core
+//! Owned relation names, namespace qualification, and column names come from
+//! this module group's `schema` layer. This module turns those names into
+//! auditable statements. Raw user queries delegate to the framework-free core
 //! authorization policy before a database driver sees them.
 
 use std::io::Cursor;

@@ -1,5 +1,14 @@
 # Storage schema changelog
 
+## Spiral schema 9
+
+- Moved the durable Workflow feature registry into the configured Studio
+  namespace as the managed `feature_registry` relation.
+- Moved dynamically derived Workflow feature caches into the same Studio
+  namespace as `features_<sanitized-source>` relations.
+- Pre-schema-9 project bundles are not readable; start a fresh project instead
+  of importing the former top-level `workflow.*` layout.
+
 ## Spiral schema 8
 
 - Replaced the `training_runs` JSON document with typed run rows, and added the

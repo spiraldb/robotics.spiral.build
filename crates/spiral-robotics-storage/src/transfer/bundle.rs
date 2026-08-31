@@ -33,6 +33,7 @@ use crate::rollout_runs::RolloutBundleSection;
 use crate::settings::StudioPreferenceBundleSection;
 use crate::training::TrainingBundleSection;
 use crate::workflow_documents::WorkflowDocumentBundleSection;
+use crate::workflow_features::WorkflowFeatureBundleSection;
 
 const PROJECT_MAGIC: &[u8; 8] = b"SPRPROJ1";
 const EPISODES_MAGIC: &[u8; 8] = b"SPREPS01";
@@ -47,7 +48,6 @@ const MAX_FEATURE_CACHE_COLUMNS: usize = 256;
 pub const SIGLIP_BASE_MODEL_ID: &str = "siglip-base";
 pub const SIGLIP_BASE_REPOSITORY: &str = "google/siglip-base-patch16-224";
 pub const SIGLIP_BASE_REVISION: &str = "7fd15f0689c79d79e38b1c2e2e2370a7bf2761ed";
-pub const WORKFLOW_FEATURE_REGISTRY_RELATION: &str = "workflow.feature_registry";
 const MAX_ARROW_MESSAGE_METADATA_BYTES: usize = MAX_MANIFEST_BYTES;
 const MAX_ARROW_DECODED_BYTES: usize = ProjectBundle::MAX_BYTES;
 const MAX_ARROW_RECORD_BATCH_ROWS: usize = MAX_FEATURE_CACHE_ROWS;
@@ -385,8 +385,10 @@ struct NamedExportedBundle {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ProjectRelation {
     Managed(Table),
-    WorkflowFeatureRegistry,
-    WorkflowFeatureCache(String),
+    WorkflowFeatureCache {
+        bundle_relation: String,
+        source_relation: String,
+    },
 }
 
 impl ProjectRelation {
@@ -394,16 +396,18 @@ impl ProjectRelation {
     fn bundle_name(&self) -> &str {
         match self {
             Self::Managed(table) => table.name(),
-            Self::WorkflowFeatureRegistry => WORKFLOW_FEATURE_REGISTRY_RELATION,
-            Self::WorkflowFeatureCache(relation) => relation,
+            Self::WorkflowFeatureCache {
+                bundle_relation, ..
+            } => bundle_relation,
         }
     }
 
     fn target(&self, namespace: &str) -> String {
         match self {
             Self::Managed(table) => table.qualified_name(namespace),
-            Self::WorkflowFeatureRegistry => WORKFLOW_FEATURE_REGISTRY_RELATION.to_owned(),
-            Self::WorkflowFeatureCache(relation) => relation.clone(),
+            Self::WorkflowFeatureCache {
+                source_relation, ..
+            } => spiral::StorageSchema::workflow_feature_cache_relation(namespace, source_relation),
         }
     }
 }
@@ -417,7 +421,6 @@ struct DecodedProjectRelation {
 #[derive(Debug, Eq, PartialEq)]
 struct WorkflowRestorePlan {
     retire_caches: Vec<String>,
-    clear_registry: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -449,22 +452,26 @@ impl WorkflowBundleRegistry {
             .map(|entry| (entry.definition.name().to_owned(), entry.definition.clone()))
             .collect()
     }
+
+    fn source_for_cache(&self, cache_relation: &str) -> Option<&str> {
+        self.entries
+            .values()
+            .find(|entry| entry.cache_relation == cache_relation)
+            .map(|entry| entry.definition.applicability().source_relation())
+    }
 }
 
 impl WorkflowBundleRegistry {
     async fn load(
         connection: &mut ProjectConnection,
+        namespace: &str,
     ) -> Result<Option<WorkflowBundleRegistry>, String> {
-        if !connection
-            .table_exists(WORKFLOW_FEATURE_REGISTRY_RELATION)
-            .await?
-        {
+        let relation = Table::FeatureRegistry.qualified_name(namespace);
+        if !connection.table_exists(&relation).await? {
             return Ok(None);
         }
         let mut records = connection
-            .execute_query(format!(
-                "SELECT * FROM {WORKFLOW_FEATURE_REGISTRY_RELATION}"
-            ))
+            .execute_query(format!("SELECT * FROM {relation}"))
             .await
             .map_err(|error| format!("reading Workflow feature registry: {error}"))?;
         let schema = records.schema().clone();
@@ -477,7 +484,7 @@ impl WorkflowBundleRegistry {
         if batches.is_empty() {
             batches.push(RecordBatch::new_empty(schema.clone()));
         }
-        Self::validate(&batches).map(Some)
+        Self::validate_for_namespace(&batches, namespace).map(Some)
     }
 }
 
@@ -497,11 +504,7 @@ impl ProjectBundle {
             };
             queries.push((table.name().to_owned(), query));
         }
-        if let Some(registry) = WorkflowBundleRegistry::load(connection).await? {
-            queries.push((
-                WORKFLOW_FEATURE_REGISTRY_RELATION.to_owned(),
-                format!("SELECT * FROM {WORKFLOW_FEATURE_REGISTRY_RELATION}"),
-            ));
+        if let Some(registry) = WorkflowBundleRegistry::load(connection, namespace).await? {
             for relation in registry.cache_relations() {
                 if !connection.table_exists(&relation).await? {
                     return Err(format!(
@@ -707,24 +710,20 @@ impl ProjectBundle {
             })
             .collect::<Vec<_>>();
         let imported_video_episodes = EpisodeBundle::video_episode_ids(&fixed_relations)?;
-        let current_caches = WorkflowBundleRegistry::load(connection)
+        let current_caches = WorkflowBundleRegistry::load(connection, namespace)
             .await?
             .map(|registry| registry.cache_relations())
             .unwrap_or_default();
         let incoming_caches = decoded
             .iter()
             .filter_map(|entry| match &entry.relation {
-                ProjectRelation::WorkflowFeatureCache(relation) => Some(relation.clone()),
+                ProjectRelation::WorkflowFeatureCache { .. } => {
+                    Some(entry.relation.target(namespace))
+                }
                 _ => None,
             })
             .collect::<BTreeSet<_>>();
-        let incoming_registry = decoded
-            .iter()
-            .any(|entry| entry.relation == ProjectRelation::WorkflowFeatureRegistry);
-        let workflow_plan = WorkflowRestorePlan::from_caches(
-            &current_caches,
-            incoming_registry.then_some(&incoming_caches),
-        );
+        let workflow_plan = WorkflowRestorePlan::from_caches(&current_caches, &incoming_caches);
 
         connection
             .begin_bundle_transaction("project import")
@@ -738,17 +737,6 @@ impl ProjectBundle {
                         .map_err(|error| format!("clearing Workflow cache {relation}: {error}"))?;
                 }
             }
-            if workflow_plan.clear_registry
-                && connection
-                    .table_exists(WORKFLOW_FEATURE_REGISTRY_RELATION)
-                    .await?
-            {
-                connection
-                    .execute_update_sql(&format!("DROP TABLE {WORKFLOW_FEATURE_REGISTRY_RELATION}"))
-                    .await
-                    .map_err(|error| format!("clearing Workflow feature registry: {error}"))?;
-            }
-
             let mut summary = ProjectImportSummary::default();
             for entry in decoded {
                 let relation = entry.relation.target(namespace);
@@ -758,6 +746,9 @@ impl ProjectBundle {
                     .map(|batch| {
                         if entry.relation == ProjectRelation::Managed(Table::VideoAssets) {
                             EpisodeBundle::prepare_video_asset_import(batch, namespace)
+                        } else if entry.relation == ProjectRelation::Managed(Table::FeatureRegistry)
+                        {
+                            WorkflowBundleRegistry::retarget_batch(batch, namespace)
                         } else {
                             Ok(batch)
                         }
@@ -1346,8 +1337,15 @@ impl ManagedRelationCatalog {
         let training = TrainingBundleSection;
         let rollout = RolloutBundleSection;
         let workflow = WorkflowDocumentBundleSection;
-        let sections: [&dyn ManagedRelationSchema; 6] = [
-            &database, &episodes, &settings, &training, &rollout, &workflow,
+        let workflow_features = WorkflowFeatureBundleSection;
+        let sections: [&dyn ManagedRelationSchema; 7] = [
+            &database,
+            &episodes,
+            &settings,
+            &training,
+            &rollout,
+            &workflow,
+            &workflow_features,
         ];
         let mut tables = sections
             .into_iter()
@@ -1370,8 +1368,15 @@ impl ManagedRelationCatalog {
         let training = TrainingBundleSection;
         let rollout = RolloutBundleSection;
         let workflow = WorkflowDocumentBundleSection;
-        let sections: [&dyn ManagedRelationSchema; 6] = [
-            &database, &episodes, &settings, &training, &rollout, &workflow,
+        let workflow_features = WorkflowFeatureBundleSection;
+        let sections: [&dyn ManagedRelationSchema; 7] = [
+            &database,
+            &episodes,
+            &settings,
+            &training,
+            &rollout,
+            &workflow,
+            &workflow_features,
         ];
         sections
             .into_iter()
@@ -1386,8 +1391,15 @@ impl ManagedRelationCatalog {
         let training = TrainingBundleSection;
         let rollout = RolloutBundleSection;
         let workflow = WorkflowDocumentBundleSection;
-        let sections: [&dyn ManagedRelationSchema; 6] = [
-            &database, &episodes, &settings, &training, &rollout, &workflow,
+        let workflow_features = WorkflowFeatureBundleSection;
+        let sections: [&dyn ManagedRelationSchema; 7] = [
+            &database,
+            &episodes,
+            &settings,
+            &training,
+            &rollout,
+            &workflow,
+            &workflow_features,
         ];
         sections
             .into_iter()
@@ -1406,17 +1418,19 @@ impl ProjectBundle {
     ) -> Result<Vec<DecodedProjectRelation>, String> {
         let mut budget = ArrowDecodeBudget::default();
         let mut payloads = entries.into_iter().collect::<BTreeMap<_, _>>();
-        let registry_batches = payloads
-            .remove(WORKFLOW_FEATURE_REGISTRY_RELATION)
+        let mut registry_batches = payloads
+            .remove(Table::FeatureRegistry.name())
             .map(|payload| {
-                budget.decode_with_row_limit(
-                    ArrowPayload::new(
-                        WORKFLOW_FEATURE_REGISTRY_RELATION,
-                        payload,
-                        PROJECT_SPEC.label,
-                    ),
+                let batches = budget.decode_with_row_limit(
+                    ArrowPayload::new(Table::FeatureRegistry.name(), payload, PROJECT_SPEC.label),
                     MAX_FEATURE_REGISTRY_ROWS,
-                )
+                )?;
+                ManagedRelationCatalog::validate(
+                    Table::FeatureRegistry,
+                    batches[0].schema().as_ref(),
+                    PROJECT_SPEC.label,
+                )?;
+                Ok::<_, String>(batches)
             })
             .transpose()?;
         let registry = registry_batches
@@ -1443,6 +1457,15 @@ impl ProjectBundle {
 
         let mut decoded = Vec::new();
         for table in ManagedRelationCatalog::tables() {
+            if table == Table::FeatureRegistry {
+                if let Some(batches) = registry_batches.take() {
+                    decoded.push(DecodedProjectRelation {
+                        relation: ProjectRelation::Managed(table),
+                        batches,
+                    });
+                }
+                continue;
+            }
             if let Some(payload) = payloads.remove(table.name()) {
                 let mut relation =
                     PROJECT_SPEC.decode_entries_with_budget(vec![(table, payload)], &mut budget)?;
@@ -1455,23 +1478,24 @@ impl ProjectBundle {
                 });
             }
         }
-        for relation in declared_caches {
+        for bundle_relation in declared_caches {
             let payload = payloads
-                .remove(&relation)
+                .remove(&bundle_relation)
                 .expect("declared project cache presence was checked");
             let batches = budget.decode_with_row_limit(
-                ArrowPayload::new(&relation, payload, PROJECT_SPEC.label),
+                ArrowPayload::new(&bundle_relation, payload, PROJECT_SPEC.label),
                 MAX_FEATURE_CACHE_ROWS,
             )?;
-            WorkflowCacheValidator::validate_bundle(&relation, &batches, &registry)?;
+            WorkflowCacheValidator::validate_bundle(&bundle_relation, &batches, &registry)?;
+            let source_relation = registry
+                .source_for_cache(&bundle_relation)
+                .expect("a declared cache has a registered source")
+                .to_owned();
             decoded.push(DecodedProjectRelation {
-                relation: ProjectRelation::WorkflowFeatureCache(relation.clone()),
-                batches,
-            });
-        }
-        if let Some(batches) = registry_batches {
-            decoded.push(DecodedProjectRelation {
-                relation: ProjectRelation::WorkflowFeatureRegistry,
+                relation: ProjectRelation::WorkflowFeatureCache {
+                    bundle_relation,
+                    source_relation,
+                },
                 batches,
             });
         }
@@ -1727,6 +1751,64 @@ impl WorkflowBundleRegistry {
         )
     }
 
+    fn validate_for_namespace(
+        batches: &[RecordBatch],
+        namespace: &str,
+    ) -> Result<WorkflowBundleRegistry, String> {
+        let registry = Self::validate(batches)?;
+        if let Some(entry) = registry.entries.values().find(|entry| {
+            entry.cache_relation
+                != spiral::StorageSchema::workflow_feature_cache_relation(
+                    namespace,
+                    entry.definition.applicability().source_relation(),
+                )
+        }) {
+            return Err(format!(
+                "Workflow feature registry cache relation {:?} is outside the configured namespace {namespace:?}",
+                entry.cache_relation
+            ));
+        }
+        Ok(registry)
+    }
+
+    fn retarget_batch(batch: RecordBatch, namespace: &str) -> Result<RecordBatch, String> {
+        let source_relations = batch
+            .column_by_name("source_relation")
+            .ok_or_else(|| "Workflow feature registry lost source_relation".to_owned())?;
+        let cache_relations = (0..batch.num_rows())
+            .map(|row| {
+                WorkflowArrow::string_value(source_relations.as_ref(), row)
+                    .map(|source| {
+                        spiral::StorageSchema::workflow_feature_cache_relation(namespace, source)
+                    })
+                    .ok_or_else(|| {
+                        "Workflow feature registry contains an invalid source_relation".to_owned()
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let cache_index = batch
+            .schema()
+            .index_of("cache_relation")
+            .map_err(|_| "Workflow feature registry lost cache_relation".to_owned())?;
+        let mut fields = batch
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.as_ref().clone())
+            .collect::<Vec<_>>();
+        fields[cache_index] = Field::new("cache_relation", DataType::Utf8, false);
+        let mut columns = batch.columns().to_vec();
+        columns[cache_index] = Arc::new(StringArray::from(cache_relations));
+        RecordBatch::try_new(
+            Arc::new(Schema::new_with_metadata(
+                fields,
+                batch.schema().metadata().clone(),
+            )),
+            columns,
+        )
+        .map_err(|error| format!("retargeting Workflow feature registry: {error}"))
+    }
+
     fn validate_with_limits(
         batches: &[RecordBatch],
         max_rows: usize,
@@ -1766,13 +1848,15 @@ impl WorkflowBundleRegistry {
                 QualifiedRelation::try_from(cache_relation.as_str()).map_err(|error| {
                     format!("Workflow feature registry has unsafe cache relation: {error}")
                 })?;
-                let expected =
-                spiral_robotics_api::workflow::WorkflowFeatureApplicability::derived_cache_relation(
+                if !spiral::StorageSchema::is_workflow_feature_cache_relation(
+                    &cache_relation,
                     &source_relation,
-                );
-                if cache_relation != expected {
+                ) {
+                    let expected = spiral_robotics_api::workflow::WorkflowFeatureApplicability::derived_cache_name(
+                        &source_relation,
+                    );
                     return Err(format!(
-                        "Workflow feature registry cache relation {cache_relation:?} does not match server-derived identity {expected:?}"
+                        "Workflow feature registry cache relation {cache_relation:?} does not match server-derived name component {expected:?}"
                     ));
                 }
                 if let Some(existing) = cache_sources.get(&cache_relation) {
@@ -2182,13 +2266,13 @@ impl WorkflowArrow {
 impl WorkflowRestorePlan {
     fn from_caches(
         current_caches: &BTreeSet<String>,
-        incoming_caches: Option<&BTreeSet<String>>,
+        incoming_caches: &BTreeSet<String>,
     ) -> WorkflowRestorePlan {
-        let empty = BTreeSet::new();
-        let incoming = incoming_caches.unwrap_or(&empty);
         WorkflowRestorePlan {
-            retire_caches: current_caches.difference(incoming).cloned().collect(),
-            clear_registry: incoming_caches.is_none(),
+            retire_caches: current_caches
+                .difference(incoming_caches)
+                .cloned()
+                .collect(),
         }
     }
 }
@@ -2831,6 +2915,8 @@ mod tests {
     use crate::manager::StorageManager;
     use crate::settings::{BackendStateStore, ServiceEndpoint, SpiralConnectionSettings};
 
+    const WORKFLOW_TEST_NAMESPACE: &str = "studio";
+
     fn envelope(manifest: Manifest, entries: &[(&str, &[u8])]) -> Vec<u8> {
         envelope_for(PROJECT_MAGIC, manifest, entries)
     }
@@ -3362,7 +3448,10 @@ mod tests {
             vec![
                 text(|definition| definition.applicability().source_relation().to_owned()),
                 text(|definition| {
-                    spiral_robotics_api::workflow::WorkflowFeatureApplicability::derived_cache_relation(definition.applicability().source_relation())
+                    spiral::StorageSchema::workflow_feature_cache_relation(
+                        WORKFLOW_TEST_NAMESPACE,
+                        definition.applicability().source_relation(),
+                    )
                 }),
                 text(|definition| definition.name().to_owned()),
                 text(|definition| definition.description().to_owned()),
@@ -3432,12 +3521,9 @@ mod tests {
             .iter()
             .map(|(name, batch)| ((*name).to_owned(), arrow_payload(batch)))
             .collect::<Vec<_>>();
-        let mut names = vec![WORKFLOW_FEATURE_REGISTRY_RELATION.to_owned()];
+        let mut names = vec![Table::FeatureRegistry.name().to_owned()];
         names.extend(cache_payloads.iter().map(|(name, _)| name.clone()));
-        let mut entries = vec![(
-            WORKFLOW_FEATURE_REGISTRY_RELATION,
-            registry_payload.as_slice(),
-        )];
+        let mut entries = vec![(Table::FeatureRegistry.name(), registry_payload.as_slice())];
         entries.extend(
             cache_payloads
                 .iter()
@@ -3642,9 +3728,7 @@ mod tests {
     fn project_workflow_relations_are_exactly_registry_allowlisted() {
         let source = "media.frames";
         let cache =
-            spiral_robotics_api::workflow::WorkflowFeatureApplicability::derived_cache_relation(
-                source,
-            );
+            spiral::StorageSchema::workflow_feature_cache_relation(WORKFLOW_TEST_NAMESPACE, source);
         let definition = workflow_definition(source, "holding_feature");
         let registry = canonical_registry_batch(std::slice::from_ref(&definition));
         let cache_batch = canonical_cache_batch(std::slice::from_ref(&definition), &[1]);
@@ -3656,13 +3740,33 @@ mod tests {
                 .iter()
                 .map(|entry| entry.relation.bundle_name())
                 .collect::<BTreeSet<_>>(),
-            BTreeSet::from([WORKFLOW_FEATURE_REGISTRY_RELATION, cache.as_str()])
+            BTreeSet::from([Table::FeatureRegistry.name(), cache.as_str()])
         );
+        let target_namespace = "restored_studio";
+        let imported_cache = decoded
+            .iter()
+            .find(|entry| {
+                matches!(
+                    &entry.relation,
+                    ProjectRelation::WorkflowFeatureCache { .. }
+                )
+            })
+            .map(|entry| entry.relation.target(target_namespace))
+            .expect("the decoded cache has an import target");
+        assert_eq!(
+            imported_cache,
+            spiral::StorageSchema::workflow_feature_cache_relation(target_namespace, source)
+        );
+        let retargeted_registry =
+            WorkflowBundleRegistry::retarget_batch(registry.clone(), target_namespace)
+                .expect("the registry cache column retargets with the imported cache");
+        WorkflowBundleRegistry::validate_for_namespace(&[retargeted_registry], target_namespace)
+            .expect("the retargeted registry names the configured import namespace");
 
         let registry_payload = arrow_payload(&registry);
         let missing = envelope(
-            manifest(vec![WORKFLOW_FEATURE_REGISTRY_RELATION.to_owned()]),
-            &[(WORKFLOW_FEATURE_REGISTRY_RELATION, &registry_payload)],
+            manifest(vec![Table::FeatureRegistry.name().to_owned()]),
+            &[(Table::FeatureRegistry.name(), &registry_payload)],
         );
         assert!(
             ProjectBundle::decode_entries(PROJECT_SPEC.parse_raw(&missing).unwrap())
@@ -3670,16 +3774,16 @@ mod tests {
                 .contains("missing declared Workflow cache")
         );
 
-        let undeclared_name = "workflow.features_undeclared";
+        let undeclared_name = "studio.features_undeclared";
         let cache_payload = arrow_payload(&cache_batch);
         let undeclared = envelope(
             manifest(vec![
-                WORKFLOW_FEATURE_REGISTRY_RELATION.to_owned(),
+                Table::FeatureRegistry.name().to_owned(),
                 cache.clone(),
                 undeclared_name.to_owned(),
             ]),
             &[
-                (WORKFLOW_FEATURE_REGISTRY_RELATION, &registry_payload),
+                (Table::FeatureRegistry.name(), &registry_payload),
                 (cache.as_str(), &cache_payload),
                 (undeclared_name, &cache_payload),
             ],
@@ -3697,17 +3801,17 @@ mod tests {
         let registry = replace_batch_column(
             &canonical_registry_batch(&[definition]),
             1,
-            Arc::new(StringArray::from(vec!["workflow.features_forged"])),
+            Arc::new(StringArray::from(vec!["studio.features_forged"])),
         );
         let payload = arrow_payload(&registry);
         let bundle = envelope(
-            manifest(vec![WORKFLOW_FEATURE_REGISTRY_RELATION.to_owned()]),
-            &[(WORKFLOW_FEATURE_REGISTRY_RELATION, &payload)],
+            manifest(vec![Table::FeatureRegistry.name().to_owned()]),
+            &[(Table::FeatureRegistry.name(), &payload)],
         );
         assert!(
             ProjectBundle::decode_entries(PROJECT_SPEC.parse_raw(&bundle).unwrap())
                 .unwrap_err()
-                .contains("does not match server-derived identity")
+                .contains("does not match server-derived name component")
         );
     }
 
@@ -3715,13 +3819,13 @@ mod tests {
     fn project_registry_requires_canonical_shape_rows_and_provenance() {
         let permissive_old_shape = text_batch(&[
             ("source_relation", &["media.frames"]),
-            ("cache_relation", &["workflow.features_media_frames"]),
+            ("cache_relation", &["studio.features_media_frames"]),
         ]);
         let bundle = workflow_project_bundle(&permissive_old_shape, &[]);
         assert!(
             ProjectBundle::decode_entries(PROJECT_SPEC.parse_raw(&bundle).unwrap())
                 .unwrap_err()
-                .contains("canonical 14-field schema")
+                .contains("feature_registry has 2 columns; expected 14")
         );
 
         let definition = workflow_definition("media.frames", "holding_feature");
@@ -3758,10 +3862,10 @@ mod tests {
         let registry_batch = canonical_registry_batch(std::slice::from_ref(&definition));
         let registry =
             WorkflowBundleRegistry::validate(std::slice::from_ref(&registry_batch)).unwrap();
-        let relation =
-            spiral_robotics_api::workflow::WorkflowFeatureApplicability::derived_cache_relation(
-                "media.frames",
-            );
+        let relation = spiral::StorageSchema::workflow_feature_cache_relation(
+            WORKFLOW_TEST_NAMESPACE,
+            "media.frames",
+        );
 
         let missing_feature = canonical_cache_batch(&[], &[1]);
         let bundle = workflow_project_bundle(
@@ -3813,10 +3917,10 @@ mod tests {
         let second = workflow_definition("media.frames", "still_feature");
         let registry_batch = canonical_registry_batch(&[first.clone(), second.clone()]);
         let registry = WorkflowBundleRegistry::validate(&[registry_batch]).unwrap();
-        let relation =
-            spiral_robotics_api::workflow::WorkflowFeatureApplicability::derived_cache_relation(
-                "media.frames",
-            );
+        let relation = spiral::StorageSchema::workflow_feature_cache_relation(
+            WORKFLOW_TEST_NAMESPACE,
+            "media.frames",
+        );
         let duplicate = canonical_cache_batch(&[first.clone(), second.clone()], &[1, 1]);
         assert!(
             WorkflowCacheValidator::validate_bundle(&relation, &[duplicate], &registry)
@@ -3850,28 +3954,27 @@ mod tests {
     #[test]
     fn workflow_restore_plan_retires_only_prior_caches_absent_from_project() {
         let current = BTreeSet::from([
-            "workflow.features_a".to_owned(),
-            "workflow.features_b".to_owned(),
+            "studio.features_a".to_owned(),
+            "studio.features_b".to_owned(),
         ]);
         let incoming = BTreeSet::from([
-            "workflow.features_b".to_owned(),
-            "workflow.features_c".to_owned(),
+            "studio.features_b".to_owned(),
+            "studio.features_c".to_owned(),
         ]);
         assert_eq!(
-            WorkflowRestorePlan::from_caches(&current, Some(&incoming)),
+            WorkflowRestorePlan::from_caches(&current, &incoming),
             WorkflowRestorePlan {
-                retire_caches: vec!["workflow.features_a".to_owned()],
-                clear_registry: false,
+                retire_caches: vec!["studio.features_a".to_owned()],
             }
         );
+        let empty = BTreeSet::new();
         assert_eq!(
-            WorkflowRestorePlan::from_caches(&current, None),
+            WorkflowRestorePlan::from_caches(&current, &empty),
             WorkflowRestorePlan {
                 retire_caches: vec![
-                    "workflow.features_a".to_owned(),
-                    "workflow.features_b".to_owned(),
+                    "studio.features_a".to_owned(),
+                    "studio.features_b".to_owned(),
                 ],
-                clear_registry: true,
             }
         );
     }

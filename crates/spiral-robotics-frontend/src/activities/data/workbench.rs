@@ -1059,7 +1059,8 @@ impl QueryPresetSql for Table {
             | Table::TrainingRunMetrics
             | Table::TrainingRunCheckpoints
             | Table::RolloutRuns
-            | Table::WorkflowRuns => self.sql(namespace),
+            | Table::WorkflowRuns
+            | Table::FeatureRegistry => self.sql(namespace),
         }
     }
 }
@@ -1084,6 +1085,7 @@ impl ManagedTablePresentation for Table {
             Table::TrainingRunCheckpoints => "Checkpoint history for each training run",
             Table::RolloutRuns => "Policy rollout lifecycle and outcomes",
             Table::WorkflowRuns => "Saved Workflow graph and latest run snapshot",
+            Table::FeatureRegistry => "Registered Workflow feature definitions and provenance",
         }
     }
 }

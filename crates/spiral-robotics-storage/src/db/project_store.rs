@@ -1099,7 +1099,7 @@ mod managed_relation_tests {
         };
         assert_eq!(
             present.describe("spiral_robotics"),
-            "all 13 managed relations present"
+            "all 14 managed relations present"
         );
 
         let created = ManagedRelationProvisioning {
