@@ -6,9 +6,7 @@ use crate::OperationError;
 use spiral_robotics_api::recording as api_recording;
 use spiral_robotics_api::robots as api_robots;
 use spiral_robotics_hardware as hardware;
-use spiral_robotics_hardware::{
-    Calibration, CalibrationInput, MotorCalibration, MotorDirection, NormalizedPosition,
-};
+use spiral_robotics_hardware::{Calibration, CalibrationInput, NormalizedPosition};
 
 use crate::robots::calibration::CalibrationControlPort;
 use crate::robots::control::RobotControlPort;
@@ -112,36 +110,10 @@ impl HardwareApiProjection<api_robots::ModeStatus> for hardware::HardwareState {
 
 impl HardwareApiProjection<api_robots::MotorLimits> for hardware::MotorLimits {
     fn to_api(&self) -> api_robots::MotorLimits {
-        api_robots::MotorLimits::from_hardware_limits(
-            self.max_temperature_celsius(),
-            api_robots::MotorVoltageRange::new(self.min_voltage_volts(), self.max_voltage_volts()),
-            self.max_load(),
-        )
-    }
-}
-
-impl HardwareApiProjection<api_robots::MotorDirection> for MotorDirection {
-    fn to_api(&self) -> api_robots::MotorDirection {
-        match self {
-            MotorDirection::Normal => api_robots::MotorDirection::Normal,
-            MotorDirection::Reversed => api_robots::MotorDirection::Reversed,
-        }
-    }
-}
-
-impl HardwareApiProjection<api_robots::MotorCalibration> for MotorCalibration {
-    fn to_api(&self) -> api_robots::MotorCalibration {
-        let reading = self.reading();
-        api_robots::MotorCalibration::new(
-            self.id(),
-            self.direction().to_api(),
-            api_robots::MotorReading::new(
-                reading.center(),
-                reading.range_min(),
-                reading.range_max(),
-            ),
-        )
-        .expect("hardware calibration is already validated")
+        api_robots::MotorLimits::default()
+            .with_max_temperature_celsius(self.max_temperature_celsius())
+            .with_voltage_range(self.min_voltage_volts(), self.max_voltage_volts())
+            .with_max_load(self.max_load())
     }
 }
 

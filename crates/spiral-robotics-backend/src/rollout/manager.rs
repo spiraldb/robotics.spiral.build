@@ -1041,23 +1041,22 @@ impl RestoredRolloutSnapshot for ContractRolloutSnapshot {
                     .map(|value| value.as_millis().min(i64::MAX as u128) as i64)
                     .unwrap_or(0),
             );
-            let identity = spiral_robotics_api::rollout::RolloutIdentity::new(
+            return Self::new(
                 self.session_id().map(str::to_owned),
                 self.run_id().map(str::to_owned),
-                self.robot().map(str::to_owned),
             )
+            .with_robot(self.robot().map(str::to_owned))
             .with_checkpoint(self.checkpoint_step())
-            .with_duration(self.duration_seconds());
-            let lifecycle = spiral_robotics_api::rollout::RolloutLifecycle::new(
-                ContractRolloutPhase::Failed,
-                self.started_ms(),
-            )
-            .with_finished_ms(finished_ms)
-            .with_messages(
+            .with_duration(self.duration_seconds())
+            .with_lifecycle(ContractRolloutPhase::Failed, self.started_ms())
+            .with_completion(
+                finished_ms,
                 Some("Studio stopped before this rollout completed.".to_owned()),
-                Some("No policy session was resumed after restart.".to_owned()),
-            );
-            return Self::new(identity, lifecycle, self.metrics().clone());
+            )
+            .with_warning(Some(
+                "No policy session was resumed after restart.".to_owned(),
+            ))
+            .with_metrics(self.metrics().clone());
         }
         self
     }

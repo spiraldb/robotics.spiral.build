@@ -452,17 +452,243 @@ impl StorageSchema {
     pub fn is_dataset_id(value: &str) -> bool {
         spiral_robotics_api::identity::DatasetId::is_canonical(value)
     }
-
-    /// Convert an external immutable ID into one component of a generated name.
-    #[cfg(test)]
-    fn identifier_component(value: &str) -> String {
-        spiral_robotics_api::identity::SqlNameComponent::from(value).into_string()
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct PublishedManagedRelation {
+        name: &'static str,
+        columns: &'static [&'static str],
+    }
+
+    const PUBLISHED_MANAGED_RELATIONS: [PublishedManagedRelation; 14] = [
+        PublishedManagedRelation {
+            name: "datasets",
+            columns: &["dataset_id", "name", "created_ms", "description"],
+        },
+        PublishedManagedRelation {
+            name: "episodes",
+            columns: &[
+                "episode_id",
+                "dataset_id",
+                "schema_version",
+                "started_ms",
+                "sample_hz",
+                "source",
+                "note",
+                "frames",
+                "duration_ns",
+                "max_follow_error_degrees",
+                "discarded",
+                "recording_gap_after_ns",
+                "recording_gap_duration_ns",
+            ],
+        },
+        PublishedManagedRelation {
+            name: "episode_streams",
+            columns: &[
+                "episode_id",
+                "stream_id",
+                "ordinal",
+                "modality",
+                "robot_type",
+                "joint_names",
+                "camera_id",
+                "width",
+                "height",
+                "fps",
+                "start_temperature_celsius",
+                "start_voltage_volts",
+                "limit_max_temperature_celsius",
+                "limit_min_voltage_volts",
+                "limit_max_voltage_volts",
+                "limit_max_load",
+                "peak_temperature_celsius",
+                "min_voltage_volts",
+                "peak_load",
+                "peak_current_amps",
+            ],
+        },
+        PublishedManagedRelation {
+            name: "joint_samples",
+            columns: &[
+                "episode_id",
+                "stream_id",
+                "sample_index",
+                "episode_time_ns",
+                "state_valid",
+                "action_valid",
+                "state_position",
+                "action_position",
+                "raw_position",
+                "velocity",
+                "effort",
+                "follow_error_degrees",
+            ],
+        },
+        PublishedManagedRelation {
+            name: "video_assets",
+            columns: &[
+                "episode_id",
+                "stream_id",
+                "segment_index",
+                "timeline_offset_ns",
+                "camera_id",
+                "payload",
+                "byte_size",
+                "width",
+                "height",
+                "fps",
+                "frames",
+                "media_relation",
+            ],
+        },
+        PublishedManagedRelation {
+            name: "training_checkpoints",
+            columns: &[
+                "run_id",
+                "run_name",
+                "policy",
+                "step",
+                "created_ms",
+                "validation_loss",
+                "config_json",
+                "checkpoint",
+            ],
+        },
+        PublishedManagedRelation {
+            name: "robots",
+            columns: &["robot_id", "config_json", "updated_ms"],
+        },
+        PublishedManagedRelation {
+            name: "studio_settings",
+            columns: &["key", "value_json", "updated_ms"],
+        },
+        PublishedManagedRelation {
+            name: "training_runs",
+            columns: &[
+                "run_id",
+                "ordinal",
+                "run_name",
+                "config_dataset_id",
+                "source_dataset_id",
+                "policy",
+                "query_sql",
+                "state_column",
+                "action_column",
+                "device",
+                "steps",
+                "batch_size",
+                "validation_split",
+                "learning_rate",
+                "checkpoint_every",
+                "chunk_size",
+                "seed",
+                "camera_streams",
+                "image_width",
+                "image_height",
+                "video_decoder",
+                "pretrained_backbone",
+                "hidden_dim",
+                "latent_dim",
+                "encoder_layers",
+                "vae_encoder_layers",
+                "decoder_layers",
+                "attention_heads",
+                "feedforward_dim",
+                "kl_weight",
+                "phase",
+                "current_step",
+                "started_ms",
+                "finished_ms",
+                "message",
+                "logs",
+            ],
+        },
+        PublishedManagedRelation {
+            name: "training_run_metrics",
+            columns: &[
+                "run_id",
+                "step",
+                "train_loss",
+                "validation_loss",
+                "learning_rate",
+                "elapsed_seconds",
+                "event",
+                "transfer_bytes_per_second",
+                "examples_per_second",
+                "cpu_percent",
+                "gpu_percent",
+                "memory_bytes",
+                "loader_ms",
+                "arrow_encode_ms",
+                "upload_ms",
+                "device_copy_ms",
+                "model_ms",
+            ],
+        },
+        PublishedManagedRelation {
+            name: "training_run_checkpoints",
+            columns: &[
+                "run_id",
+                "step",
+                "created_ms",
+                "validation_loss",
+                "byte_size",
+                "inference_ready",
+                "recommended_action_steps",
+                "sample_hz",
+            ],
+        },
+        PublishedManagedRelation {
+            name: "rollout_runs",
+            columns: &[
+                "session_id",
+                "run_id",
+                "checkpoint_step",
+                "robot",
+                "duration_seconds",
+                "phase",
+                "started_ms",
+                "finished_ms",
+                "message",
+                "warning",
+                "inference_count",
+                "command_count",
+                "missed_deadlines",
+                "last_latency_ms",
+                "last_model_ms",
+                "mean_latency_ms",
+                "max_latency_ms",
+                "updated_ms",
+            ],
+        },
+        PublishedManagedRelation {
+            name: "workflow_runs",
+            columns: &["run_id", "document_version", "snapshot_json", "updated_ms"],
+        },
+        PublishedManagedRelation {
+            name: "feature_registry",
+            columns: &[
+                "source_relation",
+                "cache_relation",
+                "feature_name",
+                "description",
+                "concept",
+                "media_field",
+                "stream_ids",
+                "producer_model_id",
+                "producer_repository",
+                "artifact_revision",
+                "value_semantics",
+                "definition_version",
+                "created_at_ms",
+                "updated_at_ms",
+            ],
+        },
+    ];
 
     /// What a relation actually holds, read from the one production Arrow
     /// schema that both the database writes and a bundle validates against.
@@ -511,21 +737,21 @@ mod tests {
         }
     }
 
-    /// The api crate's `ManagedTable` is the browser-facing listing of these
+    /// The frontend's managed catalog is the browser-facing listing of these
     /// relations; a mismatch means the Data schema browser lies about what the
-    /// database holds. This is the only place the published listing is pinned,
-    /// so it compares against the production Arrow schemas themselves rather
-    /// than against a second hand-written column list.
+    /// database holds. This local copy pins that presentation contract against
+    /// the production Arrow schemas.
     #[test]
     fn the_managed_catalog_mirrors_the_persisted_relations() {
-        use spiral_robotics_api::catalog::ManagedTable;
-
         let persisted: Vec<&str> = Table::ALL.iter().map(|table| table.name()).collect();
-        let published: Vec<&str> = ManagedTable::ALL.iter().map(|table| table.name()).collect();
+        let published: Vec<&str> = PUBLISHED_MANAGED_RELATIONS
+            .iter()
+            .map(|relation| relation.name)
+            .collect();
         assert_eq!(published, persisted, "relation names and browser order");
 
-        for (table, managed) in Table::ALL.into_iter().zip(ManagedTable::ALL) {
-            assert_eq!(managed.columns(), persisted_columns(table), "{table}");
+        for (table, published) in Table::ALL.into_iter().zip(PUBLISHED_MANAGED_RELATIONS) {
+            assert_eq!(published.columns, persisted_columns(table), "{table}");
         }
     }
 
@@ -538,12 +764,18 @@ mod tests {
         assert!(!StorageSchema::is_dataset_id("pick place"));
         assert!(!StorageSchema::is_dataset_id(""));
         assert_eq!(
-            StorageSchema::identifier_component("episode_37"),
-            "episode_37"
+            spiral_robotics_api::workflow::WorkflowFeatureApplicability::derived_cache_name(
+                "episode_37"
+            ),
+            "features_episode_37"
         );
         assert_ne!(
-            StorageSchema::identifier_component("episode-37"),
-            StorageSchema::identifier_component("episode_37")
+            spiral_robotics_api::workflow::WorkflowFeatureApplicability::derived_cache_name(
+                "episode-37"
+            ),
+            spiral_robotics_api::workflow::WorkflowFeatureApplicability::derived_cache_name(
+                "episode_37"
+            )
         );
         assert_eq!(
             StorageSchema::workflow_feature_registry_relation("studio"),

@@ -3,24 +3,9 @@
 use serde::{Deserialize, Serialize};
 
 /// Operator-approved launch parameters for one backend-owned policy session.
-pub const MIN_ROLLOUT_DURATION_SECONDS: u32 = 1;
 pub const DEFAULT_ROLLOUT_DURATION_SECONDS: u32 = 30;
 pub const MAX_ROLLOUT_DURATION_SECONDS: u32 = 600;
 pub const MAX_ROLLOUT_ACTION_STEPS: usize = 20;
-
-/// A policy rollout duration admitted by the product safety window.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub struct RolloutDuration(u32);
-
-impl RolloutDuration {
-    pub const fn new(seconds: u32) -> Option<Self> {
-        if seconds >= MIN_ROLLOUT_DURATION_SECONDS && seconds <= MAX_ROLLOUT_DURATION_SECONDS {
-            Some(Self(seconds))
-        } else {
-            None
-        }
-    }
-}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct StartRolloutRequest {
@@ -161,7 +146,7 @@ pub struct RolloutSnapshot {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct RolloutIdentity {
+struct RolloutIdentity {
     session_id: Option<String>,
     run_id: Option<String>,
     checkpoint_step: Option<u64>,
@@ -171,7 +156,7 @@ pub struct RolloutIdentity {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct RolloutLifecycle {
+struct RolloutLifecycle {
     phase: RolloutPhase,
     started_ms: Option<i64>,
     finished_ms: Option<i64>,
@@ -180,59 +165,58 @@ pub struct RolloutLifecycle {
     warning: Option<String>,
 }
 
-impl RolloutIdentity {
-    pub fn new(session_id: Option<String>, run_id: Option<String>, robot: Option<String>) -> Self {
-        Self {
-            session_id,
-            run_id,
-            checkpoint_step: None,
-            robot,
-            duration_seconds: None,
-        }
-    }
-    pub const fn with_checkpoint(mut self, checkpoint_step: Option<u64>) -> Self {
-        self.checkpoint_step = checkpoint_step;
-        self
-    }
-    pub const fn with_duration(mut self, duration_seconds: Option<u32>) -> Self {
-        self.duration_seconds = duration_seconds;
-        self
-    }
-}
-
-impl RolloutLifecycle {
-    pub const fn new(phase: RolloutPhase, started_ms: Option<i64>) -> Self {
-        Self {
-            phase,
-            started_ms,
-            finished_ms: None,
-            message: None,
-            warning: None,
-        }
-    }
-    pub const fn with_finished_ms(mut self, finished_ms: Option<i64>) -> Self {
-        self.finished_ms = finished_ms;
-        self
-    }
-    pub fn with_messages(mut self, message: Option<String>, warning: Option<String>) -> Self {
-        self.message = message;
-        self.warning = warning;
-        self
-    }
-}
-
 impl RolloutSnapshot {
-    pub fn new(
-        identity: RolloutIdentity,
-        lifecycle: RolloutLifecycle,
-        metrics: RolloutMetrics,
-    ) -> Self {
+    pub fn new(session_id: Option<String>, run_id: Option<String>) -> Self {
         Self {
-            identity,
-            lifecycle,
-            metrics,
+            identity: RolloutIdentity {
+                session_id,
+                run_id,
+                checkpoint_step: None,
+                robot: None,
+                duration_seconds: None,
+            },
+            lifecycle: RolloutLifecycle::default(),
+            metrics: RolloutMetrics::default(),
         }
     }
+
+    pub fn with_robot(mut self, robot: Option<String>) -> Self {
+        self.identity.robot = robot;
+        self
+    }
+
+    pub const fn with_checkpoint(mut self, checkpoint_step: Option<u64>) -> Self {
+        self.identity.checkpoint_step = checkpoint_step;
+        self
+    }
+
+    pub const fn with_duration(mut self, duration_seconds: Option<u32>) -> Self {
+        self.identity.duration_seconds = duration_seconds;
+        self
+    }
+
+    pub const fn with_lifecycle(mut self, phase: RolloutPhase, started_ms: Option<i64>) -> Self {
+        self.lifecycle.phase = phase;
+        self.lifecycle.started_ms = started_ms;
+        self
+    }
+
+    pub fn with_completion(mut self, finished_ms: Option<i64>, message: Option<String>) -> Self {
+        self.lifecycle.finished_ms = finished_ms;
+        self.lifecycle.message = message;
+        self
+    }
+
+    pub fn with_warning(mut self, warning: Option<String>) -> Self {
+        self.lifecycle.warning = warning;
+        self
+    }
+
+    pub const fn with_metrics(mut self, metrics: RolloutMetrics) -> Self {
+        self.metrics = metrics;
+        self
+    }
+
     pub const fn phase(&self) -> RolloutPhase {
         self.lifecycle.phase
     }

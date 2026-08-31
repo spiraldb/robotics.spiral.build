@@ -650,13 +650,9 @@ mod tests {
         CameraBinding, CameraStatus, CameraStreamFormat, CameraStreamState, ConnectionStatus,
         RobotAvailability, RobotSummary,
     };
-    use spiral_robotics_api::rollout::{
-        MAX_ROLLOUT_ACTION_STEPS, RolloutIdentity, RolloutLifecycle, RolloutMetrics, RolloutPhase,
-        RolloutSnapshot,
-    };
+    use spiral_robotics_api::rollout::{MAX_ROLLOUT_ACTION_STEPS, RolloutPhase, RolloutSnapshot};
     use spiral_robotics_api::training::{
-        StartTrainingRequest, TrainingCheckpoint, TrainingRun, TrainingRunHistory,
-        TrainingRunIdentity, TrainingRunLifecycle, TrainingRunPhase, TrainingSource,
+        StartTrainingRequest, TrainingCheckpoint, TrainingRun, TrainingRunPhase, TrainingSource,
     };
 
     use super::{
@@ -696,12 +692,9 @@ mod tests {
 
     #[test]
     fn an_active_clamp_warning_uses_the_caution_runtime_state() {
-        let rollout = RolloutSnapshot::new(
-            RolloutIdentity::default(),
-            RolloutLifecycle::new(RolloutPhase::Running, None)
-                .with_messages(None, Some("Policy output was clamped.".to_owned())),
-            RolloutMetrics::default(),
-        );
+        let rollout = RolloutSnapshot::default()
+            .with_lifecycle(RolloutPhase::Running, None)
+            .with_warning(Some("Policy output was clamped.".to_owned()));
 
         assert_eq!(
             rollout.runtime_note_class(),
@@ -762,22 +755,13 @@ mod tests {
 
     #[test]
     fn rollout_lists_inference_ready_checkpoints_from_an_active_run() {
-        let run = TrainingRun::new(
-            TrainingRunIdentity::new(
-                "active-run",
-                StartTrainingRequest::default(),
-                TrainingSource::default(),
-            ),
-            TrainingRunLifecycle::new(TrainingRunPhase::Running, 0, 0),
-            TrainingRunHistory::new(
-                Vec::new(),
-                vec![
-                    TrainingCheckpoint::new(20_000, 0).with_artifact(0, true),
-                    TrainingCheckpoint::new(10_000, 0),
-                ],
-                Vec::new(),
-            ),
-        );
+        let run = TrainingRun::starting("active-run", StartTrainingRequest::default())
+            .with_source(TrainingSource::default())
+            .with_phase(TrainingRunPhase::Running, 0)
+            .with_checkpoints(vec![
+                TrainingCheckpoint::new(20_000, 0).with_artifact(0, true),
+                TrainingCheckpoint::new(10_000, 0),
+            ]);
 
         let choices = run.checkpoint_choices();
 

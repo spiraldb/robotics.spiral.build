@@ -16,12 +16,13 @@ use charming::element::{
 use charming::series::Line;
 use dioxus::prelude::*;
 use dioxus_workbench::{LayoutNode, Panel, PanelId, PanelLayout, PanelWorkspace, SplitAxis};
-#[cfg(test)]
-use spiral_robotics_api::catalog as spiral;
 use spiral_robotics_api::identity::DatasetId;
 use spiral_robotics_api::training::{
     TrainingMetricPoint, TrainingReadiness, TrainingRun, TrainingRunPhase,
 };
+
+#[cfg(test)]
+use crate::activities::data::catalog as spiral;
 
 use crate::components::charts::{
     COLOR_CPU, COLOR_GPU, COLOR_INK_FAINT, COLOR_LINE, COLOR_MEMORY, COLOR_SELECTED, COLOR_SURFACE,
@@ -1418,7 +1419,7 @@ impl RuntimeDevicePresentation for str {
 
 #[cfg(test)]
 mod tests {
-    use spiral_robotics_api::catalog::ManagedTable as Table;
+    use crate::activities::data::catalog::ManagedTable as Table;
 
     use super::*;
 
@@ -1477,11 +1478,7 @@ mod tests {
 
     #[test]
     fn throughput_uses_the_optimizer_step_axis_and_slider_zoom() {
-        let metrics = vec![TrainingMetricPoint::new(
-            spiral_robotics_api::training::TrainingMetricProgress::new(50, 0.0, 0.0),
-            spiral_robotics_api::training::TrainingResourceMetrics::new(0.0, 25.0),
-            spiral_robotics_api::training::TrainingStageTimings::default(),
-        )];
+        let metrics = vec![TrainingMetricPoint::new(50, 0.0).with_throughput(0.0, 25.0)];
         let chart = ResourceSeries::Throughput.chart(&metrics, 100);
         let option = serde_json::to_value(chart).expect("chart should serialize");
         assert_eq!(option["xAxis"]["max"], 100.0);
@@ -1495,20 +1492,9 @@ mod tests {
 
     #[test]
     fn loss_chart_uses_a_linear_axis_and_slider_zoom_with_stable_series() {
-        let run = TrainingRun::new(
-            Default::default(),
-            Default::default(),
-            spiral_robotics_api::training::TrainingRunHistory::new(
-                vec![TrainingMetricPoint::new(
-                    spiral_robotics_api::training::TrainingMetricProgress::new(1, 0.25, 0.0)
-                        .with_validation_loss(Some(0.3)),
-                    spiral_robotics_api::training::TrainingResourceMetrics::default(),
-                    spiral_robotics_api::training::TrainingStageTimings::default(),
-                )],
-                Vec::new(),
-                Vec::new(),
-            ),
-        );
+        let run = TrainingRun::default().with_metrics(vec![
+            TrainingMetricPoint::new(1, 0.25).with_validation_loss(Some(0.3)),
+        ]);
         let option = serde_json::to_value(run.loss_chart()).expect("chart should serialize");
 
         assert_eq!(option["yAxis"]["type"], "value");

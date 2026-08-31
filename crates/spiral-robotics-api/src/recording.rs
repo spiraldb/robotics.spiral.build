@@ -2,14 +2,6 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Replay a trajectory fetched directly from SpiralDB.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct StartSpiralReplayRequest {
-    episode: String,
-    robot: String,
-    stream: String,
-}
-
 /// One recorded episode, as summarised from SpiralDB.
 ///
 /// An episode is one take: the operator arms the recorder, performs the task
@@ -46,7 +38,7 @@ struct EpisodeListIdentity {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct EpisodeIdentity {
+struct EpisodeIdentity {
     /// Stable identifier for the episode and all of its related rows.
     id: String,
     /// Dataset row this episode belongs to. Streams and samples reference the
@@ -59,7 +51,7 @@ pub struct EpisodeIdentity {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct EpisodeTimeline {
+struct EpisodeTimeline {
     frames: u64,
     duration_seconds: f64,
     /// Wall-clock intervals deliberately omitted from the episode timeline.
@@ -79,7 +71,7 @@ pub struct EpisodeTimeline {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct EpisodeAssessment {
+struct EpisodeAssessment {
     /// Largest gap between a measured and a commanded joint angle during the
     /// take, in degrees — the same quantity the inspector shows live as
     /// `Follow Δ`, kept for the whole take instead of for one instant.
@@ -123,16 +115,73 @@ impl DatasetSummary {
 }
 
 impl EpisodeInfo {
-    pub fn new(
-        identity: EpisodeIdentity,
-        timeline: EpisodeTimeline,
-        assessment: EpisodeAssessment,
-    ) -> Self {
+    pub fn new(id: impl Into<String>, dataset_id: impl Into<String>) -> Self {
         Self {
-            identity,
-            timeline,
-            assessment,
+            identity: EpisodeIdentity {
+                id: id.into(),
+                dataset_id: dataset_id.into(),
+                arms: Vec::new(),
+                source: String::new(),
+            },
+            timeline: EpisodeTimeline {
+                frames: 0,
+                duration_seconds: 0.0,
+                recording_gaps: Vec::new(),
+                sample_hz: 0.0,
+                started_ms: 0,
+            },
+            assessment: EpisodeAssessment {
+                max_follow_error_degrees: None,
+                discarded: false,
+                problem: None,
+            },
         }
+    }
+
+    pub fn with_arms(mut self, arms: Vec<EpisodeArm>) -> Self {
+        self.identity.arms = arms;
+        self
+    }
+
+    pub fn with_source(mut self, source: impl Into<String>) -> Self {
+        self.identity.source = source.into();
+        self
+    }
+
+    pub const fn with_timeline(mut self, frames: u64, duration_seconds: f64) -> Self {
+        self.timeline.frames = frames;
+        self.timeline.duration_seconds = duration_seconds;
+        self
+    }
+
+    pub const fn with_sample_hz(mut self, sample_hz: f64) -> Self {
+        self.timeline.sample_hz = sample_hz;
+        self
+    }
+
+    pub fn with_recording_gaps(mut self, recording_gaps: Vec<RecordingGap>) -> Self {
+        self.timeline.recording_gaps = recording_gaps;
+        self
+    }
+
+    pub const fn with_started_ms(mut self, started_ms: i64) -> Self {
+        self.timeline.started_ms = started_ms;
+        self
+    }
+
+    pub const fn with_assessment(
+        mut self,
+        discarded: bool,
+        max_follow_error_degrees: Option<f64>,
+    ) -> Self {
+        self.assessment.discarded = discarded;
+        self.assessment.max_follow_error_degrees = max_follow_error_degrees;
+        self
+    }
+
+    pub fn with_problem(mut self, problem: Option<String>) -> Self {
+        self.assessment.problem = problem;
+        self
     }
 
     pub fn id(&self) -> &str {
@@ -227,57 +276,6 @@ impl EpisodeListItem {
 impl EpisodeIdentity {
     fn default_dataset_id() -> String {
         "default".to_owned()
-    }
-
-    pub fn new(
-        id: impl Into<String>,
-        dataset_id: impl Into<String>,
-        arms: Vec<EpisodeArm>,
-    ) -> Self {
-        Self {
-            id: id.into(),
-            dataset_id: dataset_id.into(),
-            arms,
-            source: String::new(),
-        }
-    }
-    pub fn with_source(mut self, source: impl Into<String>) -> Self {
-        self.source = source.into();
-        self
-    }
-}
-
-impl EpisodeTimeline {
-    pub const fn new(frames: u64, duration_seconds: f64, sample_hz: f64) -> Self {
-        Self {
-            frames,
-            duration_seconds,
-            recording_gaps: Vec::new(),
-            sample_hz,
-            started_ms: 0,
-        }
-    }
-    pub fn with_recording_gaps(mut self, recording_gaps: Vec<RecordingGap>) -> Self {
-        self.recording_gaps = recording_gaps;
-        self
-    }
-    pub const fn with_started_ms(mut self, started_ms: i64) -> Self {
-        self.started_ms = started_ms;
-        self
-    }
-}
-
-impl EpisodeAssessment {
-    pub fn new(
-        discarded: bool,
-        max_follow_error_degrees: Option<f64>,
-        problem: Option<String>,
-    ) -> Self {
-        Self {
-            max_follow_error_degrees,
-            discarded,
-            problem,
-        }
     }
 }
 
@@ -374,28 +372,6 @@ impl EpisodeArmScalarSamples {
     }
 }
 
-/// Optional per-frame channels recorded beside an arm's scalar samples.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct EpisodeArmOptionalChannels {
-    velocity: EpisodeOptionalFrameMatrix,
-    effort: EpisodeOptionalFrameMatrix,
-    action: EpisodeOptionalFrameMatrix,
-}
-
-impl EpisodeArmOptionalChannels {
-    pub const fn new(
-        velocity: EpisodeOptionalFrameMatrix,
-        effort: EpisodeOptionalFrameMatrix,
-        action: EpisodeOptionalFrameMatrix,
-    ) -> Self {
-        Self {
-            velocity,
-            effort,
-            action,
-        }
-    }
-}
-
 impl EpisodeInspectionArm {
     pub fn new(
         arm: impl Into<String>,
@@ -412,10 +388,18 @@ impl EpisodeInspectionArm {
         }
     }
 
-    pub fn with_optional_channels(mut self, channels: EpisodeArmOptionalChannels) -> Self {
-        self.velocity = channels.velocity;
-        self.effort = channels.effort;
-        self.action = channels.action;
+    pub fn with_velocity(mut self, velocity: EpisodeOptionalFrameMatrix) -> Self {
+        self.velocity = velocity;
+        self
+    }
+
+    pub fn with_effort(mut self, effort: EpisodeOptionalFrameMatrix) -> Self {
+        self.effort = effort;
+        self
+    }
+
+    pub fn with_action(mut self, action: EpisodeOptionalFrameMatrix) -> Self {
+        self.action = action;
         self
     }
 
@@ -638,20 +622,15 @@ mod tests {
 
     #[test]
     fn episode_list_items_do_not_serialize_stream_layout() {
-        let episode = EpisodeInfo::new(
-            EpisodeIdentity::new(
-                "episode_000001",
-                "default",
-                vec![EpisodeArm::new(
-                    "follower",
-                    Some("so101_follower".to_owned()),
-                    vec!["shoulder_pan".to_owned()],
-                )],
-            )
-            .with_source("teleoperation"),
-            EpisodeTimeline::new(120, 2.0, 60.0),
-            EpisodeAssessment::new(false, None, None),
-        );
+        let episode = EpisodeInfo::new("episode_000001", "default")
+            .with_arms(vec![EpisodeArm::new(
+                "follower",
+                Some("so101_follower".to_owned()),
+                vec!["shoulder_pan".to_owned()],
+            )])
+            .with_source("teleoperation")
+            .with_timeline(120, 2.0)
+            .with_sample_hz(60.0);
 
         let serialized = serde_json::to_value(EpisodeListItem::from(&episode)).unwrap();
 
@@ -998,12 +977,6 @@ pub struct SetRecordingPausedRequest {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SetReplayPausedRequest {
     paused: bool,
-}
-
-/// Change the operator's judgement of a stored take.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct JudgeEpisodeRequest {
-    discarded: bool,
 }
 
 /// Play a stored episode back onto one arm.

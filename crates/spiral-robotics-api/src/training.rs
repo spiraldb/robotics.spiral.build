@@ -308,7 +308,7 @@ pub struct StartTrainingRequest {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct TrainingDataSelection {
+pub(crate) struct TrainingDataSelection {
     run_name: String,
     /// Relational dataset selected by the operator. The configured Spiral
     /// namespace remains a storage location; this ID is the training set.
@@ -326,7 +326,7 @@ pub struct TrainingDataSelection {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
-pub struct TrainingOptimizationConfig {
+pub(crate) struct TrainingOptimizationConfig {
     #[serde(default = "TrainingOptimizationConfig::default_steps")]
     steps: u64,
     #[serde(default = "TrainingOptimizationConfig::default_batch_size")]
@@ -551,7 +551,7 @@ pub struct TrainingMetricPoint {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct TrainingMetricProgress {
+struct TrainingMetricProgress {
     step: u64,
     train_loss: f64,
     validation_loss: Option<f64>,
@@ -562,7 +562,7 @@ pub struct TrainingMetricProgress {
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct TrainingResourceMetrics {
+struct TrainingResourceMetrics {
     /// Latest requested video payload bytes divided by total sample preparation time.
     transfer_bytes_per_second: f64,
     examples_per_second: f64,
@@ -578,7 +578,7 @@ pub struct TrainingResourceMetrics {
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct TrainingStageTimings {
+struct TrainingStageTimings {
     /// Spiral query, frame decode, normalization, and batch assembly time.
     #[serde(default)]
     loader_ms: Option<f64>,
@@ -596,39 +596,58 @@ pub struct TrainingStageTimings {
     model_ms: Option<f64>,
 }
 
-impl TrainingMetricProgress {
-    pub const fn new(step: u64, train_loss: f64, learning_rate: f64) -> Self {
+impl TrainingMetricPoint {
+    pub const fn new(step: u64, train_loss: f64) -> Self {
         Self {
-            step,
-            train_loss,
-            validation_loss: None,
-            learning_rate,
-            elapsed_seconds: 0.0,
-            event: None,
+            progress: TrainingMetricProgress {
+                step,
+                train_loss,
+                validation_loss: None,
+                learning_rate: 0.0,
+                elapsed_seconds: 0.0,
+                event: None,
+            },
+            resources: TrainingResourceMetrics {
+                transfer_bytes_per_second: 0.0,
+                examples_per_second: 0.0,
+                cpu_percent: None,
+                gpu_percent: None,
+                memory_bytes: None,
+            },
+            timings: TrainingStageTimings {
+                loader_ms: None,
+                arrow_encode_ms: None,
+                upload_ms: None,
+                device_copy_ms: None,
+                model_ms: None,
+            },
         }
     }
 
+    pub const fn with_learning_rate(mut self, learning_rate: f64) -> Self {
+        self.progress.learning_rate = learning_rate;
+        self
+    }
+
     pub const fn with_validation_loss(mut self, validation_loss: Option<f64>) -> Self {
-        self.validation_loss = validation_loss;
+        self.progress.validation_loss = validation_loss;
         self
     }
 
     pub fn with_timeline(mut self, elapsed_seconds: f64, event: Option<String>) -> Self {
-        self.elapsed_seconds = elapsed_seconds;
-        self.event = event;
+        self.progress.elapsed_seconds = elapsed_seconds;
+        self.progress.event = event;
         self
     }
-}
 
-impl TrainingResourceMetrics {
-    pub const fn new(transfer_bytes_per_second: f64, examples_per_second: f64) -> Self {
-        Self {
-            transfer_bytes_per_second,
-            examples_per_second,
-            cpu_percent: None,
-            gpu_percent: None,
-            memory_bytes: None,
-        }
+    pub const fn with_throughput(
+        mut self,
+        transfer_bytes_per_second: f64,
+        examples_per_second: f64,
+    ) -> Self {
+        self.resources.transfer_bytes_per_second = transfer_bytes_per_second;
+        self.resources.examples_per_second = examples_per_second;
+        self
     }
 
     pub const fn with_utilization(
@@ -636,54 +655,39 @@ impl TrainingResourceMetrics {
         cpu_percent: Option<f64>,
         gpu_percent: Option<f64>,
     ) -> Self {
-        self.cpu_percent = cpu_percent;
-        self.gpu_percent = gpu_percent;
+        self.resources.cpu_percent = cpu_percent;
+        self.resources.gpu_percent = gpu_percent;
         self
     }
 
     pub const fn with_memory_bytes(mut self, memory_bytes: Option<u64>) -> Self {
-        self.memory_bytes = memory_bytes;
+        self.resources.memory_bytes = memory_bytes;
         self
     }
-}
 
-impl TrainingStageTimings {
-    pub const fn new(
-        loader_ms: Option<f64>,
+    pub const fn with_loader_ms(mut self, loader_ms: Option<f64>) -> Self {
+        self.timings.loader_ms = loader_ms;
+        self
+    }
+
+    pub const fn with_transport_timings(
+        mut self,
         arrow_encode_ms: Option<f64>,
         upload_ms: Option<f64>,
     ) -> Self {
-        Self {
-            loader_ms,
-            arrow_encode_ms,
-            upload_ms,
-            device_copy_ms: None,
-            model_ms: None,
-        }
+        self.timings.arrow_encode_ms = arrow_encode_ms;
+        self.timings.upload_ms = upload_ms;
+        self
     }
 
-    pub const fn with_runtime(
+    pub const fn with_runtime_timings(
         mut self,
         device_copy_ms: Option<f64>,
         model_ms: Option<f64>,
     ) -> Self {
-        self.device_copy_ms = device_copy_ms;
-        self.model_ms = model_ms;
+        self.timings.device_copy_ms = device_copy_ms;
+        self.timings.model_ms = model_ms;
         self
-    }
-}
-
-impl TrainingMetricPoint {
-    pub const fn new(
-        progress: TrainingMetricProgress,
-        resources: TrainingResourceMetrics,
-        timings: TrainingStageTimings,
-    ) -> Self {
-        Self {
-            progress,
-            resources,
-            timings,
-        }
     }
 
     pub const fn step(&self) -> u64 {
@@ -925,7 +929,7 @@ pub struct TrainingRun {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct TrainingRunIdentity {
+struct TrainingRunIdentity {
     id: String,
     config: StartTrainingRequest,
     #[serde(default)]
@@ -933,7 +937,7 @@ pub struct TrainingRunIdentity {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct TrainingRunLifecycle {
+struct TrainingRunLifecycle {
     phase: TrainingRunPhase,
     current_step: u64,
     started_ms: i64,
@@ -942,55 +946,66 @@ pub struct TrainingRunLifecycle {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct TrainingRunHistory {
+struct TrainingRunHistory {
     metrics: Vec<TrainingMetricPoint>,
     checkpoints: Vec<TrainingCheckpoint>,
     logs: Vec<String>,
 }
 
-impl TrainingRunIdentity {
-    pub fn new(
-        id: impl Into<String>,
-        config: StartTrainingRequest,
-        source: TrainingSource,
-    ) -> Self {
+impl TrainingRun {
+    pub fn starting(id: impl Into<String>, config: StartTrainingRequest) -> Self {
         Self {
-            id: id.into(),
-            config,
-            source,
+            identity: TrainingRunIdentity {
+                id: id.into(),
+                config,
+                source: TrainingSource::default(),
+            },
+            lifecycle: TrainingRunLifecycle {
+                phase: TrainingRunPhase::Starting,
+                current_step: 0,
+                started_ms: 0,
+                finished_ms: None,
+                message: None,
+            },
+            history: TrainingRunHistory::default(),
         }
     }
-}
 
-impl TrainingRunLifecycle {
-    pub const fn new(phase: TrainingRunPhase, current_step: u64, started_ms: i64) -> Self {
-        Self {
-            phase,
-            current_step,
-            started_ms,
-            finished_ms: None,
-            message: None,
-        }
+    pub fn with_source(mut self, source: TrainingSource) -> Self {
+        self.identity.source = source;
+        self
+    }
+
+    pub const fn with_phase(mut self, phase: TrainingRunPhase, current_step: u64) -> Self {
+        self.lifecycle.phase = phase;
+        self.lifecycle.current_step = current_step;
+        self
+    }
+
+    pub const fn with_started_ms(mut self, started_ms: i64) -> Self {
+        self.lifecycle.started_ms = started_ms;
+        self
     }
 
     pub fn with_completion(mut self, finished_ms: Option<i64>, message: Option<String>) -> Self {
-        self.finished_ms = finished_ms;
-        self.message = message;
+        self.lifecycle.finished_ms = finished_ms;
+        self.lifecycle.message = message;
         self
     }
-}
 
-impl TrainingRun {
-    pub fn new(
-        identity: TrainingRunIdentity,
-        lifecycle: TrainingRunLifecycle,
-        history: TrainingRunHistory,
-    ) -> Self {
-        Self {
-            identity,
-            lifecycle,
-            history,
-        }
+    pub fn with_metrics(mut self, metrics: Vec<TrainingMetricPoint>) -> Self {
+        self.history.metrics = metrics;
+        self
+    }
+
+    pub fn with_checkpoints(mut self, checkpoints: Vec<TrainingCheckpoint>) -> Self {
+        self.history.checkpoints = checkpoints;
+        self
+    }
+
+    pub fn with_logs(mut self, logs: Vec<String>) -> Self {
+        self.history.logs = logs;
+        self
     }
 
     pub fn id(&self) -> &str {
@@ -1306,20 +1321,6 @@ impl ActLayerCounts {
             encoder,
             variational_encoder,
             decoder,
-        }
-    }
-}
-
-impl TrainingRunHistory {
-    pub fn new(
-        metrics: Vec<TrainingMetricPoint>,
-        checkpoints: Vec<TrainingCheckpoint>,
-        logs: Vec<String>,
-    ) -> Self {
-        Self {
-            metrics,
-            checkpoints,
-            logs,
         }
     }
 }

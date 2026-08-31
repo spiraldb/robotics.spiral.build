@@ -209,7 +209,6 @@ mod tests {
     use super::*;
     use crate::recording::*;
     use crate::robots::*;
-    use crate::robots::{MotorCalibration, MotorDirection, MotorReading};
     use crate::rollout::*;
     use crate::settings::*;
     use crate::training::*;
@@ -268,23 +267,16 @@ mod tests {
     }
 
     #[test]
-    fn motor_summary_adapts_domain_calibration_at_the_contract_edge() {
-        let summary = MotorSummary::new("joint", 7, MotorDirection::Reversed)
-            .with_model(Some("sts3215".to_owned()))
-            .with_calibration(Some(
-                MotorCalibration::new(
-                    7,
-                    MotorDirection::Reversed,
-                    MotorReading::new(200, 100, 300),
-                )
-                .unwrap(),
-            ));
+    fn motor_summary_wire_excludes_hardware_configuration_details() {
+        let summary = MotorSummary::new("joint", 7).with_model(Some("sts3215".to_owned()));
 
-        let json = serde_json::to_value(&summary).unwrap();
-        assert_eq!(json["direction"], "reversed");
-        assert_eq!(json["calibration"]["direction"], "reversed");
+        let json = serde_json::to_string(&summary).unwrap();
         assert_eq!(
-            serde_json::from_value::<MotorSummary>(json).unwrap(),
+            json,
+            r#"{"name":"joint","id":7,"model":"sts3215","limits":{"max_temperature_celsius":null,"min_voltage_volts":null,"max_voltage_volts":null,"max_load":null}}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<MotorSummary>(&json).unwrap(),
             summary
         );
     }
@@ -295,11 +287,7 @@ mod tests {
             robot_type.map(str::to_owned),
             RobotAvailability::new(true, None, ConnectionStatus::new(true, None)),
         )
-        .with_motors(vec![MotorSummary::new(
-            "shoulder",
-            1,
-            MotorDirection::Normal,
-        )])
+        .with_motors(vec![MotorSummary::new("shoulder", 1)])
     }
 
     #[test]
@@ -339,13 +327,9 @@ mod tests {
             Some("leader".to_owned()),
             RobotAvailability::new(true, None, ConnectionStatus::new(false, None)),
         )
-        .with_motors(vec![MotorSummary::new(
-            "shoulder",
-            1,
-            MotorDirection::Normal,
-        )]);
+        .with_motors(vec![MotorSummary::new("shoulder", 1)]);
         let incompatible = robot("incompatible-leader", Some("leader"))
-            .with_motors(vec![MotorSummary::new("elbow", 1, MotorDirection::Normal)]);
+            .with_motors(vec![MotorSummary::new("elbow", 1)]);
         let follower = robot("follower", Some("follower"));
         let fallback = robot("fallback", None);
         let studio = StudioSnapshot {
@@ -447,20 +431,18 @@ mod tests {
     #[test]
     fn an_unfinished_take_is_listed_but_not_offered() {
         let episode_with = |frames, problem| {
-            EpisodeInfo::new(
-                EpisodeIdentity::new(
-                    "episode_000001",
-                    "default",
-                    vec![EpisodeArm::new(
-                        "follower",
-                        Some("so101_follower".to_owned()),
-                        vec!["shoulder_pan".to_owned()],
-                    )],
-                )
-                .with_source("Teleoperation"),
-                EpisodeTimeline::new(frames, 2.0, 60.0).with_started_ms(1_770_000_000_000),
-                EpisodeAssessment::new(false, Some(3.5), problem),
-            )
+            EpisodeInfo::new("episode_000001", "default")
+                .with_arms(vec![EpisodeArm::new(
+                    "follower",
+                    Some("so101_follower".to_owned()),
+                    vec!["shoulder_pan".to_owned()],
+                )])
+                .with_source("Teleoperation")
+                .with_timeline(frames, 2.0)
+                .with_sample_hz(60.0)
+                .with_started_ms(1_770_000_000_000)
+                .with_assessment(false, Some(3.5))
+                .with_problem(problem)
         };
         let episode = episode_with(120, None);
         assert!(episode.usable());
@@ -500,23 +482,12 @@ mod tests {
     }
 
     fn training_run(id: &str) -> TrainingRun {
-        TrainingRun::new(
-            TrainingRunIdentity::new(
-                id,
-                StartTrainingRequest::default(),
-                TrainingSource::default(),
-            ),
-            TrainingRunLifecycle::default(),
-            TrainingRunHistory::default(),
-        )
+        TrainingRun::starting(id, StartTrainingRequest::default())
+            .with_source(TrainingSource::default())
     }
 
     fn training_metric(step: u64, train_loss: f64) -> TrainingMetricPoint {
-        TrainingMetricPoint::new(
-            TrainingMetricProgress::new(step, train_loss, 0.0),
-            TrainingResourceMetrics::default(),
-            TrainingStageTimings::default(),
-        )
+        TrainingMetricPoint::new(step, train_loss)
     }
 
     #[test]
@@ -524,18 +495,13 @@ mod tests {
         let mut snapshot =
             TrainingSnapshot::new(TrainingReadiness::default(), vec![training_run("run-a")]);
         for step in 0..=12_000 {
-            let progress =
-                TrainingMetricProgress::new(step, if step == 123 { 10_000.0 } else { 1.0 }, 0.0)
-                    .with_validation_loss((step == 6_000).then_some(4.0));
-            let resources = TrainingResourceMetrics::default()
-                .with_utilization((step == 777).then_some(9_000.0), None);
             snapshot.apply(TrainingUpdate::Metric {
                 run_id: "run-a".to_owned(),
-                point: Box::new(TrainingMetricPoint::new(
-                    progress,
-                    resources,
-                    TrainingStageTimings::default(),
-                )),
+                point: Box::new(
+                    TrainingMetricPoint::new(step, if step == 123 { 10_000.0 } else { 1.0 })
+                        .with_validation_loss((step == 6_000).then_some(4.0))
+                        .with_utilization((step == 777).then_some(9_000.0), None),
+                ),
             });
         }
         for line in 0..=MAX_TRAINING_LOG_LINES {
@@ -603,19 +569,11 @@ mod tests {
         let mut snapshot = TrainingSnapshot::new(
             TrainingReadiness::default(),
             vec![
-                TrainingRun::new(
-                    TrainingRunIdentity::new(
-                        "run-a",
-                        StartTrainingRequest::default(),
-                        TrainingSource::default(),
-                    ),
-                    TrainingRunLifecycle::default(),
-                    TrainingRunHistory::new(
-                        vec![TrainingMetricPoint::default()],
-                        vec![TrainingCheckpoint::default()],
-                        vec!["retained only inside the run".to_owned()],
-                    ),
-                ),
+                TrainingRun::starting("run-a", StartTrainingRequest::default())
+                    .with_source(TrainingSource::default())
+                    .with_metrics(vec![TrainingMetricPoint::default()])
+                    .with_checkpoints(vec![TrainingCheckpoint::default()])
+                    .with_logs(vec!["retained only inside the run".to_owned()]),
                 training_run("run-b"),
             ],
         );

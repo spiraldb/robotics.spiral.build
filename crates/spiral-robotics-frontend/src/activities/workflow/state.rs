@@ -14,10 +14,9 @@ use spiral_robotics_api::relations::{CatalogRelation, RelationCatalog};
 use spiral_robotics_api::workflow::{
     WorkflowAgentArtifactReceipt, WorkflowAgentCommand as AgentRequest, WorkflowAgentStateResponse,
     WorkflowCommand as WorkflowRequest, WorkflowEdgeSpec, WorkflowFeatureApplicability,
-    WorkflowFeatureDefinition, WorkflowModelRunMetadata, WorkflowNodeConfig, WorkflowNodeKind,
-    WorkflowNodePhase, WorkflowNodeProgress, WorkflowNodeSnapshot, WorkflowQuarantineSummary,
-    WorkflowRunPhase, WorkflowRunSnapshot, WorkflowSpec, WorkflowStateResponse,
-    WorkflowValidationReport,
+    WorkflowFeatureDefinition, WorkflowModelRunMetadata, WorkflowNodeConfig, WorkflowNodePhase,
+    WorkflowNodeProgress, WorkflowNodeSnapshot, WorkflowQuarantineSummary, WorkflowRunPhase,
+    WorkflowRunSnapshot, WorkflowSpec, WorkflowStateResponse, WorkflowValidationReport,
 };
 
 use crate::client::http as api;
@@ -28,6 +27,25 @@ pub(crate) const ASSISTANT_PANEL_ID: &str = "workflow-assistant";
 pub(crate) const NODE_PANEL_ID: &str = "workflow-node";
 pub(crate) const CANVAS_PANEL_ID: &str = "workflow-canvas";
 pub(crate) const RESULTS_PANEL_ID: &str = "workflow-results";
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) enum WorkflowNodeKind {
+    Table,
+    Model,
+    Query,
+    Result,
+}
+
+impl From<&WorkflowNodeConfig> for WorkflowNodeKind {
+    fn from(config: &WorkflowNodeConfig) -> Self {
+        match config {
+            WorkflowNodeConfig::Table { .. } => Self::Table,
+            WorkflowNodeConfig::Model { .. } => Self::Model,
+            WorkflowNodeConfig::Query { .. } => Self::Query,
+            WorkflowNodeConfig::Result => Self::Result,
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct WorkflowNodeData {
@@ -1545,8 +1563,11 @@ impl WorkflowDraft for WorkflowSpec {
                 .nodes()
                 .iter()
                 .find(|node| node.id() == edge.target());
-            source.is_some_and(|node| node.config().kind() == WorkflowNodeKind::Query)
-                && target.is_some_and(|node| node.config().kind() == WorkflowNodeKind::Result)
+            source.is_some_and(|node| {
+                WorkflowNodeKind::from(node.config()) == WorkflowNodeKind::Query
+            }) && target.is_some_and(|node| {
+                WorkflowNodeKind::from(node.config()) == WorkflowNodeKind::Result
+            })
         })?;
         let result_edge = workflow.edges()[result_edge_index].clone();
         let candidate_id = result_edge.source().to_owned();
@@ -1559,7 +1580,7 @@ impl WorkflowDraft for WorkflowSpec {
                     .nodes()
                     .iter()
                     .find(|node| node.id() == edge.source())
-                    .filter(|node| node.config().kind() == WorkflowNodeKind::Table)
+                    .filter(|node| WorkflowNodeKind::from(node.config()) == WorkflowNodeKind::Table)
                     .map(|_| edge.source().to_owned())
             })?;
         let source_relation = workflow
@@ -1637,7 +1658,7 @@ impl WorkflowDraft for WorkflowSpec {
     fn remove_siglip_model(&mut self, node_id: &str) -> Option<String> {
         let workflow = self;
         let model_index = workflow.nodes().iter().position(|node| {
-            node.id() == node_id && node.config().kind() == WorkflowNodeKind::Model
+            node.id() == node_id && WorkflowNodeKind::from(node.config()) == WorkflowNodeKind::Model
         })?;
         let candidate_id = workflow
             .edges()
@@ -1655,10 +1676,12 @@ impl WorkflowDraft for WorkflowSpec {
             .find(|edge| edge.source() == final_query_id)
             .map(|edge| edge.target().to_owned())?;
         let query_is_upstream = workflow.nodes().iter().any(|node| {
-            node.id() == candidate_id && node.config().kind() == WorkflowNodeKind::Query
+            node.id() == candidate_id
+                && WorkflowNodeKind::from(node.config()) == WorkflowNodeKind::Query
         });
         let query_is_downstream = workflow.nodes().iter().any(|node| {
-            node.id() == final_query_id && node.config().kind() == WorkflowNodeKind::Query
+            node.id() == final_query_id
+                && WorkflowNodeKind::from(node.config()) == WorkflowNodeKind::Query
         });
         if !query_is_upstream || !query_is_downstream {
             return None;
@@ -1854,7 +1877,7 @@ impl WorkflowGraphProjection for WorkflowSpec {
                     30.0 + *rank_index as f64 * 178.0,
                 );
                 *rank_index += 1;
-                let type_name = match node.config().kind() {
+                let type_name = match WorkflowNodeKind::from(node.config()) {
                     WorkflowNodeKind::Table => "table",
                     WorkflowNodeKind::Model => "model",
                     WorkflowNodeKind::Query => "query",
@@ -2084,7 +2107,7 @@ mod tests {
             .workflow()
             .nodes()
             .iter()
-            .map(|node| node.config().kind())
+            .map(|node| WorkflowNodeKind::from(node.config()))
             .collect::<Vec<_>>();
         assert_eq!(
             kinds,

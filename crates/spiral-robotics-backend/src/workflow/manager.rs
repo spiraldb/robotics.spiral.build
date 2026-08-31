@@ -15,7 +15,7 @@ use crate::workflow::service::{
 };
 use serde::{Deserialize, Serialize};
 use spiral_robotics_api::relations::{RelationCatalog, SpiralQueryResponse};
-use spiral_robotics_api::sql::{QualifiedRelation, WorkflowSql};
+use spiral_robotics_api::sql::QualifiedRelation;
 use spiral_robotics_api::workflow::{
     WorkflowCommand, WorkflowNodeConfig, WorkflowNodePhase, WorkflowNodeSnapshot,
     WorkflowQuarantineSummary, WorkflowRunPhase, WorkflowRunSnapshot, WorkflowSpec,
@@ -1523,6 +1523,61 @@ enum ResolvedNodeOutput {
     Query(String),
 }
 
+#[derive(Clone, Copy)]
+struct WorkflowSql<'a>(&'a str);
+
+impl<'a> From<&'a str> for WorkflowSql<'a> {
+    fn from(sql: &'a str) -> Self {
+        Self(sql)
+    }
+}
+
+impl WorkflowSql<'_> {
+    const PLACEHOLDER_PREFIX: &'static str = "{{node:";
+
+    fn node_placeholders(self) -> Result<Vec<String>, String> {
+        let sql = self.0;
+        let mut placeholders = Vec::new();
+        let mut cursor = 0_usize;
+        while let Some(relative_start) = sql[cursor..].find("{{") {
+            let start = cursor + relative_start;
+            if !sql[start..].starts_with(Self::PLACEHOLDER_PREFIX) {
+                return Err(format!(
+                    "Malformed Workflow placeholder at byte {start}; expected {{{{node:<id>}}}}",
+                ));
+            }
+            let id_start = start + Self::PLACEHOLDER_PREFIX.len();
+            let Some(relative_end) = sql[id_start..].find("}}") else {
+                return Err(format!("Unterminated Workflow placeholder at byte {start}",));
+            };
+            let end = id_start + relative_end;
+            let id = &sql[id_start..end];
+            if !Self::valid_node_id(id) {
+                return Err(format!(
+                    "Workflow placeholder {id:?} is not a valid node ID",
+                ));
+            }
+            placeholders.push(id.to_owned());
+            cursor = end + 2;
+        }
+        if let Some(relative_end) = sql[cursor..].find("}}") {
+            return Err(format!(
+                "Unexpected Workflow placeholder terminator at byte {}",
+                cursor + relative_end,
+            ));
+        }
+        Ok(placeholders)
+    }
+
+    fn valid_node_id(node_id: &str) -> bool {
+        let mut bytes = node_id.bytes();
+        bytes
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+            && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    }
+}
+
 trait ResolvedNodeOutputs {
     fn substitute_in(&self, sql: &str) -> Result<String, String>;
 }
@@ -1530,10 +1585,7 @@ trait ResolvedNodeOutputs {
 impl ResolvedNodeOutputs for BTreeMap<String, ResolvedNodeOutput> {
     fn substitute_in(&self, sql: &str) -> Result<String, String> {
         let mut substituted = sql.to_owned();
-        for id in WorkflowSql::from(sql)
-            .node_placeholders()
-            .map_err(|error| error.to_string())?
-        {
+        for id in WorkflowSql::from(sql).node_placeholders()? {
             let output = self.get(&id).ok_or_else(|| {
                 format!("Workflow query references unresolved node placeholder {id:?}")
             })?;

@@ -4,7 +4,6 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
-use crate::adapters::hardware::HardwareApiProjection as _;
 use crate::sync::MutexRecovery;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -286,14 +285,8 @@ impl RobotRecord {
         let mut motors = motors
             .into_iter()
             .map(|(name, spec)| {
-                MotorSummary::new(name.clone(), spec.id(), spec.direction().to_api())
+                MotorSummary::new(name.clone(), spec.id())
                     .with_model(spec.model().map(str::to_owned))
-                    .with_calibration(
-                        calibration
-                            .as_ref()
-                            .and_then(|calibration| calibration.motors().get(&name).copied())
-                            .map(|calibration| calibration.to_api()),
-                    )
                     .with_limits(MotorLimits::default())
             })
             .collect::<Vec<_>>();

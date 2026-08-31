@@ -1,7 +1,5 @@
 //! Stable domain identities shared by recording, training, and persistence.
 
-use std::fmt;
-
 /// A validated logical dataset identifier.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct DatasetId(String);
@@ -16,7 +14,7 @@ impl DatasetId {
 }
 
 impl TryFrom<&str> for DatasetId {
-    type Error = InvalidDatasetId;
+    type Error = &'static str;
 
     fn try_from(dataset_id: &str) -> Result<Self, Self::Error> {
         let dataset_id = dataset_id.trim();
@@ -26,7 +24,7 @@ impl TryFrom<&str> for DatasetId {
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
         {
-            return Err(InvalidDatasetId);
+            return Err("dataset ID must use 1–96 letters, numbers, '.', '_' or '-' characters");
         }
         Ok(Self(dataset_id.to_owned()))
     }
@@ -44,17 +42,6 @@ impl From<DatasetId> for String {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct InvalidDatasetId;
-
-impl fmt::Display for InvalidDatasetId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("dataset ID must use 1–96 letters, numbers, '.', '_' or '-' characters")
-    }
-}
-
-impl std::error::Error for InvalidDatasetId {}
-
 /// A validated persisted episode identifier.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct EpisodeId(String);
@@ -69,7 +56,7 @@ impl EpisodeId {
 }
 
 impl TryFrom<&str> for EpisodeId {
-    type Error = InvalidEpisodeId;
+    type Error = &'static str;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         (!value.is_empty()
@@ -78,7 +65,7 @@ impl TryFrom<&str> for EpisodeId {
                 character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
             }))
         .then(|| Self(value.to_owned()))
-        .ok_or(InvalidEpisodeId)
+        .ok_or("episode ID must use 1–64 letters, numbers, '_' or '-' characters")
     }
 }
 
@@ -88,20 +75,9 @@ impl From<EpisodeId> for String {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct InvalidEpisodeId;
-
-impl fmt::Display for InvalidEpisodeId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("episode ID must use 1–64 letters, numbers, '_' or '-' characters")
-    }
-}
-
-impl std::error::Error for InvalidEpisodeId {}
-
 /// One SQL-safe generated-name component derived from an immutable external ID.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SqlNameComponent(String);
+pub(crate) struct SqlNameComponent(String);
 
 impl From<&str> for SqlNameComponent {
     fn from(external_id: &str) -> Self {
@@ -131,10 +107,6 @@ impl From<&str> for SqlNameComponent {
 impl SqlNameComponent {
     pub(crate) fn as_str(&self) -> &str {
         &self.0
-    }
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn into_string(self) -> String {
-        self.0
     }
 }
 

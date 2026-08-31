@@ -7,11 +7,27 @@
 
 use std::sync::Arc;
 
-use spiral_robotics_api::rollout::RolloutDuration;
-use spiral_robotics_api::rollout::RolloutSnapshot as ContractRolloutSnapshot;
+use spiral_robotics_api::rollout::{
+    MAX_ROLLOUT_DURATION_SECONDS, RolloutSnapshot as ContractRolloutSnapshot,
+};
 
 use super::policy::{ControlOwner, ExpectedPolicyOwner, PolicyOwnership};
 use crate::OperationError;
+
+pub(crate) const MIN_ROLLOUT_DURATION_SECONDS: u32 = 1;
+
+/// Admission marker for a duration inside the backend-owned safety window.
+pub(crate) struct RolloutDuration;
+
+impl RolloutDuration {
+    pub(crate) const fn new(seconds: u32) -> Option<Self> {
+        if seconds >= MIN_ROLLOUT_DURATION_SECONDS && seconds <= MAX_ROLLOUT_DURATION_SECONDS {
+            Some(Self)
+        } else {
+            None
+        }
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RolloutRequest {

@@ -29,9 +29,8 @@ use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use spiral_robotics_api::recording::{
-    DatasetCatalogResponse, EpisodeArmOptionalChannels, EpisodeArmScalarSamples, EpisodeAssessment,
-    EpisodeCatalogResponse, EpisodeIdentity, EpisodeInfo, EpisodeInspectionArm,
-    EpisodeInspectionSnapshot, EpisodeListItem, EpisodeOptionalFrameMatrix, EpisodeTimeline,
+    DatasetCatalogResponse, EpisodeArmScalarSamples, EpisodeCatalogResponse, EpisodeInfo,
+    EpisodeInspectionArm, EpisodeInspectionSnapshot, EpisodeListItem, EpisodeOptionalFrameMatrix,
     EpisodeVideoAssetMetadata, EpisodeVideoFormat, EpisodeVideoIdentity, EpisodeVideoTimeline,
     SetRecordingPausedRequest, SetReplayPausedRequest, StartRecordingRequest, StartReplayRequest,
     StopRecordingRequest,

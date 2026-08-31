@@ -12,9 +12,7 @@ use arrow_array::{
     ArrayRef, Float64Array, Int64Array, RecordBatch, StringArray, UInt32Array, UInt64Array,
 };
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
-use spiral_robotics_api::rollout::{
-    RolloutIdentity, RolloutLifecycle, RolloutMetrics, RolloutPhase, RolloutSnapshot,
-};
+use spiral_robotics_api::rollout::{RolloutMetrics, RolloutPhase, RolloutSnapshot};
 
 use crate::db::ArrowColumns;
 use crate::db::column as db;
@@ -203,28 +201,22 @@ impl StoredRolloutSession {
     }
 
     fn restored(&self) -> RolloutSnapshot {
-        RolloutSnapshot::new(
-            RolloutIdentity::new(
-                Some(self.session_id.clone()),
-                self.selection.run_id.clone(),
-                self.selection.robot.clone(),
-            )
+        RolloutSnapshot::new(Some(self.session_id.clone()), self.selection.run_id.clone())
+            .with_robot(self.selection.robot.clone())
             .with_checkpoint(self.selection.checkpoint_step)
-            .with_duration(self.selection.duration_seconds),
-            RolloutLifecycle::new(self.lifecycle.phase.restored(), self.lifecycle.started_ms)
-                .with_finished_ms(self.lifecycle.finished_ms)
-                .with_messages(
-                    self.lifecycle.message.clone(),
-                    self.lifecycle.warning.clone(),
-                ),
-            RolloutMetrics::new(
-                self.metrics.inference_count,
-                self.metrics.command_count,
-                self.metrics.missed_deadlines,
+            .with_duration(self.selection.duration_seconds)
+            .with_lifecycle(self.lifecycle.phase.restored(), self.lifecycle.started_ms)
+            .with_completion(self.lifecycle.finished_ms, self.lifecycle.message.clone())
+            .with_warning(self.lifecycle.warning.clone())
+            .with_metrics(
+                RolloutMetrics::new(
+                    self.metrics.inference_count,
+                    self.metrics.command_count,
+                    self.metrics.missed_deadlines,
+                )
+                .with_latest_timings(self.metrics.last_latency_ms, self.metrics.last_model_ms)
+                .with_latency_summary(self.metrics.mean_latency_ms, self.metrics.max_latency_ms),
             )
-            .with_latest_timings(self.metrics.last_latency_ms, self.metrics.last_model_ms)
-            .with_latency_summary(self.metrics.mean_latency_ms, self.metrics.max_latency_ms),
-        )
     }
 }
 
@@ -359,21 +351,18 @@ mod tests {
     use super::*;
 
     fn snapshot() -> RolloutSnapshot {
-        RolloutSnapshot::new(
-            RolloutIdentity::new(
-                Some("rollout-3".to_owned()),
-                Some("train-7".to_owned()),
-                Some("so101".to_owned()),
-            )
+        RolloutSnapshot::new(Some("rollout-3".to_owned()), Some("train-7".to_owned()))
+            .with_robot(Some("so101".to_owned()))
             .with_checkpoint(Some(20_000))
-            .with_duration(Some(45)),
-            RolloutLifecycle::new(RolloutPhase::Failed, Some(1_700))
-                .with_finished_ms(Some(1_900))
-                .with_messages(Some("stopped".to_owned()), Some("check the arm".to_owned())),
-            RolloutMetrics::new(9, 8, 1)
-                .with_latest_timings(Some(4.5), Some(2.5))
-                .with_latency_summary(Some(4.0), Some(9.0)),
-        )
+            .with_duration(Some(45))
+            .with_lifecycle(RolloutPhase::Failed, Some(1_700))
+            .with_completion(Some(1_900), Some("stopped".to_owned()))
+            .with_warning(Some("check the arm".to_owned()))
+            .with_metrics(
+                RolloutMetrics::new(9, 8, 1)
+                    .with_latest_timings(Some(4.5), Some(2.5))
+                    .with_latency_summary(Some(4.0), Some(9.0)),
+            )
     }
 
     /// A fully populated wire session survives one typed row unchanged. A

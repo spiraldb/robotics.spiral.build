@@ -698,9 +698,8 @@ impl EpisodeDataDeadline {
 mod tests {
     use super::*;
     use spiral_robotics_api::recording::{
-        EpisodeArm, EpisodeArmOptionalChannels, EpisodeArmScalarSamples, EpisodeAssessment,
-        EpisodeIdentity, EpisodeInfo, EpisodeInspectionArm, EpisodeOptionalFrameMatrix,
-        EpisodeTimeline,
+        EpisodeArm, EpisodeArmScalarSamples, EpisodeInfo, EpisodeInspectionArm,
+        EpisodeOptionalFrameMatrix,
     };
 
     fn snapshot() -> EpisodeInspectionSnapshot {
@@ -717,27 +716,20 @@ mod tests {
     fn snapshot_with_normalized(normalized: Vec<Option<f64>>) -> EpisodeInspectionSnapshot {
         let joints = vec!["shoulder_pan".to_owned(), "gripper".to_owned()];
         let absent = EpisodeOptionalFrameMatrix::new(vec![false; 3], vec![None; 6]);
-        let episode = EpisodeInfo::new(
-            EpisodeIdentity::new(
-                "take-1",
-                "default",
-                vec![EpisodeArm::new("follower", None, joints.clone())],
-            )
-            .with_source("Teleoperation"),
-            EpisodeTimeline::new(3, 2.0, 1.0),
-            EpisodeAssessment::new(false, None, None),
-        );
+        let episode = EpisodeInfo::new("take-1", "default")
+            .with_arms(vec![EpisodeArm::new("follower", None, joints.clone())])
+            .with_source("Teleoperation")
+            .with_timeline(3, 2.0)
+            .with_sample_hz(1.0);
         let arm = EpisodeInspectionArm::new(
             "follower",
             joints,
             EpisodeArmScalarSamples::new(normalized, vec![0, 1, 5, 6, 10, 11])
                 .with_degrees(vec![Some(0.0); 6]),
         )
-        .with_optional_channels(EpisodeArmOptionalChannels::new(
-            absent.clone(),
-            absent.clone(),
-            absent,
-        ));
+        .with_velocity(absent.clone())
+        .with_effort(absent.clone())
+        .with_action(absent);
         EpisodeInspectionSnapshot::new(episode, vec![0.0, 1.0, 2.0], vec![None, Some(0.5), None])
             .with_arms(vec![arm])
     }

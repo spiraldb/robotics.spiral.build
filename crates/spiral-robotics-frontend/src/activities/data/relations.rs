@@ -5,11 +5,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::components::interaction::{Action, ActionPurpose, ActionVariant, RefreshIcon};
 use dioxus::prelude::*;
 use gloo_net::http::Method;
-use spiral_robotics_api::catalog::ManagedTable as Table;
 use spiral_robotics_api::relations::{
     CatalogRelation, RelationCatalog, SpiralQueryRequest, SpiralQueryResponse,
 };
 
+use crate::activities::data::catalog::ManagedTable as Table;
 use crate::activities::data::query_result::{QueryExecutionPresentation, QueryState};
 use crate::client::http as api;
 use crate::shell::state::studio;

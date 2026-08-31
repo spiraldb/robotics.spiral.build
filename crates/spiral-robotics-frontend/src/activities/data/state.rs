@@ -9,13 +9,13 @@ use std::sync::Arc;
 
 use dioxus::prelude::*;
 use gloo_net::http::Method;
-use spiral_robotics_api::catalog::ManagedTable;
 use spiral_robotics_api::identity::DatasetId;
 use spiral_robotics_api::recording::{
     DatasetCatalogResponse, DatasetSummary, EpisodeCatalogResponse, EpisodeInfo, EpisodeListItem,
 };
 use spiral_robotics_api::relations::SpiralQueryRequest;
 
+use crate::activities::data::catalog::ManagedTable;
 use crate::activities::data::query_result::{
     DEFAULT_QUERY_ROWS, QueryExecutionPresentation, QueryState, QueryTab,
 };

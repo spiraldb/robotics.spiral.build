@@ -143,110 +143,12 @@ impl CalibrationReapplyResponse {
     }
 }
 
-/// Direction of increasing raw motor readings in the wire contract.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum MotorDirection {
-    #[default]
-    Normal,
-    Reversed,
-}
-
-/// Raw calibration readings carried in robot API snapshots.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct MotorReading {
-    center: i64,
-    range_min: i64,
-    range_max: i64,
-}
-
-impl MotorReading {
-    pub const fn new(center: i64, range_min: i64, range_max: i64) -> Self {
-        Self {
-            center,
-            range_min,
-            range_max,
-        }
-    }
-
-    pub(crate) const fn center(self) -> i64 {
-        self.center
-    }
-
-    pub(crate) const fn range_min(self) -> i64 {
-        self.range_min
-    }
-
-    pub(crate) const fn range_max(self) -> i64 {
-        self.range_max
-    }
-}
-
-/// One validated motor calibration carried in a robot API snapshot.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct MotorCalibration {
-    id: u32,
-    direction: MotorDirection,
-    reading: MotorReading,
-}
-
-impl MotorCalibration {
-    pub fn new(
-        id: u32,
-        direction: MotorDirection,
-        reading: MotorReading,
-    ) -> Result<Self, InvalidMotorCalibration> {
-        if reading.range_min < reading.center && reading.center < reading.range_max {
-            Ok(Self {
-                id,
-                direction,
-                reading,
-            })
-        } else {
-            Err(InvalidMotorCalibration)
-        }
-    }
-
-    pub(crate) const fn id(self) -> u32 {
-        self.id
-    }
-
-    pub(crate) const fn direction(self) -> MotorDirection {
-        self.direction
-    }
-
-    pub(crate) const fn reading(self) -> MotorReading {
-        self.reading
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct InvalidMotorCalibration;
-
-impl std::fmt::Display for InvalidMotorCalibration {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("motor calibration requires range_min < center < range_max")
-    }
-}
-
-impl std::error::Error for InvalidMotorCalibration {}
-
-/// A motor as configured, with its calibration when one exists.
+/// A motor as configured.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct MotorSummary {
     name: String,
     id: u32,
-    #[serde(
-        serialize_with = "direction_serde::DirectionSerde::serialize",
-        deserialize_with = "direction_serde::DirectionSerde::deserialize"
-    )]
-    direction: MotorDirection,
     model: Option<String>,
-    #[serde(
-        default,
-        serialize_with = "motor_calibration_option_serde::MotorCalibrationOptionSerde::serialize",
-        deserialize_with = "motor_calibration_option_serde::MotorCalibrationOptionSerde::deserialize"
-    )]
-    calibration: Option<MotorCalibration>,
     /// What this motor will fault at, read from its EEPROM when it connected.
     ///
     /// Lives on the snapshot rather than the telemetry frame because it does
@@ -257,24 +159,17 @@ pub struct MotorSummary {
 }
 
 impl MotorSummary {
-    pub fn new(name: impl Into<String>, id: u32, direction: MotorDirection) -> Self {
+    pub fn new(name: impl Into<String>, id: u32) -> Self {
         Self {
             name: name.into(),
             id,
-            direction,
             model: None,
-            calibration: None,
             limits: MotorLimits::default(),
         }
     }
 
     pub fn with_model(mut self, model: Option<String>) -> Self {
         self.model = model;
-        self
-    }
-
-    pub fn with_calibration(mut self, calibration: Option<MotorCalibration>) -> Self {
-        self.calibration = calibration;
         self
     }
 
@@ -301,104 +196,6 @@ impl MotorSummary {
     }
 }
 
-mod direction_serde {
-    use super::MotorDirection;
-    use serde::{Deserialize, Deserializer, Serializer, de};
-
-    pub(super) struct DirectionSerde;
-
-    impl DirectionSerde {
-        pub(super) fn serialize<S>(
-            direction: &MotorDirection,
-            serializer: S,
-        ) -> Result<S::Ok, S::Error>
-        where
-            S: Serializer,
-        {
-            serializer.serialize_str(match direction {
-                MotorDirection::Normal => "normal",
-                MotorDirection::Reversed => "reversed",
-            })
-        }
-
-        pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<MotorDirection, D::Error>
-        where
-            D: Deserializer<'de>,
-        {
-            match String::deserialize(deserializer)?.as_str() {
-                "normal" => Ok(MotorDirection::Normal),
-                "reversed" => Ok(MotorDirection::Reversed),
-                direction_name => Err(de::Error::unknown_variant(
-                    direction_name,
-                    &["normal", "reversed"],
-                )),
-            }
-        }
-    }
-}
-
-mod motor_calibration_option_serde {
-    use super::{MotorCalibration, MotorDirection, MotorReading};
-    use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
-
-    #[derive(Deserialize, Serialize)]
-    #[serde(deny_unknown_fields)]
-    struct Wire {
-        id: u32,
-        #[serde(
-            serialize_with = "super::direction_serde::DirectionSerde::serialize",
-            deserialize_with = "super::direction_serde::DirectionSerde::deserialize"
-        )]
-        direction: MotorDirection,
-        range_min: i64,
-        center: i64,
-        range_max: i64,
-    }
-
-    pub(super) struct MotorCalibrationOptionSerde;
-
-    impl MotorCalibrationOptionSerde {
-        pub(super) fn serialize<S>(
-            calibration: &Option<MotorCalibration>,
-            serializer: S,
-        ) -> Result<S::Ok, S::Error>
-        where
-            S: Serializer,
-        {
-            calibration
-                .map(|motor| {
-                    let reading = motor.reading();
-                    Wire {
-                        id: motor.id(),
-                        direction: motor.direction(),
-                        range_min: reading.range_min(),
-                        center: reading.center(),
-                        range_max: reading.range_max(),
-                    }
-                })
-                .serialize(serializer)
-        }
-
-        pub(super) fn deserialize<'de, D>(
-            deserializer: D,
-        ) -> Result<Option<MotorCalibration>, D::Error>
-        where
-            D: Deserializer<'de>,
-        {
-            Option::<Wire>::deserialize(deserializer)?
-                .map(|wire| {
-                    MotorCalibration::new(
-                        wire.id,
-                        wire.direction,
-                        MotorReading::new(wire.center, wire.range_min, wire.range_max),
-                    )
-                    .map_err(de::Error::custom)
-                })
-                .transpose()
-        }
-    }
-}
-
 /// The limits a motor enforces on itself.
 ///
 /// These are read from the hardware rather than written down here. A motor
@@ -414,34 +211,28 @@ pub struct MotorLimits {
     max_load: Option<f64>,
 }
 
-/// Optional lower and upper voltage limits reported by one motor.
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct MotorVoltageRange {
-    min_voltage_volts: Option<f64>,
-    max_voltage_volts: Option<f64>,
-}
-
-impl MotorVoltageRange {
-    pub const fn new(min_voltage_volts: Option<f64>, max_voltage_volts: Option<f64>) -> Self {
-        Self {
-            min_voltage_volts,
-            max_voltage_volts,
-        }
-    }
-}
-
 impl MotorLimits {
-    pub const fn from_hardware_limits(
+    pub const fn with_max_temperature_celsius(
+        mut self,
         max_temperature_celsius: Option<f64>,
-        voltage: MotorVoltageRange,
-        max_load: Option<f64>,
     ) -> Self {
-        Self {
-            max_temperature_celsius,
-            min_voltage_volts: voltage.min_voltage_volts,
-            max_voltage_volts: voltage.max_voltage_volts,
-            max_load,
-        }
+        self.max_temperature_celsius = max_temperature_celsius;
+        self
+    }
+
+    pub const fn with_voltage_range(
+        mut self,
+        min_voltage_volts: Option<f64>,
+        max_voltage_volts: Option<f64>,
+    ) -> Self {
+        self.min_voltage_volts = min_voltage_volts;
+        self.max_voltage_volts = max_voltage_volts;
+        self
+    }
+
+    pub const fn with_max_load(mut self, max_load: Option<f64>) -> Self {
+        self.max_load = max_load;
+        self
     }
 
     pub const fn max_temperature_celsius(self) -> Option<f64> {

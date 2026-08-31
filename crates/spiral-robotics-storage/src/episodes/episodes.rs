@@ -13,10 +13,7 @@ use futures::future;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use spiral_robotics_api::identity::EpisodeId;
-use spiral_robotics_api::recording::{
-    EpisodeArm, EpisodeAssessment, EpisodeIdentity as EpisodeInfoIdentity, EpisodeInfo,
-    EpisodeListItem, EpisodeTimeline, RecordingGap,
-};
+use spiral_robotics_api::recording::{EpisodeArm, EpisodeInfo, EpisodeListItem, RecordingGap};
 use spiral_robotics_api::sql::QualifiedRelation;
 use spiral_robotics_hardware::Calibration;
 use spiral_robotics_hardware::{
@@ -1535,26 +1532,24 @@ impl EpisodeStart {
 
     fn summary(&self, completion: &EpisodeCompletion, frames: u64) -> EpisodeInfo {
         let start = self;
-        let identity =
-            EpisodeInfoIdentity::new(start.id(), start.dataset_id(), start.arms().to_vec())
-                .with_source(start.source());
-        let timeline =
-            EpisodeTimeline::new(frames, completion.duration_seconds(), start.sample_hz())
-                .with_recording_gaps(
-                    completion
-                        .recording_gaps()
-                        .iter()
-                        .copied()
-                        .map(EpisodeRecordingGap::to_api)
-                        .collect(),
-                )
-                .with_started_ms(start.started_ms());
-        let assessment = EpisodeAssessment::new(
-            completion.discarded(),
-            completion.max_follow_error_degrees(),
-            None,
-        );
-        EpisodeInfo::new(identity, timeline, assessment)
+        EpisodeInfo::new(start.id(), start.dataset_id())
+            .with_arms(start.arms().to_vec())
+            .with_source(start.source())
+            .with_timeline(frames, completion.duration_seconds())
+            .with_sample_hz(start.sample_hz())
+            .with_recording_gaps(
+                completion
+                    .recording_gaps()
+                    .iter()
+                    .copied()
+                    .map(EpisodeRecordingGap::to_api)
+                    .collect(),
+            )
+            .with_started_ms(start.started_ms())
+            .with_assessment(
+                completion.discarded(),
+                completion.max_follow_error_degrees(),
+            )
     }
 
     fn timeline_sample(&self, sample: &Sample, frame: u64) -> TimelineSample {

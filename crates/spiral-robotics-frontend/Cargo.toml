@@ -58,3 +58,6 @@ web-sys = { version = "0.3", features = [
 spiral-robotics-api = { workspace = true, features = ["test-support"] }
 spiral-robotics-viewport = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
+
+[build-dependencies]
+serde_json.workspace = true

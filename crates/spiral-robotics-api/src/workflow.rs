@@ -9,10 +9,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use crate::sql::{
-    QualifiedRelation, ReadOnlyQuery, ReadOnlyQueryMode, UnquotedSqlIdentifier, WorkflowNodeId,
-    WorkflowSql,
-};
+use crate::sql::workflow::{WorkflowNodeId, WorkflowSql};
+use crate::sql::{QualifiedRelation, ReadOnlyQuery, ReadOnlyQueryMode, UnquotedSqlIdentifier};
 use serde::{Deserialize, Serialize};
 
 use crate::relations::SpiralQueryResponse;
@@ -226,13 +224,24 @@ impl WorkflowNodeConfig {
         100
     }
 
-    pub const fn kind(&self) -> WorkflowNodeKind {
+    const fn label(&self) -> &'static str {
         match self {
-            Self::Table { .. } => WorkflowNodeKind::Table,
-            Self::Model { .. } => WorkflowNodeKind::Model,
-            Self::Query { .. } => WorkflowNodeKind::Query,
-            Self::Result => WorkflowNodeKind::Result,
+            Self::Table { .. } => "Table",
+            Self::Model { .. } => "Model",
+            Self::Query { .. } => "Query",
+            Self::Result => "Result",
         }
+    }
+
+    const fn allows_transition_to(&self, target: &Self) -> bool {
+        matches!(
+            (self, target),
+            (Self::Table { .. }, Self::Query { .. })
+                | (Self::Query { .. }, Self::Model { .. })
+                | (Self::Query { .. }, Self::Query { .. })
+                | (Self::Model { .. }, Self::Query { .. })
+                | (Self::Query { .. }, Self::Result)
+        )
     }
 
     /// The writable name component is a pure server-owned derivation, never
@@ -244,37 +253,6 @@ impl WorkflowNodeConfig {
         features
             .first()
             .map(|feature| feature.applicability().cache_name())
-    }
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkflowNodeKind {
-    Table,
-    Model,
-    Query,
-    Result,
-}
-
-impl WorkflowNodeKind {
-    pub(crate) const fn label(self) -> &'static str {
-        match self {
-            Self::Table => "Table",
-            Self::Model => "Model",
-            Self::Query => "Query",
-            Self::Result => "Result",
-        }
-    }
-
-    const fn allows_transition_to(self, target: Self) -> bool {
-        matches!(
-            (self, target),
-            (Self::Table, Self::Query)
-                | (Self::Query, Self::Model)
-                | (Self::Query, Self::Query)
-                | (Self::Model, Self::Query)
-                | (Self::Query, Self::Result)
-        )
     }
 }
 
@@ -1581,18 +1559,14 @@ impl WorkflowSpec {
                 );
                 continue;
             };
-            if !source
-                .config
-                .kind()
-                .allows_transition_to(target.config.kind())
-            {
+            if !source.config.allows_transition_to(&target.config) {
                 report.errors.push(
                     WorkflowValidationIssue::new(
                         "invalid_transition",
                         &format!(
                             "{} cannot feed {} in a relation-first workflow.",
-                            source.config.kind().label(),
-                            target.config.kind().label(),
+                            source.config.label(),
+                            target.config.label(),
                         ),
                         "Use Table→Query, Query→Model, Query→Query, Model→Query, or Query→Result.",
                     )
@@ -1667,7 +1641,7 @@ impl WorkflowSpec {
                     .get(node.id.as_str())
                     .and_then(|sources| sources.first())
                     .and_then(|source| nodes.get(*source))
-                    .is_some_and(|source| source.config.kind() != WorkflowNodeKind::Query) =>
+                    .is_some_and(|source| !matches!(&source.config, WorkflowNodeConfig::Query { .. })) =>
             {
                 report.errors.push(WorkflowValidationIssue::new("model_input_kind", "A SigLIP Model enriches the rows selected by an upstream candidate Query.", "Insert a Query between the source Table and this Model, and project the stable frame keys plus one decoded image field.").with_node_id(&node.id));
             }

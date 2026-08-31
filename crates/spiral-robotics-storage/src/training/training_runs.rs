@@ -16,9 +16,8 @@ use arrow_array::{
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use spiral_robotics_api::training::{
     ActArchitectureConfig, ActAttentionConfig, ActInputConfig, ActLayerCounts, ActTrainingConfig,
-    StartTrainingRequest, TrainingCheckpoint, TrainingMetricPoint, TrainingMetricProgress,
-    TrainingPolicy, TrainingResourceMetrics, TrainingRun, TrainingRunHistory, TrainingRunIdentity,
-    TrainingRunLifecycle, TrainingRunPhase, TrainingSnapshot, TrainingSource, TrainingStageTimings,
+    StartTrainingRequest, TrainingCheckpoint, TrainingMetricPoint, TrainingPolicy, TrainingRun,
+    TrainingRunPhase, TrainingSnapshot, TrainingSource,
 };
 
 use crate::db::ProjectStore;
@@ -383,27 +382,19 @@ impl StoredTrainingMetric {
     }
 
     fn restored(&self) -> TrainingMetricPoint {
-        TrainingMetricPoint::new(
-            TrainingMetricProgress::new(
-                self.progress.step,
-                self.progress.train_loss,
-                self.progress.learning_rate,
-            )
+        TrainingMetricPoint::new(self.progress.step, self.progress.train_loss)
+            .with_learning_rate(self.progress.learning_rate)
             .with_validation_loss(self.progress.validation_loss)
-            .with_timeline(self.progress.elapsed_seconds, self.progress.event.clone()),
-            TrainingResourceMetrics::new(
+            .with_timeline(self.progress.elapsed_seconds, self.progress.event.clone())
+            .with_throughput(
                 self.resources.transfer_bytes_per_second,
                 self.resources.examples_per_second,
             )
             .with_utilization(self.resources.cpu_percent, self.resources.gpu_percent)
-            .with_memory_bytes(self.resources.memory_bytes),
-            TrainingStageTimings::new(
-                self.timings.loader_ms,
-                self.timings.arrow_encode_ms,
-                self.timings.upload_ms,
-            )
-            .with_runtime(self.timings.device_copy_ms, self.timings.model_ms),
-        )
+            .with_memory_bytes(self.resources.memory_bytes)
+            .with_loader_ms(self.timings.loader_ms)
+            .with_transport_timings(self.timings.arrow_encode_ms, self.timings.upload_ms)
+            .with_runtime_timings(self.timings.device_copy_ms, self.timings.model_ms)
     }
 }
 
@@ -510,32 +501,26 @@ impl StoredTrainingRun {
     }
 
     fn restored(&self) -> TrainingRun {
-        TrainingRun::new(
-            TrainingRunIdentity::new(
-                &self.identity.run_id,
-                self.restored_config(),
-                TrainingSource::new(&self.identity.source_dataset_id),
-            ),
-            TrainingRunLifecycle::new(
-                self.lifecycle.phase.restored(),
-                self.lifecycle.current_step,
-                self.lifecycle.started_ms,
-            )
-            .with_completion(self.lifecycle.finished_ms, self.lifecycle.message.clone()),
-            TrainingRunHistory::new(
+        TrainingRun::starting(&self.identity.run_id, self.restored_config())
+            .with_source(TrainingSource::new(&self.identity.source_dataset_id))
+            .with_phase(self.lifecycle.phase.restored(), self.lifecycle.current_step)
+            .with_started_ms(self.lifecycle.started_ms)
+            .with_completion(self.lifecycle.finished_ms, self.lifecycle.message.clone())
+            .with_metrics(
                 self.history
                     .metrics
                     .iter()
                     .map(StoredTrainingMetric::restored)
                     .collect(),
+            )
+            .with_checkpoints(
                 self.history
                     .checkpoints
                     .iter()
                     .map(StoredTrainingCheckpoint::restored)
                     .collect(),
-                self.history.logs.clone(),
-            ),
-        )
+            )
+            .with_logs(self.history.logs.clone())
     }
 
     fn restored_config(&self) -> StartTrainingRequest {
@@ -1277,37 +1262,31 @@ mod tests {
             ActArchitectureConfig::new(256, 16, ActLayerCounts::new(3, 2, 1)),
             ActAttentionConfig::new(4, 1_600, 5.0),
         );
-        TrainingRun::new(
-            TrainingRunIdentity::new("train-1", config, TrainingSource::new("pick-place")),
-            TrainingRunLifecycle::new(TrainingRunPhase::Completed, 900, 1_700_000)
-                .with_completion(Some(1_900_000), Some("done".to_owned())),
-            TrainingRunHistory::new(
-                vec![
-                    TrainingMetricPoint::new(
-                        TrainingMetricProgress::new(10, 0.5, 3.0e-5)
-                            .with_validation_loss(Some(0.6))
-                            .with_timeline(12.5, Some("validated".to_owned())),
-                        TrainingResourceMetrics::new(1_024.0, 8.0)
-                            .with_utilization(Some(55.5), None)
-                            .with_memory_bytes(Some(2_048)),
-                        TrainingStageTimings::new(Some(1.0), None, Some(3.0))
-                            .with_runtime(None, Some(5.0)),
-                    ),
-                    TrainingMetricPoint::new(
-                        TrainingMetricProgress::new(20, 0.4, 3.0e-5),
-                        TrainingResourceMetrics::new(0.0, 0.0),
-                        TrainingStageTimings::new(None, None, None),
-                    ),
-                ],
-                vec![
-                    TrainingCheckpoint::new(500, 1_800_000)
-                        .with_validation_loss(Some(0.45))
-                        .with_artifact(4_096, true)
-                        .with_rollout(12, 30.0),
-                ],
-                vec!["started".to_owned(), "finished".to_owned()],
-            ),
-        )
+        TrainingRun::starting("train-1", config)
+            .with_source(TrainingSource::new("pick-place"))
+            .with_phase(TrainingRunPhase::Completed, 900)
+            .with_started_ms(1_700_000)
+            .with_completion(Some(1_900_000), Some("done".to_owned()))
+            .with_metrics(vec![
+                TrainingMetricPoint::new(10, 0.5)
+                    .with_learning_rate(3.0e-5)
+                    .with_validation_loss(Some(0.6))
+                    .with_timeline(12.5, Some("validated".to_owned()))
+                    .with_throughput(1_024.0, 8.0)
+                    .with_utilization(Some(55.5), None)
+                    .with_memory_bytes(Some(2_048))
+                    .with_loader_ms(Some(1.0))
+                    .with_transport_timings(None, Some(3.0))
+                    .with_runtime_timings(None, Some(5.0)),
+                TrainingMetricPoint::new(20, 0.4).with_learning_rate(3.0e-5),
+            ])
+            .with_checkpoints(vec![
+                TrainingCheckpoint::new(500, 1_800_000)
+                    .with_validation_loss(Some(0.45))
+                    .with_artifact(4_096, true)
+                    .with_rollout(12, 30.0),
+            ])
+            .with_logs(vec!["started".to_owned(), "finished".to_owned()])
     }
 
     #[test]
@@ -1381,15 +1360,9 @@ mod tests {
     /// added to the contract without a mapping here fails this test.
     #[test]
     fn a_populated_snapshot_round_trips_through_storage_rows() {
-        let bare = TrainingRun::new(
-            TrainingRunIdentity::new(
-                "train-2",
-                StartTrainingRequest::default(),
-                TrainingSource::default(),
-            ),
-            TrainingRunLifecycle::new(TrainingRunPhase::Starting, 0, 1_650_000),
-            TrainingRunHistory::default(),
-        );
+        let bare = TrainingRun::starting("train-2", StartTrainingRequest::default())
+            .with_source(TrainingSource::default())
+            .with_started_ms(1_650_000);
         let snapshot =
             TrainingSnapshot::new(TrainingReadiness::default(), vec![populated_run(), bare]);
 
@@ -1417,23 +1390,13 @@ mod tests {
     /// live stream showed, and no measurement is fabricated.
     #[test]
     fn a_diverged_metric_round_trips_as_nan_instead_of_becoming_a_measurement() {
-        let run = TrainingRun::new(
-            TrainingRunIdentity::new(
-                "train-nan",
-                StartTrainingRequest::default(),
-                TrainingSource::default(),
-            ),
-            TrainingRunLifecycle::new(TrainingRunPhase::Failed, 1, 5),
-            TrainingRunHistory::new(
-                vec![TrainingMetricPoint::new(
-                    TrainingMetricProgress::new(1, f64::NAN, 1.0e-5),
-                    TrainingResourceMetrics::new(0.0, 0.0),
-                    TrainingStageTimings::new(None, None, None),
-                )],
-                Vec::new(),
-                Vec::new(),
-            ),
-        );
+        let run = TrainingRun::starting("train-nan", StartTrainingRequest::default())
+            .with_source(TrainingSource::default())
+            .with_phase(TrainingRunPhase::Failed, 1)
+            .with_started_ms(5)
+            .with_metrics(vec![
+                TrainingMetricPoint::new(1, f64::NAN).with_learning_rate(1.0e-5),
+            ]);
         let snapshot = TrainingSnapshot::new(TrainingReadiness::default(), vec![run]);
 
         let stored = StoredTrainingHistory::stored(&snapshot);

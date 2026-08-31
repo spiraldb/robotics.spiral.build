@@ -527,7 +527,9 @@ impl InspectionProjection for EpisodeInspection {
                     arm.joints().to_vec(),
                     EpisodeArmScalarSamples::new(normalized, raw).with_degrees(degrees),
                 )
-                .with_optional_channels(EpisodeArmOptionalChannels::new(velocity, effort, action))
+                .with_velocity(velocity)
+                .with_effort(effort)
+                .with_action(action)
             })
             .collect();
         EpisodeInspectionSnapshot::new(
@@ -888,11 +890,11 @@ impl AppState {
             .map_err(OperationError::from)?;
         let id = writer.id().to_owned();
         let started_ms = writer.started_ms();
-        let summary = EpisodeInfo::new(
-            EpisodeIdentity::new(id, dataset_id, arms.clone()).with_source(source),
-            EpisodeTimeline::new(0, 0.0, sample_hz).with_started_ms(started_ms),
-            EpisodeAssessment::new(false, None, None),
-        );
+        let summary = EpisodeInfo::new(id, dataset_id)
+            .with_arms(arms.clone())
+            .with_source(source)
+            .with_sample_hz(sample_hz)
+            .with_started_ms(started_ms);
         Ok(RecordingDraft {
             writer,
             arms,

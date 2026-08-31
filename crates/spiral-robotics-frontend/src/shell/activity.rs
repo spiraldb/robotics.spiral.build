@@ -374,14 +374,11 @@ pub(crate) enum PanelRole {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spiral_robotics_api::recording::{EpisodeAssessment, EpisodeIdentity, EpisodeTimeline};
-
     fn episode(id: &str) -> EpisodeInfo {
-        EpisodeInfo::new(
-            EpisodeIdentity::new(id, "default", Vec::new()).with_source("Teleoperation"),
-            EpisodeTimeline::new(120, 2.0, 60.0),
-            EpisodeAssessment::new(false, None, None),
-        )
+        EpisodeInfo::new(id, "default")
+            .with_source("Teleoperation")
+            .with_timeline(120, 2.0)
+            .with_sample_hz(60.0)
     }
 
     #[test]

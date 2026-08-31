@@ -708,7 +708,6 @@ pub(crate) fn studio() -> Studio {
 
 #[cfg(test)]
 mod tests {
-    use spiral_robotics_api::robots::MotorDirection;
     use spiral_robotics_api::robots::{
         ConnectionStatus, MotorSummary, RobotAvailability, RobotSummary,
     };
@@ -725,9 +724,7 @@ mod tests {
             motors
                 .iter()
                 .enumerate()
-                .map(|(index, name)| {
-                    MotorSummary::new(*name, index as u32 + 1, MotorDirection::Normal)
-                })
+                .map(|(index, name)| MotorSummary::new(*name, index as u32 + 1))
                 .collect(),
         )
     }

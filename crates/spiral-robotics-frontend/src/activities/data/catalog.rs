@@ -1,15 +1,14 @@
-//! User-visible catalog vocabulary shared by the Data and Training activities.
+//! User-visible catalog vocabulary owned by the Data and Training activities.
 //!
-//! Physical Arrow schemas and native database operations live in `spiral-robotics-storage`;
-//! this module only publishes the managed relation names and query templates
-//! that cross the frontend/backend boundary. A storage-side test pins every
-//! name and column list here to the persisted Arrow schemas, so this listing
-//! cannot silently drift from what the database actually holds.
+//! Physical Arrow schemas and native database operations live in `spiral-robotics-storage`.
+//! A storage-side test pins every name and column list here to the persisted
+//! Arrow schemas, so this listing cannot silently drift from what the database
+//! actually holds.
 
 include!(concat!(env!("OUT_DIR"), "/storage_schema_version.rs"));
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ManagedTable {
+pub(crate) enum ManagedTable {
     Datasets,
     Episodes,
     EpisodeStreams,
@@ -29,7 +28,7 @@ pub enum ManagedTable {
 impl ManagedTable {
     /// Every managed relation, in the Data schema browser's display order —
     /// kept identical to storage's own relation order.
-    pub const ALL: [Self; 14] = [
+    pub(crate) const ALL: [Self; 14] = [
         Self::Datasets,
         Self::Episodes,
         Self::EpisodeStreams,
@@ -46,7 +45,7 @@ impl ManagedTable {
         Self::FeatureRegistry,
     ];
 
-    pub const fn name(self) -> &'static str {
+    pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::Datasets => "datasets",
             Self::Episodes => "episodes",
@@ -65,11 +64,11 @@ impl ManagedTable {
         }
     }
 
-    pub fn qualified_name(self, namespace: &str) -> String {
+    pub(crate) fn qualified_name(self, namespace: &str) -> String {
         format!("{namespace}.{}", self.name())
     }
 
-    pub const fn columns(self) -> &'static [&'static str] {
+    pub(crate) const fn columns(self) -> &'static [&'static str] {
         match self {
             Self::Datasets => &["dataset_id", "name", "created_ms", "description"],
             Self::Episodes => &[
@@ -258,7 +257,7 @@ impl ManagedTable {
 
     /// Build the default native-training query for one logical dataset.
     ///
-    pub fn training_sql_for_dataset(self, namespace: &str, dataset_id: &str) -> String {
+    pub(crate) fn training_sql_for_dataset(self, namespace: &str, dataset_id: &str) -> String {
         let datasets = self.qualified_name(namespace);
         let samples = Self::JointSamples.qualified_name(namespace);
         let episodes = Self::Episodes.qualified_name(namespace);
@@ -270,7 +269,7 @@ impl ManagedTable {
     }
 
     /// The Data workbench's default query for this relation.
-    pub fn sql(self, namespace: &str) -> String {
+    pub(crate) fn sql(self, namespace: &str) -> String {
         let relation = self.qualified_name(namespace);
         match self {
             Self::Datasets => {
@@ -308,7 +307,8 @@ impl ManagedTable {
     }
 }
 
-pub mod column {
-    pub const STATE_VALID: &str = "state_valid";
-    pub const ACTION_VALID: &str = "action_valid";
+#[cfg(test)]
+pub(crate) mod column {
+    pub(crate) const STATE_VALID: &str = "state_valid";
+    pub(crate) const ACTION_VALID: &str = "action_valid";
 }

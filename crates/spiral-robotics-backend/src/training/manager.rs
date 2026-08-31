@@ -8,9 +8,8 @@ use std::time::Duration;
 use spiral_robotics_api::settings::ConnectionTestResponse;
 use spiral_robotics_api::training::{
     MAX_TRAINING_HISTORY_RUNS, StartTrainingRequest, TrainingCheckpoint, TrainingMetricPoint,
-    TrainingMetricProgress, TrainingReadiness, TrainingResourceMetrics, TrainingRun,
-    TrainingRunPhase, TrainingRuntimeInfo, TrainingSnapshot, TrainingSource, TrainingStageTimings,
-    TrainingUpdate,
+    TrainingReadiness, TrainingRun, TrainingRunPhase, TrainingRuntimeInfo, TrainingSnapshot,
+    TrainingSource, TrainingUpdate,
 };
 use spiral_robotics_training::{
     ActLayerCounts, ActModelDimensions, ActTrainingArchitecture, ActTrainingInput,
@@ -681,20 +680,20 @@ impl TrainingManager {
             self.apply_update(
                 TrainingUpdate::Metric {
                     run_id: run_id.to_owned(),
-                    point: Box::new(TrainingMetricPoint::new(
-                        TrainingMetricProgress::new(
-                            metric.step(),
-                            metric.train_loss(),
-                            metric.learning_rate(),
-                        )
-                        .with_validation_loss(metric.validation_loss())
-                        .with_timeline(metric.elapsed_seconds(), metric.event().map(str::to_owned)),
-                        TrainingResourceMetrics::new(0.0, metric.examples_per_second())
+                    point: Box::new(
+                        TrainingMetricPoint::new(metric.step(), metric.train_loss())
+                            .with_learning_rate(metric.learning_rate())
+                            .with_validation_loss(metric.validation_loss())
+                            .with_timeline(
+                                metric.elapsed_seconds(),
+                                metric.event().map(str::to_owned),
+                            )
+                            .with_throughput(0.0, metric.examples_per_second())
                             .with_utilization(metric.cpu_percent(), metric.gpu_percent())
-                            .with_memory_bytes(metric.memory_bytes()),
-                        TrainingStageTimings::new(metric.loader_ms(), None, None)
-                            .with_runtime(metric.device_copy_ms(), metric.model_ms()),
-                    )),
+                            .with_memory_bytes(metric.memory_bytes())
+                            .with_loader_ms(metric.loader_ms())
+                            .with_runtime_timings(metric.device_copy_ms(), metric.model_ms()),
+                    ),
                 },
                 false,
             )
@@ -1079,15 +1078,10 @@ mod tests {
     use super::*;
 
     fn run(id: &str, phase: TrainingRunPhase, current_step: u64) -> TrainingRun {
-        TrainingRun::new(
-            spiral_robotics_api::training::TrainingRunIdentity::new(
-                id,
-                StartTrainingRequest::default(),
-                TrainingSource::default(),
-            ),
-            spiral_robotics_api::training::TrainingRunLifecycle::new(phase, current_step, 1),
-            spiral_robotics_api::training::TrainingRunHistory::default(),
-        )
+        TrainingRun::starting(id, StartTrainingRequest::default())
+            .with_source(TrainingSource::default())
+            .with_phase(phase, current_step)
+            .with_started_ms(1)
     }
 
     #[test]

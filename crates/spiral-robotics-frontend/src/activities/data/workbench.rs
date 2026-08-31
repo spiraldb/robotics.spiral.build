@@ -14,7 +14,6 @@ use crate::components::interaction::{
 };
 use dioxus::prelude::*;
 use gloo_net::http::Method;
-use spiral_robotics_api::catalog::ManagedTable as Table;
 use spiral_robotics_api::datasets::{
     EpisodeImportSummary, HuggingFaceDatasetFormat, HuggingFaceDatasetImportSummary,
     HuggingFaceDatasetInspection, HuggingFaceDatasetRequest,
@@ -23,6 +22,7 @@ use spiral_robotics_api::recording::EpisodeListItem;
 use spiral_robotics_api::relations::RelationCatalog;
 use spiral_robotics_api::status::BackendReadinessState;
 
+use crate::activities::data::catalog::ManagedTable as Table;
 use crate::activities::data::query_result::DEFAULT_QUERY_ROWS;
 use crate::client::http as api;
 use crate::format::ClockPresentation;
@@ -1163,16 +1163,17 @@ impl EpisodeIdPresentation for str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spiral_robotics_api::recording::{
-        EpisodeAssessment, EpisodeIdentity, EpisodeInfo, EpisodeTimeline,
-    };
+    use spiral_robotics_api::recording::EpisodeInfo;
 
     fn episode(id: &str, usable: bool, discarded: bool) -> EpisodeListItem {
-        EpisodeListItem::from(&EpisodeInfo::new(
-            EpisodeIdentity::new(id, "default", Vec::new()).with_source("test"),
-            EpisodeTimeline::new(1, 1.0, 60.0),
-            EpisodeAssessment::new(discarded, None, (!usable).then(|| "unavailable".to_owned())),
-        ))
+        EpisodeListItem::from(
+            &EpisodeInfo::new(id, "default")
+                .with_source("test")
+                .with_timeline(1, 1.0)
+                .with_sample_hz(60.0)
+                .with_assessment(discarded, None)
+                .with_problem((!usable).then(|| "unavailable".to_owned())),
+        )
     }
 
     #[test]

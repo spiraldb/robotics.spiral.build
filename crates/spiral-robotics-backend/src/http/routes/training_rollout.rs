@@ -119,19 +119,19 @@ impl From<CapabilityRolloutSnapshot> for RolloutSnapshot {
             CapabilityRolloutPhase::Failed => spiral_robotics_api::rollout::RolloutPhase::Failed,
         };
         Self::new(
-            spiral_robotics_api::rollout::RolloutIdentity::new(
-                snapshot.session_id().map(str::to_owned),
-                snapshot.run_id().map(str::to_owned),
-                snapshot.robot().map(str::to_owned),
-            )
-            .with_checkpoint(snapshot.checkpoint_step())
-            .with_duration(snapshot.duration_seconds()),
-            spiral_robotics_api::rollout::RolloutLifecycle::new(phase, snapshot.started_ms())
-                .with_finished_ms(snapshot.finished_ms())
-                .with_messages(
-                    snapshot.message().map(str::to_owned),
-                    snapshot.warning().map(str::to_owned),
-                ),
+            snapshot.session_id().map(str::to_owned),
+            snapshot.run_id().map(str::to_owned),
+        )
+        .with_robot(snapshot.robot().map(str::to_owned))
+        .with_checkpoint(snapshot.checkpoint_step())
+        .with_duration(snapshot.duration_seconds())
+        .with_lifecycle(phase, snapshot.started_ms())
+        .with_completion(
+            snapshot.finished_ms(),
+            snapshot.message().map(str::to_owned),
+        )
+        .with_warning(snapshot.warning().map(str::to_owned))
+        .with_metrics(
             spiral_robotics_api::rollout::RolloutMetrics::new(
                 snapshot.metrics().inference_count(),
                 snapshot.metrics().command_count(),

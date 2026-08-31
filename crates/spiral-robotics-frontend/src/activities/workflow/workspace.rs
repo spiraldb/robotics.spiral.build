@@ -12,13 +12,13 @@ use dioxus_workbench::{LayoutNode, Panel, PanelId, PanelLayout, PanelWorkspace, 
 use spiral_robotics_api::workflow::{
     WorkflowAgentConversationSummary, WorkflowAgentMessagePhase, WorkflowAgentPhase,
     WorkflowAgentRole, WorkflowAgentToolPhase, WorkflowAgentToolSummary, WorkflowNodeConfig,
-    WorkflowNodeKind, WorkflowNodePhase, WorkflowRunPhase,
+    WorkflowNodePhase, WorkflowRunPhase,
 };
 
 use crate::activities::data::query_result::{QueryExecutionPresentation, QueryState};
 use crate::activities::workflow::state::{
     ASSISTANT_PANEL_ID, AgentDraftKey, AgentPendingCommand, CANVAS_PANEL_ID, ModelFeatureTarget,
-    NODE_PANEL_ID, RESULTS_PANEL_ID, WorkflowNodeData, WorkflowPendingCommand,
+    NODE_PANEL_ID, RESULTS_PANEL_ID, WorkflowNodeData, WorkflowNodeKind, WorkflowPendingCommand,
 };
 use crate::components::icons::{
     FitViewIcon, ModelNodeIcon, QueryNodeIcon, ResultNodeIcon, TableNodeIcon, WorkflowIcon,

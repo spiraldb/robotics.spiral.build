@@ -6,9 +6,7 @@
 
 use crate::OperationError;
 use spiral_robotics_api::training::{
-    StartTrainingRequest, TrainingReadiness, TrainingRun, TrainingRunHistory,
-    TrainingRunIdentity as StoredTrainingRunIdentity, TrainingRunLifecycle, TrainingRunPhase,
-    TrainingSource,
+    StartTrainingRequest, TrainingReadiness, TrainingRun, TrainingRunPhase, TrainingSource,
 };
 
 const STARTING_MESSAGE: &str = "Opening SpiralDB and starting the remote training job…";
@@ -142,12 +140,10 @@ pub(crate) trait TrainingCoordinatorPort: TrainingRunPort {
         let source = self.resolve_training_source(command.dataset_id())?;
         self.validate_training_query(&command).await?;
         let identity = self.next_training_identity();
-        let run = TrainingRun::new(
-            StoredTrainingRunIdentity::new(identity.id.clone(), command.clone(), source),
-            TrainingRunLifecycle::new(TrainingRunPhase::Starting, 0, identity.created_ms)
-                .with_completion(None, Some(STARTING_MESSAGE.to_owned())),
-            TrainingRunHistory::default(),
-        );
+        let run = TrainingRun::starting(identity.id.clone(), command.clone())
+            .with_source(source)
+            .with_started_ms(identity.created_ms)
+            .with_completion(None, Some(STARTING_MESSAGE.to_owned()));
         self.admit_training_run(run.clone()).await?;
         let launch = TrainingLaunch::new(run.id(), command);
         if let Err(error) = self.launch_training_runtime(launch) {

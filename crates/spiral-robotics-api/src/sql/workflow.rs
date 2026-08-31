@@ -7,7 +7,7 @@
 //! pass to the backend adapter after the existing read-only query gate admits
 //! the surrounding statement.
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -34,7 +34,7 @@ impl std::error::Error for WorkflowSyntaxError {}
 
 /// A workflow node identity admitted by the URL/JSON naming policy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct WorkflowNodeId<'a>(&'a str);
+pub(crate) struct WorkflowNodeId<'a>(&'a str);
 
 /// Workflow node IDs are URL/JSON identities, not SQL identifiers. Hyphens are
 /// allowed because IDs are never interpolated; they only index a server-owned
@@ -86,7 +86,7 @@ impl<'a> TryFrom<&'a str> for QualifiedRelation<'a> {
 
 /// Workflow SQL whose node references can be inspected or substituted.
 #[derive(Clone, Copy, Debug)]
-pub struct WorkflowSql<'a>(&'a str);
+pub(crate) struct WorkflowSql<'a>(&'a str);
 
 impl<'a> From<&'a str> for WorkflowSql<'a> {
     fn from(sql: &'a str) -> Self {
@@ -99,7 +99,7 @@ impl<'a> From<&'a str> for WorkflowSql<'a> {
 /// Repeated placeholders are preserved intentionally: a read-only query may
 /// reference the same upstream relation more than once with different aliases.
 impl WorkflowSql<'_> {
-    pub fn node_placeholders(self) -> Result<Vec<String>, WorkflowSyntaxError> {
+    pub(crate) fn node_placeholders(self) -> Result<Vec<String>, WorkflowSyntaxError> {
         let sql = self.0;
         let mut placeholders = Vec::new();
         let mut cursor = 0_usize;
@@ -134,9 +134,9 @@ impl WorkflowSql<'_> {
         }
         Ok(placeholders)
     }
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     /// Replace placeholders with prevalidated, server-owned qualified relations.
-    pub fn substitute(
+    fn substitute(
         self,
         relations: &BTreeMap<String, String>,
     ) -> Result<String, WorkflowSyntaxError> {

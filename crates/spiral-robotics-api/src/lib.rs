@@ -5,7 +5,6 @@
 //! SQL gates shared by those contracts. Database schemas and native backend
 //! types belong elsewhere.
 
-pub mod catalog;
 pub mod datasets;
 pub mod identity;
 pub mod recording;

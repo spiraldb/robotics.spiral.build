@@ -3,13 +3,11 @@
 use std::collections::BTreeSet;
 
 use spiral_robotics_api::identity::DatasetId;
-use spiral_robotics_api::rollout::{
-    MAX_ROLLOUT_DURATION_SECONDS, MIN_ROLLOUT_DURATION_SECONDS, RolloutDuration,
-};
+use spiral_robotics_api::rollout::MAX_ROLLOUT_DURATION_SECONDS;
 use spiral_robotics_api::sql::{ReadOnlyQuery, ReadOnlyQueryMode, UnquotedSqlIdentifier};
 
 use crate::OperationError;
-use crate::rollout::service::RolloutRequest;
+use crate::rollout::service::{MIN_ROLLOUT_DURATION_SECONDS, RolloutDuration, RolloutRequest};
 use spiral_robotics_api::training::{StartTrainingRequest, TrainingRun as ContractTrainingRun};
 
 /// One image batch expanded to f32 model inputs must leave enough memory for
@@ -572,19 +570,9 @@ mod tests {
     }
 
     fn training_run(config: StartTrainingRequest) -> ContractTrainingRun {
-        ContractTrainingRun::new(
-            spiral_robotics_api::training::TrainingRunIdentity::new(
-                "run",
-                config,
-                spiral_robotics_api::training::TrainingSource::default(),
-            ),
-            spiral_robotics_api::training::TrainingRunLifecycle::new(
-                spiral_robotics_api::training::TrainingRunPhase::Starting,
-                0,
-                1,
-            ),
-            spiral_robotics_api::training::TrainingRunHistory::default(),
-        )
+        ContractTrainingRun::starting("run", config)
+            .with_source(spiral_robotics_api::training::TrainingSource::default())
+            .with_started_ms(1)
     }
 
     #[tokio::test]

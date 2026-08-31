@@ -1054,17 +1054,15 @@ mod tests {
     use super::*;
     use crate::client::http::{EpisodeTimelineResponse, TimelineSample, VideoAssetMetadata};
     use spiral_robotics_api::recording::{
-        EpisodeAssessment, EpisodeIdentity, EpisodeInfo, EpisodeTimeline, EpisodeVideoFormat,
-        EpisodeVideoIdentity, EpisodeVideoTimeline, ReplayIdentity, ReplayTimeline,
-        ReplayTransport,
+        EpisodeInfo, EpisodeVideoFormat, EpisodeVideoIdentity, EpisodeVideoTimeline,
+        ReplayIdentity, ReplayTimeline, ReplayTransport,
     };
 
     fn episode_summary() -> EpisodeInfo {
-        EpisodeInfo::new(
-            EpisodeIdentity::new("take-1", "default", Vec::new()).with_source("Teleoperation"),
-            EpisodeTimeline::new(600, 10.0, 60.0),
-            EpisodeAssessment::new(false, None, None),
-        )
+        EpisodeInfo::new("take-1", "default")
+            .with_source("Teleoperation")
+            .with_timeline(600, 10.0)
+            .with_sample_hz(60.0)
     }
 
     fn preview(at: f64, videos: Vec<VideoAssetMetadata>) -> EpisodePreview {
