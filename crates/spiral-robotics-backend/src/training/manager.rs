@@ -5,7 +5,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use spiral_robotics_api::settings::ConnectionTestResponse;
 use spiral_robotics_api::training::{
     MAX_TRAINING_HISTORY_RUNS, TrainingCheckpoint, TrainingConfig, TrainingMetricPoint,
     TrainingReadiness, TrainingRun, TrainingRunPhase, TrainingRuntimeInfo, TrainingSnapshot,
@@ -295,12 +294,10 @@ impl TrainingManager {
         next
     }
 
-    pub(crate) async fn test_runtime(&self) -> ConnectionTestResponse {
+    pub(crate) async fn test_runtime(&self) -> (bool, String) {
         match self.probe_backend().await {
-            Ok(info) => {
-                ConnectionTestResponse::new(true, format!("Connected · {}", info.display_summary()))
-            }
-            Err(error) => ConnectionTestResponse::new(false, error),
+            Ok(info) => (true, format!("Connected · {}", info.display_summary())),
+            Err(error) => (false, error),
         }
     }
 
@@ -954,9 +951,9 @@ impl TrainingManager {
             tokio::time::timeout(Duration::from_secs(8), self.inner.storage.test_spiral())
                 .await
                 .unwrap_or_else(|_| {
-                    ConnectionTestResponse::new(
+                    (
                         false,
-                        "the connection probe timed out after 8 seconds",
+                        "the connection probe timed out after 8 seconds".to_owned(),
                     )
                 })
         };
@@ -965,12 +962,10 @@ impl TrainingManager {
             TrainingRuntimeInfo::new(info.id(), info.display_name(), info.runtime())
                 .with_devices(info.devices().to_vec())
         });
-        let spiral_ready = connection.ok();
+        let spiral_ready = connection.0;
         let ready = spiral_ready && backend.is_ok();
         let summary = match (connection, backend) {
-            (result, _) if !result.ok() => {
-                format!("Spiral is not ready for training: {}", result.message())
-            }
+            ((false, message), _) => format!("Spiral is not ready for training: {message}"),
             (_, Err(error)) => format!("Training runtime is not ready: {error}"),
             (_, Ok(backend)) => format!(
                 "Runtime ready · {probe} · Spiral project {} · namespace {} · query checked at run start",

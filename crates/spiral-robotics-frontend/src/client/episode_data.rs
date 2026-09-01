@@ -10,13 +10,13 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
 use dioxus::prelude::*;
+pub(crate) use spiral_robotics_api::recording::EpisodeVideoAssetMetadata as VideoAssetMetadata;
 use spiral_robotics_api::recording::{
-    EpisodeInspectionArm, EpisodeInspectionSnapshot, EpisodeOptionalFrameMatrix,
+    EpisodeInfo, EpisodeInspectionArm, EpisodeInspectionSnapshot, EpisodeOptionalFrameMatrix,
 };
 use spiral_robotics_viewport::SO101_JOINTS;
 
-use crate::client::http as api;
-use crate::client::http::EpisodeApiPath;
+use crate::client::server_fns::inspect_episode;
 use crate::panels::timeline::panel::{
     TimelineSignalLane, TimelineSignalPoint, TimelineSignalSeries,
 };
@@ -28,6 +28,137 @@ const EPISODE_RENDER_HZ: f64 = 30.0;
 const RECORDED_REQUEST_TIMEOUT_MS: u32 = 15_000;
 const TRACE_BUCKETS: usize = 240;
 const MAX_CACHED_EPISODES: usize = 4;
+
+/// Episode detail used to align timeline samples and recorded media.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct EpisodeTimeline {
+    episode: EpisodeInfo,
+    videos: Vec<VideoAssetMetadata>,
+}
+
+impl EpisodeTimeline {
+    pub(crate) const fn new(episode: EpisodeInfo, videos: Vec<VideoAssetMetadata>) -> Self {
+        Self { episode, videos }
+    }
+
+    pub(crate) const fn episode(&self) -> &EpisodeInfo {
+        &self.episode
+    }
+
+    pub(crate) fn videos(&self) -> &[VideoAssetMetadata] {
+        &self.videos
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct TimelineArmSample {
+    arm: String,
+    normalized: BTreeMap<String, Option<f64>>,
+    degrees: BTreeMap<String, Option<f64>>,
+    velocity: Option<BTreeMap<String, Option<f64>>>,
+    effort: Option<BTreeMap<String, Option<f64>>>,
+    action: Option<BTreeMap<String, Option<f64>>>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct TimelineOptionalArmChannels {
+    velocity: Option<BTreeMap<String, Option<f64>>>,
+    effort: Option<BTreeMap<String, Option<f64>>>,
+    action: Option<BTreeMap<String, Option<f64>>>,
+}
+
+impl TimelineOptionalArmChannels {
+    pub(crate) const fn new(
+        velocity: Option<BTreeMap<String, Option<f64>>>,
+        effort: Option<BTreeMap<String, Option<f64>>>,
+        action: Option<BTreeMap<String, Option<f64>>>,
+    ) -> Self {
+        Self {
+            velocity,
+            effort,
+            action,
+        }
+    }
+}
+
+impl TimelineArmSample {
+    pub(crate) fn new(
+        arm: impl Into<String>,
+        normalized: BTreeMap<String, Option<f64>>,
+        degrees: BTreeMap<String, Option<f64>>,
+    ) -> Self {
+        Self {
+            arm: arm.into(),
+            normalized,
+            degrees,
+            velocity: None,
+            effort: None,
+            action: None,
+        }
+    }
+
+    pub(crate) fn with_optional_channels(mut self, channels: TimelineOptionalArmChannels) -> Self {
+        self.velocity = channels.velocity;
+        self.effort = channels.effort;
+        self.action = channels.action;
+        self
+    }
+
+    pub(crate) fn arm(&self) -> &str {
+        &self.arm
+    }
+
+    pub(crate) const fn normalized(&self) -> &BTreeMap<String, Option<f64>> {
+        &self.normalized
+    }
+
+    pub(crate) const fn degrees(&self) -> &BTreeMap<String, Option<f64>> {
+        &self.degrees
+    }
+}
+
+/// The nearest stored sample to a committed recorded playhead position.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct TimelineSample {
+    frame: u64,
+    seconds: f64,
+    follow_error_degrees: Option<f64>,
+    arms: Vec<TimelineArmSample>,
+}
+
+impl TimelineSample {
+    pub(crate) const fn new(frame: u64, seconds: f64) -> Self {
+        Self {
+            frame,
+            seconds,
+            follow_error_degrees: None,
+            arms: Vec::new(),
+        }
+    }
+
+    pub(crate) fn with_measurements(
+        mut self,
+        follow_error_degrees: Option<f64>,
+        arms: Vec<TimelineArmSample>,
+    ) -> Self {
+        self.follow_error_degrees = follow_error_degrees;
+        self.arms = arms;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn frame(&self) -> u64 {
+        self.frame
+    }
+
+    pub(crate) const fn seconds(&self) -> f64 {
+        self.seconds
+    }
+
+    pub(crate) fn arms(&self) -> &[TimelineArmSample] {
+        &self.arms
+    }
+}
 
 pub(crate) trait EpisodePlaybackTime {
     fn replay_slot(self) -> u64;
@@ -45,13 +176,13 @@ impl EpisodePlaybackTime for f64 {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct EpisodePreview {
     episode: String,
-    timeline: Arc<api::EpisodeTimelineResponse>,
-    sample: api::TimelineSample,
+    timeline: Arc<EpisodeTimeline>,
+    sample: TimelineSample,
     signal_lanes: Arc<[TimelineSignalLane; 6]>,
 }
 
 impl EpisodePreview {
-    fn from_inspection(inspection: &EpisodeData, sample: api::TimelineSample) -> Self {
+    fn from_inspection(inspection: &EpisodeData, sample: TimelineSample) -> Self {
         Self {
             episode: inspection.snapshot.episode().id().to_owned(),
             timeline: Arc::clone(&inspection.timeline),
@@ -63,8 +194,8 @@ impl EpisodePreview {
     #[cfg(test)]
     pub(crate) fn fixture(
         episode: String,
-        timeline: Arc<api::EpisodeTimelineResponse>,
-        render: (api::TimelineSample, Arc<[TimelineSignalLane; 6]>),
+        timeline: Arc<EpisodeTimeline>,
+        render: (TimelineSample, Arc<[TimelineSignalLane; 6]>),
     ) -> Self {
         let (sample, signal_lanes) = render;
         Self {
@@ -79,12 +210,12 @@ impl EpisodePreview {
         &self.episode
     }
 
-    pub(crate) fn timeline(&self) -> &api::EpisodeTimelineResponse {
+    pub(crate) fn timeline(&self) -> &EpisodeTimeline {
         &self.timeline
     }
 
     #[cfg(test)]
-    pub(crate) const fn sample(&self) -> &api::TimelineSample {
+    pub(crate) const fn sample(&self) -> &TimelineSample {
         &self.sample
     }
 
@@ -92,7 +223,7 @@ impl EpisodePreview {
         &self.signal_lanes
     }
 
-    pub(crate) fn into_sample(self) -> api::TimelineSample {
+    pub(crate) fn into_sample(self) -> TimelineSample {
         self.sample
     }
 }
@@ -100,14 +231,14 @@ impl EpisodePreview {
 #[derive(Clone, Debug)]
 pub(crate) struct EpisodeData {
     snapshot: EpisodeInspectionSnapshot,
-    timeline: Arc<api::EpisodeTimelineResponse>,
+    timeline: Arc<EpisodeTimeline>,
     signal_lanes: Arc<[TimelineSignalLane; 6]>,
 }
 
 impl EpisodeData {
     pub(crate) fn try_new(snapshot: EpisodeInspectionSnapshot) -> Result<Self, String> {
         snapshot.validate()?;
-        let timeline = Arc::new(api::EpisodeTimelineResponse::new(
+        let timeline = Arc::new(EpisodeTimeline::new(
             snapshot.episode().to_owned(),
             snapshot.videos().to_owned(),
         ));
@@ -124,16 +255,16 @@ impl EpisodeData {
         Ok(EpisodePreview::from_inspection(self, sample))
     }
 
-    pub(crate) fn info(&self) -> &spiral_robotics_api::recording::EpisodeInfo {
+    pub(crate) fn info(&self) -> &EpisodeInfo {
         self.snapshot.episode()
     }
 
     pub(crate) async fn load(episode: &str) -> Result<Arc<Self>, String> {
-        let path = episode.inspection_url();
+        let request = inspect_episode(episode.to_owned());
         EpisodeDataDeadline::run(
             "The episode data",
             RECORDED_REQUEST_TIMEOUT_MS,
-            api::Http::get::<api::EpisodeInspectionSnapshot>(&path),
+            async move { request.await.map_err(|error| error.to_string()) },
         )
         .await
         .and_then(Self::try_new)
@@ -366,7 +497,7 @@ impl Studio {
 
 trait EpisodeSnapshot {
     fn validate(&self) -> Result<(), String>;
-    fn sample_at(&self, seconds: f64) -> Result<api::TimelineSample, String>;
+    fn sample_at(&self, seconds: f64) -> Result<TimelineSample, String>;
     fn signal_lanes(&self, buckets: usize) -> [TimelineSignalLane; 6];
 }
 
@@ -458,7 +589,7 @@ impl EpisodeSnapshot for EpisodeInspectionSnapshot {
         Ok(())
     }
 
-    fn sample_at(&self, seconds: f64) -> Result<api::TimelineSample, String> {
+    fn sample_at(&self, seconds: f64) -> Result<TimelineSample, String> {
         if !seconds.is_finite() {
             return Err("Timeline time must be finite.".to_owned());
         }
@@ -472,7 +603,7 @@ impl EpisodeSnapshot for EpisodeInspectionSnapshot {
             .map(|arm| arm.sample_at(frame))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(
-            api::TimelineSample::new(frame as u64, self.sample_times_seconds()[frame])
+            TimelineSample::new(frame as u64, self.sample_times_seconds()[frame])
                 .with_measurements(self.follow_error_degrees()[frame], arms),
         )
     }
@@ -548,11 +679,11 @@ impl SampleClock for [f64] {
 }
 
 trait RecordedArm {
-    fn sample_at(&self, frame: usize) -> Result<api::TimelineArmSample, String>;
+    fn sample_at(&self, frame: usize) -> Result<TimelineArmSample, String>;
 }
 
 impl RecordedArm for EpisodeInspectionArm {
-    fn sample_at(&self, frame: usize) -> Result<api::TimelineArmSample, String> {
+    fn sample_at(&self, frame: usize) -> Result<TimelineArmSample, String> {
         let arm = self;
         let joint_count = self.joints().len();
         let start = frame
@@ -568,7 +699,7 @@ impl RecordedArm for EpisodeInspectionArm {
                     .collect::<BTreeMap<_, _>>()
             })
         };
-        Ok(api::TimelineArmSample::new(
+        Ok(TimelineArmSample::new(
             arm.arm(),
             arm.joints()
                 .iter()
@@ -581,7 +712,7 @@ impl RecordedArm for EpisodeInspectionArm {
                 .zip(arm.degrees()[start..end].iter().copied())
                 .collect(),
         )
-        .with_optional_channels(api::TimelineOptionalArmChannels::new(
+        .with_optional_channels(TimelineOptionalArmChannels::new(
             optional(arm.velocity()),
             optional(arm.effort()),
             optional(arm.action()),

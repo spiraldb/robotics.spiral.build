@@ -15,9 +15,11 @@ use crate::activities::data::state::DataController;
 use crate::activities::rollout::state::RolloutController;
 use crate::activities::training::state::TrainingController;
 use crate::activities::workflow::state::WorkflowController;
+#[cfg(all(feature = "web", target_arch = "wasm32"))]
 use crate::client::http as api;
 #[cfg(all(feature = "web", target_arch = "wasm32"))]
 use crate::client::http::StudioEvent;
+use crate::client::server_fns::{data_settings, relation_catalog};
 use crate::panels::timeline::signals::SignalStore;
 use crate::panels::timeline::state::TimelineController;
 use crate::shell::notifications::{
@@ -199,7 +201,7 @@ impl BackendSignals {
 impl StudioProjectResources {
     fn use_resources() -> Self {
         let settings =
-            use_resource(|| async { api::Http::get::<DataSettings>("/api/settings/data").await });
+            use_resource(|| async { data_settings().await.map_err(|error| error.to_string()) });
         let settings_result = settings.read_unchecked().to_owned();
         let loaded_settings = settings_result
             .as_ref()
@@ -222,7 +224,7 @@ impl StudioProjectResources {
             (&query_available,),
             move |(query_available,)| async move {
                 if query_available {
-                    api::Http::get::<RelationCatalog>("/api/spiral/relations").await
+                    relation_catalog().await.map_err(|error| error.to_string())
                 } else {
                     Ok(RelationCatalog::default())
                 }

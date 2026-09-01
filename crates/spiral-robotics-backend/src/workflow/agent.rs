@@ -10,14 +10,14 @@ use crate::data::catalog_lease::{CatalogLeaseOwner, CatalogMutationLease};
 use crate::sync::MutexRecovery;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use spiral_robotics_api::relations::SpiralQueryResponse;
+use spiral_robotics_api::relations::SpiralQuerySnapshot;
 use spiral_robotics_api::workflow::{
     DEFAULT_WORKFLOW_ID, MAX_WORKFLOW_AGENT_CONVERSATION_TITLE_CHARS,
     MAX_WORKFLOW_AGENT_CONVERSATIONS, MAX_WORKFLOW_AGENT_INPUT_CHARS,
     MAX_WORKFLOW_AGENT_MESSAGES_PER_CONVERSATION, MAX_WORKFLOW_AGENT_QUERY_ROWS,
     WorkflowAgentArtifactReceipt, WorkflowAgentCommand, WorkflowAgentConversationSummary,
     WorkflowAgentMessage, WorkflowAgentMessagePhase, WorkflowAgentPhase, WorkflowAgentReadiness,
-    WorkflowAgentRole, WorkflowAgentSession, WorkflowAgentStateResponse, WorkflowAgentToolPhase,
+    WorkflowAgentRole, WorkflowAgentSession, WorkflowAgentSnapshot, WorkflowAgentToolPhase,
     WorkflowAgentToolSummary, WorkflowCommand, WorkflowNodeConfig, WorkflowRunPhase, WorkflowSpec,
 };
 use tokio::sync::broadcast;
@@ -1015,7 +1015,7 @@ impl WorkflowAgentManager {
         }
     }
 
-    pub(crate) fn state(&self) -> WorkflowAgentStateResponse {
+    pub(crate) fn state(&self) -> WorkflowAgentSnapshot {
         let document = self.inner.document.recover_lock();
         self.state_for(&document)
     }
@@ -1024,7 +1024,7 @@ impl WorkflowAgentManager {
         self.inner.turn.active.recover_lock().is_some()
     }
 
-    pub(crate) fn subscription(&self) -> (WorkflowAgentStateResponse, broadcast::Receiver<()>) {
+    pub(crate) fn subscription(&self) -> (WorkflowAgentSnapshot, broadcast::Receiver<()>) {
         let document = self.inner.document.recover_lock();
         let updates = self.inner.updates.subscribe();
         (self.state_for(&document), updates)
@@ -1033,7 +1033,7 @@ impl WorkflowAgentManager {
     pub(crate) async fn command(
         &self,
         command: WorkflowAgentCommand,
-    ) -> Result<WorkflowAgentStateResponse, OperationError> {
+    ) -> Result<WorkflowAgentSnapshot, OperationError> {
         match command {
             WorkflowAgentCommand::CreateConversation {
                 scope_id,
@@ -1084,7 +1084,7 @@ impl WorkflowAgentManager {
         &self,
         scope_id: &str,
         expected_revision: u64,
-    ) -> Result<WorkflowAgentStateResponse, OperationError> {
+    ) -> Result<WorkflowAgentSnapshot, OperationError> {
         let _mutation = self.inner.turn.mutation.lock().await;
         let candidate = {
             let active = self.inner.turn.active.recover_lock();
@@ -1113,7 +1113,7 @@ impl WorkflowAgentManager {
     async fn activate_conversation(
         &self,
         selection: ConversationSelection,
-    ) -> Result<WorkflowAgentStateResponse, OperationError> {
+    ) -> Result<WorkflowAgentSnapshot, OperationError> {
         let ConversationSelection {
             scope_id,
             conversation_id,
@@ -1206,7 +1206,7 @@ impl WorkflowAgentManager {
     async fn start_turn(
         &self,
         request: TurnStart,
-    ) -> Result<WorkflowAgentStateResponse, OperationError> {
+    ) -> Result<WorkflowAgentSnapshot, OperationError> {
         let TurnStart {
             scope_id,
             conversation_id,
@@ -1376,7 +1376,7 @@ impl WorkflowAgentManager {
     async fn cancel(
         &self,
         cancellation: TurnCancellation,
-    ) -> Result<WorkflowAgentStateResponse, OperationError> {
+    ) -> Result<WorkflowAgentSnapshot, OperationError> {
         let TurnCancellation {
             scope_id,
             conversation_id: requested_conversation_id,
@@ -2298,7 +2298,7 @@ impl WorkflowAgentManager {
         Ok(())
     }
 
-    fn state_for(&self, document: &AgentDocument) -> WorkflowAgentStateResponse {
+    fn state_for(&self, document: &AgentDocument) -> WorkflowAgentSnapshot {
         let session = document
             .active()
             .map(|conversation| conversation.session.clone())
@@ -2313,7 +2313,7 @@ impl WorkflowAgentManager {
                 ))
             })
             .unwrap_or_else(|| self.inner.readiness.clone());
-        WorkflowAgentStateResponse::new(readiness, session)
+        WorkflowAgentSnapshot::new(readiness, session)
             .with_history_available(history_error.is_none())
             .with_scope(
                 self.inner.scope_id.recover_lock().clone(),
@@ -2578,11 +2578,11 @@ impl WorkflowSpecAgentExt for WorkflowSpec {
     }
 }
 
-trait SpiralQueryResponseAgentExt {
+trait SpiralQuerySnapshotAgentExt {
     fn serialize_for_agent_prompt(self) -> String;
 }
 
-impl SpiralQueryResponseAgentExt for SpiralQueryResponse {
+impl SpiralQuerySnapshotAgentExt for SpiralQuerySnapshot {
     fn serialize_for_agent_prompt(self) -> String {
         let row_count = self.rows().len();
         let source_truncated = self.truncated();
@@ -3051,7 +3051,7 @@ mod tests {
             .iter()
             .map(|column| (column.name().to_owned(), Value::String("value".repeat(100))))
             .collect();
-        let encoded = SpiralQueryResponse::new(columns, vec![row], false)
+        let encoded = SpiralQuerySnapshot::new(columns, vec![row], false)
             .with_elapsed_ms(1)
             .serialize_for_agent_prompt();
         assert!(encoded.len() <= MAX_QUERY_PROMPT_BYTES);
@@ -3205,7 +3205,7 @@ mod tests {
             spiral_robotics_api::workflow::WorkflowRunSnapshot::started(&workflow, "run-42");
         snapshot.set_phase(WorkflowRunPhase::Completed);
         snapshot.set_result(Some(
-            SpiralQueryResponse::new(Vec::new(), Vec::new(), false).with_elapsed_ms(2),
+            SpiralQuerySnapshot::new(Vec::new(), Vec::new(), false).with_elapsed_ms(2),
         ));
         let summary = snapshot.agent_summary().to_string();
         messages.refresh_deferred_wait_receipt(&snapshot, &summary);
@@ -3349,7 +3349,7 @@ mod tests {
 
     #[test]
     fn public_state_has_no_provider_secret_field() {
-        let state = WorkflowAgentStateResponse::default();
+        let state = WorkflowAgentSnapshot::default();
         let encoded = serde_json::to_string(&state).unwrap();
         assert!(!encoded.contains("api_key"));
         assert!(!encoded.contains("LLM_API_KEY"));

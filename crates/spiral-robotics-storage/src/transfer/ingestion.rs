@@ -20,7 +20,7 @@ use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 use spiral_robotics_api::datasets::{
     HuggingFaceDatasetFile, HuggingFaceDatasetFormat, HuggingFaceDatasetImportSummary,
-    HuggingFaceDatasetInspection, HuggingFaceDatasetRequest, HuggingFaceImportOutcome,
+    HuggingFaceDatasetInspection, HuggingFaceDatasetSource, HuggingFaceImportOutcome,
     HuggingFaceInspectionContents, HuggingFaceInspectionSource, HuggingFaceResolvedSource,
 };
 use url::Url;
@@ -391,11 +391,11 @@ impl ImportRelations {
 #[allow(async_fn_in_trait)]
 pub trait HuggingFaceDatasetDiscovery: Sized {
     /// Resolve one public Hugging Face dataset snapshot without changing Spiral.
-    async fn discover(request: HuggingFaceDatasetRequest, namespace: &str) -> Result<Self, String>;
+    async fn discover(request: HuggingFaceDatasetSource, namespace: &str) -> Result<Self, String>;
 }
 
 impl HuggingFaceDatasetDiscovery for HuggingFaceDatasetInspection {
-    async fn discover(request: HuggingFaceDatasetRequest, namespace: &str) -> Result<Self, String> {
+    async fn discover(request: HuggingFaceDatasetSource, namespace: &str) -> Result<Self, String> {
         request.validate_for_discovery()?;
         let dataset_id = request.dataset_id().to_owned();
         let requested_revision = request.revision().to_owned();
@@ -600,11 +600,11 @@ impl StorageManager {
     }
 }
 
-trait HuggingFaceDatasetRequestValidation {
+trait HuggingFaceDatasetSourceValidation {
     fn validate_for_discovery(&self) -> Result<(), String>;
 }
 
-impl HuggingFaceDatasetRequestValidation for HuggingFaceDatasetRequest {
+impl HuggingFaceDatasetSourceValidation for HuggingFaceDatasetSource {
     fn validate_for_discovery(&self) -> Result<(), String> {
         if !crate::db::StorageSchema::is_dataset_id(self.dataset_id()) {
             return Err(
@@ -959,11 +959,11 @@ impl IngestionClock {
 #[cfg(test)]
 mod tests {
     use spiral_robotics_api::datasets::{
-        HuggingFaceDatasetFile, HuggingFaceDatasetFormat, HuggingFaceDatasetRequest,
+        HuggingFaceDatasetFile, HuggingFaceDatasetFormat, HuggingFaceDatasetSource,
     };
 
     use super::{
-        HuggingFaceDatasetRequestValidation as _, HuggingFaceFileSelection, HuggingFaceRepository,
+        HuggingFaceDatasetSourceValidation as _, HuggingFaceFileSelection, HuggingFaceRepository,
         ImportTarget, TreeEntry,
     };
 
@@ -1009,7 +1009,7 @@ mod tests {
     #[test]
     fn revision_and_dataset_identity_are_bounded() {
         assert!(
-            HuggingFaceDatasetRequest::new(
+            HuggingFaceDatasetSource::new(
                 "bench-v1",
                 "lerobot/pusht",
                 HuggingFaceDatasetFormat::LeRobot,
@@ -1019,7 +1019,7 @@ mod tests {
             .is_ok()
         );
         assert!(
-            HuggingFaceDatasetRequest::new(
+            HuggingFaceDatasetSource::new(
                 "bad id",
                 "lerobot/pusht",
                 HuggingFaceDatasetFormat::LeRobot,

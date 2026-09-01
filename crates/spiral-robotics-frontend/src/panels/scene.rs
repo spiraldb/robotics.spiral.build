@@ -31,7 +31,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::Closure;
 use web_sys::HtmlCanvasElement;
 
-use crate::client::http::{TimelineArmSample, TimelineSample};
+use crate::client::episode_data::{TimelineArmSample, TimelineSample};
 use crate::shell::activity::RecordedSource;
 use crate::shell::state::{Selection, studio};
 

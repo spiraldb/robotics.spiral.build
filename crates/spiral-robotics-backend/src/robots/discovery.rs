@@ -1,7 +1,7 @@
 //! Framework-neutral discovery actions for serial ports and cameras.
 
 use crate::OperationError;
-use spiral_robotics_api::robots::{CameraStatus, IdentifyPortResponse, SerialPortSummary};
+use spiral_robotics_api::robots::{CameraStatus, SerialPortSummary};
 
 pub(crate) trait SerialPortInventory: Send + Sync {
     async fn available_port_paths(&self) -> Result<Vec<String>, OperationError>;
@@ -16,6 +16,19 @@ pub(crate) struct IdentifySerialPortCommand {
     before: Vec<String>,
 }
 
+#[derive(Debug, PartialEq)]
+pub(crate) struct IdentifiedSerialPort {
+    port: Option<String>,
+    removed: Vec<String>,
+    message: String,
+}
+
+impl IdentifiedSerialPort {
+    pub(crate) fn into_parts(self) -> (Option<String>, Vec<String>, String) {
+        (self.port, self.removed, self.message)
+    }
+}
+
 impl IdentifySerialPortCommand {
     pub(crate) fn new(before: Vec<String>) -> Self {
         Self { before }
@@ -26,7 +39,7 @@ impl IdentifySerialPortCommand {
     pub(crate) async fn execute<P: SerialPortInventory + ?Sized>(
         self,
         inventory: &P,
-    ) -> Result<IdentifyPortResponse, OperationError> {
+    ) -> Result<IdentifiedSerialPort, OperationError> {
         let after = inventory.available_port_paths().await?;
         let mut removed = self
             .before
@@ -54,7 +67,11 @@ impl IdentifySerialPortCommand {
                 ),
             ),
         };
-        Ok(IdentifyPortResponse::new(port, removed, guidance))
+        Ok(IdentifiedSerialPort {
+            port,
+            removed,
+            message: guidance,
+        })
     }
 }
 
@@ -122,9 +139,10 @@ mod tests {
             .execute(&inventory)
             .await
             .unwrap();
-            assert_eq!(result.port(), port);
-            assert_eq!(result.removed(), removed);
-            assert!(result.message().contains(guidance));
+            let (result_port, result_removed, message) = result.into_parts();
+            assert_eq!(result_port.as_deref(), port);
+            assert_eq!(result_removed, removed);
+            assert!(message.contains(guidance));
             assert_eq!(*inventory.calls.lock().unwrap(), 1);
         }
     }

@@ -100,15 +100,15 @@ impl HuggingFaceDatasetFormat {
 
 /// Source and destination shared by inspection and the eventual import.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct HuggingFaceDatasetRequest {
+pub struct HuggingFaceDatasetSource {
     dataset_id: String,
     repository: String,
-    #[serde(default = "HuggingFaceDatasetRequest::default_revision")]
+    #[serde(default = "HuggingFaceDatasetSource::default_revision")]
     revision: String,
     format: HuggingFaceDatasetFormat,
 }
 
-impl HuggingFaceDatasetRequest {
+impl HuggingFaceDatasetSource {
     fn default_revision() -> String {
         "main".to_owned()
     }

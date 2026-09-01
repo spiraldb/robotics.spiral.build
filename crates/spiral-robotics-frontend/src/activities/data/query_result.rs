@@ -6,7 +6,7 @@ use crate::components::interaction::{
 };
 use crate::shell::state::studio;
 use dioxus::prelude::*;
-use spiral_robotics_api::relations::{QueryColumn, SpiralQueryResponse};
+use spiral_robotics_api::relations::{QueryColumn, SpiralQuerySnapshot};
 
 pub(crate) const DEFAULT_QUERY_ROWS: usize = 100;
 const IMAGE_EXTENSION_NAME: &str = "spql.image.Image";
@@ -82,7 +82,7 @@ impl QueryTab {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum QueryState {
     Running,
-    Ready(SpiralQueryResponse),
+    Ready(SpiralQuerySnapshot),
     Failed(String),
 }
 
@@ -507,7 +507,7 @@ trait QueryResultPresentation {
     fn needs_video_preview_column(&self) -> bool;
 }
 
-impl QueryResultPresentation for SpiralQueryResponse {
+impl QueryResultPresentation for SpiralQuerySnapshot {
     fn needs_video_preview_column(&self) -> bool {
         if self
             .columns()
@@ -686,7 +686,7 @@ mod tests {
             ("segment_index".to_owned(), serde_json::json!(2)),
             ("camera_id".to_owned(), serde_json::json!("wrist")),
         ]);
-        let result = SpiralQueryResponse::new(columns, vec![row.clone()], false).with_elapsed_ms(1);
+        let result = SpiralQuerySnapshot::new(columns, vec![row.clone()], false).with_elapsed_ms(1);
         assert!(result.needs_video_preview_column());
         assert_eq!(
             row.video_preview(),
@@ -696,7 +696,7 @@ mod tests {
             ))
         );
 
-        let encoded = SpiralQueryResponse::new(
+        let encoded = SpiralQuerySnapshot::new(
             vec![
                 query_column("episode_id", None),
                 query_column("stream_id", None),

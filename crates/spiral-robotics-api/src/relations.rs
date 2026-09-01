@@ -2,34 +2,6 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct SpiralQueryRequest {
-    sql: String,
-    #[serde(default = "SpiralQueryRequest::default_max_rows")]
-    max_rows: usize,
-}
-
-impl SpiralQueryRequest {
-    const fn default_max_rows() -> usize {
-        100
-    }
-
-    pub fn new(sql: impl Into<String>, max_rows: usize) -> Self {
-        Self {
-            sql: sql.into(),
-            max_rows,
-        }
-    }
-
-    pub fn sql(&self) -> &str {
-        &self.sql
-    }
-
-    pub const fn max_rows(&self) -> usize {
-        self.max_rows
-    }
-}
-
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct QueryColumn {
     name: String,
@@ -164,14 +136,14 @@ impl CatalogRelation {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct SpiralQueryResponse {
+pub struct SpiralQuerySnapshot {
     columns: Vec<QueryColumn>,
     rows: Vec<serde_json::Map<String, serde_json::Value>>,
     truncated: bool,
     elapsed_ms: u64,
 }
 
-impl SpiralQueryResponse {
+impl SpiralQuerySnapshot {
     pub fn new(
         columns: Vec<QueryColumn>,
         rows: Vec<serde_json::Map<String, serde_json::Value>>,

@@ -13,7 +13,7 @@ use crate::sql::workflow::{WorkflowNodeId, WorkflowSql};
 use crate::sql::{QualifiedRelation, ReadOnlyQuery, ReadOnlyQueryMode, UnquotedSqlIdentifier};
 use serde::{Deserialize, Serialize};
 
-use crate::relations::SpiralQueryResponse;
+use crate::relations::SpiralQuerySnapshot;
 
 pub const DEFAULT_WORKFLOW_ID: &str = "default";
 const MAX_WORKFLOW_QUERY_ROWS: usize = 1_000;
@@ -318,7 +318,7 @@ impl WorkflowValidationIssue {
 
 /// Every mutation admitted by the Workflow runtime. One command type keeps
 /// scope and revision guards at the boundary and gives every command the same
-/// authoritative [`WorkflowStateResponse`] postcondition.
+/// authoritative [`WorkflowSnapshot`] postcondition.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkflowCommand {
@@ -364,7 +364,7 @@ impl WorkflowCommand {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct WorkflowStateResponse {
+pub struct WorkflowSnapshot {
     /// Ephemeral server identity for the active Spiral destination/project.
     /// Revisions are monotonic only within one scope.
     #[serde(default)]
@@ -374,7 +374,7 @@ pub struct WorkflowStateResponse {
     snapshot: WorkflowRunSnapshot,
 }
 
-impl Default for WorkflowStateResponse {
+impl Default for WorkflowSnapshot {
     fn default() -> Self {
         let workflow = WorkflowSpec::default();
         Self {
@@ -400,7 +400,7 @@ struct RunExecution {
     #[serde(default)]
     nodes: Vec<WorkflowNodeSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    result: Option<SpiralQueryResponse>,
+    result: Option<SpiralQuerySnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     error: Option<String>,
     #[serde(default)]
@@ -484,7 +484,7 @@ impl WorkflowRunSnapshot {
     pub fn nodes(&self) -> &[WorkflowNodeSnapshot] {
         &self.execution.nodes
     }
-    pub const fn result(&self) -> Option<&SpiralQueryResponse> {
+    pub const fn result(&self) -> Option<&SpiralQuerySnapshot> {
         self.execution.result.as_ref()
     }
     pub fn error(&self) -> Option<&str> {
@@ -508,7 +508,7 @@ impl WorkflowRunSnapshot {
     pub fn nodes_mut(&mut self) -> &mut Vec<WorkflowNodeSnapshot> {
         &mut self.execution.nodes
     }
-    pub fn set_result(&mut self, result: Option<SpiralQueryResponse>) {
+    pub fn set_result(&mut self, result: Option<SpiralQuerySnapshot>) {
         self.execution.result = result;
     }
     pub fn set_error(&mut self, error: Option<String>) {
@@ -1197,7 +1197,7 @@ struct AgentStateContext {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct WorkflowAgentStateResponse {
+pub struct WorkflowAgentSnapshot {
     readiness: WorkflowAgentReadiness,
     #[serde(flatten)]
     context: AgentStateContext,
@@ -1206,7 +1206,7 @@ pub struct WorkflowAgentStateResponse {
     session: WorkflowAgentSession,
 }
 
-impl WorkflowAgentStateResponse {
+impl WorkflowAgentSnapshot {
     pub fn new(readiness: WorkflowAgentReadiness, session: WorkflowAgentSession) -> Self {
         Self {
             readiness,
@@ -1856,7 +1856,7 @@ impl WorkflowValidationReport {
         &self.errors
     }
 }
-impl WorkflowStateResponse {
+impl WorkflowSnapshot {
     pub fn from_workflow(scope_id: impl Into<String>, workflow: WorkflowSpec) -> Self {
         let validation = workflow.validate();
         let snapshot = WorkflowRunSnapshot::idle_for(&workflow);
@@ -2220,7 +2220,7 @@ mod tests {
     #[test]
     fn api_state_and_sse_events_share_one_authoritative_shape() {
         let workflow = runnable_spec();
-        let state = WorkflowStateResponse {
+        let state = WorkflowSnapshot {
             scope_id: "workflow-scope-1".to_owned(),
             validation: workflow.validate(),
             snapshot: WorkflowRunSnapshot::idle_for(&workflow),
@@ -2231,7 +2231,7 @@ mod tests {
         assert_eq!(json["scope_id"], "workflow-scope-1");
         assert_eq!(json["snapshot"]["phase"], "idle");
         assert!(json["validation"]["errors"].as_array().unwrap().is_empty());
-        let decoded: WorkflowStateResponse = serde_json::from_value(json).unwrap();
+        let decoded: WorkflowSnapshot = serde_json::from_value(json).unwrap();
         assert_eq!(decoded, state);
     }
 
@@ -2262,7 +2262,7 @@ mod tests {
         let session = WorkflowAgentSession::new(DEFAULT_WORKFLOW_ID, "conversation-1")
             .with_revision(2)
             .with_messages(vec![message]);
-        let state = WorkflowAgentStateResponse::new(readiness, session)
+        let state = WorkflowAgentSnapshot::new(readiness, session)
             .with_history_available(true)
             .with_scope("agent-scope-1", 3)
             .with_active_conversation("conversation-1", MAX_WORKFLOW_AGENT_CONVERSATIONS)
@@ -2276,7 +2276,7 @@ mod tests {
         let encoded = json.to_string();
         assert!(!encoded.contains("api_key"));
         assert!(!encoded.contains("client_secret"));
-        let decoded: WorkflowAgentStateResponse = serde_json::from_value(json).unwrap();
+        let decoded: WorkflowAgentSnapshot = serde_json::from_value(json).unwrap();
         assert_eq!(decoded, state);
     }
 

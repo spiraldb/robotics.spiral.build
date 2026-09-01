@@ -14,12 +14,12 @@ use crate::workflow::service::{
     WorkflowCancellationAdmission, WorkflowRunAdmission, WorkflowSaveAdmission,
 };
 use serde::{Deserialize, Serialize};
-use spiral_robotics_api::relations::{RelationCatalog, SpiralQueryResponse};
+use spiral_robotics_api::relations::{RelationCatalog, SpiralQuerySnapshot};
 use spiral_robotics_api::sql::QualifiedRelation;
 use spiral_robotics_api::workflow::{
     WorkflowCommand, WorkflowNodeConfig, WorkflowNodePhase, WorkflowNodeSnapshot,
-    WorkflowQuarantineSummary, WorkflowRunPhase, WorkflowRunSnapshot, WorkflowSpec,
-    WorkflowStateResponse,
+    WorkflowQuarantineSummary, WorkflowRunPhase, WorkflowRunSnapshot, WorkflowSnapshot,
+    WorkflowSpec,
 };
 use tokio::sync::{Mutex as AsyncMutex, broadcast, mpsc};
 
@@ -130,7 +130,7 @@ struct WorkflowManagerInner {
     storage: Arc<StorageManager>,
     identity: WorkflowIdentity,
     document: Mutex<WorkflowDocument>,
-    updates: broadcast::Sender<WorkflowStateResponse>,
+    updates: broadcast::Sender<WorkflowSnapshot>,
     active: Mutex<Option<ActiveRun>>,
     persistence: WorkflowPersistenceState,
 }
@@ -420,7 +420,7 @@ impl WorkflowManager {
         Ok(())
     }
 
-    pub(crate) fn state(&self) -> WorkflowStateResponse {
+    pub(crate) fn state(&self) -> WorkflowSnapshot {
         let document = self.inner.document.recover_lock();
         self.state_response(&document)
     }
@@ -476,12 +476,7 @@ impl WorkflowManager {
         Ok((workflow, report))
     }
 
-    pub(crate) fn subscription(
-        &self,
-    ) -> (
-        WorkflowStateResponse,
-        broadcast::Receiver<WorkflowStateResponse>,
-    ) {
+    pub(crate) fn subscription(&self) -> (WorkflowSnapshot, broadcast::Receiver<WorkflowSnapshot>) {
         let document = self.inner.document.recover_lock();
         let updates = self.inner.updates.subscribe();
         (self.state_response(&document), updates)
@@ -490,7 +485,7 @@ impl WorkflowManager {
     pub(crate) async fn command(
         &self,
         command: WorkflowCommand,
-    ) -> Result<WorkflowStateResponse, OperationError> {
+    ) -> Result<WorkflowSnapshot, OperationError> {
         match command {
             WorkflowCommand::Apply {
                 scope_id,
@@ -515,7 +510,7 @@ impl WorkflowManager {
         }
     }
 
-    async fn save(&self, request: WorkflowSave) -> Result<WorkflowStateResponse, OperationError> {
+    async fn save(&self, request: WorkflowSave) -> Result<WorkflowSnapshot, OperationError> {
         let WorkflowSave {
             scope_id,
             expected_revision,
@@ -747,7 +742,7 @@ impl WorkflowManager {
             .map(|relation| (relation.name(), relation.columns().len()))
             .collect::<BTreeMap<_, _>>();
         let mut outputs = BTreeMap::new();
-        let mut query_outputs: BTreeMap<String, SpiralQueryResponse> = BTreeMap::new();
+        let mut query_outputs: BTreeMap<String, SpiralQuerySnapshot> = BTreeMap::new();
         let mut terminal_result = None;
 
         if self.cancelled(&run_id, &cancel) {
@@ -1198,7 +1193,7 @@ impl WorkflowManager {
         self.persist_publish(document).await;
     }
 
-    async fn finish_completed(&self, run_id: &str, result: Option<SpiralQueryResponse>) {
+    async fn finish_completed(&self, run_id: &str, result: Option<SpiralQuerySnapshot>) {
         // Linearize terminal publication against cancellation. Whichever
         // claims the active-run mutex first owns the final outcome; a cancel
         // that arrives first prevents the just-finished database payload from
@@ -1430,7 +1425,7 @@ impl WorkflowManager {
         let _ = self.inner.updates.send(self.state_response(document));
     }
 
-    fn state_response(&self, document: &WorkflowDocument) -> WorkflowStateResponse {
+    fn state_response(&self, document: &WorkflowDocument) -> WorkflowSnapshot {
         let mut response = document.state_response();
         response.set_scope_id(self.scope_id());
         let mut snapshot = response.snapshot().clone();
@@ -1505,13 +1500,12 @@ impl WorkflowNodeSnapshots for [WorkflowNodeSnapshot] {
 }
 
 trait WorkflowDocumentPresentation {
-    fn state_response(&self) -> WorkflowStateResponse;
+    fn state_response(&self) -> WorkflowSnapshot;
 }
 
 impl WorkflowDocumentPresentation for WorkflowDocument {
-    fn state_response(&self) -> WorkflowStateResponse {
-        let mut response =
-            WorkflowStateResponse::from_workflow(String::new(), self.workflow().clone());
+    fn state_response(&self) -> WorkflowSnapshot {
+        let mut response = WorkflowSnapshot::from_workflow(String::new(), self.workflow().clone());
         response.set_snapshot(self.snapshot().clone());
         response
     }
@@ -1769,7 +1763,7 @@ mod tests {
 
     use arrow_array::{ArrayRef, Int64Array, RecordBatch};
     use arrow_schema::{DataType, Field, Schema};
-    use spiral_robotics_api::relations::SpiralQueryResponse;
+    use spiral_robotics_api::relations::SpiralQuerySnapshot;
     use spiral_robotics_api::workflow::{
         WorkflowEdgeSpec, WorkflowFeatureApplicability, WorkflowFeatureDefinition,
         WorkflowModelRunMetadata, WorkflowNodeConfig, WorkflowNodeSpec, WorkflowRunPhase,
@@ -1943,7 +1937,7 @@ mod tests {
         let workflow = WorkflowSpec::default();
         let mut previous = WorkflowRunSnapshot::idle_for(&workflow);
         previous.set_result(Some(
-            SpiralQueryResponse::new(Vec::new(), vec![serde_json::Map::new()], false)
+            SpiralQuerySnapshot::new(Vec::new(), vec![serde_json::Map::new()], false)
                 .with_elapsed_ms(4),
         ));
         let next = workflow.starting_snapshot(&previous, "run".to_owned());

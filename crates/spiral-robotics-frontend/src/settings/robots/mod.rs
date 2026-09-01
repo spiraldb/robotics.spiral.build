@@ -8,17 +8,17 @@
 //! mixing setup work into the operating surface.
 
 use crate::components::interaction::{
-    Action, ActionLink, ActionPurpose, ActionVariant, ChevronIcon, FileAction, FileInput,
-    UnassignIcon,
+    Action, ActionPurpose, ActionVariant, ChevronIcon, FileAction, FileInput, UnassignIcon,
 };
 use dioxus::prelude::*;
-use gloo_net::http::Method;
 use spiral_robotics_api::robots::{
-    CameraBinding, CreateRobotRequest, IdentifyPortRequest, IdentifyPortResponse, PortSettings,
-    RobotSummary, SerialPortSummary, UpdateRobotRequest,
+    CameraBinding, NewRobot, PortSettings, RobotSummary, RobotUpdate, SerialPortSummary,
 };
 
-use crate::client::http as api;
+use crate::client::server_fns::{
+    connect_robot, create_robot, disconnect_robot, identify_serial_port,
+    import_robot_configuration, list_serial_ports, refresh_cameras, update_robot,
+};
 use crate::panels::scene::ScenePalette;
 use crate::shell::state::{Selection, Studio, studio};
 use crate::tasks::SingleFlight;
@@ -40,7 +40,7 @@ pub(super) fn RobotPanel() -> Element {
     let robots = studio.snapshot().read().robots().to_owned();
     let focused = studio.focused();
     let mut ports =
-        use_resource(|| async { api::Http::get::<Vec<SerialPortSummary>>("/api/ports").await });
+        use_resource(|| async { list_serial_ports().await.map_err(|error| error.to_string()) });
     let port_catalog =
         PortCatalogState::new(ports.read_unchecked().to_owned(), move |()| ports.restart());
 
@@ -186,13 +186,14 @@ fn NewRobotForm() -> Element {
             studio.report("Give the arm a name first.");
             return;
         }
-        let request = CreateRobotRequest::new(name.clone(), Some(robot_type()));
+        let request = NewRobot::new(name.clone(), Some(robot_type()));
         let selected_name = name.clone();
         studio.run_utility(format!("Created {name}."), async move {
-            let Some(result) = SingleFlight::run(
-                creating,
-                api::Http::send(Method::POST, "/api/robots", Some(&request)),
-            )
+            let Some(result) = SingleFlight::run(creating, async move {
+                create_robot(request)
+                    .await
+                    .map_err(|error| error.to_string())
+            })
             .await
             else {
                 return Ok(());
@@ -294,12 +295,9 @@ fn ImportRobotConfiguration() -> Element {
                                 .read_bytes()
                                 .await
                                 .map_err(|error| format!("Could not read {}: {error}", file.name()))?;
-                            api::Http::upload_json::<RobotSummary>(
-                                "/api/robots/import",
-                                &bytes,
-                                "application/json",
-                            )
-                            .await
+                            import_robot_configuration(bytes.to_vec())
+                                .await
+                                .map_err(|error| error.to_string())
                         })
                         .await
                     else {
@@ -377,14 +375,6 @@ fn RobotSetup(robot: RobotSummary, port_catalog: PortCatalogState) -> Element {
             }
             div { class: "device-file-row",
                 span { class: "min-w-0 flex-1 truncate text-[10px] text-ink-faint", "Stored in SpiralDB" }
-                ActionLink {
-                    purpose: ActionPurpose::Export,
-                    variant: ActionVariant::Link,
-                    href: "/api/robots/{robot.id()}/configuration",
-                    download: "{robot.id()}.json",
-                    title: "Download the complete configuration for {robot.id()}",
-                    "Export"
-                }
                 DeleteRobotAction { robot: robot.clone() }
             }
         }
@@ -473,9 +463,15 @@ fn ConnectionAction(robot: RobotSummary, sweeping: bool) -> Element {
                     return;
                 }
                 let id = id.clone();
-                let action = if connected { "disconnect" } else { "connect" };
                 studio.run("", async move {
-                    SingleFlight::run(pending, api::Http::post(&format!("/api/robots/{id}/{action}")))
+                    SingleFlight::run(pending, async move {
+                        let result = if connected {
+                            disconnect_robot(id).await
+                        } else {
+                            connect_robot(id).await
+                        };
+                        result.map_err(|error| error.to_string())
+                    })
                         .await
                         .unwrap_or(Ok(()))
                 });
@@ -564,7 +560,11 @@ fn PortSection(robot: RobotSummary, state: PortSectionState) -> Element {
                         spawn(async move {
                             let Some(result) = SingleFlight::run(
                                 starting_identify,
-                                api::Http::get::<Vec<SerialPortSummary>>("/api/ports"),
+                                async move {
+                                    list_serial_ports()
+                                        .await
+                                        .map_err(|error| error.to_string())
+                                },
                             )
                             .await
                             else {
@@ -662,17 +662,15 @@ fn PortOption(port: SerialPortSummary, owner: String, selected: bool) -> Element
 /// Record a serial port on a robot, keeping its existing baud rate.
 impl Studio {
     fn assign_port(self, assignment: PortAssignment) {
-        let request = UpdateRobotRequest::with_port(PortSettings::new(
-            assignment.path.clone(),
-            assignment.baud_rate,
-        ));
+        let request = RobotUpdate::with_port(
+            assignment.robot_id,
+            PortSettings::new(assignment.path.clone(), assignment.baud_rate),
+        );
         self.run(format!("Assigned {}.", assignment.path), async move {
-            api::Http::send(
-                Method::PATCH,
-                &format!("/api/robots/{}", assignment.robot_id),
-                Some(&request),
-            )
-            .await
+            update_robot(request)
+                .await
+                .map_err(|error| error.to_string())
+                .map(|_| ())
         });
     }
 }
@@ -731,25 +729,27 @@ fn IdentifyPort(
                                 studio.report("Controls are paused because telemetry is unavailable or delayed.");
                                 return;
                             }
-                            let request = IdentifyPortRequest::new(before.clone());
+                            let before = before.clone();
                             spawn(async move {
                                 let Some(result) = SingleFlight::run(
                                     checking,
-                                    api::Http::send_json::<_, IdentifyPortResponse>(
-                                        Method::POST, "/api/ports/identify", Some(&request)
-                                    ),
+                                    async move {
+                                        identify_serial_port(before)
+                                            .await
+                                            .map_err(|error| error.to_string())
+                                    },
                                 )
                                 .await
                                 else {
                                     return;
                                 };
                                 match result {
-                                    Ok(response) => match response.port() {
+                                    Ok((port, message)) => match port {
                                         Some(port) => {
-                                            on_found.call(port.to_owned());
-                                            step.set(IdentifyStep::Finished(response.message().to_owned()));
+                                            on_found.call(port);
+                                            step.set(IdentifyStep::Finished(message));
                                         }
-                                        None => studio.report(response.message()),
+                                        None => studio.report(message),
                                     },
                                     Err(error) => studio.report(error),
                                 }
@@ -825,7 +825,12 @@ fn CameraSection(robot: RobotSummary) -> Element {
                         spawn(async move {
                             if let Some(Err(error)) = SingleFlight::run(
                                 scanning,
-                                api::Http::post("/api/cameras/refresh"),
+                                async move {
+                                    refresh_cameras()
+                                        .await
+                                        .map_err(|error| error.to_string())
+                                        .map(|_| ())
+                                },
                             )
                             .await
                             {
@@ -964,16 +969,14 @@ impl Studio {
         if assignments.saving.peek().to_owned() {
             return;
         }
-        let request = UpdateRobotRequest::with_cameras(assignments.bindings);
+        let request = RobotUpdate::with_cameras(assignments.robot_id, assignments.bindings);
         self.run("", async move {
-            SingleFlight::run(
-                assignments.saving,
-                api::Http::send(
-                    Method::PATCH,
-                    &format!("/api/robots/{}", assignments.robot_id),
-                    Some(&request),
-                ),
-            )
+            SingleFlight::run(assignments.saving, async move {
+                update_robot(request)
+                    .await
+                    .map_err(|error| error.to_string())
+                    .map(|_| ())
+            })
             .await
             .unwrap_or(Ok(()))
         });

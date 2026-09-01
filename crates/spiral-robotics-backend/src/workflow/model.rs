@@ -3224,7 +3224,7 @@ mod tests {
         let readiness = StorageManager::new(project_store.clone())
             .test_spiral()
             .await;
-        assert!(readiness.ok(), "{}", readiness.message());
+        assert!(readiness.0, "{}", readiness.1);
         let previous_registry = FeatureRegistry::load(&project_store)
             .await
             .expect("the existing Workflow registry must be readable");

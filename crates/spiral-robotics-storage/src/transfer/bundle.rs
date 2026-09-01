@@ -4122,7 +4122,7 @@ mod tests {
         let _cleanup = TestNamespace::new(project_store.clone());
         let storage = StorageManager::new(project_store.clone());
         let readiness = storage.test_spiral().await;
-        assert!(readiness.ok(), "{}", readiness.message());
+        assert!(readiness.0, "{}", readiness.1);
 
         {
             let mut connection = project_store
@@ -4234,7 +4234,7 @@ mod tests {
         let _cleanup = TestNamespace::new(project_store.clone());
         let storage = StorageManager::new(project_store.clone());
         let readiness = storage.test_spiral().await;
-        assert!(readiness.ok(), "{}", readiness.message());
+        assert!(readiness.0, "{}", readiness.1);
 
         EpisodeSeed::new(project_store.namespace(), "source", "episode_exported")
             .with_started_ms(10)
@@ -4324,7 +4324,7 @@ mod tests {
         let _cleanup = TestNamespace::new(project_store.clone());
         let storage = StorageManager::new(project_store.clone());
         let readiness = storage.test_spiral().await;
-        assert!(readiness.ok(), "{}", readiness.message());
+        assert!(readiness.0, "{}", readiness.1);
         let episode_id = "episode_video_import";
         let episode = EpisodeFixture::new(episode_id, "video-transfer")
             .with_timing(10, 2.0)
@@ -4521,7 +4521,7 @@ mod tests {
 
         let namespace_start = Instant::now();
         let readiness = storage.test_spiral().await;
-        assert!(readiness.ok(), "{}", readiness.message());
+        assert!(readiness.0, "{}", readiness.1);
         let mut connection = project_store
             .connect_exclusive()
             .await
@@ -4620,7 +4620,7 @@ mod tests {
         let cleanup = TestNamespace::new(project_store.clone());
         let storage = StorageManager::new(project_store.clone());
         let readiness = storage.test_spiral().await;
-        assert!(readiness.ok(), "{}", readiness.message());
+        assert!(readiness.0, "{}", readiness.1);
 
         let mut connection = project_store
             .connect_exclusive()

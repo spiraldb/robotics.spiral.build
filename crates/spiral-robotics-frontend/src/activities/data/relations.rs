@@ -4,14 +4,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::components::interaction::{Action, ActionPurpose, ActionVariant, RefreshIcon};
 use dioxus::prelude::*;
-use gloo_net::http::Method;
-use spiral_robotics_api::relations::{
-    CatalogRelation, RelationCatalog, SpiralQueryRequest, SpiralQueryResponse,
-};
+use spiral_robotics_api::relations::{CatalogRelation, RelationCatalog, SpiralQuerySnapshot};
 
 use crate::activities::data::catalog::ManagedTable as Table;
 use crate::activities::data::query_result::{QueryExecutionPresentation, QueryState};
-use crate::client::http as api;
+use crate::client::server_fns::run_spiral_query;
 use crate::shell::state::studio;
 
 const PREVIEW_ROWS: usize = 5;
@@ -67,7 +64,7 @@ impl ProjectRelations {
         }
     }
 
-    fn count_request(&self) -> Option<SpiralQueryRequest> {
+    fn count_query(&self) -> Option<(String, usize)> {
         let statements = self
             .relations
             .iter()
@@ -75,9 +72,8 @@ impl ProjectRelations {
             .enumerate()
             .map(|(index, relation)| Self::count_statement(index, relation))
             .collect::<Vec<_>>();
-        (!statements.is_empty()).then(|| {
-            SpiralQueryRequest::new(statements.join("\nUNION ALL\n"), self.countable_relations)
-        })
+        (!statements.is_empty())
+            .then(|| (statements.join("\nUNION ALL\n"), self.countable_relations))
     }
 
     fn countable_relation_count(relations: &[CatalogRelation]) -> usize {
@@ -105,7 +101,7 @@ impl ProjectRelations {
         )
     }
 
-    fn with_counts(mut self, response: &SpiralQueryResponse) -> Self {
+    fn with_counts(mut self, response: &SpiralQuerySnapshot) -> Self {
         let counts = response
             .rows()
             .iter()
@@ -196,16 +192,13 @@ pub(crate) fn RelationsPanel(namespace: String, query_available: bool) -> Elemen
                 return Ok(None);
             };
             let relations = ProjectRelations::from_catalog(&catalog, &namespace);
-            let Some(request) = relations.count_request() else {
+            let Some((statement, max_rows)) = relations.count_query() else {
                 return Ok(None);
             };
-            api::Http::send_json::<_, SpiralQueryResponse>(
-                Method::POST,
-                "/api/spiral/query",
-                Some(&request),
-            )
-            .await
-            .map(Some)
+            run_spiral_query(statement, max_rows)
+                .await
+                .map_err(|error| error.to_string())
+                .map(Some)
         }
     });
     let catalog_result = studio.relation_catalog_result();
@@ -257,14 +250,10 @@ pub(crate) fn RelationsPanel(namespace: String, query_available: bool) -> Elemen
             if !query_available {
                 return Ok(None);
             }
-            let request = SpiralQueryRequest::new(relation.preview_sql(), PREVIEW_ROWS);
-            api::Http::send_json::<_, SpiralQueryResponse>(
-                Method::POST,
-                "/api/spiral/query",
-                Some(&request),
-            )
-            .await
-            .map(Some)
+            run_spiral_query(relation.preview_sql(), PREVIEW_ROWS)
+                .await
+                .map_err(|error| error.to_string())
+                .map(Some)
         }
     });
     let preview_result = preview.read_unchecked().to_owned();
@@ -504,7 +493,7 @@ trait RelationPreview {
     fn render_preview(self, relation: Option<&str>) -> Element;
 }
 
-impl RelationPreview for Option<&Result<Option<SpiralQueryResponse>, String>> {
+impl RelationPreview for Option<&Result<Option<SpiralQuerySnapshot>, String>> {
     fn render_preview(self, relation: Option<&str>) -> Element {
         let Some(relation) = relation else {
             return rsx! {
@@ -699,16 +688,16 @@ mod tests {
             ],
             true,
         );
-        let request = ProjectRelations::from_catalog(&catalog, "robotics")
-            .count_request()
+        let (statement, max_rows) = ProjectRelations::from_catalog(&catalog, "robotics")
+            .count_query()
             .expect("two visible relations produce a count query");
 
-        assert_eq!(request.max_rows(), 2);
-        assert_eq!(request.sql().matches("COUNT(*)").count(), 2);
-        assert_eq!(request.sql().matches("UNION ALL").count(), 1);
-        assert!(!request.sql().contains(';'));
+        assert_eq!(max_rows, 2);
+        assert_eq!(statement.matches("COUNT(*)").count(), 2);
+        assert_eq!(statement.matches("UNION ALL").count(), 1);
+        assert!(!statement.contains(';'));
         spiral_robotics_api::sql::ReadOnlyQuery::new(
-            request.sql(),
+            &statement,
             spiral_robotics_api::sql::ReadOnlyQueryMode::Preview,
         )
         .authorize()

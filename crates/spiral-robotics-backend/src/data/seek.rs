@@ -260,28 +260,6 @@ impl RecordedSeekResult {
         self.frame = frame;
         self
     }
-
-    pub(crate) fn state(&self) -> RecordedSeekState {
-        self.state
-    }
-    pub(crate) fn episode(&self) -> &str {
-        &self.episode
-    }
-    pub(crate) fn robot(&self) -> &str {
-        &self.robot
-    }
-    pub(crate) fn source_arm(&self) -> &str {
-        &self.source_arm
-    }
-    pub(crate) fn requested_seconds(&self) -> f64 {
-        self.requested_seconds
-    }
-    pub(crate) fn resolved_seconds(&self) -> f64 {
-        self.resolved_seconds
-    }
-    pub(crate) fn frame(&self) -> u64 {
-        self.frame
-    }
 }
 
 pub(crate) trait PhysicalSeekPort {

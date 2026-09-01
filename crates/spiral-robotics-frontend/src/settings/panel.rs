@@ -6,13 +6,12 @@ use crate::components::interaction::{
     FileInput, Toggle,
 };
 use dioxus::prelude::*;
-use gloo_net::http::Method;
-use spiral_robotics_api::datasets::ProjectImportSummary;
-use spiral_robotics_api::settings::{
-    ConnectionTestResponse, DataSettings, SpiralConnectionUpdate, UpdateDataSettingsRequest,
-};
+use spiral_robotics_api::settings::{DataSettings, SpiralConnectionUpdate};
 
-use crate::client::http as api;
+use crate::client::server_fns::{
+    data_settings, import_project, test_spiral_connection, test_training_runtime,
+    update_data_settings,
+};
 use crate::settings::robots::RobotPanel;
 use crate::shell::notifications::MessageSource;
 use crate::shell::state::studio;
@@ -81,7 +80,7 @@ struct SettingsOperationSignals {
     saving: Signal<bool>,
     testing: Signal<bool>,
     transferring_project: Signal<bool>,
-    test_result: Signal<Option<ConnectionTestResponse>>,
+    test_result: Signal<Option<(bool, String)>>,
     save_error: Signal<Option<String>>,
     project_transfer: ProjectTransferSignals,
 }
@@ -175,7 +174,7 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
         }
     }));
 
-    let mut save = move |test_path: Option<&'static str>| {
+    let mut save = move |connection_test: Option<SettingsSection>| {
         if saving() || transferring_project() || !settings_loaded {
             return;
         }
@@ -192,37 +191,27 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
             current().spiral().client_id().trim().is_empty()
                 && current().spiral().client_secret_configured(),
         );
-        let request = UpdateDataSettingsRequest::new(
-            connection,
-            current().training().to_owned(),
-            current().video().to_owned(),
-        );
+        let training = current().training().to_owned();
+        let video = current().video().to_owned();
         spawn(async move {
-            match api::Http::send_json::<_, DataSettings>(
-                Method::PATCH,
-                "/api/settings/data",
-                Some(&request),
-            )
-            .await
-            {
+            match update_data_settings(connection, training, video).await {
                 Ok(settings) => {
                     current.set(settings);
                     client_secret.set(String::new());
                     on_saved.call(());
-                    if let Some(path) = test_path {
+                    if let Some(connection_test) = connection_test {
                         testing.set(true);
                         test_result.set(None);
-                        match api::Http::send_json::<(), ConnectionTestResponse>(
-                            Method::POST,
-                            path,
-                            None,
-                        )
-                        .await
-                        {
+                        let result = match connection_test {
+                            SettingsSection::Spiral => test_spiral_connection().await,
+                            SettingsSection::Training => test_training_runtime().await,
+                            SettingsSection::Robots | SettingsSection::Video => unreachable!(
+                                "only connection-backed settings sections can request a test"
+                            ),
+                        };
+                        match result {
                             Ok(response) => test_result.set(Some(response)),
-                            Err(error) => {
-                                test_result.set(Some(ConnectionTestResponse::new(false, error)))
-                            }
+                            Err(error) => test_result.set(Some((false, error.to_string()))),
                         }
                         testing.set(false);
                     } else {
@@ -232,7 +221,7 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
                         );
                     }
                 }
-                Err(error) => save_error.set(Some(error)),
+                Err(error) => save_error.set(Some(error.to_string())),
             }
             saving.set(false);
             on_busy_change.call(false);
@@ -349,7 +338,7 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
                                     variant: ActionVariant::Outline,
                                     disabled: saving() || testing() || transferring_project() || current().spiral().project_id().trim().is_empty(),
                                     aria_busy: testing(),
-                                    onclick: move |_| save(Some("/api/settings/data/test/spiral")),
+                                    onclick: move |_| save(Some(SettingsSection::Spiral)),
                                     if testing() { "Testing…" } else { "Save and test connection" }
                                 }
                                 section { class: "settings-project-transfer", "aria-labelledby": "project-transfer-title",
@@ -412,7 +401,7 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
                                 p { class: "settings-help",
                                     "Studio uses Arrow IPC over HTTP. The selected endpoint applies to new training and rollout sessions; an active session keeps its current connection."
                                 }
-                                Action { purpose: ActionPurpose::Apply, variant: ActionVariant::Outline, disabled: saving() || testing() || transferring_project(), aria_busy: testing(), onclick: move |_| save(Some("/api/settings/data/test/training")), if testing() { "Connecting…" } else { "Save and connect" } }
+                                Action { purpose: ActionPurpose::Apply, variant: ActionVariant::Outline, disabled: saving() || testing() || transferring_project(), aria_busy: testing(), onclick: move |_| save(Some(SettingsSection::Training)), if testing() { "Connecting…" } else { "Save and connect" } }
                             },
                             SettingsSection::Video => rsx! {
                                 ProviderHeading { title: "Video", description: "Include assigned cameras in new episodes." }
@@ -421,9 +410,9 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
                         }
                         if let Some(response) = test_result() {
                             p {
-                                class: if response.ok() { "connection-test connection-test-ok" } else { "connection-test connection-test-failed" },
+                                class: if response.0 { "connection-test connection-test-ok" } else { "connection-test connection-test-failed" },
                                 role: "status",
-                                "{response.message()}"
+                                "{response.1}"
                             }
                         }
                     }
@@ -480,20 +469,14 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
                     on_busy_change.call(true);
                     spawn(async move {
                         let Some(outcome) = SingleFlight::run(transferring_project, async {
-                                let result = api::Http::upload_file_json::<ProjectImportSummary>(
-                                    "/api/project/import",
-                                    &file,
-                                    "application/vnd.spiral-robotics.project",
-                                )
-                                .await?;
+                                let result = import_project(file.into())
+                                    .await
+                                    .map_err(|error| error.to_string())?;
                                 data.set_selected_episode(None);
                                 data.invalidate_catalogs();
-                                let settings = api::Http::send_json::<(), DataSettings>(
-                                    Method::GET,
-                                    "/api/settings/data",
-                                    None,
-                                )
-                                .await?;
+                                let settings = data_settings()
+                                    .await
+                                    .map_err(|error| error.to_string())?;
                                 Ok::<_, String>((result, settings))
                             })
                             .await

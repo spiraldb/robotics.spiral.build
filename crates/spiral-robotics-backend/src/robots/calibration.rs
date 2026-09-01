@@ -2,7 +2,6 @@
 
 use std::collections::BTreeMap;
 
-use spiral_robotics_api::robots::CalibrationReapplyResponse;
 use spiral_robotics_hardware::{Calibration, CalibrationInput, MotorSpec};
 use spiral_robotics_storage::episodes::ReappliedEpisodePositions;
 
@@ -208,6 +207,27 @@ pub(crate) struct CalibrationHistoryActions<'a, P: CalibrationHistoryPort + ?Siz
     port: &'a P,
 }
 
+#[derive(Debug)]
+pub(crate) struct CalibrationReapplyOutcome {
+    episodes_updated: u64,
+    frames_updated: u64,
+    episodes_unchanged: u64,
+    episodes_skipped: u64,
+    warnings: Vec<String>,
+}
+
+impl CalibrationReapplyOutcome {
+    pub(crate) fn into_parts(self) -> (u64, u64, u64, u64, Vec<String>) {
+        (
+            self.episodes_updated,
+            self.frames_updated,
+            self.episodes_unchanged,
+            self.episodes_skipped,
+            self.warnings,
+        )
+    }
+}
+
 impl<'a, P: CalibrationHistoryPort + ?Sized> CalibrationHistoryActions<'a, P> {
     pub(crate) const fn new(port: &'a P) -> Self {
         Self { port }
@@ -222,7 +242,7 @@ impl<'a, P: CalibrationHistoryPort + ?Sized> CalibrationHistoryActions<'a, P> {
     pub(crate) async fn reapply(
         &self,
         robot: &str,
-    ) -> Result<CalibrationReapplyResponse, OperationError> {
+    ) -> Result<CalibrationReapplyOutcome, OperationError> {
         let Some(token) = self.port.reserve_catalog_mutation()? else {
             return Err(OperationError::Conflict(
                 "another recording or dataset mutation is active; wait for it to finish".to_owned(),
@@ -259,12 +279,13 @@ impl<'a, P: CalibrationHistoryPort + ?Sized> CalibrationHistoryActions<'a, P> {
                 .reapply_positions(robot.to_owned(), calibration)
                 .await?
                 .into_parts();
-        Ok(CalibrationReapplyResponse::new(
-            updated_episode_ids.len() as u64,
+        Ok(CalibrationReapplyOutcome {
+            episodes_updated: updated_episode_ids.len() as u64,
             frames_updated,
             episodes_unchanged,
-        )
-        .with_skipped(episodes_skipped, warnings))
+            episodes_skipped,
+            warnings,
+        })
     }
 }
 
@@ -523,10 +544,12 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(output.episodes_updated(), 2);
-        assert_eq!(output.frames_updated(), 120);
-        assert_eq!(output.episodes_unchanged(), 3);
-        assert_eq!(output.episodes_skipped(), 1);
+        let (updated, frames, unchanged, skipped, warnings) = output.into_parts();
+        assert_eq!(updated, 2);
+        assert_eq!(frames, 120);
+        assert_eq!(unchanged, 3);
+        assert_eq!(skipped, 1);
+        assert_eq!(warnings, ["one old take was incomplete"]);
         assert!(!history.lease.is_held());
     }
 

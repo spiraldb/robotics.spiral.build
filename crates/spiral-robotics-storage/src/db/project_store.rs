@@ -19,7 +19,6 @@ use super::database::{
 use super::spiral_database::SpiralDatabase;
 use crate::LEGACY_PROJECT_ERROR;
 use crate::settings::{SpiralConnectionSettings, SpiralCredentials};
-use spiral_robotics_api::settings::ConnectionTestResponse;
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard};
 
 use super::schema::{self as spiral, Table, column as db};
@@ -842,13 +841,13 @@ impl<'a> ProjectDatabasePersistence<'a> {
         }
     }
 
-    pub(crate) async fn test(&self) -> ConnectionTestResponse {
+    pub(crate) async fn test(&self) -> (bool, String) {
         let endpoint = self.project_store.endpoint();
         let project = self.project_store.project_id();
         if project.is_empty() {
-            return ConnectionTestResponse::new(
+            return (
                 false,
-                "Choose a Spiral project in Settings before testing the connection.",
+                "Choose a Spiral project in Settings before testing the connection.".to_owned(),
             );
         }
         let provisioning = async {
@@ -860,9 +859,9 @@ impl<'a> ProjectDatabasePersistence<'a> {
         .await;
         let provisioning = match provisioning {
             Ok(provisioning) => provisioning,
-            Err(error) => return ConnectionTestResponse::new(false, error),
+            Err(error) => return (false, error),
         };
-        ConnectionTestResponse::new(
+        (
             true,
             format!(
                 "Connected to {endpoint} · project {project} · {}",

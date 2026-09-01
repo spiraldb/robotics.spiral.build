@@ -23,7 +23,7 @@ use image::{DynamicImage, ImageFormat};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use spiral_robotics_api::recording::DatasetSummary;
 use spiral_robotics_api::relations::{
-    CatalogRelation as ApiCatalogRelation, QueryColumn, RelationCatalog, SpiralQueryResponse,
+    CatalogRelation as ApiCatalogRelation, QueryColumn, RelationCatalog, SpiralQuerySnapshot,
 };
 use spiral_robotics_api::sql::QualifiedRelation;
 
@@ -365,7 +365,7 @@ impl<'a> ProjectQueries<'a> {
         &self,
         sql: &str,
         max_rows: usize,
-    ) -> Result<SpiralQueryResponse, String> {
+    ) -> Result<SpiralQuerySnapshot, String> {
         SpiralSql::ensure_read_only(sql, ReadOnlyQueryMode::Preview)?;
         let mut connection = self.project_store.connect().await?;
         QueryExecution::new(
@@ -638,7 +638,7 @@ impl ProjectConnection {
         &mut self,
         sql: &str,
         max_rows: usize,
-    ) -> Result<SpiralQueryResponse, String> {
+    ) -> Result<SpiralQuerySnapshot, String> {
         QueryExecution::new(
             sql,
             QueryLimits::new(max_rows, MAX_INTERNAL_QUERY_RESPONSE_BYTES),
@@ -652,7 +652,7 @@ impl ProjectConnection {
         &mut self,
         sql: &str,
         max_rows: usize,
-    ) -> Result<SpiralQueryResponse, String> {
+    ) -> Result<SpiralQuerySnapshot, String> {
         self.query_rows(sql, max_rows).await
     }
 }
@@ -661,7 +661,7 @@ impl QueryExecution<'_> {
     async fn run_async(
         self,
         connection: &mut dyn DatabaseSession,
-    ) -> Result<SpiralQueryResponse, String> {
+    ) -> Result<SpiralQuerySnapshot, String> {
         let sql = self.sql.trim();
         if sql.is_empty() {
             return Err("Spiral query cannot be empty".to_owned());
@@ -734,7 +734,7 @@ impl QueryExecution<'_> {
             }
         }
         Ok(
-            SpiralQueryResponse::new(columns, rows.into_values(), truncated)
+            SpiralQuerySnapshot::new(columns, rows.into_values(), truncated)
                 .with_elapsed_ms(started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)),
         )
     }

@@ -1,10 +1,9 @@
 //! Semantic actions and backend consequences for the Live screen.
 
 use dioxus::prelude::WritableExt;
-use gloo_net::http::Method;
 use spiral_robotics_api::robots::ModeSelection;
 
-use crate::client::http as api;
+use crate::client::server_fns::{hold_robot, release_robot, set_mode};
 use crate::shell::state::{Selection, Studio};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -31,21 +30,20 @@ impl Studio {
 
     fn hold_robot(self, id: String) {
         self.run("", async move {
-            api::Http::post(&format!("/api/robots/{id}/hold")).await
+            hold_robot(id).await.map_err(|error| error.to_string())
         });
     }
 
     fn release_robot(self, id: String) {
         self.run_safety("Motors released.", async move {
-            api::Http::post(&format!("/api/robots/{id}/release")).await
+            release_robot(id).await.map_err(|error| error.to_string())
         });
     }
 
     fn set_mode(self, selection: ModeSelection) {
-        let request = selection.clone();
-        let future =
-            async move { api::Http::send(Method::POST, "/api/mode", Some(&request)).await };
-        if matches!(selection, ModeSelection::Idle) {
+        let stops_motion = matches!(selection, ModeSelection::Idle);
+        let future = async move { set_mode(selection).await.map_err(|error| error.to_string()) };
+        if stops_motion {
             self.run_safety(
                 "Motion commands stopped. Motors may still be holding position.",
                 future,

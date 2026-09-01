@@ -9,17 +9,18 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use dioxus::prelude::*;
 use dioxus_flow::{Edge, EdgeKind, Node, Side};
 use dioxus_workbench::PanelId;
-use gloo_net::http::Method;
 use spiral_robotics_api::relations::{CatalogRelation, RelationCatalog};
 use spiral_robotics_api::workflow::{
-    WorkflowAgentArtifactReceipt, WorkflowAgentCommand as AgentRequest, WorkflowAgentStateResponse,
+    WorkflowAgentArtifactReceipt, WorkflowAgentCommand as AgentRequest, WorkflowAgentSnapshot,
     WorkflowCommand as WorkflowRequest, WorkflowEdgeSpec, WorkflowFeatureApplicability,
     WorkflowFeatureDefinition, WorkflowModelRunMetadata, WorkflowNodeConfig, WorkflowNodePhase,
     WorkflowNodeProgress, WorkflowNodeSnapshot, WorkflowQuarantineSummary, WorkflowRunPhase,
-    WorkflowRunSnapshot, WorkflowSpec, WorkflowStateResponse, WorkflowValidationReport,
+    WorkflowRunSnapshot, WorkflowSnapshot, WorkflowSpec, WorkflowValidationReport,
 };
 
-use crate::client::http as api;
+use crate::client::server_fns::{
+    run_workflow_agent_command, run_workflow_command, workflow_agent_snapshot, workflow_snapshot,
+};
 use crate::shell::notifications::MessageSource;
 use crate::shell::state::Studio;
 
@@ -289,7 +290,7 @@ struct WorkflowGraphSignals {
 
 #[derive(Clone, Copy)]
 struct WorkflowDocumentSignals {
-    server: Signal<WorkflowStateResponse>,
+    server: Signal<WorkflowSnapshot>,
     draft: Signal<WorkflowSpec>,
 }
 
@@ -302,7 +303,7 @@ struct WorkflowLifecycleSignals {
 
 #[derive(Clone, Copy)]
 struct WorkflowAssistantSignals {
-    agent: Signal<WorkflowAgentStateResponse>,
+    agent: Signal<WorkflowAgentSnapshot>,
     agent_loaded: Signal<bool>,
     agent_command: Signal<Option<AgentPendingCommand>>,
     agent_error: Signal<Option<String>>,
@@ -313,7 +314,7 @@ impl WorkflowController {
     pub(crate) fn use_controller(
         relation_catalog: Resource<Result<RelationCatalog, String>>,
     ) -> Self {
-        let initial = WorkflowStateResponse::from_workflow("", WorkflowSpec::default());
+        let initial = WorkflowSnapshot::from_workflow("", WorkflowSpec::default());
         let initial_spec = initial.workflow().to_owned();
         let initial_nodes = initial_spec.graph_nodes(initial.snapshot(), &[]);
         let initial_edges = initial_spec.graph_edges(initial.snapshot());
@@ -333,7 +334,7 @@ impl WorkflowController {
                 load_error: use_signal(|| None),
             },
             assistant: WorkflowAssistantSignals {
-                agent: use_signal(WorkflowAgentStateResponse::default),
+                agent: use_signal(WorkflowAgentSnapshot::default),
                 agent_loaded: use_signal(|| false),
                 agent_command: use_signal(|| None),
                 agent_error: use_signal(|| None),
@@ -364,7 +365,7 @@ impl WorkflowController {
         self.document.server.read().snapshot().to_owned()
     }
 
-    pub(crate) fn accepted_state(&self) -> Option<WorkflowStateResponse> {
+    pub(crate) fn accepted_state(&self) -> Option<WorkflowSnapshot> {
         self.lifecycle
             .loaded
             .read()
@@ -429,7 +430,7 @@ impl WorkflowController {
         *self.lifecycle.command.read()
     }
 
-    pub(crate) fn agent_state(&self) -> WorkflowAgentStateResponse {
+    pub(crate) fn agent_state(&self) -> WorkflowAgentSnapshot {
         self.assistant.agent.read().to_owned()
     }
 
@@ -833,20 +834,15 @@ impl WorkflowController {
             self.document.draft.peek().to_owned(),
         );
         dioxus::dioxus_core::spawn_forever(async move {
-            let response = api::Http::send_json::<_, WorkflowStateResponse>(
-                Method::POST,
-                "/api/workflow/command",
-                Some(&request),
-            )
-            .await;
+            let response = run_workflow_command(request)
+                .await
+                .map_err(|error| error.to_string());
             self.finish_command(&requested_scope_id);
             match response {
                 Ok(response) => self.accept_applied_state(response, &requested_scope_id),
                 Err(error) => {
                     studio.report_from(MessageSource::Workflow, error);
-                    if let Ok(state) =
-                        api::Http::get::<WorkflowStateResponse>("/api/workflow").await
-                    {
+                    if let Ok(state) = workflow_snapshot().await {
                         self.reconcile_state_command(state, &requested_scope_id);
                     }
                 }
@@ -868,12 +864,9 @@ impl WorkflowController {
             self.document.server.peek().workflow().revision(),
         );
         dioxus::dioxus_core::spawn_forever(async move {
-            let response = api::Http::send_json::<_, WorkflowStateResponse>(
-                Method::POST,
-                "/api/workflow/command",
-                Some(&request),
-            )
-            .await;
+            let response = run_workflow_command(request)
+                .await
+                .map_err(|error| error.to_string());
             self.finish_command(&requested_scope_id);
             match response {
                 Ok(state) => {
@@ -894,12 +887,9 @@ impl WorkflowController {
         let requested_scope_id = self.document.server.peek().scope_id().to_owned();
         let request = WorkflowRequest::cancel(requested_scope_id.clone());
         dioxus::dioxus_core::spawn_forever(async move {
-            let response = api::Http::send_json::<_, WorkflowStateResponse>(
-                Method::POST,
-                "/api/workflow/command",
-                Some(&request),
-            )
-            .await;
+            let response = run_workflow_command(request)
+                .await
+                .map_err(|error| error.to_string());
             self.finish_command(&requested_scope_id);
             match response {
                 Ok(state) => {
@@ -925,12 +915,9 @@ impl WorkflowController {
         self.assistant.agent_error.set(None);
         let request = AgentRequest::create_conversation(current.scope_id(), current.revision());
         dioxus::dioxus_core::spawn_forever(async move {
-            let response = api::Http::send_json::<_, WorkflowAgentStateResponse>(
-                Method::POST,
-                "/api/workflow/agent/command",
-                Some(&request),
-            )
-            .await;
+            let response = run_workflow_agent_command(request.clone())
+                .await
+                .map_err(|error| error.to_string());
             self.assistant.agent_command.set(None);
             match response {
                 Ok(state) => {
@@ -964,12 +951,9 @@ impl WorkflowController {
             current.revision(),
         );
         dioxus::dioxus_core::spawn_forever(async move {
-            let response = api::Http::send_json::<_, WorkflowAgentStateResponse>(
-                Method::POST,
-                "/api/workflow/agent/command",
-                Some(&request),
-            )
-            .await;
+            let response = run_workflow_agent_command(request.clone())
+                .await
+                .map_err(|error| error.to_string());
             self.assistant.agent_command.set(None);
             match response {
                 Ok(state) => {
@@ -1005,12 +989,9 @@ impl WorkflowController {
             expected_revision: state.revision(),
         };
         dioxus::dioxus_core::spawn_forever(async move {
-            let response = api::Http::send_json::<_, WorkflowAgentStateResponse>(
-                Method::POST,
-                "/api/workflow/agent/command",
-                Some(&request),
-            )
-            .await;
+            let response = run_workflow_agent_command(request.clone())
+                .await
+                .map_err(|error| error.to_string());
             self.assistant.agent_command.set(None);
             match response {
                 Ok(state) => {
@@ -1027,9 +1008,7 @@ impl WorkflowController {
                 Err(error) => {
                     self.assistant.agent_error.set(Some(error.clone()));
                     studio.report_from(MessageSource::Workflow, error);
-                    if let Ok(state) =
-                        api::Http::get::<WorkflowAgentStateResponse>("/api/workflow/agent").await
-                    {
+                    if let Ok(state) = workflow_agent_snapshot().await {
                         self.reconcile_agent_command(state, request.scope_id());
                     }
                 }
@@ -1055,12 +1034,9 @@ impl WorkflowController {
                 current.active_conversation_id(),
                 turn_id,
             );
-            let response = api::Http::send_json::<_, WorkflowAgentStateResponse>(
-                Method::POST,
-                "/api/workflow/agent/command",
-                Some(&request),
-            )
-            .await;
+            let response = run_workflow_agent_command(request.clone())
+                .await
+                .map_err(|error| error.to_string());
             self.assistant.agent_command.set(None);
             match response {
                 Ok(state) => {
@@ -1094,7 +1070,7 @@ impl WorkflowController {
 
     pub(crate) async fn load(mut self, studio: Studio) {
         let workflow_bootstrap_scope = self.document.server.peek().scope_id().to_owned();
-        let state_loaded = match api::Http::get::<WorkflowStateResponse>("/api/workflow").await {
+        let state_loaded = match workflow_snapshot().await.map_err(|error| error.to_string()) {
             Ok(state) => self
                 .reconcile_state_bootstrap(state, &workflow_bootstrap_scope)
                 .is_some_and(|scope_changed| {
@@ -1112,7 +1088,10 @@ impl WorkflowController {
             }
         };
         let agent_bootstrap_scope = self.assistant.agent.peek().scope_id().to_owned();
-        match api::Http::get::<WorkflowAgentStateResponse>("/api/workflow/agent").await {
+        match workflow_agent_snapshot()
+            .await
+            .map_err(|error| error.to_string())
+        {
             Ok(state) => self.reconcile_agent_bootstrap(state, &agent_bootstrap_scope),
             Err(error) => {
                 if !*self.assistant.agent_loaded.peek() {
@@ -1126,7 +1105,7 @@ impl WorkflowController {
         }
     }
 
-    fn accept_applied_state(mut self, state: WorkflowStateResponse, requested_scope_id: &str) {
+    fn accept_applied_state(mut self, state: WorkflowSnapshot, requested_scope_id: &str) {
         let current = self.document.server.peek().to_owned();
         if current.scope_id() != requested_scope_id
             || state.scope_id() != requested_scope_id
@@ -1154,7 +1133,7 @@ impl WorkflowController {
         self.sync_graph();
     }
 
-    fn reconcile_state(mut self, state: WorkflowStateResponse) -> bool {
+    fn reconcile_state(mut self, state: WorkflowSnapshot) -> bool {
         if !self.document.server.peek().accepts(&state) {
             return false;
         }
@@ -1180,17 +1159,13 @@ impl WorkflowController {
     }
 
     #[cfg(all(feature = "web", target_arch = "wasm32"))]
-    pub(crate) fn accept_streamed_state(self, state: WorkflowStateResponse, studio: Studio) {
+    pub(crate) fn accept_streamed_state(self, state: WorkflowSnapshot, studio: Studio) {
         if self.reconcile_state(state) {
             studio.refresh_relation_catalog();
         }
     }
 
-    fn reconcile_state_command(
-        self,
-        state: WorkflowStateResponse,
-        requested_scope_id: &str,
-    ) -> bool {
+    fn reconcile_state_command(self, state: WorkflowSnapshot, requested_scope_id: &str) -> bool {
         if self.document.server.peek().scope_id() != requested_scope_id
             || state.scope_id() != requested_scope_id
         {
@@ -1208,7 +1183,7 @@ impl WorkflowController {
 
     fn reconcile_state_bootstrap(
         self,
-        state: WorkflowStateResponse,
+        state: WorkflowSnapshot,
         requested_scope_id: &str,
     ) -> Option<bool> {
         let current = self.document.server.peek();
@@ -1219,7 +1194,7 @@ impl WorkflowController {
         Some(self.reconcile_state(state))
     }
 
-    fn reconcile_agent(mut self, state: WorkflowAgentStateResponse) {
+    fn reconcile_agent(mut self, state: WorkflowAgentSnapshot) {
         let current = self.assistant.agent.peek();
         if !current.accepts_streamed(&state) {
             return;
@@ -1231,13 +1206,13 @@ impl WorkflowController {
     }
 
     #[cfg(all(feature = "web", target_arch = "wasm32"))]
-    pub(crate) fn accept_streamed_agent(self, state: WorkflowAgentStateResponse) {
+    pub(crate) fn accept_streamed_agent(self, state: WorkflowAgentSnapshot) {
         self.reconcile_agent(state);
     }
 
     fn reconcile_agent_command(
         self,
-        state: WorkflowAgentStateResponse,
+        state: WorkflowAgentSnapshot,
         requested_scope_id: &str,
     ) -> bool {
         if !self
@@ -1255,11 +1230,7 @@ impl WorkflowController {
         true
     }
 
-    fn reconcile_agent_bootstrap(
-        self,
-        state: WorkflowAgentStateResponse,
-        requested_scope_id: &str,
-    ) {
+    fn reconcile_agent_bootstrap(self, state: WorkflowAgentSnapshot, requested_scope_id: &str) {
         let current = self.assistant.agent.peek();
         if !current.accepts_bootstrap(&state, requested_scope_id) {
             // A slower GET from the prior project/import scope must not replace
@@ -1326,11 +1297,11 @@ impl WorkflowController {
 }
 
 trait WorkflowArtifactNavigation {
-    fn panel_id(&self, state: &WorkflowStateResponse, dirty: bool) -> Option<&'static str>;
+    fn panel_id(&self, state: &WorkflowSnapshot, dirty: bool) -> Option<&'static str>;
 }
 
 impl WorkflowArtifactNavigation for WorkflowAgentArtifactReceipt {
-    fn panel_id(&self, state: &WorkflowStateResponse, dirty: bool) -> Option<&'static str> {
+    fn panel_id(&self, state: &WorkflowSnapshot, dirty: bool) -> Option<&'static str> {
         match self {
             WorkflowAgentArtifactReceipt::Graph { revision, .. }
                 if !dirty && *revision == state.workflow().revision() =>
@@ -1356,28 +1327,25 @@ impl WorkflowArtifactNavigation for WorkflowAgentArtifactReceipt {
 }
 
 trait WorkflowAgentReconciliation {
-    fn accepts_streamed(&self, incoming: &WorkflowAgentStateResponse) -> bool;
+    fn accepts_streamed(&self, incoming: &WorkflowAgentSnapshot) -> bool;
     fn accepts_command_response(
         &self,
-        incoming: &WorkflowAgentStateResponse,
+        incoming: &WorkflowAgentSnapshot,
         requested_scope_id: &str,
     ) -> bool;
-    fn accepts_bootstrap(
-        &self,
-        incoming: &WorkflowAgentStateResponse,
-        requested_scope_id: &str,
-    ) -> bool;
+    fn accepts_bootstrap(&self, incoming: &WorkflowAgentSnapshot, requested_scope_id: &str)
+    -> bool;
 }
 
-impl WorkflowAgentReconciliation for WorkflowAgentStateResponse {
-    fn accepts_streamed(&self, incoming: &WorkflowAgentStateResponse) -> bool {
+impl WorkflowAgentReconciliation for WorkflowAgentSnapshot {
+    fn accepts_streamed(&self, incoming: &WorkflowAgentSnapshot) -> bool {
         incoming.session().workflow_id() == self.session().workflow_id()
             && (incoming.scope_id() != self.scope_id() || incoming.revision() >= self.revision())
     }
 
     fn accepts_command_response(
         &self,
-        incoming: &WorkflowAgentStateResponse,
+        incoming: &WorkflowAgentSnapshot,
         requested_scope_id: &str,
     ) -> bool {
         self.scope_id() == requested_scope_id && incoming.scope_id() == requested_scope_id
@@ -1385,7 +1353,7 @@ impl WorkflowAgentReconciliation for WorkflowAgentStateResponse {
 
     fn accepts_bootstrap(
         &self,
-        incoming: &WorkflowAgentStateResponse,
+        incoming: &WorkflowAgentSnapshot,
         requested_scope_id: &str,
     ) -> bool {
         self.scope_id() == requested_scope_id || incoming.scope_id() == self.scope_id()
@@ -1397,7 +1365,7 @@ struct AgentConversationChange<'a> {
     connected: bool,
     catalog_available: bool,
     command: Option<AgentPendingCommand>,
-    agent: &'a WorkflowAgentStateResponse,
+    agent: &'a WorkflowAgentSnapshot,
     snapshot: &'a WorkflowRunSnapshot,
 }
 
@@ -1441,11 +1409,11 @@ impl AgentConversationChange<'_> {
 }
 
 trait WorkflowStateReconciliation {
-    fn accepts(&self, incoming: &WorkflowStateResponse) -> bool;
+    fn accepts(&self, incoming: &WorkflowSnapshot) -> bool;
 }
 
-impl WorkflowStateReconciliation for WorkflowStateResponse {
-    fn accepts(&self, incoming: &WorkflowStateResponse) -> bool {
+impl WorkflowStateReconciliation for WorkflowSnapshot {
+    fn accepts(&self, incoming: &WorkflowSnapshot) -> bool {
         if incoming.snapshot().workflow_id() != incoming.workflow().id()
             || incoming.snapshot().workflow_revision() != incoming.workflow().revision()
         {
@@ -2102,7 +2070,7 @@ mod tests {
 
     #[test]
     fn default_editor_is_table_query_result_without_a_fake_model() {
-        let state = WorkflowStateResponse::from_workflow("", WorkflowSpec::default());
+        let state = WorkflowSnapshot::from_workflow("", WorkflowSpec::default());
         let kinds = state
             .workflow()
             .nodes()
@@ -2470,7 +2438,7 @@ mod tests {
 
     #[test]
     fn assistant_receipt_navigation_never_opens_stale_artifacts() {
-        let mut state = WorkflowStateResponse::default();
+        let mut state = WorkflowSnapshot::default();
         state.workflow_mut().set_revision(4);
         state.snapshot_mut().set_workflow_revision(4);
         let graph = WorkflowAgentArtifactReceipt::graph("View graph", 4);
@@ -2482,7 +2450,7 @@ mod tests {
         state.snapshot_mut().set_run_id(Some("run-4".to_owned()));
         state.snapshot_mut().set_phase(WorkflowRunPhase::Completed);
         state.snapshot_mut().set_result(Some(
-            spiral_robotics_api::relations::SpiralQueryResponse::new(Vec::new(), Vec::new(), false)
+            spiral_robotics_api::relations::SpiralQuerySnapshot::new(Vec::new(), Vec::new(), false)
                 .with_elapsed_ms(1),
         ));
         let results = WorkflowAgentArtifactReceipt::results("View results", "run-4", Some(0));
@@ -2500,7 +2468,7 @@ mod tests {
 
     #[test]
     fn slower_bootstrap_response_cannot_regress_newer_sse_state() {
-        let mut current = WorkflowStateResponse::default();
+        let mut current = WorkflowSnapshot::default();
         current.set_scope_id("project-a-scope");
         current.workflow_mut().set_revision(2);
         current.snapshot_mut().set_workflow_revision(2);
@@ -2514,7 +2482,7 @@ mod tests {
         newer.snapshot_mut().set_workflow_revision(3);
         assert!(current.accepts(&newer));
 
-        let mut project_b = WorkflowStateResponse::default();
+        let mut project_b = WorkflowSnapshot::default();
         project_b.set_scope_id("project-b-scope");
         assert!(
             current.accepts(&project_b),
@@ -2531,7 +2499,7 @@ mod tests {
 
     #[test]
     fn slower_agent_bootstrap_cannot_regress_streamed_history() {
-        let mut current = WorkflowAgentStateResponse::default();
+        let mut current = WorkflowAgentSnapshot::default();
         current.set_scope_id("project-a-scope");
         current.set_revision(8);
         let mut stale = current.clone();
@@ -2560,7 +2528,7 @@ mod tests {
 
     #[test]
     fn conversation_switching_is_gated_only_by_authoritative_active_work() {
-        let mut agent = WorkflowAgentStateResponse::default();
+        let mut agent = WorkflowAgentSnapshot::default();
         agent.set_history_available(true);
         agent.conversations_mut().push(
             spiral_robotics_api::workflow::WorkflowAgentConversationSummary::new(
@@ -2651,7 +2619,7 @@ mod tests {
 
     #[test]
     fn late_run_response_cannot_regress_a_completed_sse_snapshot() {
-        let mut current = WorkflowStateResponse::default();
+        let mut current = WorkflowSnapshot::default();
         current
             .snapshot_mut()
             .set_run_id(Some("workflow-run-1".to_owned()));
@@ -2679,7 +2647,7 @@ mod tests {
 
     #[test]
     fn late_cancel_response_cannot_regress_a_cancelled_sse_snapshot() {
-        let mut current = WorkflowStateResponse::default();
+        let mut current = WorkflowSnapshot::default();
         current
             .snapshot_mut()
             .set_run_id(Some("workflow-run-1".to_owned()));

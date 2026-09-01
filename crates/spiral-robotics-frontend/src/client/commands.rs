@@ -1,20 +1,19 @@
-//! Consequential Studio command gateway built on the HTTP transport.
+//! Consequential Studio command gateway built on server functions.
 //!
 //! Components emit semantic or Timeline intent. The activity controller uses
-//! this module to translate consequential intent into wire requests. The
+//! this module to translate consequential intent into admitted commands. The
 //! backend remains authoritative for recording, replay, hardware, and safety.
 
 use dioxus::prelude::*;
-use gloo_net::http::Method;
-use spiral_robotics_api::recording::{
-    EpisodeInfo, SetRecordingPausedRequest, SetReplayPausedRequest, StartRecordingRequest,
-    StartReplayRequest, StopRecordingRequest,
-};
+use spiral_robotics_api::recording::EpisodeInfo;
 use spiral_robotics_api::robots::ModeSelection;
 
 use crate::activities::data::state::DataController;
 use crate::activities::data::workbench::EpisodeIdPresentation;
-use crate::client::http as api;
+use crate::client::server_fns::{
+    seek_episode, set_mode, set_recording_paused, set_replay_paused, start_recording, start_replay,
+    stop_recording,
+};
 use crate::format::ClockPresentation;
 use crate::shell::state::Studio;
 
@@ -47,15 +46,12 @@ impl Studio {
             studio.report(reason);
             return;
         }
-        let request = StartRecordingRequest::new(studio.selected_dataset().read().trim());
+        let dataset_id = studio.selected_dataset().read().trim().to_owned();
         studio.run("", async move {
-            api::Http::send_json::<_, EpisodeInfo>(
-                Method::POST,
-                "/api/episodes/record",
-                Some(&request),
-            )
-            .await
-            .map(|_| ())
+            start_recording(dataset_id)
+                .await
+                .map_err(|error| error.to_string())
+                .map(|_| ())
         });
     }
 
@@ -70,9 +66,10 @@ impl Studio {
             studio.report("The recording changed before the Timeline action was applied.");
             return;
         }
-        let request = SetRecordingPausedRequest::new(paused);
         let future = async move {
-            api::Http::send(Method::POST, "/api/episodes/record/pause", Some(&request)).await
+            set_recording_paused(paused)
+                .await
+                .map_err(|error| error.to_string())
         };
         if paused {
             studio.run_safety("Recording paused. The episode remains open.", future);
@@ -92,7 +89,6 @@ impl Studio {
             studio.report("The recording changed before the Timeline action was applied.");
             return;
         }
-        let request = StopRecordingRequest::new(completion.keep);
         // "Episode saved." named nothing, so the one moment the operator has
         // earned something was also the moment the interface forgot what it was.
         // The real facts only exist once the server answers, so the safety message
@@ -103,12 +99,9 @@ impl Studio {
             "Recording discarded. Teleoperation stopped."
         };
         studio.run_safety(message, async move {
-            let summary = api::Http::send_json::<_, EpisodeInfo>(
-                Method::POST,
-                "/api/episodes/record/stop",
-                Some(&request),
-            )
-            .await?;
+            let summary = stop_recording(completion.keep)
+                .await
+                .map_err(|error| error.to_string())?;
             completion.data.upsert_episode(summary.clone());
             if completion.keep {
                 studio.report_episode_success(
@@ -189,11 +182,11 @@ impl Studio {
         let Some((robot, source_arm)) = studio.replay_target(episode) else {
             return;
         };
-        let request = StartReplayRequest::new(episode.id(), robot)
-            .with_source_arm(source_arm)
-            .starting_at(start_seconds);
+        let episode = episode.id().to_owned();
         studio.run("", async move {
-            api::Http::send(Method::POST, "/api/episodes/replay", Some(&request)).await
+            start_replay(episode, robot, source_arm, start_seconds)
+                .await
+                .map_err(|error| error.to_string())
         });
     }
 
@@ -203,9 +196,10 @@ impl Studio {
             studio.report("The robot replay changed before the Timeline action was applied.");
             return;
         }
-        let request = SetReplayPausedRequest::new(paused);
         let future = async move {
-            api::Http::send(Method::POST, "/api/episodes/replay/pause", Some(&request)).await
+            set_replay_paused(paused)
+                .await
+                .map_err(|error| error.to_string())
         };
         if paused {
             studio.run_safety("Robot replay paused at the current frame.", future);
@@ -222,7 +216,11 @@ impl Studio {
         }
         studio.run_safety(
             "Robot replay stopped. Motors may still be holding position.",
-            async move { api::Http::send(Method::POST, "/api/mode", Some(&ModeSelection::Idle)).await },
+            async move {
+                set_mode(ModeSelection::Idle)
+                    .await
+                    .map_err(|error| error.to_string())
+            },
         );
     }
 }
@@ -247,7 +245,6 @@ impl RecordingCompletion {
     }
 }
 
-#[derive(serde::Serialize)]
 pub(crate) struct TimelineSeekBody {
     robot: String,
     source_arm: Option<String>,
@@ -267,11 +264,10 @@ impl TimelineSeekBody {
 impl Studio {
     pub(crate) fn physical_seek(self, episode: String, request: TimelineSeekBody) {
         let studio = self;
-        let path = format!("/api/episodes/{episode}/seek");
         studio.run("", async move {
-            api::Http::send_json::<_, serde_json::Value>(Method::POST, &path, Some(&request))
+            seek_episode(episode, request.robot, request.source_arm, request.seconds)
                 .await
-                .map(|_| ())
+                .map_err(|error| error.to_string())
         });
     }
 }

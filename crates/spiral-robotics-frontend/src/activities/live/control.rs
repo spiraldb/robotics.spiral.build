@@ -8,13 +8,12 @@ use crate::components::interaction::{
     Action, ActionAuxiliaryHandlers, ActionPurpose, ActionVariant,
 };
 use dioxus::prelude::*;
-use gloo_net::http::Method;
 use spiral_robotics_api::robots::{
-    GoalRequest, JointTelemetry, MotorCondition, MotorLimits, RobotSummary, RobotTelemetry,
+    JointTelemetry, MotorCondition, MotorLimits, RobotSummary, RobotTelemetry,
 };
 use spiral_robotics_viewport::{self as arm, ArmPose};
 
-use crate::client::http as api;
+use crate::client::server_fns::set_robot_goal;
 use crate::shell::state::{Selection, studio};
 
 #[derive(Default)]
@@ -481,13 +480,9 @@ fn JointControls(
                     if normalized.is_empty() {
                         continue;
                     }
-                    let request = GoalRequest::new(normalized);
-                    if let Err(error) = api::Http::send(
-                        Method::POST,
-                        &format!("/api/robots/{command_robot}/goal"),
-                        Some(&request),
-                    )
-                    .await
+                    if let Err(error) = set_robot_goal(command_robot.clone(), normalized)
+                        .await
+                        .map_err(|error| error.to_string())
                     {
                         studio.report(error);
                     }

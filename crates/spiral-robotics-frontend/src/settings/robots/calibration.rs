@@ -3,13 +3,12 @@ use crate::components::interaction::{
     ConfirmationDismissal, ConfirmationResponse,
 };
 use dioxus::prelude::*;
-use gloo_net::http::Method;
-use spiral_robotics_api::robots::{
-    CalibrationJointProgress, CalibrationProgress, CalibrationReapplyResponse, RobotSummary,
-};
+use spiral_robotics_api::robots::{CalibrationJointProgress, CalibrationProgress, RobotSummary};
 use spiral_robotics_viewport as arm;
 
-use crate::client::http as api;
+use crate::client::server_fns::{
+    cancel_calibration, finish_calibration, reapply_calibration, start_calibration,
+};
 use crate::shell::notifications::MessageSource;
 use crate::shell::state::studio;
 use crate::tasks::SingleFlight;
@@ -69,7 +68,9 @@ pub(super) fn CalibrationSection(
                             let id = recalibrate_id.clone();
                             command.set(Some("start"));
                             studio.run("", async move {
-                                let result = api::Http::post(&format!("/api/robots/{id}/calibration/start")).await;
+                                let result = start_calibration(id)
+                                    .await
+                                    .map_err(|error| error.to_string());
                                 command.set(None);
                                 result
                             });
@@ -99,11 +100,11 @@ pub(super) fn CalibrationSection(
                                 studio.run_utility("", async move {
                                     let Some(result) = SingleFlight::run(
                                         reapplying,
-                                        api::Http::send_json::<(), CalibrationReapplyResponse>(
-                                            Method::POST,
-                                            &format!("/api/robots/{id}/calibration/reapply"),
-                                            None,
-                                        ),
+                                        async move {
+                                            reapply_calibration(id)
+                                                .await
+                                                .map_err(|error| error.to_string())
+                                        },
                                     )
                                     .await
                                     else {
@@ -115,10 +116,10 @@ pub(super) fn CalibrationSection(
                                     match result {
                                         Ok(result) => {
                                             studio.report_success(result.reapply_success());
-                                            if !result.warnings().is_empty() {
+                                            if !result.4.is_empty() {
                                                 studio.report_warning_from(
                                                     MessageSource::Studio,
-                                                    result.warnings().join(" "),
+                                                    result.4.join(" "),
                                                 );
                                             }
                                             Ok(())
@@ -167,7 +168,10 @@ pub(super) fn CalibrationSection(
                             let id = id.clone();
                             command.set(Some("finish"));
                             studio.run("Calibration saved.", async move {
-                                let result = api::Http::post(&format!("/api/robots/{id}/calibration/finish")).await;
+                                let result = finish_calibration(id)
+                                    .await
+                                    .map_err(|error| error.to_string())
+                                    .map(|_| ());
                                 command.set(None);
                                 result
                             });
@@ -188,7 +192,9 @@ pub(super) fn CalibrationSection(
                             let id = id.clone();
                             command.set(Some("cancel"));
                             studio.run("", async move {
-                                let result = api::Http::post(&format!("/api/robots/{id}/calibration/cancel")).await;
+                                let result = cancel_calibration(id)
+                                    .await
+                                    .map_err(|error| error.to_string());
                                 command.set(None);
                                 result
                             });
@@ -223,19 +229,19 @@ trait CalibrationReapplyPresentation {
     fn reapply_success(&self) -> String;
 }
 
-impl CalibrationReapplyPresentation for CalibrationReapplyResponse {
+impl CalibrationReapplyPresentation for (u64, u64, u64, u64, Vec<String>) {
     fn reapply_success(&self) -> String {
-        let episodes = self.episodes_updated();
-        let noun = if episodes == 1 { "take" } else { "takes" };
+        let (episodes, frames, unchanged, skipped, _) = self;
+        let noun = if *episodes == 1 { "take" } else { "takes" };
         let mut message = format!(
             "Reapplied calibration to {episodes} {noun} ({} frames)",
-            self.frames_updated()
+            frames
         );
-        if self.episodes_unchanged() > 0 {
-            message.push_str(&format!("; {} already matched", self.episodes_unchanged()));
+        if *unchanged > 0 {
+            message.push_str(&format!("; {unchanged} already matched"));
         }
-        if self.episodes_skipped() > 0 {
-            message.push_str(&format!("; {} skipped", self.episodes_skipped()));
+        if *skipped > 0 {
+            message.push_str(&format!("; {skipped} skipped"));
         }
         message.push('.');
         message

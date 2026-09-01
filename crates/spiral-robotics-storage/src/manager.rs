@@ -7,9 +7,8 @@
 use std::sync::Arc;
 
 use spiral_robotics_api::recording::DatasetSummary;
-use spiral_robotics_api::relations::{RelationCatalog, SpiralQueryResponse};
+use spiral_robotics_api::relations::{RelationCatalog, SpiralQuerySnapshot};
 use spiral_robotics_api::rollout::RolloutSnapshot;
-use spiral_robotics_api::settings::ConnectionTestResponse;
 use spiral_robotics_api::training::{TrainingRun, TrainingSnapshot};
 
 use crate::db::ProjectDatabasePersistence;
@@ -215,13 +214,13 @@ impl StorageManager {
             .await
     }
 
-    pub async fn test_spiral(&self) -> ConnectionTestResponse {
+    pub async fn test_spiral(&self) -> (bool, String) {
         ProjectDatabasePersistence::new(&self.project_store)
             .test()
             .await
     }
 
-    pub async fn query(&self, sql: &str, max_rows: usize) -> Result<SpiralQueryResponse, String> {
+    pub async fn query(&self, sql: &str, max_rows: usize) -> Result<SpiralQuerySnapshot, String> {
         ProjectQueries::new(&self.project_store)
             .query(sql, max_rows)
             .await

@@ -6,10 +6,13 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use crate::data_commands::DataCommands;
+use crate::device_commands::DeviceCommands;
 use crate::http::routes::{
     AppActivityManagers, AppCatalogResources, AppPlatformResources, AppRoboticsResources,
     AppRuntimeResources, AppState, AppVideoResources, AppWorkflowManagers, BootstrapState,
 };
+use crate::recording_commands::RecordingCommands;
 use crate::robotics::cameras::CameraManager;
 use crate::robotics::video::VideoEncoderSettings;
 use crate::robots::workspace::RobotWorkspace;
@@ -19,6 +22,7 @@ use crate::training::remote::ConfiguredHttpTrainingBackend;
 use crate::training_rollout::TrainingRolloutCommands;
 use crate::workflow::agent::WorkflowAgentManager;
 use crate::workflow::manager::WorkflowManager;
+use crate::workflow_commands::{WorkflowAdmission, WorkflowCommands};
 use clap::Parser;
 use spiral_robotics_hardware::{
     CameraRuntime, ControlSettings, DEFAULT_MAX_STEP_COUNTS, DEFAULT_TELEOP_MAX_STEP_COUNTS,
@@ -348,14 +352,23 @@ impl ServerStartup {
         let workflow_managers = AppWorkflowManagers::new(workflow.clone(), workflow_agent.clone());
         let activities =
             AppActivityManagers::new(training.clone(), rollout.clone(), workflow_managers);
-        let platform = AppPlatformResources::new(connection, preferences, BootstrapState::new());
+        let bootstrap_state = BootstrapState::new();
+        let platform = AppPlatformResources::new(connection, preferences, bootstrap_state.clone());
         let training_rollout_commands =
             TrainingRolloutCommands::new(training.clone(), rollout.clone());
+        let workflow_commands = WorkflowCommands::new(
+            workflow.clone(),
+            workflow_agent.clone(),
+            WorkflowAdmission::new(catalog_lease, bootstrap_state),
+        );
         let state = AppState::new(
             catalog,
             robotics,
             AppRuntimeResources::new(activities, platform),
         );
+        let recording_commands = RecordingCommands::new(state.clone());
+        let device_commands = DeviceCommands::new(state.clone());
+        let data_commands = DataCommands::new(state.clone());
         let listener = tokio::net::TcpListener::bind(bind).await?;
         let address = listener.local_addr()?;
 
@@ -375,6 +388,10 @@ impl ServerStartup {
         let app = dioxus::server::router(app)
             .nest("/api", state.api_router())
             .layer(axum::Extension(training_rollout_commands))
+            .layer(axum::Extension(workflow_commands))
+            .layer(axum::Extension(recording_commands))
+            .layer(axum::Extension(device_commands))
+            .layer(axum::Extension(data_commands))
             .layer(tower_http::trace::TraceLayer::new_for_http());
 
         // Both the server and this task observe the same edge. The server begins

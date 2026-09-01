@@ -259,6 +259,17 @@ impl SpiralConnectionUpdate {
         self.clear_client_secret = clear_client_secret;
         self
     }
+
+    pub fn into_parts(self) -> (String, String, String, String, String, bool) {
+        (
+            self.spiral_endpoint,
+            self.spiral_spfs_endpoint,
+            self.project_id,
+            self.client_id,
+            self.client_secret,
+            self.clear_client_secret,
+        )
+    }
 }
 
 impl Default for SpiralConnectionUpdate {
@@ -268,86 +279,5 @@ impl Default for SpiralConnectionUpdate {
             Self::default_spiral_spfs_endpoint(),
             String::new(),
         )
-    }
-}
-
-/// Update from the settings screen.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct UpdateDataSettingsRequest {
-    /// Backend-local bootstrap pointer for the Spiral control-plane API.
-    #[serde(flatten)]
-    connection: SpiralConnectionUpdate,
-    /// Backend-local bootstrap pointer for Spiral File System payloads.
-    #[serde(default)]
-    training: TrainingRuntimeSettings,
-    video: VideoSettings,
-}
-
-impl UpdateDataSettingsRequest {
-    pub fn new(
-        connection: SpiralConnectionUpdate,
-        training: TrainingRuntimeSettings,
-        video: VideoSettings,
-    ) -> Self {
-        Self {
-            connection,
-            training,
-            video,
-        }
-    }
-
-    pub fn spiral_endpoint(&self) -> &str {
-        &self.connection.spiral_endpoint
-    }
-
-    pub fn spiral_spfs_endpoint(&self) -> &str {
-        &self.connection.spiral_spfs_endpoint
-    }
-
-    pub fn project_id(&self) -> &str {
-        &self.connection.project_id
-    }
-
-    pub fn client_id(&self) -> &str {
-        &self.connection.client_id
-    }
-
-    pub fn client_secret(&self) -> &str {
-        &self.connection.client_secret
-    }
-
-    pub const fn clear_client_secret(&self) -> bool {
-        self.connection.clear_client_secret
-    }
-
-    pub const fn training(&self) -> &TrainingRuntimeSettings {
-        &self.training
-    }
-
-    pub const fn video(&self) -> &VideoSettings {
-        &self.video
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ConnectionTestResponse {
-    ok: bool,
-    message: String,
-}
-
-impl ConnectionTestResponse {
-    pub fn new(ok: bool, message: impl Into<String>) -> Self {
-        Self {
-            ok,
-            message: message.into(),
-        }
-    }
-
-    pub const fn ok(&self) -> bool {
-        self.ok
-    }
-
-    pub fn message(&self) -> &str {
-        &self.message
     }
 }

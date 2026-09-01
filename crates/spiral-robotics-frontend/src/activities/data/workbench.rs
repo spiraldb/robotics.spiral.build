@@ -8,15 +8,13 @@
 use std::collections::BTreeSet;
 
 use crate::components::interaction::{
-    Action, ActionLink, ActionPurpose, ActionVariant, CloseIcon, ConfirmationCopy,
-    ConfirmationDismissal, ConfirmationResponse, FileAction, FileInput, InlineConfirmation,
-    RefreshIcon,
+    Action, ActionPurpose, ActionVariant, CloseIcon, ConfirmationCopy, ConfirmationDismissal,
+    ConfirmationResponse, FileAction, FileInput, InlineConfirmation, RefreshIcon,
 };
 use dioxus::prelude::*;
-use gloo_net::http::Method;
 use spiral_robotics_api::datasets::{
-    EpisodeImportSummary, HuggingFaceDatasetFormat, HuggingFaceDatasetImportSummary,
-    HuggingFaceDatasetInspection, HuggingFaceDatasetRequest,
+    HuggingFaceDatasetFormat, HuggingFaceDatasetImportSummary, HuggingFaceDatasetInspection,
+    HuggingFaceDatasetSource,
 };
 use spiral_robotics_api::recording::EpisodeListItem;
 use spiral_robotics_api::relations::RelationCatalog;
@@ -24,7 +22,10 @@ use spiral_robotics_api::status::BackendReadinessState;
 
 use crate::activities::data::catalog::ManagedTable as Table;
 use crate::activities::data::query_result::DEFAULT_QUERY_ROWS;
-use crate::client::http as api;
+use crate::client::server_fns::{
+    EpisodeImportUpload, delete_episode, import_episodes, import_hugging_face_dataset,
+    inspect_hugging_face_dataset,
+};
 use crate::format::ClockPresentation;
 use crate::shell::state::studio;
 use crate::tasks::SingleFlight;
@@ -198,12 +199,12 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
                             let target_dataset = import_dataset_id.clone();
                             studio.run_utility("", async move {
                                 let Some(outcome) = SingleFlight::run(importing, async {
-                                        let result = api::Http::upload_file_json::<EpisodeImportSummary>(
-                                            &format!("/api/episodes/import?dataset_id={target_dataset}"),
-                                            &file,
-                                            "application/vnd.spiral-robotics.episodes",
-                                        )
-                                        .await?;
+                                        let result = import_episodes(EpisodeImportUpload::new(
+                                            target_dataset.clone(),
+                                            file.into(),
+                                        ))
+                                        .await
+                                        .map_err(|error| error.to_string())?;
                                         data.reload_dataset(target_dataset).await?;
                                         Ok::<_, String>(result)
                                     })
@@ -231,25 +232,6 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
                             },
                         ),
                         if importing() { "Importing…" } else { "Import bundle" }
-                    }
-                    if dataset_valid && !episodes.is_empty() {
-                        ActionLink {
-                            purpose: ActionPurpose::Export,
-                            variant: ActionVariant::Outline,
-                            href: "/api/episodes/export?dataset_id={dataset_id}",
-                            download: "{dataset_id}.spiral-episodes",
-                            title: "Export every episode and its streams, samples, and video from the selected dataset",
-                            "Export episodes"
-                        }
-                    } else {
-                        Action {
-                            purpose: ActionPurpose::Export,
-                            variant: ActionVariant::Outline,
-                            class: "text-ink-faint",
-                            title: "The selected dataset has no episodes to export",
-                            disabled: true,
-                            "Export episodes"
-                        }
                     }
                 }
             }
@@ -437,7 +419,7 @@ fn HuggingFaceImport(dataset_id: String, on_close: EventHandler<()>) -> Element 
             },
     } = HuggingFaceImportState::use_state();
 
-    let request = HuggingFaceDatasetRequest::new(dataset_id.clone(), repository().trim(), format())
+    let request = HuggingFaceDatasetSource::new(dataset_id.clone(), repository().trim(), format())
         .with_revision(revision().trim());
     let can_inspect = !request.repository().is_empty()
         && !request.revision().is_empty()
@@ -531,11 +513,11 @@ fn HuggingFaceImport(dataset_id: String, on_close: EventHandler<()>) -> Element 
                             studio.run_utility("", async move {
                                 let Some(outcome) = SingleFlight::run(
                                     inspecting,
-                                    api::Http::send_json::<_, HuggingFaceDatasetInspection>(
-                                        Method::POST,
-                                        "/api/datasets/huggingface/inspect",
-                                        Some(&request),
-                                    ),
+                                    async move {
+                                        inspect_hugging_face_dataset(request)
+                                            .await
+                                            .map_err(|error| error.to_string())
+                                    },
                                 )
                                 .await else {
                                     return Ok(());
@@ -616,7 +598,7 @@ fn HuggingFaceImport(dataset_id: String, on_close: EventHandler<()>) -> Element 
                             onclick: {
                                 let source = source.clone();
                                 move |_| {
-                                    let import_request = HuggingFaceDatasetRequest::new(
+                                    let import_request = HuggingFaceDatasetSource::new(
                                         source.dataset_id(),
                                         source.repository(),
                                         source.format(),
@@ -627,11 +609,11 @@ fn HuggingFaceImport(dataset_id: String, on_close: EventHandler<()>) -> Element 
                                     studio.run_utility("", async move {
                                         let Some(outcome) = SingleFlight::run(
                                             importing,
-                                            api::Http::send_json::<_, HuggingFaceDatasetImportSummary>(
-                                                Method::POST,
-                                                "/api/datasets/huggingface/import",
-                                                Some(&import_request),
-                                            ),
+                                            async move {
+                                                import_hugging_face_dataset(import_request)
+                                                    .await
+                                                    .map_err(|error| error.to_string())
+                                            },
                                         )
                                         .await else {
                                             return Ok(());
@@ -1125,13 +1107,14 @@ struct EpisodeDeletion {
 
 impl EpisodeDeletion {
     fn delete(self) {
-        let path = format!("/api/episodes/{}", self.id);
         let deleted_id = self.id.clone();
         let mut deleting = self.signals.deleting;
         let mut confirming = self.signals.confirming;
         self.studio
             .run_utility(format!("Deleted {}.", self.id), async move {
-                let result = api::Http::send::<()>(Method::DELETE, &path, None).await;
+                let result = delete_episode(deleted_id.clone())
+                    .await
+                    .map_err(|error| error.to_string());
                 deleting.set(None);
                 if result.is_ok() {
                     confirming.set(None);

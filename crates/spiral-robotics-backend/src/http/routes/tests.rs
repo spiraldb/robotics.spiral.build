@@ -1,7 +1,9 @@
-use super::data::DataSettingsOverrides;
-use super::devices::CameraConfigurationObject;
 use super::recordings::ByteRange;
 use super::*;
+use crate::device_commands::CameraConfigurationObject;
+use crate::robots::service::CameraAssignment;
+use serde_json::Map;
+use spiral_robotics_api::robots::CameraStatus;
 
 #[test]
 fn bootstrap_lifecycle_controls_catalog_admission() {
@@ -33,77 +35,6 @@ fn bootstrap_lifecycle_controls_catalog_admission() {
         state.catalog_unavailable().as_deref(),
         Some("authentication expired")
     );
-}
-
-#[test]
-fn temporary_unavailability_includes_a_retry_hint() {
-    let response = Failure::unavailable("still warming").into_response();
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(
-        response.headers().get(header::RETRY_AFTER),
-        Some(&axum::http::HeaderValue::from_static("1"))
-    );
-}
-
-#[test]
-fn feature_routers_preserve_every_legacy_rest_path_exactly_once() {
-    let sources = [
-        include_str!("../routes.rs"),
-        include_str!("data.rs"),
-        include_str!("devices.rs"),
-        include_str!("recordings.rs"),
-        include_str!("workflow.rs"),
-    ]
-    .join("\n");
-    let paths = [
-        "/events",
-        "/ports",
-        "/ports/identify",
-        "/cameras/refresh",
-        "/cameras/stream.mjpeg",
-        "/robots",
-        "/robots/import",
-        "/robots/{id}",
-        "/robots/{id}/connect",
-        "/robots/{id}/disconnect",
-        "/robots/{id}/hold",
-        "/robots/{id}/release",
-        "/robots/{id}/goal",
-        "/robots/{id}/calibration/start",
-        "/robots/{id}/calibration/finish",
-        "/robots/{id}/calibration/cancel",
-        "/robots/{id}/calibration/reapply",
-        "/mode",
-        "/datasets",
-        "/episodes",
-        "/episodes/record",
-        "/episodes/record/pause",
-        "/episodes/record/stop",
-        "/episodes/replay",
-        "/episodes/replay/pause",
-        "/episodes/import",
-        "/episodes/{id}",
-        "/episodes/{id}/inspection",
-        "/episodes/{id}/seek",
-        "/episodes/{id}/videos/{stream}",
-        "/settings/data",
-        "/settings/data/test/spiral",
-        "/spiral/query",
-        "/spiral/relations",
-        "/project/export",
-        "/project/import",
-        "/workflow",
-        "/workflow/command",
-        "/workflow/agent",
-        "/workflow/agent/command",
-    ];
-    for path in paths {
-        assert_eq!(
-            sources.matches(&format!("\"{path}\"")).count(),
-            1,
-            "route path {path:?} must be registered exactly once"
-        );
-    }
 }
 
 #[test]
@@ -139,17 +70,6 @@ fn workflow_agent_sse_cursor_coalesces_duplicate_wakeups_and_accepts_new_scopes(
     }));
     assert_eq!(cursor.scope_id, "scope-b");
     assert_eq!(cursor.revision, 1);
-}
-
-#[test]
-fn imports_distinguish_unavailable_storage_from_invalid_files() {
-    let unavailable = Failure::import(
-        "SpiralDB is unavailable at http://127.0.0.1:4279. Start the service or update Settings → SpiralDB, then try again.",
-    );
-    assert_eq!(unavailable.0, StatusCode::SERVICE_UNAVAILABLE);
-
-    let invalid = Failure::import("episode bundle has the wrong format");
-    assert_eq!(invalid.0, StatusCode::BAD_REQUEST);
 }
 
 fn status(id: &str) -> CameraStatus {
@@ -268,95 +188,4 @@ fn spiral_video_ranges_cover_browser_seek_forms() {
     assert_eq!(ByteRange::parse("bytes=0-1,4-5", 100), None);
     assert_eq!(ByteRange::parse("items=0-1", 100), None);
     assert_eq!(ByteRange::parse("bytes=0-1", 0), None);
-}
-
-#[test]
-fn episode_errors_map_to_the_right_status_codes() {
-    let cases = [
-        (
-            EpisodeError::InvalidId("../x".to_owned()),
-            StatusCode::BAD_REQUEST,
-        ),
-        (
-            EpisodeError::NotFound("episode_000001".to_owned()),
-            StatusCode::NOT_FOUND,
-        ),
-    ];
-    for (error, expected) in cases {
-        assert_eq!(Failure::from(error).0, expected);
-    }
-}
-
-#[test]
-fn workspace_errors_map_to_the_right_status_codes() {
-    let cases = [
-        (
-            WorkspaceError::InvalidId("../x".to_owned()),
-            StatusCode::BAD_REQUEST,
-        ),
-        (
-            WorkspaceError::NotFound("arm".to_owned()),
-            StatusCode::NOT_FOUND,
-        ),
-        (
-            WorkspaceError::AlreadyExists("arm".to_owned()),
-            StatusCode::CONFLICT,
-        ),
-    ];
-
-    for (error, expected) in cases {
-        assert_eq!(Failure::from(error).0, expected);
-    }
-    // A control-thread refusal is a conflict, not a crash.
-    assert_eq!(
-        Failure::from("robot is not connected".to_owned()).0,
-        StatusCode::CONFLICT
-    );
-}
-
-#[test]
-fn data_presenters_round_trip_transport_values_without_leaking_them_to_policy() {
-    let settings = DataSettings::new(
-        ContractSpiralSettings::new(
-            "https://api.spiraldb.dev",
-            "https://spfs.spiraldb.dev",
-            "project",
-        )
-        .with_namespace("dataset"),
-        spiral_robotics_api::settings::TrainingRuntimeSettings::default(),
-        VideoSettings::new(true),
-    );
-    assert_eq!(
-        DataSettings::from(DataSettingsOverrides::new(None, None).apply(settings.clone())),
-        settings
-    );
-
-    let pending =
-        DataSettingsOverrides::new(Some("http://127.0.0.1:4279"), Some("http://127.0.0.1:4295"))
-            .with_identity(Some("local-project"), Some("client-id"))
-            .with_credentials(true)
-            .apply(settings);
-    assert_eq!(pending.spiral().endpoint(), "http://127.0.0.1:4279");
-    assert_eq!(pending.spiral().spfs_endpoint(), "http://127.0.0.1:4295");
-    assert_eq!(pending.spiral().project_id(), "local-project");
-    assert!(!pending.spiral().endpoint_restart_required());
-    assert_eq!(pending.spiral().client_id(), "client-id");
-    assert!(pending.spiral().client_secret_configured());
-
-    let query = SpiralQueryResponse::new(
-        vec![
-            spiral_robotics_api::relations::QueryColumn::new("payload", "json", true)
-                .with_semantic_type(Some("spql.test.Payload".to_owned())),
-        ],
-        vec![serde_json::Map::from_iter([(
-            "payload".to_owned(),
-            serde_json::json!({"signed": -2, "unsigned": u64::MAX, "nested": [true, null]}),
-        )])],
-        true,
-    )
-    .with_elapsed_ms(9);
-    assert_eq!(
-        SpiralQueryResponse::from(CapabilityQueryResult::from(query.clone())),
-        query
-    );
 }

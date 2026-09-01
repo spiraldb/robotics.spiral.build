@@ -3,10 +3,9 @@ use crate::components::interaction::{
     ConfirmationResponse, InlineConfirmation,
 };
 use dioxus::prelude::*;
-use gloo_net::http::Method;
 use spiral_robotics_api::robots::RobotSummary;
 
-use crate::client::http as api;
+use crate::client::server_fns::delete_robot;
 use crate::shell::state::studio;
 use crate::tasks::SingleFlight;
 
@@ -56,7 +55,11 @@ pub(super) fn DeleteRobotAction(robot: RobotSummary) -> Element {
                     studio.run(format!("Deleted {id}."), async move {
                         let Some(result) = SingleFlight::run(
                             deleting,
-                            api::Http::send::<()>(Method::DELETE, &format!("/api/robots/{id}"), None),
+                            async move {
+                                delete_robot(id)
+                                    .await
+                                    .map_err(|error| error.to_string())
+                            },
                         )
                         .await
                         else {

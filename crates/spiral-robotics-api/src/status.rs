@@ -1,4 +1,4 @@
-//! Studio bootstrap status, top-level snapshot, and request failures.
+//! Studio bootstrap status and top-level snapshot.
 
 use serde::{Deserialize, Serialize};
 
@@ -186,31 +186,12 @@ impl StudioSnapshot {
     }
 }
 
-/// A failed request.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ApiError {
-    error: String,
-}
-
-impl ApiError {
-    pub fn new(error: impl Into<String>) -> Self {
-        Self {
-            error: error.into(),
-        }
-    }
-
-    pub fn into_error(self) -> String {
-        self.error
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::recording::*;
     use crate::robots::*;
     use crate::rollout::*;
-    use crate::settings::*;
     use crate::training::*;
 
     #[test]
@@ -384,29 +365,6 @@ mod tests {
                 "{json} should round-trip"
             );
         }
-    }
-
-    #[test]
-    fn optional_request_fields_may_be_omitted() {
-        let created: CreateRobotRequest = serde_json::from_str(r#"{"id":"arm"}"#).unwrap();
-        assert_eq!(created.id(), "arm");
-        assert_eq!(created.robot_type(), None);
-
-        let update: UpdateRobotRequest = serde_json::from_str("{}").unwrap();
-        assert_eq!(update, UpdateRobotRequest::default());
-
-        let settings: UpdateDataSettingsRequest = serde_json::from_str(
-            r#"{
-                "video": { "enabled": true }
-            }"#,
-        )
-        .unwrap();
-        assert_eq!(settings.spiral_endpoint(), DEFAULT_SPIRAL_ENDPOINT);
-        assert_eq!(
-            settings.spiral_spfs_endpoint(),
-            DEFAULT_SPIRAL_SPFS_ENDPOINT
-        );
-        assert_eq!(settings.training(), &TrainingRuntimeSettings::default());
     }
 
     #[test]

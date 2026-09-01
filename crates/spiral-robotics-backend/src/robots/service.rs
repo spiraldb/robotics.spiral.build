@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use spiral_robotics_api::robots::{NewRobot, PortSettings, RobotUpdate};
 use spiral_robotics_hardware::{Calibration, MotorSpec};
 
 use crate::OperationError;
@@ -52,13 +53,6 @@ pub(crate) struct CreateRobotCommand {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct NewRobot {
-    id: String,
-    robot_type: Option<String>,
-    port: Option<SerialPortConfiguration>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CameraAssignment {
     role: String,
     device_id: String,
@@ -70,14 +64,6 @@ pub(crate) struct UpdateRobotCommand {
     robot_type: Option<String>,
     port: Option<SerialPortConfiguration>,
     cameras: Option<Vec<CameraAssignment>>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct RobotUpdate<C> {
-    id: String,
-    robot_type: Option<String>,
-    port: Option<SerialPortConfiguration>,
-    cameras: Option<C>,
 }
 
 /// Plain information required to connect a saved robot.
@@ -138,12 +124,6 @@ impl CreateRobotCommand {
     }
 }
 
-impl NewRobot {
-    pub(crate) fn into_parts(self) -> (String, Option<String>, Option<SerialPortConfiguration>) {
-        (self.id, self.robot_type, self.port)
-    }
-}
-
 impl CameraAssignment {
     pub(crate) fn new(role: impl Into<String>, device_id: impl Into<String>) -> Self {
         Self {
@@ -175,19 +155,6 @@ impl UpdateRobotCommand {
     pub(crate) fn with_cameras(mut self, cameras: Option<Vec<CameraAssignment>>) -> Self {
         self.cameras = cameras;
         self
-    }
-}
-
-impl<C> RobotUpdate<C> {
-    pub(crate) fn into_parts(
-        self,
-    ) -> (
-        String,
-        Option<String>,
-        Option<SerialPortConfiguration>,
-        Option<C>,
-    ) {
-        (self.id, self.robot_type, self.port, self.cameras)
     }
 }
 
@@ -304,11 +271,10 @@ impl<'a, R: RobotStore + ?Sized> RobotCatalogActions<'a, R> {
             )?),
         };
         self.store
-            .create(NewRobot {
-                id: command.id,
-                robot_type: command.robot_type,
-                port,
-            })
+            .create(
+                NewRobot::new(command.id, command.robot_type)
+                    .with_port(port.map(|port| PortSettings::new(port.path, port.baud_rate))),
+            )
             .await
     }
 
@@ -397,12 +363,14 @@ where
             None => None,
         };
         self.store
-            .update(RobotUpdate {
-                id: command.id,
-                robot_type: command.robot_type,
-                port: command.port,
+            .update(RobotUpdate::new(
+                command.id,
+                command.robot_type,
+                command
+                    .port
+                    .map(|port| PortSettings::new(port.path, port.baud_rate)),
                 cameras,
-            })
+            ))
             .await
     }
 
@@ -515,15 +483,15 @@ mod tests {
         type CameraConfiguration = Vec<String>;
 
         async fn create(&self, robot: NewRobot) -> Result<SavedRobot, OperationError> {
-            let port = robot
-                .port
-                .map(|port| format!("{}@{}", port.path, port.baud_rate))
+            let (id, _, port) = robot.into_parts();
+            let port = port
+                .map(|port| format!("{}@{}", port.path(), port.baud_rate()))
                 .unwrap_or_else(|| "none".to_owned());
             self.events
                 .lock()
                 .unwrap()
-                .push(format!("create:{}:{port}", robot.id));
-            Ok(SavedRobot { id: robot.id })
+                .push(format!("create:{id}:{port}"));
+            Ok(SavedRobot { id })
         }
 
         async fn import_configuration(&self) -> Result<SavedRobot, OperationError> {
@@ -556,11 +524,9 @@ mod tests {
             &self,
             command: RobotUpdate<Vec<String>>,
         ) -> Result<SavedRobot, OperationError> {
-            self.events
-                .lock()
-                .unwrap()
-                .push(format!("update:{}", command.id));
-            Ok(SavedRobot { id: command.id })
+            let (id, ..) = command.into_parts();
+            self.events.lock().unwrap().push(format!("update:{id}"));
+            Ok(SavedRobot { id })
         }
 
         async fn ensure_exists(&self, robot: &str) -> Result<(), OperationError> {

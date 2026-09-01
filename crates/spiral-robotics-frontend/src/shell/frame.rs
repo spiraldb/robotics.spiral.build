@@ -3,7 +3,7 @@
 use crate::components::interaction::{Action, ActionPurpose, ActionVariant, BrowserFocus};
 use dioxus::prelude::*;
 use spiral_robotics_api::status::BackendReadinessState;
-use spiral_robotics_api::workflow::{WorkflowRunPhase, WorkflowStateResponse};
+use spiral_robotics_api::workflow::{WorkflowRunPhase, WorkflowSnapshot};
 
 use crate::activities::data::workbench::EpisodeIdPresentation;
 use crate::components::icons::{
@@ -442,7 +442,7 @@ struct WorkflowStatusProjection {
 }
 
 struct WorkflowStatusContext<'a> {
-    state: Option<&'a WorkflowStateResponse>,
+    state: Option<&'a WorkflowSnapshot>,
     backend_connected: bool,
     readiness: BackendReadinessState,
     catalog_available: bool,
@@ -510,7 +510,7 @@ mod tests {
 
     #[test]
     fn workflow_status_projects_authoritative_graph_and_run_phase() {
-        let mut state = WorkflowStateResponse::default();
+        let mut state = WorkflowSnapshot::default();
         state.workflow_mut().set_revision(7);
         state.snapshot_mut().set_phase(WorkflowRunPhase::Running);
 
@@ -539,7 +539,7 @@ mod tests {
         assert_eq!(loading.phase, "Loading saved workflow…");
         assert_eq!(loading.graph, "Loading graph…");
 
-        let state = WorkflowStateResponse::default();
+        let state = WorkflowSnapshot::default();
         let unavailable = WorkflowStatusContext {
             state: Some(&state),
             backend_connected: false,

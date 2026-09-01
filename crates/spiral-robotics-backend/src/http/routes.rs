@@ -8,105 +8,41 @@
 mod data;
 mod devices;
 mod recordings;
-mod workflow;
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
-use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
+use axum::body::Body;
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
-use axum::middleware::{self, Next};
+use axum::response::Response;
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
-use axum::{Json, body::Body};
+use axum::routing::get;
 use bytes::{BufMut, Bytes, BytesMut};
 use futures_util::{Stream, StreamExt};
-use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
-use spiral_robotics_api::recording::{
-    DatasetCatalogResponse, EpisodeArmScalarSamples, EpisodeCatalogResponse, EpisodeInfo,
-    EpisodeInspectionArm, EpisodeInspectionSnapshot, EpisodeListItem, EpisodeOptionalFrameMatrix,
-    EpisodeVideoAssetMetadata, EpisodeVideoFormat, EpisodeVideoIdentity, EpisodeVideoTimeline,
-    SetRecordingPausedRequest, SetReplayPausedRequest, StartRecordingRequest, StartReplayRequest,
-    StopRecordingRequest,
-};
-use spiral_robotics_api::relations::{SpiralQueryRequest, SpiralQueryResponse};
-use spiral_robotics_api::robots::{
-    CalibrationReapplyResponse, CameraStatus, ConnectionStatus, CreateRobotRequest, GoalRequest,
-    IdentifyPortRequest, IdentifyPortResponse, ModeSelection, PortSettings, RobotSummary,
-    SerialPortSummary, UpdateRobotRequest,
-};
-use spiral_robotics_api::settings::{
-    ConnectionTestResponse, DataSettings, SpiralSettings as ContractSpiralSettings,
-    UpdateDataSettingsRequest, VideoSettings,
-};
-use spiral_robotics_api::status::{
-    ApiError, BackendReadiness, BackendReadinessState, StudioSnapshot,
-};
-use spiral_robotics_hardware::{Calibration, MotorSpec, SerialPortCatalog};
+use serde::Deserialize;
+use spiral_robotics_api::status::{BackendReadiness, BackendReadinessState, StudioSnapshot};
 
-use crate::OperationError;
 use crate::adapters::hardware::HardwareApiProjection as _;
-#[cfg(test)]
-use crate::data::SpiralDestinationSettings;
-use crate::data::catalog::{
-    DeleteEpisodeCommand, EpisodeActivity, EpisodeCatalogActions, EpisodeCatalogPort,
-};
-use crate::data::catalog_lease::{CatalogLeaseOwner, CatalogLeaseToken, CatalogMutationLease};
+use crate::data::catalog_lease::CatalogMutationLease;
 use crate::data::connection::SpiralConnectionController;
-use crate::data::queries::{EpisodeQueries, EpisodeQueryPort};
-use crate::data::seek::{
-    ActiveRecording, PhysicalSeekActions, PhysicalSeekPlan, PhysicalSeekPort, RecordedSample,
-    RecordedSeekState, SampledArm, SeekActivity, SeekControlMode, SeekEpisodeCommand, SeekTarget,
-    SeekableEpisode,
-};
-use crate::data::{
-    ConnectionCheck, DataCatalogPort, DataSettingsSnapshot, DataSettingsUpdate,
-    QueryColumn as CapabilityQueryColumn, QueryCommand, QueryResult as CapabilityQueryResult,
-    QueryValue, TestConnectionCommand, UpdateDataSettingsCommand,
-};
-use crate::recording::{
-    RecordingActions, RecordingContext, RecordingPort, RecordingResult, ReplayActions,
-    ReplayEpisode, ReplayPlan, ReplayPort, ReplayTrajectory, SetRecordingPausedCommand,
-    SetReplayPausedCommand, StartRecordingCommand, StartReplayCommand, StopRecordingCommand,
-    TeleoperationPair,
-};
+use crate::data::queries::EpisodeQueries;
 use crate::recording_session::RecordingSessionManager;
 use crate::robotics::cameras::{CameraManager, Frame};
-use crate::robotics::video::{
-    CameraCaptureSpec, VideoAsset, VideoCapture, VideoCaptureRequest, VideoEncoderSettings,
-};
-use crate::robots::calibration::{
-    CalibrationActions, CalibrationControlActions, CalibrationHistoryActions,
-    CalibrationHistoryActivity, CalibrationHistoryPort, CalibrationUpdate, RobotCalibrationStore,
-};
-use crate::robots::control::{RobotControlActions, RobotControlCommand};
-use crate::robots::discovery::{
-    CameraDiscoveryPort, IdentifySerialPortCommand, SerialPortInventory, SerialPortQueryPort,
-};
-use crate::robots::mode::{ModeActions, OperatorMode};
-use crate::robots::service::{
-    AutoConnectOutcome, AutoConnectStatus, CameraAssignment, CreateRobotCommand, NewRobot,
-    RobotActions, RobotCatalogActions, RobotConnectionActions, RobotConnectionPort,
-    RobotConnectionSpec, RobotStore, RobotUpdate, SavedRobot, SerialPortConfiguration,
-    UpdateRobotCommand,
-};
-use crate::robots::workspace::{RobotRecord, RobotWorkspace, WorkspaceError};
+use crate::robotics::video::{VideoAsset, VideoCapture, VideoEncoderSettings};
+use crate::robots::discovery::CameraDiscoveryPort;
+use crate::robots::service::RobotCatalogActions;
+use crate::robots::workspace::RobotWorkspace;
 use crate::rollout::manager::RolloutManager;
 use crate::training::manager::TrainingManager;
 use crate::workflow::agent::WorkflowAgentManager;
 use crate::workflow::manager::WorkflowManager;
-use spiral_robotics_hardware::{HardwareHandle, HardwareState, RobotSpec};
+use spiral_robotics_hardware::HardwareHandle;
 use spiral_robotics_storage::StorageManager;
 use spiral_robotics_storage::StudioPreferencesStore;
-use spiral_robotics_storage::episodes::{
-    ArmCondition, EpisodeError, EpisodeInspection, EpisodeRecordingRequest, EpisodeStore,
-    EpisodeWriter, JointMotorLimits, RobotPlaybackRequest,
-};
+use spiral_robotics_storage::episodes::EpisodeStore;
 use spiral_robotics_storage::video::{VideoAssetKey, VideoByteRange};
 
 /// Boundary marker separating parts of an MJPEG response.
@@ -386,12 +322,12 @@ impl BootstrapState {
         ));
     }
 
-    fn catalog_unavailable(&self) -> Option<String> {
+    pub(crate) fn catalog_unavailable(&self) -> Option<String> {
         let current = self.current();
         (!current.catalog_available()).then(|| current.detail().to_owned())
     }
 
-    fn storage_unavailable(&self) -> Option<String> {
+    pub(crate) fn storage_unavailable(&self) -> Option<String> {
         let current = self.current();
         (!current.storage_available()).then(|| current.detail().to_owned())
     }
@@ -484,7 +420,7 @@ impl AppState {
         }
     }
 
-    pub(super) async fn finish_video_capture(&self, capture: VideoCapture) -> Vec<VideoAsset> {
+    pub(crate) async fn finish_video_capture(&self, capture: VideoCapture) -> Vec<VideoAsset> {
         let (videos, failures) = capture.finish().await;
         for failure in failures {
             self.cameras()
@@ -494,149 +430,15 @@ impl AppState {
     }
 }
 
-/// A failed request, rendered as `{"error": "..."}`.
-#[derive(Debug)]
-pub(crate) struct Failure(StatusCode, String);
-
-impl Failure {
-    fn bad_request(message: impl Into<String>) -> Self {
-        Self(StatusCode::BAD_REQUEST, message.into())
-    }
-
-    fn import(message: impl Into<String>) -> Self {
-        let message = message.into();
-        let status = if spiral_robotics_storage::ProjectStore::is_unavailable_error(&message) {
-            StatusCode::SERVICE_UNAVAILABLE
-        } else {
-            StatusCode::BAD_REQUEST
-        };
-        Self(status, message)
-    }
-
-    fn conflict(message: impl Into<String>) -> Self {
-        Self(StatusCode::CONFLICT, message.into())
-    }
-
-    fn catalog_read(message: impl Into<String>) -> Self {
-        let message = message.into();
-        let status = if spiral_robotics_storage::ProjectStore::is_unavailable_error(&message) {
-            StatusCode::SERVICE_UNAVAILABLE
-        } else {
-            StatusCode::INTERNAL_SERVER_ERROR
-        };
-        Self(status, message)
-    }
-
-    fn unavailable(message: impl Into<String>) -> Self {
-        Self(StatusCode::SERVICE_UNAVAILABLE, message.into())
-    }
-}
-
-impl IntoResponse for Failure {
-    fn into_response(self) -> Response {
-        let retry = self.0 == StatusCode::SERVICE_UNAVAILABLE;
-        let mut response = (self.0, Json(ApiError::new(self.1))).into_response();
-        if retry {
-            response
-                .headers_mut()
-                .insert(header::RETRY_AFTER, "1".parse().expect("valid retry delay"));
-        }
-        response
-    }
-}
-
-impl From<EpisodeError> for Failure {
-    fn from(error: EpisodeError) -> Self {
-        let status = match &error {
-            EpisodeError::InvalidId(_) | EpisodeError::Invalid(_) => StatusCode::BAD_REQUEST,
-            EpisodeError::NotFound(_) => StatusCode::NOT_FOUND,
-        };
-        Self(status, error.to_string())
-    }
-}
-
-impl From<WorkspaceError> for Failure {
-    fn from(error: WorkspaceError) -> Self {
-        let status = match &error {
-            WorkspaceError::InvalidId(_) | WorkspaceError::Invalid(_) => StatusCode::BAD_REQUEST,
-            WorkspaceError::NotFound(_) => StatusCode::NOT_FOUND,
-            WorkspaceError::AlreadyExists(_) => StatusCode::CONFLICT,
-            WorkspaceError::Config(_) => StatusCode::INTERNAL_SERVER_ERROR,
-        };
-        Self(status, error.to_string())
-    }
-}
-
-/// Control-thread refusals are the operator asking for something not currently
-/// allowed, which is a client error rather than a server fault.
-impl From<String> for Failure {
-    fn from(message: String) -> Self {
-        Self(StatusCode::CONFLICT, message)
-    }
-}
-
-impl From<OperationError> for Failure {
-    fn from(error: OperationError) -> Self {
-        let status = match error {
-            OperationError::InvalidInput(_) => StatusCode::BAD_REQUEST,
-            OperationError::NotFound(_) => StatusCode::NOT_FOUND,
-            OperationError::Conflict(_) => StatusCode::CONFLICT,
-            OperationError::External(_) => StatusCode::BAD_GATEWAY,
-            OperationError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
-        };
-        Self(status, error.to_string())
-    }
-}
-
 /// Build the studio's API routes.
 impl AppState {
     pub(crate) fn api_router(self) -> Router {
-        let storage_routes = Self::recording_storage_router().route_layer(
-            middleware::from_fn_with_state(self.clone(), Self::require_storage_ready),
-        );
-        let catalog_routes = Router::new()
-            .merge(Self::data_catalog_router())
-            .merge(Self::device_catalog_router())
-            .merge(Self::recording_router())
-            .merge(Self::workflow_router())
-            .route_layer(middleware::from_fn_with_state(
-                self.clone(),
-                Self::require_catalog_ready,
-            ));
-
         Router::new()
-            .merge(Self::data_bootstrap_router())
+            .merge(Self::data_transfer_router())
             .merge(Self::device_bootstrap_router())
-            .merge(storage_routes)
-            .merge(catalog_routes)
+            .merge(Self::recording_storage_router())
             .route("/events", get(Self::events))
             .with_state(self)
-    }
-
-    async fn require_storage_ready(
-        State(state): State<Self>,
-        request: Request,
-        next: Next,
-    ) -> Result<Response, Failure> {
-        match state.bootstrap().storage_unavailable() {
-            Some(detail) => Err(Failure::unavailable(format!(
-                "SpiralDB storage is not ready: {detail}"
-            ))),
-            None => Ok(next.run(request).await),
-        }
-    }
-
-    async fn require_catalog_ready(
-        State(state): State<Self>,
-        request: Request,
-        next: Next,
-    ) -> Result<Response, Failure> {
-        match state.bootstrap().catalog_unavailable() {
-            Some(detail) => Err(Failure::unavailable(format!(
-                "Studio catalog is not ready: {detail}"
-            ))),
-            None => Ok(next.run(request).await),
-        }
     }
 
     /// Assemble the current setup-level view of the studio.
@@ -645,7 +447,7 @@ impl AppState {
         let hardware = state.hardware().state();
         let readiness = state.bootstrap().current();
         let robots = if readiness.catalog_available() {
-            let robot_adapter = devices::RobotHttpAdapter::prefetched(state).await;
+            let robot_adapter = crate::device_commands::RobotAdapter::prefetched(state).await;
             let mut summaries = Vec::new();
             for saved in RobotCatalogActions::new(&robot_adapter).list().await {
                 let connection = hardware
@@ -695,7 +497,8 @@ impl AppState {
             issues.push(issue.to_owned());
         }
 
-        let cameras = devices::CameraDiscoveryAdapter::new(state.cameras().clone()).cameras();
+        let cameras =
+            crate::device_commands::CameraDiscoveryAdapter::new(state.cameras().clone()).cameras();
         StudioSnapshot::new(readiness, "SpiralDB", hardware.to_api())
             .with_robots(robots)
             .with_cameras(cameras)
@@ -918,8 +721,8 @@ impl AgentCursor {
     }
 }
 
-impl From<&spiral_robotics_api::workflow::WorkflowAgentStateResponse> for AgentCursor {
-    fn from(state: &spiral_robotics_api::workflow::WorkflowAgentStateResponse) -> Self {
+impl From<&spiral_robotics_api::workflow::WorkflowAgentSnapshot> for AgentCursor {
+    fn from(state: &spiral_robotics_api::workflow::WorkflowAgentSnapshot) -> Self {
         Self {
             scope_id: state.scope_id().to_owned(),
             revision: state.revision(),

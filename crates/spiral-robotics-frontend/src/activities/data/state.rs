@@ -8,12 +8,8 @@
 use std::sync::Arc;
 
 use dioxus::prelude::*;
-use gloo_net::http::Method;
 use spiral_robotics_api::identity::DatasetId;
-use spiral_robotics_api::recording::{
-    DatasetCatalogResponse, DatasetSummary, EpisodeCatalogResponse, EpisodeInfo, EpisodeListItem,
-};
-use spiral_robotics_api::relations::SpiralQueryRequest;
+use spiral_robotics_api::recording::{DatasetSummary, EpisodeInfo, EpisodeListItem};
 
 use crate::activities::data::catalog::ManagedTable;
 use crate::activities::data::query_result::{
@@ -22,7 +18,9 @@ use crate::activities::data::query_result::{
 use crate::activities::data::sql_draft::GeneratedSqlDraft;
 use crate::activities::data::workbench::QueryPresetSql;
 use crate::client::episode_data::EpisodeData;
-use crate::client::http as api;
+use crate::client::server_fns::{
+    list_datasets as fetch_datasets, list_episodes as fetch_episodes, run_spiral_query,
+};
 use crate::shell::notifications::MessageSource;
 use crate::shell::state::Studio;
 
@@ -30,17 +28,6 @@ pub(crate) const MAX_QUERY_TABS: usize = 8;
 
 struct ActiveQuery {
     id: u64,
-    #[cfg(target_arch = "wasm32")]
-    abort: Option<web_sys::AbortController>,
-}
-
-impl ActiveQuery {
-    fn abort(&self) {
-        #[cfg(target_arch = "wasm32")]
-        if let Some(abort) = &self.abort {
-            abort.abort();
-        }
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -407,13 +394,13 @@ impl DataController {
             catalog.error = None;
             catalog.request_sequence
         };
-        match api::Http::get::<DatasetCatalogResponse>("/api/datasets").await {
-            Ok(response) => {
+        match fetch_datasets().await.map_err(|error| error.to_string()) {
+            Ok(datasets) => {
                 let mut catalog = self.dataset_catalog.write();
                 if catalog.request_sequence != request_sequence {
                     return Ok(());
                 }
-                catalog.datasets = response.into_datasets();
+                catalog.datasets = datasets;
                 catalog.loading = false;
                 catalog.loaded = true;
                 Ok(())
@@ -449,10 +436,11 @@ impl DataController {
             catalog.error = None;
             catalog.request_sequence
         };
-        let path = format!("/api/episodes?dataset_id={dataset_id}");
-        match api::Http::get::<EpisodeCatalogResponse>(&path).await {
-            Ok(response) => {
-                let (episodes, issues) = response.into_parts();
+        match fetch_episodes(dataset_id.clone())
+            .await
+            .map_err(|error| error.to_string())
+        {
+            Ok((episodes, issues)) => {
                 let mut catalog = self.episode_catalog.write();
                 if catalog.request_sequence != request_sequence
                     || catalog.dataset_id.as_deref() != Some(dataset_id.as_str())
@@ -613,7 +601,7 @@ impl DataController {
             .is_some_and(|request| request.id == id)
             && let Some(request) = self.execution.active_request.replace(None)
         {
-            request.abort();
+            let _ = request;
         }
         let mut tabs = self.execution.query_tabs.peek().to_owned();
         let mut active = self.execution.active_query.peek().to_owned();
@@ -666,28 +654,15 @@ impl DataController {
         self.execution.query_tabs.set(tabs);
         self.execution.active_query.set(Some(id));
 
-        #[cfg(target_arch = "wasm32")]
-        let abort = web_sys::AbortController::new().ok();
-        #[cfg(target_arch = "wasm32")]
-        let signal = abort.as_ref().map(web_sys::AbortController::signal);
-        #[cfg(not(target_arch = "wasm32"))]
-        let signal = None::<web_sys::AbortSignal>;
-        self.execution.active_request.set(Some(ActiveQuery {
-            id,
-            #[cfg(target_arch = "wasm32")]
-            abort,
-        }));
+        self.execution.active_request.set(Some(ActiveQuery { id }));
 
-        let request = SpiralQueryRequest::new(statement.clone(), rows);
         // The Data view may be unmounted while the request is in flight. The
         // controller and its generation guard are shell-owned, so completion
         // must outlive the button that launched it.
         dioxus::dioxus_core::spawn_forever(async move {
-            let outcome =
-                api::AbortableJsonRequest::new(Method::POST, "/api/spiral/query", Some(&request))
-                    .with_signal(signal.as_ref())
-                    .send()
-                    .await;
+            let outcome = run_spiral_query(statement.clone(), rows)
+                .await
+                .map_err(|error| error.to_string());
             if self
                 .execution
                 .active_request
@@ -717,7 +692,6 @@ impl DataController {
         let Some(request) = self.execution.active_request.replace(None) else {
             return;
         };
-        request.abort();
         let mut tabs = self.execution.query_tabs.peek().to_owned();
         if let Some(tab) = tabs.iter_mut().find(|tab| tab.id() == request.id) {
             tab.mark_cancelled();

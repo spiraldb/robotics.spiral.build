@@ -1,7 +1,5 @@
 //! Robot configuration, operation, calibration, and telemetry contracts.
 
-use std::collections::BTreeMap;
-
 use serde::{Deserialize, Serialize};
 
 use crate::recording::{RecordingProgress, ReplayProgress};
@@ -97,49 +95,6 @@ impl RobotSummary {
 
     pub const fn connection(&self) -> &ConnectionStatus {
         &self.availability.connection
-    }
-}
-
-/// Result of reinterpreting recorded measured state with a robot's current calibration.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct CalibrationReapplyResponse {
-    episodes_updated: u64,
-    frames_updated: u64,
-    episodes_unchanged: u64,
-    episodes_skipped: u64,
-    warnings: Vec<String>,
-}
-
-impl CalibrationReapplyResponse {
-    pub fn new(episodes_updated: u64, frames_updated: u64, episodes_unchanged: u64) -> Self {
-        Self {
-            episodes_updated,
-            frames_updated,
-            episodes_unchanged,
-            episodes_skipped: 0,
-            warnings: Vec::new(),
-        }
-    }
-
-    pub fn with_skipped(mut self, episodes_skipped: u64, warnings: Vec<String>) -> Self {
-        self.episodes_skipped = episodes_skipped;
-        self.warnings = warnings;
-        self
-    }
-    pub const fn episodes_updated(&self) -> u64 {
-        self.episodes_updated
-    }
-    pub const fn frames_updated(&self) -> u64 {
-        self.frames_updated
-    }
-    pub const fn episodes_unchanged(&self) -> u64 {
-        self.episodes_unchanged
-    }
-    pub const fn episodes_skipped(&self) -> u64 {
-        self.episodes_skipped
-    }
-    pub fn warnings(&self) -> &[String] {
-        &self.warnings
     }
 }
 
@@ -1012,17 +967,15 @@ impl CalibrationJointProgress {
     }
 }
 
-/// Create a new robot instance in SpiralDB.
+/// A new robot instance admitted for creation in SpiralDB.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct CreateRobotRequest {
+pub struct NewRobot {
     id: String,
     /// Defaults to `so101_follower` when omitted.
     #[serde(default)]
     robot_type: Option<String>,
     #[serde(default)]
-    port: Option<String>,
-    #[serde(default)]
-    baud_rate: Option<u32>,
+    port: Option<PortSettings>,
 }
 
 /// Change a robot's port or camera assignments.
@@ -1030,136 +983,69 @@ pub struct CreateRobotRequest {
 /// Omitted fields are left exactly as they are in the stored configuration,
 /// including fields this build does not understand.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct UpdateRobotRequest {
+pub struct RobotUpdate<C = Vec<CameraBinding>> {
+    id: String,
     #[serde(default)]
     robot_type: Option<String>,
     #[serde(default)]
     port: Option<PortSettings>,
     #[serde(default)]
-    cameras: Option<Vec<CameraBinding>>,
+    cameras: Option<C>,
 }
 
-/// Command joint positions in normalized `[-1.0, 1.0]` space.
-///
-/// Normalized commands are the only ones the API accepts: they are meaningless
-/// without a calibration, which is exactly the safety property wanted here.
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct GoalRequest {
-    normalized: BTreeMap<String, f64>,
-}
-
-impl CreateRobotRequest {
+impl NewRobot {
     pub fn new(id: impl Into<String>, robot_type: Option<String>) -> Self {
         Self {
             id: id.into(),
             robot_type,
             port: None,
-            baud_rate: None,
         }
     }
 
-    pub fn id(&self) -> &str {
-        &self.id
+    pub fn with_port(mut self, port: Option<PortSettings>) -> Self {
+        self.port = port;
+        self
     }
 
-    pub fn robot_type(&self) -> Option<&str> {
-        self.robot_type.as_deref()
-    }
-
-    pub fn port(&self) -> Option<&str> {
-        self.port.as_deref()
-    }
-
-    pub const fn baud_rate(&self) -> Option<u32> {
-        self.baud_rate
+    pub fn into_parts(self) -> (String, Option<String>, Option<PortSettings>) {
+        (self.id, self.robot_type, self.port)
     }
 }
 
-impl UpdateRobotRequest {
-    pub fn with_port(port: PortSettings) -> Self {
+impl RobotUpdate<Vec<CameraBinding>> {
+    pub fn with_port(id: impl Into<String>, port: PortSettings) -> Self {
         Self {
+            id: id.into(),
             port: Some(port),
             ..Self::default()
         }
     }
 
-    pub fn with_cameras(cameras: Vec<CameraBinding>) -> Self {
+    pub fn with_cameras(id: impl Into<String>, cameras: Vec<CameraBinding>) -> Self {
         Self {
+            id: id.into(),
             cameras: Some(cameras),
             ..Self::default()
         }
     }
-
-    pub fn robot_type(&self) -> Option<&str> {
-        self.robot_type.as_deref()
-    }
-
-    pub const fn port(&self) -> Option<&PortSettings> {
-        self.port.as_ref()
-    }
-
-    pub fn cameras(&self) -> Option<&[CameraBinding]> {
-        self.cameras.as_deref()
-    }
 }
 
-impl GoalRequest {
-    pub fn new(normalized: BTreeMap<String, f64>) -> Self {
-        Self { normalized }
-    }
-
-    pub const fn normalized(&self) -> &BTreeMap<String, f64> {
-        &self.normalized
-    }
-}
-
-/// Identify a motor bus by comparing the ports present before and after a cable
-/// is unplugged.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct IdentifyPortRequest {
-    /// Port paths observed before the cable was removed.
-    before: Vec<String>,
-}
-
-impl IdentifyPortRequest {
-    pub fn new(before: Vec<String>) -> Self {
-        Self { before }
-    }
-
-    pub fn before(&self) -> &[String] {
-        &self.before
-    }
-}
-
-/// The outcome of a port-identification attempt.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct IdentifyPortResponse {
-    /// The single port that disappeared, when exactly one did.
-    port: Option<String>,
-    /// Every port that disappeared, for the ambiguous case.
-    removed: Vec<String>,
-    message: String,
-}
-
-impl IdentifyPortResponse {
-    pub fn new(port: Option<String>, removed: Vec<String>, message: impl Into<String>) -> Self {
+impl<C> RobotUpdate<C> {
+    pub fn new(
+        id: impl Into<String>,
+        robot_type: Option<String>,
+        port: Option<PortSettings>,
+        cameras: Option<C>,
+    ) -> Self {
         Self {
+            id: id.into(),
+            robot_type,
             port,
-            removed,
-            message: message.into(),
+            cameras,
         }
     }
 
-    pub fn port(&self) -> Option<&str> {
-        self.port.as_deref()
-    }
-
-    pub fn message(&self) -> &str {
-        &self.message
-    }
-    #[cfg(any(test, feature = "test-support"))]
-    /// Every port that disappeared, for the ambiguous case.
-    pub fn removed(&self) -> &[String] {
-        &self.removed
+    pub fn into_parts(self) -> (String, Option<String>, Option<PortSettings>, Option<C>) {
+        (self.id, self.robot_type, self.port, self.cameras)
     }
 }

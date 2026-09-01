@@ -9,9 +9,12 @@
 mod adapters;
 mod clock;
 mod data;
+mod data_commands;
+mod device_commands;
 mod error;
 mod http;
 mod recording;
+mod recording_commands;
 mod recording_session;
 mod robotics;
 mod robots;
@@ -20,7 +23,15 @@ mod sync;
 mod training;
 mod training_rollout;
 mod workflow;
+mod workflow_commands;
 
+pub use data_commands::{
+    DataCommands, DataFailure, DataSettingsChange, MAX_EPISODE_IMPORT_BYTES,
+    MAX_PROJECT_IMPORT_BYTES,
+};
+pub use device_commands::{DeviceCommands, DeviceFailure};
 pub(crate) use error::OperationError;
 pub use http::server::StudioServer;
+pub use recording_commands::{RecordingCommands, RecordingFailure};
 pub use training_rollout::{TrainingRolloutCommands, TrainingRolloutFailure};
+pub use workflow_commands::{WorkflowCommands, WorkflowFailure};
