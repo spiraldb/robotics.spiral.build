@@ -46,10 +46,10 @@ jobs:
 
       - name: Build Studio stylesheet
         run: |
-          mkdir -p crates/spiral-robotics-studio/assets
+          mkdir -p crates/frontend/assets
           nix develop .#ci --command tailwindcss \
-            -i crates/spiral-robotics-studio/tailwind.css \
-            -o crates/spiral-robotics-studio/assets/tailwind.css
+            -i crates/frontend/tailwind.css \
+            -o crates/frontend/assets/tailwind.css
 
       - name: Check formatting
         run: nix develop .#ci --command cargo fmt --all -- --check
@@ -76,8 +76,8 @@ jobs:
           wheel_dir="${RUNNER_TEMP}/spiral-training-wheel"
           mkdir -p "$wheel_dir"
           nix develop .#ci --command uv build --project training --wheel --out-dir "$wheel_dir"
-          unzip -p "$wheel_dir"/*.whl spiral_training_runtime/storage_schema_version.json | cmp - crates/spiral-robotics-storage/schema/version.json
-          unzip -p "$wheel_dir"/*.whl spiral_training_runtime/training_protocol_version.json | cmp - crates/spiral-robotics-training/protocol/version.json
+          unzip -p "$wheel_dir"/*.whl spiral_training_runtime/storage_schema_version.json | cmp - crates/backend/storage/schema/version.json
+          unzip -p "$wheel_dir"/*.whl spiral_training_runtime/training_protocol_version.json | cmp - crates/backend/training/protocol/version.json
 
       # The locked worker environment includes the production CUDA stack and
       # SpiralDB driver. A separate compute/integration lane will exercise it;

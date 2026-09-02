@@ -1,15 +1,15 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/spiral-robotics-common",
-    "crates/spiral-robotics-hardware",
-    "crates/spiral-robotics-storage",
-    "crates/spiral-robotics-inference",
-    "crates/spiral-robotics-training",
-    "crates/spiral-robotics-backend",
-    "crates/spiral-robotics-viewport",
-    "crates/spiral-robotics-frontend",
-    "crates/spiral-robotics-studio",
+    "crates/common",
+    "crates/backend/hardware",
+    "crates/backend/storage",
+    "crates/backend/inference",
+    "crates/backend/training",
+    "crates/backend",
+    "crates/frontend/viewport",
+    "crates/frontend",
+    "crates/studio",
 ]
 
 [workspace.package]
@@ -26,14 +26,14 @@ base64 = "0.22"
 candle-core = "=0.11.0"
 candle-nn = "=0.11.0"
 candle-transformers = "=0.11.0"
-spiral-robotics-common = { path = "crates/spiral-robotics-common" }
-spiral-robotics-inference = { path = "crates/spiral-robotics-inference", default-features = false }
-spiral-robotics-hardware = { path = "crates/spiral-robotics-hardware" }
-spiral-robotics-backend = { path = "crates/spiral-robotics-backend" }
-spiral-robotics-frontend = { path = "crates/spiral-robotics-frontend" }
-spiral-robotics-storage = { path = "crates/spiral-robotics-storage" }
-spiral-robotics-training = { path = "crates/spiral-robotics-training" }
-spiral-robotics-viewport = { path = "crates/spiral-robotics-viewport" }
+spiral-robotics-common = { path = "crates/common" }
+spiral-robotics-inference = { path = "crates/backend/inference", default-features = false }
+spiral-robotics-hardware = { path = "crates/backend/hardware" }
+spiral-robotics-backend = { path = "crates/backend" }
+spiral-robotics-frontend = { path = "crates/frontend" }
+spiral-robotics-storage = { path = "crates/backend/storage" }
+spiral-robotics-training = { path = "crates/backend/training" }
+spiral-robotics-viewport = { path = "crates/frontend/viewport" }
 spiral-client = { git = "https://github.com/spiraldb/spiraldb.git", branch = "develop" }
 spiral-config = { git = "https://github.com/spiraldb/spiraldb.git", branch = "develop" }
 spiral-defaults = { git = "https://github.com/spiraldb/spiraldb.git", branch = "develop" }

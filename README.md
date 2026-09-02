@@ -22,7 +22,7 @@ nix develop .
 Start the studio with:
 
 ```console
-cd crates/spiral-robotics-studio
+cd crates/studio
 dx serve --release
 ```
 

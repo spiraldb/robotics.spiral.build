@@ -5,14 +5,12 @@ mod protocol_build;
 
 fn main() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let crates = manifest
+    let backend = manifest
         .parent()
-        .expect("training crate lives in the workspace crates directory");
+        .expect("training crate lives in the backend directory");
     protocol_build::ProtocolVersionGenerator::new(
         manifest.join("protocol").as_path(),
-        crates
-            .join("spiral-robotics-storage/schema/version.json")
-            .as_path(),
+        backend.join("storage/schema/version.json").as_path(),
     )
     .generate();
 }

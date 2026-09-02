@@ -13,7 +13,7 @@ Training tensors never pass through Studio.
 The authoritative API major/minor and compatible storage schema range live in
 [`protocol/version.json`](protocol/version.json). The current relational
 schema lives with its owner in
-[`../spiral-robotics-storage/schema/version.json`](../spiral-robotics-storage/schema/version.json).
+[`../storage/schema/version.json`](../storage/schema/version.json).
 Rust constants are generated from those files; version literals do not belong
 in clients or runtimes. The deliberately small surface is:
 
@@ -38,4 +38,4 @@ path because those live observations originate in Studio's hardware process.
 
 See the [protocol bump policy](protocol/README.md) before changing a request,
 response, or compatibility rule. Persisted-schema changes follow the
-[storage schema policy](../spiral-robotics-storage/schema/README.md).
+[storage schema policy](../storage/schema/README.md).

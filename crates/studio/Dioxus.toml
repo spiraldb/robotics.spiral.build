@@ -6,8 +6,8 @@
 name = "spiral-robotics-studio"
 # Let DX own the stylesheet pipeline too. Both `dx serve` and `dx bundle`
 # compile it before the client is built, with no checked-in generated CSS.
-tailwind_input = "../spiral-robotics-frontend/tailwind.css"
-tailwind_output = "../spiral-robotics-frontend/assets/tailwind.css"
+tailwind_input = "../frontend/tailwind.css"
+tailwind_output = "../frontend/assets/tailwind.css"
 
 [web.app]
 title = "Spiral Robotics Studio"

@@ -37,7 +37,7 @@ impl<'a> SchemaVersionGenerator<'a> {
         let generated = format!(
             "/// Schema version written into every completed episode row.\n\
              ///\n\
-             /// Generated from `spiral-robotics-storage/schema/version.json`.\n\
+             /// Generated from `crates/backend/storage/schema/version.json`.\n\
              {visibility} const SCHEMA_VERSION: u32 = {current};\n"
         );
         let output = PathBuf::from(std::env::var("OUT_DIR").expect("Cargo supplies OUT_DIR"));

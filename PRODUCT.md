@@ -406,19 +406,19 @@ rollout, replay, export), *ingestion*
 
 Real, in-repo:
 
-- `crates/spiral-robotics-viewport/assets/so101.urdf` — the shipped robot description.
+- `crates/frontend/viewport/assets/so101.urdf` — the shipped robot description.
 - `examples/robot.json`, `examples/calibration-input.json` — real configuration
   and calibration input.
 - `robots/leader.json`, `robots/follower.json` — a working two-arm setup.
-- `crates/spiral-robotics-studio-backend/src/backend/recording/spiral.rs` — the relational episode schema.
-- `crates/spiral-robotics-studio-backend/src/backend/robotics/video.rs` — server-owned MP4 capture and
+- `crates/backend/storage/src/episodes/episode_schema.rs` — the relational episode schema.
+- `crates/backend/src/robotics/video.rs` — server-owned MP4 capture and
   timeline-aligned segment manifests.
-- `crates/spiral-robotics-studio-backend/src/backend/workflow/model.rs` — the
+- `crates/backend/src/workflow/model.rs` — the
   pinned SigLIP runner, SQL-candidate contract, source-derived feature cache,
   Studio feature registry, atomic publication, bounded pipeline, quarantine,
   cancellation, and cross-workflow reuse.
-- `crates/spiral-robotics-studio-backend/src/backend/workflow/agent.rs` and
-  `provider.rs` — the bounded relation-first tool loop, project-scoped durable
+- `crates/backend/src/workflow/agent.rs` and
+  `crates/backend/src/workflow/provider.rs` — the bounded relation-first tool loop, project-scoped durable
   session, long-run continuation, and OpenAI-compatible streaming transport.
 - A detailed `README.md` maintained in the repository.
 

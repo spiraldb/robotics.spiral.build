@@ -348,7 +348,7 @@ announce the resting state. A mode or torque chip exists while that condition
 is consequential, not merely because the interface has room for another badge.
 
 **The One-Spelling Rule.** Reusable interface colours are role-named
-`--tone-*` properties in `crates/spiral-robotics-studio/tailwind.css`, including
+`--tone-*` properties in `crates/frontend/tailwind.css`, including
 semantic training-series roles. The panel crate maps its `--rp-*` roles to
 those tokens. Renderer-owned arm and signal colours remain centralized with
 the code that paints them; components do not restate their literals.

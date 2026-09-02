@@ -132,10 +132,8 @@ mod tests {
         );
         let request_fixture: serde_json::Value =
             serde_json::from_str(include_str!("../fixtures/job-request.json")).unwrap();
-        let storage_schema: serde_json::Value = serde_json::from_str(include_str!(
-            "../../spiral-robotics-storage/schema/version.json"
-        ))
-        .unwrap();
+        let storage_schema: serde_json::Value =
+            serde_json::from_str(include_str!("../../storage/schema/version.json")).unwrap();
         assert_eq!(
             request_fixture["spiral_schema_version"],
             storage_schema["current"]

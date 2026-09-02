@@ -54,7 +54,7 @@
             pkgs.dioxus-cli # fullstack dx bundle / dx serve
             tailwind # compiles tailwind.css
             # Must match the `wasm-bindgen` version pinned in
-            # crates/spiral-robotics-studio/Cargo.toml; wasm-bindgen refuses a mismatch.
+            # crates/frontend/Cargo.toml; wasm-bindgen refuses a mismatch.
             pkgs.wasm-bindgen-cli_0_2_126
             pkgs.binaryen # wasm-opt, used for release builds
           ];

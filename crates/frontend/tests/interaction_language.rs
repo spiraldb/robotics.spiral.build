@@ -325,10 +325,8 @@ fn studio_is_a_strict_desktop_pointer_application() {
         .expect("Studio styles should be readable");
     let ui_styles = fs::read_to_string(frontend.join("assets/ui.css"))
         .expect("shared UI styles should be readable");
-    let crates = frontend.parent().expect("Frontend should live in crates/");
-    let viewport_gestures =
-        fs::read_to_string(crates.join("spiral-robotics-viewport/src/gesture.rs"))
-            .expect("viewport gesture source should be readable");
+    let viewport_gestures = fs::read_to_string(frontend.join("viewport/src/gesture.rs"))
+        .expect("viewport gesture source should be readable");
     let scene = fs::read_to_string(frontend.join("src/panels/scene.rs"))
         .expect("scene source should be readable");
 
@@ -501,7 +499,7 @@ fn workflow_assistant_receipts_results_and_run_states_are_explicit() {
         frontend
             .parent()
             .expect("Frontend should live in crates/")
-            .join("spiral-robotics-backend/src/workflow/agent.rs"),
+            .join("backend/src/workflow/agent.rs"),
     )
     .expect("Workflow agent source should be readable");
     let data = fs::read_to_string(frontend.join("src/activities/data/query_result.rs"))

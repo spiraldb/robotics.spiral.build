@@ -39,8 +39,8 @@ spiral-training-runtime = "spiral_training_runtime.__main__:main"
 packages = ["src/spiral_training_runtime"]
 
 [tool.hatch.build.targets.wheel.force-include]
-"../crates/spiral-robotics-storage/schema/version.json" = "spiral_training_runtime/storage_schema_version.json"
-"../crates/spiral-robotics-training/protocol/version.json" = "spiral_training_runtime/training_protocol_version.json"
+"../crates/backend/storage/schema/version.json" = "spiral_training_runtime/storage_schema_version.json"
+"../crates/backend/training/protocol/version.json" = "spiral_training_runtime/training_protocol_version.json"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

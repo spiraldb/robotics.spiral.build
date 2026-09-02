@@ -35,13 +35,13 @@ def _load_versions() -> RuntimeVersions:
     storage = json.loads(
         _metadata_text(
             "storage_schema_version.json",
-            Path("crates/spiral-robotics-storage/schema/version.json"),
+            Path("crates/backend/storage/schema/version.json"),
         )
     )
     protocol = json.loads(
         _metadata_text(
             "training_protocol_version.json",
-            Path("crates/spiral-robotics-training/protocol/version.json"),
+            Path("crates/backend/training/protocol/version.json"),
         )
     )
     _require_keys(storage, {"format_version", "current"}, "storage schema version")
