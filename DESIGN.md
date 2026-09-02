@@ -454,9 +454,9 @@ in the Timeline and global status bar. Robot identity appears once in a compact
 switcher. There is no selected-arm toolbar beneath it. Setup is global Settings
 → Robots rather than a collapsible section in Live.
 
-Data states `Dataset → Episodes` explicitly. Episodes owns select, replay, and
-delete, plus lossless episode import/export scoped to the selected dataset.
-Query is a peer tool within Data; its result joins the selected
+Data states `Dataset → Episodes` explicitly. Episodes owns select, replay,
+delete, and external dataset ingestion scoped to the selected dataset. Query
+is a peer tool within Data; its result joins the selected
 episode's Scene as a sibling tab and never unregisters that Scene. The Timeline
 keeps the same layout contract. Recorded camera panels come from the selected
 episode’s media streams, not the currently connected camera assignments.
@@ -1172,16 +1172,12 @@ ambient browser selection—decides whether execution may begin.
 
 ### Data, Episodes, and Query
 
-- **Hierarchy:** Dataset owns Episodes. The Episodes header imports or exports
-  only the selected dataset's episode-owned relations; episode-level actions
-  are Select, Replay, and Delete. Whole-project transfer belongs to Settings →
-  SpiralDB.
+- **Hierarchy:** Dataset owns Episodes. The Episodes header adds external data
+  to the selected dataset; episode-level actions are Select, Replay, and
+  Delete. Whole-project transfer belongs to Settings → SpiralDB.
 - **One storage layer:** Episodes remain one newest-first SpiralDB ledger. No
   location grouping, publication badge, Push action, retry queue, or local
   fallback appears because there is no second durable store to reconcile.
-- **Episode transfer:** Data exports a versioned `.spiral-episodes` file for the
-  selected dataset. Import merges into the selected target dataset and refuses
-  episode-ID collisions rather than replacing an existing episode.
 - **Catalog refresh:** The Data Activity Controller loads Episodes when Data
   first opens and retains them across route changes. Known recording, deletion,
   and import results update the controller-owned catalog; one compact Refresh
@@ -1192,7 +1188,7 @@ ambient browser selection—decides whether execution may begin.
   polling or the live event stream.
 - **Form decision:** This is an incumbent-surface extension, exempt from a
   concept roll because the operator explicitly retained the existing ordered
-  episode list and rejected location grouping or a new transfer composition.
+  episode list and rejected location grouping or a new ingestion composition.
 - **Query:** A guarded read-only SQL editor with presets and a row limit in the
   Data workbench. Results render as the active sibling tab beside the preserved
   Scene and may synchronize the selected episode/playhead.

@@ -2206,7 +2206,7 @@ impl ProjectConnection {
         episode_id: &str,
     ) -> Result<(), String> {
         let connection = self;
-        for table in super::EpisodeBundleSection::DELETION_RELATIONS {
+        for table in super::EpisodeRelations::DELETION_RELATIONS {
             let target = table.qualified_name(namespace);
             connection
                 .execute_delete_sql(&SpiralSql::delete_episode(&target, episode_id))

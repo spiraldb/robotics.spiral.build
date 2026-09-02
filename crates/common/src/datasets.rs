@@ -32,53 +32,6 @@ impl ProjectImportSummary {
     }
 }
 
-/// What merging a portable episode bundle into one dataset imported.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct EpisodeImportSummary {
-    dataset_id: String,
-    episodes: u64,
-    rows: u64,
-    first_episode: Option<String>,
-    /// Non-transactional derived resources that still need repair after the
-    /// durable episode rows committed.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    warnings: Vec<String>,
-}
-
-impl EpisodeImportSummary {
-    pub fn new(dataset_id: impl Into<String>, episodes: u64, rows: u64) -> Self {
-        Self {
-            dataset_id: dataset_id.into(),
-            episodes,
-            rows,
-            first_episode: None,
-            warnings: Vec::new(),
-        }
-    }
-    pub fn with_first_episode(mut self, first_episode: Option<String>) -> Self {
-        self.first_episode = first_episode;
-        self
-    }
-    pub fn dataset_id(&self) -> &str {
-        &self.dataset_id
-    }
-    pub const fn episodes(&self) -> u64 {
-        self.episodes
-    }
-    pub const fn rows(&self) -> u64 {
-        self.rows
-    }
-    pub fn first_episode(&self) -> Option<&str> {
-        self.first_episode.as_deref()
-    }
-    pub fn warnings(&self) -> &[String] {
-        &self.warnings
-    }
-    pub fn push_warning(&mut self, warning: impl Into<String>) {
-        self.warnings.push(warning.into());
-    }
-}
-
 /// Dataset layouts that Studio can materialize from a Hugging Face dataset
 /// repository using Spiral's native readers and Dataset producers.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

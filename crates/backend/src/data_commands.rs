@@ -4,8 +4,8 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use spiral_robotics_common::datasets::{
-    EpisodeImportSummary, HuggingFaceDatasetImportSummary, HuggingFaceDatasetInspection,
-    HuggingFaceDatasetSource, ProjectImportSummary,
+    HuggingFaceDatasetImportSummary, HuggingFaceDatasetInspection, HuggingFaceDatasetSource,
+    ProjectImportSummary,
 };
 use spiral_robotics_common::relations::{RelationCatalog, SpiralQuerySnapshot};
 use spiral_robotics_common::settings::{
@@ -26,8 +26,6 @@ use crate::main_runtime::{MainRuntime, MainRuntimeFailure};
 
 pub const MAX_PROJECT_IMPORT_BYTES: usize =
     spiral_robotics_storage::bundle::ProjectBundle::MAX_BYTES;
-pub const MAX_EPISODE_IMPORT_BYTES: usize =
-    spiral_robotics_storage::bundle::EpisodeBundle::MAX_BYTES;
 
 struct CatalogLeaseReservation {
     lease: Arc<CatalogMutationLease>,
@@ -464,58 +462,6 @@ impl DataCommands {
             .await?;
         self.state.auto_connect_saved_robots().await;
         Ok(summary)
-    }
-
-    pub async fn import_episodes(
-        &self,
-        dataset_id: String,
-        document: Vec<u8>,
-    ) -> Result<EpisodeImportSummary, DataFailure> {
-        let commands = self.clone();
-        self.main_runtime
-            .execute(async move {
-                commands
-                    .import_episodes_on_main_runtime(dataset_id, document)
-                    .await
-            })
-            .await?
-    }
-
-    async fn import_episodes_on_main_runtime(
-        &self,
-        dataset_id: String,
-        document: Vec<u8>,
-    ) -> Result<EpisodeImportSummary, DataFailure> {
-        self.require_catalog_ready()?;
-        if !spiral_robotics_storage::StorageSchema::is_dataset_id(&dataset_id) {
-            return Err(DataFailure::invalid(
-                "dataset ID must contain 1–96 letters, numbers, '.', '_' or '-'",
-            ));
-        }
-        let token = self
-            .state
-            .catalog_lease()
-            .try_acquire(CatalogLeaseOwner::EpisodeImport)
-            .ok_or_else(|| {
-                DataFailure::conflict(
-                    "Wait for the current recording or catalog change before importing episodes",
-                )
-            })?;
-        let _reservation = CatalogLeaseReservation {
-            lease: self.state.catalog_lease().clone(),
-            token,
-        };
-        self.require_import_idle("episodes")?;
-        if document.is_empty() {
-            return Err(DataFailure::invalid(
-                "choose a .spiral-episodes file to import",
-            ));
-        }
-        self.state
-            .storage()
-            .import_episode_bundle(&dataset_id, &document)
-            .await
-            .map_err(DataFailure)
     }
 
     fn require_catalog_ready(&self) -> Result<(), DataFailure> {

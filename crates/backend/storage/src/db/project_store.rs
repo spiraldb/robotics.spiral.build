@@ -1088,7 +1088,7 @@ impl<'a> ManagedRelationProvisioner<'a> {
 #[cfg(test)]
 mod managed_relation_tests {
     use super::*;
-    use crate::episodes::EpisodeBundleSection;
+    use crate::episodes::EpisodeRelations;
 
     #[test]
     fn provisioning_summary_reports_present_and_created_relations() {
@@ -1121,10 +1121,7 @@ mod managed_relation_tests {
                 Table::TrainingCheckpoints,
                 Arc::new(ManagedRelationCatalog::schema(Table::TrainingCheckpoints)),
             ),
-            (
-                Table::VideoAssets,
-                EpisodeBundleSection::native_video_schema(),
-            ),
+            (Table::VideoAssets, EpisodeRelations::native_video_schema()),
         ] {
             let native = schema
                 .fields()

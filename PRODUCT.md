@@ -49,15 +49,15 @@ consumers**:
 
 - **Producers** put episodes into the project. Recording with connected arms
   is the built-in producer. Ingestion from external sources — LeRobot
-  datasets, object stores full of MCAP files, portable episode bundles — is a
-  peer producer and, for many users, the primary one.
+  datasets and object stores full of MCAP files — is a peer producer and, for
+  many users, the primary one.
 - **The data core** is where the user spends their time: the episode catalog,
   the Timeline as one synchronized clock over every stream, SQL query, and
   curation — selecting, transforming, and deriving the datasets worth
   training on.
-- **Consumers** take datasets and episodes out of the core: training a
-  policy, rolling a checkpoint out on real hardware, replaying an episode,
-  and exporting portable bundles.
+- **Consumers** put the core to work: training a policy, rolling a checkpoint
+  out on real hardware, replaying an episode, and backing up the complete
+  project.
 
 The full hardware loop — connect, calibrate, teleoperate, record, train,
 run a policy — remains shipped and supported, but it is one path through the
@@ -194,8 +194,8 @@ never becomes the motor-control runtime.
 - A fullstack Dioxus Studio with five primary operating activities:
   - **Live** owns recording, arm selection, Hold / Release / Teleop, joint
     control, health, and camera status.
-  - **Data** owns the SpiralDB episode catalog, replay/delete actions,
-    selected-dataset episode import/export, and guarded read-only Spiral SQL.
+  - **Data** owns the SpiralDB episode catalog, replay/delete actions, external
+    dataset ingestion, and guarded read-only Spiral SQL.
   - **Workflow** owns relation discovery and a persisted, revision-safe
     Table → Query → optional Model/backfill → final Query → Result editor over existing qualified
     Spiral relations. The backend runs bounded read-only SQL and one executable
@@ -273,7 +273,6 @@ never becomes the motor-control runtime.
   applied on committed release rather than every pointer move.
 - Dataset semantics are explicit: one dataset contains many episodes. An
   episode can be selected, deleted, or replayed on a compatible follower.
-  Data transfers the selected dataset's episodes as `.spiral-episodes`;
   Settings imports and exports the complete active project—including binary
   MP4, checkpoint data, and Studio-owned Workflow feature registry/cache
   relations—as one versioned `.spiral-project` file.
@@ -454,9 +453,9 @@ oversized streams, cancellation, and secret redaction.
    signals, query selection, and replay meet at the Timeline without erasing
    their natural stream rates.
 5. **One SpiralDB project holds the complete durable system; explicit files are
-   transfer formats.** Robot JSON, selected-dataset episode bundles,
-   whole-project bundles, and external source files stay portable, while no
-   filesystem spool or retry queue becomes a second source of truth.
+   transfer formats.** Robot JSON, whole-project bundles, and external source
+   files stay portable, while no filesystem spool or retry queue becomes a
+   second source of truth.
 6. **Robot semantics are capabilities, not assumptions.** An episode earns
    replay, physical seek, and training compatibility by matching a configured
    robot's contract; without a match it remains fully viewable, queryable, and

@@ -15,7 +15,7 @@ use arrow_ipc::writer::StreamWriter;
 use arrow_schema::{DataType, Field, Schema};
 use futures::StreamExt as _;
 use serde::{Deserialize, Serialize};
-use spiral_robotics_common::datasets::{EpisodeImportSummary, ProjectImportSummary};
+use spiral_robotics_common::datasets::ProjectImportSummary;
 use spiral_robotics_common::sql::{QualifiedRelation, UnquotedSqlIdentifier};
 use spiral_robotics_common::workflow::{
     DEFAULT_WORKFLOW_ID, MAX_SIGLIP_CONCEPT_LENGTH, MAX_WORKFLOW_FEATURE_DESCRIPTION_LENGTH,
@@ -26,7 +26,7 @@ use spiral_robotics_common::workflow::{
 use crate::db::ArrowColumns;
 use crate::db::ProjectConnection;
 use crate::db::SpiralSql;
-use crate::episodes::EpisodeBundleSection;
+use crate::episodes::EpisodeRelations;
 use crate::rollout_runs::RolloutBundleSection;
 use crate::settings::StudioPreferenceBundleSection;
 use crate::training::TrainingBundleSection;
@@ -37,9 +37,7 @@ use crate::workflow_documents::{
 use crate::workflow_features::WorkflowFeatureBundleSection;
 
 const PROJECT_MAGIC: &[u8; 8] = b"SPRPROJ1";
-const EPISODES_MAGIC: &[u8; 8] = b"SPREPS01";
 const PROJECT_FORMAT: &str = "spiral-robotics-project";
-const EPISODES_FORMAT: &str = "spiral-robotics-episodes";
 const FORMAT_VERSION: u32 = 1;
 const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
 const MAX_ENTRY_NAME_BYTES: usize = 256;
@@ -245,122 +243,16 @@ impl ProjectBundle {
     pub const MAX_BYTES: usize = 256 * 1024 * 1024;
 }
 
-pub struct EpisodeBundle;
-
-pub(super) struct BundleSource<'a> {
+pub(super) struct ProjectBundleImport<'a> {
     namespace: &'a str,
     bytes: &'a [u8],
 }
 
-impl<'a> BundleSource<'a> {
+impl<'a> ProjectBundleImport<'a> {
     pub(super) const fn new(namespace: &'a str, bytes: &'a [u8]) -> Self {
         Self { namespace, bytes }
     }
 }
-
-pub(super) struct EpisodeBundleSelection<'a> {
-    namespace: &'a str,
-    dataset_id: &'a str,
-}
-
-impl<'a> EpisodeBundleSelection<'a> {
-    pub(super) const fn new(namespace: &'a str, dataset_id: &'a str) -> Self {
-        Self {
-            namespace,
-            dataset_id,
-        }
-    }
-}
-
-pub(super) struct EpisodeBundleImport<'a> {
-    selection: EpisodeBundleSelection<'a>,
-    bytes: &'a [u8],
-}
-
-impl<'a> EpisodeBundleImport<'a> {
-    pub(super) const fn new(selection: EpisodeBundleSelection<'a>, bytes: &'a [u8]) -> Self {
-        Self { selection, bytes }
-    }
-}
-
-impl EpisodeBundle {
-    pub const MAX_BYTES: usize = ProjectBundle::MAX_BYTES;
-    #[cfg(any(test, feature = "test-support"))]
-    pub(super) async fn export(
-        &self,
-        connection: &mut ProjectConnection,
-        selection: EpisodeBundleSelection<'_>,
-    ) -> Result<Vec<u8>, String> {
-        let EpisodeBundleSelection {
-            namespace,
-            dataset_id,
-        } = selection;
-        EpisodeBundle::validate_dataset_id(dataset_id)?;
-        let episodes = Table::Episodes.qualified_name(namespace);
-        let dataset = SpiralSql::string_literal(dataset_id);
-        let episode_ids = format!(
-            "SELECT {episode_id} FROM {episodes} WHERE {dataset_id_column} = {dataset}",
-            episode_id = column::EPISODE_ID,
-            dataset_id_column = column::DATASET_ID,
-        );
-        let mut queries = Vec::new();
-        for table in EpisodeBundleSection::RELATIONS {
-            let relation = table.qualified_name(namespace);
-            let query = match table {
-                Table::Datasets | Table::Episodes => format!(
-                    "SELECT * FROM {relation} WHERE {} = {dataset}",
-                    column::DATASET_ID
-                ),
-                Table::EpisodeStreams | Table::JointSamples => format!(
-                    "SELECT * FROM {relation} WHERE {} IN ({episode_ids})",
-                    column::EPISODE_ID
-                ),
-                Table::VideoAssets => BundleSpec::portable_video_assets_query(
-                    &relation,
-                    Some(&format!("{} IN ({episode_ids})", column::EPISODE_ID)),
-                ),
-                _ => unreachable!("episode bundle table set is closed"),
-            };
-            queries.push((table, query));
-        }
-        let export = EPISODES_SPEC.export_queries(connection, queries).await?;
-        if export
-            .row_counts
-            .iter()
-            .find_map(|(table, rows)| (*table == Table::Episodes).then_some(*rows))
-            .unwrap_or(0)
-            == 0
-        {
-            return Err(format!("dataset {dataset_id:?} has no episodes to export"));
-        }
-        Ok(export.bytes)
-    }
-}
-
-#[derive(Clone, Copy)]
-struct BundleSpec {
-    magic: &'static [u8; 8],
-    format: &'static str,
-    label: &'static str,
-    tables: &'static [Table],
-    max_bytes: usize,
-}
-
-const PROJECT_SPEC: BundleSpec = BundleSpec {
-    magic: PROJECT_MAGIC,
-    format: PROJECT_FORMAT,
-    label: "project",
-    tables: &Table::ALL,
-    max_bytes: ProjectBundle::MAX_BYTES,
-};
-
-const EPISODES_SPEC: BundleSpec = BundleSpec {
-    magic: EPISODES_MAGIC,
-    format: EPISODES_FORMAT,
-    label: "episode bundle",
-    tables: &EpisodeBundleSection::RELATIONS,
-    max_bytes: EpisodeBundle::MAX_BYTES,
-};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct Manifest {
@@ -369,18 +261,6 @@ struct Manifest {
     schema_version: u32,
     exported_ms: i64,
     relations: Vec<String>,
-}
-
-#[cfg(any(test, feature = "test-support"))]
-struct ExportedBundle {
-    bytes: Vec<u8>,
-    row_counts: Vec<(Table, u64)>,
-}
-
-struct NamedExportedBundle {
-    bytes: Vec<u8>,
-    #[cfg(any(test, feature = "test-support"))]
-    row_counts: Vec<(String, u64)>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -499,7 +379,7 @@ impl ProjectBundle {
         for table in ManagedRelationCatalog::tables() {
             let relation = table.qualified_name(namespace);
             let query = if table == Table::VideoAssets {
-                BundleSpec::portable_video_assets_query(&relation, None)
+                ProjectBundle::portable_video_assets_query(&relation)
             } else {
                 format!("SELECT * FROM {relation}")
             };
@@ -515,52 +395,39 @@ impl ProjectBundle {
                 queries.push((relation.clone(), format!("SELECT * FROM {relation}")));
             }
         }
-        PROJECT_SPEC
-            .export_named_queries(connection, queries)
-            .await
-            .map(|export| export.bytes)
+        self.export_named_queries(connection, queries).await
     }
 }
 
-impl BundleSpec {
+impl ProjectBundle {
     async fn export_named_queries(
         &self,
         connection: &mut ProjectConnection,
         queries: Vec<(String, String)>,
-    ) -> Result<NamedExportedBundle, String> {
+    ) -> Result<Vec<u8>, String> {
         let mut entries = Vec::<(String, Vec<u8>)>::new();
-        #[cfg(any(test, feature = "test-support"))]
-        let mut row_counts = Vec::new();
         for (relation, query) in queries {
             let mut records = connection
                 .execute_query(query)
                 .await
-                .map_err(|error| format!("reading {} relation {relation}: {error}", self.label))?;
-            // A bundle must only ever hold shapes its own importer accepts.
-            if let Some(table) = self.table_named(&relation) {
-                ManagedRelationCatalog::validate(table, records.schema().as_ref(), self.label)
+                .map_err(|error| format!("reading project relation {relation}: {error}"))?;
+            // A project must only ever hold shapes its own importer accepts.
+            if let Some(table) = ManagedRelationCatalog::table_named(&relation) {
+                ManagedRelationCatalog::validate(table, records.schema().as_ref(), "project")
                     .map_err(|error| format!("{error}; relation {relation} is not exportable"))?;
             }
             let occupied = Self::encoded_entries_size(&entries)
-                .saturating_add(self.magic.len() + 4 + MAX_MANIFEST_BYTES + 2);
-            let payload_limit = self
-                .max_bytes
+                .saturating_add(PROJECT_MAGIC.len() + 4 + MAX_MANIFEST_BYTES + 2);
+            let payload_limit = Self::MAX_BYTES
                 .saturating_sub(occupied)
                 .saturating_sub(2 + relation.len() + 8);
-            let mut payload = LimitedPayload::new(payload_limit, self.label);
-            #[cfg(any(test, feature = "test-support"))]
-            let mut rows = 0_u64;
+            let mut payload = LimitedPayload::new(payload_limit);
             {
                 let mut writer = StreamWriter::try_new(&mut payload, records.schema().as_ref())
                     .map_err(|error| format!("opening Arrow stream for {relation}: {error}"))?;
                 while let Some(batch) = records.next().await {
-                    let batch = batch.map_err(|error| {
-                        format!("reading {} relation {relation}: {error}", self.label)
-                    })?;
-                    #[cfg(any(test, feature = "test-support"))]
-                    {
-                        rows = rows.saturating_add(batch.num_rows() as u64);
-                    }
+                    let batch = batch
+                        .map_err(|error| format!("reading project relation {relation}: {error}"))?;
                     writer
                         .write(&batch)
                         .map_err(|error| format!("writing Arrow stream for {relation}: {error}"))?;
@@ -572,66 +439,25 @@ impl BundleSpec {
             let payload = payload.into_inner();
             let projected_size = Self::encoded_entries_size(&entries)
                 .saturating_add(2 + relation.len() + 8 + payload.len())
-                .saturating_add(self.magic.len() + 4 + MAX_MANIFEST_BYTES);
-            if projected_size > self.max_bytes {
+                .saturating_add(PROJECT_MAGIC.len() + 4 + MAX_MANIFEST_BYTES);
+            if projected_size > Self::MAX_BYTES {
                 return Err(format!(
-                    "{} export exceeds the {} MiB portable-file limit",
-                    self.label,
-                    self.max_bytes / (1024 * 1024),
+                    "project export exceeds the {} MiB portable-file limit",
+                    Self::MAX_BYTES / (1024 * 1024),
                 ));
             }
-            #[cfg(any(test, feature = "test-support"))]
-            row_counts.push((relation.clone(), rows));
             entries.push((relation, payload));
         }
-        self.build(entries).map(|bytes| NamedExportedBundle {
-            bytes,
-            #[cfg(any(test, feature = "test-support"))]
-            row_counts,
-        })
-    }
-    #[cfg(any(test, feature = "test-support"))]
-    async fn export_queries(
-        &self,
-        connection: &mut ProjectConnection,
-        queries: Vec<(Table, String)>,
-    ) -> Result<ExportedBundle, String> {
-        let export = self
-            .export_named_queries(
-                connection,
-                queries
-                    .into_iter()
-                    .map(|(table, query)| (table.name().to_owned(), query))
-                    .collect(),
-            )
-            .await?;
-        let row_counts = export
-            .row_counts
-            .into_iter()
-            .map(|(name, rows)| {
-                self.table_named(&name)
-                    .map(|table| (table, rows))
-                    .ok_or_else(|| {
-                        format!("{} export contains unknown relation {name:?}", self.label)
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(ExportedBundle {
-            bytes: export.bytes,
-            row_counts,
-        })
+        self.build(entries)
     }
 }
 
-impl BundleSpec {
-    fn portable_video_assets_query(relation: &str, predicate: Option<&str>) -> String {
-        let filter = predicate
-            .map(|predicate| format!(" WHERE {predicate}"))
-            .unwrap_or_default();
+impl ProjectBundle {
+    fn portable_video_assets_query(relation: &str) -> String {
         format!(
             "SELECT {episode_id}, {stream_id}, {segment_index}, {timeline_offset}, {camera_id}, \
          spql.io.read_bytes({payload}) AS {payload}, {byte_size}, {width}, {height}, {fps}, \
-         {frames}, {media_relation} FROM {relation}{filter}",
+         {frames}, {media_relation} FROM {relation}",
             episode_id = column::EPISODE_ID,
             stream_id = column::STREAM_ID,
             segment_index = column::SEGMENT_INDEX,
@@ -655,25 +481,25 @@ impl BundleSpec {
     }
 }
 
-impl BundleSpec {
+impl ProjectBundle {
     fn build(&self, entries: Vec<(String, Vec<u8>)>) -> Result<Vec<u8>, String> {
         if let Some((name, _)) = entries
             .iter()
             .find(|(name, _)| name.len() > MAX_ENTRY_NAME_BYTES)
         {
-            return Err(format!("{} relation name {name:?} is too long", self.label));
+            return Err(format!("project relation name {name:?} is too long"));
         }
         let manifest = Manifest {
-            format: self.format.to_owned(),
+            format: PROJECT_FORMAT.to_owned(),
             format_version: FORMAT_VERSION,
             schema_version: spiral::SCHEMA_VERSION,
             exported_ms: BundleClock::unix_millis(),
             relations: entries.iter().map(|(name, _)| name.clone()).collect(),
         };
         let manifest = serde_json::to_vec(&manifest)
-            .map_err(|error| format!("encoding {} manifest: {error}", self.label))?;
+            .map_err(|error| format!("encoding project manifest: {error}"))?;
         let mut bundle = Vec::new();
-        bundle.extend_from_slice(self.magic);
+        bundle.extend_from_slice(PROJECT_MAGIC);
         BundleCodec::write_u32(&mut bundle, manifest.len())?;
         bundle.extend_from_slice(&manifest);
         for (name, payload) in entries {
@@ -683,11 +509,10 @@ impl BundleSpec {
             bundle.extend_from_slice(&payload);
         }
         bundle.extend_from_slice(&0_u16.to_le_bytes());
-        if bundle.len() > self.max_bytes {
+        if bundle.len() > Self::MAX_BYTES {
             return Err(format!(
-                "{} export exceeds the {} MiB portable-file limit",
-                self.label,
-                self.max_bytes / (1024 * 1024),
+                "project export exceeds the {} MiB portable-file limit",
+                Self::MAX_BYTES / (1024 * 1024),
             ));
         }
         Ok(bundle)
@@ -698,10 +523,10 @@ impl ProjectBundle {
     pub(super) async fn import(
         &self,
         connection: &mut ProjectConnection,
-        source: BundleSource<'_>,
+        source: ProjectBundleImport<'_>,
     ) -> Result<ProjectImportSummary, String> {
-        let BundleSource { namespace, bytes } = source;
-        let decoded = ProjectBundle::decode_entries(PROJECT_SPEC.parse_raw(bytes)?)?;
+        let ProjectBundleImport { namespace, bytes } = source;
+        let decoded = ProjectBundle::decode_entries(self.parse_raw(bytes)?)?;
         let decoded = ProjectBundle::with_empty_managed_relations(decoded);
         let fixed_relations = decoded
             .iter()
@@ -710,7 +535,7 @@ impl ProjectBundle {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        let imported_video_episodes = EpisodeBundle::video_episode_ids(&fixed_relations)?;
+        let imported_video_episodes = ProjectBundle::video_episode_ids(&fixed_relations)?;
         let current_caches = WorkflowBundleRegistry::load(connection, namespace)
             .await?
             .map(|registry| registry.cache_relations())
@@ -746,7 +571,7 @@ impl ProjectBundle {
                     .into_iter()
                     .map(|batch| {
                         if entry.relation == ProjectRelation::Managed(Table::VideoAssets) {
-                            EpisodeBundle::prepare_video_asset_import(batch, namespace)
+                            ProjectBundle::prepare_video_asset_import(batch, namespace)
                         } else if entry.relation == ProjectRelation::Managed(Table::FeatureRegistry)
                         {
                             WorkflowBundleRegistry::retarget_batch(batch, namespace)
@@ -785,12 +610,9 @@ impl ProjectBundle {
         // until the commit is published. Keep the project_store's exclusive
         // checkout while reconciling derived MP4 resources immediately after
         // the durable rows commit.
-        if let Err(error) = EpisodeBundle::reconcile_project_video_dataset(
-            connection,
-            namespace,
-            &imported_video_episodes,
-        )
-        .await
+        if let Err(error) =
+            ProjectBundle::reconcile_video_dataset(connection, namespace, &imported_video_episodes)
+                .await
         {
             summary.push_warning(format!(
                 "project rows committed, but the derived video dataset needs repair: {error}"
@@ -823,99 +645,6 @@ impl ProjectBundle {
     }
 }
 
-impl EpisodeBundle {
-    pub(super) async fn import(
-        &self,
-        connection: &mut ProjectConnection,
-        request: EpisodeBundleImport<'_>,
-    ) -> Result<EpisodeImportSummary, String> {
-        let EpisodeBundleImport { selection, bytes } = request;
-        let EpisodeBundleSelection {
-            namespace,
-            dataset_id,
-        } = selection;
-        EpisodeBundle::validate_dataset_id(dataset_id)?;
-        let mut decoded = EPISODES_SPEC.decode_entries(EPISODES_SPEC.parse(bytes)?)?;
-        EpisodeBundle::sort_relations(&mut decoded, &EpisodeBundleSection::RELATIONS);
-        let episode_ids = EpisodeBundle::validate_relations(&decoded)?;
-        let video_episode_ids = EpisodeBundle::video_episode_ids(&decoded)?;
-        let existing_video_episodes = connection.stored_video_episode_ids(namespace).await?;
-        EpisodeBundle::reject_existing_episodes(connection, namespace, &episode_ids).await?;
-        if !existing_video_episodes.is_empty()
-            && !connection.video_dataset_exists(namespace).await?
-        {
-            connection
-                .retarget_stored_video_media_relations(namespace)
-                .await?;
-        }
-
-        connection
-            .begin_bundle_transaction("episode import")
-            .await?;
-        let outcome = async {
-            let datasets = Table::Datasets.qualified_name(namespace);
-            let dataset_exists = !connection
-                .query_rows(&SpiralSql::dataset_exists(&datasets, dataset_id), 1)
-                .await?
-                .rows()
-                .is_empty();
-            let mut imported_rows = 0_u64;
-            for (table, batches) in decoded {
-                if table == Table::Datasets && dataset_exists {
-                    continue;
-                }
-                let relation = table.qualified_name(namespace);
-                let batches = batches
-                    .into_iter()
-                    .map(|batch| match table {
-                        Table::Datasets | Table::Episodes => EpisodeBundle::replace_utf8_column(
-                            batch,
-                            column::DATASET_ID,
-                            dataset_id,
-                        ),
-                        Table::VideoAssets => {
-                            EpisodeBundle::prepare_video_asset_import(batch, namespace)
-                        }
-                        _ => Ok(batch),
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                imported_rows =
-                    imported_rows.saturating_add(
-                        batches.iter().map(RecordBatch::num_rows).sum::<usize>() as u64,
-                    );
-                connection.ingest_batches(&relation, batches).await?;
-            }
-            Ok(
-                EpisodeImportSummary::new(dataset_id, episode_ids.len() as u64, imported_rows)
-                    .with_first_episode(episode_ids.first().cloned()),
-            )
-        }
-        .await;
-        let (mut summary, reconnect_warning) = connection
-            .finish_bundle_transaction(outcome, "episode import")
-            .await?;
-        if let Some(warning) = reconnect_warning {
-            summary.push_warning(warning);
-            if !video_episode_ids.is_empty() {
-                summary.push_warning(
-                    "episode rows committed, but derived video reconciliation was skipped because a post-commit connection could not be opened"
-                        .to_owned(),
-                );
-            }
-            return Ok(summary);
-        }
-        if !video_episode_ids.is_empty()
-            && let Err(error) =
-                EpisodeBundle::reconcile_appended_video_dataset(connection, namespace).await
-        {
-            summary.push_warning(format!(
-                "episode rows committed, but the derived video dataset needs repair: {error}"
-            ));
-        }
-        Ok(summary)
-    }
-}
-
 #[derive(Clone, Copy)]
 struct ArrowDecodeLimits {
     decoded_bytes: usize,
@@ -938,21 +667,18 @@ const ARROW_DECODE_LIMITS: ArrowDecodeLimits = ArrowDecodeLimits {
 struct ArrowPayload<'a> {
     relation: &'a str,
     bytes: Vec<u8>,
-    label: &'a str,
 }
 
 struct ArrowPreflight<'a> {
     relation: &'a str,
-    label: &'a str,
     body: &'a [u8],
     limits: ArrowDecodeLimits,
 }
 
 impl<'a> ArrowPreflight<'a> {
-    const fn new(relation: &'a str, label: &'a str, limits: ArrowDecodeLimits) -> Self {
+    const fn new(relation: &'a str, limits: ArrowDecodeLimits) -> Self {
         Self {
             relation,
-            label,
             body: &[],
             limits,
         }
@@ -971,12 +697,8 @@ struct ArrowPreflightCounters {
 }
 
 impl<'a> ArrowPayload<'a> {
-    fn new(relation: &'a str, bytes: Vec<u8>, label: &'a str) -> Self {
-        Self {
-            relation,
-            bytes,
-            label,
-        }
+    fn new(relation: &'a str, bytes: Vec<u8>) -> Self {
+        Self { relation, bytes }
     }
 }
 
@@ -1011,11 +733,7 @@ impl ArrowDecodeBudget {
         limits: ArrowDecodeLimits,
     ) -> Result<Vec<RecordBatch>, String> {
         self.preflight(&payload, limits)?;
-        let ArrowPayload {
-            relation,
-            bytes,
-            label,
-        } = payload;
+        let ArrowPayload { relation, bytes } = payload;
         // The preflight above bounds every IPC buffer by its declared decoded
         // length before Arrow can allocate or decompress it. Do not use
         // `RecordBatch::get_array_memory_size` for this bound: the stream reader
@@ -1038,7 +756,7 @@ impl ArrowDecodeBudget {
             .any(|batch| batch.schema() != batches[0].schema())
         {
             return Err(format!(
-                "{label} relation {relation} changes schema between Arrow batches"
+                "project relation {relation} changes schema between Arrow batches"
             ));
         }
         Ok(batches)
@@ -1050,7 +768,6 @@ impl ArrowDecodeBudget {
         limits: ArrowDecodeLimits,
     ) -> Result<(), String> {
         let relation = payload.relation;
-        let label = payload.label;
         let payload = payload.bytes.as_slice();
         let mut position = 0_usize;
         let mut counters = ArrowPreflightCounters::default();
@@ -1064,7 +781,7 @@ impl ArrowDecodeBudget {
             if metadata_len == 0 {
                 if position != payload.len() {
                     return Err(format!(
-                        "{label} Arrow stream for {relation} has bytes after its end marker"
+                        "project Arrow stream for {relation} has bytes after its end marker"
                     ));
                 }
                 break;
@@ -1073,7 +790,7 @@ impl ArrowDecodeBudget {
                 .expect("Arrow metadata length always fits usize on supported targets");
             if metadata_len > limits.message_metadata_bytes {
                 return Err(format!(
-                    "{label} Arrow metadata for {relation} exceeds the {} MiB message limit",
+                    "project Arrow metadata for {relation} exceeds the {} MiB message limit",
                     limits.message_metadata_bytes / (1024 * 1024),
                 ));
             }
@@ -1083,56 +800,56 @@ impl ArrowDecodeBudget {
             .filter(|bytes| *bytes <= limits.decoded_bytes)
             .ok_or_else(|| {
                 format!(
-                    "{label} Arrow data exceeds the {} MiB decoded-buffer limit at relation {relation}",
+                    "project Arrow data exceeds the {} MiB decoded-buffer limit at relation {relation}",
                     limits.decoded_bytes / (1024 * 1024),
                 )
             })?;
             let metadata_end = position
                 .checked_add(metadata_len)
                 .filter(|end| *end <= payload.len())
-                .ok_or_else(|| format!("{label} Arrow metadata for {relation} is truncated"))?;
+                .ok_or_else(|| format!("project Arrow metadata for {relation} is truncated"))?;
             let message = arrow_ipc::root_as_message(&payload[position..metadata_end])
                 .map_err(|error| format!("opening Arrow metadata for {relation}: {error}"))?;
             position = metadata_end;
 
             let body_len = usize::try_from(message.bodyLength()).map_err(|_| {
-                format!("{label} Arrow message for {relation} has an invalid body length")
+                format!("project Arrow message for {relation} has an invalid body length")
             })?;
             if body_len > limits.decoded_bytes {
                 return Err(format!(
-                    "{label} Arrow message body for {relation} exceeds the {} MiB decoded-memory limit",
+                    "project Arrow message body for {relation} exceeds the {} MiB decoded-memory limit",
                     limits.decoded_bytes / (1024 * 1024),
                 ));
             }
             let body_end = position
                 .checked_add(body_len)
                 .filter(|end| *end <= payload.len())
-                .ok_or_else(|| format!("{label} Arrow message body for {relation} is truncated"))?;
+                .ok_or_else(|| format!("project Arrow message body for {relation} is truncated"))?;
             let body = &payload[position..body_end];
 
             match message.header_type() {
                 arrow_ipc::MessageHeader::Schema => {
                     let schema = message.header_as_schema().ok_or_else(|| {
-                        format!("{label} Arrow schema metadata for {relation} is invalid")
+                        format!("project Arrow schema metadata for {relation} is invalid")
                     })?;
-                    ArrowPreflight::new(relation, label, limits).validate_schema(schema)?;
+                    ArrowPreflight::new(relation, limits).validate_schema(schema)?;
                 }
                 arrow_ipc::MessageHeader::RecordBatch => {
                     let batch = message.header_as_record_batch().ok_or_else(|| {
-                        format!("{label} Arrow record metadata for {relation} is invalid")
+                        format!("project Arrow record metadata for {relation} is invalid")
                     })?;
-                    ArrowPreflight::new(relation, label, limits)
+                    ArrowPreflight::new(relation, limits)
                         .with_body(body)
                         .validate_record_batch(batch, &mut counters)?;
                 }
                 arrow_ipc::MessageHeader::DictionaryBatch => {
                     let dictionary = message.header_as_dictionary_batch().ok_or_else(|| {
-                        format!("{label} Arrow dictionary metadata for {relation} is invalid")
+                        format!("project Arrow dictionary metadata for {relation} is invalid")
                     })?;
                     let batch = dictionary.data().ok_or_else(|| {
-                        format!("{label} Arrow dictionary for {relation} has no record metadata")
+                        format!("project Arrow dictionary for {relation} has no record metadata")
                     })?;
-                    ArrowPreflight::new(relation, label, limits)
+                    ArrowPreflight::new(relation, limits)
                         .with_body(body)
                         .validate_record_batch(batch, &mut counters)?;
                 }
@@ -1143,7 +860,7 @@ impl ArrowDecodeBudget {
 
         if counters.rows > limits.relation_rows {
             return Err(format!(
-                "{label} Arrow relation {relation} exceeds the {}-row relation limit",
+                "project Arrow relation {relation} exceeds the {}-row relation limit",
                 limits.relation_rows,
             ));
         }
@@ -1153,7 +870,7 @@ impl ArrowDecodeBudget {
         .filter(|bytes| *bytes <= limits.decoded_bytes)
         .ok_or_else(|| {
             format!(
-                "{label} Arrow data exceeds the {} MiB decoded-buffer limit at relation {relation}",
+                "project Arrow data exceeds the {} MiB decoded-buffer limit at relation {relation}",
                 limits.decoded_bytes / (1024 * 1024),
             )
         })?;
@@ -1163,7 +880,7 @@ impl ArrowDecodeBudget {
             .filter(|rows| *rows <= limits.decoded_rows)
             .ok_or_else(|| {
                 format!(
-                    "{label} Arrow data exceeds the {}-row decoded limit at relation {relation}",
+                    "project Arrow data exceeds the {}-row decoded limit at relation {relation}",
                     limits.decoded_rows,
                 )
             })?;
@@ -1192,14 +909,13 @@ impl BundleCodec {
 impl ArrowPreflight<'_> {
     fn validate_schema(&self, schema: arrow_ipc::Schema<'_>) -> Result<(), String> {
         let relation = self.relation;
-        let label = self.label;
         let max_fields = self.limits.schema_fields;
         let Some(fields) = schema.fields() else {
             return Ok(());
         };
         if fields.len() > max_fields {
             return Err(format!(
-                "{label} Arrow schema for {relation} exceeds the {max_fields}-column limit"
+                "project Arrow schema for {relation} exceeds the {max_fields}-column limit"
             ));
         }
         let mut pending = fields.iter().collect::<Vec<_>>();
@@ -1210,7 +926,7 @@ impl ArrowPreflight<'_> {
                 .filter(|count| *count <= max_fields)
                 .ok_or_else(|| {
                     format!(
-                        "{label} Arrow schema for {relation} exceeds the {max_fields}-field limit"
+                        "project Arrow schema for {relation} exceeds the {max_fields}-field limit"
                     )
                 })?;
             if let Some(children) = field.children() {
@@ -1226,42 +942,41 @@ impl ArrowPreflight<'_> {
         counters: &mut ArrowPreflightCounters,
     ) -> Result<(), String> {
         let relation = self.relation;
-        let label = self.label;
         let body = self.body;
         let limits = self.limits;
         let batch_rows = usize::try_from(batch.length()).map_err(|_| {
-            format!("{label} Arrow record batch for {relation} has an invalid row count")
+            format!("project Arrow record batch for {relation} has an invalid row count")
         })?;
         if batch_rows > limits.record_batch_rows {
             return Err(format!(
-                "{label} Arrow record batch for {relation} exceeds the {}-row batch limit",
+                "project Arrow record batch for {relation} exceeds the {}-row batch limit",
                 limits.record_batch_rows,
             ));
         }
         counters.rows = counters.rows.checked_add(batch_rows).ok_or_else(|| {
-            format!("{label} Arrow row count overflows while reading relation {relation}")
+            format!("project Arrow row count overflows while reading relation {relation}")
         })?;
 
         let compressed = batch.compression().is_some();
         for buffer in batch.buffers().into_iter().flatten() {
             let offset = usize::try_from(buffer.offset()).map_err(|_| {
-                format!("{label} Arrow buffer for {relation} has an invalid offset")
+                format!("project Arrow buffer for {relation} has an invalid offset")
             })?;
             let length = usize::try_from(buffer.length()).map_err(|_| {
-                format!("{label} Arrow buffer for {relation} has an invalid length")
+                format!("project Arrow buffer for {relation} has an invalid length")
             })?;
             let end = offset
                 .checked_add(length)
                 .filter(|end| *end <= body.len())
                 .ok_or_else(|| {
-                    format!("{label} Arrow buffer for {relation} exceeds its message body")
+                    format!("project Arrow buffer for {relation} exceeds its message body")
                 })?;
             let decoded_length = if length == 0 || !compressed {
                 length
             } else {
                 if length < 8 {
                     return Err(format!(
-                        "{label} compressed Arrow buffer for {relation} has no length prefix"
+                        "project compressed Arrow buffer for {relation} has no length prefix"
                     ));
                 }
                 let declared = i64::from_le_bytes(
@@ -1273,12 +988,12 @@ impl ArrowPreflight<'_> {
                 -1 => length - 8,
                 0.. => usize::try_from(declared).map_err(|_| {
                     format!(
-                        "{label} compressed Arrow buffer for {relation} is too large for this machine"
+                        "project compressed Arrow buffer for {relation} is too large for this machine"
                     )
                 })?,
                 _ => {
                     return Err(format!(
-                        "{label} compressed Arrow buffer for {relation} has an invalid decoded length"
+                        "project compressed Arrow buffer for {relation} has an invalid decoded length"
                     ));
                 }
             }
@@ -1287,9 +1002,9 @@ impl ArrowPreflight<'_> {
             .claimed_decoded_bytes
             .checked_add(decoded_length)
             .filter(|bytes| *bytes <= limits.decoded_bytes)
-            .ok_or_else(|| {
-                format!(
-                    "{label} Arrow data exceeds the {} MiB decoded-buffer limit at relation {relation}",
+                .ok_or_else(|| {
+                    format!(
+                        "project Arrow data exceeds the {} MiB decoded-buffer limit at relation {relation}",
                     limits.decoded_bytes / (1024 * 1024),
                 )
             })?;
@@ -1299,25 +1014,26 @@ impl ArrowPreflight<'_> {
     }
 }
 
-impl BundleSpec {
-    fn decode_entries(
+impl ProjectBundle {
+    #[cfg(test)]
+    fn decode_managed_entries(
         &self,
         entries: Vec<(Table, Vec<u8>)>,
     ) -> Result<Vec<(Table, Vec<RecordBatch>)>, String> {
         let mut budget = ArrowDecodeBudget::default();
-        self.decode_entries_with_budget(entries, &mut budget)
+        self.decode_managed_entries_with_budget(entries, &mut budget)
     }
 
-    fn decode_entries_with_budget(
+    fn decode_managed_entries_with_budget(
         &self,
         entries: Vec<(Table, Vec<u8>)>,
         budget: &mut ArrowDecodeBudget,
     ) -> Result<Vec<(Table, Vec<RecordBatch>)>, String> {
         let mut decoded = Vec::new();
         for (table, payload) in entries {
-            let batches = budget.decode(ArrowPayload::new(table.name(), payload, self.label))?;
+            let batches = budget.decode(ArrowPayload::new(table.name(), payload))?;
             let schema = batches[0].schema();
-            ManagedRelationCatalog::validate(table, schema.as_ref(), self.label)?;
+            ManagedRelationCatalog::validate(table, schema.as_ref(), "project")?;
             decoded.push((table, batches));
         }
         Ok(decoded)
@@ -1333,7 +1049,7 @@ pub(crate) struct ManagedRelationCatalog;
 impl ManagedRelationCatalog {
     pub(crate) fn tables() -> Vec<Table> {
         let database = DatabaseBundleSection;
-        let episodes = EpisodeBundleSection;
+        let episode_relations = EpisodeRelations;
         let settings = StudioPreferenceBundleSection;
         let training = TrainingBundleSection;
         let rollout = RolloutBundleSection;
@@ -1341,7 +1057,7 @@ impl ManagedRelationCatalog {
         let workflow_features = WorkflowFeatureBundleSection;
         let sections: [&dyn ManagedRelationSchema; 7] = [
             &database,
-            &episodes,
+            &episode_relations,
             &settings,
             &training,
             &rollout,
@@ -1364,7 +1080,7 @@ impl ManagedRelationCatalog {
 
     pub(crate) fn schema(table: Table) -> Schema {
         let database = DatabaseBundleSection;
-        let episodes = EpisodeBundleSection;
+        let episode_relations = EpisodeRelations;
         let settings = StudioPreferenceBundleSection;
         let training = TrainingBundleSection;
         let rollout = RolloutBundleSection;
@@ -1372,7 +1088,7 @@ impl ManagedRelationCatalog {
         let workflow_features = WorkflowFeatureBundleSection;
         let sections: [&dyn ManagedRelationSchema; 7] = [
             &database,
-            &episodes,
+            &episode_relations,
             &settings,
             &training,
             &rollout,
@@ -1387,7 +1103,7 @@ impl ManagedRelationCatalog {
 
     pub(crate) fn validate(table: Table, schema: &Schema, label: &str) -> Result<(), String> {
         let database = DatabaseBundleSection;
-        let episodes = EpisodeBundleSection;
+        let episode_relations = EpisodeRelations;
         let settings = StudioPreferenceBundleSection;
         let training = TrainingBundleSection;
         let rollout = RolloutBundleSection;
@@ -1395,7 +1111,7 @@ impl ManagedRelationCatalog {
         let workflow_features = WorkflowFeatureBundleSection;
         let sections: [&dyn ManagedRelationSchema; 7] = [
             &database,
-            &episodes,
+            &episode_relations,
             &settings,
             &training,
             &rollout,
@@ -1411,6 +1127,22 @@ impl ManagedRelationCatalog {
                 ))
             })
     }
+
+    fn table_named(name: &str) -> Option<Table> {
+        Self::tables()
+            .into_iter()
+            .find(|table| table.name() == name)
+    }
+
+    #[cfg(test)]
+    fn sort(decoded: &mut [(Table, Vec<RecordBatch>)]) {
+        decoded.sort_by_key(|(table, _)| {
+            Table::ALL
+                .iter()
+                .position(|candidate| candidate == table)
+                .unwrap_or(usize::MAX)
+        });
+    }
 }
 
 impl ProjectBundle {
@@ -1423,13 +1155,13 @@ impl ProjectBundle {
             .remove(Table::FeatureRegistry.name())
             .map(|payload| {
                 let batches = budget.decode_with_row_limit(
-                    ArrowPayload::new(Table::FeatureRegistry.name(), payload, PROJECT_SPEC.label),
+                    ArrowPayload::new(Table::FeatureRegistry.name(), payload),
                     MAX_FEATURE_REGISTRY_ROWS,
                 )?;
                 ManagedRelationCatalog::validate(
                     Table::FeatureRegistry,
                     batches[0].schema().as_ref(),
-                    PROJECT_SPEC.label,
+                    "project",
                 )?;
                 Ok::<_, String>(batches)
             })
@@ -1442,7 +1174,7 @@ impl ProjectBundle {
         let declared_caches = registry.cache_relations();
         let dynamic_names = payloads
             .keys()
-            .filter(|name| PROJECT_SPEC.table_named(name).is_none())
+            .filter(|name| ManagedRelationCatalog::table_named(name).is_none())
             .cloned()
             .collect::<BTreeSet<_>>();
         if let Some(name) = dynamic_names.difference(&declared_caches).next() {
@@ -1468,8 +1200,8 @@ impl ProjectBundle {
                 continue;
             }
             if let Some(payload) = payloads.remove(table.name()) {
-                let mut relation =
-                    PROJECT_SPEC.decode_entries_with_budget(vec![(table, payload)], &mut budget)?;
+                let mut relation = ProjectBundle
+                    .decode_managed_entries_with_budget(vec![(table, payload)], &mut budget)?;
                 if table == Table::WorkflowRuns {
                     BundleAgentDocumentV2::validate_batches(&relation[0].1)?;
                 }
@@ -1484,7 +1216,7 @@ impl ProjectBundle {
                 .remove(&bundle_relation)
                 .expect("declared project cache presence was checked");
             let batches = budget.decode_with_row_limit(
-                ArrowPayload::new(&bundle_relation, payload, PROJECT_SPEC.label),
+                ArrowPayload::new(&bundle_relation, payload),
                 MAX_FEATURE_CACHE_ROWS,
             )?;
             WorkflowCacheValidator::validate_bundle(&bundle_relation, &batches, &registry)?;
@@ -2389,88 +2121,7 @@ impl ProjectConnection {
     }
 }
 
-impl EpisodeBundle {
-    fn sort_relations(decoded: &mut [(Table, Vec<RecordBatch>)], order: &[Table]) {
-        decoded.sort_by_key(|(table, _)| {
-            order
-                .iter()
-                .position(|candidate| candidate == table)
-                .unwrap_or(usize::MAX)
-        });
-    }
-
-    fn validate_relations(decoded: &[(Table, Vec<RecordBatch>)]) -> Result<Vec<String>, String> {
-        if !decoded.iter().any(|(table, _)| *table == Table::Datasets)
-            || !decoded.iter().any(|(table, _)| *table == Table::Episodes)
-        {
-            return Err("episode bundle must contain datasets and episodes relations".to_owned());
-        }
-        let dataset_rows = decoded
-            .iter()
-            .filter(|(table, _)| *table == Table::Datasets)
-            .flat_map(|(_, batches)| batches)
-            .map(RecordBatch::num_rows)
-            .sum::<usize>();
-        if dataset_rows != 1 {
-            return Err("episode bundle must describe exactly one source dataset".to_owned());
-        }
-        let mut source_datasets = Vec::new();
-        for (_, batches) in decoded
-            .iter()
-            .filter(|(table, _)| *table == Table::Datasets)
-        {
-            for batch in batches {
-                source_datasets.extend(EpisodeBundle::utf8_values(batch, column::DATASET_ID)?);
-            }
-        }
-        let source_dataset = source_datasets
-            .pop()
-            .ok_or_else(|| "episode bundle source dataset has no dataset ID".to_owned())?;
-        EpisodeBundle::validate_dataset_id(&source_dataset)?;
-        let mut episode_ids = BTreeSet::new();
-        for (table, batches) in decoded {
-            if *table == Table::Episodes {
-                for batch in batches {
-                    let ids = EpisodeBundle::utf8_values(batch, column::EPISODE_ID)?;
-                    let datasets = EpisodeBundle::utf8_values(batch, column::DATASET_ID)?;
-                    if datasets.iter().any(|dataset| dataset != &source_dataset) {
-                        return Err(format!(
-                            "episode bundle contains an episode outside source dataset {source_dataset:?}"
-                        ));
-                    }
-                    for episode_id in ids {
-                        EpisodeBundle::validate_episode_id(&episode_id)?;
-                        if !episode_ids.insert(episode_id.clone()) {
-                            return Err(format!(
-                                "episode bundle repeats episode ID {episode_id:?}"
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-        if episode_ids.is_empty() {
-            return Err("episode bundle contains no episodes".to_owned());
-        }
-        for (table, batches) in decoded {
-            if matches!(
-                table,
-                Table::EpisodeStreams | Table::JointSamples | Table::VideoAssets
-            ) {
-                for batch in batches {
-                    for episode_id in EpisodeBundle::utf8_values(batch, column::EPISODE_ID)? {
-                        if !episode_ids.contains(&episode_id) {
-                            return Err(format!(
-                                "episode bundle relation {table} references unknown episode {episode_id:?}"
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-        Ok(episode_ids.into_iter().collect())
-    }
-
+impl ProjectBundle {
     fn video_episode_ids(
         decoded: &[(Table, Vec<RecordBatch>)],
     ) -> Result<BTreeSet<String>, String> {
@@ -2480,8 +2131,8 @@ impl EpisodeBundle {
             .filter(|(table, _)| *table == Table::VideoAssets)
         {
             for batch in batches {
-                for episode_id in EpisodeBundle::utf8_values(batch, column::EPISODE_ID)? {
-                    EpisodeBundle::validate_episode_id(&episode_id)?;
+                for episode_id in ProjectBundle::utf8_values(batch, column::EPISODE_ID)? {
+                    ProjectBundle::validate_episode_id(&episode_id)?;
                     episode_ids.insert(episode_id);
                 }
             }
@@ -2489,7 +2140,7 @@ impl EpisodeBundle {
         Ok(episode_ids)
     }
 
-    async fn reconcile_project_video_dataset(
+    async fn reconcile_video_dataset(
         connection: &mut ProjectConnection,
         namespace: &str,
         imported: &BTreeSet<String>,
@@ -2505,33 +2156,22 @@ impl EpisodeBundle {
         Ok(())
     }
 
-    async fn reconcile_appended_video_dataset(
-        connection: &mut ProjectConnection,
-        namespace: &str,
-    ) -> Result<(), String> {
-        let dataset_exists = connection.video_dataset_exists(namespace).await?;
-        connection
-            .rebuild_video_dataset_internal(namespace, dataset_exists)
-            .await?;
-        Ok(())
-    }
-
     fn utf8_values(batch: &RecordBatch, name: &str) -> Result<Vec<String>, String> {
         let index = batch
             .schema()
             .index_of(name)
-            .map_err(|error| format!("episode bundle is missing column {name}: {error}"))?;
+            .map_err(|error| format!("project is missing column {name}: {error}"))?;
         let values = batch.column(index);
         if let Some(values) = values.as_any().downcast_ref::<StringArray>() {
-            return EpisodeBundle::collect_utf8(values.iter(), name);
+            return ProjectBundle::collect_utf8(values.iter(), name);
         }
         if let Some(values) = values.as_any().downcast_ref::<LargeStringArray>() {
-            return EpisodeBundle::collect_utf8(values.iter(), name);
+            return ProjectBundle::collect_utf8(values.iter(), name);
         }
         if let Some(values) = values.as_any().downcast_ref::<StringViewArray>() {
-            return EpisodeBundle::collect_utf8(values.iter(), name);
+            return ProjectBundle::collect_utf8(values.iter(), name);
         }
-        Err(format!("episode bundle column {name} is not UTF-8 text"))
+        Err(format!("project column {name} is not UTF-8 text"))
     }
 
     fn collect_utf8<'a>(
@@ -2542,33 +2182,9 @@ impl EpisodeBundle {
             .map(|value| {
                 value
                     .map(str::to_owned)
-                    .ok_or_else(|| format!("episode bundle column {name} contains a null value"))
+                    .ok_or_else(|| format!("project column {name} contains a null value"))
             })
             .collect()
-    }
-
-    fn replace_utf8_column(
-        batch: RecordBatch,
-        name: &str,
-        value: &str,
-    ) -> Result<RecordBatch, String> {
-        let index = batch
-            .schema()
-            .index_of(name)
-            .map_err(|error| format!("episode bundle is missing column {name}: {error}"))?;
-        let mut columns = batch.columns().to_vec();
-        let source = &columns[index];
-        columns[index] = if source.as_any().is::<StringArray>() {
-            Arc::new(StringArray::from(vec![value; batch.num_rows()])) as ArrayRef
-        } else if source.as_any().is::<LargeStringArray>() {
-            Arc::new(LargeStringArray::from(vec![value; batch.num_rows()])) as ArrayRef
-        } else if source.as_any().is::<StringViewArray>() {
-            Arc::new(StringViewArray::from(vec![value; batch.num_rows()])) as ArrayRef
-        } else {
-            return Err(format!("episode bundle column {name} is not UTF-8 text"));
-        };
-        RecordBatch::try_new(batch.schema(), columns)
-            .map_err(|error| format!("retargeting episode bundle dataset: {error}"))
     }
 
     fn retarget_video_media_relations(
@@ -2581,7 +2197,7 @@ impl EpisodeBundle {
             .index_of(column::MEDIA_RELATION)
             .map_err(|error| {
                 format!(
-                    "episode bundle is missing column {}: {error}",
+                    "project is missing column {}: {error}",
                     column::MEDIA_RELATION
                 )
             })?;
@@ -2604,62 +2220,22 @@ impl EpisodeBundle {
             ])) as ArrayRef
         } else {
             return Err(format!(
-                "episode bundle column {} is not UTF-8 text",
+                "project column {} is not UTF-8 text",
                 column::MEDIA_RELATION
             ));
         };
         RecordBatch::try_new(batch.schema(), columns)
-            .map_err(|error| format!("retargeting episode bundle media relations: {error}"))
+            .map_err(|error| format!("retargeting project media relations: {error}"))
     }
 
     fn prepare_video_asset_import(
         batch: RecordBatch,
         namespace: &str,
     ) -> Result<RecordBatch, String> {
-        EpisodeBundle::retarget_video_media_relations(
-            EpisodeBundleSection::normalize_video_asset(batch)?,
+        ProjectBundle::retarget_video_media_relations(
+            EpisodeRelations::normalize_video_asset(batch)?,
             namespace,
         )
-    }
-
-    async fn reject_existing_episodes(
-        connection: &mut ProjectConnection,
-        namespace: &str,
-        episode_ids: &[String],
-    ) -> Result<(), String> {
-        let episodes = Table::Episodes.qualified_name(namespace);
-        for chunk in episode_ids.chunks(100) {
-            let candidates = chunk
-                .iter()
-                .map(|episode_id| SpiralSql::string_literal(episode_id))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let query = format!(
-                "SELECT {episode_id} FROM {episodes} WHERE {episode_id} IN ({candidates})",
-                episode_id = column::EPISODE_ID,
-            );
-            let existing = connection.query_rows(&query, chunk.len()).await?;
-            if let Some(value) = existing
-                .rows()
-                .first()
-                .and_then(|row| row.get(column::EPISODE_ID))
-                .and_then(serde_json::Value::as_str)
-            {
-                return Err(format!(
-                    "episode {value:?} already exists; episode import never overwrites existing episodes"
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    fn validate_dataset_id(dataset_id: &str) -> Result<(), String> {
-        if !spiral::StorageSchema::is_dataset_id(dataset_id) {
-            return Err(
-                "dataset ID must contain 1–96 letters, numbers, '.', '_' or '-'".to_owned(),
-            );
-        }
-        Ok(())
     }
 
     fn validate_episode_id(episode_id: &str) -> Result<(), String> {
@@ -2670,61 +2246,57 @@ impl EpisodeBundle {
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
         {
             return Err(format!(
-                "episode bundle contains invalid episode ID {episode_id:?}"
+                "project contains invalid episode ID {episode_id:?}"
             ));
         }
         Ok(())
     }
 }
 
-impl BundleSpec {
-    fn parse(&self, bundle: &[u8]) -> Result<Vec<(Table, Vec<u8>)>, String> {
+impl ProjectBundle {
+    #[cfg(test)]
+    fn parse_managed_entries(&self, bundle: &[u8]) -> Result<Vec<(Table, Vec<u8>)>, String> {
         self.parse_raw(bundle)?
             .into_iter()
             .map(|(name, payload)| {
-                self.table_named(&name)
+                ManagedRelationCatalog::table_named(&name)
                     .map(|table| (table, payload))
-                    .ok_or_else(|| format!("{} contains unknown relation {name:?}", self.label))
+                    .ok_or_else(|| format!("project contains unknown relation {name:?}"))
             })
             .collect()
     }
 
     fn parse_raw(&self, bundle: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
-        if bundle.len() > self.max_bytes {
+        if bundle.len() > Self::MAX_BYTES {
             return Err(format!(
-                "{} file exceeds the {} MiB import limit",
-                self.label,
-                self.max_bytes / (1024 * 1024),
+                "project file exceeds the {} MiB import limit",
+                Self::MAX_BYTES / (1024 * 1024),
             ));
         }
         let mut source = Cursor::new(bundle);
         let mut magic = [0_u8; 8];
         source
             .read_exact(&mut magic)
-            .map_err(|_| format!("{} file is truncated", self.label))?;
-        if &magic != self.magic {
-            return Err(format!("file is not a Spiral Robotics {}", self.label));
+            .map_err(|_| "project file is truncated".to_owned())?;
+        if &magic != PROJECT_MAGIC {
+            return Err("file is not a Spiral Robotics project".to_owned());
         }
         let manifest_len = BundleCodec::read_u32(&mut source)? as usize;
         if manifest_len == 0 || manifest_len > MAX_MANIFEST_BYTES {
-            return Err(format!("{} manifest has an invalid size", self.label));
+            return Err("project manifest has an invalid size".to_owned());
         }
         let mut manifest = vec![0_u8; manifest_len];
         source
             .read_exact(&mut manifest)
-            .map_err(|_| format!("{} manifest is truncated", self.label))?;
+            .map_err(|_| "project manifest is truncated".to_owned())?;
         let manifest: Manifest = serde_json::from_slice(&manifest)
-            .map_err(|error| format!("{} manifest is invalid: {error}", self.label))?;
-        if manifest.format != self.format || manifest.format_version != FORMAT_VERSION {
-            return Err(format!(
-                "{} file uses an unsupported format version",
-                self.label
-            ));
+            .map_err(|error| format!("project manifest is invalid: {error}"))?;
+        if manifest.format != PROJECT_FORMAT || manifest.format_version != FORMAT_VERSION {
+            return Err("project file uses an unsupported format version".to_owned());
         }
         if manifest.schema_version != spiral::SCHEMA_VERSION {
             return Err(format!(
-                "{} schema {} cannot be imported by schema {}",
-                self.label,
+                "project schema {} cannot be imported by schema {}",
                 manifest.schema_version,
                 spiral::SCHEMA_VERSION
             ));
@@ -2733,20 +2305,7 @@ impl BundleSpec {
         let relation_count = manifest.relations.len();
         let mut expected = manifest.relations.into_iter().collect::<BTreeSet<_>>();
         if expected.len() != relation_count {
-            return Err(format!(
-                "{} manifest contains duplicate relations",
-                self.label
-            ));
-        }
-        if self.format != PROJECT_FORMAT
-            && let Some(name) = expected
-                .iter()
-                .find(|name| self.table_named(name).is_none())
-        {
-            return Err(format!(
-                "{} manifest contains unknown relation {name:?}",
-                self.label
-            ));
+            return Err("project manifest contains duplicate relations".to_owned());
         }
         let mut seen = BTreeSet::new();
         let mut entries = BTreeMap::new();
@@ -2756,70 +2315,55 @@ impl BundleSpec {
                 break;
             }
             if name_len > MAX_ENTRY_NAME_BYTES {
-                return Err(format!("{} relation name is too long", self.label));
+                return Err("project relation name is too long".to_owned());
             }
             let mut name = vec![0_u8; name_len];
             source
                 .read_exact(&mut name)
-                .map_err(|_| format!("{} relation name is truncated", self.label))?;
+                .map_err(|_| "project relation name is truncated".to_owned())?;
             let name = String::from_utf8(name)
-                .map_err(|_| format!("{} relation name is not UTF-8", self.label))?;
+                .map_err(|_| "project relation name is not UTF-8".to_owned())?;
             if !expected.remove(&name) || !seen.insert(name.clone()) {
                 return Err(format!(
-                    "{} contains unexpected or duplicate relation {name:?}",
-                    self.label
+                    "project contains unexpected or duplicate relation {name:?}"
                 ));
             }
             let payload_len = BundleCodec::read_u64(&mut source)?;
-            let payload_len = usize::try_from(payload_len).map_err(|_| {
-                format!(
-                    "{} relation {name:?} is too large for this machine",
-                    self.label
-                )
-            })?;
+            let payload_len = usize::try_from(payload_len)
+                .map_err(|_| format!("project relation {name:?} is too large for this machine"))?;
             let remaining = bundle.len().saturating_sub(source.position() as usize);
             if payload_len > remaining {
-                return Err(format!("{} relation {name:?} is truncated", self.label));
+                return Err(format!("project relation {name:?} is truncated"));
             }
             let mut payload = vec![0_u8; payload_len];
             source
                 .read_exact(&mut payload)
-                .map_err(|_| format!("{} relation {name:?} is truncated", self.label))?;
+                .map_err(|_| format!("project relation {name:?} is truncated"))?;
             entries.insert(name, payload);
         }
         if !expected.is_empty() {
             return Err(format!(
-                "{} is missing relations: {}",
-                self.label,
+                "project is missing relations: {}",
                 expected.into_iter().collect::<Vec<_>>().join(", ")
             ));
         }
         if source.position() != bundle.len() as u64 {
-            return Err(format!("{} file has trailing bytes", self.label));
+            return Err("project file has trailing bytes".to_owned());
         }
         Ok(entries.into_iter().collect())
-    }
-
-    fn table_named(&self, name: &str) -> Option<Table> {
-        self.tables
-            .iter()
-            .copied()
-            .find(|table| table.name() == name)
     }
 }
 
 struct LimitedPayload {
     bytes: Vec<u8>,
     limit: usize,
-    label: &'static str,
 }
 
 impl LimitedPayload {
-    fn new(limit: usize, label: &'static str) -> Self {
+    fn new(limit: usize) -> Self {
         Self {
             bytes: Vec::new(),
             limit,
-            label,
         }
     }
     fn into_inner(self) -> Vec<u8> {
@@ -2831,8 +2375,7 @@ impl io::Write for LimitedPayload {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         if bytes.len() > self.limit.saturating_sub(self.bytes.len()) {
             return Err(io::Error::other(format!(
-                "{} export exceeds the {} MiB portable-file limit",
-                self.label,
+                "project export exceeds the {} MiB portable-file limit",
                 self.limit / (1024 * 1024),
             )));
         }
@@ -2919,13 +2462,9 @@ mod tests {
     const WORKFLOW_TEST_NAMESPACE: &str = "studio";
 
     fn envelope(manifest: Manifest, entries: &[(&str, &[u8])]) -> Vec<u8> {
-        envelope_for(PROJECT_MAGIC, manifest, entries)
-    }
-
-    fn envelope_for(magic: &[u8; 8], manifest: Manifest, entries: &[(&str, &[u8])]) -> Vec<u8> {
         let manifest = serde_json::to_vec(&manifest).unwrap();
         let mut bundle = Vec::new();
-        bundle.extend_from_slice(magic);
+        bundle.extend_from_slice(PROJECT_MAGIC);
         BundleCodec::write_u32(&mut bundle, manifest.len()).unwrap();
         bundle.extend_from_slice(&manifest);
         for (name, payload) in entries {
@@ -2939,12 +2478,8 @@ mod tests {
     }
 
     fn manifest(relations: Vec<String>) -> Manifest {
-        manifest_for(PROJECT_FORMAT, relations)
-    }
-
-    fn manifest_for(format: &str, relations: Vec<String>) -> Manifest {
         Manifest {
-            format: format.to_owned(),
+            format: PROJECT_FORMAT.to_owned(),
             format_version: FORMAT_VERSION,
             schema_version: spiral::SCHEMA_VERSION,
             exported_ms: 1,
@@ -3035,7 +2570,7 @@ mod tests {
 
         let error = ArrowDecodeBudget::default()
             .decode_with_limits(
-                ArrowPayload::new("compressed_bomb", payload, "project"),
+                ArrowPayload::new("compressed_bomb", payload),
                 ArrowDecodeLimits {
                     decoded_bytes: 64 * 1_024,
                     ..ARROW_DECODE_LIMITS
@@ -3062,17 +2597,11 @@ mod tests {
         };
         let mut budget = ArrowDecodeBudget::default();
         budget
-            .decode_with_limits(
-                ArrowPayload::new("first_relation", payload.clone(), "project"),
-                limits,
-            )
+            .decode_with_limits(ArrowPayload::new("first_relation", payload.clone()), limits)
             .unwrap();
 
         let error = budget
-            .decode_with_limits(
-                ArrowPayload::new("second_relation", payload, "project"),
-                limits,
-            )
+            .decode_with_limits(ArrowPayload::new("second_relation", payload), limits)
             .unwrap_err();
 
         assert!(error.contains("decoded-buffer limit"), "{error}");
@@ -3096,7 +2625,7 @@ mod tests {
 
         ArrowDecodeBudget::default()
             .decode_with_limits(
-                ArrowPayload::new("video_assets", payload.clone(), "project"),
+                ArrowPayload::new("video_assets", payload.clone()),
                 ArrowDecodeLimits {
                     decoded_bytes: payload.len(),
                     ..ARROW_DECODE_LIMITS
@@ -3113,7 +2642,7 @@ mod tests {
         );
         let error = ArrowDecodeBudget::default()
             .decode_with_limits(
-                ArrowPayload::new("too_many_rows", arrow_payload(&batch), "project"),
+                ArrowPayload::new("too_many_rows", arrow_payload(&batch)),
                 ArrowDecodeLimits {
                     record_batch_rows: 1_000,
                     ..ARROW_DECODE_LIMITS
@@ -3135,7 +2664,6 @@ mod tests {
                 ArrowPayload::new(
                     "too_many_relation_rows",
                     arrow_payload_batches(&[batch.clone(), batch]),
-                    "project",
                 ),
                 ArrowDecodeLimits {
                     relation_rows: 1_000,
@@ -3154,8 +2682,8 @@ mod tests {
         let payload = arrow_payload_batches(&[batch.clone(), batch.clone(), batch.clone(), batch]);
         assert!(payload.len() < 16 * 1_024);
 
-        let error = PROJECT_SPEC
-            .decode_entries(vec![(Table::Datasets, payload)])
+        let error = ProjectBundle
+            .decode_managed_entries(vec![(Table::Datasets, payload)])
             .unwrap_err();
 
         assert!(
@@ -3177,20 +2705,16 @@ mod tests {
             .expect("video assets contain a payload field");
         fields[payload] = Field::new(column::PAYLOAD, DataType::BinaryView, false);
 
-        ManagedRelationCatalog::validate(
-            Table::VideoAssets,
-            &Schema::new(fields),
-            PROJECT_SPEC.label,
-        )
-        .expect("a required portable payload safely satisfies the nullable binary contract");
+        ManagedRelationCatalog::validate(Table::VideoAssets, &Schema::new(fields), "project")
+            .expect("a required portable payload safely satisfies the nullable binary contract");
     }
 
     #[test]
     fn managed_decode_rejects_semantically_wrong_field_types() {
         let batch = null_typed_batch(Table::Datasets, 1);
 
-        let error = PROJECT_SPEC
-            .decode_entries(vec![(Table::Datasets, arrow_payload(&batch))])
+        let error = ProjectBundle
+            .decode_managed_entries(vec![(Table::Datasets, arrow_payload(&batch))])
             .unwrap_err();
 
         assert!(error.contains("semantic type"), "{error}");
@@ -3210,7 +2734,7 @@ mod tests {
         );
         let error = ArrowDecodeBudget::default()
             .decode_with_limits(
-                ArrowPayload::new("too_many_columns", arrow_payload(&batch), "project"),
+                ArrowPayload::new("too_many_columns", arrow_payload(&batch)),
                 ArrowDecodeLimits {
                     schema_fields: 1,
                     ..ARROW_DECODE_LIMITS
@@ -3536,9 +3060,12 @@ mod tests {
     #[test]
     fn empty_project_envelope_restores_every_managed_relation_as_empty() {
         let bundle = envelope(manifest(Vec::new()), &[]);
-        assert_eq!(PROJECT_SPEC.parse(&bundle).unwrap(), Vec::new());
+        assert_eq!(
+            ProjectBundle.parse_managed_entries(&bundle).unwrap(),
+            Vec::new()
+        );
         let decoded =
-            ProjectBundle::decode_entries(PROJECT_SPEC.parse_raw(&bundle).unwrap()).unwrap();
+            ProjectBundle::decode_entries(ProjectBundle.parse_raw(&bundle).unwrap()).unwrap();
         let complete = ProjectBundle::with_empty_managed_relations(decoded);
         assert_eq!(complete.len(), Table::ALL.len());
         for (entry, table) in complete.iter().zip(Table::ALL) {
@@ -3557,16 +3084,16 @@ mod tests {
         let name = Table::Datasets.name().to_owned();
         let missing = envelope(manifest(vec![name.clone()]), &[]);
         assert!(
-            PROJECT_SPEC
-                .parse(&missing)
+            ProjectBundle
+                .parse_managed_entries(&missing)
                 .unwrap_err()
                 .contains("missing relations")
         );
 
         let unexpected = envelope(manifest(Vec::new()), &[(name.as_str(), b"arrow")]);
         assert!(
-            PROJECT_SPEC
-                .parse(&unexpected)
+            ProjectBundle
+                .parse_managed_entries(&unexpected)
                 .unwrap_err()
                 .contains("unexpected or duplicate")
         );
@@ -3577,110 +3104,15 @@ mod tests {
         let name = Table::Datasets.name().to_owned();
         let bundle = envelope(manifest(vec![name.clone(), name]), &[]);
         assert!(
-            PROJECT_SPEC
-                .parse(&bundle)
+            ProjectBundle
+                .parse_managed_entries(&bundle)
                 .unwrap_err()
                 .contains("duplicate relations")
         );
     }
 
     #[test]
-    fn project_and_episode_bundle_formats_are_not_interchangeable() {
-        let project = envelope(manifest(Vec::new()), &[]);
-        assert!(
-            EPISODES_SPEC
-                .parse(&project)
-                .unwrap_err()
-                .contains("not a Spiral Robotics episode bundle")
-        );
-
-        let episodes = envelope_for(
-            EPISODES_MAGIC,
-            manifest_for(EPISODES_FORMAT, Vec::new()),
-            &[],
-        );
-        assert!(
-            PROJECT_SPEC
-                .parse(&episodes)
-                .unwrap_err()
-                .contains("not a Spiral Robotics project")
-        );
-    }
-
-    #[test]
-    fn episode_bundle_rejects_project_only_relations() {
-        let robots = Table::Robots.name().to_owned();
-        let bundle = envelope_for(
-            EPISODES_MAGIC,
-            manifest_for(EPISODES_FORMAT, vec![robots]),
-            &[],
-        );
-        assert!(
-            EPISODES_SPEC
-                .parse(&bundle)
-                .unwrap_err()
-                .contains("unknown relation")
-        );
-    }
-
-    #[test]
-    fn episode_bundle_requires_unique_ids_and_closed_references() {
-        let dataset = text_batch(&[(column::DATASET_ID, &["source"])]);
-        let duplicate_episodes = text_batch(&[
-            (column::EPISODE_ID, &["episode_1", "episode_1"]),
-            (column::DATASET_ID, &["source", "source"]),
-        ]);
-        let duplicate = vec![
-            (Table::Datasets, vec![dataset.clone()]),
-            (Table::Episodes, vec![duplicate_episodes]),
-        ];
-        assert!(
-            EpisodeBundle::validate_relations(&duplicate)
-                .unwrap_err()
-                .contains("repeats episode ID")
-        );
-
-        let episodes = text_batch(&[
-            (column::EPISODE_ID, &["episode_1"]),
-            (column::DATASET_ID, &["source"]),
-        ]);
-        let unknown_child = text_batch(&[(column::EPISODE_ID, &["episode_2"])]);
-        let dangling = vec![
-            (Table::Datasets, vec![dataset]),
-            (Table::Episodes, vec![episodes]),
-            (Table::JointSamples, vec![unknown_child]),
-        ];
-        assert!(
-            EpisodeBundle::validate_relations(&dangling)
-                .unwrap_err()
-                .contains("references unknown episode")
-        );
-    }
-
-    #[test]
-    fn episode_bundle_requires_one_consistent_source_dataset() {
-        let decoded = vec![
-            (
-                Table::Datasets,
-                vec![text_batch(&[(column::DATASET_ID, &["source"])])],
-            ),
-            (
-                Table::Episodes,
-                vec![text_batch(&[
-                    (column::EPISODE_ID, &["episode_1"]),
-                    (column::DATASET_ID, &["other"]),
-                ])],
-            ),
-        ];
-        assert!(
-            EpisodeBundle::validate_relations(&decoded)
-                .unwrap_err()
-                .contains("outside source dataset")
-        );
-    }
-
-    #[test]
-    fn imported_video_assets_are_retargeted_to_the_destination_namespace() {
+    fn project_video_assets_are_retargeted_to_the_destination_namespace() {
         let batch = text_batch(&[
             (column::EPISODE_ID, &["episode_a", "episode-b"]),
             (
@@ -3690,14 +3122,14 @@ mod tests {
         ]);
 
         let retargeted =
-            EpisodeBundle::retarget_video_media_relations(batch, "destination").unwrap();
+            ProjectBundle::retarget_video_media_relations(batch, "destination").unwrap();
 
         assert_eq!(
-            EpisodeBundle::utf8_values(&retargeted, column::MEDIA_RELATION).unwrap(),
+            ProjectBundle::utf8_values(&retargeted, column::MEDIA_RELATION).unwrap(),
             vec![SpiralSql::video_dataset_output("destination"); 2]
         );
         assert_eq!(
-            EpisodeBundle::video_episode_ids(&[(Table::VideoAssets, vec![retargeted])]).unwrap(),
+            ProjectBundle::video_episode_ids(&[(Table::VideoAssets, vec![retargeted])]).unwrap(),
             BTreeSet::from(["episode-b".to_owned(), "episode_a".to_owned()])
         );
     }
@@ -3708,13 +3140,13 @@ mod tests {
         let mut bundle = envelope(manifest(vec![name.clone()]), &[(name.as_str(), b"")]);
         let length_offset = bundle.len() - 2 - 8;
         bundle[length_offset..length_offset + 8].copy_from_slice(&u64::MAX.to_le_bytes());
-        let error = PROJECT_SPEC.parse(&bundle).unwrap_err();
+        let error = ProjectBundle.parse_raw(&bundle).unwrap_err();
         assert!(error.contains("too large for this machine") || error.contains("truncated"));
     }
 
     #[test]
     fn export_payload_writer_enforces_its_bound() {
-        let mut payload = LimitedPayload::new(3, "project");
+        let mut payload = LimitedPayload::new(3);
         payload.write_all(b"abc").unwrap();
         assert!(
             payload
@@ -3734,7 +3166,7 @@ mod tests {
         let registry = canonical_registry_batch(std::slice::from_ref(&definition));
         let cache_batch = canonical_cache_batch(std::slice::from_ref(&definition), &[1]);
         let valid = workflow_project_bundle(&registry, &[(cache.as_str(), cache_batch.clone())]);
-        let decoded = ProjectBundle::decode_entries(PROJECT_SPEC.parse_raw(&valid).unwrap())
+        let decoded = ProjectBundle::decode_entries(ProjectBundle.parse_raw(&valid).unwrap())
             .expect("a registry and its exact declared cache must decode");
         assert_eq!(
             decoded
@@ -3770,7 +3202,7 @@ mod tests {
             &[(Table::FeatureRegistry.name(), &registry_payload)],
         );
         assert!(
-            ProjectBundle::decode_entries(PROJECT_SPEC.parse_raw(&missing).unwrap())
+            ProjectBundle::decode_entries(ProjectBundle.parse_raw(&missing).unwrap())
                 .unwrap_err()
                 .contains("missing declared Workflow cache")
         );
@@ -3790,7 +3222,7 @@ mod tests {
             ],
         );
         assert!(
-            ProjectBundle::decode_entries(PROJECT_SPEC.parse_raw(&undeclared).unwrap())
+            ProjectBundle::decode_entries(ProjectBundle.parse_raw(&undeclared).unwrap())
                 .unwrap_err()
                 .contains("undeclared Workflow relation")
         );
@@ -3810,7 +3242,7 @@ mod tests {
             &[(Table::FeatureRegistry.name(), &payload)],
         );
         assert!(
-            ProjectBundle::decode_entries(PROJECT_SPEC.parse_raw(&bundle).unwrap())
+            ProjectBundle::decode_entries(ProjectBundle.parse_raw(&bundle).unwrap())
                 .unwrap_err()
                 .contains("does not match server-derived name component")
         );
@@ -3824,7 +3256,7 @@ mod tests {
         ]);
         let bundle = workflow_project_bundle(&permissive_old_shape, &[]);
         assert!(
-            ProjectBundle::decode_entries(PROJECT_SPEC.parse_raw(&bundle).unwrap())
+            ProjectBundle::decode_entries(ProjectBundle.parse_raw(&bundle).unwrap())
                 .unwrap_err()
                 .contains("feature_registry has 2 columns; expected 14")
         );
@@ -3837,7 +3269,7 @@ mod tests {
         );
         let bundle = workflow_project_bundle(&forged, &[]);
         assert!(
-            ProjectBundle::decode_entries(PROJECT_SPEC.parse_raw(&bundle).unwrap())
+            ProjectBundle::decode_entries(ProjectBundle.parse_raw(&bundle).unwrap())
                 .unwrap_err()
                 .contains("incompatible producer provenance")
         );
@@ -3874,7 +3306,7 @@ mod tests {
             &[(relation.as_str(), missing_feature.clone())],
         );
         assert!(
-            ProjectBundle::decode_entries(PROJECT_SPEC.parse_raw(&bundle).unwrap())
+            ProjectBundle::decode_entries(ProjectBundle.parse_raw(&bundle).unwrap())
                 .unwrap_err()
                 .contains("do not exactly match")
         );
@@ -4220,96 +3652,6 @@ mod tests {
 
     /// Run with the same real-Spiral environment as the project transfer E2E.
     #[tokio::test(flavor = "current_thread")]
-    #[ignore = "requires a real SpiralDB server, SpFS, and disposable project access"]
-    async fn spiral_episode_export_import_round_trip_merges_without_overwrite() {
-        let project = required_project();
-        let namespace = format!(
-            "spiral_robotics_episode_transfer_e2e_{}_{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("system clock must be after the Unix epoch")
-                .as_nanos()
-        );
-        let project_store = configured_project_store(project, namespace);
-        let _cleanup = TestNamespace::new(project_store.clone());
-        let storage = StorageManager::new(project_store.clone());
-        let readiness = storage.test_spiral().await;
-        assert!(readiness.0, "{}", readiness.1);
-
-        EpisodeSeed::new(project_store.namespace(), "source", "episode_exported")
-            .with_started_ms(10)
-            .save(&storage)
-            .await
-            .expect("seeding the source episode must succeed");
-
-        let exported = storage
-            .export_episode_bundle("source")
-            .await
-            .expect("exporting source episodes must succeed");
-        let exported_relations = EPISODES_SPEC
-            .parse(&exported)
-            .expect("the exported episode bundle must parse")
-            .into_iter()
-            .map(|(table, _)| table)
-            .collect::<Vec<_>>();
-        assert_eq!(exported_relations, EpisodeBundleSection::RELATIONS);
-
-        let empty_project = PROJECT_SPEC
-            .build(Vec::new())
-            .expect("the empty project bundle must build");
-        storage
-            .import_project_bundle(&empty_project)
-            .await
-            .expect("the source project rows must clear without dropping relations");
-        EpisodeSeed::new(project_store.namespace(), "target", "episode_existing")
-            .with_started_ms(20)
-            .save(&storage)
-            .await
-            .expect("seeding the target dataset must succeed");
-
-        let summary = storage
-            .import_episode_bundle("target", &exported)
-            .await
-            .expect("importing episodes into the target dataset must succeed");
-        assert_eq!(summary.dataset_id(), "target");
-        assert_eq!(summary.episodes(), 1);
-        assert_eq!(summary.first_episode(), Some("episode_exported"));
-
-        let mut connection = project_store
-            .connect()
-            .await
-            .expect("the merged episode project must connect");
-        let episodes = Table::Episodes.qualified_name(project_store.namespace());
-        let result = connection
-            .query_rows(
-                &format!(
-                    "SELECT {episode_id}, {dataset_id} FROM {episodes} ORDER BY {episode_id}",
-                    episode_id = column::EPISODE_ID,
-                    dataset_id = column::DATASET_ID,
-                ),
-                10,
-            )
-            .await
-            .expect("the imported and pre-existing episodes must both remain");
-        assert_eq!(result.rows().len(), 2);
-        assert!(result.rows().iter().all(|row| {
-            row.get(column::DATASET_ID)
-                .and_then(serde_json::Value::as_str)
-                == Some("target")
-        }));
-        drop(connection);
-
-        let collision = storage
-            .import_episode_bundle("target", &exported)
-            .await
-            .expect_err("a repeated episode import must refuse the ID collision");
-        assert!(collision.contains("never overwrites existing episodes"));
-        _cleanup.cleanup().await;
-    }
-
-    /// Run with the same real-Spiral environment as the project transfer E2E.
-    #[tokio::test(flavor = "current_thread")]
     #[ignore = "requires a real SpiralDB server, SpFS, disposable project access, and FFmpeg"]
     async fn spiral_project_import_rebuilds_the_shared_managed_video_dataset() {
         let project = required_project();
@@ -4357,7 +3699,7 @@ mod tests {
         connection
             .ingest_batch(
                 &Table::VideoAssets.qualified_name(project_store.namespace()),
-                EpisodeBundle::prepare_video_asset_import(
+                ProjectBundle::prepare_video_asset_import(
                     video_asset_batch(episode_id, &mp4),
                     project_store.namespace(),
                 )
@@ -4370,7 +3712,7 @@ mod tests {
             .export_project_bundle()
             .await
             .expect("exporting the video project must succeed");
-        let empty_project = PROJECT_SPEC
+        let empty_project = ProjectBundle
             .build(Vec::new())
             .expect("the empty project bundle must build");
         storage
@@ -4599,14 +3941,14 @@ mod tests {
         let bundle_path = std::env::var("SPIRAL_PROJECT_BUNDLE")
             .expect("SPIRAL_PROJECT_BUNDLE must name the project archive to profile");
         let bytes = fs::read(&bundle_path).expect("the profiling archive must be readable");
-        let mut decoded = PROJECT_SPEC
-            .decode_entries(
-                PROJECT_SPEC
-                    .parse(&bytes)
+        let mut decoded = ProjectBundle
+            .decode_managed_entries(
+                ProjectBundle
+                    .parse_managed_entries(&bytes)
                     .expect("the profiling archive must parse"),
             )
             .expect("the profiling archive must decode");
-        EpisodeBundle::sort_relations(&mut decoded, &Table::ALL);
+        ManagedRelationCatalog::sort(&mut decoded);
 
         let project = required_project();
         let namespace = format!(
@@ -4872,14 +4214,14 @@ mod tests {
         bundle: &[u8],
     ) -> Result<ProjectImportSummary, String> {
         let parse_start = Instant::now();
-        let entries = PROJECT_SPEC.parse(bundle)?;
+        let entries = ProjectBundle.parse_managed_entries(bundle)?;
         profile_event("studio.bundle_parse", parse_start, (0, bundle.len()));
 
         let mut decoded = Vec::new();
         for (table, payload) in entries {
             let payload_bytes = payload.len();
             let decode_start = Instant::now();
-            let mut relation = PROJECT_SPEC.decode_entries(vec![(table, payload)])?;
+            let mut relation = ProjectBundle.decode_managed_entries(vec![(table, payload)])?;
             let rows = relation
                 .iter()
                 .flat_map(|(_, batches)| batches)
@@ -4903,13 +4245,13 @@ mod tests {
                 ))],
             ));
         }
-        EpisodeBundle::sort_relations(&mut decoded, &Table::ALL);
+        ManagedRelationCatalog::sort(&mut decoded);
         if let Some(limit) = profile_usize("SPIRAL_PROFILE_VIDEO_LIMIT") {
             limit_relation_rows(&mut decoded, Table::VideoAssets, limit);
         }
 
         let video_ids_start = Instant::now();
-        let imported_video_episodes = EpisodeBundle::video_episode_ids(&decoded)?;
+        let imported_video_episodes = ProjectBundle::video_episode_ids(&decoded)?;
         profile_event(
             "studio.collect_video_episode_ids",
             video_ids_start,
@@ -4934,7 +4276,7 @@ mod tests {
                 for batch in batches {
                     let transform_start = Instant::now();
                     let batch = if table == Table::VideoAssets {
-                        EpisodeBundle::prepare_video_asset_import(batch, namespace)?
+                        ProjectBundle::prepare_video_asset_import(batch, namespace)?
                     } else {
                         batch
                     };
@@ -5145,7 +4487,7 @@ mod tests {
     }
 
     fn relation_payloads(bundle: &[u8]) -> BTreeMap<String, Vec<u8>> {
-        PROJECT_SPEC
+        ProjectBundle
             .parse_raw(bundle)
             .expect("the exported project must parse")
             .into_iter()
@@ -5207,37 +4549,6 @@ mod tests {
                 Arc::new(Int64Array::from(vec![20])) as ArrayRef,
             ],
         )
-    }
-
-    struct EpisodeSeed<'a> {
-        namespace: &'a str,
-        dataset_id: &'a str,
-        episode_id: &'a str,
-        started_ms: i64,
-    }
-
-    impl<'a> EpisodeSeed<'a> {
-        fn new(namespace: &'a str, dataset_id: &'a str, episode_id: &'a str) -> Self {
-            Self {
-                namespace,
-                dataset_id,
-                episode_id,
-                started_ms: 0,
-            }
-        }
-
-        fn with_started_ms(mut self, started_ms: i64) -> Self {
-            self.started_ms = started_ms;
-            self
-        }
-
-        async fn save(self, storage: &StorageManager) -> Result<(), String> {
-            let episode = EpisodeFixture::new(self.episode_id, self.dataset_id)
-                .with_timing(self.started_ms, 60.0)
-                .into_episode();
-            debug_assert_eq!(storage.namespace(), self.namespace);
-            storage.commit_episode(&episode, &[]).await
-        }
     }
 
     fn test_mp4() -> Vec<u8> {

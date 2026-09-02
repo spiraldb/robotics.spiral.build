@@ -6,8 +6,8 @@ use dioxus::fullstack::FileStream;
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 use spiral_robotics_common::datasets::{
-    EpisodeImportSummary, HuggingFaceDatasetImportSummary, HuggingFaceDatasetInspection,
-    HuggingFaceDatasetSource, ProjectImportSummary,
+    HuggingFaceDatasetImportSummary, HuggingFaceDatasetInspection, HuggingFaceDatasetSource,
+    ProjectImportSummary,
 };
 use spiral_robotics_common::recording::{
     DatasetSummary, EpisodeInfo, EpisodeInspectionSnapshot, EpisodeListItem,
@@ -42,60 +42,6 @@ use spiral_robotics_backend::{DataCommands, DataSettingsChange};
 /// Message-only command failure transported as Dioxus typed error details.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct CommandError(String);
-
-pub(crate) struct EpisodeImportUpload {
-    dataset_id: String,
-    document: FileStream,
-}
-
-impl EpisodeImportUpload {
-    pub(crate) const fn new(dataset_id: String, document: FileStream) -> Self {
-        Self {
-            dataset_id,
-            document,
-        }
-    }
-}
-
-impl dioxus::fullstack::IntoRequest for EpisodeImportUpload {
-    fn into_request(
-        self,
-        request: dioxus::fullstack::ClientRequest,
-    ) -> impl std::future::Future<
-        Output = Result<dioxus::fullstack::ClientResponse, dioxus::fullstack::RequestError>,
-    > + 'static {
-        async move {
-            let request = request.header("X-Spiral-Dataset-ID", self.dataset_id)?;
-            dioxus::fullstack::IntoRequest::into_request(self.document, request).await
-        }
-    }
-}
-
-impl dioxus::fullstack::extract::FromRequest<dioxus::fullstack::FullstackContext>
-    for EpisodeImportUpload
-{
-    type Rejection = ServerFnError;
-
-    fn from_request(
-        request: dioxus::fullstack::extract::Request,
-        state: &dioxus::fullstack::FullstackContext,
-    ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
-        let dataset_id = request
-            .headers()
-            .get("X-Spiral-Dataset-ID")
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned);
-        let document = <FileStream as dioxus::fullstack::extract::FromRequest<_>>::from_request(
-            request, state,
-        );
-        async move {
-            let dataset_id = dataset_id.ok_or_else(|| {
-                ServerFnError::Serialization("episode import is missing its dataset ID".to_owned())
-            })?;
-            Ok(Self::new(dataset_id, document.await?))
-        }
-    }
-}
 
 impl From<ServerFnError> for CommandError {
     fn from(error: ServerFnError) -> Self {
@@ -761,27 +707,6 @@ pub(crate) async fn import_project(
     commands
         .0
         .import_project(document)
-        .await
-        .map_err(|failure| CommandError(failure.to_string()))
-}
-
-#[server(
-    endpoint = "server-functions/data/import-episodes",
-    commands: Extension<DataCommands>
-)]
-pub(crate) async fn import_episodes(
-    upload: EpisodeImportUpload,
-) -> Result<EpisodeImportSummary, CommandError> {
-    let EpisodeImportUpload {
-        dataset_id,
-        document,
-    } = upload;
-    let document =
-        CommandError::read_upload(document, spiral_robotics_backend::MAX_EPISODE_IMPORT_BYTES)
-            .await?;
-    commands
-        .0
-        .import_episodes(dataset_id, document)
         .await
         .map_err(|failure| CommandError(failure.to_string()))
 }

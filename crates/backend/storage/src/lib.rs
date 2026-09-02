@@ -14,8 +14,7 @@ pub mod bundle {
     //! Portable single-file snapshots of the Studio-owned Spiral namespace.
 
     pub use crate::transfer::{
-        EpisodeBundle, ProjectBundle, SIGLIP_BASE_MODEL_ID, SIGLIP_BASE_REPOSITORY,
-        SIGLIP_BASE_REVISION,
+        ProjectBundle, SIGLIP_BASE_MODEL_ID, SIGLIP_BASE_REPOSITORY, SIGLIP_BASE_REVISION,
     };
 }
 

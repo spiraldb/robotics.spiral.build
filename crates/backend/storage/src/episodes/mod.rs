@@ -55,10 +55,10 @@ use arrow_schema::{DataType, Field, Schema};
 use crate::db::{ManagedRelationSchema, Table, column};
 use episode_schema::EpisodeSchema;
 
-/// Episode relations contributed to project and episode bundles.
-pub(crate) struct EpisodeBundleSection;
+/// Episode relation schemas shared by capture, ingestion, and project transfer.
+pub(crate) struct EpisodeRelations;
 
-impl EpisodeBundleSection {
+impl EpisodeRelations {
     pub(crate) const RELATIONS: [Table; 5] = [
         Table::Datasets,
         Table::Episodes,
@@ -74,7 +74,7 @@ impl EpisodeBundleSection {
     ];
 }
 
-impl ManagedRelationSchema for EpisodeBundleSection {
+impl ManagedRelationSchema for EpisodeRelations {
     fn relations(&self) -> &'static [Table] {
         &Self::RELATIONS
     }
@@ -107,7 +107,7 @@ impl ManagedRelationSchema for EpisodeBundleSection {
     }
 }
 
-impl EpisodeBundleSection {
+impl EpisodeRelations {
     pub(crate) fn dataset_schema() -> arrow_schema::SchemaRef {
         EpisodeSchema::datasets()
     }

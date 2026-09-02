@@ -13,7 +13,6 @@ use crate::sync::MutexRecovery;
 pub(crate) enum CatalogLeaseOwner {
     Recording,
     CalibrationReapply,
-    EpisodeImport,
     DatasetImport,
     ProjectImport,
     ProjectSwitch,
@@ -129,13 +128,13 @@ mod tests {
             .expect("Workflow claims the empty handshake slot");
         assert!(
             lease
-                .try_acquire(CatalogLeaseOwner::EpisodeImport)
+                .try_acquire(CatalogLeaseOwner::DatasetImport)
                 .is_none(),
             "import cannot pass its idle check before Workflow publishes active state"
         );
         assert!(lease.release(workflow));
         let import = lease
-            .try_acquire(CatalogLeaseOwner::EpisodeImport)
+            .try_acquire(CatalogLeaseOwner::DatasetImport)
             .expect("import may perform its active-state check after Workflow releases handshake");
         assert!(lease.release(import));
     }

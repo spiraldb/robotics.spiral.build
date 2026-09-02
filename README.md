@@ -8,8 +8,7 @@ queries that data; trains vision-conditioned ACT policies; and safely
 executes trained policies through the follower's bounded rollout path.
 
 SpiralDB is Studio's only persistent storage layer. Studio can transfer the
-complete active project from Settings as one `.spiral-project` file, while Data
-imports and exports the selected dataset's episodes as `.spiral-episodes`.
+complete active project from Settings as one `.spiral-project` file.
 
 ## Development
 

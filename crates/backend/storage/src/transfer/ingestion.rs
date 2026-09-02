@@ -27,7 +27,7 @@ use url::Url;
 
 use crate::db::ProjectConnection;
 use crate::db::SpiralSql;
-use crate::episodes::EpisodeBundleSection;
+use crate::episodes::EpisodeRelations;
 use crate::manager::StorageManager;
 
 const HUGGING_FACE_ORIGIN: &str = "https://huggingface.co";
@@ -734,7 +734,7 @@ impl HuggingFaceInspectionStorage for HuggingFaceDatasetInspection {
             self.resolved_revision()
         );
         RecordBatch::try_new(
-            EpisodeBundleSection::dataset_schema(),
+            EpisodeRelations::dataset_schema(),
             vec![
                 Arc::new(StringArray::from(vec![self.dataset_id()])) as ArrayRef,
                 Arc::new(StringArray::from(vec![self.dataset_id()])) as ArrayRef,

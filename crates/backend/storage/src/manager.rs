@@ -204,16 +204,6 @@ impl StorageManager {
             .await
     }
 
-    pub async fn import_episode_bundle(
-        &self,
-        dataset_id: &str,
-        bytes: &[u8],
-    ) -> Result<spiral_robotics_common::datasets::EpisodeImportSummary, String> {
-        TransferPersistence::new(&self.project_store)
-            .import_episodes(dataset_id, bytes)
-            .await
-    }
-
     pub async fn test_spiral(&self) -> (bool, String) {
         ProjectDatabasePersistence::new(&self.project_store)
             .test()
@@ -255,13 +245,6 @@ impl StorageManager {
     ) -> Result<Vec<u8>, String> {
         VideoAssetPersistence::new(&self.project_store)
             .range(asset, range)
-            .await
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    pub async fn export_episode_bundle(&self, dataset_id: &str) -> Result<Vec<u8>, String> {
-        TransferPersistence::new(&self.project_store)
-            .export_episodes(dataset_id)
             .await
     }
 }

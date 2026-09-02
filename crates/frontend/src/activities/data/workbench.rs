@@ -2,14 +2,14 @@
 //!
 //! Episode selection and query execution are independent state channels. A
 //! result owned by `query_result` stays mounted while an operator selects,
-//! replays, imports, or exports episodes; neither tool has to impersonate
+//! or replays episodes; neither tool has to impersonate
 //! navigation for the other.
 
 use std::collections::BTreeSet;
 
 use crate::components::interaction::{
     Action, ActionPurpose, ActionVariant, CloseIcon, ConfirmationCopy, ConfirmationDismissal,
-    ConfirmationResponse, FileAction, FileInput, InlineConfirmation, RefreshIcon,
+    ConfirmationResponse, InlineConfirmation, RefreshIcon,
 };
 use dioxus::prelude::*;
 use spiral_robotics_common::datasets::{
@@ -23,8 +23,7 @@ use spiral_robotics_common::status::BackendReadinessState;
 use crate::activities::data::catalog::ManagedTable as Table;
 use crate::activities::data::query_result::DEFAULT_QUERY_ROWS;
 use crate::client::server_fns::{
-    EpisodeImportUpload, delete_episode, import_episodes, import_hugging_face_dataset,
-    inspect_hugging_face_dataset,
+    delete_episode, import_hugging_face_dataset, inspect_hugging_face_dataset,
 };
 use crate::format::ClockPresentation;
 use crate::shell::state::studio;
@@ -37,7 +36,6 @@ const QUERY_ROW_OPTIONS: [usize; 5] = [25, 100, 250, 500, 1_000];
 pub(crate) fn EpisodesPanel(namespace: String) -> Element {
     let studio = studio();
     let data = studio.data_controller();
-    let importing = use_signal(|| false);
     let mut adding_data = use_signal(|| false);
     let mut confirming_delete = use_signal(|| None::<String>);
     let mut deleting_episode = use_signal(|| None::<String>);
@@ -116,7 +114,6 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
         !storage_available && backend_readiness.state() == BackendReadinessState::Bootstrapping;
     let storage_readiness_detail = backend_readiness.detail().to_owned();
     let reload_dataset_id = dataset_id.clone();
-    let import_dataset_id = dataset_id.clone();
     let confirming_delete_id = confirming_delete.read().to_owned();
     let deleting_episode_id = deleting_episode.read().to_owned();
 
@@ -171,10 +168,8 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
                         RefreshIcon {}
                     }
                 }
-                // The scope note takes its own line rather than competing with two
-                // buttons for the width of one. Sharing the row left it 30px of
-                // the 105px it needs, so the caption on the transfer controls read
-                // "Sele…".
+                // The import scope remains visible beside the action instead of
+                // being hidden inside the expanded form.
                 div { class: "flex min-h-9 flex-wrap items-center gap-x-2 gap-y-0.5 border-t border-line px-2 py-1",
                     span { class: "order-last w-full text-[10px] text-ink-faint", "Selected dataset only" }
                     Action {
@@ -185,53 +180,6 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
                         disabled: !dataset_valid || !storage_available,
                         onclick: move |_| adding_data.toggle(),
                         if adding_data() { "Adding data" } else { "Add data" }
-                    }
-                    FileAction {
-                        purpose: ActionPurpose::Import,
-                        variant: ActionVariant::Outline,
-                        title: "Import episodes into the selected dataset; existing episode IDs are never replaced",
-                        disabled: importing() || !dataset_valid || !storage_available,
-                        aria_busy: importing(),
-                        input: FileInput::new(
-                            ".spiral-episodes,application/vnd.spiral-robotics.episodes",
-                            move |event: Event<FormData>| {
-                            let Some(file) = event.files().first().cloned() else { return };
-                            let target_dataset = import_dataset_id.clone();
-                            studio.run_utility("", async move {
-                                let Some(outcome) = SingleFlight::run(importing, async {
-                                        let result = import_episodes(EpisodeImportUpload::new(
-                                            target_dataset.clone(),
-                                            file.into(),
-                                        ))
-                                        .await
-                                        .map_err(|error| error.to_string())?;
-                                        data.reload_dataset(target_dataset).await?;
-                                        Ok::<_, String>(result)
-                                    })
-                                    .await
-                                else {
-                                    return Ok(());
-                                };
-                                match outcome {
-                                    Ok(result) => {
-                                        if let Some(episode) = result.first_episode() {
-                                            data.set_selected_episode(Some(episode.to_owned()));
-                                        }
-                                        studio.report_success(format!(
-                                            "Imported {} episodes into {} ({} rows).{}",
-                                            result.episodes(),
-                                            result.dataset_id(),
-                                            result.rows(),
-                                            result.warnings().import_warning_suffix(),
-                                        ));
-                                        Ok(())
-                                    }
-                                    Err(error) => Err(error),
-                                }
-                            });
-                            },
-                        ),
-                        if importing() { "Importing…" } else { "Import bundle" }
                     }
                 }
             }
@@ -280,7 +228,7 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
                     div { class: "px-3 py-8 text-center",
                         strong { class: "block text-[12px] font-medium text-ink", "No episodes yet" }
                         p { class: "mt-1 text-[11px] text-ink-faint",
-                            "Record in Live, add a Hugging Face dataset, or import an episode bundle."
+                            "Record in Live or add a Hugging Face dataset."
                         }
                     }
                 } else {
@@ -336,20 +284,6 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
                     }
                 }
             }
-        }
-    }
-}
-
-trait ImportWarningsPresentation {
-    fn import_warning_suffix(&self) -> String;
-}
-
-impl ImportWarningsPresentation for [String] {
-    fn import_warning_suffix(&self) -> String {
-        if self.is_empty() {
-            String::new()
-        } else {
-            format!(" Warning: {}", self.join(" "))
         }
     }
 }
