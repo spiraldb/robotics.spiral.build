@@ -9,8 +9,10 @@ impl AppState {
         Router::new().route("/project/export", get(Self::export_project))
     }
 
-    async fn export_project(State(state): State<Self>) -> Result<Response, (StatusCode, String)> {
-        let bytes = DataCommands::new(state)
+    async fn export_project(
+        Extension(commands): Extension<DataCommands>,
+    ) -> Result<Response, (StatusCode, String)> {
+        let bytes = commands
             .export_project()
             .await
             .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;

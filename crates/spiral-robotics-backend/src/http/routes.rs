@@ -13,6 +13,7 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::Extension;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::{Path, Query, State};

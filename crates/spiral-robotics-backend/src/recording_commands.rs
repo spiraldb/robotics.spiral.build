@@ -18,6 +18,7 @@ use crate::data::seek::{
     SampledArm, SeekActivity, SeekControlMode, SeekEpisodeCommand, SeekTarget, SeekableEpisode,
 };
 use crate::http::routes::AppState;
+use crate::main_runtime::{MainRuntime, MainRuntimeFailure};
 use crate::recording::{
     RecordingActions, RecordingContext, RecordingDraftRequest, RecordingPort, RecordingResult,
     ReplayActions, ReplayEpisode, ReplayPlan, ReplayPort, ReplayTrajectory,
@@ -727,6 +728,7 @@ impl PhysicalSeekPort for SeekAdapter<'_> {
 /// Narrow command facade shared with the Studio's server-function handlers.
 #[derive(Clone)]
 pub struct RecordingCommands {
+    main_runtime: MainRuntime,
     state: AppState,
 }
 
@@ -735,36 +737,54 @@ pub struct RecordingCommands {
 pub struct RecordingFailure(String);
 
 impl RecordingCommands {
-    pub(crate) fn new(state: AppState) -> Self {
-        Self { state }
+    pub(crate) fn new(main_runtime: MainRuntime, state: AppState) -> Self {
+        Self {
+            main_runtime,
+            state,
+        }
     }
 
     pub async fn datasets(&self) -> Result<Vec<DatasetSummary>, RecordingFailure> {
-        self.require_storage_ready()?;
-        self.state.storage().datasets().await.map_err(Into::into)
+        let commands = self.clone();
+        self.main_runtime
+            .execute(async move {
+                commands.require_storage_ready()?;
+                commands
+                    .state
+                    .storage()
+                    .datasets()
+                    .await
+                    .map_err(Into::into)
+            })
+            .await?
     }
 
     pub async fn episodes(
         &self,
         dataset_id: String,
     ) -> Result<(Vec<EpisodeListItem>, Vec<String>), RecordingFailure> {
-        self.require_storage_ready()?;
-        // A paused take has a readable SpiralDB checkpoint. Hide its catalog row
-        // here because live recording state is delivered through telemetry.
-        let recording = self
-            .state
-            .hardware()
-            .state()
-            .recording()
-            .as_ref()
-            .map(|progress| progress.episode().to_owned());
-        let episodes = EpisodeQueries::new(&EpisodeAdapter::new(&self.state))
-            .list(dataset_id)
+        let commands = self.clone();
+        self.main_runtime
+            .execute(async move {
+                commands.require_storage_ready()?;
+                // A paused take has a readable SpiralDB checkpoint. Hide its catalog row
+                // here because live recording state is delivered through telemetry.
+                let recording = commands
+                    .state
+                    .hardware()
+                    .state()
+                    .recording()
+                    .as_ref()
+                    .map(|progress| progress.episode().to_owned());
+                let episodes = EpisodeQueries::new(&EpisodeAdapter::new(&commands.state))
+                    .list(dataset_id)
+                    .await?
+                    .into_iter()
+                    .filter(|episode| Some(episode.id()) != recording.as_deref())
+                    .collect();
+                Ok((episodes, commands.state.episodes().issues()))
+            })
             .await?
-            .into_iter()
-            .filter(|episode| Some(episode.id()) != recording.as_deref())
-            .collect();
-        Ok((episodes, self.state.episodes().issues()))
     }
 
     /// Begin a take using the configured teleoperation pair.
@@ -772,48 +792,73 @@ impl RecordingCommands {
         &self,
         dataset_id: String,
     ) -> Result<EpisodeInfo, RecordingFailure> {
-        self.require_catalog_ready()?;
-        let adapter = RecordingAdapter::new(&self.state);
-        let result = RecordingActions::new(&adapter)
-            .start(StartRecordingCommand::new(dataset_id, Vec::new(), None))
-            .await?;
-        adapter.present_recording(result).map_err(Into::into)
+        let commands = self.clone();
+        self.main_runtime
+            .execute(async move {
+                commands.require_catalog_ready()?;
+                let adapter = RecordingAdapter::new(&commands.state);
+                let result = RecordingActions::new(&adapter)
+                    .start(StartRecordingCommand::new(dataset_id, Vec::new(), None))
+                    .await?;
+                adapter.present_recording(result).map_err(Into::into)
+            })
+            .await?
     }
 
     pub async fn stop_recording(&self, keep: bool) -> Result<EpisodeInfo, RecordingFailure> {
-        self.require_catalog_ready()?;
-        let adapter = RecordingAdapter::new(&self.state);
-        let result = RecordingActions::new(&adapter)
-            .stop(StopRecordingCommand::new(keep))
-            .await?;
-        adapter.present_recording(result).map_err(Into::into)
+        let commands = self.clone();
+        self.main_runtime
+            .execute(async move {
+                commands.require_catalog_ready()?;
+                let adapter = RecordingAdapter::new(&commands.state);
+                let result = RecordingActions::new(&adapter)
+                    .stop(StopRecordingCommand::new(keep))
+                    .await?;
+                adapter.present_recording(result).map_err(Into::into)
+            })
+            .await?
     }
 
     pub async fn set_recording_paused(&self, paused: bool) -> Result<(), RecordingFailure> {
-        self.require_catalog_ready()?;
-        RecordingActions::new(&RecordingAdapter::new(&self.state))
-            .set_paused(SetRecordingPausedCommand::new(paused))
-            .await
-            .map_err(Into::into)
+        let commands = self.clone();
+        self.main_runtime
+            .execute(async move {
+                commands.require_catalog_ready()?;
+                RecordingActions::new(&RecordingAdapter::new(&commands.state))
+                    .set_paused(SetRecordingPausedCommand::new(paused))
+                    .await
+                    .map_err(Into::into)
+            })
+            .await?
     }
 
     pub async fn delete_episode(&self, id: String) -> Result<(), RecordingFailure> {
-        self.require_catalog_ready()?;
-        EpisodeCatalogActions::new(&EpisodeAdapter::new(&self.state))
-            .delete(DeleteEpisodeCommand::new(id))
-            .await
-            .map_err(Into::into)
+        let commands = self.clone();
+        self.main_runtime
+            .execute(async move {
+                commands.require_catalog_ready()?;
+                EpisodeCatalogActions::new(&EpisodeAdapter::new(&commands.state))
+                    .delete(DeleteEpisodeCommand::new(id))
+                    .await
+                    .map_err(Into::into)
+            })
+            .await?
     }
 
     pub async fn inspection(
         &self,
         id: String,
     ) -> Result<EpisodeInspectionSnapshot, RecordingFailure> {
-        self.require_storage_ready()?;
-        EpisodeQueries::new(&EpisodeAdapter::new(&self.state))
-            .inspection(id)
-            .await
-            .map_err(Into::into)
+        let commands = self.clone();
+        self.main_runtime
+            .execute(async move {
+                commands.require_storage_ready()?;
+                EpisodeQueries::new(&EpisodeAdapter::new(&commands.state))
+                    .inspection(id)
+                    .await
+                    .map_err(Into::into)
+            })
+            .await?
     }
 
     /// Move a physical follower to one committed recorded sample.
@@ -824,11 +869,18 @@ impl RecordingCommands {
         source_arm: Option<String>,
         seconds: f64,
     ) -> Result<(), RecordingFailure> {
-        self.require_catalog_ready()?;
-        PhysicalSeekActions::new(&SeekAdapter { state: &self.state })
-            .seek(SeekEpisodeCommand::new(id, robot, seconds).with_source_arm(source_arm))
-            .await?;
-        Ok(())
+        let commands = self.clone();
+        self.main_runtime
+            .execute(async move {
+                commands.require_catalog_ready()?;
+                PhysicalSeekActions::new(&SeekAdapter {
+                    state: &commands.state,
+                })
+                .seek(SeekEpisodeCommand::new(id, robot, seconds).with_source_arm(source_arm))
+                .await?;
+                Ok(())
+            })
+            .await?
     }
 
     pub async fn start_replay(
@@ -838,19 +890,32 @@ impl RecordingCommands {
         source_arm: Option<String>,
         start_seconds: f64,
     ) -> Result<(), RecordingFailure> {
-        self.require_catalog_ready()?;
-        ReplayActions::new(&RecordingAdapter::new(&self.state))
-            .start(StartReplayCommand::new(episode, robot, source_arm).starting_at(start_seconds))
-            .await
-            .map_err(Into::into)
+        let commands = self.clone();
+        self.main_runtime
+            .execute(async move {
+                commands.require_catalog_ready()?;
+                ReplayActions::new(&RecordingAdapter::new(&commands.state))
+                    .start(
+                        StartReplayCommand::new(episode, robot, source_arm)
+                            .starting_at(start_seconds),
+                    )
+                    .await
+                    .map_err(Into::into)
+            })
+            .await?
     }
 
     pub async fn set_replay_paused(&self, paused: bool) -> Result<(), RecordingFailure> {
-        self.require_catalog_ready()?;
-        ReplayActions::new(&RecordingAdapter::new(&self.state))
-            .set_paused(SetReplayPausedCommand::new(paused))
-            .await
-            .map_err(Into::into)
+        let commands = self.clone();
+        self.main_runtime
+            .execute(async move {
+                commands.require_catalog_ready()?;
+                ReplayActions::new(&RecordingAdapter::new(&commands.state))
+                    .set_paused(SetReplayPausedCommand::new(paused))
+                    .await
+                    .map_err(Into::into)
+            })
+            .await?
     }
 
     fn require_storage_ready(&self) -> Result<(), RecordingFailure> {
@@ -887,6 +952,12 @@ impl From<OperationError> for RecordingFailure {
 impl From<String> for RecordingFailure {
     fn from(message: String) -> Self {
         Self(message)
+    }
+}
+
+impl From<MainRuntimeFailure> for RecordingFailure {
+    fn from(error: MainRuntimeFailure) -> Self {
+        Self(error.to_string())
     }
 }
 

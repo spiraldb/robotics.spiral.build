@@ -7,6 +7,7 @@ use crate::OperationError;
 use crate::adapters::hardware::HardwareApiProjection as _;
 use crate::data::catalog_lease::{CatalogLeaseOwner, CatalogLeaseToken, CatalogMutationLease};
 use crate::http::routes::AppState;
+use crate::main_runtime::{MainRuntime, MainRuntimeFailure};
 use crate::robotics::cameras::CameraManager;
 use crate::robots::calibration::{
     CalibrationActions, CalibrationControlActions, CalibrationHistoryActions,
@@ -525,6 +526,7 @@ impl CatalogMutationLease {
 /// Narrow command facade shared with the Studio's server-function handlers.
 #[derive(Clone)]
 pub struct DeviceCommands {
+    main_runtime: MainRuntime,
     state: AppState,
 }
 
@@ -533,71 +535,104 @@ pub struct DeviceCommands {
 pub struct DeviceFailure(String);
 
 impl DeviceCommands {
-    pub(crate) fn new(state: AppState) -> Self {
-        Self { state }
+    pub(crate) fn new(main_runtime: MainRuntime, state: AppState) -> Self {
+        Self {
+            main_runtime,
+            state,
+        }
     }
 
     pub async fn list_ports(&self) -> Result<Vec<SerialPortSummary>, DeviceFailure> {
-        self.require_catalog_ready()?;
-        SerialPortQueryAdapter { state: &self.state }
-            .serial_ports()
-            .await
-            .map_err(Into::into)
+        let commands = self.clone();
+        self.main_runtime
+            .execute(async move {
+                commands.require_catalog_ready()?;
+                SerialPortQueryAdapter {
+                    state: &commands.state,
+                }
+                .serial_ports()
+                .await
+                .map_err(Into::into)
+            })
+            .await?
     }
 
     pub async fn identify_port(
         &self,
         before: Vec<String>,
     ) -> Result<(Option<String>, String), DeviceFailure> {
-        self.require_catalog_ready()?;
-        let (port, _, message) = IdentifySerialPortCommand::new(before)
-            .execute(&SystemSerialPortInventory)
+        let commands = self.clone();
+        self.main_runtime
+            .execute(async move {
+                commands.require_catalog_ready()?;
+                let (port, _, message) = IdentifySerialPortCommand::new(before)
+                    .execute(&SystemSerialPortInventory)
+                    .await?
+                    .into_parts();
+                Ok((port, message))
+            })
             .await?
-            .into_parts();
-        Ok((port, message))
     }
 
     pub async fn refresh_cameras(&self) -> Result<Vec<CameraStatus>, DeviceFailure> {
-        CameraDiscoveryAdapter::new(self.state.cameras().clone())
-            .refresh_cameras()
-            .await
-            .map_err(Into::into)
+        let commands = self.clone();
+        self.main_runtime
+            .execute(async move {
+                CameraDiscoveryAdapter::new(commands.state.cameras().clone())
+                    .refresh_cameras()
+                    .await
+                    .map_err(Into::into)
+            })
+            .await?
     }
 
     pub async fn list_robots(&self) -> Result<Vec<RobotSummary>, DeviceFailure> {
-        self.require_catalog_ready()?;
-        let adapter = RobotAdapter::prefetched(&self.state).await;
-        let hardware = self.state.hardware().state();
-        let mut summaries = Vec::new();
-        for robot in RobotCatalogActions::new(&adapter).list().await {
-            let connection = hardware
-                .connections()
-                .get(robot.id())
-                .cloned()
-                .unwrap_or_default();
-            if let Ok(summary) = adapter.summary(robot.id(), connection.to_api()).await {
-                summaries.push(summary);
-            }
-        }
-        Ok(summaries)
+        let commands = self.clone();
+        self.main_runtime
+            .execute(async move {
+                commands.require_catalog_ready()?;
+                let adapter = RobotAdapter::prefetched(&commands.state).await;
+                let hardware = commands.state.hardware().state();
+                let mut summaries = Vec::new();
+                for robot in RobotCatalogActions::new(&adapter).list().await {
+                    let connection = hardware
+                        .connections()
+                        .get(robot.id())
+                        .cloned()
+                        .unwrap_or_default();
+                    if let Ok(summary) = adapter.summary(robot.id(), connection.to_api()).await {
+                        summaries.push(summary);
+                    }
+                }
+                Ok(summaries)
+            })
+            .await?
     }
 
     pub async fn create_robot(&self, request: NewRobot) -> Result<RobotSummary, DeviceFailure> {
-        self.require_catalog_ready()?;
-        let (id, robot_type, port) = request.into_parts();
-        let (port_path, baud_rate) = match port {
-            Some(port) => (Some(port.path().to_owned()), Some(port.baud_rate())),
-            None => (None, None),
-        };
-        let adapter = RobotAdapter::new(&self.state);
-        let robot = RobotCatalogActions::new(&adapter)
-            .create(CreateRobotCommand::new(id, robot_type, port_path).with_baud_rate(baud_rate))
-            .await?;
-        RobotActions::new(&adapter, &adapter)
-            .auto_connect_robot(robot.id().to_owned())
-            .await
-            .log();
-        self.present_saved_robot(robot).await
+        let commands = self.clone();
+        self.main_runtime
+            .execute(async move {
+                commands.require_catalog_ready()?;
+                let (id, robot_type, port) = request.into_parts();
+                let (port_path, baud_rate) = match port {
+                    Some(port) => (Some(port.path().to_owned()), Some(port.baud_rate())),
+                    None => (None, None),
+                };
+                let adapter = RobotAdapter::new(&commands.state);
+                let robot = RobotCatalogActions::new(&adapter)
+                    .create(
+                        CreateRobotCommand::new(id, robot_type, port_path)
+                            .with_baud_rate(baud_rate),
+                    )
+                    .await?;
+                RobotActions::new(&adapter, &adapter)
+                    .auto_connect_robot(robot.id().to_owned())
+                    .await
+                    .log();
+                commands.present_saved_robot(robot).await
+            })
+            .await?
     }
 
     /// Add a complete unified robot JSON document as a new workspace instance.
@@ -605,103 +640,145 @@ impl DeviceCommands {
         &self,
         document: Vec<u8>,
     ) -> Result<RobotSummary, DeviceFailure> {
-        self.require_catalog_ready()?;
-        if document.is_empty() {
-            return Err(DeviceFailure(
-                "choose a robot configuration JSON file to import".to_owned(),
-            ));
-        }
-        let adapter = RobotAdapter::import(&self.state, Bytes::from(document));
-        let robot = RobotCatalogActions::new(&adapter)
-            .import_configuration()
-            .await?;
-        RobotActions::new(&adapter, &adapter)
-            .auto_connect_robot(robot.id().to_owned())
-            .await
-            .log();
-        self.present_saved_robot(robot).await
+        let commands = self.clone();
+        self.main_runtime
+            .execute(async move {
+                commands.require_catalog_ready()?;
+                if document.is_empty() {
+                    return Err(DeviceFailure(
+                        "choose a robot configuration JSON file to import".to_owned(),
+                    ));
+                }
+                let adapter = RobotAdapter::import(&commands.state, Bytes::from(document));
+                let robot = RobotCatalogActions::new(&adapter)
+                    .import_configuration()
+                    .await?;
+                RobotActions::new(&adapter, &adapter)
+                    .auto_connect_robot(robot.id().to_owned())
+                    .await
+                    .log();
+                commands.present_saved_robot(robot).await
+            })
+            .await?
     }
 
     pub async fn get_robot(&self, id: String) -> Result<RobotSummary, DeviceFailure> {
-        self.require_catalog_ready()?;
-        let robot = RobotCatalogActions::new(&RobotAdapter::new(&self.state))
-            .get(id)
-            .await?;
-        self.present_saved_robot(robot).await
+        let commands = self.clone();
+        self.main_runtime
+            .execute(async move {
+                commands.require_catalog_ready()?;
+                let robot = RobotCatalogActions::new(&RobotAdapter::new(&commands.state))
+                    .get(id)
+                    .await?;
+                commands.present_saved_robot(robot).await
+            })
+            .await?
     }
 
     pub async fn update_robot(
         &self,
         request: RobotUpdate<Vec<CameraBinding>>,
     ) -> Result<RobotSummary, DeviceFailure> {
-        self.require_catalog_ready()?;
-        let (id, robot_type, port, camera_bindings) = request.into_parts();
-        let adapter = RobotAdapter::new(&self.state);
-        let should_auto_connect = port.is_some();
-        let robot = RobotActions::new(&adapter, &adapter)
-            .update(
-                UpdateRobotCommand::new(
-                    id,
-                    robot_type,
-                    port.map(|port| SerialPortConfiguration::new(port.path(), port.baud_rate())),
-                )
-                .with_cameras(camera_bindings.map(|bindings| {
-                    bindings
-                        .into_iter()
-                        .map(|binding| CameraAssignment::new(binding.name(), binding.id()))
-                        .collect()
-                })),
-            )
-            .await?;
-        if should_auto_connect {
-            RobotActions::new(&adapter, &adapter)
-                .auto_connect_robot(robot.id().to_owned())
-                .await
-                .log();
-        }
-        self.present_saved_robot(robot).await
+        let commands = self.clone();
+        self.main_runtime
+            .execute(async move {
+                commands.require_catalog_ready()?;
+                let (id, robot_type, port, camera_bindings) = request.into_parts();
+                let adapter = RobotAdapter::new(&commands.state);
+                let should_auto_connect = port.is_some();
+                let robot = RobotActions::new(&adapter, &adapter)
+                    .update(
+                        UpdateRobotCommand::new(
+                            id,
+                            robot_type,
+                            port.map(|port| {
+                                SerialPortConfiguration::new(port.path(), port.baud_rate())
+                            }),
+                        )
+                        .with_cameras(camera_bindings.map(|bindings| {
+                            bindings
+                                .into_iter()
+                                .map(|binding| CameraAssignment::new(binding.name(), binding.id()))
+                                .collect()
+                        })),
+                    )
+                    .await?;
+                if should_auto_connect {
+                    RobotActions::new(&adapter, &adapter)
+                        .auto_connect_robot(robot.id().to_owned())
+                        .await
+                        .log();
+                }
+                commands.present_saved_robot(robot).await
+            })
+            .await?
     }
 
     pub async fn delete_robot(&self, id: String) -> Result<(), DeviceFailure> {
-        self.require_catalog_ready()?;
-        let adapter = RobotAdapter::new(&self.state);
-        RobotActions::new(&adapter, &adapter)
-            .delete(&id)
-            .await
-            .map_err(Into::into)
+        let commands = self.clone();
+        self.main_runtime
+            .execute(async move {
+                commands.require_catalog_ready()?;
+                let adapter = RobotAdapter::new(&commands.state);
+                RobotActions::new(&adapter, &adapter)
+                    .delete(&id)
+                    .await
+                    .map_err(Into::into)
+            })
+            .await?
     }
 
     pub async fn connect_robot(&self, id: String) -> Result<(), DeviceFailure> {
-        self.require_catalog_ready()?;
-        let adapter = RobotAdapter::new(&self.state);
-        RobotActions::new(&adapter, &adapter)
-            .connect(&id)
-            .await
-            .map_err(Into::into)
+        let commands = self.clone();
+        self.main_runtime
+            .execute(async move {
+                commands.require_catalog_ready()?;
+                let adapter = RobotAdapter::new(&commands.state);
+                RobotActions::new(&adapter, &adapter)
+                    .connect(&id)
+                    .await
+                    .map_err(Into::into)
+            })
+            .await?
     }
 
     pub async fn disconnect_robot(&self, id: String) -> Result<(), DeviceFailure> {
-        self.require_catalog_ready()?;
-        RobotConnectionActions::new(&RobotAdapter::new(&self.state))
-            .disconnect(&id)
-            .await
-            .map_err(Into::into)
+        let commands = self.clone();
+        self.main_runtime
+            .execute(async move {
+                commands.require_catalog_ready()?;
+                RobotConnectionActions::new(&RobotAdapter::new(&commands.state))
+                    .disconnect(&id)
+                    .await
+                    .map_err(Into::into)
+            })
+            .await?
     }
 
     pub async fn hold_robot(&self, id: String) -> Result<(), DeviceFailure> {
-        self.require_catalog_ready()?;
-        RobotControlActions::new(self.state.hardware().as_ref())
-            .execute(RobotControlCommand::Hold { robot: id })
-            .await
-            .map_err(Into::into)
+        let commands = self.clone();
+        self.main_runtime
+            .execute(async move {
+                commands.require_catalog_ready()?;
+                RobotControlActions::new(commands.state.hardware().as_ref())
+                    .execute(RobotControlCommand::Hold { robot: id })
+                    .await
+                    .map_err(Into::into)
+            })
+            .await?
     }
 
     pub async fn release_robot(&self, id: String) -> Result<(), DeviceFailure> {
-        self.require_catalog_ready()?;
-        RobotControlActions::new(self.state.hardware().as_ref())
-            .execute(RobotControlCommand::Release { robot: id })
-            .await
-            .map_err(Into::into)
+        let commands = self.clone();
+        self.main_runtime
+            .execute(async move {
+                commands.require_catalog_ready()?;
+                RobotControlActions::new(commands.state.hardware().as_ref())
+                    .execute(RobotControlCommand::Release { robot: id })
+                    .await
+                    .map_err(Into::into)
+            })
+            .await?
     }
 
     pub async fn set_robot_goal(
@@ -709,85 +786,116 @@ impl DeviceCommands {
         id: String,
         normalized: BTreeMap<String, f64>,
     ) -> Result<(), DeviceFailure> {
-        self.require_catalog_ready()?;
-        RobotControlActions::new(self.state.hardware().as_ref())
-            .execute(RobotControlCommand::MoveJoints {
-                robot: id,
-                normalized,
+        let commands = self.clone();
+        self.main_runtime
+            .execute(async move {
+                commands.require_catalog_ready()?;
+                RobotControlActions::new(commands.state.hardware().as_ref())
+                    .execute(RobotControlCommand::MoveJoints {
+                        robot: id,
+                        normalized,
+                    })
+                    .await
+                    .map_err(Into::into)
             })
-            .await
-            .map_err(Into::into)
+            .await?
     }
 
     pub async fn start_calibration(&self, id: String) -> Result<(), DeviceFailure> {
-        self.require_catalog_ready()?;
-        CalibrationControlActions::new(self.state.hardware().as_ref())
-            .start(&id)
-            .await
-            .map_err(Into::into)
+        let commands = self.clone();
+        self.main_runtime
+            .execute(async move {
+                commands.require_catalog_ready()?;
+                CalibrationControlActions::new(commands.state.hardware().as_ref())
+                    .start(&id)
+                    .await
+                    .map_err(Into::into)
+            })
+            .await?
     }
 
     pub async fn finish_calibration(&self, id: String) -> Result<RobotSummary, DeviceFailure> {
-        self.require_catalog_ready()?;
-        let output = CalibrationActions::new(
-            self.state.workspace().as_ref(),
-            self.state.hardware().as_ref(),
-        )
-        .finish(&id)
-        .await?;
-        if let Some(warning) = output.live_warning() {
-            tracing::warn!(robot = %id, "saved calibration but live refresh was incomplete: {warning}");
-        }
-        self.present_robot(&id).await
+        let commands = self.clone();
+        self.main_runtime
+            .execute(async move {
+                commands.require_catalog_ready()?;
+                let output = CalibrationActions::new(
+                    commands.state.workspace().as_ref(),
+                    commands.state.hardware().as_ref(),
+                )
+                .finish(&id)
+                .await?;
+                if let Some(warning) = output.live_warning() {
+                    tracing::warn!(robot = %id, "saved calibration but live refresh was incomplete: {warning}");
+                }
+                commands.present_robot(&id).await
+            })
+            .await?
     }
 
     pub async fn cancel_calibration(&self, id: String) -> Result<(), DeviceFailure> {
-        self.require_catalog_ready()?;
-        CalibrationControlActions::new(self.state.hardware().as_ref())
-            .cancel(&id)
-            .await
-            .map_err(Into::into)
+        let commands = self.clone();
+        self.main_runtime
+            .execute(async move {
+                commands.require_catalog_ready()?;
+                CalibrationControlActions::new(commands.state.hardware().as_ref())
+                    .cancel(&id)
+                    .await
+                    .map_err(Into::into)
+            })
+            .await?
     }
 
     pub async fn reapply_calibration(
         &self,
         id: String,
     ) -> Result<(u64, u64, u64, u64, Vec<String>), DeviceFailure> {
-        self.require_catalog_ready()?;
-        let outcome =
-            CalibrationHistoryActions::new(&CalibrationHistoryAdapter { state: &self.state })
+        let commands = self.clone();
+        self.main_runtime
+            .execute(async move {
+                commands.require_catalog_ready()?;
+                let outcome = CalibrationHistoryActions::new(&CalibrationHistoryAdapter {
+                    state: &commands.state,
+                })
                 .reapply(&id)
                 .await
                 .map_err(DeviceFailure::from)?;
-        Ok(outcome.into_parts())
+                Ok(outcome.into_parts())
+            })
+            .await?
     }
 
     pub async fn set_mode(&self, selection: ModeSelection) -> Result<(), DeviceFailure> {
-        self.require_catalog_ready()?;
-        // Replay and policy need their own admission and resource-loading paths.
-        let mode = match selection {
-            ModeSelection::Idle => OperatorMode::Idle,
-            ModeSelection::Manual { robot } => OperatorMode::Manual { robot },
-            ModeSelection::Teleoperate { leader, follower } => {
-                OperatorMode::Teleoperate { leader, follower }
-            }
-            ModeSelection::Replay { .. } => {
-                return Err(DeviceFailure(
-                    "start a replay with POST /api/episodes/replay, which loads the take first"
-                        .to_owned(),
-                ));
-            }
-            ModeSelection::Policy { .. } => {
-                return Err(DeviceFailure(
-                    "start policy control with POST /api/rollout, which validates and warms the checkpoint first"
-                        .to_owned(),
-                ));
-            }
-        };
-        ModeActions::new(self.state.hardware().as_ref())
-            .set(mode)
-            .await
-            .map_err(Into::into)
+        let commands = self.clone();
+        self.main_runtime
+            .execute(async move {
+                commands.require_catalog_ready()?;
+                // Replay and policy need their own admission and resource-loading paths.
+                let mode = match selection {
+                    ModeSelection::Idle => OperatorMode::Idle,
+                    ModeSelection::Manual { robot } => OperatorMode::Manual { robot },
+                    ModeSelection::Teleoperate { leader, follower } => {
+                        OperatorMode::Teleoperate { leader, follower }
+                    }
+                    ModeSelection::Replay { .. } => {
+                        return Err(DeviceFailure(
+                            "start a replay with POST /api/episodes/replay, which loads the take first"
+                                .to_owned(),
+                        ));
+                    }
+                    ModeSelection::Policy { .. } => {
+                        return Err(DeviceFailure(
+                            "start policy control with POST /api/rollout, which validates and warms the checkpoint first"
+                                .to_owned(),
+                        ));
+                    }
+                };
+                ModeActions::new(commands.state.hardware().as_ref())
+                    .set(mode)
+                    .await
+                    .map_err(Into::into)
+            })
+            .await?
     }
 
     async fn present_saved_robot(&self, robot: SavedRobot) -> Result<RobotSummary, DeviceFailure> {
@@ -829,6 +937,12 @@ impl std::fmt::Display for DeviceFailure {
 
 impl From<OperationError> for DeviceFailure {
     fn from(error: OperationError) -> Self {
+        Self(error.to_string())
+    }
+}
+
+impl From<MainRuntimeFailure> for DeviceFailure {
+    fn from(error: MainRuntimeFailure) -> Self {
         Self(error.to_string())
     }
 }

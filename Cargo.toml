@@ -39,6 +39,9 @@ spiral-config = { git = "https://github.com/spiraldb/spiraldb.git", branch = "de
 spiral-defaults = { git = "https://github.com/spiraldb/spiraldb.git", branch = "develop" }
 spiral-engine = { git = "https://github.com/spiraldb/spiraldb.git", branch = "develop" }
 spiral-session = { git = "https://github.com/spiraldb/spiraldb.git", branch = "develop" }
+spiraldb-catalog = { git = "https://github.com/spiraldb/spiraldb.git", branch = "develop" }
+spiraldb-control-plane = { git = "https://github.com/spiraldb/spiraldb.git", branch = "develop" }
+spiraldb-table = { git = "https://github.com/spiraldb/spiraldb.git", branch = "develop" }
 vortex-array = { git = "https://github.com/vortex-data/vortex.git", rev = "ee1ac2521bb477d26797b300c8d0fdd17101fb0c" }
 vortex-arrow = { git = "https://github.com/vortex-data/vortex.git", rev = "ee1ac2521bb477d26797b300c8d0fdd17101fb0c" }
 vortex-error = { git = "https://github.com/vortex-data/vortex.git", rev = "ee1ac2521bb477d26797b300c8d0fdd17101fb0c" }

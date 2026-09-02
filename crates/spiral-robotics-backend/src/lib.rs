@@ -13,6 +13,7 @@ mod data_commands;
 mod device_commands;
 mod error;
 mod http;
+mod main_runtime;
 mod recording;
 mod recording_commands;
 mod recording_session;

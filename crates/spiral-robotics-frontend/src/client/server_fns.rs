@@ -157,7 +157,7 @@ impl dioxus::fullstack::AsStatusCode for CommandError {
 }
 
 #[server(
-    endpoint = "/server-functions/training/start",
+    endpoint = "server-functions/training/start",
     commands: Extension<TrainingRolloutCommands>
 )]
 pub(crate) async fn start_training_run(
@@ -171,7 +171,7 @@ pub(crate) async fn start_training_run(
 }
 
 #[server(
-    endpoint = "/server-functions/training/stop",
+    endpoint = "server-functions/training/stop",
     commands: Extension<TrainingRolloutCommands>
 )]
 pub(crate) async fn stop_training_run(id: String) -> Result<(), CommandError> {
@@ -183,7 +183,7 @@ pub(crate) async fn stop_training_run(id: String) -> Result<(), CommandError> {
 }
 
 #[server(
-    endpoint = "/server-functions/training/delete",
+    endpoint = "server-functions/training/delete",
     commands: Extension<TrainingRolloutCommands>
 )]
 pub(crate) async fn delete_training_run(id: String) -> Result<(), CommandError> {
@@ -195,7 +195,7 @@ pub(crate) async fn delete_training_run(id: String) -> Result<(), CommandError> 
 }
 
 #[server(
-    endpoint = "/server-functions/rollout/start",
+    endpoint = "server-functions/rollout/start",
     commands: Extension<TrainingRolloutCommands>
 )]
 pub(crate) async fn start_rollout(config: RolloutConfig) -> Result<RolloutSnapshot, CommandError> {
@@ -207,7 +207,7 @@ pub(crate) async fn start_rollout(config: RolloutConfig) -> Result<RolloutSnapsh
 }
 
 #[server(
-    endpoint = "/server-functions/rollout/stop",
+    endpoint = "server-functions/rollout/stop",
     commands: Extension<TrainingRolloutCommands>
 )]
 pub(crate) async fn stop_rollout() -> Result<(), CommandError> {
@@ -219,7 +219,7 @@ pub(crate) async fn stop_rollout() -> Result<(), CommandError> {
 }
 
 #[server(
-    endpoint = "/server-functions/workflow/snapshot",
+    endpoint = "server-functions/workflow/snapshot",
     commands: Extension<WorkflowCommands>
 )]
 pub(crate) async fn workflow_snapshot() -> Result<WorkflowSnapshot, CommandError> {
@@ -231,7 +231,7 @@ pub(crate) async fn workflow_snapshot() -> Result<WorkflowSnapshot, CommandError
 }
 
 #[server(
-    endpoint = "/server-functions/workflow/command",
+    endpoint = "server-functions/workflow/command",
     commands: Extension<WorkflowCommands>
 )]
 pub(crate) async fn run_workflow_command(
@@ -245,7 +245,7 @@ pub(crate) async fn run_workflow_command(
 }
 
 #[server(
-    endpoint = "/server-functions/workflow/agent-snapshot",
+    endpoint = "server-functions/workflow/agent-snapshot",
     commands: Extension<WorkflowCommands>
 )]
 pub(crate) async fn workflow_agent_snapshot() -> Result<WorkflowAgentSnapshot, CommandError> {
@@ -257,7 +257,7 @@ pub(crate) async fn workflow_agent_snapshot() -> Result<WorkflowAgentSnapshot, C
 }
 
 #[server(
-    endpoint = "/server-functions/workflow/agent-command",
+    endpoint = "server-functions/workflow/agent-command",
     commands: Extension<WorkflowCommands>
 )]
 pub(crate) async fn run_workflow_agent_command(
@@ -271,7 +271,7 @@ pub(crate) async fn run_workflow_agent_command(
 }
 
 #[server(
-    endpoint = "/server-functions/recordings/list-datasets",
+    endpoint = "server-functions/recordings/list-datasets",
     commands: Extension<RecordingCommands>
 )]
 pub(crate) async fn list_datasets() -> Result<Vec<DatasetSummary>, CommandError> {
@@ -283,7 +283,7 @@ pub(crate) async fn list_datasets() -> Result<Vec<DatasetSummary>, CommandError>
 }
 
 #[server(
-    endpoint = "/server-functions/recordings/list-episodes",
+    endpoint = "server-functions/recordings/list-episodes",
     commands: Extension<RecordingCommands>
 )]
 pub(crate) async fn list_episodes(
@@ -297,7 +297,7 @@ pub(crate) async fn list_episodes(
 }
 
 #[server(
-    endpoint = "/server-functions/recordings/start",
+    endpoint = "server-functions/recordings/start",
     commands: Extension<RecordingCommands>
 )]
 pub(crate) async fn start_recording(dataset_id: String) -> Result<EpisodeInfo, CommandError> {
@@ -309,7 +309,7 @@ pub(crate) async fn start_recording(dataset_id: String) -> Result<EpisodeInfo, C
 }
 
 #[server(
-    endpoint = "/server-functions/recordings/stop",
+    endpoint = "server-functions/recordings/stop",
     commands: Extension<RecordingCommands>
 )]
 pub(crate) async fn stop_recording(keep: bool) -> Result<EpisodeInfo, CommandError> {
@@ -321,7 +321,7 @@ pub(crate) async fn stop_recording(keep: bool) -> Result<EpisodeInfo, CommandErr
 }
 
 #[server(
-    endpoint = "/server-functions/recordings/set-paused",
+    endpoint = "server-functions/recordings/set-paused",
     commands: Extension<RecordingCommands>
 )]
 pub(crate) async fn set_recording_paused(paused: bool) -> Result<(), CommandError> {
@@ -333,7 +333,7 @@ pub(crate) async fn set_recording_paused(paused: bool) -> Result<(), CommandErro
 }
 
 #[server(
-    endpoint = "/server-functions/recordings/delete-episode",
+    endpoint = "server-functions/recordings/delete-episode",
     commands: Extension<RecordingCommands>
 )]
 pub(crate) async fn delete_episode(id: String) -> Result<(), CommandError> {
@@ -345,7 +345,7 @@ pub(crate) async fn delete_episode(id: String) -> Result<(), CommandError> {
 }
 
 #[server(
-    endpoint = "/server-functions/recordings/inspect-episode",
+    endpoint = "server-functions/recordings/inspect-episode",
     commands: Extension<RecordingCommands>
 )]
 pub(crate) async fn inspect_episode(id: String) -> Result<EpisodeInspectionSnapshot, CommandError> {
@@ -357,7 +357,7 @@ pub(crate) async fn inspect_episode(id: String) -> Result<EpisodeInspectionSnaps
 }
 
 #[server(
-    endpoint = "/server-functions/recordings/seek-episode",
+    endpoint = "server-functions/recordings/seek-episode",
     commands: Extension<RecordingCommands>
 )]
 pub(crate) async fn seek_episode(
@@ -374,7 +374,7 @@ pub(crate) async fn seek_episode(
 }
 
 #[server(
-    endpoint = "/server-functions/recordings/start-replay",
+    endpoint = "server-functions/recordings/start-replay",
     commands: Extension<RecordingCommands>
 )]
 pub(crate) async fn start_replay(
@@ -391,7 +391,7 @@ pub(crate) async fn start_replay(
 }
 
 #[server(
-    endpoint = "/server-functions/recordings/set-replay-paused",
+    endpoint = "server-functions/recordings/set-replay-paused",
     commands: Extension<RecordingCommands>
 )]
 pub(crate) async fn set_replay_paused(paused: bool) -> Result<(), CommandError> {
@@ -403,7 +403,7 @@ pub(crate) async fn set_replay_paused(paused: bool) -> Result<(), CommandError> 
 }
 
 #[server(
-    endpoint = "/server-functions/devices/list-ports",
+    endpoint = "server-functions/devices/list-ports",
     commands: Extension<DeviceCommands>
 )]
 pub(crate) async fn list_serial_ports() -> Result<Vec<SerialPortSummary>, CommandError> {
@@ -415,7 +415,7 @@ pub(crate) async fn list_serial_ports() -> Result<Vec<SerialPortSummary>, Comman
 }
 
 #[server(
-    endpoint = "/server-functions/devices/identify-port",
+    endpoint = "server-functions/devices/identify-port",
     commands: Extension<DeviceCommands>
 )]
 pub(crate) async fn identify_serial_port(
@@ -429,7 +429,7 @@ pub(crate) async fn identify_serial_port(
 }
 
 #[server(
-    endpoint = "/server-functions/devices/refresh-cameras",
+    endpoint = "server-functions/devices/refresh-cameras",
     commands: Extension<DeviceCommands>
 )]
 pub(crate) async fn refresh_cameras() -> Result<Vec<CameraStatus>, CommandError> {
@@ -441,7 +441,7 @@ pub(crate) async fn refresh_cameras() -> Result<Vec<CameraStatus>, CommandError>
 }
 
 #[server(
-    endpoint = "/server-functions/devices/list-robots",
+    endpoint = "server-functions/devices/list-robots",
     commands: Extension<DeviceCommands>
 )]
 pub(crate) async fn list_robots() -> Result<Vec<RobotSummary>, CommandError> {
@@ -453,7 +453,7 @@ pub(crate) async fn list_robots() -> Result<Vec<RobotSummary>, CommandError> {
 }
 
 #[server(
-    endpoint = "/server-functions/devices/create-robot",
+    endpoint = "server-functions/devices/create-robot",
     commands: Extension<DeviceCommands>
 )]
 pub(crate) async fn create_robot(request: NewRobot) -> Result<RobotSummary, CommandError> {
@@ -465,7 +465,7 @@ pub(crate) async fn create_robot(request: NewRobot) -> Result<RobotSummary, Comm
 }
 
 #[server(
-    endpoint = "/server-functions/devices/import-robot",
+    endpoint = "server-functions/devices/import-robot",
     commands: Extension<DeviceCommands>
 )]
 pub(crate) async fn import_robot_configuration(
@@ -479,7 +479,7 @@ pub(crate) async fn import_robot_configuration(
 }
 
 #[server(
-    endpoint = "/server-functions/devices/get-robot",
+    endpoint = "server-functions/devices/get-robot",
     commands: Extension<DeviceCommands>
 )]
 pub(crate) async fn get_robot(id: String) -> Result<RobotSummary, CommandError> {
@@ -491,7 +491,7 @@ pub(crate) async fn get_robot(id: String) -> Result<RobotSummary, CommandError> 
 }
 
 #[server(
-    endpoint = "/server-functions/devices/update-robot",
+    endpoint = "server-functions/devices/update-robot",
     commands: Extension<DeviceCommands>
 )]
 pub(crate) async fn update_robot(
@@ -505,7 +505,7 @@ pub(crate) async fn update_robot(
 }
 
 #[server(
-    endpoint = "/server-functions/devices/delete-robot",
+    endpoint = "server-functions/devices/delete-robot",
     commands: Extension<DeviceCommands>
 )]
 pub(crate) async fn delete_robot(id: String) -> Result<(), CommandError> {
@@ -517,7 +517,7 @@ pub(crate) async fn delete_robot(id: String) -> Result<(), CommandError> {
 }
 
 #[server(
-    endpoint = "/server-functions/devices/connect-robot",
+    endpoint = "server-functions/devices/connect-robot",
     commands: Extension<DeviceCommands>
 )]
 pub(crate) async fn connect_robot(id: String) -> Result<(), CommandError> {
@@ -529,7 +529,7 @@ pub(crate) async fn connect_robot(id: String) -> Result<(), CommandError> {
 }
 
 #[server(
-    endpoint = "/server-functions/devices/disconnect-robot",
+    endpoint = "server-functions/devices/disconnect-robot",
     commands: Extension<DeviceCommands>
 )]
 pub(crate) async fn disconnect_robot(id: String) -> Result<(), CommandError> {
@@ -541,7 +541,7 @@ pub(crate) async fn disconnect_robot(id: String) -> Result<(), CommandError> {
 }
 
 #[server(
-    endpoint = "/server-functions/devices/hold-robot",
+    endpoint = "server-functions/devices/hold-robot",
     commands: Extension<DeviceCommands>
 )]
 pub(crate) async fn hold_robot(id: String) -> Result<(), CommandError> {
@@ -553,7 +553,7 @@ pub(crate) async fn hold_robot(id: String) -> Result<(), CommandError> {
 }
 
 #[server(
-    endpoint = "/server-functions/devices/release-robot",
+    endpoint = "server-functions/devices/release-robot",
     commands: Extension<DeviceCommands>
 )]
 pub(crate) async fn release_robot(id: String) -> Result<(), CommandError> {
@@ -565,7 +565,7 @@ pub(crate) async fn release_robot(id: String) -> Result<(), CommandError> {
 }
 
 #[server(
-    endpoint = "/server-functions/devices/set-robot-goal",
+    endpoint = "server-functions/devices/set-robot-goal",
     commands: Extension<DeviceCommands>
 )]
 pub(crate) async fn set_robot_goal(
@@ -580,7 +580,7 @@ pub(crate) async fn set_robot_goal(
 }
 
 #[server(
-    endpoint = "/server-functions/devices/start-calibration",
+    endpoint = "server-functions/devices/start-calibration",
     commands: Extension<DeviceCommands>
 )]
 pub(crate) async fn start_calibration(id: String) -> Result<(), CommandError> {
@@ -592,7 +592,7 @@ pub(crate) async fn start_calibration(id: String) -> Result<(), CommandError> {
 }
 
 #[server(
-    endpoint = "/server-functions/devices/finish-calibration",
+    endpoint = "server-functions/devices/finish-calibration",
     commands: Extension<DeviceCommands>
 )]
 pub(crate) async fn finish_calibration(id: String) -> Result<RobotSummary, CommandError> {
@@ -604,7 +604,7 @@ pub(crate) async fn finish_calibration(id: String) -> Result<RobotSummary, Comma
 }
 
 #[server(
-    endpoint = "/server-functions/devices/cancel-calibration",
+    endpoint = "server-functions/devices/cancel-calibration",
     commands: Extension<DeviceCommands>
 )]
 pub(crate) async fn cancel_calibration(id: String) -> Result<(), CommandError> {
@@ -616,7 +616,7 @@ pub(crate) async fn cancel_calibration(id: String) -> Result<(), CommandError> {
 }
 
 #[server(
-    endpoint = "/server-functions/devices/reapply-calibration",
+    endpoint = "server-functions/devices/reapply-calibration",
     commands: Extension<DeviceCommands>
 )]
 pub(crate) async fn reapply_calibration(
@@ -630,7 +630,7 @@ pub(crate) async fn reapply_calibration(
 }
 
 #[server(
-    endpoint = "/server-functions/devices/set-mode",
+    endpoint = "server-functions/devices/set-mode",
     commands: Extension<DeviceCommands>
 )]
 pub(crate) async fn set_mode(selection: ModeSelection) -> Result<(), CommandError> {
@@ -642,7 +642,7 @@ pub(crate) async fn set_mode(selection: ModeSelection) -> Result<(), CommandErro
 }
 
 #[server(
-    endpoint = "/server-functions/data/settings",
+    endpoint = "server-functions/data/settings",
     commands: Extension<DataCommands>
 )]
 pub(crate) async fn data_settings() -> Result<DataSettings, CommandError> {
@@ -654,7 +654,7 @@ pub(crate) async fn data_settings() -> Result<DataSettings, CommandError> {
 }
 
 #[server(
-    endpoint = "/server-functions/data/update-settings",
+    endpoint = "server-functions/data/update-settings",
     commands: Extension<DataCommands>
 )]
 pub(crate) async fn update_data_settings(
@@ -670,7 +670,7 @@ pub(crate) async fn update_data_settings(
 }
 
 #[server(
-    endpoint = "/server-functions/data/test-spiral",
+    endpoint = "server-functions/data/test-spiral",
     commands: Extension<DataCommands>
 )]
 pub(crate) async fn test_spiral_connection() -> Result<(bool, String), CommandError> {
@@ -682,7 +682,7 @@ pub(crate) async fn test_spiral_connection() -> Result<(bool, String), CommandEr
 }
 
 #[server(
-    endpoint = "/server-functions/data/test-training-runtime",
+    endpoint = "server-functions/data/test-training-runtime",
     commands: Extension<DataCommands>
 )]
 pub(crate) async fn test_training_runtime() -> Result<(bool, String), CommandError> {
@@ -694,7 +694,7 @@ pub(crate) async fn test_training_runtime() -> Result<(bool, String), CommandErr
 }
 
 #[server(
-    endpoint = "/server-functions/data/relations",
+    endpoint = "server-functions/data/relations",
     commands: Extension<DataCommands>
 )]
 pub(crate) async fn relation_catalog() -> Result<RelationCatalog, CommandError> {
@@ -706,7 +706,7 @@ pub(crate) async fn relation_catalog() -> Result<RelationCatalog, CommandError> 
 }
 
 #[server(
-    endpoint = "/server-functions/data/query",
+    endpoint = "server-functions/data/query",
     commands: Extension<DataCommands>
 )]
 pub(crate) async fn run_spiral_query(
@@ -721,7 +721,7 @@ pub(crate) async fn run_spiral_query(
 }
 
 #[server(
-    endpoint = "/server-functions/data/inspect-hugging-face",
+    endpoint = "server-functions/data/inspect-hugging-face",
     commands: Extension<DataCommands>
 )]
 pub(crate) async fn inspect_hugging_face_dataset(
@@ -735,7 +735,7 @@ pub(crate) async fn inspect_hugging_face_dataset(
 }
 
 #[server(
-    endpoint = "/server-functions/data/import-hugging-face",
+    endpoint = "server-functions/data/import-hugging-face",
     commands: Extension<DataCommands>
 )]
 pub(crate) async fn import_hugging_face_dataset(
@@ -749,7 +749,7 @@ pub(crate) async fn import_hugging_face_dataset(
 }
 
 #[server(
-    endpoint = "/server-functions/data/import-project",
+    endpoint = "server-functions/data/import-project",
     commands: Extension<DataCommands>
 )]
 pub(crate) async fn import_project(
@@ -766,7 +766,7 @@ pub(crate) async fn import_project(
 }
 
 #[server(
-    endpoint = "/server-functions/data/import-episodes",
+    endpoint = "server-functions/data/import-episodes",
     commands: Extension<DataCommands>
 )]
 pub(crate) async fn import_episodes(

@@ -10,11 +10,12 @@ use futures::{FutureExt as _, StreamExt as _, TryStreamExt as _};
 use parking_lot::RwLock;
 use spiral_client::SpiralClientOptions;
 use spiral_client::authn::ClientCredentials;
+use spiral_client::catalog_client::lazy_catalog_client_with_client;
+use spiral_client::lazy_client::LazySpiralClient;
 use spiral_config::{ClientSettings, FragmentsCacheEnabled, MutableConfig as _};
-use spiral_defaults::default_session_with_client_options;
+use spiral_defaults::default_session_with_config;
 use spiral_engine::catalog::{
-    CatalogEntryRequest, RelationCatalogSessionExt as _, RelationName as SpiralRelationName,
-    RelationType,
+    CatalogEntryRequest, RelationName as SpiralRelationName, RelationType,
 };
 use spiral_engine::exec::QueryCtx;
 use spiral_engine::logical::{
@@ -27,6 +28,8 @@ use spiral_engine::sql::{CommandOutput, ConnectionCtx};
 use spiral_engine::statement::CreateTable;
 use spiral_engine::{EngineRuntime, Morsel, MorselSequence, RelationMeta};
 use spiral_session::SpiralSession;
+use spiraldb_control_plane::SpiralDbConnection;
+use spiraldb_table::{SpiralDbConnectionServices, SpiralDbPlugin};
 use tokio::sync::Mutex;
 use url::Url;
 use vortex_array::{ArrayRef, VortexSessionExecute as _};
@@ -46,23 +49,33 @@ const SPIRALDB_CATALOG: &str = "spiraldb";
 
 /// Configured database entry point held by application state.
 pub(super) struct SpiralDatabase {
-    session: RwLock<SpiralSession>,
+    configured_session: RwLock<ConfiguredSpiralSession>,
 }
 
 impl SpiralDatabase {
     pub(super) fn new(settings: SpiralConnectionSettings) -> DatabaseResult<Self> {
         Ok(Self {
-            session: RwLock::new(Self::create_session(&settings)?),
+            configured_session: RwLock::new(ConfiguredSpiralSession::new(&settings)?),
         })
     }
 
     pub(super) fn configure(&self, settings: SpiralConnectionSettings) -> DatabaseResult<()> {
-        let session = Self::create_session(&settings)?;
-        *self.session.write() = session;
+        let configured_session = ConfiguredSpiralSession::new(&settings)?;
+        *self.configured_session.write() = configured_session;
         Ok(())
     }
+}
 
-    fn create_session(settings: &SpiralConnectionSettings) -> DatabaseResult<SpiralSession> {
+#[derive(Clone)]
+struct ConfiguredSpiralSession {
+    session: SpiralSession,
+    client_options: SpiralClientOptions,
+    spfs_endpoint: Url,
+    project: Option<String>,
+}
+
+impl ConfiguredSpiralSession {
+    fn new(settings: &SpiralConnectionSettings) -> DatabaseResult<Self> {
         let mut client_settings = ClientSettings::load().map_err(DatabaseError::from_external)?;
         client_settings
             .set::<FragmentsCacheEnabled>(true)
@@ -72,37 +85,64 @@ impl SpiralDatabase {
             Url::parse(settings.spfs_endpoint()).map_err(DatabaseError::from_external)?;
         let mut client_options = SpiralClientOptions::new(client_settings)
             .with_api_url(api_url)
-            .with_spfs_url(spfs_url);
+            .with_spfs_url(spfs_url.clone());
         if let Some(credentials) = settings.credentials() {
             client_options = client_options.with_client_credentials(ClientCredentials::new(
                 credentials.client_id().to_owned(),
                 credentials.client_secret().to_owned(),
             ));
         }
-        let session = default_session_with_client_options(client_options)
+        let session = default_session_with_config(client_options.config().clone())
             .map_err(DatabaseError::from_external)?;
-        session
-            .relation_catalog_mut()
-            .use_catalog(SPIRALDB_CATALOG)
-            .map_err(DatabaseError::from_external)?;
-        if let Some(project) = settings.project_id() {
-            session
-                .relation_catalog_mut()
-                .use_project(project.to_owned());
-        }
         let workers = std::thread::available_parallelism()
             .map(usize::from)
             .unwrap_or(1);
         let runtime = EngineRuntime::current(workers).map_err(DatabaseError::from_external)?;
-        Ok(runtime.install_io(session))
+        Ok(Self {
+            session: runtime.install_io(session),
+            client_options,
+            spfs_endpoint: spfs_url,
+            project: settings.project_id().map(str::to_owned),
+        })
+    }
+
+    fn open_connection(&self) -> DatabaseResult<ConnectionCtx> {
+        let client = LazySpiralClient::with_options(self.client_options.clone());
+        let project_catalog = Arc::new(lazy_catalog_client_with_client(
+            &self.session,
+            client.clone(),
+        ));
+        let control_plane = SpiralDbConnection::new(Arc::new(client.clone()));
+        let legacy: Arc<dyn spiraldb_catalog::LegacyResolverClient> = Arc::new(client);
+        let connection = SpiralDbPlugin::default()
+            .open_connection(
+                &self.session,
+                SpiralDbConnectionServices::new(
+                    control_plane,
+                    project_catalog,
+                    legacy,
+                    self.spfs_endpoint.clone(),
+                ),
+            )
+            .map_err(DatabaseError::from_external)?;
+        connection
+            .relation_catalog_mut()
+            .use_catalog(SPIRALDB_CATALOG)
+            .map_err(DatabaseError::from_external)?;
+        if let Some(project) = &self.project {
+            connection
+                .relation_catalog_mut()
+                .use_project(project.clone());
+        }
+        Ok(connection)
     }
 }
 
 impl Database for SpiralDatabase {
     fn connect(&self) -> DatabaseFuture<'_, Box<dyn DatabaseConnection>> {
         async move {
-            let session = self.session.read().clone();
-            Ok(Box::new(SpiralConnection::new(session)) as Box<dyn DatabaseConnection>)
+            let connection = self.configured_session.read().open_connection()?;
+            Ok(Box::new(SpiralConnection::new(connection)) as Box<dyn DatabaseConnection>)
         }
         .boxed()
     }
@@ -113,10 +153,8 @@ struct SpiralConnection {
 }
 
 impl SpiralConnection {
-    fn new(session: SpiralSession) -> Self {
-        Self {
-            context: ConnectionCtx::new(session),
-        }
+    fn new(context: ConnectionCtx) -> Self {
+        Self { context }
     }
 
     async fn execute_command(

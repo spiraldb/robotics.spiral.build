@@ -32,6 +32,9 @@ spiral-config.workspace = true
 spiral-defaults.workspace = true
 spiral-engine.workspace = true
 spiral-session.workspace = true
+spiraldb-catalog.workspace = true
+spiraldb-control-plane.workspace = true
+spiraldb-table.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
 tracing = "0.1"
 url = "2"

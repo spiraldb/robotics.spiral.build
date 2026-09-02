@@ -12,6 +12,7 @@ use crate::http::routes::{
     AppActivityManagers, AppCatalogResources, AppPlatformResources, AppRoboticsResources,
     AppRuntimeResources, AppState, AppVideoResources, AppWorkflowManagers, BootstrapState,
 };
+use crate::main_runtime::MainRuntime;
 use crate::recording_commands::RecordingCommands;
 use crate::robotics::cameras::CameraManager;
 use crate::robotics::video::VideoEncoderSettings;
@@ -354,9 +355,11 @@ impl ServerStartup {
             AppActivityManagers::new(training.clone(), rollout.clone(), workflow_managers);
         let bootstrap_state = BootstrapState::new();
         let platform = AppPlatformResources::new(connection, preferences, bootstrap_state.clone());
+        let main_runtime = MainRuntime::current();
         let training_rollout_commands =
-            TrainingRolloutCommands::new(training.clone(), rollout.clone());
+            TrainingRolloutCommands::new(main_runtime.clone(), training.clone(), rollout.clone());
         let workflow_commands = WorkflowCommands::new(
+            main_runtime.clone(),
             workflow.clone(),
             workflow_agent.clone(),
             WorkflowAdmission::new(catalog_lease, bootstrap_state),
@@ -366,9 +369,9 @@ impl ServerStartup {
             robotics,
             AppRuntimeResources::new(activities, platform),
         );
-        let recording_commands = RecordingCommands::new(state.clone());
-        let device_commands = DeviceCommands::new(state.clone());
-        let data_commands = DataCommands::new(state.clone());
+        let recording_commands = RecordingCommands::new(main_runtime.clone(), state.clone());
+        let device_commands = DeviceCommands::new(main_runtime.clone(), state.clone());
+        let data_commands = DataCommands::new(main_runtime, state.clone());
         let listener = tokio::net::TcpListener::bind(bind).await?;
         let address = listener.local_addr()?;
 

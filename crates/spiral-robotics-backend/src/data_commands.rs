@@ -22,6 +22,7 @@ use crate::data::{
     QueryResult, TestConnectionCommand, UpdateDataSettingsCommand,
 };
 use crate::http::routes::{AppState, BootstrapState};
+use crate::main_runtime::{MainRuntime, MainRuntimeFailure};
 
 pub const MAX_PROJECT_IMPORT_BYTES: usize =
     spiral_robotics_storage::bundle::ProjectBundle::MAX_BYTES;
@@ -63,6 +64,7 @@ impl ProjectRecoveryPublication {
 /// Narrow command facade shared with Studio's server-function and file-transfer handlers.
 #[derive(Clone)]
 pub struct DataCommands {
+    main_runtime: MainRuntime,
     state: AppState,
 }
 
@@ -102,15 +104,35 @@ impl DataSettingsChange {
 pub struct DataFailure(String);
 
 impl DataCommands {
-    pub(crate) const fn new(state: AppState) -> Self {
-        Self { state }
+    pub(crate) fn new(main_runtime: MainRuntime, state: AppState) -> Self {
+        Self {
+            main_runtime,
+            state,
+        }
     }
 
     pub async fn settings(&self) -> Result<DataSettings, DataFailure> {
+        let commands = self.clone();
+        self.main_runtime
+            .execute(async move { commands.settings_on_main_runtime().await })
+            .await?
+    }
+
+    async fn settings_on_main_runtime(&self) -> Result<DataSettings, DataFailure> {
         Ok(DataAdapter::new(&self.state).settings().into())
     }
 
     pub async fn update_settings(
+        &self,
+        change: DataSettingsChange,
+    ) -> Result<DataSettings, DataFailure> {
+        let commands = self.clone();
+        self.main_runtime
+            .execute(async move { commands.update_settings_on_main_runtime(change).await })
+            .await?
+    }
+
+    async fn update_settings_on_main_runtime(
         &self,
         change: DataSettingsChange,
     ) -> Result<DataSettings, DataFailure> {
@@ -235,6 +257,13 @@ impl DataCommands {
     }
 
     pub async fn test_spiral(&self) -> Result<(bool, String), DataFailure> {
+        let commands = self.clone();
+        self.main_runtime
+            .execute(async move { commands.test_spiral_on_main_runtime().await })
+            .await?
+    }
+
+    async fn test_spiral_on_main_runtime(&self) -> Result<(bool, String), DataFailure> {
         let result = TestConnectionCommand::execute(&DataAdapter::new(&self.state)).await;
         let (ok, message, project_state_rehydrated) = result.into_parts();
         self.complete_project_recovery(project_state_rehydrated);
@@ -242,10 +271,24 @@ impl DataCommands {
     }
 
     pub async fn test_training_runtime(&self) -> Result<(bool, String), DataFailure> {
+        let commands = self.clone();
+        self.main_runtime
+            .execute(async move { commands.test_training_runtime_on_main_runtime().await })
+            .await?
+    }
+
+    async fn test_training_runtime_on_main_runtime(&self) -> Result<(bool, String), DataFailure> {
         Ok(self.state.training().test_runtime().await)
     }
 
     pub async fn relations(&self) -> Result<RelationCatalog, DataFailure> {
+        let commands = self.clone();
+        self.main_runtime
+            .execute(async move { commands.relations_on_main_runtime().await })
+            .await?
+    }
+
+    async fn relations_on_main_runtime(&self) -> Result<RelationCatalog, DataFailure> {
         self.require_catalog_ready()?;
         let token = self
             .state
@@ -268,6 +311,17 @@ impl DataCommands {
         statement: String,
         max_rows: usize,
     ) -> Result<SpiralQuerySnapshot, DataFailure> {
+        let commands = self.clone();
+        self.main_runtime
+            .execute(async move { commands.query_on_main_runtime(statement, max_rows).await })
+            .await?
+    }
+
+    async fn query_on_main_runtime(
+        &self,
+        statement: String,
+        max_rows: usize,
+    ) -> Result<SpiralQuerySnapshot, DataFailure> {
         self.require_catalog_ready()?;
         QueryCommand::new(statement, max_rows)
             .execute(&DataAdapter::new(&self.state))
@@ -280,6 +334,20 @@ impl DataCommands {
         &self,
         request: HuggingFaceDatasetSource,
     ) -> Result<HuggingFaceDatasetInspection, DataFailure> {
+        let commands = self.clone();
+        self.main_runtime
+            .execute(async move {
+                commands
+                    .inspect_hugging_face_dataset_on_main_runtime(request)
+                    .await
+            })
+            .await?
+    }
+
+    async fn inspect_hugging_face_dataset_on_main_runtime(
+        &self,
+        request: HuggingFaceDatasetSource,
+    ) -> Result<HuggingFaceDatasetInspection, DataFailure> {
         HuggingFaceDatasetInspection::discover(
             request,
             self.state.storage().workflow_model_store().namespace(),
@@ -289,6 +357,20 @@ impl DataCommands {
     }
 
     pub async fn import_hugging_face_dataset(
+        &self,
+        request: HuggingFaceDatasetSource,
+    ) -> Result<HuggingFaceDatasetImportSummary, DataFailure> {
+        let commands = self.clone();
+        self.main_runtime
+            .execute(async move {
+                commands
+                    .import_hugging_face_dataset_on_main_runtime(request)
+                    .await
+            })
+            .await?
+    }
+
+    async fn import_hugging_face_dataset_on_main_runtime(
         &self,
         request: HuggingFaceDatasetSource,
     ) -> Result<HuggingFaceDatasetImportSummary, DataFailure> {
@@ -321,6 +403,13 @@ impl DataCommands {
     }
 
     pub(crate) async fn export_project(&self) -> Result<Vec<u8>, DataFailure> {
+        let commands = self.clone();
+        self.main_runtime
+            .execute(async move { commands.export_project_on_main_runtime().await })
+            .await?
+    }
+
+    async fn export_project_on_main_runtime(&self) -> Result<Vec<u8>, DataFailure> {
         self.require_catalog_ready()?;
         self.state
             .storage()
@@ -330,6 +419,16 @@ impl DataCommands {
     }
 
     pub async fn import_project(
+        &self,
+        document: Vec<u8>,
+    ) -> Result<ProjectImportSummary, DataFailure> {
+        let commands = self.clone();
+        self.main_runtime
+            .execute(async move { commands.import_project_on_main_runtime(document).await })
+            .await?
+    }
+
+    async fn import_project_on_main_runtime(
         &self,
         document: Vec<u8>,
     ) -> Result<ProjectImportSummary, DataFailure> {
@@ -368,6 +467,21 @@ impl DataCommands {
     }
 
     pub async fn import_episodes(
+        &self,
+        dataset_id: String,
+        document: Vec<u8>,
+    ) -> Result<EpisodeImportSummary, DataFailure> {
+        let commands = self.clone();
+        self.main_runtime
+            .execute(async move {
+                commands
+                    .import_episodes_on_main_runtime(dataset_id, document)
+                    .await
+            })
+            .await?
+    }
+
+    async fn import_episodes_on_main_runtime(
         &self,
         dataset_id: String,
         document: Vec<u8>,
@@ -805,6 +919,12 @@ impl From<OperationError> for DataFailure {
 impl From<String> for DataFailure {
     fn from(message: String) -> Self {
         Self(message)
+    }
+}
+
+impl From<MainRuntimeFailure> for DataFailure {
+    fn from(error: MainRuntimeFailure) -> Self {
+        Self(error.to_string())
     }
 }
 
