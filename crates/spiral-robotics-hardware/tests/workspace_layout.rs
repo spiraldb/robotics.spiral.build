@@ -12,7 +12,7 @@ fn collect_rust_sources(directory: &Path, sources: &mut Vec<PathBuf>) {
             .expect("workspace entry type must be readable")
             .is_dir()
         {
-            if !matches!(name.as_ref(), ".git" | ".venv" | "node_modules" | "target") {
+            if !name.starts_with('.') && !matches!(name.as_ref(), "node_modules" | "target") {
                 collect_rust_sources(&path, sources);
             }
         } else if path.extension().and_then(|extension| extension.to_str()) == Some("rs") {

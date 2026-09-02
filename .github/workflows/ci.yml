@@ -21,7 +21,7 @@ jobs:
       CARGO_UNSTABLE_AVOID_DEV_DEPS: "true"
       CI_RUST_PACKAGES: >-
         -p spiral-robotics-api
-        -p spiral-robotics-core
+        -p spiral-robotics-storage
         -p spiral-robotics-frontend
         -p spiral-robotics-hardware
         -p spiral-robotics-inference

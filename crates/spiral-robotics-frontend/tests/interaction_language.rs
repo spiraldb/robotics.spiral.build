@@ -123,10 +123,16 @@ fn episode_catalog_and_full_data_belong_to_the_data_controller() {
         !studio.contains("episode_catalog"),
         "the episode catalog must not drift back into Studio-wide state",
     );
-    assert!(
-        episodes.contains("if !data.episodes_loaded() && !data.episodes_loading()"),
-        "the episode catalog must load when the Episodes panel mounts",
-    );
+    for catalog_load in [
+        "!data.episodes_loaded(&dataset_id)",
+        "!data.episodes_loading(&dataset_id)",
+        "data.load_episodes(dataset_id)",
+    ] {
+        assert!(
+            episodes.contains(catalog_load),
+            "the Episodes panel is missing dataset-scoped catalog loading {catalog_load:?}",
+        );
+    }
     assert!(
         workspace.contains("match data.selected_episode_data()"),
         "Data renderers must derive directly from the selected resource",
@@ -225,6 +231,8 @@ fn relation_schemas_belong_to_studio_while_exact_counts_are_data_view_scoped() {
     let frontend = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let studio = fs::read_to_string(frontend.join("src/shell/state.rs"))
         .expect("Studio state source should be readable");
+    let server_functions = fs::read_to_string(frontend.join("src/client/server_fns.rs"))
+        .expect("server function source should be readable");
     let routes = fs::read_to_string(frontend.join("src/shell/routes.rs"))
         .expect("Studio routes source should be readable");
     let data_state = fs::read_to_string(frontend.join("src/activities/data/state.rs"))
@@ -237,8 +245,8 @@ fn relation_schemas_belong_to_studio_while_exact_counts_are_data_view_scoped() {
         .expect("Workflow controller source should be readable");
 
     assert!(studio.contains("relation_catalog: Resource<Result<RelationCatalog, String>>"));
-    assert!(studio.contains("/api/spiral/relations"));
-    assert_eq!(studio.matches("/api/spiral/relations").count(), 1);
+    assert_eq!(studio.matches("relation_catalog()").count(), 1);
+    assert!(server_functions.contains("endpoint = \"server-functions/data/relations\""));
     assert!(routes.contains("Studio::use_studio"));
     assert!(!frontend.join("src/shell/catalog.rs").exists());
     assert!(!query.contains("get::<RelationCatalog>"));
