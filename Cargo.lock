@@ -10631,14 +10631,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "spiral-robotics-api"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "spiral-robotics-backend"
 version = "0.1.0"
 dependencies = [
@@ -10668,7 +10660,7 @@ dependencies = [
  "serde_json",
  "serialport",
  "sha2 0.10.9",
- "spiral-robotics-api",
+ "spiral-robotics-common",
  "spiral-robotics-hardware",
  "spiral-robotics-inference",
  "spiral-robotics-storage",
@@ -10686,6 +10678,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "spiral-robotics-common"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "spiral-robotics-frontend"
 version = "0.1.0"
 dependencies = [
@@ -10700,8 +10700,8 @@ dependencies = [
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
- "spiral-robotics-api",
  "spiral-robotics-backend",
+ "spiral-robotics-common",
  "spiral-robotics-viewport",
  "tempfile",
  "wasm-bindgen",
@@ -10717,6 +10717,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serialport",
+ "spiral-robotics-common",
  "tempfile",
  "tokio",
  "tracing",
@@ -10753,7 +10754,7 @@ dependencies = [
  "spiral-config",
  "spiral-defaults",
  "spiral-engine",
- "spiral-robotics-api",
+ "spiral-robotics-common",
  "spiral-robotics-hardware",
  "spiral-session",
  "spiraldb-catalog",

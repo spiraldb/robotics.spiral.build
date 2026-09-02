@@ -10,8 +10,8 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
 use dioxus::prelude::*;
-pub(crate) use spiral_robotics_api::recording::EpisodeVideoAssetMetadata as VideoAssetMetadata;
-use spiral_robotics_api::recording::{
+pub(crate) use spiral_robotics_common::recording::EpisodeVideoAssetMetadata as VideoAssetMetadata;
+use spiral_robotics_common::recording::{
     EpisodeInfo, EpisodeInspectionArm, EpisodeInspectionSnapshot, EpisodeOptionalFrameMatrix,
 };
 use spiral_robotics_viewport::SO101_JOINTS;
@@ -828,7 +828,7 @@ impl EpisodeDataDeadline {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spiral_robotics_api::recording::{
+    use spiral_robotics_common::recording::{
         EpisodeArm, EpisodeArmScalarSamples, EpisodeInfo, EpisodeInspectionArm,
         EpisodeOptionalFrameMatrix,
     };

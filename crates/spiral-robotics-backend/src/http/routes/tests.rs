@@ -3,7 +3,7 @@ use super::*;
 use crate::device_commands::CameraConfigurationObject;
 use crate::robots::service::CameraAssignment;
 use serde_json::Map;
-use spiral_robotics_api::robots::CameraStatus;
+use spiral_robotics_common::robots::CameraStatus;
 
 #[test]
 fn bootstrap_lifecycle_controls_catalog_admission() {
@@ -76,7 +76,7 @@ fn status(id: &str) -> CameraStatus {
     CameraStatus::new(
         id,
         "Test camera",
-        spiral_robotics_api::robots::CameraStreamFormat::new(1280, 720, 30),
+        spiral_robotics_common::robots::CameraStreamFormat::new(1280, 720, 30),
     )
 }
 

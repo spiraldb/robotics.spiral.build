@@ -24,9 +24,8 @@ use axum::routing::get;
 use bytes::{BufMut, Bytes, BytesMut};
 use futures_util::{Stream, StreamExt};
 use serde::Deserialize;
-use spiral_robotics_api::status::{BackendReadiness, BackendReadinessState, StudioSnapshot};
+use spiral_robotics_common::status::{BackendReadiness, BackendReadinessState, StudioSnapshot};
 
-use crate::adapters::hardware::HardwareApiProjection as _;
 use crate::data::catalog_lease::CatalogMutationLease;
 use crate::data::connection::SpiralConnectionController;
 use crate::data::queries::EpisodeQueries;
@@ -456,10 +455,7 @@ impl AppState {
                     .get(saved.id())
                     .cloned()
                     .unwrap_or_default();
-                let summary = robot_adapter
-                    .summary(saved.id(), connection.to_api())
-                    .await
-                    .ok();
+                let summary = robot_adapter.summary(saved.id(), connection).await.ok();
                 let Some(mut summary) = summary else {
                     continue;
                 };
@@ -472,7 +468,7 @@ impl AppState {
                         .cloned()
                         .map(|mut motor| {
                             if let Some(limits) = limits.get(motor.name()) {
-                                motor.set_limits(limits.to_api());
+                                motor.set_limits(*limits);
                             }
                             motor
                         })
@@ -500,7 +496,7 @@ impl AppState {
 
         let cameras =
             crate::device_commands::CameraDiscoveryAdapter::new(state.cameras().clone()).cameras();
-        StudioSnapshot::new(readiness, "SpiralDB", hardware.to_api())
+        StudioSnapshot::new(readiness, "SpiralDB", hardware.mode_status().clone())
             .with_robots(robots)
             .with_cameras(cameras)
             .with_issues(issues)
@@ -580,8 +576,7 @@ impl AppState {
                     }
                     _ = telemetry_timer.tick() => {
                         let hardware = state.hardware().state();
-                        let telemetry: spiral_robotics_api::robots::TelemetryFrame =
-                            hardware.to_api();
+                        let telemetry = hardware.telemetry().clone();
                         if telemetry.sequence() == last_sequence {
                             continue;
                         }
@@ -722,8 +717,8 @@ impl AgentCursor {
     }
 }
 
-impl From<&spiral_robotics_api::workflow::WorkflowAgentSnapshot> for AgentCursor {
-    fn from(state: &spiral_robotics_api::workflow::WorkflowAgentSnapshot) -> Self {
+impl From<&spiral_robotics_common::workflow::WorkflowAgentSnapshot> for AgentCursor {
+    fn from(state: &spiral_robotics_common::workflow::WorkflowAgentSnapshot) -> Self {
         Self {
             scope_id: state.scope_id().to_owned(),
             revision: state.revision(),

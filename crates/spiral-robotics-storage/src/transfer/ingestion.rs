@@ -18,7 +18,7 @@ use reqwest::StatusCode;
 use reqwest::header::LINK;
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
-use spiral_robotics_api::datasets::{
+use spiral_robotics_common::datasets::{
     HuggingFaceDatasetFile, HuggingFaceDatasetFormat, HuggingFaceDatasetImportSummary,
     HuggingFaceDatasetInspection, HuggingFaceDatasetSource, HuggingFaceImportOutcome,
     HuggingFaceInspectionContents, HuggingFaceInspectionSource, HuggingFaceResolvedSource,
@@ -958,7 +958,7 @@ impl IngestionClock {
 
 #[cfg(test)]
 mod tests {
-    use spiral_robotics_api::datasets::{
+    use spiral_robotics_common::datasets::{
         HuggingFaceDatasetFile, HuggingFaceDatasetFormat, HuggingFaceDatasetSource,
     };
 

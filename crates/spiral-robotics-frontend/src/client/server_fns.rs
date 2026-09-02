@@ -5,24 +5,24 @@ use std::collections::BTreeMap;
 use dioxus::fullstack::FileStream;
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
-use spiral_robotics_api::datasets::{
+use spiral_robotics_common::datasets::{
     EpisodeImportSummary, HuggingFaceDatasetImportSummary, HuggingFaceDatasetInspection,
     HuggingFaceDatasetSource, ProjectImportSummary,
 };
-use spiral_robotics_api::recording::{
+use spiral_robotics_common::recording::{
     DatasetSummary, EpisodeInfo, EpisodeInspectionSnapshot, EpisodeListItem,
 };
-use spiral_robotics_api::relations::{RelationCatalog, SpiralQuerySnapshot};
-use spiral_robotics_api::robots::{
+use spiral_robotics_common::relations::{RelationCatalog, SpiralQuerySnapshot};
+use spiral_robotics_common::robots::{
     CameraBinding, CameraStatus, ModeSelection, NewRobot, RobotSummary, RobotUpdate,
     SerialPortSummary,
 };
-use spiral_robotics_api::rollout::{RolloutConfig, RolloutSnapshot};
-use spiral_robotics_api::settings::{
+use spiral_robotics_common::rollout::{RolloutConfig, RolloutSnapshot};
+use spiral_robotics_common::settings::{
     DataSettings, SpiralConnectionUpdate, TrainingRuntimeSettings, VideoSettings,
 };
-use spiral_robotics_api::training::{TrainingConfig, TrainingRun};
-use spiral_robotics_api::workflow::{
+use spiral_robotics_common::training::{TrainingConfig, TrainingRun};
+use spiral_robotics_common::workflow::{
     WorkflowAgentCommand, WorkflowAgentSnapshot, WorkflowCommand, WorkflowSnapshot,
 };
 

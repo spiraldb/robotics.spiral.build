@@ -15,14 +15,12 @@ use arrow_ipc::writer::StreamWriter;
 use arrow_schema::{DataType, Field, Schema};
 use futures::StreamExt as _;
 use serde::{Deserialize, Serialize};
-use spiral_robotics_api::datasets::{EpisodeImportSummary, ProjectImportSummary};
-use spiral_robotics_api::sql::{QualifiedRelation, UnquotedSqlIdentifier};
-use spiral_robotics_api::workflow::{
-    DEFAULT_WORKFLOW_ID, MAX_SIGLIP_CONCEPT_LENGTH, MAX_WORKFLOW_AGENT_CONVERSATION_TITLE_CHARS,
-    MAX_WORKFLOW_AGENT_CONVERSATIONS, MAX_WORKFLOW_AGENT_MESSAGES_PER_CONVERSATION,
-    MAX_WORKFLOW_FEATURE_DESCRIPTION_LENGTH, MAX_WORKFLOW_FEATURE_STREAMS,
-    WorkflowAgentMessagePhase, WorkflowAgentPhase, WorkflowAgentRole, WorkflowAgentToolPhase,
-    WorkflowFeatureApplicability, WorkflowFeatureDefinition,
+use spiral_robotics_common::datasets::{EpisodeImportSummary, ProjectImportSummary};
+use spiral_robotics_common::sql::{QualifiedRelation, UnquotedSqlIdentifier};
+use spiral_robotics_common::workflow::{
+    DEFAULT_WORKFLOW_ID, MAX_SIGLIP_CONCEPT_LENGTH, MAX_WORKFLOW_FEATURE_DESCRIPTION_LENGTH,
+    MAX_WORKFLOW_FEATURE_STREAMS, WorkflowAgentMessagePhase, WorkflowAgentPhase, WorkflowAgentRole,
+    WorkflowAgentToolPhase, WorkflowFeatureApplicability, WorkflowFeatureDefinition,
 };
 
 use crate::db::ArrowColumns;
@@ -32,7 +30,10 @@ use crate::episodes::EpisodeBundleSection;
 use crate::rollout_runs::RolloutBundleSection;
 use crate::settings::StudioPreferenceBundleSection;
 use crate::training::TrainingBundleSection;
-use crate::workflow_documents::WorkflowDocumentBundleSection;
+use crate::workflow_documents::{
+    MAX_WORKFLOW_AGENT_CONVERSATION_TITLE_CHARS, MAX_WORKFLOW_AGENT_CONVERSATIONS,
+    MAX_WORKFLOW_AGENT_MESSAGES_PER_CONVERSATION, WorkflowDocumentBundleSection,
+};
 use crate::workflow_features::WorkflowFeatureBundleSection;
 
 const PROJECT_MAGIC: &[u8; 8] = b"SPRPROJ1";
@@ -1852,7 +1853,7 @@ impl WorkflowBundleRegistry {
                     &cache_relation,
                     &source_relation,
                 ) {
-                    let expected = spiral_robotics_api::workflow::WorkflowFeatureApplicability::derived_cache_name(
+                    let expected = spiral_robotics_common::workflow::WorkflowFeatureApplicability::derived_cache_name(
                         &source_relation,
                     );
                     return Err(format!(
@@ -4328,7 +4329,7 @@ mod tests {
         let episode_id = "episode_video_import";
         let episode = EpisodeFixture::new(episode_id, "video-transfer")
             .with_timing(10, 2.0)
-            .with_arms(vec![spiral_robotics_api::recording::EpisodeArm::new(
+            .with_arms(vec![spiral_robotics_common::recording::EpisodeArm::new(
                 "follower",
                 Some("test".to_owned()),
                 vec!["joint".to_owned()],

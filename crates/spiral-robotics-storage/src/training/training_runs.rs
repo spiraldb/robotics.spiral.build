@@ -14,7 +14,7 @@ use arrow_array::{
     UInt64Array,
 };
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
-use spiral_robotics_api::training::{
+use spiral_robotics_common::training::{
     ActArchitectureConfig, ActAttentionConfig, ActInputConfig, ActLayerCounts, ActTrainingConfig,
     TrainingCheckpoint, TrainingConfig, TrainingMetricPoint, TrainingPolicy, TrainingRun,
     TrainingRunPhase, TrainingSnapshot, TrainingSource,
@@ -1107,7 +1107,7 @@ impl TrainingHistoryAssembly {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spiral_robotics_api::training::TrainingReadiness;
+    use spiral_robotics_common::training::TrainingReadiness;
 
     fn run(run_id: &str, phase: StoredTrainingPhase) -> StoredTrainingRun {
         StoredTrainingRun {

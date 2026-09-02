@@ -5,8 +5,8 @@
 //! backend remains authoritative for recording, replay, hardware, and safety.
 
 use dioxus::prelude::*;
-use spiral_robotics_api::recording::EpisodeInfo;
-use spiral_robotics_api::robots::ModeSelection;
+use spiral_robotics_common::recording::EpisodeInfo;
+use spiral_robotics_common::robots::ModeSelection;
 
 use crate::activities::data::state::DataController;
 use crate::activities::data::workbench::EpisodeIdPresentation;
@@ -20,7 +20,7 @@ use crate::shell::state::Studio;
 impl Studio {
     pub(crate) fn recording_blocker(self) -> Option<String> {
         let studio = self;
-        if !spiral_robotics_api::identity::DatasetId::is_canonical(
+        if !spiral_robotics_common::identity::DatasetId::is_canonical(
             studio.selected_dataset().read().trim(),
         ) {
             Some("Choose a dataset ID using letters, numbers, '.', '_' or '-'.".to_owned())

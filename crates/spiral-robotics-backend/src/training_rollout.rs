@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 
-use spiral_robotics_api::rollout::{RolloutConfig, RolloutSnapshot};
-use spiral_robotics_api::training::{TrainingConfig, TrainingRun};
+use spiral_robotics_common::rollout::{RolloutConfig, RolloutSnapshot};
+use spiral_robotics_common::training::{TrainingConfig, TrainingRun};
 
 use crate::OperationError;
 use crate::main_runtime::{MainRuntime, MainRuntimeFailure};

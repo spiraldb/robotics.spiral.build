@@ -14,9 +14,9 @@ use crate::workflow::service::{
     WorkflowCancellationAdmission, WorkflowRunAdmission, WorkflowSaveAdmission,
 };
 use serde::{Deserialize, Serialize};
-use spiral_robotics_api::relations::{RelationCatalog, SpiralQuerySnapshot};
-use spiral_robotics_api::sql::QualifiedRelation;
-use spiral_robotics_api::workflow::{
+use spiral_robotics_common::relations::{RelationCatalog, SpiralQuerySnapshot};
+use spiral_robotics_common::sql::QualifiedRelation;
+use spiral_robotics_common::workflow::{
     WorkflowCommand, WorkflowNodeConfig, WorkflowNodePhase, WorkflowNodeSnapshot,
     WorkflowQuarantineSummary, WorkflowRunPhase, WorkflowRunSnapshot, WorkflowSnapshot,
     WorkflowSpec,
@@ -458,7 +458,7 @@ impl WorkflowManager {
     ) -> Result<
         (
             WorkflowSpec,
-            spiral_robotics_api::workflow::WorkflowValidationReport,
+            spiral_robotics_common::workflow::WorkflowValidationReport,
         ),
         OperationError,
     > {
@@ -1104,7 +1104,7 @@ impl WorkflowManager {
             node.set_rows(Some(result.rows()));
             node.set_error(None);
             node.set_progress(Some(
-                spiral_robotics_api::workflow::WorkflowNodeProgress::new(
+                spiral_robotics_common::workflow::WorkflowNodeProgress::new(
                     result
                         .computed_feature_cells()
                         .saturating_add(result.reused_feature_cells()),
@@ -1763,8 +1763,8 @@ mod tests {
 
     use arrow_array::{ArrayRef, Int64Array, RecordBatch};
     use arrow_schema::{DataType, Field, Schema};
-    use spiral_robotics_api::relations::SpiralQuerySnapshot;
-    use spiral_robotics_api::workflow::{
+    use spiral_robotics_common::relations::SpiralQuerySnapshot;
+    use spiral_robotics_common::workflow::{
         WorkflowEdgeSpec, WorkflowFeatureApplicability, WorkflowFeatureDefinition,
         WorkflowModelRunMetadata, WorkflowNodeConfig, WorkflowNodeSpec, WorkflowRunPhase,
     };

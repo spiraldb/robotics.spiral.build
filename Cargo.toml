@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/spiral-robotics-api",
+    "crates/spiral-robotics-common",
     "crates/spiral-robotics-hardware",
     "crates/spiral-robotics-storage",
     "crates/spiral-robotics-inference",
@@ -26,7 +26,7 @@ base64 = "0.22"
 candle-core = "=0.11.0"
 candle-nn = "=0.11.0"
 candle-transformers = "=0.11.0"
-spiral-robotics-api = { path = "crates/spiral-robotics-api" }
+spiral-robotics-common = { path = "crates/spiral-robotics-common" }
 spiral-robotics-inference = { path = "crates/spiral-robotics-inference", default-features = false }
 spiral-robotics-hardware = { path = "crates/spiral-robotics-hardware" }
 spiral-robotics-backend = { path = "crates/spiral-robotics-backend" }

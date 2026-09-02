@@ -239,7 +239,7 @@ impl TimelineActionContext {
                                 data,
                                 keep,
                                 EventHandler::new(
-                                    move |_: spiral_robotics_api::recording::EpisodeInfo| {
+                                    move |_: spiral_robotics_common::recording::EpisodeInfo| {
                                         episode_data_cache.write().invalidate(&finished_episode);
                                         let next_revision =
                                             episode_preview_revision.peek().wrapping_add(1);

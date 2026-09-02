@@ -2,17 +2,18 @@
 
 use crate::components::interaction::{Action, ActionPurpose, ActionSize, ActionVariant};
 use dioxus::prelude::*;
-use spiral_robotics_api::robots::{CameraStatus, RobotSummary};
-use spiral_robotics_api::rollout::{
-    MAX_ROLLOUT_ACTION_STEPS, MAX_ROLLOUT_DURATION_SECONDS, RolloutConfig, RolloutPhase,
-    RolloutSnapshot,
+use spiral_robotics_common::robots::{CameraStatus, RobotSummary};
+use spiral_robotics_common::rollout::{
+    MAX_ROLLOUT_DURATION_SECONDS, RolloutConfig, RolloutPhase, RolloutSnapshot,
 };
-use spiral_robotics_api::training::{TrainingCheckpoint, TrainingRun, TrainingSnapshot};
+use spiral_robotics_common::training::{TrainingCheckpoint, TrainingRun, TrainingSnapshot};
 
 use crate::client::server_fns;
 use crate::format::LossPresentation;
 use crate::shell::notifications::MessageSource;
 use crate::shell::state::studio;
+
+const MAX_ROLLOUT_ACTION_STEPS: usize = 20;
 
 #[derive(Clone, Debug, PartialEq)]
 struct CheckpointChoice {
@@ -645,18 +646,18 @@ impl RolloutCountPresentation for u64 {
 
 #[cfg(test)]
 mod tests {
-    use spiral_robotics_api::robots::{
+    use spiral_robotics_common::robots::{
         CameraBinding, CameraStatus, CameraStreamFormat, CameraStreamState, ConnectionStatus,
         RobotAvailability, RobotSummary,
     };
-    use spiral_robotics_api::rollout::{MAX_ROLLOUT_ACTION_STEPS, RolloutPhase, RolloutSnapshot};
-    use spiral_robotics_api::training::{
+    use spiral_robotics_common::rollout::{RolloutPhase, RolloutSnapshot};
+    use spiral_robotics_common::training::{
         TrainingCheckpoint, TrainingConfig, TrainingRun, TrainingRunPhase, TrainingSource,
     };
 
     use super::{
-        CameraStreamRoles, RobotFleet, RolloutCameraSummary, RolloutPreconditions,
-        RolloutRuntimePresentation, TrainingRunRollout,
+        CameraStreamRoles, MAX_ROLLOUT_ACTION_STEPS, RobotFleet, RolloutCameraSummary,
+        RolloutPreconditions, RolloutRuntimePresentation, TrainingRunRollout,
     };
 
     fn robot(id: &str, role: &str) -> RobotSummary {

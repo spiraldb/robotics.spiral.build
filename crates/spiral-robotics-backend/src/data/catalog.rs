@@ -4,7 +4,7 @@
 //! delivery response types remain opaque behind [`EpisodeCatalogPort`].
 
 use crate::OperationError;
-use spiral_robotics_api::identity::EpisodeId;
+use spiral_robotics_storage::episodes::EpisodeId;
 
 /// Current episode use that makes deletion unsafe.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

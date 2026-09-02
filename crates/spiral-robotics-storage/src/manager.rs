@@ -6,10 +6,10 @@
 
 use std::sync::Arc;
 
-use spiral_robotics_api::recording::DatasetSummary;
-use spiral_robotics_api::relations::{RelationCatalog, SpiralQuerySnapshot};
-use spiral_robotics_api::rollout::RolloutSnapshot;
-use spiral_robotics_api::training::{TrainingRun, TrainingSnapshot};
+use spiral_robotics_common::recording::DatasetSummary;
+use spiral_robotics_common::relations::{RelationCatalog, SpiralQuerySnapshot};
+use spiral_robotics_common::rollout::RolloutSnapshot;
+use spiral_robotics_common::training::{TrainingRun, TrainingSnapshot};
 
 use crate::db::ProjectDatabasePersistence;
 use crate::db::ProjectQueries;
@@ -198,7 +198,7 @@ impl StorageManager {
     pub async fn import_project_bundle(
         &self,
         bytes: &[u8],
-    ) -> Result<spiral_robotics_api::datasets::ProjectImportSummary, String> {
+    ) -> Result<spiral_robotics_common::datasets::ProjectImportSummary, String> {
         TransferPersistence::new(&self.project_store)
             .import_project(bytes)
             .await
@@ -208,7 +208,7 @@ impl StorageManager {
         &self,
         dataset_id: &str,
         bytes: &[u8],
-    ) -> Result<spiral_robotics_api::datasets::EpisodeImportSummary, String> {
+    ) -> Result<spiral_robotics_common::datasets::EpisodeImportSummary, String> {
         TransferPersistence::new(&self.project_store)
             .import_episodes(dataset_id, bytes)
             .await

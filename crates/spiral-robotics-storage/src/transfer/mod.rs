@@ -10,7 +10,7 @@ pub use bundle::{
 };
 pub use ingestion::HuggingFaceDatasetDiscovery;
 
-use spiral_robotics_api::datasets::{EpisodeImportSummary, ProjectImportSummary};
+use spiral_robotics_common::datasets::{EpisodeImportSummary, ProjectImportSummary};
 
 use crate::db::ProjectStore;
 use bundle::{BundleSource, EpisodeBundleImport, EpisodeBundleSelection};

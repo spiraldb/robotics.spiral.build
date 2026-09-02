@@ -7,7 +7,7 @@
 use std::collections::BTreeSet;
 
 use dioxus::prelude::*;
-use spiral_robotics_api::training::TrainingConfig;
+use spiral_robotics_common::training::TrainingConfig;
 
 use crate::activities::data::catalog as spiral;
 use crate::activities::data::sql_draft::GeneratedSqlDraft;

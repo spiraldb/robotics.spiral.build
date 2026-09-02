@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use spiral_robotics_api::training::{
+use spiral_robotics_common::training::{
     MAX_TRAINING_HISTORY_RUNS, TrainingCheckpoint, TrainingConfig, TrainingMetricPoint,
     TrainingReadiness, TrainingRun, TrainingRunPhase, TrainingRuntimeInfo, TrainingSnapshot,
     TrainingSource, TrainingUpdate,

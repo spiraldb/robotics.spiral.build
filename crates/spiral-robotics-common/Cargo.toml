@@ -1,9 +1,12 @@
 [package]
-name = "spiral-robotics-api"
+name = "spiral-robotics-common"
 version.workspace = true
 edition.workspace = true
-description = "Wire protocol shared by the Spiral Robotics frontend and backend"
+description = "Dependency-minimal types shared across Spiral Robotics crates"
 publish = false
+
+[lib]
+name = "spiral_robotics_common"
 
 [lints]
 workspace = true

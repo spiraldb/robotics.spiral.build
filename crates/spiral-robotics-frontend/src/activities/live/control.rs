@@ -8,7 +8,7 @@ use crate::components::interaction::{
     Action, ActionAuxiliaryHandlers, ActionPurpose, ActionVariant,
 };
 use dioxus::prelude::*;
-use spiral_robotics_api::robots::{
+use spiral_robotics_common::robots::{
     JointTelemetry, MotorCondition, MotorLimits, RobotSummary, RobotTelemetry,
 };
 use spiral_robotics_viewport::{self as arm, ArmPose};

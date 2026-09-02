@@ -3,7 +3,7 @@ use crate::components::interaction::{
     ConfirmationResponse, InlineConfirmation,
 };
 use dioxus::prelude::*;
-use spiral_robotics_api::robots::RobotSummary;
+use spiral_robotics_common::robots::RobotSummary;
 
 use crate::client::server_fns::delete_robot;
 use crate::shell::state::studio;

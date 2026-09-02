@@ -6,8 +6,8 @@ use dioxus::prelude::*;
 use dioxus_workbench::{DockZone, Panel, PanelId, PanelLayout, PanelWorkspace};
 #[cfg(test)]
 use dioxus_workbench::{LayoutNode, SplitAxis};
-use spiral_robotics_api::recording::{ReplayPhase, ReplayPurpose};
-use spiral_robotics_api::robots::ModeSelection;
+use spiral_robotics_common::recording::{ReplayPhase, ReplayPurpose};
+use spiral_robotics_common::robots::ModeSelection;
 
 use crate::activities::data::query_result::QueryResultView;
 use crate::activities::data::relations::RelationsPanel;
@@ -762,7 +762,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
                         match recording {
                             Some(recording) => studio.stop_recording(
                                 recording.episode(),
-                                commands::RecordingCompletion::new(data, true, EventHandler::new(move |_: spiral_robotics_api::recording::EpisodeInfo| {
+                                commands::RecordingCompletion::new(data, true, EventHandler::new(move |_: spiral_robotics_common::recording::EpisodeInfo| {
                                     let next_revision = episode_preview_revision.peek().wrapping_add(1);
                                     episode_preview_revision.set(next_revision);
                                     episode_preview_state.set(None);
@@ -841,7 +841,7 @@ trait TimelineReplay {
     fn drives_recorded_media(&self) -> bool;
 }
 
-impl TimelineReplay for spiral_robotics_api::recording::ReplayProgress {
+impl TimelineReplay for spiral_robotics_common::recording::ReplayProgress {
     fn owns_timeline_transport(&self) -> bool {
         self.purpose() == ReplayPurpose::Timeline
     }
@@ -1053,7 +1053,7 @@ impl Studio {
 mod tests {
     use super::*;
     use crate::client::episode_data::{EpisodeTimeline, TimelineSample, VideoAssetMetadata};
-    use spiral_robotics_api::recording::{
+    use spiral_robotics_common::recording::{
         EpisodeInfo, EpisodeVideoFormat, EpisodeVideoIdentity, EpisodeVideoTimeline,
         ReplayIdentity, ReplayTimeline, ReplayTransport,
     };
@@ -1258,7 +1258,7 @@ mod tests {
 
     #[test]
     fn physical_seek_never_takes_ownership_of_timeline_transport() {
-        let mut replay = spiral_robotics_api::recording::ReplayProgress::new(
+        let mut replay = spiral_robotics_common::recording::ReplayProgress::new(
             ReplayIdentity::new("take-1", "follower"),
             ReplayTimeline::new(0, 1, 0.0).with_duration_seconds(1.0 / 60.0),
             ReplayTransport::new(ReplayPurpose::PhysicalSeek, ReplayPhase::Seeking, false),

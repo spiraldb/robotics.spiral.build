@@ -11,7 +11,7 @@ use crate::components::interaction::{
     Action, ActionPurpose, ActionVariant, ChevronIcon, FileAction, FileInput, UnassignIcon,
 };
 use dioxus::prelude::*;
-use spiral_robotics_api::robots::{
+use spiral_robotics_common::robots::{
     CameraBinding, NewRobot, PortSettings, RobotSummary, RobotUpdate, SerialPortSummary,
 };
 

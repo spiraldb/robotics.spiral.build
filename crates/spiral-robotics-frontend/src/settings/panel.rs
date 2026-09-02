@@ -6,7 +6,7 @@ use crate::components::interaction::{
     FileInput, Toggle,
 };
 use dioxus::prelude::*;
-use spiral_robotics_api::settings::{DataSettings, SpiralConnectionUpdate};
+use spiral_robotics_common::settings::{DataSettings, SpiralConnectionUpdate};
 
 use crate::client::server_fns::{
     data_settings, import_project, test_spiral_connection, test_training_runtime,

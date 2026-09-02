@@ -21,17 +21,17 @@ use futures::StreamExt as _;
 use image::codecs::jpeg::JpegEncoder;
 use image::{DynamicImage, ImageFormat};
 use serde_json::{Map as JsonMap, Value as JsonValue};
-use spiral_robotics_api::recording::DatasetSummary;
-use spiral_robotics_api::relations::{
+use spiral_robotics_common::recording::DatasetSummary;
+use spiral_robotics_common::relations::{
     CatalogRelation as ApiCatalogRelation, QueryColumn, RelationCatalog, SpiralQuerySnapshot,
 };
-use spiral_robotics_api::sql::QualifiedRelation;
+use spiral_robotics_common::sql::QualifiedRelation;
 
 use super::database::{DatabaseCommand, DatabaseSession, RelationKind};
 use super::project_store::{ProjectConnection, ProjectStore};
 use super::schema::{self as spiral, Table, column};
 use crate::episodes::video::{VideoAssetKey, VideoByteRange};
-use spiral_robotics_api::sql::ReadOnlyQueryMode;
+use spiral_robotics_common::sql::ReadOnlyQueryMode;
 
 const MAX_QUERY_ROWS: usize = 1_000;
 const MAX_QUERY_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
@@ -314,7 +314,7 @@ impl SpiralSql {
     }
 
     pub(crate) fn ensure_read_only(sql: &str, mode: ReadOnlyQueryMode) -> Result<(), String> {
-        spiral_robotics_api::sql::ReadOnlyQuery::new(sql, mode)
+        spiral_robotics_common::sql::ReadOnlyQuery::new(sql, mode)
             .authorize()
             .map_err(|error| error.to_string())
     }

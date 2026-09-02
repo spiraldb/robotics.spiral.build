@@ -20,6 +20,13 @@ use crate::db::column as db;
 use crate::db::{ManagedRelationSchema, Table};
 use crate::db::{ProjectStore, StorageClock};
 
+/// Maximum number of Assistant conversations retained in one project document.
+pub const MAX_WORKFLOW_AGENT_CONVERSATIONS: usize = 20;
+/// Maximum number of messages retained in one Assistant conversation.
+pub const MAX_WORKFLOW_AGENT_MESSAGES_PER_CONVERSATION: usize = 80;
+/// Maximum persisted Assistant conversation title length.
+pub const MAX_WORKFLOW_AGENT_CONVERSATION_TITLE_CHARS: usize = 64;
+
 /// Workflow document relations contributed to project bundles.
 pub(crate) struct WorkflowDocumentBundleSection;
 

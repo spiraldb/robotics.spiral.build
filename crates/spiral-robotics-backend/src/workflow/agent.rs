@@ -10,15 +10,13 @@ use crate::data::catalog_lease::{CatalogLeaseOwner, CatalogMutationLease};
 use crate::sync::MutexRecovery;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use spiral_robotics_api::relations::SpiralQuerySnapshot;
-use spiral_robotics_api::workflow::{
-    DEFAULT_WORKFLOW_ID, MAX_WORKFLOW_AGENT_CONVERSATION_TITLE_CHARS,
-    MAX_WORKFLOW_AGENT_CONVERSATIONS, MAX_WORKFLOW_AGENT_INPUT_CHARS,
-    MAX_WORKFLOW_AGENT_MESSAGES_PER_CONVERSATION, MAX_WORKFLOW_AGENT_QUERY_ROWS,
-    WorkflowAgentArtifactReceipt, WorkflowAgentCommand, WorkflowAgentConversationSummary,
-    WorkflowAgentMessage, WorkflowAgentMessagePhase, WorkflowAgentPhase, WorkflowAgentReadiness,
-    WorkflowAgentRole, WorkflowAgentSession, WorkflowAgentSnapshot, WorkflowAgentToolPhase,
-    WorkflowAgentToolSummary, WorkflowCommand, WorkflowNodeConfig, WorkflowRunPhase, WorkflowSpec,
+use spiral_robotics_common::relations::SpiralQuerySnapshot;
+use spiral_robotics_common::workflow::{
+    DEFAULT_WORKFLOW_ID, WorkflowAgentArtifactReceipt, WorkflowAgentCommand,
+    WorkflowAgentConversationSummary, WorkflowAgentMessage, WorkflowAgentMessagePhase,
+    WorkflowAgentPhase, WorkflowAgentReadiness, WorkflowAgentRole, WorkflowAgentSession,
+    WorkflowAgentSnapshot, WorkflowAgentToolPhase, WorkflowAgentToolSummary, WorkflowCommand,
+    WorkflowNodeConfig, WorkflowRunPhase, WorkflowSpec,
 };
 use tokio::sync::broadcast;
 
@@ -27,11 +25,16 @@ use crate::workflow::provider::{
     OpenAiProvider, ProviderCompletion, ProviderConfig, ProviderMessage, ProviderResponse,
     ProviderToolCall,
 };
-use spiral_robotics_storage::workflow_documents::StoredWorkflowDocument;
+use spiral_robotics_storage::workflow_documents::{
+    MAX_WORKFLOW_AGENT_CONVERSATION_TITLE_CHARS, MAX_WORKFLOW_AGENT_CONVERSATIONS,
+    MAX_WORKFLOW_AGENT_MESSAGES_PER_CONVERSATION, StoredWorkflowDocument,
+};
 use spiral_robotics_storage::{StorageManager, StorageSchema};
 
 const MAX_PUBLIC_MESSAGES: usize = MAX_WORKFLOW_AGENT_MESSAGES_PER_CONVERSATION;
 const MAX_PROVIDER_MESSAGES: usize = 80;
+const MAX_WORKFLOW_AGENT_INPUT_CHARS: usize = 8_000;
+const MAX_WORKFLOW_AGENT_QUERY_ROWS: usize = 50;
 const MAX_TOOL_ITERATIONS: usize = 16;
 const MAX_TOOL_CALLS: usize = 48;
 const MAX_TOOL_OUTPUT_BYTES: usize = 32 * 1024;
@@ -1915,7 +1918,7 @@ impl WorkflowAgentManager {
         &self,
         run_id: &str,
         cancel: Arc<AtomicBool>,
-    ) -> Result<spiral_robotics_api::workflow::WorkflowRunSnapshot, String> {
+    ) -> Result<spiral_robotics_common::workflow::WorkflowRunSnapshot, String> {
         let (mut state, mut updates) = self.inner.services.workflow.subscription();
         loop {
             if cancel.load(Ordering::SeqCst) {
@@ -2226,7 +2229,7 @@ impl WorkflowAgentManager {
     async fn begin_auto_resume(
         &self,
         identity: TurnIdentity<'_>,
-        snapshot: &spiral_robotics_api::workflow::WorkflowRunSnapshot,
+        snapshot: &spiral_robotics_common::workflow::WorkflowRunSnapshot,
     ) -> Result<(), String> {
         let TurnIdentity {
             conversation_id,
@@ -2676,7 +2679,7 @@ trait WorkflowRunAgentSummary {
     fn agent_summary(&self) -> Value;
 }
 
-impl WorkflowRunAgentSummary for spiral_robotics_api::workflow::WorkflowRunSnapshot {
+impl WorkflowRunAgentSummary for spiral_robotics_common::workflow::WorkflowRunSnapshot {
     fn agent_summary(&self) -> Value {
         json!({
             "ok": self.phase() == WorkflowRunPhase::Completed,
@@ -2699,7 +2702,7 @@ impl WorkflowRunAgentSummary for spiral_robotics_api::workflow::WorkflowRunSnaps
 trait WorkflowAgentMessageHistoryExt {
     fn refresh_deferred_wait_receipt(
         &mut self,
-        snapshot: &spiral_robotics_api::workflow::WorkflowRunSnapshot,
+        snapshot: &spiral_robotics_common::workflow::WorkflowRunSnapshot,
         summary: &str,
     );
 }
@@ -2707,7 +2710,7 @@ trait WorkflowAgentMessageHistoryExt {
 impl WorkflowAgentMessageHistoryExt for [WorkflowAgentMessage] {
     fn refresh_deferred_wait_receipt(
         &mut self,
-        snapshot: &spiral_robotics_api::workflow::WorkflowRunSnapshot,
+        snapshot: &spiral_robotics_common::workflow::WorkflowRunSnapshot,
         summary: &str,
     ) {
         let Some(wait) = self
@@ -3040,7 +3043,7 @@ mod tests {
     fn serialized_query_prompt_is_hard_bounded_including_schema_and_json_overhead() {
         let columns = (0..40)
             .map(|index| {
-                spiral_robotics_api::relations::QueryColumn::new(
+                spiral_robotics_common::relations::QueryColumn::new(
                     format!("field_{index}_{}", "x".repeat(900)),
                     format!("Struct<{}>", "y".repeat(900)),
                     true,
@@ -3202,7 +3205,7 @@ mod tests {
         ];
         let workflow = WorkflowSpec::new("workflow", "Test workflow");
         let mut snapshot =
-            spiral_robotics_api::workflow::WorkflowRunSnapshot::started(&workflow, "run-42");
+            spiral_robotics_common::workflow::WorkflowRunSnapshot::started(&workflow, "run-42");
         snapshot.set_phase(WorkflowRunPhase::Completed);
         snapshot.set_result(Some(
             SpiralQuerySnapshot::new(Vec::new(), Vec::new(), false).with_elapsed_ms(2),

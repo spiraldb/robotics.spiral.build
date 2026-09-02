@@ -12,7 +12,7 @@ workspace = true
 test-support = []
 
 [dependencies]
-spiral-robotics-api.workspace = true
+spiral-robotics-common.workspace = true
 spiral-robotics-hardware.workspace = true
 arrow-array = "58.4.0"
 arrow-schema = "58.4.0"
@@ -43,7 +43,7 @@ vortex-arrow.workspace = true
 vortex-error.workspace = true
 
 [dev-dependencies]
-spiral-robotics-api = { workspace = true, features = ["test-support"] }
+spiral-robotics-common = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 
 [build-dependencies]

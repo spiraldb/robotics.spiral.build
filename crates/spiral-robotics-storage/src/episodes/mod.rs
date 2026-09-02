@@ -2,9 +2,11 @@
 
 mod episode_schema;
 mod episodes;
+mod identity;
 pub(crate) mod video;
 
 pub use episodes::*;
+pub use identity::EpisodeId;
 
 #[cfg(test)]
 pub(crate) struct EpisodeFixture {
@@ -29,7 +31,7 @@ impl EpisodeFixture {
 
     pub(crate) fn with_arms(
         mut self,
-        arms: Vec<spiral_robotics_api::recording::EpisodeArm>,
+        arms: Vec<spiral_robotics_common::recording::EpisodeArm>,
     ) -> Self {
         self.start = self.start.with_arms(arms, Vec::new());
         self

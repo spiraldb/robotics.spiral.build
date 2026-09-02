@@ -14,6 +14,7 @@ nokhwa.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serialport.workspace = true
+spiral-robotics-common = { path = "../spiral-robotics-common" }
 tempfile.workspace = true
 tokio = { version = "1", features = ["rt", "sync"] }
 tracing = "0.1"

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use spiral_robotics_api::workflow::{
+use spiral_robotics_common::workflow::{
     WorkflowAgentCommand, WorkflowAgentSnapshot, WorkflowCommand, WorkflowSnapshot,
 };
 

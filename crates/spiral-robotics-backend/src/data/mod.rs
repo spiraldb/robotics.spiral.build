@@ -9,7 +9,7 @@ pub(crate) mod seek;
 
 use std::collections::BTreeMap;
 
-use spiral_robotics_api::sql::{ReadOnlyQuery, ReadOnlyQueryMode};
+use spiral_robotics_common::sql::{ReadOnlyQuery, ReadOnlyQueryMode};
 use url::Url;
 
 use crate::OperationError;

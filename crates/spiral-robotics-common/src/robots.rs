@@ -193,6 +193,18 @@ impl MotorLimits {
     pub const fn max_temperature_celsius(self) -> Option<f64> {
         self.max_temperature_celsius
     }
+
+    pub const fn min_voltage_volts(self) -> Option<f64> {
+        self.min_voltage_volts
+    }
+
+    pub const fn max_voltage_volts(self) -> Option<f64> {
+        self.max_voltage_volts
+    }
+
+    pub const fn max_load(self) -> Option<f64> {
+        self.max_load
+    }
 }
 
 /// Serial settings for a robot's motor bus.
@@ -208,6 +220,17 @@ impl PortSettings {
             path: path.into(),
             baud_rate,
         }
+    }
+
+    pub fn try_new(path: impl Into<String>, baud_rate: u32) -> Result<Self, &'static str> {
+        let path = path.into();
+        if path.trim().is_empty() {
+            return Err("serial port path must not be empty");
+        }
+        if baud_rate == 0 {
+            return Err("serial port baud rate must be greater than zero");
+        }
+        Ok(Self { path, baud_rate })
     }
 
     pub fn path(&self) -> &str {
@@ -499,6 +522,15 @@ impl ModeStatus {
     pub const fn active(&self) -> bool {
         self.active
     }
+
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    pub fn update_activity(&mut self, active: bool, error: Option<String>) {
+        self.active = active;
+        self.error = error;
+    }
 }
 
 /// A live sample of every connected robot.
@@ -761,6 +793,63 @@ impl JointDiagnostics {
         self.faults = faults;
         self
     }
+
+    pub fn assess(&self, limits: MotorLimits) -> MotorCondition {
+        const CAUTION_LIMIT_FRACTION: f64 = 0.85;
+        const CAUTION_VOLTAGE_MARGIN_VOLTS: f64 = 0.3;
+
+        let readings = [
+            self.electrical.temperature_celsius,
+            self.electrical.voltage_volts,
+            self.load,
+        ];
+        let declared = [
+            limits.max_temperature_celsius(),
+            limits.min_voltage_volts(),
+            limits.max_voltage_volts(),
+            limits.max_load(),
+        ];
+        let invalid = readings
+            .into_iter()
+            .chain(declared)
+            .flatten()
+            .any(|value| !value.is_finite())
+            || limits
+                .max_temperature_celsius()
+                .is_some_and(|value| value <= 0.0)
+            || limits.min_voltage_volts().is_some_and(|value| value <= 0.0)
+            || limits.max_voltage_volts().is_some_and(|value| value <= 0.0)
+            || limits.max_load().is_some_and(|value| value <= 0.0)
+            || matches!(
+                (limits.min_voltage_volts(), limits.max_voltage_volts()),
+                (Some(minimum), Some(maximum)) if minimum >= maximum
+            );
+        if !self.faults.is_empty() || invalid {
+            return MotorCondition::Fault;
+        }
+        let hot = self
+            .electrical
+            .temperature_celsius
+            .zip(limits.max_temperature_celsius())
+            .is_some_and(|(value, limit)| value >= limit * CAUTION_LIMIT_FRACTION);
+        let strained = self
+            .load
+            .zip(limits.max_load())
+            .is_some_and(|(value, limit)| value.abs() >= limit * CAUTION_LIMIT_FRACTION);
+        let supply = self.electrical.voltage_volts.is_some_and(|volts| {
+            limits
+                .min_voltage_volts()
+                .is_some_and(|minimum| volts <= minimum + CAUTION_VOLTAGE_MARGIN_VOLTS)
+                || limits
+                    .max_voltage_volts()
+                    .is_some_and(|maximum| volts >= maximum - CAUTION_VOLTAGE_MARGIN_VOLTS)
+        });
+        if hot || strained || supply {
+            MotorCondition::Caution
+        } else {
+            MotorCondition::Nominal
+        }
+    }
 }
 
 impl JointTelemetry {
@@ -794,6 +883,12 @@ impl JointTelemetry {
     }
     pub const fn normalized(&self) -> Option<f64> {
         self.kinematics.normalized
+    }
+    pub const fn goal_raw(&self) -> Option<i64> {
+        self.kinematics.goal_raw
+    }
+    pub const fn target_raw(&self) -> Option<i64> {
+        self.kinematics.target_raw
     }
     pub const fn target_degrees(&self) -> Option<f64> {
         self.kinematics.target_degrees
@@ -880,6 +975,18 @@ pub struct JointRange {
 impl JointRange {
     pub const fn new(min: i64, center: i64, max: i64) -> Self {
         Self { min, center, max }
+    }
+
+    pub const fn min(self) -> i64 {
+        self.min
+    }
+
+    pub const fn center(self) -> i64 {
+        self.center
+    }
+
+    pub const fn max(self) -> i64 {
+        self.max
     }
 }
 
@@ -1047,5 +1154,172 @@ impl<C> RobotUpdate<C> {
 
     pub fn into_parts(self) -> (String, Option<String>, Option<PortSettings>, Option<C>) {
         (self.id, self.robot_type, self.port, self.cameras)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct MotorAssessmentTest {
+        diagnostics: JointDiagnostics,
+        limits: MotorLimits,
+    }
+
+    impl MotorAssessmentTest {
+        fn new(
+            electrical: MotorElectricalReadings,
+            load: Option<f64>,
+            limits: MotorLimits,
+        ) -> Self {
+            Self {
+                diagnostics: JointDiagnostics::new(electrical, load, Some(0.0)),
+                limits,
+            }
+        }
+
+        fn limits() -> MotorLimits {
+            MotorLimits::default()
+                .with_max_temperature_celsius(Some(70.0))
+                .with_voltage_range(Some(4.5), Some(9.0))
+                .with_max_load(Some(1.0))
+        }
+
+        fn with_faults(mut self, faults: Vec<MotorFault>) -> Self {
+            self.diagnostics = self.diagnostics.with_faults(faults);
+            self
+        }
+
+        fn condition(self) -> MotorCondition {
+            self.diagnostics.assess(self.limits)
+        }
+    }
+
+    #[test]
+    fn motor_summary_wire_excludes_hardware_configuration_details() {
+        let summary = MotorSummary::new("joint", 7).with_model(Some("sts3215".to_owned()));
+
+        let json = serde_json::to_string(&summary).unwrap();
+        assert_eq!(
+            json,
+            r#"{"name":"joint","id":7,"model":"sts3215","limits":{"max_temperature_celsius":null,"min_voltage_volts":null,"max_voltage_volts":null,"max_load":null}}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<MotorSummary>(&json).unwrap(),
+            summary
+        );
+    }
+
+    #[test]
+    fn mode_selection_round_trips_through_its_tag() {
+        let cases = [
+            (ModeSelection::Idle, r#"{"mode":"idle"}"#),
+            (
+                ModeSelection::Manual {
+                    robot: "arm".to_owned(),
+                },
+                r#"{"mode":"manual","robot":"arm"}"#,
+            ),
+            (
+                ModeSelection::Teleoperate {
+                    leader: "left".to_owned(),
+                    follower: "right".to_owned(),
+                },
+                r#"{"mode":"teleoperate","leader":"left","follower":"right"}"#,
+            ),
+            (
+                ModeSelection::Replay {
+                    robot: "right".to_owned(),
+                    episode: "episode_000007".to_owned(),
+                },
+                r#"{"mode":"replay","robot":"right","episode":"episode_000007"}"#,
+            ),
+            (
+                ModeSelection::Policy {
+                    robot: "right".to_owned(),
+                    session: "rollout-1".to_owned(),
+                },
+                r#"{"mode":"policy","robot":"right","session":"rollout-1"}"#,
+            ),
+        ];
+
+        for (mode, json) in cases {
+            assert_eq!(serde_json::to_string(&mode).unwrap(), json);
+            assert_eq!(serde_json::from_str::<ModeSelection>(json).unwrap(), mode);
+        }
+    }
+
+    #[test]
+    fn calibration_span_saturates_instead_of_overflowing() {
+        let progress = CalibrationJointProgress::new("gripper", i64::MIN, 0).with_max(i64::MAX);
+        assert_eq!(progress.span(), i64::MAX);
+    }
+
+    #[test]
+    fn an_arms_condition_is_the_worst_of_its_motors() {
+        assert_eq!(
+            [
+                MotorCondition::Nominal,
+                MotorCondition::Fault,
+                MotorCondition::Caution,
+            ]
+            .into_iter()
+            .max(),
+            Some(MotorCondition::Fault)
+        );
+    }
+
+    #[test]
+    fn reported_limits_and_faults_determine_motor_condition() {
+        assert_eq!(
+            MotorAssessmentTest::new(
+                MotorElectricalReadings::new(Some(30.0), Some(7.4), Some(0.2)),
+                Some(0.1),
+                MotorAssessmentTest::limits(),
+            )
+            .condition(),
+            MotorCondition::Nominal
+        );
+        assert_eq!(
+            MotorAssessmentTest::new(
+                MotorElectricalReadings::new(Some(59.5), Some(7.4), Some(0.2)),
+                Some(-0.9),
+                MotorAssessmentTest::limits(),
+            )
+            .condition(),
+            MotorCondition::Caution
+        );
+        assert_eq!(
+            MotorAssessmentTest::new(
+                MotorElectricalReadings::new(Some(30.0), Some(7.4), Some(0.2)),
+                Some(0.1),
+                MotorAssessmentTest::limits(),
+            )
+            .with_faults(vec![MotorFault::Overheat])
+            .condition(),
+            MotorCondition::Fault
+        );
+    }
+
+    #[test]
+    fn missing_limits_do_not_invent_thresholds_but_invalid_evidence_faults() {
+        assert_eq!(
+            MotorAssessmentTest::new(
+                MotorElectricalReadings::new(Some(200.0), Some(7.4), Some(0.2)),
+                Some(0.1),
+                MotorLimits::default(),
+            )
+            .condition(),
+            MotorCondition::Nominal
+        );
+        assert_eq!(
+            MotorAssessmentTest::new(
+                MotorElectricalReadings::new(Some(f64::NAN), Some(7.4), Some(0.2)),
+                Some(0.1),
+                MotorLimits::default(),
+            )
+            .condition(),
+            MotorCondition::Fault
+        );
     }
 }

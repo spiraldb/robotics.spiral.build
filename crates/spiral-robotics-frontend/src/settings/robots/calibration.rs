@@ -3,7 +3,7 @@ use crate::components::interaction::{
     ConfirmationDismissal, ConfirmationResponse,
 };
 use dioxus::prelude::*;
-use spiral_robotics_api::robots::{CalibrationJointProgress, CalibrationProgress, RobotSummary};
+use spiral_robotics_common::robots::{CalibrationJointProgress, CalibrationProgress, RobotSummary};
 use spiral_robotics_viewport as arm;
 
 use crate::client::server_fns::{

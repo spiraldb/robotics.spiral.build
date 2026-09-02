@@ -11,7 +11,7 @@ use crate::OperationError;
 use arrow_array::{LargeStringArray, StringArray, StringViewArray};
 use futures::StreamExt as _;
 use serde_json::{Map, Value};
-use spiral_robotics_api::robots::{
+use spiral_robotics_common::robots::{
     CameraBinding, ConnectionStatus, MotorLimits, MotorSummary, PortSettings, RobotSummary,
 };
 use spiral_robotics_hardware::{Calibration, MotorSpec};
@@ -298,7 +298,7 @@ impl RobotRecord {
         RobotSummary::new(
             self.id.clone(),
             self.robot_type(),
-            spiral_robotics_api::robots::RobotAvailability::new(calibrated, problem, connection),
+            spiral_robotics_common::robots::RobotAvailability::new(calibrated, problem, connection),
         )
         .with_port(self.port())
         .with_motors(motors)

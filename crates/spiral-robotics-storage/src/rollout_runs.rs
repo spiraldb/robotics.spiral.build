@@ -12,7 +12,7 @@ use arrow_array::{
     ArrayRef, Float64Array, Int64Array, RecordBatch, StringArray, UInt32Array, UInt64Array,
 };
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
-use spiral_robotics_api::rollout::{RolloutMetrics, RolloutPhase, RolloutSnapshot};
+use spiral_robotics_common::rollout::{RolloutMetrics, RolloutPhase, RolloutSnapshot};
 
 use crate::db::ArrowColumns;
 use crate::db::column as db;

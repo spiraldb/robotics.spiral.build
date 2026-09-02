@@ -717,8 +717,17 @@ impl RecordingProgress {
     pub const fn elapsed_seconds(&self) -> f64 {
         self.clock.elapsed_seconds
     }
+    pub const fn wall_elapsed_seconds(&self) -> f64 {
+        self.clock.wall_elapsed_seconds
+    }
+    pub const fn paused_seconds(&self) -> f64 {
+        self.clock.paused_seconds
+    }
     pub const fn paused(&self) -> bool {
         self.state.paused
+    }
+    pub const fn max_follow_error_degrees(&self) -> Option<f64> {
+        self.state.max_follow_error_degrees
     }
     pub fn error(&self) -> Option<&str> {
         self.state.error.as_deref()
@@ -742,6 +751,14 @@ impl RecordingGap {
             after_seconds,
             duration_seconds,
         }
+    }
+
+    pub const fn after_seconds(self) -> f64 {
+        self.after_seconds
+    }
+
+    pub const fn duration_seconds(self) -> f64 {
+        self.duration_seconds
     }
 }
 
@@ -856,8 +873,20 @@ impl ReplayProgress {
     pub fn episode(&self) -> &str {
         &self.identity.episode
     }
+    pub fn robot(&self) -> &str {
+        &self.identity.robot
+    }
+    pub const fn frame(&self) -> u64 {
+        self.timeline.frame
+    }
+    pub const fn frames(&self) -> u64 {
+        self.timeline.frames
+    }
     pub const fn elapsed_seconds(&self) -> f64 {
         self.timeline.elapsed_seconds
+    }
+    pub const fn duration_seconds(&self) -> f64 {
+        self.timeline.duration_seconds
     }
     pub const fn purpose(&self) -> ReplayPurpose {
         self.transport.purpose
@@ -871,5 +900,61 @@ impl ReplayProgress {
     #[cfg(any(test, feature = "test-support"))]
     pub const fn set_transport(&mut self, transport: ReplayTransport) {
         self.transport = transport;
+    }
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+
+    #[test]
+    fn older_replay_progress_defaults_to_timeline_playback() {
+        let replay: ReplayProgress = serde_json::from_str(
+            r#"{
+                "episode":"episode_000001",
+                "robot":"follower",
+                "frame":12,
+                "frames":60,
+                "elapsed_seconds":0.2,
+                "duration_seconds":1.0
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(replay.purpose(), ReplayPurpose::Timeline);
+        assert_eq!(replay.phase(), ReplayPhase::Playing);
+        assert!(!replay.paused());
+    }
+
+    #[test]
+    fn an_unfinished_take_is_listed_but_not_offered() {
+        struct EpisodeTest;
+
+        impl EpisodeTest {
+            fn episode(frames: u64, problem: Option<String>) -> EpisodeInfo {
+                EpisodeInfo::new("episode_000001", "default")
+                    .with_arms(vec![EpisodeArm::new(
+                        "follower",
+                        Some("so101_follower".to_owned()),
+                        vec!["shoulder_pan".to_owned()],
+                    )])
+                    .with_source("Teleoperation")
+                    .with_timeline(frames, 2.0)
+                    .with_sample_hz(60.0)
+                    .with_started_ms(1_770_000_000_000)
+                    .with_assessment(false, Some(3.5))
+                    .with_problem(problem)
+            }
+        }
+
+        let episode = EpisodeTest::episode(120, None);
+        assert!(episode.usable());
+        assert_eq!(
+            episode.arm("follower").map(|arm| arm.joints().len()),
+            Some(1)
+        );
+        assert_eq!(episode.arm("leader"), None);
+        assert!(!EpisodeTest::episode(120, Some("recording did not finish".to_owned())).usable());
+        assert!(!EpisodeTest::episode(0, None).usable());
     }
 }

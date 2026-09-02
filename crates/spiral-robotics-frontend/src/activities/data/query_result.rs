@@ -6,7 +6,7 @@ use crate::components::interaction::{
 };
 use crate::shell::state::studio;
 use dioxus::prelude::*;
-use spiral_robotics_api::relations::{QueryColumn, SpiralQuerySnapshot};
+use spiral_robotics_common::relations::{QueryColumn, SpiralQuerySnapshot};
 
 pub(crate) const DEFAULT_QUERY_ROWS: usize = 100;
 const IMAGE_EXTENSION_NAME: &str = "spql.image.Image";

@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use spiral_robotics_api::rollout::{
+use spiral_robotics_common::rollout::{
     MAX_ROLLOUT_DURATION_SECONDS, RolloutConfig, RolloutMetrics, RolloutPhase, RolloutSnapshot,
 };
 

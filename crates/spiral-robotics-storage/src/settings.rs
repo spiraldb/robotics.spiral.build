@@ -13,7 +13,7 @@ use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
-use spiral_robotics_api::settings::{DEFAULT_SPIRAL_ENDPOINT, DEFAULT_SPIRAL_SPFS_ENDPOINT};
+use spiral_robotics_common::settings::{DEFAULT_SPIRAL_ENDPOINT, DEFAULT_SPIRAL_SPFS_ENDPOINT};
 use url::Url;
 
 use crate::db::{ManagedRelationSchema, Table, column as db};
@@ -617,7 +617,7 @@ mod tests {
     /// A fresh project and a fresh browser session must agree on defaults.
     #[test]
     fn stored_preference_defaults_match_the_wire_defaults() {
-        use spiral_robotics_api::settings::{TrainingRuntimeSettings, VideoSettings};
+        use spiral_robotics_common::settings::{TrainingRuntimeSettings, VideoSettings};
 
         assert_eq!(
             StoredTrainingRuntimePreference::default().endpoint(),

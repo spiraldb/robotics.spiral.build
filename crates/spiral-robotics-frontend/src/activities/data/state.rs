@@ -8,8 +8,8 @@
 use std::sync::Arc;
 
 use dioxus::prelude::*;
-use spiral_robotics_api::identity::DatasetId;
-use spiral_robotics_api::recording::{DatasetSummary, EpisodeInfo, EpisodeListItem};
+use spiral_robotics_common::identity::DatasetId;
+use spiral_robotics_common::recording::{DatasetSummary, EpisodeInfo, EpisodeListItem};
 
 use crate::activities::data::catalog::ManagedTable;
 use crate::activities::data::query_result::{

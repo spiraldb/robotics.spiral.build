@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 /// Operator-approved launch parameters for one backend-owned policy session.
 pub const DEFAULT_ROLLOUT_DURATION_SECONDS: u32 = 30;
 pub const MAX_ROLLOUT_DURATION_SECONDS: u32 = 600;
-pub const MAX_ROLLOUT_ACTION_STEPS: usize = 20;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RolloutConfig {
@@ -249,5 +248,22 @@ impl RolloutSnapshot {
     }
     pub const fn metrics(&self) -> &RolloutMetrics {
         &self.metrics
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn older_rollout_configs_receive_the_safe_default_duration() {
+        let config: RolloutConfig = serde_json::from_value(serde_json::json!({
+            "run_id": "run-1",
+            "checkpoint_step": 20_000,
+            "robot": "follower"
+        }))
+        .expect("duration defaults for an older client");
+
+        assert_eq!(config.duration_seconds(), DEFAULT_ROLLOUT_DURATION_SECONDS);
     }
 }

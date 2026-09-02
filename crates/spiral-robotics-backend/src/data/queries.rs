@@ -1,8 +1,9 @@
 //! Read-only episode catalog use cases and delivery-neutral projections.
 
 use crate::OperationError;
-use spiral_robotics_api::identity::{DatasetId, EpisodeId};
-use spiral_robotics_api::recording::{EpisodeInspectionSnapshot, EpisodeListItem};
+use spiral_robotics_common::identity::DatasetId;
+use spiral_robotics_common::recording::{EpisodeInspectionSnapshot, EpisodeListItem};
+use spiral_robotics_storage::episodes::EpisodeId;
 
 pub(crate) trait EpisodeQueryPort: Send + Sync {
     async fn episodes(&self, dataset_id: &str) -> Vec<EpisodeListItem>;

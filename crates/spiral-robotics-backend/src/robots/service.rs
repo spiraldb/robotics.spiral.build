@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use spiral_robotics_api::robots::{NewRobot, PortSettings, RobotUpdate};
+use spiral_robotics_common::robots::{NewRobot, PortSettings, RobotUpdate};
 use spiral_robotics_hardware::{Calibration, MotorSpec};
 
 use crate::OperationError;

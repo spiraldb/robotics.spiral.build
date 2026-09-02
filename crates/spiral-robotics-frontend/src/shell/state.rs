@@ -3,13 +3,13 @@
 use std::future::Future;
 
 use dioxus::prelude::*;
-use spiral_robotics_api::recording::{RecordingProgress, ReplayProgress};
-use spiral_robotics_api::relations::RelationCatalog;
-use spiral_robotics_api::robots::{ModeSelection, RobotSummary, RobotTelemetry, TelemetryFrame};
-use spiral_robotics_api::rollout::RolloutSnapshot;
-use spiral_robotics_api::settings::DataSettings;
-use spiral_robotics_api::status::StudioSnapshot;
-use spiral_robotics_api::training::TrainingSnapshot;
+use spiral_robotics_common::recording::{RecordingProgress, ReplayProgress};
+use spiral_robotics_common::relations::RelationCatalog;
+use spiral_robotics_common::robots::{ModeSelection, RobotSummary, RobotTelemetry, TelemetryFrame};
+use spiral_robotics_common::rollout::RolloutSnapshot;
+use spiral_robotics_common::settings::DataSettings;
+use spiral_robotics_common::status::StudioSnapshot;
+use spiral_robotics_common::training::TrainingSnapshot;
 
 use crate::activities::data::state::DataController;
 use crate::activities::rollout::state::RolloutController;
@@ -710,7 +710,7 @@ pub(crate) fn studio() -> Studio {
 
 #[cfg(test)]
 mod tests {
-    use spiral_robotics_api::robots::{
+    use spiral_robotics_common::robots::{
         ConnectionStatus, MotorSummary, RobotAvailability, RobotSummary,
     };
 

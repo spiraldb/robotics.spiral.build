@@ -5,7 +5,6 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::OperationError;
-use crate::adapters::hardware::RecordingArmProjection as _;
 use crate::data::catalog::{
     DeleteEpisodeCommand, EpisodeActivity, EpisodeCatalogActions, EpisodeCatalogPort,
 };
@@ -27,7 +26,7 @@ use crate::recording::{
 };
 use crate::robotics::video::{CameraCaptureSpec, VideoAsset, VideoCapture, VideoCaptureRequest};
 use crate::robots::workspace::RobotRecord;
-use spiral_robotics_api::recording::{
+use spiral_robotics_common::recording::{
     DatasetSummary, EpisodeArmScalarSamples, EpisodeInfo, EpisodeInspectionArm,
     EpisodeInspectionSnapshot, EpisodeListItem, EpisodeOptionalFrameMatrix,
     EpisodeVideoAssetMetadata, EpisodeVideoFormat, EpisodeVideoIdentity, EpisodeVideoTimeline,
@@ -77,7 +76,7 @@ impl<'a> RecordingAdapter<'a> {
 
 struct RecordingDraft {
     writer: EpisodeWriter,
-    arms: Vec<spiral_robotics_api::recording::EpisodeArm>,
+    arms: Vec<spiral_robotics_common::recording::EpisodeArm>,
     summary: EpisodeInfo,
 }
 
@@ -188,7 +187,7 @@ impl RecordingPort for RecordingAdapter<'_> {
     ) -> Result<RecordingResult, OperationError> {
         self.state
             .hardware()
-            .start_recording(draft.writer, draft.arms.to_hardware())
+            .start_recording(draft.writer, draft.arms)
             .await
             .map_err(OperationError::conflict)?;
         let result = RecordingResult::new(draft.summary.id());
@@ -1007,7 +1006,7 @@ impl AppState {
             })
             .collect::<Result<Vec<_>, OperationError>>()?;
         let saved_robots = self.workspace().list().await;
-        let arms = spiral_robotics_api::recording::EpisodeArm::from_joint_lists(&arms)
+        let arms = spiral_robotics_common::recording::EpisodeArm::from_joint_lists(&arms)
             .map_err(OperationError::from)?
             .into_iter()
             .map(|arm| {
@@ -1016,7 +1015,7 @@ impl AppState {
                     .find(|robot| robot.id() == arm.id())
                     .cloned()
                     .and_then(|robot| robot.robot_type());
-                spiral_robotics_api::recording::EpisodeArm::new(
+                spiral_robotics_common::recording::EpisodeArm::new(
                     arm.id(),
                     robot_type,
                     arm.joints().to_vec(),

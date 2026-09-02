@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::components::interaction::{Action, ActionPurpose, ActionVariant, RefreshIcon};
 use dioxus::prelude::*;
-use spiral_robotics_api::relations::{CatalogRelation, RelationCatalog, SpiralQuerySnapshot};
+use spiral_robotics_common::relations::{CatalogRelation, RelationCatalog, SpiralQuerySnapshot};
 
 use crate::activities::data::catalog::ManagedTable as Table;
 use crate::activities::data::query_result::{QueryExecutionPresentation, QueryState};
@@ -639,7 +639,7 @@ impl RelationCountPresentation for Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use spiral_robotics_api::relations::QueryColumn;
+    use spiral_robotics_common::relations::QueryColumn;
 
     use super::*;
 
@@ -696,9 +696,9 @@ mod tests {
         assert_eq!(statement.matches("COUNT(*)").count(), 2);
         assert_eq!(statement.matches("UNION ALL").count(), 1);
         assert!(!statement.contains(';'));
-        spiral_robotics_api::sql::ReadOnlyQuery::new(
+        spiral_robotics_common::sql::ReadOnlyQuery::new(
             &statement,
-            spiral_robotics_api::sql::ReadOnlyQueryMode::Preview,
+            spiral_robotics_common::sql::ReadOnlyQueryMode::Preview,
         )
         .authorize()
         .expect("the combined count query must pass the shared read-only policy");

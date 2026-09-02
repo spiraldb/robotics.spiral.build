@@ -5,7 +5,7 @@
 //! between Studio activities.
 
 use dioxus::prelude::*;
-use spiral_robotics_api::rollout::{
+use spiral_robotics_common::rollout::{
     DEFAULT_ROLLOUT_DURATION_SECONDS, MAX_ROLLOUT_DURATION_SECONDS,
 };
 

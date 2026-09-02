@@ -1,7 +1,7 @@
 //! Framework-neutral discovery actions for serial ports and cameras.
 
 use crate::OperationError;
-use spiral_robotics_api::robots::{CameraStatus, SerialPortSummary};
+use spiral_robotics_common::robots::{CameraStatus, SerialPortSummary};
 
 pub(crate) trait SerialPortInventory: Send + Sync {
     async fn available_port_paths(&self) -> Result<Vec<String>, OperationError>;
@@ -214,7 +214,7 @@ mod tests {
             result: Ok(vec![CameraStatus::new(
                 "wrist",
                 "Wrist",
-                spiral_robotics_api::robots::CameraStreamFormat::new(640, 480, 30),
+                spiral_robotics_common::robots::CameraStreamFormat::new(640, 480, 30),
             )]),
         };
         assert_eq!(cameras.refresh_cameras().await.unwrap()[0].id(), "wrist");

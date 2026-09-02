@@ -13,12 +13,11 @@ use arrow_array::{
     UInt64Array,
 };
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
-use spiral_robotics_api::recording::EpisodeArm;
+use spiral_robotics_common::recording::{EpisodeArm, RecordingGap};
 
 use super::episodes::{
     ArmCondition, ArmConditionEffortExtremes, ArmConditionSummary, ArmConditionThermalExtremes,
-    EpisodeCompletion, EpisodeError, EpisodeRecordingGap, EpisodeStart, JointMotorLimits,
-    JointVoltageRange, Sample,
+    EpisodeCompletion, EpisodeError, EpisodeStart, JointMotorLimits, JointVoltageRange, Sample,
 };
 use super::video::VideoSize;
 use crate::db::{
@@ -449,7 +448,7 @@ impl RecordingGapColumns {
         &self.duration_ns
     }
 
-    fn encode(gaps: &[EpisodeRecordingGap]) -> Result<Self, EpisodeError> {
+    fn encode(gaps: &[RecordingGap]) -> Result<Self, EpisodeError> {
         Ok(Self {
             after_ns: gaps
                 .iter()
@@ -466,7 +465,7 @@ impl RecordingGapColumns {
         })
     }
 
-    fn decode(columns: &ArrowColumns<'_>, row: usize) -> Result<Vec<EpisodeRecordingGap>, String> {
+    fn decode(columns: &ArrowColumns<'_>, row: usize) -> Result<Vec<RecordingGap>, String> {
         let after = columns.unsigned_list(db::RECORDING_GAP_AFTER_NS, row)?;
         let duration = columns.unsigned_list(db::RECORDING_GAP_DURATION_NS, row)?;
         if after.len() != duration.len() {
@@ -480,7 +479,7 @@ impl RecordingGapColumns {
             .into_iter()
             .zip(duration)
             .map(|(after, duration)| {
-                EpisodeRecordingGap::new(
+                RecordingGap::new(
                     after as f64 / NANOSECONDS_PER_SECOND,
                     duration as f64 / NANOSECONDS_PER_SECOND,
                 )
@@ -1132,7 +1131,7 @@ impl EpisodeTimestamp {
 mod tests {
 
     use arrow_array::{Array as _, Float64Array, ListArray, StringArray, UInt64Array};
-    use spiral_robotics_api::recording::EpisodeArm;
+    use spiral_robotics_common::recording::EpisodeArm;
 
     use super::*;
 
@@ -1369,13 +1368,9 @@ mod tests {
     fn populated() -> StoredEpisodeRow {
         StoredEpisodeRow::new(
             start().with_arms(start().arms().to_vec(), condition()),
-            EpisodeCompletion::new(
-                2.5,
-                vec![EpisodeRecordingGap::new(1.0, 0.25)],
-                condition_summary(),
-            )
-            .with_max_follow_error_degrees(Some(1.25))
-            .with_discarded(true),
+            EpisodeCompletion::new(2.5, vec![RecordingGap::new(1.0, 0.25)], condition_summary())
+                .with_max_follow_error_degrees(Some(1.25))
+                .with_discarded(true),
             150,
         )
     }
@@ -1410,7 +1405,7 @@ mod tests {
         assert_eq!(restored.completion().duration_seconds(), 2.5);
         assert_eq!(
             restored.completion().recording_gaps(),
-            [EpisodeRecordingGap::new(1.0, 0.25)]
+            [RecordingGap::new(1.0, 0.25)]
         );
         assert_eq!(restored.completion().max_follow_error_degrees(), Some(1.25));
         assert!(restored.completion().discarded());

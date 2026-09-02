@@ -9,7 +9,7 @@ use dioxus_flow::{
     LayoutOptions, NodeViewCtx, Point, use_flow_handle,
 };
 use dioxus_workbench::{LayoutNode, Panel, PanelId, PanelLayout, PanelWorkspace, SplitAxis};
-use spiral_robotics_api::workflow::{
+use spiral_robotics_common::workflow::{
     WorkflowAgentConversationSummary, WorkflowAgentMessagePhase, WorkflowAgentPhase,
     WorkflowAgentRole, WorkflowAgentToolPhase, WorkflowAgentToolSummary, WorkflowNodeConfig,
     WorkflowNodePhase, WorkflowRunPhase,

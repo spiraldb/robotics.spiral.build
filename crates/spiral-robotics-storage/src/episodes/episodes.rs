@@ -12,14 +12,14 @@ use crate::db::{Table, column as db};
 use futures::future;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
-use spiral_robotics_api::identity::EpisodeId;
-use spiral_robotics_api::recording::{EpisodeArm, EpisodeInfo, EpisodeListItem, RecordingGap};
-use spiral_robotics_api::sql::QualifiedRelation;
+use spiral_robotics_common::recording::{EpisodeArm, EpisodeInfo, EpisodeListItem, RecordingGap};
+use spiral_robotics_common::sql::QualifiedRelation;
+
+use super::EpisodeId;
 use spiral_robotics_hardware::Calibration;
 use spiral_robotics_hardware::{
     ArmConditionSummary as HardwareArmConditionSummary, CompletedRecording,
-    MotorLimits as HardwareMotorLimits, RecordingCompletion, RecordingGap as HardwareRecordingGap,
-    RecordingWriter,
+    MotorLimits as HardwareMotorLimits, RecordingCompletion, RecordingWriter,
 };
 pub use spiral_robotics_hardware::{EpisodeCheckpoint, Sample};
 
@@ -361,42 +361,10 @@ impl<'a> RobotPlaybackRequest<'a> {
     }
 }
 
-/// A deliberate pause in an otherwise continuous recording session.
-///
-/// `after_seconds` is expressed on the gap-free active timeline. Storage owns
-/// this shape because it is persisted: the equivalent wire type exposes no
-/// accessors, so a stored gap could never be read back through it.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(super) struct EpisodeRecordingGap {
-    after_seconds: f64,
-    duration_seconds: f64,
-}
-
-impl EpisodeRecordingGap {
-    pub(super) const fn new(after_seconds: f64, duration_seconds: f64) -> Self {
-        Self {
-            after_seconds,
-            duration_seconds,
-        }
-    }
-
-    pub(super) const fn after_seconds(self) -> f64 {
-        self.after_seconds
-    }
-
-    pub(super) const fn duration_seconds(self) -> f64 {
-        self.duration_seconds
-    }
-
-    fn to_api(self) -> RecordingGap {
-        RecordingGap::new(self.after_seconds, self.duration_seconds)
-    }
-}
-
 #[derive(Clone, Debug)]
 pub(super) struct EpisodeCompletion {
     duration_seconds: f64,
-    recording_gaps: Vec<EpisodeRecordingGap>,
+    recording_gaps: Vec<RecordingGap>,
     max_follow_error_degrees: Option<f64>,
     discarded: bool,
     condition: Vec<ArmConditionSummary>,
@@ -516,7 +484,7 @@ impl From<&HardwareArmConditionSummary> for ArmConditionSummary {
 impl EpisodeCompletion {
     pub(super) fn new(
         duration_seconds: f64,
-        recording_gaps: Vec<EpisodeRecordingGap>,
+        recording_gaps: Vec<RecordingGap>,
         condition: Vec<ArmConditionSummary>,
     ) -> Self {
         Self {
@@ -545,7 +513,7 @@ impl EpisodeCompletion {
         self.duration_seconds
     }
 
-    pub(super) fn recording_gaps(&self) -> &[EpisodeRecordingGap] {
+    pub(super) fn recording_gaps(&self) -> &[RecordingGap] {
         &self.recording_gaps
     }
 
@@ -1236,7 +1204,7 @@ impl RecordingWriter for EpisodeWriter {
             self,
             EpisodeCompletion::new(
                 completion.duration_seconds(),
-                completion.recording_gaps().to_stored(),
+                completion.recording_gaps().to_vec(),
                 completion
                     .condition()
                     .iter()
@@ -1259,7 +1227,7 @@ impl RecordingWriter for EpisodeWriter {
             *self,
             EpisodeCompletion::new(
                 completion.duration_seconds(),
-                completion.recording_gaps().to_stored(),
+                completion.recording_gaps().to_vec(),
                 completion
                     .condition()
                     .iter()
@@ -1271,18 +1239,6 @@ impl RecordingWriter for EpisodeWriter {
         )
         .map(|summary| CompletedRecording::new(summary.id(), summary.frames()))
         .map_err(|error| error.to_string())
-    }
-}
-
-trait RecordingGapProjection {
-    fn to_stored(&self) -> Vec<EpisodeRecordingGap>;
-}
-
-impl RecordingGapProjection for [HardwareRecordingGap] {
-    fn to_stored(&self) -> Vec<EpisodeRecordingGap> {
-        self.iter()
-            .map(|gap| EpisodeRecordingGap::new(gap.after_seconds(), gap.duration_seconds()))
-            .collect()
     }
 }
 
@@ -1537,14 +1493,7 @@ impl EpisodeStart {
             .with_source(start.source())
             .with_timeline(frames, completion.duration_seconds())
             .with_sample_hz(start.sample_hz())
-            .with_recording_gaps(
-                completion
-                    .recording_gaps()
-                    .iter()
-                    .copied()
-                    .map(EpisodeRecordingGap::to_api)
-                    .collect(),
-            )
+            .with_recording_gaps(completion.recording_gaps().to_vec())
             .with_started_ms(start.started_ms())
             .with_assessment(
                 completion.discarded(),

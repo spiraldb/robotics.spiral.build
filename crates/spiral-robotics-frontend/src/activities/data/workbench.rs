@@ -12,13 +12,13 @@ use crate::components::interaction::{
     ConfirmationResponse, FileAction, FileInput, InlineConfirmation, RefreshIcon,
 };
 use dioxus::prelude::*;
-use spiral_robotics_api::datasets::{
+use spiral_robotics_common::datasets::{
     HuggingFaceDatasetFormat, HuggingFaceDatasetImportSummary, HuggingFaceDatasetInspection,
     HuggingFaceDatasetSource,
 };
-use spiral_robotics_api::recording::EpisodeListItem;
-use spiral_robotics_api::relations::RelationCatalog;
-use spiral_robotics_api::status::BackendReadinessState;
+use spiral_robotics_common::recording::EpisodeListItem;
+use spiral_robotics_common::relations::RelationCatalog;
+use spiral_robotics_common::status::BackendReadinessState;
 
 use crate::activities::data::catalog::ManagedTable as Table;
 use crate::activities::data::query_result::DEFAULT_QUERY_ROWS;
@@ -70,7 +70,7 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
         let storage_available = studio.snapshot().read().readiness().storage_available();
         if storage_available
             && data.datasets_loaded()
-            && spiral_robotics_api::identity::DatasetId::is_canonical(&dataset_id)
+            && spiral_robotics_common::identity::DatasetId::is_canonical(&dataset_id)
             && !data.episodes_loaded(&dataset_id)
             && !data.episodes_loading(&dataset_id)
             && data.episode_catalog_error(&dataset_id).is_none()
@@ -95,7 +95,7 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
     });
 
     let dataset_id = studio.selected_dataset().read().trim().to_owned();
-    let dataset_valid = spiral_robotics_api::identity::DatasetId::is_canonical(&dataset_id);
+    let dataset_valid = spiral_robotics_common::identity::DatasetId::is_canonical(&dataset_id);
     let dataset_ids = data
         .datasets()
         .into_iter()
@@ -713,7 +713,7 @@ pub(crate) fn QueryPanel(namespace: String, dataset_id: String, query_available:
         &dataset_id,
         query_available.then_some(relation_response).flatten(),
     );
-    let dataset_valid = spiral_robotics_api::identity::DatasetId::is_canonical(&dataset_id);
+    let dataset_valid = spiral_robotics_common::identity::DatasetId::is_canonical(&dataset_id);
     let can_query = query_available && dataset_valid;
     let query_running = controller.query_running();
     let run_query = move || controller.run_query(studio, can_query);
@@ -1146,7 +1146,7 @@ impl EpisodeIdPresentation for str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spiral_robotics_api::recording::EpisodeInfo;
+    use spiral_robotics_common::recording::EpisodeInfo;
 
     fn episode(id: &str, usable: bool, discarded: bool) -> EpisodeListItem {
         EpisodeListItem::from(

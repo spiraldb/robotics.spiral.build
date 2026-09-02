@@ -22,11 +22,6 @@ pub const MAX_SIGLIP_CONCEPT_LENGTH: usize = 80;
 const MAX_WORKFLOW_FEATURE_NAME_LENGTH: usize = 96;
 pub const MAX_WORKFLOW_FEATURE_DESCRIPTION_LENGTH: usize = 240;
 pub const MAX_WORKFLOW_FEATURE_STREAMS: usize = 8;
-pub const MAX_WORKFLOW_AGENT_INPUT_CHARS: usize = 8_000;
-pub const MAX_WORKFLOW_AGENT_CONVERSATIONS: usize = 20;
-pub const MAX_WORKFLOW_AGENT_MESSAGES_PER_CONVERSATION: usize = 80;
-pub const MAX_WORKFLOW_AGENT_CONVERSATION_TITLE_CHARS: usize = 64;
-pub const MAX_WORKFLOW_AGENT_QUERY_ROWS: usize = 50;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkflowSpec {
@@ -2265,7 +2260,7 @@ mod tests {
         let state = WorkflowAgentSnapshot::new(readiness, session)
             .with_history_available(true)
             .with_scope("agent-scope-1", 3)
-            .with_active_conversation("conversation-1", MAX_WORKFLOW_AGENT_CONVERSATIONS)
+            .with_active_conversation("conversation-1", 20)
             .with_conversations(vec![conversation]);
         let json = serde_json::to_value(&state).unwrap();
         assert_eq!(json["session"]["revision"], 2);

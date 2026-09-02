@@ -5,7 +5,7 @@
 //! boundaries; runtime execution and checkpoint writes belong to the worker.
 
 use crate::OperationError;
-use spiral_robotics_api::training::{
+use spiral_robotics_common::training::{
     TrainingConfig, TrainingReadiness, TrainingRun, TrainingRunPhase, TrainingSource,
 };
 
@@ -270,18 +270,18 @@ mod tests {
         config.set_learning_rate(0.001);
         config.set_checkpoint_every(5);
         config.set_chunk_size(4);
-        *config.act_mut() = spiral_robotics_api::training::ActTrainingConfig::new(
-            spiral_robotics_api::training::ActInputConfig::new(
+        *config.act_mut() = spiral_robotics_common::training::ActTrainingConfig::new(
+            spiral_robotics_common::training::ActInputConfig::new(
                 vec!["front".to_owned()],
                 (32, 32),
                 "auto",
             ),
-            spiral_robotics_api::training::ActArchitectureConfig::new(
+            spiral_robotics_common::training::ActArchitectureConfig::new(
                 64,
                 1,
-                spiral_robotics_api::training::ActLayerCounts::new(1, 1, 1),
+                spiral_robotics_common::training::ActLayerCounts::new(1, 1, 1),
             ),
-            spiral_robotics_api::training::ActAttentionConfig::new(4, 64, 1.0),
+            spiral_robotics_common::training::ActAttentionConfig::new(4, 64, 1.0),
         );
         config
     }

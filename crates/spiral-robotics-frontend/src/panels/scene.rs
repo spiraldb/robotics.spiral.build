@@ -20,7 +20,7 @@ use crate::components::interaction::{Action, ActionPurpose, ActionVariant};
 use dioxus::prelude::*;
 use dioxus_elements::geometry::WheelDelta;
 use dioxus_elements::input_data::MouseButton;
-use spiral_robotics_api::robots::{MotorCondition, RobotSummary};
+use spiral_robotics_common::robots::{MotorCondition, RobotSummary};
 use spiral_robotics_viewport::{
     ArmPose, Command, Condition, Frame as BenchFrame, FrameError, Interaction, Joint, Target,
     Viewport as Bench,
@@ -781,7 +781,7 @@ trait CameraBindingPresentation {
     fn add_to(&self, frame: &mut BenchFrame, robot: &str) -> Result<(), FrameError>;
 }
 
-impl CameraBindingPresentation for spiral_robotics_api::robots::CameraBinding {
+impl CameraBindingPresentation for spiral_robotics_common::robots::CameraBinding {
     fn add_to(&self, frame: &mut BenchFrame, robot: &str) -> Result<(), FrameError> {
         let camera_mount = self.mount();
         let Some(mount) = camera_mount.as_ref() else {

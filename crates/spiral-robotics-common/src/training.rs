@@ -1318,3 +1318,165 @@ impl ActLayerCounts {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TrainingSnapshotTest;
+
+    impl TrainingSnapshotTest {
+        fn run(id: &str) -> TrainingRun {
+            TrainingRun::starting(id, TrainingConfig::default())
+                .with_source(TrainingSource::default())
+        }
+
+        fn metric(step: u64, train_loss: f64) -> TrainingMetricPoint {
+            TrainingMetricPoint::new(step, train_loss)
+        }
+    }
+
+    #[test]
+    fn act_defaults_match_current_lerobot_architecture() {
+        let config = ActTrainingConfig::default();
+        assert_eq!(config.hidden_dim(), 512);
+        assert_eq!(config.feedforward_dim(), 3_200);
+        assert_eq!(config.vae_encoder_layers(), 4);
+        assert_eq!(config.decoder_layers(), 1);
+        assert!(config.camera_streams().is_empty());
+        let config = TrainingConfig::default();
+        assert_eq!(config.batch_size(), 8);
+        assert_eq!(config.steps(), 100_000);
+        assert_eq!(config.checkpoint_every(), 20_000);
+        assert_eq!(config.seed(), 1_000);
+        assert_eq!(config.validation_split(), 0.1);
+    }
+
+    #[test]
+    fn historical_training_configs_keep_no_validation_semantics() {
+        let mut serialized_config = serde_json::to_value(TrainingConfig::default()).unwrap();
+        serialized_config
+            .as_object_mut()
+            .unwrap()
+            .remove("validation_split");
+        let config: TrainingConfig = serde_json::from_value(serialized_config).unwrap();
+        assert_eq!(config.validation_split(), 0.0);
+    }
+
+    #[test]
+    fn incremental_training_updates_stay_bounded_without_dropping_early_history() {
+        let mut snapshot = TrainingSnapshot::new(
+            TrainingReadiness::default(),
+            vec![TrainingSnapshotTest::run("run-a")],
+        );
+        for step in 0..=12_000 {
+            snapshot.apply(TrainingUpdate::Metric {
+                run_id: "run-a".to_owned(),
+                point: Box::new(
+                    TrainingMetricPoint::new(step, if step == 123 { 10_000.0 } else { 1.0 })
+                        .with_validation_loss((step == 6_000).then_some(4.0))
+                        .with_utilization((step == 777).then_some(9_000.0), None),
+                ),
+            });
+        }
+        for line in 0..=MAX_TRAINING_LOG_LINES {
+            snapshot.apply(TrainingUpdate::Log {
+                run_id: "run-a".to_owned(),
+                line: format!("line {line}"),
+            });
+        }
+
+        let run = &snapshot.runs()[0];
+        assert!(run.metrics().len() <= MAX_TRAINING_METRIC_POINTS);
+        assert_eq!(
+            run.metrics().first().map(TrainingMetricPoint::step),
+            Some(0)
+        );
+        assert_eq!(
+            run.metrics().last().map(TrainingMetricPoint::step),
+            Some(12_000)
+        );
+        assert!(run.metrics().iter().any(|point| point.step() == 123));
+        assert!(run.metrics().iter().any(|point| point.step() == 777));
+        assert!(run.metrics().iter().any(|point| point.step() == 6_000));
+        assert_eq!(run.logs().len(), MAX_TRAINING_LOG_LINES);
+        assert_eq!(run.logs()[0], "line 1");
+        assert_eq!(run.current_step(), 12_000);
+    }
+
+    #[test]
+    fn repeated_or_late_metric_updates_replace_the_step_without_regressing_progress() {
+        let mut snapshot = TrainingSnapshot::new(
+            TrainingReadiness::default(),
+            vec![TrainingSnapshotTest::run("run-a")],
+        );
+        for (step, loss) in [(2, 2.0), (1, 1.0), (2, 0.5)] {
+            snapshot.apply(TrainingUpdate::Metric {
+                run_id: "run-a".to_owned(),
+                point: Box::new(TrainingSnapshotTest::metric(step, loss)),
+            });
+        }
+
+        let run = &snapshot.runs()[0];
+        assert_eq!(run.current_step(), 2);
+        assert_eq!(run.metrics().len(), 2);
+        assert_eq!(run.metrics()[0].step(), 1);
+        assert_eq!(run.metrics()[1].step(), 2);
+        assert_eq!(run.metrics()[1].train_loss(), 0.5);
+    }
+
+    #[test]
+    fn resolved_training_configuration_updates_the_run_snapshot() {
+        let mut snapshot = TrainingSnapshot::new(
+            TrainingReadiness::default(),
+            vec![TrainingSnapshotTest::run("run-a")],
+        );
+        let mut config = TrainingConfig::default();
+        config.act_mut().set_camera_streams(vec![
+            "follower.camera.gripper".to_owned(),
+            "follower.camera.top".to_owned(),
+        ]);
+        snapshot.apply(TrainingUpdate::RunConfigured {
+            run_id: "run-a".to_owned(),
+            config: Box::new(config.clone()),
+        });
+        assert_eq!(snapshot.runs()[0].config(), &config);
+    }
+
+    #[test]
+    fn removing_a_training_run_removes_its_complete_snapshot_record() {
+        let mut snapshot = TrainingSnapshot::new(
+            TrainingReadiness::default(),
+            vec![
+                TrainingRun::starting("run-a", TrainingConfig::default())
+                    .with_source(TrainingSource::default())
+                    .with_metrics(vec![TrainingMetricPoint::default()])
+                    .with_checkpoints(vec![TrainingCheckpoint::default()])
+                    .with_logs(vec!["retained only inside the run".to_owned()]),
+                TrainingSnapshotTest::run("run-b"),
+            ],
+        );
+
+        snapshot.apply(TrainingUpdate::RunRemoved {
+            run_id: "run-a".to_owned(),
+        });
+
+        assert_eq!(snapshot.runs().len(), 1);
+        assert_eq!(snapshot.runs()[0].id(), "run-b");
+    }
+
+    #[test]
+    fn bootstrap_training_snapshot_replaces_the_placeholder_atomically() {
+        let mut snapshot = TrainingSnapshot::default();
+        let restored = TrainingSnapshot::new(
+            TrainingReadiness::default(),
+            vec![TrainingSnapshotTest::run("restored-run")],
+        );
+
+        snapshot.apply(TrainingUpdate::Snapshot {
+            snapshot: Box::new(restored.clone()),
+        });
+
+        assert_eq!(snapshot, restored);
+    }
+}

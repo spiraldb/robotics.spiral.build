@@ -1,6 +1,6 @@
 //! Physical relational schema owned by the SpiralDB storage adapter.
 //!
-//! User-visible catalog vocabulary lives in `spiral-robotics-api`. This module
+//! User-visible catalog vocabulary lives in `spiral-robotics-common`. This module
 //! owns persisted relation names, namespace qualification, columns, and
 //! schema-drift checks. Feature modules contribute their concrete Arrow
 //! layouts through [`ManagedRelationSchema`].
@@ -399,7 +399,7 @@ impl StorageSchema {
     pub fn workflow_feature_cache_relation(namespace: &str, source_relation: &str) -> String {
         format!(
             "{namespace}.{}",
-            spiral_robotics_api::workflow::WorkflowFeatureApplicability::derived_cache_name(
+            spiral_robotics_common::workflow::WorkflowFeatureApplicability::derived_cache_name(
                 source_relation
             )
         )
@@ -417,7 +417,7 @@ impl StorageSchema {
         !name.contains('.')
             && Self::is_identifier(namespace)
             && name
-                == spiral_robotics_api::workflow::WorkflowFeatureApplicability::derived_cache_name(
+                == spiral_robotics_common::workflow::WorkflowFeatureApplicability::derived_cache_name(
                     source_relation,
                 )
     }
@@ -445,12 +445,12 @@ impl StorageSchema {
 
     /// Whether a value is safe to interpolate as an unquoted SQL identifier.
     pub fn is_identifier(value: &str) -> bool {
-        spiral_robotics_api::sql::UnquotedSqlIdentifier::try_from(value).is_ok()
+        spiral_robotics_common::sql::UnquotedSqlIdentifier::try_from(value).is_ok()
     }
 
     /// Whether a value is safe as a logical dataset row identifier.
     pub fn is_dataset_id(value: &str) -> bool {
-        spiral_robotics_api::identity::DatasetId::is_canonical(value)
+        spiral_robotics_common::identity::DatasetId::is_canonical(value)
     }
 }
 
@@ -764,16 +764,16 @@ mod tests {
         assert!(!StorageSchema::is_dataset_id("pick place"));
         assert!(!StorageSchema::is_dataset_id(""));
         assert_eq!(
-            spiral_robotics_api::workflow::WorkflowFeatureApplicability::derived_cache_name(
+            spiral_robotics_common::workflow::WorkflowFeatureApplicability::derived_cache_name(
                 "episode_37"
             ),
             "features_episode_37"
         );
         assert_ne!(
-            spiral_robotics_api::workflow::WorkflowFeatureApplicability::derived_cache_name(
+            spiral_robotics_common::workflow::WorkflowFeatureApplicability::derived_cache_name(
                 "episode-37"
             ),
-            spiral_robotics_api::workflow::WorkflowFeatureApplicability::derived_cache_name(
+            spiral_robotics_common::workflow::WorkflowFeatureApplicability::derived_cache_name(
                 "episode_37"
             )
         );

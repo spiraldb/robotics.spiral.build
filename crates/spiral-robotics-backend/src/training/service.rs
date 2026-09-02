@@ -2,10 +2,10 @@
 
 use std::collections::BTreeSet;
 
-use spiral_robotics_api::identity::DatasetId;
-use spiral_robotics_api::rollout::{MAX_ROLLOUT_DURATION_SECONDS, RolloutConfig};
-use spiral_robotics_api::sql::{ReadOnlyQuery, ReadOnlyQueryMode, UnquotedSqlIdentifier};
-use spiral_robotics_api::training::{TrainingConfig, TrainingRun, TrainingSnapshot};
+use spiral_robotics_common::identity::DatasetId;
+use spiral_robotics_common::rollout::{MAX_ROLLOUT_DURATION_SECONDS, RolloutConfig};
+use spiral_robotics_common::sql::{ReadOnlyQuery, ReadOnlyQueryMode, UnquotedSqlIdentifier};
+use spiral_robotics_common::training::{TrainingConfig, TrainingRun, TrainingSnapshot};
 
 use crate::OperationError;
 use crate::rollout::service::{MIN_ROLLOUT_DURATION_SECONDS, RolloutDuration};
@@ -472,7 +472,7 @@ impl StartTrainingAdmission for TrainingConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spiral_robotics_api::training::{TrainingCheckpoint, TrainingRunPhase};
+    use spiral_robotics_common::training::{TrainingCheckpoint, TrainingRunPhase};
 
     fn rollout_command() -> RolloutConfig {
         RolloutConfig::new("run-1", 20_000, "follower").with_duration(30)
@@ -497,11 +497,11 @@ mod tests {
     }
 
     fn act_config(
-        architecture: spiral_robotics_api::training::ActArchitectureConfig,
-        attention: spiral_robotics_api::training::ActAttentionConfig,
-    ) -> spiral_robotics_api::training::ActTrainingConfig {
-        spiral_robotics_api::training::ActTrainingConfig::new(
-            spiral_robotics_api::training::ActInputConfig::new(
+        architecture: spiral_robotics_common::training::ActArchitectureConfig,
+        attention: spiral_robotics_common::training::ActAttentionConfig,
+    ) -> spiral_robotics_common::training::ActTrainingConfig {
+        spiral_robotics_common::training::ActTrainingConfig::new(
+            spiral_robotics_common::training::ActInputConfig::new(
                 vec!["wrist".to_owned()],
                 (0, 0),
                 "auto",
@@ -544,12 +544,12 @@ mod tests {
         commands.push(duplicate_columns);
         let mut invalid_vae = training_command();
         *invalid_vae.act_mut() = act_config(
-            spiral_robotics_api::training::ActArchitectureConfig::new(
+            spiral_robotics_common::training::ActArchitectureConfig::new(
                 256,
                 8,
-                spiral_robotics_api::training::ActLayerCounts::new(4, 0, 4),
+                spiral_robotics_common::training::ActLayerCounts::new(4, 0, 4),
             ),
-            spiral_robotics_api::training::ActAttentionConfig::new(32, 1_024, 10.0),
+            spiral_robotics_common::training::ActAttentionConfig::new(32, 1_024, 10.0),
         );
         commands.push(invalid_vae);
         let mut non_finite = training_command();
@@ -600,12 +600,12 @@ mod tests {
         command.set_batch_size(1);
         command.set_chunk_size(1);
         *command.act_mut() = act_config(
-            spiral_robotics_api::training::ActArchitectureConfig::new(
+            spiral_robotics_common::training::ActArchitectureConfig::new(
                 1_024,
                 512,
-                spiral_robotics_api::training::ActLayerCounts::new(12, 12, 12),
+                spiral_robotics_common::training::ActLayerCounts::new(12, 12, 12),
             ),
-            spiral_robotics_api::training::ActAttentionConfig::new(16, 16_384, 10.0),
+            spiral_robotics_common::training::ActAttentionConfig::new(16, 16_384, 10.0),
         );
 
         let error = command.validated().unwrap_err();
@@ -628,12 +628,12 @@ mod tests {
 
         let mut overflow = training_command();
         *overflow.act_mut() = act_config(
-            spiral_robotics_api::training::ActArchitectureConfig::new(
+            spiral_robotics_common::training::ActArchitectureConfig::new(
                 usize::MAX,
                 512,
-                spiral_robotics_api::training::ActLayerCounts::new(usize::MAX, 4, 4),
+                spiral_robotics_common::training::ActLayerCounts::new(usize::MAX, 4, 4),
             ),
-            spiral_robotics_api::training::ActAttentionConfig::new(16, usize::MAX, 10.0),
+            spiral_robotics_common::training::ActAttentionConfig::new(16, usize::MAX, 10.0),
         );
         assert!(
             overflow.estimated_act_resource_bytes(usize::MAX).is_none(),

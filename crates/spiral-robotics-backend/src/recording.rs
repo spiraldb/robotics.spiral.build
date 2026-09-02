@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use spiral_robotics_api::identity::DatasetId;
+use spiral_robotics_common::identity::DatasetId;
 
 use crate::OperationError;
 use crate::data::catalog_lease::CatalogLeaseToken;

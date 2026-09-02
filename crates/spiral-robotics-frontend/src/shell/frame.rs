@@ -2,8 +2,8 @@
 
 use crate::components::interaction::{Action, ActionPurpose, ActionVariant, BrowserFocus};
 use dioxus::prelude::*;
-use spiral_robotics_api::status::BackendReadinessState;
-use spiral_robotics_api::workflow::{WorkflowRunPhase, WorkflowSnapshot};
+use spiral_robotics_common::status::BackendReadinessState;
+use spiral_robotics_common::workflow::{WorkflowRunPhase, WorkflowSnapshot};
 
 use crate::activities::data::workbench::EpisodeIdPresentation;
 use crate::components::icons::{

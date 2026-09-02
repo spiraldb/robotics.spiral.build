@@ -4,7 +4,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::OperationError;
-use crate::adapters::hardware::HardwareApiProjection as _;
 use crate::data::catalog_lease::{CatalogLeaseOwner, CatalogLeaseToken, CatalogMutationLease};
 use crate::http::routes::AppState;
 use crate::main_runtime::{MainRuntime, MainRuntimeFailure};
@@ -26,7 +25,7 @@ use crate::robots::service::{
 use crate::robots::workspace::{RobotRecord, RobotWorkspace, WorkspaceError};
 use bytes::Bytes;
 use serde_json::{Map, Value};
-use spiral_robotics_api::robots::{
+use spiral_robotics_common::robots::{
     CameraBinding, CameraStatus, ConnectionStatus, ModeSelection, NewRobot, RobotSummary,
     RobotUpdate, SerialPortSummary,
 };
@@ -336,7 +335,7 @@ impl RobotConnectionPort for RobotAdapter<'_> {
 
     async fn connect(&self, specification: RobotConnectionSpec) -> Result<(), OperationError> {
         let (id, port, motors, calibration) = specification.into_parts();
-        let port = spiral_robotics_hardware::PortSettings::new(port.path(), port.baud_rate())
+        let port = spiral_robotics_hardware::PortSettings::try_new(port.path(), port.baud_rate())
             .map_err(|error| OperationError::invalid_input(error.to_string()))?;
         let specification = RobotSpec::new(id, port, motors)
             .map_err(|error| OperationError::invalid_input(error.to_string()))?;
@@ -424,9 +423,9 @@ impl CalibrationHistoryPort for CalibrationHistoryAdapter<'_> {
             self.state.training().snapshot().runs().iter().any(|run| {
                 matches!(
                     run.phase(),
-                    spiral_robotics_api::training::TrainingRunPhase::Starting
-                        | spiral_robotics_api::training::TrainingRunPhase::Running
-                        | spiral_robotics_api::training::TrainingRunPhase::Stopping
+                    spiral_robotics_common::training::TrainingRunPhase::Starting
+                        | spiral_robotics_common::training::TrainingRunPhase::Running
+                        | spiral_robotics_common::training::TrainingRunPhase::Stopping
                 )
             }),
         )
@@ -600,7 +599,7 @@ impl DeviceCommands {
                         .get(robot.id())
                         .cloned()
                         .unwrap_or_default();
-                    if let Ok(summary) = adapter.summary(robot.id(), connection.to_api()).await {
+                    if let Ok(summary) = adapter.summary(robot.id(), connection).await {
                         summaries.push(summary);
                     }
                 }
@@ -915,7 +914,7 @@ impl DeviceCommands {
             .workspace()
             .get(id)
             .await
-            .map(|record| record.summary(connection.to_api()))
+            .map(|record| record.summary(connection))
             .map_err(|error| DeviceFailure(error.to_string()))
     }
 

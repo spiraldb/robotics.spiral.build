@@ -8,7 +8,7 @@ use futures_util::FutureExt as _;
 use image::imageops::FilterType;
 use safetensors::SafeTensors;
 use serde::Deserialize;
-use spiral_robotics_api::rollout::{RolloutConfig, RolloutPhase, RolloutSnapshot};
+use spiral_robotics_common::rollout::{RolloutConfig, RolloutPhase, RolloutSnapshot};
 use spiral_robotics_inference::{
     ActionChunk, ImageDimensions, ImageFrame, InferenceInput, Policy, PolicyLoader,
 };
@@ -18,7 +18,6 @@ use tokio::time::{Instant as TokioInstant, MissedTickBehavior};
 
 use crate::adapters::clock::SystemClock;
 use crate::adapters::compute_runtime::HttpPolicyLoader;
-use crate::adapters::hardware::HardwareApiProjection as _;
 use crate::clock::{Clock, StableIdSequence};
 use crate::robotics::cameras::{CameraManager, Frame};
 use crate::robots::workspace::RobotWorkspace;
@@ -660,7 +659,7 @@ impl RolloutManager {
             .get(config.robot())
             .cloned()
             .unwrap_or_default();
-        let summary = record.summary(connection.to_api());
+        let summary = record.summary(connection);
         let contract = manifest
             .data_contract
             .into_policy_contract(spiral_robotics_storage::SCHEMA_VERSION)
@@ -1505,7 +1504,7 @@ mod tests {
         TargetRobotContract,
     };
     use bytes::Bytes;
-    use spiral_robotics_api::rollout::RolloutConfig;
+    use spiral_robotics_common::rollout::RolloutConfig;
     use spiral_robotics_inference::{
         ActionChunk, ActionChunkShape, ActionChunkSpecification, InferenceInput, InferenceStats,
         ObservationSpecification, Policy, PolicyKind, PolicySpecification,

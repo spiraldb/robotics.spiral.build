@@ -9,8 +9,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use dioxus::prelude::*;
 use dioxus_flow::{Edge, EdgeKind, Node, Side};
 use dioxus_workbench::PanelId;
-use spiral_robotics_api::relations::{CatalogRelation, RelationCatalog};
-use spiral_robotics_api::workflow::{
+use spiral_robotics_common::relations::{CatalogRelation, RelationCatalog};
+use spiral_robotics_common::workflow::{
     WorkflowAgentArtifactReceipt, WorkflowAgentCommand as AgentRequest, WorkflowAgentSnapshot,
     WorkflowCommand as WorkflowRequest, WorkflowEdgeSpec, WorkflowFeatureApplicability,
     WorkflowFeatureDefinition, WorkflowModelRunMetadata, WorkflowNodeConfig, WorkflowNodePhase,
@@ -1060,7 +1060,7 @@ impl WorkflowController {
             .iter()
             .rev()
             .find(|message| {
-                message.role() == spiral_robotics_api::workflow::WorkflowAgentRole::User
+                message.role() == spiral_robotics_common::workflow::WorkflowAgentRole::User
             })
             .map(|message| message.text().to_owned());
         if let Some(text) = text {
@@ -1591,7 +1591,7 @@ impl WorkflowDraft for WorkflowSpec {
             .unwrap_or(workflow.nodes().len());
         workflow.nodes_mut().insert(
             insert_at,
-            spiral_robotics_api::workflow::WorkflowNodeSpec::new(
+            spiral_robotics_common::workflow::WorkflowNodeSpec::new(
                 node_id.clone(),
                 "Backfill visual features",
                 WorkflowNodeConfig::Model {
@@ -1605,7 +1605,7 @@ impl WorkflowDraft for WorkflowSpec {
         );
         workflow.nodes_mut().insert(
             insert_at + 1,
-            spiral_robotics_api::workflow::WorkflowNodeSpec::new(
+            spiral_robotics_common::workflow::WorkflowNodeSpec::new(
                 final_query_id.clone(),
                 "Join candidates and features",
                 WorkflowNodeConfig::Query {
@@ -1932,7 +1932,7 @@ struct NodeProjection<'a> {
 impl NodeProjection<'_> {
     fn project(
         &self,
-        node: &spiral_robotics_api::workflow::WorkflowNodeSpec,
+        node: &spiral_robotics_common::workflow::WorkflowNodeSpec,
         node_snapshot: Option<&WorkflowNodeSnapshot>,
     ) -> WorkflowNodeData {
         let phase = node_snapshot.map_or(WorkflowNodePhase::Pending, |snapshot| snapshot.phase());
@@ -2248,7 +2248,7 @@ mod tests {
         let mut workflow = WorkflowSpec::default();
         workflow
             .nodes_mut()
-            .push(spiral_robotics_api::workflow::WorkflowNodeSpec::new(
+            .push(spiral_robotics_common::workflow::WorkflowNodeSpec::new(
                 "second_query",
                 "Second query",
                 WorkflowNodeConfig::Query {
@@ -2378,7 +2378,7 @@ mod tests {
 
     #[test]
     fn model_projection_preserves_authoritative_progress_and_warning_evidence() {
-        let node = spiral_robotics_api::workflow::WorkflowNodeSpec::new(
+        let node = spiral_robotics_common::workflow::WorkflowNodeSpec::new(
             "siglip",
             "SigLIP scores",
             WorkflowNodeConfig::Model {
@@ -2450,8 +2450,12 @@ mod tests {
         state.snapshot_mut().set_run_id(Some("run-4".to_owned()));
         state.snapshot_mut().set_phase(WorkflowRunPhase::Completed);
         state.snapshot_mut().set_result(Some(
-            spiral_robotics_api::relations::SpiralQuerySnapshot::new(Vec::new(), Vec::new(), false)
-                .with_elapsed_ms(1),
+            spiral_robotics_common::relations::SpiralQuerySnapshot::new(
+                Vec::new(),
+                Vec::new(),
+                false,
+            )
+            .with_elapsed_ms(1),
         ));
         let results = WorkflowAgentArtifactReceipt::results("View results", "run-4", Some(0));
         assert_eq!(
@@ -2531,7 +2535,7 @@ mod tests {
         let mut agent = WorkflowAgentSnapshot::default();
         agent.set_history_available(true);
         agent.conversations_mut().push(
-            spiral_robotics_api::workflow::WorkflowAgentConversationSummary::new(
+            spiral_robotics_common::workflow::WorkflowAgentConversationSummary::new(
                 "conversation-a",
                 "Inspect relations",
                 0,
@@ -2567,7 +2571,7 @@ mod tests {
 
         agent
             .session_mut()
-            .set_phase(spiral_robotics_api::workflow::WorkflowAgentPhase::Responding);
+            .set_phase(spiral_robotics_common::workflow::WorkflowAgentPhase::Responding);
         assert_eq!(
             AgentConversationChange {
                 loaded: true,
@@ -2583,7 +2587,7 @@ mod tests {
         );
         agent
             .session_mut()
-            .set_phase(spiral_robotics_api::workflow::WorkflowAgentPhase::Idle);
+            .set_phase(spiral_robotics_common::workflow::WorkflowAgentPhase::Idle);
 
         snapshot.set_phase(WorkflowRunPhase::Running);
         snapshot.set_run_id(Some("run-agent".to_owned()));

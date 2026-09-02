@@ -1,7 +1,7 @@
 //! Semantic actions and backend consequences for the Live screen.
 
 use dioxus::prelude::WritableExt;
-use spiral_robotics_api::robots::ModeSelection;
+use spiral_robotics_common::robots::ModeSelection;
 
 use crate::client::server_fns::{hold_robot, release_robot, set_mode};
 use crate::shell::state::{Selection, Studio};

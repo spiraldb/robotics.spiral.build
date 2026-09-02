@@ -7,7 +7,7 @@
 //! actually operate.
 
 #[cfg(any(test, all(feature = "web", target_arch = "wasm32")))]
-use spiral_robotics_api::robots::TelemetryFrame;
+use spiral_robotics_common::robots::TelemetryFrame;
 use spiral_robotics_viewport as arm;
 
 /// Thirty minutes at the studio's 20 Hz telemetry publish rate.
@@ -214,10 +214,10 @@ impl SignalStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spiral_robotics_api::recording::{
+    use spiral_robotics_common::recording::{
         RecordingClock, RecordingIdentity, RecordingProgress, RecordingState,
     };
-    use spiral_robotics_api::robots::{
+    use spiral_robotics_common::robots::{
         JointDiagnostics, JointIdentity, JointKinematics, JointTelemetry, RobotTelemetry,
     };
 

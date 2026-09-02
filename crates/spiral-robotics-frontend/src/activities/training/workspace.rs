@@ -16,8 +16,8 @@ use charming::element::{
 use charming::series::Line;
 use dioxus::prelude::*;
 use dioxus_workbench::{LayoutNode, Panel, PanelId, PanelLayout, PanelWorkspace, SplitAxis};
-use spiral_robotics_api::identity::DatasetId;
-use spiral_robotics_api::training::{
+use spiral_robotics_common::identity::DatasetId;
+use spiral_robotics_common::training::{
     TrainingMetricPoint, TrainingReadiness, TrainingRun, TrainingRunPhase,
 };
 

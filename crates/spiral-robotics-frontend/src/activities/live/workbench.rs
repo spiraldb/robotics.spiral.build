@@ -7,7 +7,7 @@ use crate::components::interaction::{
     ConfirmationDismissal, ConfirmationResponse, ModeAction, ModeGroup,
 };
 use dioxus::prelude::*;
-use spiral_robotics_api::robots::ModeSelection;
+use spiral_robotics_common::robots::ModeSelection;
 
 use crate::activities::live::actions::LiveAction;
 use crate::activities::live::control::JointPanel;
@@ -96,7 +96,7 @@ fn CaptureSection() -> Element {
 
 #[component]
 fn RobotRoster(
-    robots: Vec<spiral_robotics_api::robots::RobotSummary>,
+    robots: Vec<spiral_robotics_common::robots::RobotSummary>,
     on_select: EventHandler<Option<Selection>>,
 ) -> Element {
     let studio = studio();

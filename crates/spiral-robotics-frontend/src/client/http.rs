@@ -8,15 +8,15 @@ use futures_util::{StreamExt, stream};
 #[cfg(all(feature = "web", target_arch = "wasm32"))]
 use gloo_net::eventsource::futures::EventSource;
 #[cfg(all(feature = "web", target_arch = "wasm32"))]
-use spiral_robotics_api::robots::TelemetryFrame;
+use spiral_robotics_common::robots::TelemetryFrame;
 #[cfg(all(feature = "web", target_arch = "wasm32"))]
-use spiral_robotics_api::rollout::RolloutSnapshot;
+use spiral_robotics_common::rollout::RolloutSnapshot;
 #[cfg(all(feature = "web", target_arch = "wasm32"))]
-use spiral_robotics_api::status::StudioSnapshot;
+use spiral_robotics_common::status::StudioSnapshot;
 #[cfg(all(feature = "web", target_arch = "wasm32"))]
-use spiral_robotics_api::training::{TrainingSnapshot, TrainingUpdate};
+use spiral_robotics_common::training::{TrainingSnapshot, TrainingUpdate};
 #[cfg(all(feature = "web", target_arch = "wasm32"))]
-use spiral_robotics_api::workflow::{WorkflowAgentSnapshot, WorkflowSnapshot};
+use spiral_robotics_common::workflow::{WorkflowAgentSnapshot, WorkflowSnapshot};
 
 #[cfg(all(feature = "web", target_arch = "wasm32"))]
 pub(crate) struct Http;

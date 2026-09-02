@@ -39,12 +39,14 @@ pub use control::{
     RobotSpec, Sample,
 };
 pub use serial_ports::SerialPortCatalog;
-pub use state::{
-    CalibrationJointProgress, CalibrationProgress, CompletedRecording, ConnectionStatus,
-    EpisodeArm, JointRange, JointTelemetry, ModeSelection, MotorCondition, MotorFault, MotorLimits,
-    PortSettings, RecordingGap, RecordingProgress, ReplayPhase, ReplayProgress, ReplayPurpose,
-    RobotTelemetry,
+pub use spiral_robotics_common::recording::{
+    EpisodeArm, RecordingGap, RecordingProgress, ReplayPhase, ReplayProgress, ReplayPurpose,
 };
+pub use spiral_robotics_common::robots::{
+    CalibrationJointProgress, CalibrationProgress, ConnectionStatus, JointRange, JointTelemetry,
+    ModeSelection, MotorCondition, MotorFault, MotorLimits, PortSettings, RobotTelemetry,
+};
+pub use state::CompletedRecording;
 
 /// A malformed value was rejected before it could enter the hardware actor.
 ///

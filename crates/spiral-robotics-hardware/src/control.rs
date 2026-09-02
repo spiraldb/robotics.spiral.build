@@ -42,16 +42,21 @@ use crate::control_policy::{
     ReplayDecision as ReplayPolicyDecision, ReplayEvent as ReplayPolicyEvent,
     ReplayState as ReplayPolicyState, RobotAdmission,
 };
-use crate::state::{
-    CAUTION_FOLLOW_ERROR_DEGREES, CalibrationJointProgress, CalibrationProgress,
-    CompletedRecording, ConnectionStatus, EpisodeArm, JointDiagnostics, JointIdentity,
-    JointKinematics, JointRange, JointTelemetry, ModeSelection, ModeStatus,
-    MotorElectricalReadings, MotorFault, MotorLimits, MotorVoltageRange, PortSettings,
-    RecordingClock as RecordingProgressClock, RecordingGap, RecordingIdentity, RecordingProgress,
-    RecordingState, ReplayIdentity, ReplayPhase, ReplayProgress, ReplayPurpose, ReplayTimeline,
-    ReplayTransport, RobotTelemetry,
+use crate::state::CompletedRecording;
+use spiral_robotics_common::recording::{
+    EpisodeArm, RecordingClock as RecordingProgressClock, RecordingGap, RecordingIdentity,
+    RecordingProgress, RecordingState, ReplayIdentity, ReplayPhase, ReplayProgress, ReplayPurpose,
+    ReplayTimeline, ReplayTransport,
+};
+use spiral_robotics_common::robots::{
+    CalibrationJointProgress, CalibrationProgress, ConnectionStatus, JointDiagnostics,
+    JointIdentity, JointKinematics, JointRange, JointTelemetry, ModeSelection, ModeStatus,
+    MotorElectricalReadings, MotorFault, MotorLimits, PortSettings, RobotTelemetry, TelemetryFrame,
 };
 use tokio::sync::{oneshot, watch};
+
+/// Follow error at which an arm is no longer considered settled.
+const CAUTION_FOLLOW_ERROR_DEGREES: f64 = 5.0;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ArmConditionSummary {
@@ -333,6 +338,16 @@ impl RobotSpec {
         motors: BTreeMap<String, MotorSpec>,
     ) -> Result<Self, HardwareInputError> {
         HardwareInputError::validate_name("robot identifier", &id)?;
+        if port.path().trim().is_empty() {
+            return Err(HardwareInputError::new(
+                "serial port path must not be empty",
+            ));
+        }
+        if port.baud_rate() == 0 {
+            return Err(HardwareInputError::new(
+                "serial port baud rate must be greater than zero",
+            ));
+        }
         MotorSpec::validate_set(&motors)
             .map_err(|error| HardwareInputError::new(format!("invalid motor set: {error}")))?;
         Ok(Self {
@@ -397,7 +412,7 @@ impl Default for ControlSettings {
 /// A published sample of everything the control thread knows.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct HardwareState {
-    telemetry: HardwareTelemetry,
+    telemetry: TelemetryFrame,
     /// Every robot the thread has been asked to connect, including ones whose
     /// bus has since been lost, so the reason stays visible.
     connections: BTreeMap<String, ConnectionStatus>,
@@ -411,39 +426,29 @@ pub struct HardwareState {
     recording_issue: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
-struct HardwareTelemetry {
-    sequence: u64,
-    loop_hz: f64,
-    target_hz: f64,
-    robots: Vec<RobotTelemetry>,
-    recording: Option<RecordingProgress>,
-    replay: Option<ReplayProgress>,
-}
-
 impl HardwareState {
     pub const fn sequence(&self) -> u64 {
-        self.telemetry.sequence
+        self.telemetry.sequence()
     }
 
     pub const fn loop_hz(&self) -> f64 {
-        self.telemetry.loop_hz
+        self.telemetry.loop_hz()
     }
 
     pub const fn target_hz(&self) -> f64 {
-        self.telemetry.target_hz
+        self.telemetry.target_hz()
     }
 
     pub fn robots(&self) -> &[RobotTelemetry] {
-        &self.telemetry.robots
+        self.telemetry.robots()
     }
 
     pub const fn recording(&self) -> Option<&RecordingProgress> {
-        self.telemetry.recording.as_ref()
+        self.telemetry.recording()
     }
 
     pub const fn replay(&self) -> Option<&ReplayProgress> {
-        self.telemetry.replay.as_ref()
+        self.telemetry.replay()
     }
 
     pub const fn connections(&self) -> &BTreeMap<String, ConnectionStatus> {
@@ -452,6 +457,14 @@ impl HardwareState {
 
     pub const fn mode(&self) -> &ModeSelection {
         self.mode.selection()
+    }
+
+    pub const fn mode_status(&self) -> &ModeStatus {
+        &self.mode
+    }
+
+    pub const fn telemetry(&self) -> &TelemetryFrame {
+        &self.telemetry
     }
 
     pub const fn mode_active(&self) -> bool {
@@ -1303,11 +1316,10 @@ struct ConnectedRobot {
 /// Restate a bus-level limit on the published wire boundary.
 impl From<BusMotorLimits> for MotorLimits {
     fn from(limits: BusMotorLimits) -> Self {
-        Self::from_hardware_limits(
-            limits.max_temperature_celsius(),
-            MotorVoltageRange::new(limits.min_voltage_volts(), limits.max_voltage_volts()),
-            limits.max_load(),
-        )
+        Self::default()
+            .with_max_temperature_celsius(limits.max_temperature_celsius())
+            .with_voltage_range(limits.min_voltage_volts(), limits.max_voltage_volts())
+            .with_max_load(limits.max_load())
     }
 }
 
@@ -1562,11 +1574,14 @@ impl ConnectedRobot {
                         .map(|track| Vec::from(track.sample.faults()))
                         .unwrap_or_default(),
                 );
+                let condition =
+                    diagnostics.assess(self.limits.get(name).copied().unwrap_or_default());
                 JointTelemetry::new(
                     JointIdentity::new(name.clone(), spec.id()),
                     kinematics,
-                    diagnostics.assess(self.limits.get(name).copied().unwrap_or_default()),
+                    diagnostics,
                 )
+                .with_condition(condition)
             })
             .collect();
 
@@ -1578,6 +1593,11 @@ impl ConnectedRobot {
                 .map(|(name, range)| {
                     CalibrationJointProgress::new(name.clone(), range.minimum(), range.position())
                         .with_max(range.maximum())
+                        .with_encoder_counts_per_turn(MotorSpec::encoder_counts_per_turn())
+                        .with_ready(
+                            range.maximum().saturating_sub(range.minimum())
+                                >= crate::calibration::MINIMUM_CALIBRATION_TRAVEL,
+                        )
                 })
                 .collect();
             CalibrationProgress::new(joints, sweep.is_ready())
@@ -3195,18 +3215,18 @@ impl Controller {
             ReplayProgress::new(identity, timeline, transport)
         });
         let state = HardwareState {
-            telemetry: HardwareTelemetry {
-                sequence: self.published.sequence,
-                loop_hz: self.published.loop_hz,
-                target_hz: 1.0 / self.settings.period.as_secs_f64(),
-                robots: self
-                    .robots
+            telemetry: TelemetryFrame::new(
+                self.published.sequence,
+                self.published.loop_hz,
+                1.0 / self.settings.period.as_secs_f64(),
+            )
+            .with_robots(
+                self.robots
                     .values()
                     .map(ConnectedRobot::telemetry)
                     .collect(),
-                recording,
-                replay,
-            },
+            )
+            .with_operations(recording, replay),
             connections: self.published.connections.clone(),
             mode: self.published.mode.clone(),
             limits: self
@@ -3289,7 +3309,7 @@ mod tests {
     fn spec(id: &str, calibration: Option<Calibration>) -> RobotSpec {
         let specification = RobotSpec::new(
             id.to_owned(),
-            PortSettings::new(format!("/dev/{id}"), 1_000_000).expect("port settings"),
+            PortSettings::try_new(format!("/dev/{id}"), 1_000_000).expect("port settings"),
             motors(),
         )
         .expect("robot specification");
@@ -3930,7 +3950,7 @@ mod tests {
 
         let stale_specification = RobotSpec::new(
             "stale".to_owned(),
-            PortSettings::new("/dev/stale", 1_000_000).expect("port"),
+            PortSettings::try_new("/dev/stale", 1_000_000).expect("port"),
             motors(),
         )
         .expect("robot definition");

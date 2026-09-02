@@ -26,10 +26,10 @@ use hf_hub::{Repo, RepoType};
 use image::imageops::FilterType;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use spiral_robotics_api::sql::{
+use spiral_robotics_common::sql::{
     QualifiedRelation, ReadOnlyQuery, ReadOnlyQueryMode, UnquotedSqlIdentifier,
 };
-use spiral_robotics_api::workflow::{
+use spiral_robotics_common::workflow::{
     MAX_SIGLIP_CONCEPT_LENGTH, MAX_WORKFLOW_FEATURE_DESCRIPTION_LENGTH,
     MAX_WORKFLOW_FEATURE_STREAMS, WorkflowFeatureDefinition, WorkflowModelRunMetadata,
     WorkflowNodeProgress, WorkflowQuarantineSummary,
@@ -971,7 +971,7 @@ impl FeatureRegistry {
                         required_text("concept")?,
                     )
                     .with_applicability(
-                        spiral_robotics_api::workflow::WorkflowFeatureApplicability::new(
+                        spiral_robotics_common::workflow::WorkflowFeatureApplicability::new(
                             source_relation.clone(),
                             required_text("media_field")?,
                         )
@@ -2544,7 +2544,7 @@ mod tests {
             concept,
         )
         .with_applicability(
-            spiral_robotics_api::workflow::WorkflowFeatureApplicability::new(
+            spiral_robotics_common::workflow::WorkflowFeatureApplicability::new(
                 source_relation,
                 "image",
             ),

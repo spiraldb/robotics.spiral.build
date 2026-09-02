@@ -16,7 +16,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use spiral_robotics_api::robots::{CameraStatus, CameraStreamFormat, CameraStreamState};
+use spiral_robotics_common::robots::{CameraStatus, CameraStreamFormat, CameraStreamState};
 use spiral_robotics_hardware::{
     DEFAULT_JPEG_QUALITY, DetectedCamera, JpegStreamConfig, ProbeOutcome,
 };

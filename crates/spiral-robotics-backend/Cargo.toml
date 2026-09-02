@@ -9,7 +9,7 @@ publish = false
 workspace = true
 
 [dependencies]
-spiral-robotics-api.workspace = true
+spiral-robotics-common.workspace = true
 spiral-robotics-hardware.workspace = true
 spiral-robotics-storage.workspace = true
 spiral-robotics-training.workspace = true
@@ -57,7 +57,7 @@ candle-nn = { workspace = true, features = ["metal"] }
 libc = "0.2"
 
 [dev-dependencies]
-spiral-robotics-api = { workspace = true, features = ["test-support"] }
+spiral-robotics-common = { workspace = true, features = ["test-support"] }
 spiral-robotics-inference = { workspace = true, features = ["test-support"] }
 spiral-robotics-storage = { workspace = true, features = ["test-support"] }
 spiral-robotics-training = { workspace = true, features = ["test-support"] }

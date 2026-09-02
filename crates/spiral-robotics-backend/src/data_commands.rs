@@ -3,12 +3,12 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use spiral_robotics_api::datasets::{
+use spiral_robotics_common::datasets::{
     EpisodeImportSummary, HuggingFaceDatasetImportSummary, HuggingFaceDatasetInspection,
     HuggingFaceDatasetSource, ProjectImportSummary,
 };
-use spiral_robotics_api::relations::{RelationCatalog, SpiralQuerySnapshot};
-use spiral_robotics_api::settings::{
+use spiral_robotics_common::relations::{RelationCatalog, SpiralQuerySnapshot};
+use spiral_robotics_common::settings::{
     DataSettings, SpiralConnectionUpdate, SpiralSettings as ContractSpiralSettings,
     TrainingRuntimeSettings, VideoSettings,
 };
@@ -722,7 +722,7 @@ impl From<DataSettingsSnapshot> for DataSettings {
             )
             .with_namespace(settings.spiral().namespace())
             .with_endpoint_restart_required(settings.spiral().endpoint_restart_required()),
-            spiral_robotics_api::settings::TrainingRuntimeSettings::new(
+            spiral_robotics_common::settings::TrainingRuntimeSettings::new(
                 settings.training_endpoint(),
             ),
             VideoSettings::new(settings.video_enabled()),
@@ -813,7 +813,7 @@ impl From<QueryResult> for SpiralQuerySnapshot {
                 .into_iter()
                 .map(|column| {
                     let (name, data_type, nullable, semantic_type) = column.into_parts();
-                    spiral_robotics_api::relations::QueryColumn::new(name, data_type, nullable)
+                    spiral_robotics_common::relations::QueryColumn::new(name, data_type, nullable)
                         .with_semantic_type(semantic_type)
                 })
                 .collect(),
@@ -931,10 +931,10 @@ impl From<MainRuntimeFailure> for DataFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spiral_robotics_api::settings::{
+    use spiral_robotics_common::settings::{
         DataSettings, SpiralSettings, TrainingRuntimeSettings, VideoSettings,
     };
-    use spiral_robotics_api::status::{BackendReadiness, BackendReadinessState};
+    use spiral_robotics_common::status::{BackendReadiness, BackendReadinessState};
 
     #[test]
     fn unavailable_catalog_can_detach_idle_hidden_robots_during_cutover() {
