@@ -137,7 +137,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -148,7 +148,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -178,7 +178,7 @@ dependencies = [
 [[package]]
 name = "arbor-api"
 version = "0.0.0"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "arbor-spec",
  "async-trait",
@@ -195,7 +195,7 @@ dependencies = [
 [[package]]
 name = "arbor-spec"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -1648,7 +1648,7 @@ dependencies = [
 [[package]]
 name = "catalog-api"
 version = "0.0.0"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "async-trait",
  "axum",
@@ -2629,7 +2629,7 @@ checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
 [[package]]
 name = "dataset-api"
 version = "0.0.0"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "async-trait",
  "axum",
@@ -3436,7 +3436,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -3703,7 +3703,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6010,7 +6010,7 @@ checksum = "830d08ce1d1d941e6b30645f1a0eb5643013d835ce3779a5fc208261dbe10f55"
 [[package]]
 name = "legacy-spiral-engine"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "arrow",
  "async-channel",
@@ -6204,6 +6204,22 @@ name = "litrs"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
+
+[[package]]
+name = "location-api"
+version = "0.0.0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
+dependencies = [
+ "async-trait",
+ "axum",
+ "http 1.5.0",
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
+ "spid",
+ "spiral-api",
+ "spiral-token",
+]
 
 [[package]]
 name = "lock_api"
@@ -6926,7 +6942,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -8216,7 +8232,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -8925,7 +8941,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -8984,7 +9000,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -9786,7 +9802,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -9815,7 +9831,7 @@ dependencies = [
 [[package]]
 name = "spfs"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "anyhow",
  "arrow",
@@ -9865,7 +9881,7 @@ dependencies = [
 [[package]]
 name = "spid"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "serde",
  "strum 0.28.0",
@@ -9891,7 +9907,7 @@ checksum = "023a211cb3138dbc438680b32560ad89f699977624c9f8dbb95a47d5b4c07dd3"
 [[package]]
 name = "spiral-ai"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "arrow-schema",
  "async-trait",
@@ -9926,7 +9942,7 @@ dependencies = [
 [[package]]
 name = "spiral-api"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "async-trait",
  "bytes",
@@ -9960,7 +9976,7 @@ dependencies = [
 [[package]]
 name = "spiral-arbor"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "arbor-spec",
  "async-trait",
@@ -10004,7 +10020,7 @@ dependencies = [
 [[package]]
 name = "spiral-arrow"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "arrow-array",
  "arrow-ipc",
@@ -10021,7 +10037,7 @@ dependencies = [
 [[package]]
 name = "spiral-authz-spec"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "chrono",
  "serde",
@@ -10033,22 +10049,21 @@ dependencies = [
 [[package]]
 name = "spiral-build-info"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 
 [[package]]
 name = "spiral-catalog-core"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "serde",
  "thiserror 2.0.19",
- "url",
 ]
 
 [[package]]
 name = "spiral-client"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -10093,7 +10108,7 @@ dependencies = [
 [[package]]
 name = "spiral-config"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "arc-swap",
  "config",
@@ -10111,7 +10126,7 @@ dependencies = [
 [[package]]
 name = "spiral-core"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "base64 0.23.1",
  "crc32fast",
@@ -10134,7 +10149,7 @@ dependencies = [
 [[package]]
 name = "spiral-datetime"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -10154,7 +10169,7 @@ dependencies = [
 [[package]]
 name = "spiral-defaults"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "spiral-ai",
  "spiral-arrow",
@@ -10189,7 +10204,7 @@ dependencies = [
 [[package]]
 name = "spiral-depth"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "arrow-schema",
  "spiral-engine",
@@ -10205,7 +10220,7 @@ dependencies = [
 [[package]]
 name = "spiral-engine"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "arcstr",
  "async-fs",
@@ -10256,7 +10271,7 @@ dependencies = [
 [[package]]
 name = "spiral-error"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "arrow",
  "async-trait",
@@ -10283,7 +10298,7 @@ dependencies = [
 [[package]]
 name = "spiral-http"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "async-trait",
  "axum",
@@ -10319,7 +10334,7 @@ dependencies = [
 [[package]]
 name = "spiral-http-client"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10341,7 +10356,7 @@ dependencies = [
 [[package]]
 name = "spiral-huggingface"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "futures",
  "reqwest 0.13.4",
@@ -10358,7 +10373,7 @@ dependencies = [
 [[package]]
 name = "spiral-image"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -10385,7 +10400,7 @@ dependencies = [
 [[package]]
 name = "spiral-io"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "arrow-schema",
  "async-trait",
@@ -10434,7 +10449,7 @@ dependencies = [
 [[package]]
 name = "spiral-keyed"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "arrow",
  "bytes",
@@ -10460,7 +10475,7 @@ dependencies = [
 [[package]]
 name = "spiral-kismet-cache"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "hex",
  "kismet-cache",
@@ -10471,7 +10486,7 @@ dependencies = [
 [[package]]
 name = "spiral-list"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "spiral-engine",
  "spiral-error",
@@ -10482,7 +10497,7 @@ dependencies = [
 [[package]]
 name = "spiral-media"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "arrow-schema",
  "spiral-core",
@@ -10500,7 +10515,7 @@ dependencies = [
 [[package]]
 name = "spiral-metal"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "block2 0.5.1",
  "futures",
@@ -10517,7 +10532,7 @@ dependencies = [
 [[package]]
 name = "spiral-mp4"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "async-trait",
  "futures",
@@ -10537,7 +10552,7 @@ dependencies = [
 [[package]]
 name = "spiral-o11y"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "async-trait",
  "bytes",
@@ -10566,7 +10581,7 @@ dependencies = [
 [[package]]
 name = "spiral-parquet"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -10584,7 +10599,7 @@ dependencies = [
 [[package]]
 name = "spiral-rabitq"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "half",
  "num-traits",
@@ -10602,7 +10617,7 @@ dependencies = [
 [[package]]
 name = "spiral-rand"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "vortex-error",
 ]
@@ -10610,7 +10625,7 @@ dependencies = [
 [[package]]
 name = "spiral-robotics"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "async-trait",
  "futures",
@@ -10801,7 +10816,7 @@ dependencies = [
 [[package]]
 name = "spiral-service"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "sea-orm",
  "secrecy",
@@ -10813,7 +10828,7 @@ dependencies = [
 [[package]]
 name = "spiral-session"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -10838,7 +10853,7 @@ dependencies = [
 [[package]]
 name = "spiral-spatial"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "geo-types",
  "parking_lot",
@@ -10856,7 +10871,7 @@ dependencies = [
 [[package]]
 name = "spiral-spfs"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "futures",
  "itertools 0.15.0",
@@ -10876,7 +10891,7 @@ dependencies = [
 [[package]]
 name = "spiral-spql"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "async-trait",
  "bytes",
@@ -10897,7 +10912,7 @@ dependencies = [
 [[package]]
 name = "spiral-str"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "spiral-engine",
  "spiral-error",
@@ -10909,7 +10924,7 @@ dependencies = [
 [[package]]
 name = "spiral-table"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "arrow",
  "async-trait",
@@ -10958,7 +10973,7 @@ dependencies = [
 [[package]]
 name = "spiral-table-spec"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -10985,7 +11000,7 @@ dependencies = [
 [[package]]
 name = "spiral-task-specs"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "catalog-api",
  "serde",
@@ -10999,7 +11014,7 @@ dependencies = [
 [[package]]
 name = "spiral-tensor"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -11022,7 +11037,7 @@ dependencies = [
 [[package]]
 name = "spiral-token"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "jsonwebtoken",
  "secrecy",
@@ -11033,7 +11048,7 @@ dependencies = [
 [[package]]
 name = "spiral-turboquant"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "spiral-engine",
  "spiral-session",
@@ -11047,7 +11062,7 @@ dependencies = [
 [[package]]
 name = "spiral-usage"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "async-trait",
  "opentelemetry",
@@ -11059,7 +11074,7 @@ dependencies = [
 [[package]]
 name = "spiral-vector-index"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "futures",
  "hex",
@@ -11083,7 +11098,7 @@ dependencies = [
 [[package]]
 name = "spiral-video"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "anyhow",
  "arrow-schema",
@@ -11132,7 +11147,7 @@ dependencies = [
 [[package]]
 name = "spiral-video-runtime"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "ffmpeg-next",
 ]
@@ -11140,7 +11155,7 @@ dependencies = [
 [[package]]
 name = "spiral-vortex"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "futures",
  "parking_lot",
@@ -11159,17 +11174,19 @@ dependencies = [
 [[package]]
 name = "spiraldb-catalog"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "arbor-api",
  "arbor-spec",
  "async-trait",
  "catalog-api",
+ "chrono",
  "dashmap",
  "dataset-api",
  "derive_builder",
  "futures",
  "futures-util",
+ "location-api",
  "moka",
  "parking_lot",
  "reqwest 0.13.4",
@@ -11205,7 +11222,7 @@ dependencies = [
 [[package]]
 name = "spiraldb-control-plane"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "async-trait",
  "futures",
@@ -11221,7 +11238,7 @@ dependencies = [
 [[package]]
 name = "spiraldb-spfs"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "moka",
  "parking_lot",
@@ -11242,7 +11259,7 @@ dependencies = [
 [[package]]
 name = "spiraldb-table"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "async-trait",
  "foundationdb-tuple",
@@ -11309,7 +11326,7 @@ dependencies = [
 [[package]]
 name = "spql"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "arcstr",
  "async-trait",
@@ -11328,7 +11345,7 @@ dependencies = [
 [[package]]
 name = "spql-blob"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "async-trait",
  "bytes",
@@ -11359,7 +11376,7 @@ dependencies = [
 [[package]]
 name = "spql-core"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "spiral-error",
  "spiral-session",
@@ -11370,7 +11387,7 @@ dependencies = [
 [[package]]
 name = "spql-list"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "prost 0.14.4",
  "spiral-session",
@@ -11381,7 +11398,7 @@ dependencies = [
 [[package]]
 name = "spql-text"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "ordered-float 5.3.0",
  "prost 0.14.4",
@@ -11392,7 +11409,7 @@ dependencies = [
 [[package]]
 name = "spql-turboquant"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -11414,7 +11431,7 @@ dependencies = [
 [[package]]
 name = "spql-vector"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "vortex",
  "vortex-tensor",
@@ -11633,7 +11650,7 @@ dependencies = [
  "cfg-if 1.0.4",
  "libc",
  "psm",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -11863,7 +11880,7 @@ dependencies = [
 [[package]]
 name = "task-api"
 version = "0.0.0"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "async-trait",
  "axum",
@@ -11890,7 +11907,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -12127,7 +12144,7 @@ dependencies = [
 [[package]]
 name = "tokio-spiral"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "dashmap",
  "futures",
@@ -12811,7 +12828,7 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 [[package]]
 name = "vector-index-api"
 version = "0.0.0"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "arbor-spec",
  "async-trait",
@@ -12834,7 +12851,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "view-api"
 version = "0.0.0"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "async-trait",
  "axum",
@@ -12885,7 +12902,7 @@ dependencies = [
 [[package]]
 name = "vortex-accessor"
 version = "0.0.0+dev"
-source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#31fe55d9280a54e0425d998120027b5a83ebfbb0"
+source = "git+https://github.com/spiraldb/spiraldb.git?branch=develop#c2a0eb27b136b4b2a29ad0cf3a51b45d28643e98"
 dependencies = [
  "vortex-array",
  "vortex-buffer",
@@ -13787,7 +13804,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
