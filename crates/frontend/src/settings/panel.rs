@@ -1,5 +1,6 @@
 //! Settings screen for robots, SpiralDB, training, and video.
 
+use crate::client::project::ProjectClient;
 use crate::components::interaction::{
     Action, ActionLink, ActionPurpose, ActionVariant, BlockingConfirmation, BrowserFocus,
     CloseIcon, ConfirmationCopy, ConfirmationDismissal, ConfirmationResponse, FileAction,
@@ -8,10 +9,6 @@ use crate::components::interaction::{
 use dioxus::prelude::*;
 use spiral_robotics_common::settings::{DataSettings, SpiralConnectionUpdate};
 
-use crate::client::server_fns::{
-    data_settings, import_project, test_spiral_connection, test_training_runtime,
-    update_data_settings,
-};
 use crate::settings::robots::RobotPanel;
 use crate::shell::notifications::MessageSource;
 use crate::shell::state::studio;
@@ -194,7 +191,10 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
         let training = current().training().to_owned();
         let video = current().video().to_owned();
         spawn(async move {
-            match update_data_settings(connection, training, video).await {
+            match ProjectClient::current()
+                .update_data_settings(connection, training, video)
+                .await
+            {
                 Ok(settings) => {
                     current.set(settings);
                     client_secret.set(String::new());
@@ -203,8 +203,12 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
                         testing.set(true);
                         test_result.set(None);
                         let result = match connection_test {
-                            SettingsSection::Spiral => test_spiral_connection().await,
-                            SettingsSection::Training => test_training_runtime().await,
+                            SettingsSection::Spiral => {
+                                ProjectClient::current().test_spiral_connection().await
+                            }
+                            SettingsSection::Training => {
+                                ProjectClient::current().test_training_runtime().await
+                            }
                             SettingsSection::Robots | SettingsSection::Video => unreachable!(
                                 "only connection-backed settings sections can request a test"
                             ),
@@ -372,7 +376,7 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
                                             ActionLink {
                                                 purpose: ActionPurpose::Export,
                                                 variant: ActionVariant::Outline,
-                                                href: "/api/project/export",
+                                                href: crate::client::project::ProjectClient::current().scoped_url("/api/project/export"),
                                                 download: "spiral-robotics-project.spiral-project",
                                                 title: "Export every Studio-managed relation from the active SpiralDB project",
                                                 "Export project"
@@ -469,12 +473,12 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
                     on_busy_change.call(true);
                     spawn(async move {
                         let Some(outcome) = SingleFlight::run(transferring_project, async {
-                                let result = import_project(file.into())
+                                let result = ProjectClient::current().import_project(file.into())
                                     .await
                                     .map_err(|error| error.to_string())?;
                                 data.set_selected_episode(None);
                                 data.invalidate_catalogs();
-                                let settings = data_settings()
+                                let settings = ProjectClient::current().data_settings()
                                     .await
                                     .map_err(|error| error.to_string())?;
                                 Ok::<_, String>((result, settings))

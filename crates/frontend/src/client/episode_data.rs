@@ -6,6 +6,7 @@
 //! small workspace cache below is only for paused recordings outside Data;
 //! physical motion continues through backend-owned validation and control.
 
+use crate::client::project::ProjectClient;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
@@ -16,7 +17,6 @@ use spiral_robotics_common::recording::{
 };
 use spiral_robotics_viewport::SO101_JOINTS;
 
-use crate::client::server_fns::inspect_episode;
 use crate::panels::timeline::panel::{
     TimelineSignalLane, TimelineSignalPoint, TimelineSignalSeries,
 };
@@ -260,7 +260,7 @@ impl EpisodeData {
     }
 
     pub(crate) async fn load(episode: &str) -> Result<Arc<Self>, String> {
-        let request = inspect_episode(episode.to_owned());
+        let request = ProjectClient::current().inspect_episode(episode.to_owned());
         EpisodeDataDeadline::run(
             "The episode data",
             RECORDED_REQUEST_TIMEOUT_MS,

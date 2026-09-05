@@ -7,6 +7,7 @@
 //! assignments, and calibration. Live consumes that configuration without
 //! mixing setup work into the operating surface.
 
+use crate::client::project::ProjectClient;
 use crate::components::interaction::{
     Action, ActionPurpose, ActionVariant, ChevronIcon, FileAction, FileInput, UnassignIcon,
 };
@@ -15,10 +16,6 @@ use spiral_robotics_common::robots::{
     CameraBinding, NewRobot, PortSettings, RobotSummary, RobotUpdate, SerialPortSummary,
 };
 
-use crate::client::server_fns::{
-    connect_robot, create_robot, disconnect_robot, identify_serial_port,
-    import_robot_configuration, list_serial_ports, refresh_cameras, update_robot,
-};
 use crate::panels::scene::ScenePalette;
 use crate::shell::state::{Selection, Studio, studio};
 use crate::tasks::SingleFlight;
@@ -39,8 +36,12 @@ pub(super) fn RobotPanel() -> Element {
     let studio = studio();
     let robots = studio.snapshot().read().robots().to_owned();
     let focused = studio.focused();
-    let mut ports =
-        use_resource(|| async { list_serial_ports().await.map_err(|error| error.to_string()) });
+    let mut ports = use_resource(|| async {
+        ProjectClient::current()
+            .list_serial_ports()
+            .await
+            .map_err(|error| error.to_string())
+    });
     let port_catalog =
         PortCatalogState::new(ports.read_unchecked().to_owned(), move |()| ports.restart());
 
@@ -190,7 +191,8 @@ fn NewRobotForm() -> Element {
         let selected_name = name.clone();
         studio.run_utility(format!("Created {name}."), async move {
             let Some(result) = SingleFlight::run(creating, async move {
-                create_robot(request)
+                ProjectClient::current()
+                    .create_robot(request)
                     .await
                     .map_err(|error| error.to_string())
             })
@@ -295,7 +297,7 @@ fn ImportRobotConfiguration() -> Element {
                                 .read_bytes()
                                 .await
                                 .map_err(|error| format!("Could not read {}: {error}", file.name()))?;
-                            import_robot_configuration(bytes.to_vec())
+                            ProjectClient::current().import_robot_configuration(bytes.to_vec())
                                 .await
                                 .map_err(|error| error.to_string())
                         })
@@ -466,9 +468,9 @@ fn ConnectionAction(robot: RobotSummary, sweeping: bool) -> Element {
                 studio.run("", async move {
                     SingleFlight::run(pending, async move {
                         let result = if connected {
-                            disconnect_robot(id).await
+                            ProjectClient::current().disconnect_robot(id).await
                         } else {
-                            connect_robot(id).await
+                            ProjectClient::current().connect_robot(id).await
                         };
                         result.map_err(|error| error.to_string())
                     })
@@ -561,7 +563,7 @@ fn PortSection(robot: RobotSummary, state: PortSectionState) -> Element {
                             let Some(result) = SingleFlight::run(
                                 starting_identify,
                                 async move {
-                                    list_serial_ports()
+                                    ProjectClient::current().list_serial_ports()
                                         .await
                                         .map_err(|error| error.to_string())
                                 },
@@ -667,7 +669,8 @@ impl Studio {
             PortSettings::new(assignment.path.clone(), assignment.baud_rate),
         );
         self.run(format!("Assigned {}.", assignment.path), async move {
-            update_robot(request)
+            ProjectClient::current()
+                .update_robot(request)
                 .await
                 .map_err(|error| error.to_string())
                 .map(|_| ())
@@ -734,7 +737,7 @@ fn IdentifyPort(
                                 let Some(result) = SingleFlight::run(
                                     checking,
                                     async move {
-                                        identify_serial_port(before)
+                                        ProjectClient::current().identify_serial_port(before)
                                             .await
                                             .map_err(|error| error.to_string())
                                     },
@@ -826,7 +829,7 @@ fn CameraSection(robot: RobotSummary) -> Element {
                             if let Some(Err(error)) = SingleFlight::run(
                                 scanning,
                                 async move {
-                                    refresh_cameras()
+                                    ProjectClient::current().refresh_cameras()
                                         .await
                                         .map_err(|error| error.to_string())
                                         .map(|_| ())
@@ -972,7 +975,8 @@ impl Studio {
         let request = RobotUpdate::with_cameras(assignments.robot_id, assignments.bindings);
         self.run("", async move {
             SingleFlight::run(assignments.saving, async move {
-                update_robot(request)
+                ProjectClient::current()
+                    .update_robot(request)
                     .await
                     .map_err(|error| error.to_string())
                     .map(|_| ())

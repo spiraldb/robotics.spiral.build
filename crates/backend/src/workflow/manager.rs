@@ -138,6 +138,7 @@ struct WorkflowManagerInner {
 struct WorkflowPersistenceState {
     mutation: AsyncMutex<()>,
     terminal_error: Mutex<Option<TerminalPersistenceError>>,
+    recovery_pending: AtomicBool,
     #[cfg(test)]
     test_outcomes: Mutex<VecDeque<Result<(), String>>>,
 }
@@ -147,6 +148,7 @@ impl WorkflowPersistenceState {
         Self {
             mutation: AsyncMutex::new(()),
             terminal_error: Mutex::new(None),
+            recovery_pending: AtomicBool::new(false),
             #[cfg(test)]
             test_outcomes: Mutex::new(VecDeque::new()),
         }
@@ -358,14 +360,7 @@ impl WorkflowManager {
         }
     }
 
-    /// Restore the saved graph and latest snapshot. Local SQL execution is not
-    /// resumable, so an in-flight snapshot becomes explicitly interrupted.
-    pub(crate) async fn hydrate_from_storage(&self) -> Result<(), String> {
-        let document = self.stored_document().await?;
-        self.install_hydrated_document(document).await
-    }
-
-    pub(crate) async fn reload_from_storage(&self) -> Result<(), String> {
+    pub(crate) async fn prepare_from_storage(&self) -> Result<(), String> {
         let document = self.stored_document().await?;
         self.install_hydrated_document(document).await
     }
@@ -386,7 +381,12 @@ impl WorkflowManager {
         &self,
         mut document: WorkflowDocument,
     ) -> Result<(), String> {
-        if document.snapshot().phase().active() {
+        let interrupted = document.snapshot().phase().active();
+        self.inner
+            .persistence
+            .recovery_pending
+            .store(interrupted, Ordering::SeqCst);
+        if interrupted {
             let interruption =
                 "Studio restarted before this Workflow run finished. Run it again.".to_owned();
             let finished_ms = SystemTime::now().unix_millis();
@@ -408,15 +408,29 @@ impl WorkflowManager {
                     node.set_error(Some(interruption.clone()));
                 }
             }
-            self.inner
-                .storage
-                .save_workflow_document(&document.persisted()?)
-                .await?;
         }
         *self.inner.document.recover_lock() = document;
         self.inner.identity.advance_scope();
         *self.inner.persistence.terminal_error.recover_lock() = None;
         let _ = self.inner.updates.send(self.state());
+        Ok(())
+    }
+
+    pub(crate) async fn persist_recovery(&self) -> Result<(), String> {
+        let _mutation = self.inner.persistence.mutation.lock().await;
+        if self
+            .inner
+            .persistence
+            .recovery_pending
+            .load(Ordering::SeqCst)
+        {
+            let document = self.inner.document.recover_lock().clone();
+            self.save_document(&document).await?;
+            self.inner
+                .persistence
+                .recovery_pending
+                .store(false, Ordering::SeqCst);
+        }
         Ok(())
     }
 
@@ -2252,7 +2266,7 @@ mod tests {
         let storage = Arc::new(StorageManager::new(project_store.clone()));
         let manager = WorkflowManager::new(storage.clone());
         manager
-            .hydrate_from_storage()
+            .prepare_from_storage()
             .await
             .expect("an empty Workflow document must hydrate");
         let mut workflow = WorkflowSpec::default();
@@ -2291,7 +2305,7 @@ mod tests {
 
         let reloaded = WorkflowManager::new(storage);
         reloaded
-            .hydrate_from_storage()
+            .prepare_from_storage()
             .await
             .expect("the saved graph and result must reload");
         assert_eq!(reloaded.state().workflow(), saved.workflow());
@@ -2429,7 +2443,7 @@ mod tests {
         let storage = Arc::new(StorageManager::new(project_store.clone()));
         let manager = WorkflowManager::new(storage.clone());
         manager
-            .hydrate_from_storage()
+            .prepare_from_storage()
             .await
             .expect("an empty Workflow document must hydrate");
         let saved = manager
@@ -2501,7 +2515,7 @@ mod tests {
 
         let reloaded = WorkflowManager::new(storage);
         reloaded
-            .hydrate_from_storage()
+            .prepare_from_storage()
             .await
             .expect("the SigLIP workflow and snapshot must reload");
         assert_eq!(reloaded.state().snapshot().result(), reused.result());
@@ -2631,7 +2645,7 @@ mod tests {
             .await
             .expect("ordinary persistence must work after cleanup restores autocommit");
         reloaded
-            .reload_from_storage()
+            .prepare_from_storage()
             .await
             .expect("the post-cleanup document must remain readable");
         assert_eq!(

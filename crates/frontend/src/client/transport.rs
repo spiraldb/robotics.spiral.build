@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+#[cfg(feature = "server")]
 use dioxus::fullstack::FileStream;
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -42,6 +43,12 @@ use spiral_robotics_backend::{DataCommands, DataSettingsChange};
 /// Message-only command failure transported as Dioxus typed error details.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct CommandError(String);
+
+impl CommandError {
+    pub(crate) fn stale_project() -> Self {
+        Self("The project changed before this request completed. Refresh the current project and try again.".to_owned())
+    }
+}
 
 impl From<ServerFnError> for CommandError {
     fn from(error: ServerFnError) -> Self {
@@ -107,10 +114,14 @@ impl dioxus::fullstack::AsStatusCode for CommandError {
     commands: Extension<TrainingRolloutCommands>
 )]
 pub(crate) async fn start_training_run(
+    session_id: String,
     config: TrainingConfig,
 ) -> Result<TrainingRun, CommandError> {
-    commands
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .start_training_run(config)
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -120,9 +131,12 @@ pub(crate) async fn start_training_run(
     endpoint = "server-functions/training/stop",
     commands: Extension<TrainingRolloutCommands>
 )]
-pub(crate) async fn stop_training_run(id: String) -> Result<(), CommandError> {
-    commands
+pub(crate) async fn stop_training_run(session_id: String, id: String) -> Result<(), CommandError> {
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .stop_training_run(id)
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -132,9 +146,15 @@ pub(crate) async fn stop_training_run(id: String) -> Result<(), CommandError> {
     endpoint = "server-functions/training/delete",
     commands: Extension<TrainingRolloutCommands>
 )]
-pub(crate) async fn delete_training_run(id: String) -> Result<(), CommandError> {
-    commands
+pub(crate) async fn delete_training_run(
+    session_id: String,
+    id: String,
+) -> Result<(), CommandError> {
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .delete_training_run(id)
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -144,9 +164,15 @@ pub(crate) async fn delete_training_run(id: String) -> Result<(), CommandError> 
     endpoint = "server-functions/rollout/start",
     commands: Extension<TrainingRolloutCommands>
 )]
-pub(crate) async fn start_rollout(config: RolloutConfig) -> Result<RolloutSnapshot, CommandError> {
-    commands
+pub(crate) async fn start_rollout(
+    session_id: String,
+    config: RolloutConfig,
+) -> Result<RolloutSnapshot, CommandError> {
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .start_rollout(config)
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -156,9 +182,12 @@ pub(crate) async fn start_rollout(config: RolloutConfig) -> Result<RolloutSnapsh
     endpoint = "server-functions/rollout/stop",
     commands: Extension<TrainingRolloutCommands>
 )]
-pub(crate) async fn stop_rollout() -> Result<(), CommandError> {
-    commands
+pub(crate) async fn stop_rollout(session_id: String) -> Result<(), CommandError> {
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .stop_rollout()
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -168,9 +197,14 @@ pub(crate) async fn stop_rollout() -> Result<(), CommandError> {
     endpoint = "server-functions/workflow/snapshot",
     commands: Extension<WorkflowCommands>
 )]
-pub(crate) async fn workflow_snapshot() -> Result<WorkflowSnapshot, CommandError> {
-    commands
+pub(crate) async fn workflow_snapshot(
+    session_id: String,
+) -> Result<WorkflowSnapshot, CommandError> {
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .snapshot()
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -181,10 +215,14 @@ pub(crate) async fn workflow_snapshot() -> Result<WorkflowSnapshot, CommandError
     commands: Extension<WorkflowCommands>
 )]
 pub(crate) async fn run_workflow_command(
+    session_id: String,
     command: WorkflowCommand,
 ) -> Result<WorkflowSnapshot, CommandError> {
-    commands
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .command(command)
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -194,9 +232,14 @@ pub(crate) async fn run_workflow_command(
     endpoint = "server-functions/workflow/agent-snapshot",
     commands: Extension<WorkflowCommands>
 )]
-pub(crate) async fn workflow_agent_snapshot() -> Result<WorkflowAgentSnapshot, CommandError> {
-    commands
+pub(crate) async fn workflow_agent_snapshot(
+    session_id: String,
+) -> Result<WorkflowAgentSnapshot, CommandError> {
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .agent_snapshot()
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -207,10 +250,14 @@ pub(crate) async fn workflow_agent_snapshot() -> Result<WorkflowAgentSnapshot, C
     commands: Extension<WorkflowCommands>
 )]
 pub(crate) async fn run_workflow_agent_command(
+    session_id: String,
     command: WorkflowAgentCommand,
 ) -> Result<WorkflowAgentSnapshot, CommandError> {
-    commands
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .agent_command(command)
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -220,9 +267,12 @@ pub(crate) async fn run_workflow_agent_command(
     endpoint = "server-functions/recordings/list-datasets",
     commands: Extension<RecordingCommands>
 )]
-pub(crate) async fn list_datasets() -> Result<Vec<DatasetSummary>, CommandError> {
-    commands
+pub(crate) async fn list_datasets(session_id: String) -> Result<Vec<DatasetSummary>, CommandError> {
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .datasets()
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -233,10 +283,14 @@ pub(crate) async fn list_datasets() -> Result<Vec<DatasetSummary>, CommandError>
     commands: Extension<RecordingCommands>
 )]
 pub(crate) async fn list_episodes(
+    session_id: String,
     dataset_id: String,
 ) -> Result<(Vec<EpisodeListItem>, Vec<String>), CommandError> {
-    commands
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .episodes(dataset_id)
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -246,9 +300,15 @@ pub(crate) async fn list_episodes(
     endpoint = "server-functions/recordings/start",
     commands: Extension<RecordingCommands>
 )]
-pub(crate) async fn start_recording(dataset_id: String) -> Result<EpisodeInfo, CommandError> {
-    commands
+pub(crate) async fn start_recording(
+    session_id: String,
+    dataset_id: String,
+) -> Result<EpisodeInfo, CommandError> {
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .start_recording(dataset_id)
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -258,9 +318,15 @@ pub(crate) async fn start_recording(dataset_id: String) -> Result<EpisodeInfo, C
     endpoint = "server-functions/recordings/stop",
     commands: Extension<RecordingCommands>
 )]
-pub(crate) async fn stop_recording(keep: bool) -> Result<EpisodeInfo, CommandError> {
-    commands
+pub(crate) async fn stop_recording(
+    session_id: String,
+    keep: bool,
+) -> Result<EpisodeInfo, CommandError> {
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .stop_recording(keep)
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -270,9 +336,15 @@ pub(crate) async fn stop_recording(keep: bool) -> Result<EpisodeInfo, CommandErr
     endpoint = "server-functions/recordings/set-paused",
     commands: Extension<RecordingCommands>
 )]
-pub(crate) async fn set_recording_paused(paused: bool) -> Result<(), CommandError> {
-    commands
+pub(crate) async fn set_recording_paused(
+    session_id: String,
+    paused: bool,
+) -> Result<(), CommandError> {
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .set_recording_paused(paused)
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -282,9 +354,12 @@ pub(crate) async fn set_recording_paused(paused: bool) -> Result<(), CommandErro
     endpoint = "server-functions/recordings/delete-episode",
     commands: Extension<RecordingCommands>
 )]
-pub(crate) async fn delete_episode(id: String) -> Result<(), CommandError> {
-    commands
+pub(crate) async fn delete_episode(session_id: String, id: String) -> Result<(), CommandError> {
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .delete_episode(id)
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -294,9 +369,15 @@ pub(crate) async fn delete_episode(id: String) -> Result<(), CommandError> {
     endpoint = "server-functions/recordings/inspect-episode",
     commands: Extension<RecordingCommands>
 )]
-pub(crate) async fn inspect_episode(id: String) -> Result<EpisodeInspectionSnapshot, CommandError> {
-    commands
+pub(crate) async fn inspect_episode(
+    session_id: String,
+    id: String,
+) -> Result<EpisodeInspectionSnapshot, CommandError> {
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .inspection(id)
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -307,13 +388,17 @@ pub(crate) async fn inspect_episode(id: String) -> Result<EpisodeInspectionSnaps
     commands: Extension<RecordingCommands>
 )]
 pub(crate) async fn seek_episode(
+    session_id: String,
     id: String,
     robot: String,
     source_arm: Option<String>,
     seconds: f64,
 ) -> Result<(), CommandError> {
-    commands
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .seek_episode(id, robot, source_arm, seconds)
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -324,13 +409,17 @@ pub(crate) async fn seek_episode(
     commands: Extension<RecordingCommands>
 )]
 pub(crate) async fn start_replay(
+    session_id: String,
     episode: String,
     robot: String,
     source_arm: Option<String>,
     start_seconds: f64,
 ) -> Result<(), CommandError> {
-    commands
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .start_replay(episode, robot, source_arm, start_seconds)
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -340,9 +429,15 @@ pub(crate) async fn start_replay(
     endpoint = "server-functions/recordings/set-replay-paused",
     commands: Extension<RecordingCommands>
 )]
-pub(crate) async fn set_replay_paused(paused: bool) -> Result<(), CommandError> {
-    commands
+pub(crate) async fn set_replay_paused(
+    session_id: String,
+    paused: bool,
+) -> Result<(), CommandError> {
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .set_replay_paused(paused)
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -352,9 +447,14 @@ pub(crate) async fn set_replay_paused(paused: bool) -> Result<(), CommandError> 
     endpoint = "server-functions/devices/list-ports",
     commands: Extension<DeviceCommands>
 )]
-pub(crate) async fn list_serial_ports() -> Result<Vec<SerialPortSummary>, CommandError> {
-    commands
+pub(crate) async fn list_serial_ports(
+    session_id: String,
+) -> Result<Vec<SerialPortSummary>, CommandError> {
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .list_ports()
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -365,10 +465,14 @@ pub(crate) async fn list_serial_ports() -> Result<Vec<SerialPortSummary>, Comman
     commands: Extension<DeviceCommands>
 )]
 pub(crate) async fn identify_serial_port(
+    session_id: String,
     before: Vec<String>,
 ) -> Result<(Option<String>, String), CommandError> {
-    commands
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .identify_port(before)
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -378,9 +482,12 @@ pub(crate) async fn identify_serial_port(
     endpoint = "server-functions/devices/refresh-cameras",
     commands: Extension<DeviceCommands>
 )]
-pub(crate) async fn refresh_cameras() -> Result<Vec<CameraStatus>, CommandError> {
-    commands
+pub(crate) async fn refresh_cameras(session_id: String) -> Result<Vec<CameraStatus>, CommandError> {
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .refresh_cameras()
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -390,9 +497,12 @@ pub(crate) async fn refresh_cameras() -> Result<Vec<CameraStatus>, CommandError>
     endpoint = "server-functions/devices/list-robots",
     commands: Extension<DeviceCommands>
 )]
-pub(crate) async fn list_robots() -> Result<Vec<RobotSummary>, CommandError> {
-    commands
+pub(crate) async fn list_robots(session_id: String) -> Result<Vec<RobotSummary>, CommandError> {
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .list_robots()
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -402,9 +512,15 @@ pub(crate) async fn list_robots() -> Result<Vec<RobotSummary>, CommandError> {
     endpoint = "server-functions/devices/create-robot",
     commands: Extension<DeviceCommands>
 )]
-pub(crate) async fn create_robot(request: NewRobot) -> Result<RobotSummary, CommandError> {
-    commands
+pub(crate) async fn create_robot(
+    session_id: String,
+    request: NewRobot,
+) -> Result<RobotSummary, CommandError> {
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .create_robot(request)
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -415,10 +531,14 @@ pub(crate) async fn create_robot(request: NewRobot) -> Result<RobotSummary, Comm
     commands: Extension<DeviceCommands>
 )]
 pub(crate) async fn import_robot_configuration(
+    session_id: String,
     document: Vec<u8>,
 ) -> Result<RobotSummary, CommandError> {
-    commands
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .import_robot_configuration(document)
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -428,9 +548,15 @@ pub(crate) async fn import_robot_configuration(
     endpoint = "server-functions/devices/get-robot",
     commands: Extension<DeviceCommands>
 )]
-pub(crate) async fn get_robot(id: String) -> Result<RobotSummary, CommandError> {
-    commands
+pub(crate) async fn get_robot(
+    session_id: String,
+    id: String,
+) -> Result<RobotSummary, CommandError> {
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .get_robot(id)
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -441,10 +567,14 @@ pub(crate) async fn get_robot(id: String) -> Result<RobotSummary, CommandError> 
     commands: Extension<DeviceCommands>
 )]
 pub(crate) async fn update_robot(
+    session_id: String,
     request: RobotUpdate<Vec<CameraBinding>>,
 ) -> Result<RobotSummary, CommandError> {
-    commands
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .update_robot(request)
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -454,9 +584,12 @@ pub(crate) async fn update_robot(
     endpoint = "server-functions/devices/delete-robot",
     commands: Extension<DeviceCommands>
 )]
-pub(crate) async fn delete_robot(id: String) -> Result<(), CommandError> {
-    commands
+pub(crate) async fn delete_robot(session_id: String, id: String) -> Result<(), CommandError> {
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .delete_robot(id)
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -466,9 +599,12 @@ pub(crate) async fn delete_robot(id: String) -> Result<(), CommandError> {
     endpoint = "server-functions/devices/connect-robot",
     commands: Extension<DeviceCommands>
 )]
-pub(crate) async fn connect_robot(id: String) -> Result<(), CommandError> {
-    commands
+pub(crate) async fn connect_robot(session_id: String, id: String) -> Result<(), CommandError> {
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .connect_robot(id)
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -478,9 +614,12 @@ pub(crate) async fn connect_robot(id: String) -> Result<(), CommandError> {
     endpoint = "server-functions/devices/disconnect-robot",
     commands: Extension<DeviceCommands>
 )]
-pub(crate) async fn disconnect_robot(id: String) -> Result<(), CommandError> {
-    commands
+pub(crate) async fn disconnect_robot(session_id: String, id: String) -> Result<(), CommandError> {
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .disconnect_robot(id)
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -490,9 +629,12 @@ pub(crate) async fn disconnect_robot(id: String) -> Result<(), CommandError> {
     endpoint = "server-functions/devices/hold-robot",
     commands: Extension<DeviceCommands>
 )]
-pub(crate) async fn hold_robot(id: String) -> Result<(), CommandError> {
-    commands
+pub(crate) async fn hold_robot(session_id: String, id: String) -> Result<(), CommandError> {
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .hold_robot(id)
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -502,9 +644,12 @@ pub(crate) async fn hold_robot(id: String) -> Result<(), CommandError> {
     endpoint = "server-functions/devices/release-robot",
     commands: Extension<DeviceCommands>
 )]
-pub(crate) async fn release_robot(id: String) -> Result<(), CommandError> {
-    commands
+pub(crate) async fn release_robot(session_id: String, id: String) -> Result<(), CommandError> {
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .release_robot(id)
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -515,11 +660,15 @@ pub(crate) async fn release_robot(id: String) -> Result<(), CommandError> {
     commands: Extension<DeviceCommands>
 )]
 pub(crate) async fn set_robot_goal(
+    session_id: String,
     id: String,
     normalized: BTreeMap<String, f64>,
 ) -> Result<(), CommandError> {
-    commands
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .set_robot_goal(id, normalized)
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -529,9 +678,12 @@ pub(crate) async fn set_robot_goal(
     endpoint = "server-functions/devices/start-calibration",
     commands: Extension<DeviceCommands>
 )]
-pub(crate) async fn start_calibration(id: String) -> Result<(), CommandError> {
-    commands
+pub(crate) async fn start_calibration(session_id: String, id: String) -> Result<(), CommandError> {
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .start_calibration(id)
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -541,9 +693,15 @@ pub(crate) async fn start_calibration(id: String) -> Result<(), CommandError> {
     endpoint = "server-functions/devices/finish-calibration",
     commands: Extension<DeviceCommands>
 )]
-pub(crate) async fn finish_calibration(id: String) -> Result<RobotSummary, CommandError> {
-    commands
+pub(crate) async fn finish_calibration(
+    session_id: String,
+    id: String,
+) -> Result<RobotSummary, CommandError> {
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .finish_calibration(id)
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -553,9 +711,12 @@ pub(crate) async fn finish_calibration(id: String) -> Result<RobotSummary, Comma
     endpoint = "server-functions/devices/cancel-calibration",
     commands: Extension<DeviceCommands>
 )]
-pub(crate) async fn cancel_calibration(id: String) -> Result<(), CommandError> {
-    commands
+pub(crate) async fn cancel_calibration(session_id: String, id: String) -> Result<(), CommandError> {
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .cancel_calibration(id)
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -566,10 +727,14 @@ pub(crate) async fn cancel_calibration(id: String) -> Result<(), CommandError> {
     commands: Extension<DeviceCommands>
 )]
 pub(crate) async fn reapply_calibration(
+    session_id: String,
     id: String,
 ) -> Result<(u64, u64, u64, u64, Vec<String>), CommandError> {
-    commands
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .reapply_calibration(id)
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -579,9 +744,15 @@ pub(crate) async fn reapply_calibration(
     endpoint = "server-functions/devices/set-mode",
     commands: Extension<DeviceCommands>
 )]
-pub(crate) async fn set_mode(selection: ModeSelection) -> Result<(), CommandError> {
-    commands
+pub(crate) async fn set_mode(
+    session_id: String,
+    selection: ModeSelection,
+) -> Result<(), CommandError> {
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .set_mode(selection)
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -591,9 +762,12 @@ pub(crate) async fn set_mode(selection: ModeSelection) -> Result<(), CommandErro
     endpoint = "server-functions/data/settings",
     commands: Extension<DataCommands>
 )]
-pub(crate) async fn data_settings() -> Result<DataSettings, CommandError> {
-    commands
+pub(crate) async fn data_settings(session_id: String) -> Result<DataSettings, CommandError> {
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .settings()
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -604,12 +778,16 @@ pub(crate) async fn data_settings() -> Result<DataSettings, CommandError> {
     commands: Extension<DataCommands>
 )]
 pub(crate) async fn update_data_settings(
+    session_id: String,
     connection: SpiralConnectionUpdate,
     training: TrainingRuntimeSettings,
     video: VideoSettings,
 ) -> Result<DataSettings, CommandError> {
-    commands
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .update_settings(DataSettingsChange::new(connection, training, video))
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -619,9 +797,14 @@ pub(crate) async fn update_data_settings(
     endpoint = "server-functions/data/test-spiral",
     commands: Extension<DataCommands>
 )]
-pub(crate) async fn test_spiral_connection() -> Result<(bool, String), CommandError> {
-    commands
+pub(crate) async fn test_spiral_connection(
+    session_id: String,
+) -> Result<(bool, String), CommandError> {
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .test_spiral()
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -631,9 +814,14 @@ pub(crate) async fn test_spiral_connection() -> Result<(bool, String), CommandEr
     endpoint = "server-functions/data/test-training-runtime",
     commands: Extension<DataCommands>
 )]
-pub(crate) async fn test_training_runtime() -> Result<(bool, String), CommandError> {
-    commands
+pub(crate) async fn test_training_runtime(
+    session_id: String,
+) -> Result<(bool, String), CommandError> {
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .test_training_runtime()
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -643,9 +831,12 @@ pub(crate) async fn test_training_runtime() -> Result<(bool, String), CommandErr
     endpoint = "server-functions/data/relations",
     commands: Extension<DataCommands>
 )]
-pub(crate) async fn relation_catalog() -> Result<RelationCatalog, CommandError> {
-    commands
+pub(crate) async fn relation_catalog(session_id: String) -> Result<RelationCatalog, CommandError> {
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .relations()
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -656,11 +847,15 @@ pub(crate) async fn relation_catalog() -> Result<RelationCatalog, CommandError> 
     commands: Extension<DataCommands>
 )]
 pub(crate) async fn run_spiral_query(
+    session_id: String,
     statement: String,
     max_rows: usize,
 ) -> Result<SpiralQuerySnapshot, CommandError> {
-    commands
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .query(statement, max_rows)
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -671,10 +866,14 @@ pub(crate) async fn run_spiral_query(
     commands: Extension<DataCommands>
 )]
 pub(crate) async fn inspect_hugging_face_dataset(
+    session_id: String,
     request: HuggingFaceDatasetSource,
 ) -> Result<HuggingFaceDatasetInspection, CommandError> {
-    commands
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .inspect_hugging_face_dataset(request)
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -685,10 +884,14 @@ pub(crate) async fn inspect_hugging_face_dataset(
     commands: Extension<DataCommands>
 )]
 pub(crate) async fn import_hugging_face_dataset(
+    session_id: String,
     request: HuggingFaceDatasetSource,
 ) -> Result<HuggingFaceDatasetImportSummary, CommandError> {
-    commands
+    let commands = commands
         .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
+    commands
         .import_hugging_face_dataset(request)
         .await
         .map_err(|failure| CommandError(failure.to_string()))
@@ -699,13 +902,17 @@ pub(crate) async fn import_hugging_face_dataset(
     commands: Extension<DataCommands>
 )]
 pub(crate) async fn import_project(
-    document: FileStream,
+    upload: super::project_upload::ProjectUpload,
 ) -> Result<ProjectImportSummary, CommandError> {
+    let (session_id, document) = upload.into_parts();
+    let commands = commands
+        .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.to_string()))?;
     let document =
         CommandError::read_upload(document, spiral_robotics_backend::MAX_PROJECT_IMPORT_BYTES)
             .await?;
     commands
-        .0
         .import_project(document)
         .await
         .map_err(|failure| CommandError(failure.to_string()))

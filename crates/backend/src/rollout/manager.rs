@@ -429,11 +429,100 @@ impl RolloutHardwareResources {
     }
 }
 
+type RolloutFlushRequest = tokio::sync::oneshot::Sender<Result<(), String>>;
+
+struct RolloutPersistence {
+    changes: Mutex<Option<watch::Receiver<RolloutSnapshot>>>,
+    task: Mutex<Option<JoinHandle<()>>>,
+    stop: watch::Sender<bool>,
+    flush: tokio::sync::mpsc::UnboundedSender<RolloutFlushRequest>,
+    requests: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<RolloutFlushRequest>>>,
+}
+
+impl RolloutPersistence {
+    fn new(changes: watch::Receiver<RolloutSnapshot>) -> Self {
+        let (stop, receiver) = watch::channel(false);
+        drop(receiver);
+        let (flush, requests) = tokio::sync::mpsc::unbounded_channel();
+        Self {
+            changes: Mutex::new(Some(changes)),
+            task: Mutex::new(None),
+            stop,
+            flush,
+            requests: Mutex::new(Some(requests)),
+        }
+    }
+
+    fn start<Write, Pending>(&self, persist: Write)
+    where
+        Write: Fn(RolloutSnapshot) -> Pending + Send + 'static,
+        Pending: std::future::Future<Output = Result<(), String>> + Send,
+    {
+        let Some(mut changes) = self.changes.recover_lock().take() else {
+            return;
+        };
+        let Some(mut requests) = self.requests.recover_lock().take() else {
+            return;
+        };
+        let mut stop = self.stop.subscribe();
+        let task = tokio::spawn(async move {
+            let mut last_error = None;
+            loop {
+                let (reply, stopping, dirty) = tokio::select! {
+                    biased;
+                    _ = stop.changed() => (None, true, changes.has_changed().unwrap_or(false)),
+                    request = requests.recv() => (request, false, changes.has_changed().unwrap_or(false)),
+                    changed = changes.changed() => {
+                        if changed.is_err() { break; }
+                        (None, false, true)
+                    }
+                };
+                if dirty || last_error.is_some() {
+                    let snapshot = changes.borrow_and_update().clone();
+                    last_error = persist(snapshot).await.err();
+                    if let Some(error) = &last_error {
+                        tracing::error!("could not persist rollout state: {error}");
+                    }
+                }
+                if let Some(reply) = reply {
+                    let _ = reply.send(last_error.clone().map_or(Ok(()), Err));
+                }
+                if stopping {
+                    break;
+                }
+            }
+        });
+        *self.task.recover_lock() = Some(task);
+    }
+
+    async fn flush(&self) -> Result<(), String> {
+        if self.task.recover_lock().is_none() {
+            return Ok(());
+        }
+        let (reply, received) = tokio::sync::oneshot::channel();
+        self.flush
+            .send(reply)
+            .map_err(|_| "rollout persistence stopped before its writes were drained".to_owned())?;
+        received
+            .await
+            .map_err(|_| "rollout persistence stopped before acknowledging its writes".to_owned())?
+    }
+
+    async fn shutdown(&self) {
+        self.stop.send_replace(true);
+        let task = self.task.recover_lock().take();
+        if let Some(task) = task {
+            let _ = task.await;
+        }
+    }
+}
+
 struct RolloutLifecycle {
     state: watch::Sender<RolloutSnapshot>,
     coordinator: Mutex<RolloutCoordinator>,
     active: Mutex<Option<ActiveRollout>>,
     session_ids: StableIdSequence,
+    persistence: RolloutPersistence,
 }
 
 impl RolloutLifecycle {
@@ -459,16 +548,8 @@ impl RolloutManager {
         // Persisted state is hydrated after the listener starts. Constructing
         // the manager must not put Spiral I/O on the server's critical path.
         let initial = RolloutSnapshot::default();
-        let (persistence, mut changes) = watch::channel(initial.clone());
-        let persistence_storage = storage.clone();
-        tokio::spawn(async move {
-            while changes.changed().await.is_ok() {
-                let snapshot = changes.borrow_and_update().clone();
-                if let Err(error) = persistence_storage.save_rollout_session(&snapshot).await {
-                    tracing::error!("could not persist rollout state: {error}");
-                }
-            }
-        });
+        let (persistence, changes) = watch::channel(initial.clone());
+        let persistence_worker = RolloutPersistence::new(changes);
         let (state, receiver) = watch::channel(initial);
         drop(receiver);
         let events = Arc::new(WatchRolloutEvents {
@@ -485,11 +566,28 @@ impl RolloutManager {
                 coordinator: Mutex::new(RolloutCoordinator::new(events)),
                 active: Mutex::new(None),
                 session_ids: StableIdSequence::new("rollout", 1),
+                persistence: persistence_worker,
             },
         })
     }
 
-    pub(crate) async fn reload_from_storage(&self) -> Result<(), String> {
+    pub(crate) fn activate(&self) {
+        let storage = self.storage.clone();
+        self.lifecycle.persistence.start(move |snapshot| {
+            let storage = storage.clone();
+            async move { storage.save_rollout_session(&snapshot).await }
+        });
+    }
+
+    pub(crate) async fn flush_persistence(&self) -> Result<(), String> {
+        self.lifecycle.persistence.flush().await
+    }
+
+    pub(crate) fn is_active(&self) -> bool {
+        self.lifecycle.active.recover_lock().is_some() || self.snapshot().phase().active()
+    }
+
+    pub(crate) async fn prepare_from_storage(&self) -> Result<(), String> {
         if self.lifecycle.active.recover_lock().is_some() {
             return Err("cannot reload rollout history while a session is active".to_owned());
         }
@@ -567,14 +665,11 @@ impl RolloutManager {
     }
 
     pub(crate) async fn shutdown(&self) {
-        let task = {
-            let Some(active) = self.lifecycle.take_active() else {
-                return;
-            };
+        if let Some(active) = self.lifecycle.take_active() {
             let _ = self.lifecycle.coordinator.recover_lock().request_stop();
-            active
-        };
-        task.stop_and_join().await;
+            active.stop_and_join().await;
+        }
+        self.lifecycle.persistence.shutdown().await;
     }
 
     async fn run_and_finish(self: Arc<Self>, run: RolloutRun) {
@@ -1875,5 +1970,160 @@ mod tests {
             receiver,
         }];
         assert!(cameras.require_fresh().unwrap_err().contains("stale"));
+    }
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use std::sync::{Arc, Mutex};
+
+    use futures_util::FutureExt as _;
+    use spiral_robotics_common::rollout::RolloutSnapshot;
+    use tokio::sync::{mpsc, oneshot, watch};
+
+    use super::RolloutPersistence;
+
+    #[derive(Debug)]
+    struct PendingRolloutWrite {
+        snapshot: RolloutSnapshot,
+        completion: oneshot::Sender<Result<(), String>>,
+    }
+
+    impl PendingRolloutWrite {
+        fn complete(self, result: Result<(), String>) {
+            self.completion.send(result).unwrap();
+        }
+    }
+
+    struct PersistenceHarness {
+        persistence: Arc<RolloutPersistence>,
+        updates: watch::Sender<RolloutSnapshot>,
+        writes: mpsc::UnboundedReceiver<PendingRolloutWrite>,
+        durable: Arc<Mutex<RolloutSnapshot>>,
+    }
+
+    impl PersistenceHarness {
+        fn new() -> Self {
+            let (updates, changes) = watch::channel(RolloutSnapshot::default());
+            let persistence = Arc::new(RolloutPersistence::new(changes));
+            let (attempted, writes) = mpsc::unbounded_channel();
+            let durable = Arc::new(Mutex::new(RolloutSnapshot::default()));
+            let destination = durable.clone();
+            persistence.start(move |snapshot| {
+                let (completion, completed) = oneshot::channel();
+                attempted
+                    .send(PendingRolloutWrite {
+                        snapshot: snapshot.clone(),
+                        completion,
+                    })
+                    .unwrap();
+                let destination = destination.clone();
+                async move {
+                    let result = completed.await.unwrap();
+                    if result.is_ok() {
+                        *destination.lock().unwrap() = snapshot;
+                    }
+                    result
+                }
+            });
+            Self {
+                persistence,
+                updates,
+                writes,
+                durable,
+            }
+        }
+
+        fn snapshot(session_id: &str) -> RolloutSnapshot {
+            RolloutSnapshot::new(Some(session_id.to_owned()), Some("training-run".to_owned()))
+        }
+
+        fn publish(&self, session_id: &str) {
+            self.updates.send_replace(Self::snapshot(session_id));
+        }
+
+        async fn next_write(&mut self) -> PendingRolloutWrite {
+            self.writes
+                .recv()
+                .await
+                .expect("the persistence worker must attempt a write")
+        }
+    }
+
+    #[tokio::test]
+    async fn flush_waits_for_inflight_write_and_drains_a_newer_snapshot() {
+        let mut harness = PersistenceHarness::new();
+        harness.publish("running");
+        let running = harness.next_write().await;
+        assert_eq!(running.snapshot.session_id(), Some("running"));
+
+        let persistence = harness.persistence.clone();
+        let mut flush = Box::pin(persistence.flush());
+        assert!(flush.as_mut().now_or_never().is_none());
+        harness.publish("completed");
+        running.complete(Ok(()));
+
+        let terminal = harness.next_write().await;
+        assert_eq!(terminal.snapshot.session_id(), Some("completed"));
+        assert!(
+            flush.as_mut().now_or_never().is_none(),
+            "the flush must include the queued terminal snapshot"
+        );
+        terminal.complete(Ok(()));
+        flush.await.unwrap();
+        assert_eq!(
+            harness.durable.lock().unwrap().session_id(),
+            Some("completed")
+        );
+        persistence.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn failed_flush_is_reported_and_a_later_flush_retries_the_same_snapshot() {
+        let mut harness = PersistenceHarness::new();
+        harness.publish("completed");
+        let persistence = harness.persistence.clone();
+        // Queue the barrier before yielding to the worker, so this write is
+        // the one the first flush must acknowledge.
+        let mut first_flush = Box::pin(persistence.flush());
+        assert!(first_flush.as_mut().now_or_never().is_none());
+        harness
+            .next_write()
+            .await
+            .complete(Err("storage unavailable".to_owned()));
+        assert_eq!(first_flush.await.unwrap_err(), "storage unavailable");
+
+        let mut retry = Box::pin(persistence.flush());
+        assert!(retry.as_mut().now_or_never().is_none());
+        let retried = harness.next_write().await;
+        assert_eq!(retried.snapshot.session_id(), Some("completed"));
+        retried.complete(Ok(()));
+        retry.await.unwrap();
+        assert_eq!(
+            harness.durable.lock().unwrap().session_id(),
+            Some("completed")
+        );
+        persistence.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_after_flush_does_not_overwrite_replacement_project_data() {
+        let mut harness = PersistenceHarness::new();
+        harness.publish("old-project-run");
+        let persistence = harness.persistence.clone();
+        let mut flush = Box::pin(persistence.flush());
+        assert!(flush.as_mut().now_or_never().is_none());
+        harness.next_write().await.complete(Ok(()));
+        flush.await.unwrap();
+
+        *harness.durable.lock().unwrap() = PersistenceHarness::snapshot("imported-run");
+        tokio::select! {
+            () = persistence.shutdown() => {}
+            Some(write) = harness.writes.recv() => panic!("retirement attempted another write: {write:?}"),
+        }
+        assert_eq!(
+            harness.durable.lock().unwrap().session_id(),
+            Some("imported-run")
+        );
     }
 }

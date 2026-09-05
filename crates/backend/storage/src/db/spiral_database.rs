@@ -7,7 +7,6 @@ use arrow_array::cast::AsArray as _;
 use arrow_array::{ArrayRef as ArrowArrayRef, RecordBatch, StringArray, StructArray};
 use arrow_schema::{DataType, Field, Schema};
 use futures::{FutureExt as _, StreamExt as _, TryStreamExt as _};
-use parking_lot::RwLock;
 use spiral_client::SpiralClientOptions;
 use spiral_client::authn::ClientCredentials;
 use spiral_client::catalog_client::lazy_catalog_client_with_client;
@@ -49,20 +48,14 @@ const SPIRALDB_CATALOG: &str = "spiraldb";
 
 /// Configured database entry point held by application state.
 pub(super) struct SpiralDatabase {
-    configured_session: RwLock<ConfiguredSpiralSession>,
+    configured_session: ConfiguredSpiralSession,
 }
 
 impl SpiralDatabase {
     pub(super) fn new(settings: SpiralConnectionSettings) -> DatabaseResult<Self> {
         Ok(Self {
-            configured_session: RwLock::new(ConfiguredSpiralSession::new(&settings)?),
+            configured_session: ConfiguredSpiralSession::new(&settings)?,
         })
-    }
-
-    pub(super) fn configure(&self, settings: SpiralConnectionSettings) -> DatabaseResult<()> {
-        let configured_session = ConfiguredSpiralSession::new(&settings)?;
-        *self.configured_session.write() = configured_session;
-        Ok(())
     }
 }
 
@@ -141,7 +134,7 @@ impl ConfiguredSpiralSession {
 impl Database for SpiralDatabase {
     fn connect(&self) -> DatabaseFuture<'_, Box<dyn DatabaseConnection>> {
         async move {
-            let connection = self.configured_session.read().open_connection()?;
+            let connection = self.configured_session.open_connection()?;
             Ok(Box::new(SpiralConnection::new(connection)) as Box<dyn DatabaseConnection>)
         }
         .boxed()

@@ -5,6 +5,7 @@
 //! resource, while successful immutable episode data is cached on its catalog
 //! entry.
 
+use crate::client::project::ProjectClient;
 use std::sync::Arc;
 
 use dioxus::prelude::*;
@@ -18,9 +19,7 @@ use crate::activities::data::query_result::{
 use crate::activities::data::sql_draft::GeneratedSqlDraft;
 use crate::activities::data::workbench::QueryPresetSql;
 use crate::client::episode_data::EpisodeData;
-use crate::client::server_fns::{
-    list_datasets as fetch_datasets, list_episodes as fetch_episodes, run_spiral_query,
-};
+
 use crate::shell::notifications::MessageSource;
 use crate::shell::state::Studio;
 
@@ -394,7 +393,11 @@ impl DataController {
             catalog.error = None;
             catalog.request_sequence
         };
-        match fetch_datasets().await.map_err(|error| error.to_string()) {
+        match ProjectClient::current()
+            .list_datasets()
+            .await
+            .map_err(|error| error.to_string())
+        {
             Ok(datasets) => {
                 let mut catalog = self.dataset_catalog.write();
                 if catalog.request_sequence != request_sequence {
@@ -436,7 +439,8 @@ impl DataController {
             catalog.error = None;
             catalog.request_sequence
         };
-        match fetch_episodes(dataset_id.clone())
+        match ProjectClient::current()
+            .list_episodes(dataset_id.clone())
             .await
             .map_err(|error| error.to_string())
         {
@@ -659,8 +663,9 @@ impl DataController {
         // The Data view may be unmounted while the request is in flight. The
         // controller and its generation guard are shell-owned, so completion
         // must outlive the button that launched it.
-        dioxus::dioxus_core::spawn_forever(async move {
-            let outcome = run_spiral_query(statement.clone(), rows)
+        crate::client::project::ProjectClient::current().spawn(async move {
+            let outcome = ProjectClient::current()
+                .run_spiral_query(statement.clone(), rows)
                 .await
                 .map_err(|error| error.to_string());
             if self

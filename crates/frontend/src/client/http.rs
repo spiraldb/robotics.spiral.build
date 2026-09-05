@@ -1,28 +1,18 @@
-//! Browser event streams and URLs for the intentional HTTP media/download surfaces.
-//!
-//! Requests go to the same origin the page was served from, so the UI works
-//! unchanged whether the studio is on localhost or on the robot's own machine.
+//! Ordered browser events and URLs for media/download surfaces.
 
-#[cfg(all(feature = "web", target_arch = "wasm32"))]
-use futures_util::{StreamExt, stream};
-#[cfg(all(feature = "web", target_arch = "wasm32"))]
-use gloo_net::eventsource::futures::EventSource;
-#[cfg(all(feature = "web", target_arch = "wasm32"))]
+#[cfg(any(test, all(feature = "web", target_arch = "wasm32")))]
+use spiral_robotics_common::project::{ProjectEvent, ProjectSessionInfo};
 use spiral_robotics_common::robots::TelemetryFrame;
-#[cfg(all(feature = "web", target_arch = "wasm32"))]
 use spiral_robotics_common::rollout::RolloutSnapshot;
-#[cfg(all(feature = "web", target_arch = "wasm32"))]
 use spiral_robotics_common::status::StudioSnapshot;
-#[cfg(all(feature = "web", target_arch = "wasm32"))]
 use spiral_robotics_common::training::{TrainingSnapshot, TrainingUpdate};
-#[cfg(all(feature = "web", target_arch = "wasm32"))]
 use spiral_robotics_common::workflow::{WorkflowAgentSnapshot, WorkflowSnapshot};
 
-#[cfg(all(feature = "web", target_arch = "wasm32"))]
-pub(crate) struct Http;
-
-/// One message from the studio's event stream.
-#[cfg(all(feature = "web", target_arch = "wasm32"))]
+#[cfg_attr(
+    not(any(test, all(feature = "web", target_arch = "wasm32"))),
+    allow(dead_code)
+)]
+#[derive(Clone)]
 pub(crate) enum StudioEvent {
     Snapshot(Box<StudioSnapshot>),
     Telemetry(Box<TelemetryFrame>),
@@ -33,98 +23,130 @@ pub(crate) enum StudioEvent {
     WorkflowAgent(Box<WorkflowAgentSnapshot>),
 }
 
-/// Consume the server's event stream, handing every message to `on_event`.
-///
-/// Returns when the connection closes, which the caller treats as a signal to
-/// reconnect. The [`EventSource`] is owned by this future, so dropping the
-/// future closes the connection.
+#[cfg(any(test, all(feature = "web", target_arch = "wasm32")))]
+pub(crate) enum ProjectStreamMessage {
+    Session(ProjectSessionInfo),
+    Event(ProjectEvent<StudioEvent>),
+    Connected(bool),
+}
+
+#[cfg(any(test, all(feature = "web", target_arch = "wasm32")))]
+impl ProjectStreamMessage {
+    pub(crate) fn decode(kind: &str, text: &str) -> Option<Self> {
+        if kind == "project_session" {
+            return serde_json::from_str(text).ok().map(Self::Session);
+        }
+        let envelope: ProjectEvent<serde_json::Value> = serde_json::from_str(text).ok()?;
+        let (session_id, payload) = envelope.into_parts();
+        let event = match kind {
+            "state" => StudioEvent::Snapshot(Box::new(serde_json::from_value(payload).ok()?)),
+            "telemetry" => StudioEvent::Telemetry(Box::new(serde_json::from_value(payload).ok()?)),
+            "training_snapshot" => {
+                StudioEvent::TrainingSnapshot(Box::new(serde_json::from_value(payload).ok()?))
+            }
+            "training_update" => {
+                StudioEvent::TrainingUpdate(Box::new(serde_json::from_value(payload).ok()?))
+            }
+            "rollout_state" => {
+                StudioEvent::Rollout(Box::new(serde_json::from_value(payload).ok()?))
+            }
+            "workflow_snapshot" | "workflow_update" => {
+                StudioEvent::WorkflowState(Box::new(serde_json::from_value(payload).ok()?))
+            }
+            "workflow_agent" => {
+                StudioEvent::WorkflowAgent(Box::new(serde_json::from_value(payload).ok()?))
+            }
+            _ => return None,
+        };
+        Some(Self::Event(ProjectEvent::new(session_id, event)))
+    }
+}
+
+#[cfg(all(feature = "web", target_arch = "wasm32"))]
+pub(crate) struct Http;
+
 #[cfg(all(feature = "web", target_arch = "wasm32"))]
 impl Http {
-    pub(crate) async fn stream_events<F>(mut on_event: F) -> Result<(), String>
-    where
-        F: FnMut(StudioEvent),
-    {
-        let mut source = EventSource::new("/api/events")
-            .map_err(|error| format!("could not open the event stream: {error}"))?;
-        let snapshots = source
-            .subscribe("state")
-            .map_err(|error| format!("could not subscribe to studio state: {error}"))?;
-        let telemetry = source
-            .subscribe("telemetry")
-            .map_err(|error| format!("could not subscribe to telemetry: {error}"))?;
-        let training_snapshots = source
-            .subscribe("training_snapshot")
-            .map_err(|error| format!("could not subscribe to training snapshots: {error}"))?;
-        let training_updates = source
-            .subscribe("training_update")
-            .map_err(|error| format!("could not subscribe to training updates: {error}"))?;
-        let rollout = source
-            .subscribe("rollout_state")
-            .map_err(|error| format!("could not subscribe to rollout state: {error}"))?;
-        let workflow_snapshots = source
-            .subscribe("workflow_snapshot")
-            .map_err(|error| format!("could not subscribe to Workflow snapshots: {error}"))?;
-        let workflow_updates = source
-            .subscribe("workflow_update")
-            .map_err(|error| format!("could not subscribe to Workflow updates: {error}"))?;
-        let workflow_agent = source.subscribe("workflow_agent").map_err(|error| {
-            format!("could not subscribe to Workflow Assistant updates: {error}")
-        })?;
-
-        let mut events = stream::select(
-            stream::select(stream::select(snapshots, telemetry), rollout),
-            stream::select(
-                stream::select(training_snapshots, training_updates),
-                stream::select(
-                    stream::select(workflow_snapshots, workflow_updates),
-                    workflow_agent,
-                ),
-            ),
-        );
-        while let Some(Ok((kind, message))) = events.next().await {
-            let Some(text) = message.data().as_string() else {
-                continue;
-            };
-            match kind.as_str() {
-                "state" => {
-                    if let Ok(snapshot) = serde_json::from_str(&text) {
-                        on_event(StudioEvent::Snapshot(Box::new(snapshot)));
-                    }
-                }
-                "telemetry" => {
-                    if let Ok(frame) = serde_json::from_str(&text) {
-                        on_event(StudioEvent::Telemetry(Box::new(frame)));
-                    }
-                }
-                "training_snapshot" => {
-                    if let Ok(snapshot) = serde_json::from_str(&text) {
-                        on_event(StudioEvent::TrainingSnapshot(Box::new(snapshot)));
-                    }
-                }
-                "training_update" => {
-                    if let Ok(update) = serde_json::from_str(&text) {
-                        on_event(StudioEvent::TrainingUpdate(Box::new(update)));
-                    }
-                }
-                "rollout_state" => {
-                    if let Ok(snapshot) = serde_json::from_str(&text) {
-                        on_event(StudioEvent::Rollout(Box::new(snapshot)));
-                    }
-                }
-                "workflow_snapshot" | "workflow_update" => {
-                    if let Ok(state) = serde_json::from_str(&text) {
-                        on_event(StudioEvent::WorkflowState(Box::new(state)));
-                    }
-                }
-                "workflow_agent" => {
-                    if let Ok(state) = serde_json::from_str(&text) {
-                        on_event(StudioEvent::WorkflowAgent(Box::new(state)));
-                    }
-                }
-                _ => {}
-            }
-        }
+    pub(crate) async fn stream_events(
+        on_event: impl FnMut(ProjectStreamMessage) + 'static,
+    ) -> Result<(), String> {
+        let _connection = BrowserEventConnection::new(on_event)?;
+        // EventSource reconnects itself. Dropping this scoped future closes it
+        // and removes its listeners; callbacks retain native dispatch order.
+        std::future::pending::<()>().await;
         Ok(())
+    }
+}
+
+#[cfg(all(feature = "web", target_arch = "wasm32"))]
+struct BrowserEventConnection {
+    source: web_sys::EventSource,
+    listeners: Vec<(
+        String,
+        wasm_bindgen::closure::Closure<dyn FnMut(web_sys::Event)>,
+    )>,
+}
+
+#[cfg(all(feature = "web", target_arch = "wasm32"))]
+impl BrowserEventConnection {
+    fn new(on_event: impl FnMut(ProjectStreamMessage) + 'static) -> Result<Self, String> {
+        use wasm_bindgen::JsCast as _;
+        let source = web_sys::EventSource::new("/api/events")
+            .map_err(|error| format!("could not open the event stream: {error:?}"))?;
+        let on_event = std::rc::Rc::new(std::cell::RefCell::new(on_event));
+        let mut connection = Self {
+            source,
+            listeners: Vec::new(),
+        };
+        for kind in [
+            "open",
+            "error",
+            "project_session",
+            "state",
+            "telemetry",
+            "training_snapshot",
+            "training_update",
+            "rollout_state",
+            "workflow_snapshot",
+            "workflow_update",
+            "workflow_agent",
+        ] {
+            let callback = on_event.clone();
+            let listener =
+                wasm_bindgen::closure::Closure::wrap(Box::new(move |event: web_sys::Event| {
+                    let message = match kind {
+                        "open" => Some(ProjectStreamMessage::Connected(true)),
+                        "error" => Some(ProjectStreamMessage::Connected(false)),
+                        _ => event
+                            .dyn_ref::<web_sys::MessageEvent>()
+                            .and_then(|event| event.data().as_string())
+                            .and_then(|text| ProjectStreamMessage::decode(kind, &text)),
+                    };
+                    if let Some(message) = message {
+                        callback.borrow_mut()(message);
+                    }
+                })
+                    as Box<dyn FnMut(web_sys::Event)>);
+            connection
+                .source
+                .add_event_listener_with_callback(kind, listener.as_ref().unchecked_ref())
+                .map_err(|error| format!("could not subscribe to {kind}: {error:?}"))?;
+            connection.listeners.push((kind.to_owned(), listener));
+        }
+        Ok(connection)
+    }
+}
+
+#[cfg(all(feature = "web", target_arch = "wasm32"))]
+impl Drop for BrowserEventConnection {
+    fn drop(&mut self) {
+        use wasm_bindgen::JsCast as _;
+        self.source.close();
+        for (kind, listener) in &self.listeners {
+            let _ = self
+                .source
+                .remove_event_listener_with_callback(kind, listener.as_ref().unchecked_ref());
+        }
     }
 }
 
@@ -158,7 +180,7 @@ impl EpisodeApiPath for str {
 ///
 /// Camera identifiers are device paths on Linux, so at minimum the separators
 /// and reserved characters have to survive the round trip.
-trait UrlComponent {
+pub(crate) trait UrlComponent {
     fn url_component(&self) -> String;
 }
 
@@ -180,6 +202,26 @@ impl UrlComponent for str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn events_require_an_explicit_project_envelope() {
+        let snapshot = StudioSnapshot::default();
+        let unscoped = serde_json::to_string(&snapshot).unwrap();
+        assert!(ProjectStreamMessage::decode("state", &unscoped).is_none());
+        let scoped = serde_json::to_string(&ProjectEvent::new("project-a", snapshot)).unwrap();
+        let Some(ProjectStreamMessage::Event(event)) =
+            ProjectStreamMessage::decode("state", &scoped)
+        else {
+            panic!("the scoped snapshot must decode");
+        };
+        assert_eq!(event.session_id(), "project-a");
+        let announcement =
+            serde_json::to_string(&ProjectSessionInfo::new("project-b", "robotics")).unwrap();
+        assert!(matches!(
+            ProjectStreamMessage::decode("project_session", &announcement),
+            Some(ProjectStreamMessage::Session(_))
+        ));
+    }
 
     #[test]
     fn device_paths_survive_the_query_string() {

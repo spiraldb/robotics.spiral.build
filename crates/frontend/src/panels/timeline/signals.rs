@@ -6,16 +6,13 @@
 //! prevents a second timeline implementation from growing beside the one users
 //! actually operate.
 
-#[cfg(any(test, all(feature = "web", target_arch = "wasm32")))]
 use spiral_robotics_common::robots::TelemetryFrame;
 use spiral_robotics_viewport as arm;
 
 /// Thirty minutes at the studio's 20 Hz telemetry publish rate.
-#[cfg(any(test, all(feature = "web", target_arch = "wasm32")))]
 const MAX_SAMPLES: usize = 36_000;
 
 /// Drop samples in chunks so trimming remains amortized.
-#[cfg(any(test, all(feature = "web", target_arch = "wasm32")))]
 const TRIM_CHUNK: usize = 3_600;
 
 const SIGNAL_COLORS: [&str; 6] = [
@@ -87,14 +84,11 @@ impl ArmSignals {
 /// same frame. Every joint vector is kept index-aligned with that column.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct SignalStore {
-    #[cfg(any(test, all(feature = "web", target_arch = "wasm32")))]
     take: Option<String>,
     times: Vec<f32>,
     arms: Vec<ArmSignals>,
-    #[cfg(any(test, all(feature = "web", target_arch = "wasm32")))]
     live: bool,
     /// Consecutive telemetry frames that reported no active recording.
-    #[cfg(any(test, all(feature = "web", target_arch = "wasm32")))]
     idle: u8,
 }
 
@@ -107,7 +101,6 @@ impl SignalStore {
         &self.times
     }
 
-    #[cfg(any(test, all(feature = "web", target_arch = "wasm32")))]
     pub(crate) fn live(&self) -> bool {
         self.live
     }
@@ -117,7 +110,6 @@ impl SignalStore {
     // A single idle frame can be a publication race between recorder state and
     // telemetry. Two consecutive idle frames end the take while preserving it
     // for inspection in the Timeline.
-    #[cfg(any(test, all(feature = "web", target_arch = "wasm32")))]
     pub(crate) fn observe(&mut self, frame: &TelemetryFrame) {
         let Some(recording) = frame.recording() else {
             self.idle = self.idle.saturating_add(1);
@@ -192,7 +184,6 @@ impl SignalStore {
         }
     }
 
-    #[cfg(any(test, all(feature = "web", target_arch = "wasm32")))]
     fn reset(&mut self, take: &str) {
         self.take = Some(take.to_owned());
         self.times.clear();
@@ -200,7 +191,6 @@ impl SignalStore {
         self.idle = 0;
     }
 
-    #[cfg(any(test, all(feature = "web", target_arch = "wasm32")))]
     fn trim(&mut self) {
         self.times.drain(..TRIM_CHUNK);
         for arm in &mut self.arms {

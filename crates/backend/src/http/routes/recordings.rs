@@ -65,8 +65,9 @@ impl ByteRange {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 struct LocalVideoQuery {
+    session_id: String,
     #[serde(default)]
     segment: Option<u32>,
 }
@@ -80,6 +81,13 @@ impl AppState {
             HeaderMap,
         ),
     ) -> Result<Response, (StatusCode, String)> {
+        let state = state
+            .for_session(&query.session_id)
+            .map_err(|error| (StatusCode::CONFLICT, error.to_string()))?;
+        let _activity = state
+            .admit()
+            .map_err(|error| (StatusCode::CONFLICT, error.to_string()))?;
+
         if let Some(detail) = state.bootstrap().storage_unavailable() {
             return Err((
                 StatusCode::SERVICE_UNAVAILABLE,

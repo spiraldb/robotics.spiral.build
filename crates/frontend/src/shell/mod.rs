@@ -4,6 +4,7 @@ pub(crate) mod activity;
 pub(crate) mod frame;
 pub(crate) mod layout;
 pub(crate) mod notifications;
+pub(crate) mod project;
 pub(crate) mod routes;
 pub(crate) mod state;
 pub(crate) mod workspace;

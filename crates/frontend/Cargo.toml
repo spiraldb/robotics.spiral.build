@@ -44,6 +44,8 @@ web-sys = { version = "0.3", features = [
     "DomRect",
     "Element",
     "EventTarget",
+    "EventSource",
+    "MessageEvent",
     "File",
     "AbortController",
     "AbortSignal",

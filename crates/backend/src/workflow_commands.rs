@@ -1,40 +1,18 @@
 //! Workflow commands exposed to fullstack delivery adapters.
 
-use std::sync::Arc;
-
 use spiral_robotics_common::workflow::{
     WorkflowAgentCommand, WorkflowAgentSnapshot, WorkflowCommand, WorkflowSnapshot,
 };
 
 use crate::OperationError;
-use crate::data::catalog_lease::{CatalogLeaseOwner, CatalogMutationLease};
-use crate::http::routes::BootstrapState;
+use crate::data::catalog_lease::CatalogLeaseOwner;
 use crate::main_runtime::{MainRuntime, MainRuntimeFailure};
-use crate::workflow::agent::WorkflowAgentManager;
-use crate::workflow::manager::WorkflowManager;
-
-/// Admission resources shared by Workflow commands.
-pub(crate) struct WorkflowAdmission {
-    catalog_lease: Arc<CatalogMutationLease>,
-    bootstrap: BootstrapState,
-}
-
-impl WorkflowAdmission {
-    pub(crate) fn new(catalog_lease: Arc<CatalogMutationLease>, bootstrap: BootstrapState) -> Self {
-        Self {
-            catalog_lease,
-            bootstrap,
-        }
-    }
-}
 
 /// Narrow command facade shared with the Studio's server-function handlers.
 #[derive(Clone)]
 pub struct WorkflowCommands {
     main_runtime: MainRuntime,
-    workflow: Arc<WorkflowManager>,
-    agent: Arc<WorkflowAgentManager>,
-    admission: Arc<WorkflowAdmission>,
+    state: crate::http::routes::AppState,
 }
 
 /// One Workflow command failure whose backend message is shown verbatim by Studio.
@@ -42,26 +20,28 @@ pub struct WorkflowCommands {
 pub struct WorkflowFailure(String);
 
 impl WorkflowCommands {
-    pub(crate) fn new(
-        main_runtime: MainRuntime,
-        workflow: Arc<WorkflowManager>,
-        agent: Arc<WorkflowAgentManager>,
-        admission: WorkflowAdmission,
-    ) -> Self {
+    pub(crate) fn new(main_runtime: MainRuntime, state: crate::http::routes::AppState) -> Self {
         Self {
             main_runtime,
-            workflow,
-            agent,
-            admission: Arc::new(admission),
+            state,
         }
+    }
+
+    pub fn for_session(&self, session_id: &str) -> Result<Self, WorkflowFailure> {
+        Ok(Self::new(
+            self.main_runtime.clone(),
+            self.state.for_session(session_id)?,
+        ))
     }
 
     pub async fn snapshot(&self) -> Result<WorkflowSnapshot, WorkflowFailure> {
         let commands = self.clone();
+        let activity = commands.state.admit()?;
         self.main_runtime
             .execute(async move {
+                let _activity = activity;
                 commands.require_catalog_ready()?;
-                Ok(commands.workflow.state())
+                Ok(commands.state.workflow().state())
             })
             .await?
     }
@@ -71,23 +51,23 @@ impl WorkflowCommands {
         command: WorkflowCommand,
     ) -> Result<WorkflowSnapshot, WorkflowFailure> {
         let commands = self.clone();
+        let activity = commands.state.admit()?;
         self.main_runtime
             .execute(async move {
+                let _activity = activity;
                 commands.require_catalog_ready()?;
                 if matches!(&command, WorkflowCommand::Cancel { .. }) {
-                    return commands.workflow.command(command).await.map_err(Into::into);
+                    return commands.state.workflow().command(command).await.map_err(Into::into);
                 }
-                let token = commands
-                    .admission
-                    .catalog_lease
+                let token = commands.state.catalog_lease()
                     .try_acquire(CatalogLeaseOwner::WorkflowStart)
                     .ok_or_else(|| {
                         WorkflowFailure::conflict(
                             "Wait for the current recording or catalog change before changing Workflow",
                         )
                     })?;
-                if commands.agent.is_active() {
-                    let released = commands.admission.catalog_lease.release(token);
+                if commands.state.workflow_agent().is_active() {
+                    let released = commands.state.catalog_lease().release(token);
                     debug_assert!(
                         released,
                         "Workflow command releases its admission lease once"
@@ -96,8 +76,8 @@ impl WorkflowCommands {
                         "Wait for the active Assistant turn before changing Workflow manually",
                     ));
                 }
-                let result = commands.workflow.command(command).await.map_err(Into::into);
-                let released = commands.admission.catalog_lease.release(token);
+                let result = commands.state.workflow().command(command).await.map_err(Into::into);
+                let released = commands.state.catalog_lease().release(token);
                 debug_assert!(
                     released,
                     "Workflow command releases its admission lease once"
@@ -109,10 +89,12 @@ impl WorkflowCommands {
 
     pub async fn agent_snapshot(&self) -> Result<WorkflowAgentSnapshot, WorkflowFailure> {
         let commands = self.clone();
+        let activity = commands.state.admit()?;
         self.main_runtime
             .execute(async move {
+                let _activity = activity;
                 commands.require_catalog_ready()?;
-                Ok(commands.agent.state())
+                Ok(commands.state.workflow_agent().state())
             })
             .await?
     }
@@ -122,13 +104,13 @@ impl WorkflowCommands {
         command: WorkflowAgentCommand,
     ) -> Result<WorkflowAgentSnapshot, WorkflowFailure> {
         let commands = self.clone();
+        let activity = commands.state.admit()?;
         self.main_runtime
             .execute(async move {
+                let _activity = activity;
                 commands.require_catalog_ready()?;
                 if !matches!(&command, WorkflowAgentCommand::Cancel { .. })
-                    && !commands
-                        .admission
-                        .bootstrap
+                    && !commands.state.bootstrap()
                         .current()
                         .catalog_available()
                 {
@@ -143,9 +125,7 @@ impl WorkflowCommands {
                 );
                 let token = if history_mutation {
                     Some(
-                        commands
-                            .admission
-                            .catalog_lease
+                        commands.state.catalog_lease()
                             .try_acquire(CatalogLeaseOwner::WorkflowAgentHistory)
                             .ok_or_else(|| {
                                 WorkflowFailure::conflict(
@@ -156,9 +136,9 @@ impl WorkflowCommands {
                 } else {
                     None
                 };
-                let result = commands.agent.command(command).await.map_err(Into::into);
+                let result = commands.state.workflow_agent().command(command).await.map_err(Into::into);
                 if let Some(token) = token {
-                    let released = commands.admission.catalog_lease.release(token);
+                    let released = commands.state.catalog_lease().release(token);
                     debug_assert!(
                         released,
                         "Assistant command releases its history lease once"
@@ -170,7 +150,7 @@ impl WorkflowCommands {
     }
 
     fn require_catalog_ready(&self) -> Result<(), WorkflowFailure> {
-        match self.admission.bootstrap.catalog_unavailable() {
+        match self.state.bootstrap().catalog_unavailable() {
             Some(detail) => Err(WorkflowFailure(format!(
                 "Studio catalog is not ready: {detail}"
             ))),

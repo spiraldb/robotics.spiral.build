@@ -4,6 +4,7 @@
 //! item, and in-flight command guards therefore belong to the shell rather
 //! than to the mounted Training workspace.
 
+use crate::client::project::ProjectClient;
 use std::collections::BTreeSet;
 
 use dioxus::prelude::*;
@@ -11,7 +12,7 @@ use spiral_robotics_common::training::TrainingConfig;
 
 use crate::activities::data::catalog as spiral;
 use crate::activities::data::sql_draft::GeneratedSqlDraft;
-use crate::client::server_fns;
+
 use crate::shell::notifications::MessageSource;
 use crate::shell::state::Studio;
 
@@ -190,7 +191,8 @@ impl TrainingController {
         let mut config_signal = self.draft.config;
         let mut automatic_run_name = self.draft.automatic_run_name;
         spawn(async move {
-            let result = server_fns::start_training_run(config)
+            let result = ProjectClient::current()
+                .start_training_run(config)
                 .await
                 .map_err(|error| error.to_string());
             starting.set(false);
@@ -230,7 +232,8 @@ impl TrainingController {
         self.commands.stopping.set(Some(id.clone()));
         let mut stopping = self.commands.stopping;
         studio.run_utility("Stop requested.", async move {
-            let result = server_fns::stop_training_run(id)
+            let result = ProjectClient::current()
+                .stop_training_run(id)
                 .await
                 .map_err(|error| error.to_string());
             stopping.set(None);
@@ -249,7 +252,8 @@ impl TrainingController {
         let mut selected_run = self.history.selected_run;
         let mut opened_runs = self.history.opened_runs;
         studio.run_utility(format!("Deleted run {}.", run.name), async move {
-            let result = server_fns::delete_training_run(run_id)
+            let result = ProjectClient::current()
+                .delete_training_run(run_id)
                 .await
                 .map_err(|error| error.to_string());
             deleting.set(None);

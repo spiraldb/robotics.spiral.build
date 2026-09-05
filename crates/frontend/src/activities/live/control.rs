@@ -1,5 +1,6 @@
 //! Joint controls for the arm selected on the Live screen.
 
+use crate::client::project::ProjectClient;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -13,7 +14,6 @@ use spiral_robotics_common::robots::{
 };
 use spiral_robotics_viewport::{self as arm, ArmPose};
 
-use crate::client::server_fns::set_robot_goal;
 use crate::shell::state::{Selection, studio};
 
 #[derive(Default)]
@@ -480,7 +480,8 @@ fn JointControls(
                     if normalized.is_empty() {
                         continue;
                     }
-                    if let Err(error) = set_robot_goal(command_robot.clone(), normalized)
+                    if let Err(error) = ProjectClient::current()
+                        .set_robot_goal(command_robot.clone(), normalized)
                         .await
                         .map_err(|error| error.to_string())
                     {

@@ -483,6 +483,9 @@ impl AppState {
     /// A failed bus stays disconnected with its error attached; one absent arm
     /// never prevents the web interface or another arm from starting.
     pub(crate) async fn auto_connect_saved_robots(&self) {
+        let Ok(_activity) = self.admit() else {
+            return;
+        };
         let adapter = RobotAdapter::new(self);
         for outcome in RobotActions::new(&adapter, &adapter).auto_connect().await {
             outcome.log();
@@ -534,6 +537,13 @@ pub struct DeviceCommands {
 pub struct DeviceFailure(String);
 
 impl DeviceCommands {
+    pub fn for_session(&self, session_id: &str) -> Result<Self, DeviceFailure> {
+        Ok(Self::new(
+            self.main_runtime.clone(),
+            self.state.for_session(session_id)?,
+        ))
+    }
+
     pub(crate) fn new(main_runtime: MainRuntime, state: AppState) -> Self {
         Self {
             main_runtime,
@@ -543,8 +553,10 @@ impl DeviceCommands {
 
     pub async fn list_ports(&self) -> Result<Vec<SerialPortSummary>, DeviceFailure> {
         let commands = self.clone();
+        let activity = commands.state.admit()?;
         self.main_runtime
             .execute(async move {
+                let _activity = activity;
                 commands.require_catalog_ready()?;
                 SerialPortQueryAdapter {
                     state: &commands.state,
@@ -561,8 +573,10 @@ impl DeviceCommands {
         before: Vec<String>,
     ) -> Result<(Option<String>, String), DeviceFailure> {
         let commands = self.clone();
+        let activity = commands.state.admit()?;
         self.main_runtime
             .execute(async move {
+                let _activity = activity;
                 commands.require_catalog_ready()?;
                 let (port, _, message) = IdentifySerialPortCommand::new(before)
                     .execute(&SystemSerialPortInventory)
@@ -575,8 +589,10 @@ impl DeviceCommands {
 
     pub async fn refresh_cameras(&self) -> Result<Vec<CameraStatus>, DeviceFailure> {
         let commands = self.clone();
+        let activity = commands.state.admit()?;
         self.main_runtime
             .execute(async move {
+                let _activity = activity;
                 CameraDiscoveryAdapter::new(commands.state.cameras().clone())
                     .refresh_cameras()
                     .await
@@ -587,8 +603,10 @@ impl DeviceCommands {
 
     pub async fn list_robots(&self) -> Result<Vec<RobotSummary>, DeviceFailure> {
         let commands = self.clone();
+        let activity = commands.state.admit()?;
         self.main_runtime
             .execute(async move {
+                let _activity = activity;
                 commands.require_catalog_ready()?;
                 let adapter = RobotAdapter::prefetched(&commands.state).await;
                 let hardware = commands.state.hardware().state();
@@ -610,8 +628,10 @@ impl DeviceCommands {
 
     pub async fn create_robot(&self, request: NewRobot) -> Result<RobotSummary, DeviceFailure> {
         let commands = self.clone();
+        let activity = commands.state.admit()?;
         self.main_runtime
             .execute(async move {
+                let _activity = activity;
                 commands.require_catalog_ready()?;
                 let (id, robot_type, port) = request.into_parts();
                 let (port_path, baud_rate) = match port {
@@ -640,8 +660,10 @@ impl DeviceCommands {
         document: Vec<u8>,
     ) -> Result<RobotSummary, DeviceFailure> {
         let commands = self.clone();
+        let activity = commands.state.admit()?;
         self.main_runtime
             .execute(async move {
+                let _activity = activity;
                 commands.require_catalog_ready()?;
                 if document.is_empty() {
                     return Err(DeviceFailure(
@@ -663,8 +685,10 @@ impl DeviceCommands {
 
     pub async fn get_robot(&self, id: String) -> Result<RobotSummary, DeviceFailure> {
         let commands = self.clone();
+        let activity = commands.state.admit()?;
         self.main_runtime
             .execute(async move {
+                let _activity = activity;
                 commands.require_catalog_ready()?;
                 let robot = RobotCatalogActions::new(&RobotAdapter::new(&commands.state))
                     .get(id)
@@ -679,8 +703,10 @@ impl DeviceCommands {
         request: RobotUpdate<Vec<CameraBinding>>,
     ) -> Result<RobotSummary, DeviceFailure> {
         let commands = self.clone();
+        let activity = commands.state.admit()?;
         self.main_runtime
             .execute(async move {
+                let _activity = activity;
                 commands.require_catalog_ready()?;
                 let (id, robot_type, port, camera_bindings) = request.into_parts();
                 let adapter = RobotAdapter::new(&commands.state);
@@ -715,8 +741,10 @@ impl DeviceCommands {
 
     pub async fn delete_robot(&self, id: String) -> Result<(), DeviceFailure> {
         let commands = self.clone();
+        let activity = commands.state.admit()?;
         self.main_runtime
             .execute(async move {
+                let _activity = activity;
                 commands.require_catalog_ready()?;
                 let adapter = RobotAdapter::new(&commands.state);
                 RobotActions::new(&adapter, &adapter)
@@ -729,8 +757,10 @@ impl DeviceCommands {
 
     pub async fn connect_robot(&self, id: String) -> Result<(), DeviceFailure> {
         let commands = self.clone();
+        let activity = commands.state.admit()?;
         self.main_runtime
             .execute(async move {
+                let _activity = activity;
                 commands.require_catalog_ready()?;
                 let adapter = RobotAdapter::new(&commands.state);
                 RobotActions::new(&adapter, &adapter)
@@ -743,8 +773,10 @@ impl DeviceCommands {
 
     pub async fn disconnect_robot(&self, id: String) -> Result<(), DeviceFailure> {
         let commands = self.clone();
+        let activity = commands.state.admit()?;
         self.main_runtime
             .execute(async move {
+                let _activity = activity;
                 commands.require_catalog_ready()?;
                 RobotConnectionActions::new(&RobotAdapter::new(&commands.state))
                     .disconnect(&id)
@@ -756,8 +788,10 @@ impl DeviceCommands {
 
     pub async fn hold_robot(&self, id: String) -> Result<(), DeviceFailure> {
         let commands = self.clone();
+        let activity = commands.state.admit()?;
         self.main_runtime
             .execute(async move {
+                let _activity = activity;
                 commands.require_catalog_ready()?;
                 RobotControlActions::new(commands.state.hardware().as_ref())
                     .execute(RobotControlCommand::Hold { robot: id })
@@ -769,8 +803,10 @@ impl DeviceCommands {
 
     pub async fn release_robot(&self, id: String) -> Result<(), DeviceFailure> {
         let commands = self.clone();
+        let activity = commands.state.admit()?;
         self.main_runtime
             .execute(async move {
+                let _activity = activity;
                 commands.require_catalog_ready()?;
                 RobotControlActions::new(commands.state.hardware().as_ref())
                     .execute(RobotControlCommand::Release { robot: id })
@@ -786,8 +822,10 @@ impl DeviceCommands {
         normalized: BTreeMap<String, f64>,
     ) -> Result<(), DeviceFailure> {
         let commands = self.clone();
+        let activity = commands.state.admit()?;
         self.main_runtime
             .execute(async move {
+                let _activity = activity;
                 commands.require_catalog_ready()?;
                 RobotControlActions::new(commands.state.hardware().as_ref())
                     .execute(RobotControlCommand::MoveJoints {
@@ -802,8 +840,10 @@ impl DeviceCommands {
 
     pub async fn start_calibration(&self, id: String) -> Result<(), DeviceFailure> {
         let commands = self.clone();
+        let activity = commands.state.admit()?;
         self.main_runtime
             .execute(async move {
+                let _activity = activity;
                 commands.require_catalog_ready()?;
                 CalibrationControlActions::new(commands.state.hardware().as_ref())
                     .start(&id)
@@ -815,8 +855,10 @@ impl DeviceCommands {
 
     pub async fn finish_calibration(&self, id: String) -> Result<RobotSummary, DeviceFailure> {
         let commands = self.clone();
+        let activity = commands.state.admit()?;
         self.main_runtime
             .execute(async move {
+                let _activity = activity;
                 commands.require_catalog_ready()?;
                 let output = CalibrationActions::new(
                     commands.state.workspace().as_ref(),
@@ -834,8 +876,10 @@ impl DeviceCommands {
 
     pub async fn cancel_calibration(&self, id: String) -> Result<(), DeviceFailure> {
         let commands = self.clone();
+        let activity = commands.state.admit()?;
         self.main_runtime
             .execute(async move {
+                let _activity = activity;
                 commands.require_catalog_ready()?;
                 CalibrationControlActions::new(commands.state.hardware().as_ref())
                     .cancel(&id)
@@ -850,8 +894,10 @@ impl DeviceCommands {
         id: String,
     ) -> Result<(u64, u64, u64, u64, Vec<String>), DeviceFailure> {
         let commands = self.clone();
+        let activity = commands.state.admit()?;
         self.main_runtime
             .execute(async move {
+                let _activity = activity;
                 commands.require_catalog_ready()?;
                 let outcome = CalibrationHistoryActions::new(&CalibrationHistoryAdapter {
                     state: &commands.state,
@@ -866,8 +912,10 @@ impl DeviceCommands {
 
     pub async fn set_mode(&self, selection: ModeSelection) -> Result<(), DeviceFailure> {
         let commands = self.clone();
+        let activity = commands.state.admit()?;
         self.main_runtime
             .execute(async move {
+                let _activity = activity;
                 commands.require_catalog_ready()?;
                 // Replay and policy need their own admission and resource-loading paths.
                 let mode = match selection {

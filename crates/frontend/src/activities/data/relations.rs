@@ -1,5 +1,6 @@
 //! User-facing project relation map and bounded row preview.
 
+use crate::client::project::ProjectClient;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::components::interaction::{Action, ActionPurpose, ActionVariant, RefreshIcon};
@@ -8,7 +9,7 @@ use spiral_robotics_common::relations::{CatalogRelation, RelationCatalog, Spiral
 
 use crate::activities::data::catalog::ManagedTable as Table;
 use crate::activities::data::query_result::{QueryExecutionPresentation, QueryState};
-use crate::client::server_fns::run_spiral_query;
+
 use crate::shell::state::studio;
 
 const PREVIEW_ROWS: usize = 5;
@@ -195,7 +196,8 @@ pub(crate) fn RelationsPanel(namespace: String, query_available: bool) -> Elemen
             let Some((statement, max_rows)) = relations.count_query() else {
                 return Ok(None);
             };
-            run_spiral_query(statement, max_rows)
+            ProjectClient::current()
+                .run_spiral_query(statement, max_rows)
                 .await
                 .map_err(|error| error.to_string())
                 .map(Some)
@@ -250,7 +252,8 @@ pub(crate) fn RelationsPanel(namespace: String, query_available: bool) -> Elemen
             if !query_available {
                 return Ok(None);
             }
-            run_spiral_query(relation.preview_sql(), PREVIEW_ROWS)
+            ProjectClient::current()
+                .run_spiral_query(relation.preview_sql(), PREVIEW_ROWS)
                 .await
                 .map_err(|error| error.to_string())
                 .map(Some)

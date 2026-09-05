@@ -1,5 +1,6 @@
 //! Checkpoint selection and follower rollout controls.
 
+use crate::client::project::ProjectClient;
 use crate::components::interaction::{Action, ActionPurpose, ActionSize, ActionVariant};
 use dioxus::prelude::*;
 use spiral_robotics_common::robots::{CameraStatus, RobotSummary};
@@ -8,7 +9,6 @@ use spiral_robotics_common::rollout::{
 };
 use spiral_robotics_common::training::{TrainingCheckpoint, TrainingRun, TrainingSnapshot};
 
-use crate::client::server_fns;
 use crate::format::LossPresentation;
 use crate::shell::notifications::MessageSource;
 use crate::shell::state::studio;
@@ -297,7 +297,7 @@ pub(crate) fn RolloutWorkbench() -> Element {
                                 )
                                 .with_duration(duration_seconds);
                                 spawn(async move {
-                                    let result = server_fns::start_rollout(config)
+                                    let result = ProjectClient::current().start_rollout(config)
                                         .await
                                         .map_err(|error| error.to_string());
                                     if let Err(error) = result {
@@ -329,7 +329,7 @@ pub(crate) fn RolloutWorkbench() -> Element {
                             pending_action.set(Some(PendingRolloutAction::Stop));
                             let mut pending_action = pending_action;
                             spawn(async move {
-                                if let Err(error) = server_fns::stop_rollout()
+                                if let Err(error) = ProjectClient::current().stop_rollout()
                                     .await
                                     .map_err(|error| error.to_string())
                                 {

@@ -8,6 +8,7 @@
 
 pub mod datasets;
 pub mod identity;
+pub mod project;
 pub mod recording;
 pub mod relations;
 pub mod robots;

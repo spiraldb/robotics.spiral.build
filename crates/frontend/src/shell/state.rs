@@ -15,16 +15,15 @@ use crate::activities::data::state::DataController;
 use crate::activities::rollout::state::RolloutController;
 use crate::activities::training::state::TrainingController;
 use crate::activities::workflow::state::WorkflowController;
-#[cfg(all(feature = "web", target_arch = "wasm32"))]
-use crate::client::http as api;
-#[cfg(all(feature = "web", target_arch = "wasm32"))]
 use crate::client::http::StudioEvent;
-use crate::client::server_fns::{data_settings, relation_catalog};
+use crate::client::project::ProjectClient;
+
 use crate::panels::timeline::signals::SignalStore;
 use crate::panels::timeline::state::TimelineController;
 use crate::shell::notifications::{
     MessageAction, MessageNotice, MessageSeverity, MessageSource, NotificationCenterState,
 };
+use crate::shell::project::ProjectSessionSignals;
 
 /// The one selection shared by the hierarchy, viewport, cameras, and inspector.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -200,8 +199,12 @@ impl BackendSignals {
 
 impl StudioProjectResources {
     fn use_resources() -> Self {
-        let settings =
-            use_resource(|| async { data_settings().await.map_err(|error| error.to_string()) });
+        let settings = use_resource(|| async {
+            ProjectClient::current()
+                .data_settings()
+                .await
+                .map_err(|error| error.to_string())
+        });
         let settings_result = settings.read_unchecked().to_owned();
         let loaded_settings = settings_result
             .as_ref()
@@ -224,7 +227,10 @@ impl StudioProjectResources {
             (&query_available,),
             move |(query_available,)| async move {
                 if query_available {
-                    relation_catalog().await.map_err(|error| error.to_string())
+                    ProjectClient::current()
+                        .relation_catalog()
+                        .await
+                        .map_err(|error| error.to_string())
                 } else {
                     Ok(RelationCatalog::default())
                 }
@@ -433,43 +439,36 @@ impl Studio {
     /// Follow the one backend stream and hand feature events directly to the
     /// controller that owns their accepted state.
     pub(crate) fn use_event_stream(self) {
+        let client = use_hook(ProjectClient::current);
+        let sessions = ProjectSessionSignals::current();
         let workflow = self.workflow_controller();
-        #[cfg(not(all(feature = "web", target_arch = "wasm32")))]
-        let _ = workflow;
-        #[cfg(all(feature = "web", target_arch = "wasm32"))]
-        use_future(move || async move {
-            let studio = self;
-            let mut snapshot = studio.snapshot();
-            let mut telemetry = studio.telemetry();
-            let mut training = studio.training();
-            let mut rollout = studio.rollout();
-            let mut live = studio.live();
-            let mut last_event_ms = studio.last_event_ms();
-            let mut recording_signals = studio.recording_signals();
-            loop {
-                let _ = api::Http::stream_events(|event| {
-                    live.set(true);
-                    last_event_ms.set(js_sys::Date::now());
-                    match event {
-                        StudioEvent::Snapshot(value) => snapshot.set(*value),
-                        StudioEvent::TrainingSnapshot(value) => training.set(*value),
-                        StudioEvent::TrainingUpdate(update) => training.write().apply(*update),
-                        StudioEvent::Rollout(value) => rollout.set(*value),
-                        StudioEvent::WorkflowState(value) => {
-                            workflow.accept_streamed_state(*value, studio)
-                        }
-                        StudioEvent::WorkflowAgent(value) => workflow.accept_streamed_agent(*value),
-                        StudioEvent::Telemetry(frame) => {
-                            if frame.recording().is_some() || recording_signals.peek().live() {
-                                recording_signals.write().observe(&frame);
-                            }
-                            telemetry.set(*frame);
-                        }
+        use_effect(move || {
+            // An old subtree can be scheduled once more before its key is
+            // replaced. It must leave the new session's inbox untouched.
+            if client.require_current().is_err() {
+                return;
+            }
+            self.live().set(sessions.connected());
+            for event in sessions.take_events() {
+                #[cfg(all(feature = "web", target_arch = "wasm32"))]
+                self.last_event_ms().set(js_sys::Date::now());
+                match event {
+                    StudioEvent::Snapshot(value) => self.snapshot().set(*value),
+                    StudioEvent::TrainingSnapshot(value) => self.training().set(*value),
+                    StudioEvent::TrainingUpdate(update) => self.training().write().apply(*update),
+                    StudioEvent::Rollout(value) => self.rollout().set(*value),
+                    StudioEvent::WorkflowState(value) => {
+                        workflow.accept_streamed_state(*value, self)
                     }
-                })
-                .await;
-                live.set(false);
-                gloo_timers::future::TimeoutFuture::new(1_000).await;
+                    StudioEvent::WorkflowAgent(value) => workflow.accept_streamed_agent(*value),
+                    StudioEvent::Telemetry(frame) => {
+                        let mut recording_signals = self.recording_signals();
+                        if frame.recording().is_some() || recording_signals.peek().live() {
+                            recording_signals.write().observe(&frame);
+                        }
+                        self.telemetry().set(*frame);
+                    }
+                }
             }
         });
     }
@@ -643,7 +642,7 @@ impl Studio {
         // button or activity that happened to launch them. Activity switches
         // unmount views, so keep accepted commands alive until the backend
         // answers and report their outcome through session-owned messages.
-        dioxus::dioxus_core::spawn_forever(async move {
+        crate::client::project::ProjectClient::current().spawn(async move {
             match future.await {
                 Ok(()) if success.is_empty() => {}
                 Ok(()) => studio.report_success(success),

@@ -4,6 +4,7 @@
 //! saved graph, validation, execution phases, and result payload are backend
 //! truth and reconcile through HTTP plus the one shared SSE stream.
 
+use crate::client::project::ProjectClient;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use dioxus::prelude::*;
@@ -18,9 +19,6 @@ use spiral_robotics_common::workflow::{
     WorkflowRunSnapshot, WorkflowSnapshot, WorkflowSpec, WorkflowValidationReport,
 };
 
-use crate::client::server_fns::{
-    run_workflow_agent_command, run_workflow_command, workflow_agent_snapshot, workflow_snapshot,
-};
 use crate::shell::notifications::MessageSource;
 use crate::shell::state::Studio;
 
@@ -833,8 +831,9 @@ impl WorkflowController {
             self.document.draft.peek().revision(),
             self.document.draft.peek().to_owned(),
         );
-        dioxus::dioxus_core::spawn_forever(async move {
-            let response = run_workflow_command(request)
+        crate::client::project::ProjectClient::current().spawn(async move {
+            let response = ProjectClient::current()
+                .run_workflow_command(request)
                 .await
                 .map_err(|error| error.to_string());
             self.finish_command(&requested_scope_id);
@@ -842,7 +841,7 @@ impl WorkflowController {
                 Ok(response) => self.accept_applied_state(response, &requested_scope_id),
                 Err(error) => {
                     studio.report_from(MessageSource::Workflow, error);
-                    if let Ok(state) = workflow_snapshot().await {
+                    if let Ok(state) = ProjectClient::current().workflow_snapshot().await {
                         self.reconcile_state_command(state, &requested_scope_id);
                     }
                 }
@@ -863,8 +862,9 @@ impl WorkflowController {
             requested_scope_id.clone(),
             self.document.server.peek().workflow().revision(),
         );
-        dioxus::dioxus_core::spawn_forever(async move {
-            let response = run_workflow_command(request)
+        crate::client::project::ProjectClient::current().spawn(async move {
+            let response = ProjectClient::current()
+                .run_workflow_command(request)
                 .await
                 .map_err(|error| error.to_string());
             self.finish_command(&requested_scope_id);
@@ -886,8 +886,9 @@ impl WorkflowController {
             .set(Some(WorkflowPendingCommand::Cancelling));
         let requested_scope_id = self.document.server.peek().scope_id().to_owned();
         let request = WorkflowRequest::cancel(requested_scope_id.clone());
-        dioxus::dioxus_core::spawn_forever(async move {
-            let response = run_workflow_command(request)
+        crate::client::project::ProjectClient::current().spawn(async move {
+            let response = ProjectClient::current()
+                .run_workflow_command(request)
                 .await
                 .map_err(|error| error.to_string());
             self.finish_command(&requested_scope_id);
@@ -914,8 +915,9 @@ impl WorkflowController {
             .set(Some(AgentPendingCommand::CreatingConversation));
         self.assistant.agent_error.set(None);
         let request = AgentRequest::create_conversation(current.scope_id(), current.revision());
-        dioxus::dioxus_core::spawn_forever(async move {
-            let response = run_workflow_agent_command(request.clone())
+        crate::client::project::ProjectClient::current().spawn(async move {
+            let response = ProjectClient::current()
+                .run_workflow_agent_command(request.clone())
                 .await
                 .map_err(|error| error.to_string());
             self.assistant.agent_command.set(None);
@@ -950,8 +952,9 @@ impl WorkflowController {
             conversation_id,
             current.revision(),
         );
-        dioxus::dioxus_core::spawn_forever(async move {
-            let response = run_workflow_agent_command(request.clone())
+        crate::client::project::ProjectClient::current().spawn(async move {
+            let response = ProjectClient::current()
+                .run_workflow_agent_command(request.clone())
                 .await
                 .map_err(|error| error.to_string());
             self.assistant.agent_command.set(None);
@@ -988,8 +991,9 @@ impl WorkflowController {
             text: text.clone(),
             expected_revision: state.revision(),
         };
-        dioxus::dioxus_core::spawn_forever(async move {
-            let response = run_workflow_agent_command(request.clone())
+        crate::client::project::ProjectClient::current().spawn(async move {
+            let response = ProjectClient::current()
+                .run_workflow_agent_command(request.clone())
                 .await
                 .map_err(|error| error.to_string());
             self.assistant.agent_command.set(None);
@@ -1008,7 +1012,7 @@ impl WorkflowController {
                 Err(error) => {
                     self.assistant.agent_error.set(Some(error.clone()));
                     studio.report_from(MessageSource::Workflow, error);
-                    if let Ok(state) = workflow_agent_snapshot().await {
+                    if let Ok(state) = ProjectClient::current().workflow_agent_snapshot().await {
                         self.reconcile_agent_command(state, request.scope_id());
                     }
                 }
@@ -1024,7 +1028,7 @@ impl WorkflowController {
         self.assistant
             .agent_command
             .set(Some(AgentPendingCommand::Cancelling));
-        dioxus::dioxus_core::spawn_forever(async move {
+        crate::client::project::ProjectClient::current().spawn(async move {
             let Some(turn_id) = current.session().active_turn_id().to_owned() else {
                 self.assistant.agent_command.set(None);
                 return;
@@ -1034,7 +1038,8 @@ impl WorkflowController {
                 current.active_conversation_id(),
                 turn_id,
             );
-            let response = run_workflow_agent_command(request.clone())
+            let response = ProjectClient::current()
+                .run_workflow_agent_command(request.clone())
                 .await
                 .map_err(|error| error.to_string());
             self.assistant.agent_command.set(None);
@@ -1070,7 +1075,11 @@ impl WorkflowController {
 
     pub(crate) async fn load(mut self, studio: Studio) {
         let workflow_bootstrap_scope = self.document.server.peek().scope_id().to_owned();
-        let state_loaded = match workflow_snapshot().await.map_err(|error| error.to_string()) {
+        let state_loaded = match ProjectClient::current()
+            .workflow_snapshot()
+            .await
+            .map_err(|error| error.to_string())
+        {
             Ok(state) => self
                 .reconcile_state_bootstrap(state, &workflow_bootstrap_scope)
                 .is_some_and(|scope_changed| {
@@ -1088,7 +1097,8 @@ impl WorkflowController {
             }
         };
         let agent_bootstrap_scope = self.assistant.agent.peek().scope_id().to_owned();
-        match workflow_agent_snapshot()
+        match ProjectClient::current()
+            .workflow_agent_snapshot()
             .await
             .map_err(|error| error.to_string())
         {
@@ -1158,7 +1168,6 @@ impl WorkflowController {
         scope_changed
     }
 
-    #[cfg(all(feature = "web", target_arch = "wasm32"))]
     pub(crate) fn accept_streamed_state(self, state: WorkflowSnapshot, studio: Studio) {
         if self.reconcile_state(state) {
             studio.refresh_relation_catalog();
@@ -1205,7 +1214,6 @@ impl WorkflowController {
         self.assistant.agent_error.set(None);
     }
 
-    #[cfg(all(feature = "web", target_arch = "wasm32"))]
     pub(crate) fn accept_streamed_agent(self, state: WorkflowAgentSnapshot) {
         self.reconcile_agent(state);
     }

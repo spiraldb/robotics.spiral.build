@@ -14,8 +14,6 @@ pub(crate) enum CatalogLeaseOwner {
     Recording,
     CalibrationReapply,
     DatasetImport,
-    ProjectImport,
-    ProjectSwitch,
     WorkflowStart,
     StudioCatalogRead,
     WorkflowAgentStart,
@@ -58,7 +56,6 @@ impl CatalogMutationLease {
         Some(token)
     }
 
-    #[cfg(test)]
     pub(crate) fn is_held(&self) -> bool {
         self.state.recover_lock().holder.is_some()
     }
@@ -113,7 +110,7 @@ mod tests {
     fn workflow_start_and_catalog_import_handshakes_are_linearized() {
         let lease = CatalogMutationLease::default();
         let import = lease
-            .try_acquire(CatalogLeaseOwner::ProjectImport)
+            .try_acquire(CatalogLeaseOwner::DatasetImport)
             .expect("import claims the empty handshake slot");
         assert!(
             lease
@@ -140,7 +137,7 @@ mod tests {
     }
 
     #[test]
-    fn assistant_admission_linearizes_with_manual_workflow_and_destination_changes() {
+    fn assistant_admission_linearizes_with_manual_workflow_and_catalog_changes() {
         let lease = CatalogMutationLease::default();
         let agent = lease
             .try_acquire(CatalogLeaseOwner::WorkflowAgentStart)
@@ -152,7 +149,7 @@ mod tests {
         );
         assert!(
             lease
-                .try_acquire(CatalogLeaseOwner::ProjectSwitch)
+                .try_acquire(CatalogLeaseOwner::CalibrationReapply)
                 .is_none()
         );
         assert!(lease.release(agent));
@@ -172,13 +169,13 @@ mod tests {
             .expect("Assistant conversation persistence claims the handshake slot");
         assert!(
             lease
-                .try_acquire(CatalogLeaseOwner::ProjectImport)
+                .try_acquire(CatalogLeaseOwner::DatasetImport)
                 .is_none(),
             "project import cannot replace history during conversation persistence"
         );
         assert!(
             lease
-                .try_acquire(CatalogLeaseOwner::ProjectSwitch)
+                .try_acquire(CatalogLeaseOwner::CalibrationReapply)
                 .is_none(),
             "destination cutover cannot replace history during conversation persistence"
         );

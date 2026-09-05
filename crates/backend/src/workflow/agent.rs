@@ -54,7 +54,6 @@ pub(crate) struct WorkflowAgentManager {
 struct WorkflowAgentInner {
     services: WorkflowAgentServices,
     readiness: WorkflowAgentReadiness,
-    history_error: Mutex<Option<String>>,
     scope_id: Mutex<String>,
     document: Mutex<AgentDocument>,
     turn: AgentTurnState,
@@ -64,6 +63,7 @@ struct WorkflowAgentInner {
 struct AgentTurnState {
     active: Mutex<Option<ActiveTurn>>,
     mutation: tokio::sync::Mutex<()>,
+    recovery_pending: AtomicBool,
 }
 
 struct WorkflowAgentServices {
@@ -178,6 +178,7 @@ impl AgentDocument {
             .find(|conversation| conversation.conversation_id == conversation_id)
     }
 
+    #[cfg(test)]
     fn active_mut(&mut self) -> Option<&mut AgentConversation> {
         let conversation_id = self.active_conversation_id.clone();
         self.conversation_mut(&conversation_id)
@@ -290,6 +291,7 @@ impl AgentDocument {
         Ok(())
     }
 
+    #[cfg(test)]
     fn fresh() -> Result<Self, String> {
         let document = Self::default();
         document.validate()?;
@@ -905,74 +907,30 @@ impl WorkflowAgentManager {
                     provider,
                 },
                 readiness,
-                history_error: Mutex::new(None),
                 scope_id: Mutex::new(AgentIdentifier::next("agent-scope")),
                 document: Mutex::new(AgentDocument::default()),
                 turn: AgentTurnState {
                     active: Mutex::new(None),
                     mutation: tokio::sync::Mutex::new(()),
+                    recovery_pending: AtomicBool::new(false),
                 },
                 updates,
             }),
         }
     }
 
-    pub(crate) async fn hydrate_from_storage(&self) -> Result<(), String> {
-        let stored = match self.stored_document().await {
-            Ok(stored) => stored,
-            Err(error) => {
-                self.install_unavailable_scope(&error);
-                return Err(error);
-            }
-        };
-        let document = match self
-            .prepare_or_reset_document(
-                stored.as_deref(),
-                "Studio restarted before this Assistant turn finished. Retry the turn.",
-            )
-            .await
-        {
-            Ok(document) => document,
-            Err(error) => {
-                self.install_unavailable_scope(&error);
-                return Err(error);
-            }
-        };
+    /// Candidate preparation validates history without rewriting it or starting a turn.
+    pub(crate) async fn prepare_from_storage(&self) -> Result<(), String> {
+        let stored = self.stored_document().await?;
+        let (document, rewrite) = AgentDocument::restored_snapshot(
+            stored.as_deref(),
+            "Studio reconnected before this Assistant turn finished. Retry the turn.",
+        )?;
         *self.inner.document.recover_lock() = document;
-        *self.inner.history_error.recover_lock() = None;
-        *self.inner.scope_id.recover_lock() = AgentIdentifier::next("agent-scope");
-        self.publish();
-        Ok(())
-    }
-
-    pub(crate) async fn reload_from_storage(&self) -> Result<(), String> {
-        let stored = match self.stored_document().await {
-            Ok(stored) => stored,
-            Err(error) => {
-                self.install_unavailable_scope(&error);
-                return Err(error);
-            }
-        };
-        let document = match self
-            .prepare_or_reset_document(
-                stored.as_deref(),
-                "The active Spiral project changed during an Assistant turn. Retry the turn.",
-            )
-            .await
-        {
-            Ok(document) => document,
-            Err(error) => {
-                self.install_unavailable_scope(&error);
-                return Err(error);
-            }
-        };
-        // A project import or destination switch may legitimately load a
-        // lower persisted revision. Give every authoritative reload a fresh
-        // server-owned scope so browsers replace the prior project's history
-        // instead of comparing unrelated revision counters.
-        *self.inner.document.recover_lock() = document;
-        *self.inner.history_error.recover_lock() = None;
-        *self.inner.scope_id.recover_lock() = AgentIdentifier::next("agent-scope");
+        self.inner
+            .turn
+            .recovery_pending
+            .store(rewrite, Ordering::SeqCst);
         self.publish();
         Ok(())
     }
@@ -990,32 +948,17 @@ impl WorkflowAgentManager {
             .transpose()
     }
 
-    async fn prepare_or_reset_document(
-        &self,
-        raw_snapshot: Option<&str>,
-        interruption_detail: &str,
-    ) -> Result<AgentDocument, String> {
-        match AgentDocument::restored_snapshot(raw_snapshot, interruption_detail) {
-            Ok((document, changed)) => {
-                if changed {
-                    self.persist_document(&document).await?;
-                }
-                Ok(document)
-            }
-            Err(_) => {
-                let fresh = AgentDocument::fresh()?;
-                if let Some(raw_snapshot) = raw_snapshot {
-                    self.inner
-                        .services
-                        .storage
-                        .reset_workflow_agent_document(raw_snapshot, &fresh.persisted()?)
-                        .await?;
-                } else {
-                    self.persist_document(&fresh).await?;
-                }
-                Ok(fresh)
-            }
+    pub(crate) async fn persist_recovery(&self) -> Result<(), String> {
+        let _mutation = self.inner.turn.mutation.lock().await;
+        if self.inner.turn.recovery_pending.load(Ordering::SeqCst) {
+            let document = self.inner.document.recover_lock().clone();
+            self.persist_document(&document).await?;
+            self.inner
+                .turn
+                .recovery_pending
+                .store(false, Ordering::SeqCst);
         }
+        Ok(())
     }
 
     pub(crate) fn state(&self) -> WorkflowAgentSnapshot {
@@ -1168,11 +1111,6 @@ impl WorkflowAgentManager {
                 "Configure or reconnect Spiral before changing Assistant conversations.".to_owned(),
             ));
         }
-        if let Some(error) = self.inner.history_error.recover_lock().as_ref() {
-            return Err(OperationError::External(format!(
-                "Assistant history is unavailable for this project: {error}"
-            )));
-        }
         if scope_id != *self.inner.scope_id.recover_lock() {
             return Err(OperationError::Conflict(
                 "The active Spiral project changed. Reload Assistant conversations.".to_owned(),
@@ -1231,11 +1169,6 @@ impl WorkflowAgentManager {
             return Err(OperationError::Conflict(
                 "Configure or reconnect Spiral before starting an Assistant turn.".to_owned(),
             ));
-        }
-        if let Some(error) = self.inner.history_error.recover_lock().as_ref() {
-            return Err(OperationError::External(format!(
-                "Assistant history is unavailable for this project: {error}"
-            )));
         }
         if self.inner.services.provider.is_none() {
             return Err(OperationError::External(
@@ -2306,18 +2239,8 @@ impl WorkflowAgentManager {
             .active()
             .map(|conversation| conversation.session.clone())
             .unwrap_or_default();
-        let history_error = self.inner.history_error.recover_lock();
-        let readiness = history_error
-            .as_ref()
-            .map(|error| {
-                WorkflowAgentReadiness::error(format!(
-                    "Assistant history is unavailable for this project: {}",
-                    error
-                ))
-            })
-            .unwrap_or_else(|| self.inner.readiness.clone());
-        WorkflowAgentSnapshot::new(readiness, session)
-            .with_history_available(history_error.is_none())
+        WorkflowAgentSnapshot::new(self.inner.readiness.clone(), session)
+            .with_history_available(true)
             .with_scope(
                 self.inner.scope_id.recover_lock().clone(),
                 document.revision,
@@ -2353,21 +2276,6 @@ impl WorkflowAgentManager {
             .storage
             .save_workflow_agent_document(&document.persisted()?)
             .await
-    }
-
-    fn install_unavailable_scope(&self, error: &str) {
-        let mut document = AgentDocument::default();
-        if let Some(conversation) = document.active_mut() {
-            conversation.session.set_phase(WorkflowAgentPhase::Failed);
-            conversation.session.set_error(Some(
-                "Assistant history could not be reset for the active Spiral project. Reconnect Spiral and reload Studio."
-                    .to_owned(),
-            ));
-        }
-        *self.inner.document.recover_lock() = document;
-        *self.inner.history_error.recover_lock() = Some(error.to_owned());
-        *self.inner.scope_id.recover_lock() = AgentIdentifier::next("agent-scope");
-        self.publish();
     }
 
     fn publish(&self) {

@@ -1,3 +1,4 @@
+use crate::client::project::ProjectClient;
 use crate::components::interaction::{
     Action, ActionPurpose, ActionVariant, ConfirmationCopy, ConfirmationDismissal,
     ConfirmationResponse, InlineConfirmation,
@@ -5,7 +6,6 @@ use crate::components::interaction::{
 use dioxus::prelude::*;
 use spiral_robotics_common::robots::RobotSummary;
 
-use crate::client::server_fns::delete_robot;
 use crate::shell::state::studio;
 use crate::tasks::SingleFlight;
 
@@ -56,7 +56,7 @@ pub(super) fn DeleteRobotAction(robot: RobotSummary) -> Element {
                         let Some(result) = SingleFlight::run(
                             deleting,
                             async move {
-                                delete_robot(id)
+                                ProjectClient::current().delete_robot(id)
                                     .await
                                     .map_err(|error| error.to_string())
                             },

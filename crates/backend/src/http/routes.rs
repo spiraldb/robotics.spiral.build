@@ -13,6 +13,7 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::project_session::ProjectReadiness;
 use axum::Extension;
 use axum::Router;
 use axum::body::Body;
@@ -24,10 +25,9 @@ use axum::routing::get;
 use bytes::{BufMut, Bytes, BytesMut};
 use futures_util::{Stream, StreamExt};
 use serde::Deserialize;
-use spiral_robotics_common::status::{BackendReadiness, BackendReadinessState, StudioSnapshot};
+use spiral_robotics_common::status::StudioSnapshot;
 
 use crate::data::catalog_lease::CatalogMutationLease;
-use crate::data::connection::SpiralConnectionController;
 use crate::data::queries::EpisodeQueries;
 use crate::recording_session::RecordingSessionManager;
 use crate::robotics::cameras::{CameraManager, Frame};
@@ -59,277 +59,86 @@ const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(2);
 const VIDEO_RECORDING_MONITOR_INTERVAL: Duration = Duration::from_millis(200);
 const VIDEO_RECORDING_STOP_TICKS: u8 = 5;
 
-/// Everything a request handler can reach.
+/// A request or task retains one project for its entire lifetime.
 #[derive(Clone)]
 pub(crate) struct AppState {
-    catalog: AppCatalogResources,
-    robotics: AppRoboticsResources,
-    runtime: AppRuntimeResources,
-}
-
-#[derive(Clone)]
-pub(crate) struct AppCatalogResources {
-    workspace: Arc<RobotWorkspace>,
-    episodes: Arc<EpisodeStore>,
-    storage: Arc<StorageManager>,
-    catalog_lease: Arc<CatalogMutationLease>,
-}
-
-impl AppCatalogResources {
-    pub(crate) fn new(
-        workspace: Arc<RobotWorkspace>,
-        episodes: Arc<EpisodeStore>,
-        storage: Arc<StorageManager>,
-    ) -> Self {
-        Self {
-            workspace,
-            episodes,
-            storage,
-            catalog_lease: Arc::new(CatalogMutationLease::default()),
-        }
-    }
-
-    pub(crate) fn with_lease(mut self, catalog_lease: Arc<CatalogMutationLease>) -> Self {
-        self.catalog_lease = catalog_lease;
-        self
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct AppRoboticsResources {
-    hardware: Arc<HardwareHandle>,
-    cameras: Arc<CameraManager>,
-    video: AppVideoResources,
-}
-
-#[derive(Clone)]
-pub(crate) struct AppVideoResources {
-    recording_session: Arc<RecordingSessionManager>,
-    video_encoder: VideoEncoderSettings,
-}
-
-impl AppVideoResources {
-    pub(crate) fn new(
-        recording_session: Arc<RecordingSessionManager>,
-        video_encoder: VideoEncoderSettings,
-    ) -> Self {
-        Self {
-            recording_session,
-            video_encoder,
-        }
-    }
-}
-
-impl AppRoboticsResources {
-    pub(crate) fn new(
-        hardware: Arc<HardwareHandle>,
-        cameras: Arc<CameraManager>,
-        video: AppVideoResources,
-    ) -> Self {
-        Self {
-            hardware,
-            cameras,
-            video,
-        }
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct AppActivityManagers {
-    training: Arc<TrainingManager>,
-    rollout: Arc<RolloutManager>,
-    workflow: AppWorkflowManagers,
-}
-
-#[derive(Clone)]
-pub(crate) struct AppWorkflowManagers {
-    workflow: Arc<WorkflowManager>,
-    workflow_agent: Arc<WorkflowAgentManager>,
-}
-
-impl AppWorkflowManagers {
-    pub(crate) fn new(
-        workflow: Arc<WorkflowManager>,
-        workflow_agent: Arc<WorkflowAgentManager>,
-    ) -> Self {
-        Self {
-            workflow,
-            workflow_agent,
-        }
-    }
-}
-
-impl AppActivityManagers {
-    pub(crate) fn new(
-        training: Arc<TrainingManager>,
-        rollout: Arc<RolloutManager>,
-        workflow: AppWorkflowManagers,
-    ) -> Self {
-        Self {
-            training,
-            rollout,
-            workflow,
-        }
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct AppPlatformResources {
-    connection: Arc<SpiralConnectionController>,
-    preferences: Arc<StudioPreferencesStore>,
-    bootstrap: BootstrapState,
-}
-
-impl AppPlatformResources {
-    pub(crate) fn new(
-        connection: Arc<SpiralConnectionController>,
-        preferences: Arc<StudioPreferencesStore>,
-        bootstrap: BootstrapState,
-    ) -> Self {
-        Self {
-            connection,
-            preferences,
-            bootstrap,
-        }
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct AppRuntimeResources {
-    activities: AppActivityManagers,
-    platform: AppPlatformResources,
-}
-
-impl AppRuntimeResources {
-    pub(crate) fn new(activities: AppActivityManagers, platform: AppPlatformResources) -> Self {
-        Self {
-            activities,
-            platform,
-        }
-    }
+    project: Arc<crate::project_session::ProjectSession>,
+    projects: Arc<crate::project_session::ProjectCoordinator>,
 }
 
 impl AppState {
-    pub(crate) fn new(
-        catalog: AppCatalogResources,
-        robotics: AppRoboticsResources,
-        runtime: AppRuntimeResources,
-    ) -> Self {
+    pub(crate) fn new(projects: Arc<crate::project_session::ProjectCoordinator>) -> Self {
         Self {
-            catalog,
-            robotics,
-            runtime,
+            project: projects.active(),
+            projects,
         }
     }
 
+    pub(crate) fn current(&self) -> Self {
+        Self::new(self.projects.clone())
+    }
+
+    pub(crate) fn for_session(&self, session_id: &str) -> Result<Self, crate::OperationError> {
+        let project = self.projects.resolve(session_id)?;
+        Ok(Self {
+            project,
+            projects: self.projects.clone(),
+        })
+    }
+
+    pub(crate) fn admit(
+        &self,
+    ) -> Result<crate::project_admission::ProjectActivity, crate::OperationError> {
+        self.projects.admit(self.project.info().id())
+    }
+
+    pub(crate) fn project(&self) -> &Arc<crate::project_session::ProjectSession> {
+        &self.project
+    }
+    pub(crate) fn projects(&self) -> &Arc<crate::project_session::ProjectCoordinator> {
+        &self.projects
+    }
     pub(crate) fn workspace(&self) -> &Arc<RobotWorkspace> {
-        &self.catalog.workspace
+        self.project.workspace()
     }
     pub(crate) fn episodes(&self) -> &Arc<EpisodeStore> {
-        &self.catalog.episodes
+        self.project.episodes()
     }
     pub(crate) fn storage(&self) -> &Arc<StorageManager> {
-        &self.catalog.storage
+        self.project.storage()
     }
     pub(crate) fn catalog_lease(&self) -> &Arc<CatalogMutationLease> {
-        &self.catalog.catalog_lease
+        self.project.catalog_lease()
     }
     pub(crate) fn hardware(&self) -> &Arc<HardwareHandle> {
-        &self.robotics.hardware
+        self.projects.hardware()
     }
     pub(crate) fn cameras(&self) -> &Arc<CameraManager> {
-        &self.robotics.cameras
+        self.projects.cameras()
     }
     pub(crate) fn recording_session(&self) -> &Arc<RecordingSessionManager> {
-        &self.robotics.video.recording_session
+        self.project.recording()
     }
     pub(crate) fn video_encoder(&self) -> &VideoEncoderSettings {
-        &self.robotics.video.video_encoder
+        self.projects.video_encoder()
     }
     pub(crate) fn training(&self) -> &Arc<TrainingManager> {
-        &self.runtime.activities.training
+        self.project.training()
     }
     pub(crate) fn workflow(&self) -> &Arc<WorkflowManager> {
-        &self.runtime.activities.workflow.workflow
+        self.project.workflow()
     }
     pub(crate) fn workflow_agent(&self) -> &Arc<WorkflowAgentManager> {
-        &self.runtime.activities.workflow.workflow_agent
+        self.project.workflow_agent()
     }
     pub(crate) fn rollout(&self) -> &Arc<RolloutManager> {
-        &self.runtime.activities.rollout
-    }
-    pub(crate) fn connection(&self) -> &Arc<SpiralConnectionController> {
-        &self.runtime.platform.connection
+        self.project.rollout()
     }
     pub(crate) fn preferences(&self) -> &Arc<StudioPreferencesStore> {
-        &self.runtime.platform.preferences
+        self.project.preferences()
     }
-    pub(crate) fn bootstrap(&self) -> &BootstrapState {
-        &self.runtime.platform.bootstrap
-    }
-}
-
-/// Shared backend lifecycle published to the browser and consulted by
-/// catalog-dependent request admission.
-#[derive(Clone)]
-pub(crate) struct BootstrapState {
-    current: tokio::sync::watch::Sender<BackendReadiness>,
-}
-
-impl BootstrapState {
-    pub(crate) fn new() -> Self {
-        let (current, receiver) = tokio::sync::watch::channel(BackendReadiness::default());
-        drop(receiver);
-        Self { current }
-    }
-
-    pub(crate) fn current(&self) -> BackendReadiness {
-        self.current.borrow().clone()
-    }
-
-    fn subscribe(&self) -> tokio::sync::watch::Receiver<BackendReadiness> {
-        self.current.subscribe()
-    }
-
-    pub(crate) fn bootstrapping(&self, detail: impl Into<String>) {
-        self.current.send_replace(BackendReadiness::new(
-            BackendReadinessState::Bootstrapping,
-            false,
-            detail,
-        ));
-    }
-
-    pub(crate) fn hydrating_services(&self, detail: impl Into<String>) {
-        self.current.send_replace(
-            BackendReadiness::new(BackendReadinessState::Bootstrapping, false, detail)
-                .with_storage_available(),
-        );
-    }
-
-    pub(crate) fn ready(&self) {
-        self.current.send_replace(BackendReadiness::new(
-            BackendReadinessState::Ready,
-            true,
-            "Studio services are ready",
-        ));
-    }
-
-    pub(crate) fn degraded(&self, catalog_available: bool, detail: impl Into<String>) {
-        self.current.send_replace(BackendReadiness::new(
-            BackendReadinessState::Degraded,
-            catalog_available,
-            detail,
-        ));
-    }
-
-    pub(crate) fn catalog_unavailable(&self) -> Option<String> {
-        let current = self.current();
-        (!current.catalog_available()).then(|| current.detail().to_owned())
-    }
-
-    pub(crate) fn storage_unavailable(&self) -> Option<String> {
-        let current = self.current();
-        (!current.storage_available()).then(|| current.detail().to_owned())
+    pub(crate) fn bootstrap(&self) -> &ProjectReadiness {
+        self.project.readiness()
     }
 }
 
@@ -340,7 +149,8 @@ impl AppState {
         let mut missing_ticks = 0_u8;
         loop {
             ticker.tick().await;
-            let Some(capture_episode) = self.recording_session().episode() else {
+            let state = self.current();
+            let Some(capture_episode) = state.recording_session().episode() else {
                 missing_episode.clear();
                 missing_ticks = 0;
                 continue;
@@ -364,7 +174,7 @@ impl AppState {
             if missing_ticks < VIDEO_RECORDING_STOP_TICKS {
                 continue;
             }
-            self.finish_stale_video_capture().await;
+            state.finish_stale_video_capture().await;
             missing_episode.clear();
             missing_ticks = 0;
         }
@@ -438,6 +248,7 @@ impl AppState {
             .merge(Self::device_bootstrap_router())
             .merge(Self::recording_storage_router())
             .route("/events", get(Self::events))
+            .route("/session", get(Self::session_info))
             .with_state(self)
     }
 
@@ -502,204 +313,137 @@ impl AppState {
             .with_issues(issues)
     }
 
-    /// Push setup changes and live telemetry to the browser.
-    ///
-    /// The snapshot is only re-sent when it actually differs, so an idle studio
-    /// costs one small telemetry frame per tick instead of a full state dump.
+    async fn session_info(
+        State(state): State<Self>,
+    ) -> axum::Json<spiral_robotics_common::project::ProjectSessionInfo> {
+        axum::Json(state.projects().active().info().clone())
+    }
+
+    /// Each stream generation owns exactly one session. A replacement first
+    /// announces its identity, then sends fresh snapshots and rebinds receivers.
     async fn events(
         State(state): State<Self>,
     ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
         let stream = async_stream::stream! {
-            let mut snapshot_timer = tokio::time::interval(SNAPSHOT_INTERVAL);
-            snapshot_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            let mut telemetry_timer = tokio::time::interval(TELEMETRY_INTERVAL);
-            let mut readiness = state.bootstrap().subscribe();
-            let (initial_training, mut training) = state.training().subscription();
-            let (initial_workflow, mut workflow) = state.workflow().subscription();
-            let mut last_workflow = initial_workflow.clone();
-            let (initial_agent, mut workflow_agent) = state.workflow_agent().subscription();
-            let mut last_agent_cursor = AgentCursor::from(&initial_agent);
-            let initial_rollout = RolloutManager::snapshot(state.rollout().as_ref());
-            let mut rollout = state.rollout().subscribe();
-            let mut last_snapshot: Option<StudioSnapshot> = None;
-            let mut last_sequence = 0_u64;
-
-            if let Ok(event) = Event::default()
-                .event("training_snapshot")
-                .json_data(&initial_training)
-            {
-                yield Ok(event);
-            }
-            if let Ok(event) = Event::default()
-                .event("rollout_state")
-                .json_data(&initial_rollout)
-            {
-                yield Ok(event);
-            }
-            if let Ok(event) = Event::default()
-                .event("workflow_snapshot")
-                .json_data(&initial_workflow)
-            {
-                yield Ok(event);
-            }
-            if let Ok(event) = Event::default()
-                .event("workflow_agent")
-                .json_data(&initial_agent)
-            {
-                yield Ok(event);
-            }
-
+            let mut sessions = state.projects().subscribe();
             loop {
-                tokio::select! {
-                    changed = readiness.changed() => {
-                        if changed.is_err() {
+                let project = sessions.borrow_and_update().clone();
+                let scoped = AppState { project, projects: state.projects().clone() };
+                let wire = ProjectEventStream::new(scoped.project().info().id());
+                let (initial_training, mut training) = scoped.training().subscription();
+                let (initial_workflow, mut workflow) = scoped.workflow().subscription();
+                let (initial_agent, mut workflow_agent) = scoped.workflow_agent().subscription();
+                let mut rollout = scoped.rollout().subscribe();
+                let mut readiness = scoped.bootstrap().subscribe();
+                let mut snapshot_timer = tokio::time::interval(SNAPSHOT_INTERVAL);
+                snapshot_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                let mut telemetry_timer = tokio::time::interval(TELEMETRY_INTERVAL);
+                let mut last_snapshot: Option<StudioSnapshot> = None;
+                let mut last_sequence = 0_u64;
+                let mut last_agent_cursor = AgentCursor::from(&initial_agent);
+                if let Ok(event) = Event::default().event("project_session").json_data(scoped.project().info()) { yield Ok(event); }
+                for event in [
+                    wire.encode("training_snapshot", &initial_training),
+                    wire.encode("rollout_state", &scoped.rollout().snapshot()),
+                    wire.encode("workflow_snapshot", &initial_workflow),
+                    wire.encode("workflow_agent", &initial_agent),
+                ].into_iter().flatten() { yield Ok(event); }
+                loop {
+                    tokio::select! {
+                        biased;
+                        changed = sessions.changed() => {
+                            if changed.is_err() { return; }
                             break;
                         }
-                        let snapshot = state.snapshot().await;
-                        if last_snapshot.as_ref() == Some(&snapshot) {
-                            continue;
+                        changed = readiness.changed() => {
+                            if changed.is_err() { break; }
+                            let snapshot = tokio::select! {
+                                biased;
+                                _ = sessions.changed() => break,
+                                snapshot = scoped.snapshot() => snapshot,
+                            };
+                            if let Some(event) = wire.encode("state", &snapshot) { yield Ok(event); }
+                            last_snapshot = Some(snapshot);
                         }
-                        last_snapshot = Some(snapshot.clone());
-                        if let Ok(event) = Event::default().event("state").json_data(&snapshot) {
-                            yield Ok(event);
-                        }
-                    }
-                    _ = snapshot_timer.tick() => {
-                        let snapshot = state.snapshot().await;
-                        if last_snapshot.as_ref() == Some(&snapshot) {
-                            continue;
-                        }
-                        last_snapshot = Some(snapshot.clone());
-                        if let Ok(event) = Event::default().event("state").json_data(&snapshot) {
-                            yield Ok(event);
-                        }
-                    }
-                    _ = telemetry_timer.tick() => {
-                        let hardware = state.hardware().state();
-                        let telemetry = hardware.telemetry().clone();
-                        if telemetry.sequence() == last_sequence {
-                            continue;
-                        }
-                        last_sequence = telemetry.sequence();
-                        if let Ok(event) = Event::default()
-                            .event("telemetry")
-                            .json_data(telemetry)
-                        {
-                            yield Ok(event);
-                        }
-                    }
-                    update = training.recv() => {
-                        match update {
-                            Ok(update) => {
-                                if let Ok(event) = Event::default()
-                                    .event("training_update")
-                                    .json_data(&update)
-                                {
-                                    yield Ok(event);
-                                }
+                        _ = snapshot_timer.tick() => {
+                            let snapshot = tokio::select! {
+                                biased;
+                                _ = sessions.changed() => break,
+                                snapshot = scoped.snapshot() => snapshot,
+                            };
+                            if last_snapshot.as_ref() != Some(&snapshot) {
+                                if let Some(event) = wire.encode("state", &snapshot) { yield Ok(event); }
+                                last_snapshot = Some(snapshot);
                             }
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                                let (snapshot, replacement) = state.training().subscription();
-                                training = replacement;
-                                if let Ok(event) = Event::default()
-                                    .event("training_snapshot")
-                                    .json_data(&snapshot)
-                                {
-                                    yield Ok(event);
-                                }
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                         }
-                    }
-                    update = workflow.recv() => {
-                        match update {
-                            Ok(_) => {
-                                // Broadcast values are wakeups. A queued update
-                                // from the project that was just replaced must not
-                                // overwrite the manager's newer, lower-revision
-                                // scoped state.
-                                let snapshot = state.workflow().state();
-                                if snapshot == last_workflow {
-                                    continue;
-                                }
-                                last_workflow = snapshot.clone();
-                                if let Ok(event) = Event::default()
-                                    .event("workflow_update")
-                                    .json_data(&snapshot)
-                                {
-                                    yield Ok(event);
-                                }
+                        _ = telemetry_timer.tick() => {
+                            let telemetry = scoped.hardware().state().telemetry().clone();
+                            if telemetry.sequence() != last_sequence {
+                                last_sequence = telemetry.sequence();
+                                if let Some(event) = wire.encode("telemetry", &telemetry) { yield Ok(event); }
                             }
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                                let (snapshot, replacement) = state.workflow().subscription();
-                                workflow = replacement;
-                                if snapshot == last_workflow {
-                                    continue;
-                                }
-                                last_workflow = snapshot.clone();
-                                if let Ok(event) = Event::default()
-                                    .event("workflow_snapshot")
-                                    .json_data(&snapshot)
-                                {
-                                    yield Ok(event);
-                                }
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                         }
-                    }
-                    update = workflow_agent.recv() => {
-                        match update {
-                            Ok(_) => {
-                                // Broadcast values are wakeups. Snapshot current
-                                // manager truth so a queued update from a prior
-                                // conversation or project scope cannot regress SSE.
-                                let snapshot = state.workflow_agent().state();
-                                let cursor = AgentCursor::from(&snapshot);
-                                if !last_agent_cursor.advance_to(cursor) {
-                                    continue;
+                        update = training.recv() => {
+                            match update {
+                                Ok(update) => if let Some(event) = wire.encode("training_update", &update) { yield Ok(event); },
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                    let (snapshot, replacement) = scoped.training().subscription();
+                                    training = replacement;
+                                    if let Some(event) = wire.encode("training_snapshot", &snapshot) { yield Ok(event); }
                                 }
-                                if let Ok(event) = Event::default()
-                                    .event("workflow_agent")
-                                    .json_data(&snapshot)
-                                {
-                                    yield Ok(event);
-                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                             }
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                                let (snapshot, replacement) = state.workflow_agent().subscription();
-                                workflow_agent = replacement;
-                                let cursor = AgentCursor::from(&snapshot);
-                                if !last_agent_cursor.advance_to(cursor) {
-                                    continue;
-                                }
-                                if let Ok(event) = Event::default()
-                                    .event("workflow_agent")
-                                    .json_data(&snapshot)
-                                {
-                                    yield Ok(event);
-                                }
+                        }
+                        update = workflow.recv() => {
+                            if matches!(update, Err(tokio::sync::broadcast::error::RecvError::Closed)) { break; }
+                            if let Some(event) = wire.encode("workflow_snapshot", &scoped.workflow().state()) { yield Ok(event); }
+                        }
+                        update = workflow_agent.recv() => {
+                            if matches!(update, Err(tokio::sync::broadcast::error::RecvError::Closed)) { break; }
+                            let snapshot = scoped.workflow_agent().state();
+                            if last_agent_cursor.advance_to(AgentCursor::from(&snapshot))
+                                && let Some(event) = wire.encode("workflow_agent", &snapshot) {
+                                yield Ok(event);
                             }
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                         }
-                    }
-                    changed = rollout.changed() => {
-                        if changed.is_err() {
-                            break;
-                        }
-                        let snapshot = rollout.borrow_and_update().clone();
-                        if let Ok(event) = Event::default()
-                            .event("rollout_state")
-                            .json_data(&snapshot)
-                        {
-                            yield Ok(event);
+                        changed = rollout.changed() => {
+                            if changed.is_err() { break; }
+                            let snapshot = rollout.borrow_and_update().clone();
+                            if let Some(event) = wire.encode("rollout_state", &snapshot) { yield Ok(event); }
                         }
                     }
                 }
             }
         };
-
         Sse::new(stream).keep_alive(KeepAlive::default())
     }
+}
+
+struct ProjectEventStream {
+    session_id: String,
+}
+
+impl ProjectEventStream {
+    fn new(session_id: &str) -> Self {
+        Self {
+            session_id: session_id.to_owned(),
+        }
+    }
+
+    fn encode<T: serde::Serialize>(&self, name: &str, payload: &T) -> Option<Event> {
+        Event::default()
+            .event(name)
+            .json_data(spiral_robotics_common::project::ProjectEvent::new(
+                &self.session_id,
+                payload,
+            ))
+            .ok()
+    }
+}
+
+#[derive(Deserialize)]
+struct ProjectQuery {
+    session_id: String,
 }
 
 struct AgentCursor {

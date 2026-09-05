@@ -1,3 +1,4 @@
+use crate::client::project::ProjectClient;
 use crate::components::interaction::{
     Action, ActionPurpose, ActionVariant, BlockingConfirmation, ConfirmationCopy,
     ConfirmationDismissal, ConfirmationResponse,
@@ -6,9 +7,6 @@ use dioxus::prelude::*;
 use spiral_robotics_common::robots::{CalibrationJointProgress, CalibrationProgress, RobotSummary};
 use spiral_robotics_viewport as arm;
 
-use crate::client::server_fns::{
-    cancel_calibration, finish_calibration, reapply_calibration, start_calibration,
-};
 use crate::shell::notifications::MessageSource;
 use crate::shell::state::studio;
 use crate::tasks::SingleFlight;
@@ -68,7 +66,7 @@ pub(super) fn CalibrationSection(
                             let id = recalibrate_id.clone();
                             command.set(Some("start"));
                             studio.run("", async move {
-                                let result = start_calibration(id)
+                                let result = ProjectClient::current().start_calibration(id)
                                     .await
                                     .map_err(|error| error.to_string());
                                 command.set(None);
@@ -101,7 +99,7 @@ pub(super) fn CalibrationSection(
                                     let Some(result) = SingleFlight::run(
                                         reapplying,
                                         async move {
-                                            reapply_calibration(id)
+                                            ProjectClient::current().reapply_calibration(id)
                                                 .await
                                                 .map_err(|error| error.to_string())
                                         },
@@ -168,7 +166,7 @@ pub(super) fn CalibrationSection(
                             let id = id.clone();
                             command.set(Some("finish"));
                             studio.run("Calibration saved.", async move {
-                                let result = finish_calibration(id)
+                                let result = ProjectClient::current().finish_calibration(id)
                                     .await
                                     .map_err(|error| error.to_string())
                                     .map(|_| ());
@@ -192,7 +190,7 @@ pub(super) fn CalibrationSection(
                             let id = id.clone();
                             command.set(Some("cancel"));
                             studio.run("", async move {
-                                let result = cancel_calibration(id)
+                                let result = ProjectClient::current().cancel_calibration(id)
                                     .await
                                     .map_err(|error| error.to_string());
                                 command.set(None);

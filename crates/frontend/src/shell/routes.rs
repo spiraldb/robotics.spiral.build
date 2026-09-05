@@ -5,11 +5,14 @@ use dioxus::prelude::*;
 
 use crate::activities::training::workspace::TrainingWorkspace;
 use crate::activities::workflow::workspace::WorkflowWorkspace;
+use crate::client::project::ProjectClient;
 use crate::settings::panel::SettingsPanel;
 use crate::shell::activity::Activity;
 use crate::shell::frame::{ActivityRail, StatusBar};
+use crate::shell::project::ProjectSessionSignals;
 use crate::shell::state::Studio;
 use crate::shell::workspace::EpisodeWorkspace;
+use spiral_robotics_common::project::ProjectSessionInfo;
 
 const TAILWIND: Asset = asset!("/assets/tailwind.css");
 const ECHARTS_RUNTIME: &str = "https://cdn.jsdelivr.net/npm/echarts@6.1.0/dist/echarts.min.js";
@@ -81,6 +84,27 @@ pub(crate) fn StudioRouter() -> Element {
 /// runs, messages, and long-running backend commands survive navigation.
 #[component]
 fn StudioShell() -> Element {
+    let sessions = ProjectSessionSignals::use_provider();
+    sessions.use_event_stream();
+    let session = sessions.active().read().clone();
+    rsx! {
+        document::Stylesheet { href: TAILWIND }
+        if let Some(session) = session {
+            ProjectStudioShell { key: "{session.id()}", session }
+        } else {
+            div { class: "studio-shell studio-shell-v2",
+                div { class: "editor-empty", role: "status", "Connecting to Studio…" }
+            }
+        }
+    }
+}
+
+/// Every project resource, controller, selection, and draft is owned below this
+/// key. Dioxus drops this scope and its tasks before mounting another project.
+#[component]
+fn ProjectStudioShell(session: ProjectSessionInfo) -> Element {
+    let sessions = ProjectSessionSignals::current();
+    use_context_provider(|| ProjectClient::new(session, sessions.active()));
     let studio = Studio::use_studio();
     let route = use_route::<StudioRoute>();
     let activity = route.activity();
@@ -128,7 +152,6 @@ fn StudioShell() -> Element {
     ));
 
     rsx! {
-        document::Stylesheet { href: TAILWIND }
         document::Script { src: ECHARTS_RUNTIME }
         document::Title { if settings_are_open { "Spiral Robotics Studio · Settings" } else { "Spiral Robotics Studio · {activity.label()}" } }
         document::Link { rel: "icon", href: FAVICON }

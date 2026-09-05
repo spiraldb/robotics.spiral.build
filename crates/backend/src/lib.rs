@@ -14,6 +14,8 @@ mod device_commands;
 mod error;
 mod http;
 mod main_runtime;
+mod project_admission;
+mod project_session;
 mod recording;
 mod recording_commands;
 mod recording_session;

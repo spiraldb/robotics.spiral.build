@@ -119,18 +119,28 @@ pub(crate) trait TrainingRunPort: Send + Sync {
 }
 
 pub(crate) trait TrainingCoordinatorPort: TrainingRunPort {
+    type ProjectActivity: Clone + Send;
+
+    fn admit_project_activity(&self) -> Result<Self::ProjectActivity, OperationError>;
     async fn refresh_training_readiness(&self) -> TrainingReadiness;
     fn resolve_training_source(&self, dataset_id: &str) -> Result<TrainingSource, OperationError>;
     async fn validate_training_query(&self, command: &TrainingConfig)
     -> Result<(), OperationError>;
     fn next_training_identity(&self) -> TrainingRunIdentity;
     async fn admit_training_run(&self, run: TrainingRun) -> Result<(), OperationError>;
-    fn launch_training_runtime(&self, launch: TrainingLaunch) -> Result<(), OperationError>;
+    fn launch_training_runtime(
+        &self,
+        launch: TrainingLaunch,
+        activity: Self::ProjectActivity,
+    ) -> Result<(), OperationError>;
 
     async fn coordinate_training_start(
         &self,
         command: TrainingConfig,
     ) -> Result<TrainingRun, OperationError> {
+        // Retain admission through readiness, persistence, and launch failure
+        // compensation; the runtime receives ownership before this copy drops.
+        let activity = self.admit_project_activity()?;
         let readiness = self.refresh_training_readiness().await;
         if !readiness.ready() {
             return Err(OperationError::Conflict(readiness.summary().to_owned()));
@@ -144,7 +154,7 @@ pub(crate) trait TrainingCoordinatorPort: TrainingRunPort {
             .with_completion(None, Some(STARTING_MESSAGE.to_owned()));
         self.admit_training_run(run.clone()).await?;
         let launch = TrainingLaunch::new(run.id(), command);
-        if let Err(error) = self.launch_training_runtime(launch) {
+        if let Err(error) = self.launch_training_runtime(launch, activity.clone()) {
             self.fail_run(run.id(), error.message().to_owned()).await;
             self.cleanup_runtime(run.id());
             return Err(error);
@@ -155,7 +165,10 @@ pub(crate) trait TrainingCoordinatorPort: TrainingRunPort {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
+
+    use crate::project_admission::{ProjectActivity, ProjectAdmissionGate};
+    use tokio::sync::Notify;
 
     use super::*;
     struct FakePort {
@@ -163,6 +176,28 @@ mod tests {
         readiness: TrainingReadiness,
         active: bool,
         fail: Option<&'static str>,
+        project_admission: ProjectAdmissionGate,
+        runtime_activity: Mutex<Option<ProjectActivity>>,
+        pauses: ExecutionPauses,
+    }
+
+    #[derive(Default)]
+    struct ExecutionPauses {
+        readiness: Option<Arc<ExecutionPause>>,
+        persistence: Option<Arc<ExecutionPause>>,
+    }
+
+    #[derive(Default)]
+    struct ExecutionPause {
+        entered: Notify,
+        resume: Notify,
+    }
+
+    impl ExecutionPause {
+        async fn wait(&self) {
+            self.entered.notify_one();
+            self.resume.notified().await;
+        }
     }
 
     impl FakePort {
@@ -172,6 +207,9 @@ mod tests {
                 readiness: TrainingReadiness::new(true, true, "ready"),
                 active: true,
                 fail: None,
+                project_admission: ProjectAdmissionGate::default(),
+                runtime_activity: Mutex::new(None),
+                pauses: ExecutionPauses::default(),
             }
         }
 
@@ -198,6 +236,9 @@ mod tests {
         }
         async fn transition_run(&self, run_id: &str, change: RunStateChange) -> Result<(), String> {
             self.push(format!("transition:{run_id}:{:?}", change.phase));
+            if let Some(pause) = &self.pauses.persistence {
+                pause.wait().await;
+            }
             if self.fail == Some("transition") {
                 return Err("transition failed".to_owned());
             }
@@ -218,8 +259,17 @@ mod tests {
     }
 
     impl TrainingCoordinatorPort for FakePort {
+        type ProjectActivity = ProjectActivity;
+
+        fn admit_project_activity(&self) -> Result<ProjectActivity, OperationError> {
+            self.project_admission.admit_activity()
+        }
+
         async fn refresh_training_readiness(&self) -> TrainingReadiness {
             self.push("readiness");
+            if let Some(pause) = &self.pauses.readiness {
+                pause.wait().await;
+            }
             self.readiness.clone()
         }
         fn resolve_training_source(
@@ -250,11 +300,16 @@ mod tests {
             }
             Ok(())
         }
-        fn launch_training_runtime(&self, launch: TrainingLaunch) -> Result<(), OperationError> {
+        fn launch_training_runtime(
+            &self,
+            launch: TrainingLaunch,
+            activity: ProjectActivity,
+        ) -> Result<(), OperationError> {
             self.push(format!("launch:{}", launch.run_id()));
             if self.fail == Some("launch") {
                 return Err(OperationError::Internal("launch failed".to_owned()));
             }
+            *self.runtime_activity.lock().unwrap() = Some(activity);
             Ok(())
         }
     }
@@ -354,5 +409,95 @@ mod tests {
         };
         assert!(port.coordinate_training_stop("run-1").await.is_err());
         assert_eq!(port.events(), ["active:run-1"]);
+    }
+
+    #[tokio::test]
+    async fn training_owns_project_before_readiness_and_through_background_persistence() {
+        let readiness = Arc::new(ExecutionPause::default());
+        let mut port = FakePort::ready();
+        port.pauses.readiness = Some(readiness.clone());
+        let port = Arc::new(port);
+        let starting_port = port.clone();
+        let start =
+            tokio::spawn(async move { starting_port.coordinate_training_start(command()).await });
+        readiness.entered.notified().await;
+        assert!(port.project_admission.begin_transition().is_err());
+        readiness.resume.notify_one();
+        start.await.unwrap().unwrap();
+        assert!(
+            port.project_admission.begin_transition().is_err(),
+            "returning the run must not release the background job's ownership"
+        );
+
+        let activity = port.runtime_activity.lock().unwrap().take().unwrap();
+        let persistence = Arc::new(ExecutionPause::default());
+        let pending_persistence = persistence.clone();
+        let runtime = tokio::spawn(async move {
+            let _activity = activity;
+            pending_persistence.wait().await;
+        });
+        persistence.entered.notified().await;
+        assert!(
+            port.project_admission.begin_transition().is_err(),
+            "a terminal snapshot must not release ownership before its write completes"
+        );
+        persistence.resume.notify_one();
+        runtime.await.unwrap();
+        assert!(port.project_admission.begin_transition().is_ok());
+    }
+
+    #[tokio::test]
+    async fn project_transition_rejects_training_before_any_readiness_effect() {
+        let port = FakePort::ready();
+        let transition = port.project_admission.begin_transition().unwrap();
+        assert!(port.coordinate_training_start(command()).await.is_err());
+        assert!(port.events().is_empty());
+        drop(transition);
+        assert!(port.coordinate_training_start(command()).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn launch_failure_retains_ownership_through_compensating_persistence() {
+        let persistence = Arc::new(ExecutionPause::default());
+        let mut port = FakePort::with_failure("launch");
+        port.pauses.persistence = Some(persistence.clone());
+        let port = Arc::new(port);
+        let starting_port = port.clone();
+        let start =
+            tokio::spawn(async move { starting_port.coordinate_training_start(command()).await });
+        persistence.entered.notified().await;
+        assert!(port.project_admission.begin_transition().is_err());
+        persistence.resume.notify_one();
+        assert!(start.await.unwrap().is_err());
+        assert!(port.project_admission.begin_transition().is_ok());
+    }
+
+    #[tokio::test]
+    async fn rejected_start_releases_project_ownership() {
+        for failure in ["validate", "admit"] {
+            let port = FakePort::with_failure(failure);
+            assert!(port.coordinate_training_start(command()).await.is_err());
+            assert!(port.project_admission.begin_transition().is_ok());
+        }
+        let mut port = FakePort::ready();
+        port.readiness = TrainingReadiness::new(false, true, "not ready");
+        assert!(port.coordinate_training_start(command()).await.is_err());
+        assert!(port.project_admission.begin_transition().is_ok());
+    }
+
+    #[tokio::test]
+    async fn dropping_a_pending_start_releases_project_ownership() {
+        let readiness = Arc::new(ExecutionPause::default());
+        let mut port = FakePort::ready();
+        port.pauses.readiness = Some(readiness.clone());
+        let port = Arc::new(port);
+        let starting_port = port.clone();
+        let start =
+            tokio::spawn(async move { starting_port.coordinate_training_start(command()).await });
+        readiness.entered.notified().await;
+        assert!(port.project_admission.begin_transition().is_err());
+        start.abort();
+        assert!(start.await.unwrap_err().is_cancelled());
+        assert!(port.project_admission.begin_transition().is_ok());
     }
 }

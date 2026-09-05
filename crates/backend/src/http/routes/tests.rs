@@ -4,25 +4,17 @@ use crate::device_commands::CameraConfigurationObject;
 use crate::robots::service::CameraAssignment;
 use serde_json::Map;
 use spiral_robotics_common::robots::CameraStatus;
+use spiral_robotics_common::status::BackendReadinessState;
 
 #[test]
 fn bootstrap_lifecycle_controls_catalog_admission() {
-    let state = BootstrapState::new();
+    let state = ProjectReadiness::new();
     assert_eq!(
         state.current().state(),
         BackendReadinessState::Bootstrapping
     );
     assert!(state.catalog_unavailable().is_some());
     assert!(state.storage_unavailable().is_some());
-
-    state.hydrating_services("loading run history");
-    assert_eq!(
-        state.current().state(),
-        BackendReadinessState::Bootstrapping
-    );
-    assert!(state.current().storage_available());
-    assert!(state.storage_unavailable().is_none());
-    assert!(state.catalog_unavailable().is_some());
 
     state.ready();
     assert_eq!(state.current().state(), BackendReadinessState::Ready);
@@ -37,17 +29,45 @@ fn bootstrap_lifecycle_controls_catalog_admission() {
     );
 }
 
-#[test]
-fn workflow_uses_named_events_on_the_single_reconnecting_stream() {
-    let source = include_str!("../routes.rs");
-    assert!(source.contains("event(\"workflow_snapshot\")"));
-    assert!(source.contains("event(\"workflow_update\")"));
-    assert!(source.contains("event(\"workflow_agent\")"));
-    assert!(
-        source.contains("let snapshot = state.workflow().state();"),
-        "Workflow broadcasts are wakeups so an old queued scope cannot regress SSE"
-    );
-    assert_eq!(source.matches("route(\"/events\"").count(), 1);
+#[tokio::test]
+async fn event_stream_announces_replacement_before_its_scoped_snapshots() {
+    use crate::project_session::tests::ProjectFixture;
+    use axum::response::IntoResponse as _;
+
+    let fixture = ProjectFixture::new();
+    let original = fixture.projects.active();
+    let state = AppState::new(fixture.projects.clone());
+    let response = AppState::events(State(state)).await.into_response();
+    let mut stream = response.into_body().into_data_stream();
+    let announcement = stream.next().await.unwrap().unwrap();
+    let announcement = String::from_utf8(announcement.to_vec()).unwrap();
+    assert!(announcement.contains("event: project_session\n"));
+    assert!(announcement.contains(original.info().id()));
+    for expected in [
+        "training_snapshot",
+        "rollout_state",
+        "workflow_snapshot",
+        "workflow_agent",
+    ] {
+        let bytes = stream.next().await.unwrap().unwrap();
+        let frame = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(frame.contains(&format!("event: {expected}\n")));
+        assert!(frame.contains(&format!("\"session_id\":\"{}\"", original.info().id())));
+    }
+    let replacement = fixture.replace("project_b");
+    let announcement = tokio::time::timeout(Duration::from_secs(1), stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let announcement = String::from_utf8(announcement.to_vec()).unwrap();
+    assert!(announcement.contains("event: project_session\n"));
+    assert!(announcement.contains(replacement.info().id()));
+    let bytes = stream.next().await.unwrap().unwrap();
+    let snapshot = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(snapshot.contains(&format!("\"session_id\":\"{}\"", replacement.info().id())));
+    assert!(!snapshot.contains(original.info().id()));
+    fixture.projects.hardware().shutdown().await.unwrap();
 }
 
 #[test]

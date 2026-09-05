@@ -23,6 +23,7 @@ use tokio::sync::broadcast;
 use crate::OperationError;
 use crate::adapters::clock::SystemClock;
 use crate::clock::{Clock, StableIdSequence};
+use crate::project_admission::{ProjectActivity, ProjectAdmissionGate};
 use crate::sync::MutexRecovery;
 use crate::training::execution::{
     RunStateChange, TrainingCoordinatorPort, TrainingLaunch, TrainingRunIdentity, TrainingRunPort,
@@ -47,6 +48,7 @@ struct TrainingManagerInner {
 }
 
 struct TrainingRuntimeState {
+    project_admission: Arc<ProjectAdmissionGate>,
     controls: Mutex<BTreeMap<String, Arc<AtomicBool>>>,
     mutation: tokio::sync::Mutex<()>,
 }
@@ -170,25 +172,19 @@ impl TrainingManager {
     pub(crate) fn new(
         storage: Arc<StorageManager>,
         training_backend: Arc<dyn TrainingBackend>,
-    ) -> Self {
-        Self::new_with_clock(storage, training_backend, Arc::new(SystemClock))
-    }
-
-    fn new_with_clock(
-        storage: Arc<StorageManager>,
-        training_backend: Arc<dyn TrainingBackend>,
-        clock: Arc<dyn Clock>,
+        project_admission: Arc<ProjectAdmissionGate>,
     ) -> Self {
         let (updates, _) = broadcast::channel(512);
         Self {
             inner: Arc::new(TrainingManagerInner {
                 storage,
                 training_backend,
-                clock,
+                clock: Arc::new(SystemClock),
                 run_ids: StableIdSequence::new("train", 0),
                 snapshot: Mutex::new(TrainingSnapshot::default()),
                 updates,
                 runtime: TrainingRuntimeState {
+                    project_admission,
                     controls: Mutex::new(BTreeMap::new()),
                     mutation: tokio::sync::Mutex::new(()),
                 },
@@ -196,10 +192,10 @@ impl TrainingManager {
         }
     }
 
-    /// Restore persisted history after the HTTP listener is already serving.
-    pub(crate) async fn hydrate_from_storage(&self) -> Result<(), String> {
-        // Hold the admission gate: a training start racing bootstrap must not
-        // be overwritten by this install.
+    /// Load a candidate without launching jobs or touching shared hardware.
+    pub(crate) async fn prepare_from_storage(&self) -> Result<(), String> {
+        // Install the prepared history under the same mutation gate used by
+        // training commands. Activation starts only after the session is published.
         let _mutation = self.inner.runtime.mutation.lock().await;
         let mut snapshot = self.restored_snapshot().await?;
         let run_registry = snapshot.run_registry()?;
@@ -222,43 +218,34 @@ impl TrainingManager {
         let _ = self.inner.updates.send(TrainingUpdate::Snapshot {
             snapshot: Box::new(snapshot.clone()),
         });
-        // A worker-owned job continues while Studio is down. Re-submit the
-        // immutable ID (the runtime treats POST as idempotent) and resume
-        // polling its replayable state instead of marking the run failed.
+        Ok(())
+    }
+
+    pub(crate) fn resume_prepared_runs(&self, activity: ProjectActivity) {
+        let snapshot = self.snapshot();
         for run in snapshot.runs().iter().filter(|run| run.phase().active()) {
             let run = run.clone();
             let cancel = Arc::new(AtomicBool::new(false));
-            self.inner
-                .runtime
-                .controls
-                .recover_lock()
-                .insert(run.id().to_owned(), cancel.clone());
+            {
+                let mut controls = self.inner.runtime.controls.recover_lock();
+                if controls.contains_key(run.id()) {
+                    continue;
+                }
+                controls.insert(run.id().to_owned(), cancel.clone());
+            }
             let manager = self.clone();
+            let activity = activity.clone();
             tokio::spawn(async move {
+                let _activity = activity;
                 manager
                     .run_backend(TrainingLaunch::new(run.id(), run.config().clone()), cancel)
                     .await;
             });
         }
-        Ok(())
     }
 
     pub(crate) fn snapshot(&self) -> TrainingSnapshot {
         self.inner.snapshot.recover_lock().clone()
-    }
-
-    pub(crate) async fn reload_from_storage(&self) -> Result<(), String> {
-        let _mutation = self.inner.runtime.mutation.lock().await;
-        if !self.inner.runtime.controls.recover_lock().is_empty() {
-            return Err("cannot reload training history while a run is active".to_owned());
-        }
-        let snapshot = self.restored_snapshot().await?;
-        snapshot.run_registry()?;
-        // Readiness describes the live runtime, not the project's history, so
-        // a project change keeps the value the process already computed.
-        let mut current = self.inner.snapshot.recover_lock();
-        *current = TrainingSnapshot::new(current.readiness().clone(), snapshot.runs().to_vec());
-        Ok(())
     }
 
     async fn restored_snapshot(&self) -> Result<TrainingSnapshot, String> {
@@ -308,6 +295,9 @@ impl TrainingManager {
     }
 
     pub(crate) async fn stop(&self, run_id: &str) -> Result<(), String> {
+        let _activity = self
+            .admit_project_activity()
+            .map_err(|error| error.to_string())?;
         self.coordinate_training_stop(run_id)
             .await
             .map_err(|error| error.to_string())
@@ -317,6 +307,9 @@ impl TrainingManager {
     /// removal. A failed checkpoint deletion therefore leaves the complete run
     /// visible and retryable instead of hiding orphaned model artifacts.
     pub(crate) async fn delete(&self, run_id: &str) -> Result<(), String> {
+        let _activity = self
+            .admit_project_activity()
+            .map_err(|error| error.to_string())?;
         if self
             .inner
             .runtime
@@ -881,6 +874,12 @@ impl TrainingRunPort for TrainingManager {
 }
 
 impl TrainingCoordinatorPort for TrainingManager {
+    type ProjectActivity = ProjectActivity;
+
+    fn admit_project_activity(&self) -> Result<ProjectActivity, OperationError> {
+        self.inner.runtime.project_admission.admit_activity()
+    }
+
     async fn refresh_training_readiness(&self) -> TrainingReadiness {
         self.refresh_readiness().await
     }
@@ -924,7 +923,11 @@ impl TrainingCoordinatorPort for TrainingManager {
         Ok(())
     }
 
-    fn launch_training_runtime(&self, launch: TrainingLaunch) -> Result<(), OperationError> {
+    fn launch_training_runtime(
+        &self,
+        launch: TrainingLaunch,
+        activity: ProjectActivity,
+    ) -> Result<(), OperationError> {
         let cancel = Arc::new(AtomicBool::new(false));
         {
             let mut controls = self.inner.runtime.controls.recover_lock();
@@ -938,6 +941,7 @@ impl TrainingCoordinatorPort for TrainingManager {
         }
         let manager = self.clone();
         tokio::spawn(async move {
+            let _activity = activity;
             manager.run_backend(launch, cancel).await;
         });
         Ok(())

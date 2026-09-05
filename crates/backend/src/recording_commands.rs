@@ -736,6 +736,13 @@ pub struct RecordingCommands {
 pub struct RecordingFailure(String);
 
 impl RecordingCommands {
+    pub fn for_session(&self, session_id: &str) -> Result<Self, RecordingFailure> {
+        Ok(Self::new(
+            self.main_runtime.clone(),
+            self.state.for_session(session_id)?,
+        ))
+    }
+
     pub(crate) fn new(main_runtime: MainRuntime, state: AppState) -> Self {
         Self {
             main_runtime,
@@ -745,8 +752,10 @@ impl RecordingCommands {
 
     pub async fn datasets(&self) -> Result<Vec<DatasetSummary>, RecordingFailure> {
         let commands = self.clone();
+        let activity = commands.state.admit()?;
         self.main_runtime
             .execute(async move {
+                let _activity = activity;
                 commands.require_storage_ready()?;
                 commands
                     .state
@@ -763,8 +772,10 @@ impl RecordingCommands {
         dataset_id: String,
     ) -> Result<(Vec<EpisodeListItem>, Vec<String>), RecordingFailure> {
         let commands = self.clone();
+        let activity = commands.state.admit()?;
         self.main_runtime
             .execute(async move {
+                let _activity = activity;
                 commands.require_storage_ready()?;
                 // A paused take has a readable SpiralDB checkpoint. Hide its catalog row
                 // here because live recording state is delivered through telemetry.
@@ -792,8 +803,10 @@ impl RecordingCommands {
         dataset_id: String,
     ) -> Result<EpisodeInfo, RecordingFailure> {
         let commands = self.clone();
+        let activity = commands.state.admit()?;
         self.main_runtime
             .execute(async move {
+                let _activity = activity;
                 commands.require_catalog_ready()?;
                 let adapter = RecordingAdapter::new(&commands.state);
                 let result = RecordingActions::new(&adapter)
@@ -806,8 +819,10 @@ impl RecordingCommands {
 
     pub async fn stop_recording(&self, keep: bool) -> Result<EpisodeInfo, RecordingFailure> {
         let commands = self.clone();
+        let activity = commands.state.admit()?;
         self.main_runtime
             .execute(async move {
+                let _activity = activity;
                 commands.require_catalog_ready()?;
                 let adapter = RecordingAdapter::new(&commands.state);
                 let result = RecordingActions::new(&adapter)
@@ -820,8 +835,10 @@ impl RecordingCommands {
 
     pub async fn set_recording_paused(&self, paused: bool) -> Result<(), RecordingFailure> {
         let commands = self.clone();
+        let activity = commands.state.admit()?;
         self.main_runtime
             .execute(async move {
+                let _activity = activity;
                 commands.require_catalog_ready()?;
                 RecordingActions::new(&RecordingAdapter::new(&commands.state))
                     .set_paused(SetRecordingPausedCommand::new(paused))
@@ -833,8 +850,10 @@ impl RecordingCommands {
 
     pub async fn delete_episode(&self, id: String) -> Result<(), RecordingFailure> {
         let commands = self.clone();
+        let activity = commands.state.admit()?;
         self.main_runtime
             .execute(async move {
+                let _activity = activity;
                 commands.require_catalog_ready()?;
                 EpisodeCatalogActions::new(&EpisodeAdapter::new(&commands.state))
                     .delete(DeleteEpisodeCommand::new(id))
@@ -849,8 +868,10 @@ impl RecordingCommands {
         id: String,
     ) -> Result<EpisodeInspectionSnapshot, RecordingFailure> {
         let commands = self.clone();
+        let activity = commands.state.admit()?;
         self.main_runtime
             .execute(async move {
+                let _activity = activity;
                 commands.require_storage_ready()?;
                 EpisodeQueries::new(&EpisodeAdapter::new(&commands.state))
                     .inspection(id)
@@ -869,8 +890,10 @@ impl RecordingCommands {
         seconds: f64,
     ) -> Result<(), RecordingFailure> {
         let commands = self.clone();
+        let activity = commands.state.admit()?;
         self.main_runtime
             .execute(async move {
+                let _activity = activity;
                 commands.require_catalog_ready()?;
                 PhysicalSeekActions::new(&SeekAdapter {
                     state: &commands.state,
@@ -890,8 +913,10 @@ impl RecordingCommands {
         start_seconds: f64,
     ) -> Result<(), RecordingFailure> {
         let commands = self.clone();
+        let activity = commands.state.admit()?;
         self.main_runtime
             .execute(async move {
+                let _activity = activity;
                 commands.require_catalog_ready()?;
                 ReplayActions::new(&RecordingAdapter::new(&commands.state))
                     .start(
@@ -906,8 +931,10 @@ impl RecordingCommands {
 
     pub async fn set_replay_paused(&self, paused: bool) -> Result<(), RecordingFailure> {
         let commands = self.clone();
+        let activity = commands.state.admit()?;
         self.main_runtime
             .execute(async move {
+                let _activity = activity;
                 commands.require_catalog_ready()?;
                 ReplayActions::new(&RecordingAdapter::new(&commands.state))
                     .set_paused(SetReplayPausedCommand::new(paused))

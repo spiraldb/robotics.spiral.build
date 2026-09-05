@@ -8,33 +8,19 @@ use std::sync::Arc;
 
 use crate::data_commands::DataCommands;
 use crate::device_commands::DeviceCommands;
-use crate::http::routes::{
-    AppActivityManagers, AppCatalogResources, AppPlatformResources, AppRoboticsResources,
-    AppRuntimeResources, AppState, AppVideoResources, AppWorkflowManagers, BootstrapState,
-};
+use crate::http::routes::AppState;
 use crate::main_runtime::MainRuntime;
 use crate::recording_commands::RecordingCommands;
 use crate::robotics::cameras::CameraManager;
 use crate::robotics::video::VideoEncoderSettings;
-use crate::robots::workspace::RobotWorkspace;
-use crate::rollout::manager::{RolloutHardwareResources, RolloutManager};
-use crate::training::manager::TrainingManager;
-use crate::training::remote::ConfiguredHttpTrainingBackend;
 use crate::training_rollout::TrainingRolloutCommands;
-use crate::workflow::agent::WorkflowAgentManager;
-use crate::workflow::manager::WorkflowManager;
-use crate::workflow_commands::{WorkflowAdmission, WorkflowCommands};
+use crate::workflow_commands::WorkflowCommands;
 use clap::Parser;
 use spiral_robotics_hardware::{
     CameraRuntime, ControlSettings, DEFAULT_MAX_STEP_COUNTS, DEFAULT_TELEOP_MAX_STEP_COUNTS,
     HardwareHandle,
 };
-use spiral_robotics_storage::ProjectStore;
-use spiral_robotics_storage::StorageManager;
-use spiral_robotics_storage::episodes::EpisodeStore;
-use spiral_robotics_storage::{
-    BackendStateStore, ServiceEndpoint, SpiralConnectionSettings, StudioPreferencesStore,
-};
+use spiral_robotics_storage::{BackendStateStore, ServiceEndpoint, SpiralConnectionSettings};
 use tracing_subscriber::EnvFilter;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -292,83 +278,28 @@ impl ServerStartup {
                 .map_err(std::io::Error::other)?;
         }
         connection = connection.with_credentials(backend_state.credentials());
-        let project_store =
-            Arc::new(ProjectStore::new(connection, namespace).map_err(std::io::Error::other)?);
-        let workspace = Arc::new(RobotWorkspace::new(project_store.clone()));
-        let episodes = Arc::new(EpisodeStore::new(project_store.clone()));
-        let storage = Arc::new(StorageManager::new(project_store));
-        let preferences = Arc::new(StudioPreferencesStore::new(Default::default()));
-        let training = Arc::new(TrainingManager::new(
-            storage.clone(),
-            Arc::new(ConfiguredHttpTrainingBackend::new(preferences.clone())),
-        ));
-        let workflow = Arc::new(WorkflowManager::new(storage.clone()));
-        let catalog_lease = Arc::new(crate::data::catalog_lease::CatalogMutationLease::default());
-        let workflow_agent = Arc::new(WorkflowAgentManager::new(
-            storage.clone(),
-            workflow.clone(),
-            catalog_lease.clone(),
-        ));
         let hardware = Arc::new(HardwareHandle::spawn(control_settings));
         let cameras = Arc::new(CameraManager::new());
-        let rollout = RolloutManager::new(
-            storage.clone(),
-            RolloutHardwareResources::new(hardware.clone(), cameras.clone(), workspace.clone()),
-            preferences.clone(),
-        );
-        let connection = Arc::new(crate::data::connection::SpiralConnectionController::new(
-            crate::data::connection::SpiralConnectionStores::new(
-                backend_state,
-                storage.clone(),
-                preferences.clone(),
-            ),
-            crate::data::connection::ProjectStateManagers::new(
-                training.clone(),
-                rollout.clone(),
-                crate::data::connection::WorkflowStateManagers::new(
-                    workflow.clone(),
-                    workflow_agent.clone(),
-                ),
-            ),
-        ));
-
-        // Without permission a camera still enumerates and its stream still opens;
-        // it just never delivers a frame. Say so instead of showing a blank box.
         if let Some(error) = camera_access_error {
             cameras.note_issue(format!("camera previews will stay blank: {error}"));
         }
-
-        let catalog = AppCatalogResources::new(workspace.clone(), episodes.clone(), storage)
-            .with_lease(catalog_lease.clone());
-        let video = AppVideoResources::new(
-            Arc::new(crate::recording_session::RecordingSessionManager::new(
-                catalog_lease.clone(),
-            )),
+        let resources = crate::project_session::ProjectHardware::new(
+            hardware.clone(),
+            cameras.clone(),
             VideoEncoderSettings::new(
                 arguments.video.ffmpeg.clone(),
                 arguments.video.video_codec.clone(),
             ),
         );
-        let robotics = AppRoboticsResources::new(hardware.clone(), cameras.clone(), video);
-        let workflow_managers = AppWorkflowManagers::new(workflow.clone(), workflow_agent.clone());
-        let activities =
-            AppActivityManagers::new(training.clone(), rollout.clone(), workflow_managers);
-        let bootstrap_state = BootstrapState::new();
-        let platform = AppPlatformResources::new(connection, preferences, bootstrap_state.clone());
+        let factory = crate::project_session::ProjectSessionFactory::new(resources, namespace);
+        let projects =
+            crate::project_session::ProjectCoordinator::new(factory, backend_state, connection)
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let state = AppState::new(projects);
         let main_runtime = MainRuntime::current();
         let training_rollout_commands =
-            TrainingRolloutCommands::new(main_runtime.clone(), training.clone(), rollout.clone());
-        let workflow_commands = WorkflowCommands::new(
-            main_runtime.clone(),
-            workflow.clone(),
-            workflow_agent.clone(),
-            WorkflowAdmission::new(catalog_lease, bootstrap_state),
-        );
-        let state = AppState::new(
-            catalog,
-            robotics,
-            AppRuntimeResources::new(activities, platform),
-        );
+            TrainingRolloutCommands::new(main_runtime.clone(), state.clone());
+        let workflow_commands = WorkflowCommands::new(main_runtime.clone(), state.clone());
         let recording_commands = RecordingCommands::new(main_runtime.clone(), state.clone());
         let device_commands = DeviceCommands::new(main_runtime.clone(), state.clone());
         let data_commands = DataCommands::new(main_runtime, state.clone());
@@ -423,10 +354,8 @@ impl ServerStartup {
         };
         tracing::info!("releasing motors and cameras");
         let cleanup = async {
-            workflow_agent.shutdown().await;
-            workflow.shutdown().await;
-            training.shutdown().await;
-            rollout.shutdown().await;
+            let cleanup_state = cleanup_state.current();
+            cleanup_state.project().shutdown().await;
             if let Err(error) = hardware.shutdown().await {
                 tracing::error!("hardware shutdown did not verify every motor release: {error}");
             }
@@ -509,67 +438,14 @@ impl AppState {
 
     async fn bootstrap_catalog(&self) {
         self.bootstrap()
-            .bootstrapping("Connecting to SpiralDB and warming the native database session");
-        if let Err(error) = self.storage().prewarm().await {
-            tracing::warn!("could not prewarm SpiralDB during startup: {error}");
-            self.bootstrap().degraded(false, error);
-            return;
-        }
-
-        self.bootstrap()
-            .hydrating_services("Loading Studio preferences and run history");
-        let preferences = {
-            let state = self.clone();
-            async move {
-                let loaded = state.storage().load_studio_preferences().await;
-                let issue = match loaded {
-                    Ok(preferences) => {
-                        state.preferences().replace(preferences);
-                        None
-                    }
-                    Err(error) => Some(format!("could not load Studio preferences: {error}")),
-                };
-                // Runtime selection lives in project preferences. Start both
-                // readiness probes as soon as those preferences resolve, while
-                // the independent history loads may still be running.
-                state.training().refresh_readiness().await;
-                issue
+            .bootstrapping("Connecting to SpiralDB and loading the project");
+        match self.projects().recover(self.project()).await {
+            Ok(()) => self.current().auto_connect_saved_robots().await,
+            Err(error) => {
+                tracing::warn!("could not load initial Spiral project: {error}");
+                self.bootstrap().degraded(false, error.to_string());
             }
-        };
-        let training = self.training().hydrate_from_storage();
-        let workflow = self.workflow().hydrate_from_storage();
-        let workflow_agent = self.workflow_agent().hydrate_from_storage();
-        let rollout = self.rollout().reload_from_storage();
-        let (preferences, training, workflow, workflow_agent, rollout) =
-            tokio::join!(preferences, training, workflow, workflow_agent, rollout);
-
-        let mut issues = Vec::new();
-        if let Some(issue) = preferences {
-            issues.push(issue);
         }
-        if let Err(error) = training {
-            issues.push(format!("could not load training history: {error}"));
-        }
-        if let Err(error) = workflow {
-            issues.push(format!("could not load Workflow history: {error}"));
-        }
-        if let Err(error) = workflow_agent {
-            issues.push(format!(
-                "could not load Workflow Assistant history: {error}"
-            ));
-        }
-        match rollout {
-            Ok(()) => {}
-            Err(error) => issues.push(format!("could not load rollout history: {error}")),
-        }
-        if issues.is_empty() {
-            self.bootstrap().ready();
-        } else {
-            let detail = issues.join("; ");
-            tracing::warn!("Studio started with reduced history/preferences state: {detail}");
-            self.bootstrap().degraded(true, detail);
-        }
-        self.auto_connect_saved_robots().await;
     }
 }
 

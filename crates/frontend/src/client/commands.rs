@@ -4,16 +4,14 @@
 //! this module to translate consequential intent into admitted commands. The
 //! backend remains authoritative for recording, replay, hardware, and safety.
 
+use crate::client::project::ProjectClient;
 use dioxus::prelude::*;
 use spiral_robotics_common::recording::EpisodeInfo;
 use spiral_robotics_common::robots::ModeSelection;
 
 use crate::activities::data::state::DataController;
 use crate::activities::data::workbench::EpisodeIdPresentation;
-use crate::client::server_fns::{
-    seek_episode, set_mode, set_recording_paused, set_replay_paused, start_recording, start_replay,
-    stop_recording,
-};
+
 use crate::format::ClockPresentation;
 use crate::shell::state::Studio;
 
@@ -48,7 +46,8 @@ impl Studio {
         }
         let dataset_id = studio.selected_dataset().read().trim().to_owned();
         studio.run("", async move {
-            start_recording(dataset_id)
+            ProjectClient::current()
+                .start_recording(dataset_id)
                 .await
                 .map_err(|error| error.to_string())
                 .map(|_| ())
@@ -67,7 +66,8 @@ impl Studio {
             return;
         }
         let future = async move {
-            set_recording_paused(paused)
+            ProjectClient::current()
+                .set_recording_paused(paused)
                 .await
                 .map_err(|error| error.to_string())
         };
@@ -99,7 +99,8 @@ impl Studio {
             "Recording discarded. Teleoperation stopped."
         };
         studio.run_safety(message, async move {
-            let summary = stop_recording(completion.keep)
+            let summary = ProjectClient::current()
+                .stop_recording(completion.keep)
                 .await
                 .map_err(|error| error.to_string())?;
             completion.data.upsert_episode(summary.clone());
@@ -184,7 +185,8 @@ impl Studio {
         };
         let episode = episode.id().to_owned();
         studio.run("", async move {
-            start_replay(episode, robot, source_arm, start_seconds)
+            ProjectClient::current()
+                .start_replay(episode, robot, source_arm, start_seconds)
                 .await
                 .map_err(|error| error.to_string())
         });
@@ -197,7 +199,8 @@ impl Studio {
             return;
         }
         let future = async move {
-            set_replay_paused(paused)
+            ProjectClient::current()
+                .set_replay_paused(paused)
                 .await
                 .map_err(|error| error.to_string())
         };
@@ -217,7 +220,8 @@ impl Studio {
         studio.run_safety(
             "Robot replay stopped. Motors may still be holding position.",
             async move {
-                set_mode(ModeSelection::Idle)
+                ProjectClient::current()
+                    .set_mode(ModeSelection::Idle)
                     .await
                     .map_err(|error| error.to_string())
             },
@@ -265,7 +269,8 @@ impl Studio {
     pub(crate) fn physical_seek(self, episode: String, request: TimelineSeekBody) {
         let studio = self;
         studio.run("", async move {
-            seek_episode(episode, request.robot, request.source_arm, request.seconds)
+            ProjectClient::current()
+                .seek_episode(episode, request.robot, request.source_arm, request.seconds)
                 .await
                 .map_err(|error| error.to_string())
         });

@@ -11,7 +11,11 @@ impl AppState {
 
     async fn export_project(
         Extension(commands): Extension<DataCommands>,
+        Query(query): Query<ProjectQuery>,
     ) -> Result<Response, (StatusCode, String)> {
+        let commands = commands
+            .for_session(&query.session_id)
+            .map_err(|error| (StatusCode::CONFLICT, error.to_string()))?;
         let bytes = commands
             .export_project()
             .await

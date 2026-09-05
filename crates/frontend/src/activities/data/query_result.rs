@@ -575,7 +575,7 @@ impl QueryRowPresentation for serde_json::Map<String, serde_json::Value> {
             td { class: "query-media-cell",
                 video {
                     class: "query-video-preview",
-                    src: url,
+                    src: crate::client::project::ProjectClient::current().scoped_url(&url),
                     preload: "none",
                     controls: true,
                     playsinline: true,

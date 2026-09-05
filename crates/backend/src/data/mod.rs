@@ -2,7 +2,6 @@
 
 pub(crate) mod catalog;
 pub(crate) mod catalog_lease;
-pub(crate) mod connection;
 pub(crate) mod episode_arms;
 pub(crate) mod queries;
 pub(crate) mod seek;
@@ -81,17 +80,8 @@ pub(crate) struct DataSettingsSnapshot {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DataSettingsUpdate {
     settings: DataSettingsSnapshot,
-    project_state_rehydrated: bool,
+    session_replaced: bool,
 }
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ConnectionCheck {
-    ok: bool,
-    message: String,
-    project_state_rehydrated: bool,
-}
-
-pub(crate) struct TestConnectionCommand;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum QueryValue {
@@ -267,34 +257,15 @@ impl DataSettingsSnapshot {
 }
 
 impl DataSettingsUpdate {
-    pub(crate) fn new(settings: DataSettingsSnapshot, project_state_rehydrated: bool) -> Self {
+    pub(crate) fn new(settings: DataSettingsSnapshot, session_replaced: bool) -> Self {
         Self {
             settings,
-            project_state_rehydrated,
+            session_replaced,
         }
     }
 
     pub(crate) fn into_parts(self) -> (DataSettingsSnapshot, bool) {
-        (self.settings, self.project_state_rehydrated)
-    }
-}
-
-impl ConnectionCheck {
-    pub(crate) fn new(ok: bool, message: impl Into<String>) -> Self {
-        Self {
-            ok,
-            message: message.into(),
-            project_state_rehydrated: false,
-        }
-    }
-
-    fn with_rehydrated_project_state(mut self) -> Self {
-        self.project_state_rehydrated = true;
-        self
-    }
-
-    pub(crate) fn into_parts(self) -> (bool, String, bool) {
-        (self.ok, self.message, self.project_state_rehydrated)
+        (self.settings, self.session_replaced)
     }
 }
 
@@ -366,50 +337,9 @@ impl QueryCommand {
     }
 }
 
-/// Data-catalog consequences expressed only in capability-owned models.
+/// Read-only data-query consequences.
 pub(crate) trait DataCatalogPort: Send + Sync {
-    fn settings(&self) -> DataSettingsSnapshot;
-    async fn update_settings(
-        &self,
-        command: UpdateDataSettingsCommand,
-    ) -> Result<DataSettingsUpdate, OperationError>;
-    async fn refresh_training_readiness(&self);
-
-    async fn test_connection(&self) -> ConnectionCheck;
-    async fn recover_project_state(&self) -> Result<(), OperationError>;
     async fn query(&self, command: QueryCommand) -> Result<QueryResult, OperationError>;
-}
-
-impl UpdateDataSettingsCommand {
-    pub(crate) async fn apply<P: DataCatalogPort + ?Sized>(
-        self,
-        port: &P,
-    ) -> Result<DataSettingsUpdate, OperationError> {
-        let command = self.validated()?;
-        let update = port.update_settings(command).await?;
-        // Training readiness depends on the selected runtime endpoint, so publish
-        // preferences before rebuilding it.
-        port.refresh_training_readiness().await;
-        Ok(update)
-    }
-}
-
-impl TestConnectionCommand {
-    pub(crate) async fn execute<P: DataCatalogPort + ?Sized>(port: &P) -> ConnectionCheck {
-        let check = port.test_connection().await;
-        if !check.ok {
-            return check;
-        }
-        match port.recover_project_state().await {
-            Ok(()) => check.with_rehydrated_project_state(),
-            Err(error) => ConnectionCheck::new(
-                false,
-                format!(
-                    "SpiralDB provisioning succeeded, but Studio could not reload the project state: {error}"
-                ),
-            ),
-        }
-    }
 }
 
 impl QueryCommand {
@@ -426,7 +356,7 @@ impl QueryCommand {
 }
 
 impl UpdateDataSettingsCommand {
-    fn validated(mut self) -> Result<Self, OperationError> {
+    pub(crate) fn validated(mut self) -> Result<Self, OperationError> {
         self.spiral_endpoint =
             HttpEndpoint::parse(&self.spiral_endpoint, "Spiral API endpoint")?.into_string();
         self.spiral_spfs_endpoint =
@@ -474,10 +404,6 @@ mod tests {
 
     struct FakeData {
         events: Mutex<Vec<String>>,
-        update_error: Option<OperationError>,
-        update_rehydrated: bool,
-        connection_check: ConnectionCheck,
-        recovery_error: Option<OperationError>,
         query_error: Option<OperationError>,
     }
 
@@ -485,57 +411,12 @@ mod tests {
         fn new() -> Self {
             Self {
                 events: Mutex::new(Vec::new()),
-                update_error: None,
-                update_rehydrated: false,
-                connection_check: ConnectionCheck::new(true, "connected"),
-                recovery_error: None,
                 query_error: None,
             }
         }
     }
 
     impl DataCatalogPort for FakeData {
-        fn settings(&self) -> DataSettingsSnapshot {
-            settings_view("settings")
-        }
-
-        async fn update_settings(
-            &self,
-            command: UpdateDataSettingsCommand,
-        ) -> Result<DataSettingsUpdate, OperationError> {
-            self.events.lock().unwrap().push(format!(
-                "update:{}:{}:{}:{}:{}",
-                command.spiral_endpoint,
-                command.spiral_spfs_endpoint,
-                command.project_id,
-                command.training_endpoint,
-                command.video_enabled
-            ));
-            self.update_error.clone().map_or_else(
-                || {
-                    Ok(DataSettingsUpdate::new(
-                        settings_view("saved"),
-                        self.update_rehydrated,
-                    ))
-                },
-                Err,
-            )
-        }
-
-        async fn refresh_training_readiness(&self) {
-            self.events.lock().unwrap().push("refresh".to_owned());
-        }
-
-        async fn test_connection(&self) -> ConnectionCheck {
-            self.events.lock().unwrap().push("test".to_owned());
-            self.connection_check.clone()
-        }
-
-        async fn recover_project_state(&self) -> Result<(), OperationError> {
-            self.events.lock().unwrap().push("recover".to_owned());
-            self.recovery_error.clone().map_or(Ok(()), Err)
-        }
-
         async fn query(&self, command: QueryCommand) -> Result<QueryResult, OperationError> {
             self.events
                 .lock()
@@ -555,22 +436,6 @@ mod tests {
         }
     }
 
-    fn settings_view(project: &str) -> DataSettingsSnapshot {
-        DataSettingsSnapshot {
-            spiral: SpiralDestinationSettings {
-                endpoint: "https://api.spiraldb.dev".to_owned(),
-                spfs_endpoint: "https://spfs.spiraldb.dev".to_owned(),
-                project_id: project.to_owned(),
-                client_id: String::new(),
-                client_secret_configured: false,
-                namespace: "dataset".to_owned(),
-                endpoint_restart_required: false,
-            },
-            training_endpoint: "http://127.0.0.1:50051".to_owned(),
-            video_enabled: true,
-        }
-    }
-
     fn settings() -> UpdateDataSettingsCommand {
         UpdateDataSettingsCommand {
             spiral_endpoint: " https://api.spiraldb.dev/ ".to_owned(),
@@ -583,105 +448,29 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn settings_are_validated_normalized_saved_then_readiness_is_refreshed() {
-        let data = FakeData::new();
-        assert_eq!(
-            settings().apply(&data).await,
-            Ok(DataSettingsUpdate::new(settings_view("saved"), false))
-        );
-        assert_eq!(
-            *data.events.lock().unwrap(),
-            [
-                "update:https://api.spiraldb.dev:https://spfs.spiraldb.dev:project:http://127.0.0.1:50051:true",
-                "refresh"
-            ]
-        );
+    #[test]
+    fn settings_validation_normalizes_all_destinations() {
+        let command = settings().validated().unwrap();
+        assert_eq!(command.spiral_endpoint(), "https://api.spiraldb.dev");
+        assert_eq!(command.spiral_spfs_endpoint(), "https://spfs.spiraldb.dev");
+        assert_eq!(command.project_id(), "project");
+        assert_eq!(command.training_endpoint(), "http://127.0.0.1:50051");
     }
 
-    #[tokio::test]
-    async fn successful_spiral_test_recovers_project_state() {
-        let data = FakeData::new();
-
-        let result = TestConnectionCommand::execute(&data).await;
-
-        assert_eq!(result.into_parts(), (true, "connected".to_owned(), true));
-        assert_eq!(*data.events.lock().unwrap(), ["test", "recover"]);
-    }
-
-    #[tokio::test]
-    async fn failed_spiral_test_does_not_touch_project_state() {
-        let mut data = FakeData::new();
-        data.connection_check = ConnectionCheck::new(false, "connection refused");
-
-        let result = TestConnectionCommand::execute(&data).await;
-
-        assert_eq!(
-            result.into_parts(),
-            (false, "connection refused".to_owned(), false)
-        );
-        assert_eq!(*data.events.lock().unwrap(), ["test"]);
-    }
-
-    #[tokio::test]
-    async fn recovery_failure_does_not_report_a_successful_spiral_test() {
-        let mut data = FakeData::new();
-        data.recovery_error = Some(OperationError::External(
-            "unknown table rollout_runs".to_owned(),
-        ));
-
-        let result = TestConnectionCommand::execute(&data).await;
-        let (ok, message, project_state_rehydrated) = result.into_parts();
-
-        assert!(!ok);
-        assert!(!project_state_rehydrated);
-        assert!(message.contains("provisioning succeeded"), "{message}");
-        assert!(message.contains("unknown table rollout_runs"), "{message}");
-        assert_eq!(*data.events.lock().unwrap(), ["test", "recover"]);
-    }
-
-    #[tokio::test]
-    async fn invalid_or_unsaved_settings_never_refresh_training() {
-        let data = FakeData::new();
+    #[test]
+    fn invalid_settings_are_rejected_before_project_preparation() {
         let mut invalid = settings();
         invalid.project_id = "not/a/project".to_owned();
-        assert!(matches!(
-            invalid.apply(&data).await,
-            Err(OperationError::InvalidInput(_))
-        ));
-        assert!(data.events.lock().unwrap().is_empty());
-
+        assert!(invalid.validated().is_err());
         let mut invalid = settings();
         invalid.spiral_endpoint = "file:///tmp/spiral".to_owned();
-        assert!(matches!(
-            invalid.apply(&data).await,
-            Err(OperationError::InvalidInput(_))
-        ));
-        assert!(data.events.lock().unwrap().is_empty());
-
+        assert!(invalid.validated().is_err());
         let mut invalid = settings();
         invalid.spiral_spfs_endpoint = "file:///tmp/spfs".to_owned();
-        assert!(matches!(
-            invalid.apply(&data).await,
-            Err(OperationError::InvalidInput(_))
-        ));
-        assert!(data.events.lock().unwrap().is_empty());
-
+        assert!(invalid.validated().is_err());
         let mut invalid = settings();
         invalid.training_endpoint = "ftp://runtime.example".to_owned();
-        assert!(matches!(
-            invalid.apply(&data).await,
-            Err(OperationError::InvalidInput(_))
-        ));
-        assert!(data.events.lock().unwrap().is_empty());
-
-        let mut data = FakeData::new();
-        data.update_error = Some(OperationError::Internal("Spiral unavailable".to_owned()));
-        assert_eq!(
-            settings().apply(&data).await,
-            Err(OperationError::Internal("Spiral unavailable".to_owned()))
-        );
-        assert_eq!(data.events.lock().unwrap().len(), 1);
+        assert!(invalid.validated().is_err());
     }
 
     #[tokio::test]

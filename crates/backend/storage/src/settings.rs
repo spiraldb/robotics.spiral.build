@@ -283,6 +283,12 @@ impl BackendStateStore {
         Self::open(path)
     }
 
+    /// Isolated bootstrap state for integration tests, without process-global environment changes.
+    #[cfg(feature = "test-support")]
+    pub fn open_for_test(path: PathBuf) -> Result<Self, String> {
+        Self::open(path)
+    }
+
     fn open(path: PathBuf) -> Result<Self, String> {
         let current = if path.exists() {
             let bytes =

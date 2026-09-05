@@ -1,6 +1,5 @@
 //! Data settings, catalog, query, and transfer commands exposed to delivery adapters.
 
-use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use spiral_robotics_common::datasets::{
@@ -18,10 +17,9 @@ use spiral_robotics_storage::ingestion::HuggingFaceDatasetDiscovery as _;
 use crate::OperationError;
 use crate::data::catalog_lease::{CatalogLeaseOwner, CatalogLeaseToken, CatalogMutationLease};
 use crate::data::{
-    ConnectionCheck, DataCatalogPort, DataSettingsSnapshot, DataSettingsUpdate, QueryCommand,
-    QueryResult, TestConnectionCommand, UpdateDataSettingsCommand,
+    DataCatalogPort, DataSettingsSnapshot, QueryCommand, QueryResult, UpdateDataSettingsCommand,
 };
-use crate::http::routes::{AppState, BootstrapState};
+use crate::http::routes::AppState;
 use crate::main_runtime::{MainRuntime, MainRuntimeFailure};
 
 pub const MAX_PROJECT_IMPORT_BYTES: usize =
@@ -36,26 +34,6 @@ impl Drop for CatalogLeaseReservation {
     fn drop(&mut self) {
         let released = self.lease.release(self.token);
         debug_assert!(released, "catalog operation releases its exact lease once");
-    }
-}
-
-struct ProjectRecoveryPublication {
-    project_state_rehydrated: bool,
-}
-
-impl ProjectRecoveryPublication {
-    const fn new(project_state_rehydrated: bool) -> Self {
-        Self {
-            project_state_rehydrated,
-        }
-    }
-
-    fn publish_to(self, bootstrap: &BootstrapState) -> bool {
-        if !self.project_state_rehydrated {
-            return false;
-        }
-        bootstrap.ready();
-        true
     }
 }
 
@@ -102,6 +80,13 @@ impl DataSettingsChange {
 pub struct DataFailure(String);
 
 impl DataCommands {
+    pub fn for_session(&self, session_id: &str) -> Result<Self, DataFailure> {
+        Ok(Self::new(
+            self.main_runtime.clone(),
+            self.state.for_session(session_id)?,
+        ))
+    }
+
     pub(crate) fn new(main_runtime: MainRuntime, state: AppState) -> Self {
         Self {
             main_runtime,
@@ -117,7 +102,7 @@ impl DataCommands {
     }
 
     async fn settings_on_main_runtime(&self) -> Result<DataSettings, DataFailure> {
-        Ok(DataAdapter::new(&self.state).settings().into())
+        Ok(self.state.project().settings().into())
     }
 
     pub async fn update_settings(
@@ -135,120 +120,26 @@ impl DataCommands {
         change: DataSettingsChange,
     ) -> Result<DataSettings, DataFailure> {
         let (connection, training, video) = change.into_parts();
-        let (
-            spiral_endpoint,
-            spiral_spfs_endpoint,
-            project_id,
-            client_id,
-            client_secret,
-            clear_client_secret,
-        ) = connection.into_parts();
-        let requested_endpoint = spiral_robotics_storage::ServiceEndpoint::spiral(&spiral_endpoint)
-            .map(spiral_robotics_storage::ServiceEndpoint::into_string)
-            .map_err(DataFailure::invalid)?;
-        let requested_spfs_endpoint =
-            spiral_robotics_storage::ServiceEndpoint::spiral_spfs(&spiral_spfs_endpoint)
-                .map(spiral_robotics_storage::ServiceEndpoint::into_string)
-                .map_err(DataFailure::invalid)?;
-        let requested_training_endpoint =
-            spiral_robotics_storage::ServiceEndpoint::training_runtime(training.endpoint())
-                .map(spiral_robotics_storage::ServiceEndpoint::into_string)
-                .map_err(DataFailure::invalid)?;
-        let catalog_was_available = self.state.bootstrap().current().catalog_available();
-        let current_connection = self.state.connection().settings();
-        let endpoint_changed = current_connection.spiral().endpoint() != requested_endpoint
-            || current_connection.spiral().spfs_endpoint() != requested_spfs_endpoint;
-        let project_changed = current_connection.spiral().project_id() != project_id.trim();
-        let credentials_change_requested = clear_client_secret
-            || !client_secret.trim().is_empty()
-            || current_connection.spiral().client_id() != client_id;
-        let training_endpoint_changed =
-            self.state.preferences().get().training().endpoint() != requested_training_endpoint;
-        let training_is_active = self
-            .state
-            .training()
-            .snapshot()
-            .runs()
-            .iter()
-            .any(|run| run.phase().active());
-        if training_endpoint_changed && training_is_active {
-            return Err(DataFailure::conflict(
-                "Stop the active training job before changing its remote worker endpoint",
-            ));
-        }
-        let _reservation = if project_changed || endpoint_changed || credentials_change_requested {
-            let token = self
-                .state
-                .catalog_lease()
-                .try_acquire(CatalogLeaseOwner::ProjectSwitch)
-                .ok_or_else(|| {
-                    DataFailure::conflict(
-                        "Wait for the current recording or catalog change before changing the Spiral destination",
-                    )
-                })?;
-            let reservation = CatalogLeaseReservation {
-                lease: self.state.catalog_lease().clone(),
-                token,
-            };
-            if self.state.workflow_agent().is_active() {
-                return Err(DataFailure::conflict(
-                    "Stop the active Workflow Assistant turn before changing the Spiral destination",
-                ));
-            }
-            let hardware = self.state.hardware().state();
-            let rollout_is_active = self.state.rollout().snapshot().phase().active();
-            let current_robot_ids = self.state.workspace().try_list().await.ok().map(|records| {
-                records
-                    .into_iter()
-                    .map(|record| record.id().to_owned())
-                    .collect::<BTreeSet<_>>()
-            });
-            match DestinationChangeContext::new(&hardware, current_robot_ids.as_ref())
-                .with_active_work(
-                    training_is_active
-                        || rollout_is_active
-                        || self.state.workflow().state().snapshot().phase().active(),
-                )
-                .admission()
-            {
-                DestinationChangeAdmission::Ready => {}
-                DestinationChangeAdmission::Busy => {
-                    return Err(DataFailure::conflict(
-                        "Stop recording, replay, rollout, training, and Workflow, then disconnect visible robots before changing the Spiral destination",
-                    ));
-                }
-                DestinationChangeAdmission::DisconnectOrphaned(robot_ids) => {
-                    for robot_id in robot_ids {
-                        self.state.hardware().disconnect(&robot_id).await.map_err(|error| {
-                            DataFailure::conflict(format!(
-                                "Could not safely disconnect hidden robot {robot_id:?} before changing the Spiral destination: {error}"
-                            ))
-                        })?;
-                    }
-                }
-            }
-            Some(reservation)
-        } else {
-            None
-        };
-        let client_secret = if clear_client_secret {
+        let (endpoint, spfs, project, client_id, secret, clear_secret) = connection.into_parts();
+        let secret = if clear_secret {
             Some(String::new())
-        } else if client_secret.trim().is_empty() {
+        } else if secret.trim().is_empty() {
             None
         } else {
-            Some(client_secret)
+            Some(secret)
         };
-        let update =
-            UpdateDataSettingsCommand::new(spiral_endpoint, project_id, training.endpoint())
-                .with_spfs_endpoint(spiral_spfs_endpoint)
-                .with_client(client_id)
-                .with_client_secret(client_secret)
-                .with_video_enabled(video.enabled())
-                .apply(&DataAdapter::new(&self.state))
-                .await?;
-        let (settings, project_state_rehydrated) = update.into_parts();
-        let recovery_completed = self.complete_project_recovery(project_state_rehydrated);
-        if !recovery_completed && !endpoint_changed && catalog_was_available {
+        let command = UpdateDataSettingsCommand::new(endpoint, project, training.endpoint())
+            .with_spfs_endpoint(spfs)
+            .with_client(client_id)
+            .with_client_secret(secret)
+            .with_video_enabled(video.enabled());
+        let result = self
+            .state
+            .projects()
+            .update_settings(self.state.project(), command)
+            .await?;
+        let (settings, replaced) = result.into_parts();
+        if replaced {
             self.spawn_auto_connect_saved_robots();
         }
         Ok(settings.into())
@@ -262,10 +153,16 @@ impl DataCommands {
     }
 
     async fn test_spiral_on_main_runtime(&self) -> Result<(bool, String), DataFailure> {
-        let result = TestConnectionCommand::execute(&DataAdapter::new(&self.state)).await;
-        let (ok, message, project_state_rehydrated) = result.into_parts();
-        self.complete_project_recovery(project_state_rehydrated);
-        Ok((ok, message))
+        match self.state.projects().recover(self.state.project()).await {
+            Ok(()) => {
+                self.spawn_auto_connect_saved_robots();
+                Ok((
+                    true,
+                    "Connected to SpiralDB and loaded the project".to_owned(),
+                ))
+            }
+            Err(error) => Ok((false, error.to_string())),
+        }
     }
 
     pub async fn test_training_runtime(&self) -> Result<(bool, String), DataFailure> {
@@ -276,6 +173,7 @@ impl DataCommands {
     }
 
     async fn test_training_runtime_on_main_runtime(&self) -> Result<(bool, String), DataFailure> {
+        let _activity = self.state.admit()?;
         Ok(self.state.training().test_runtime().await)
     }
 
@@ -287,6 +185,7 @@ impl DataCommands {
     }
 
     async fn relations_on_main_runtime(&self) -> Result<RelationCatalog, DataFailure> {
+        let _activity = self.state.admit()?;
         self.require_catalog_ready()?;
         let token = self
             .state
@@ -320,6 +219,7 @@ impl DataCommands {
         statement: String,
         max_rows: usize,
     ) -> Result<SpiralQuerySnapshot, DataFailure> {
+        let _activity = self.state.admit()?;
         self.require_catalog_ready()?;
         QueryCommand::new(statement, max_rows)
             .execute(&DataAdapter::new(&self.state))
@@ -346,6 +246,7 @@ impl DataCommands {
         &self,
         request: HuggingFaceDatasetSource,
     ) -> Result<HuggingFaceDatasetInspection, DataFailure> {
+        let _activity = self.state.admit()?;
         HuggingFaceDatasetInspection::discover(
             request,
             self.state.storage().workflow_model_store().namespace(),
@@ -372,6 +273,7 @@ impl DataCommands {
         &self,
         request: HuggingFaceDatasetSource,
     ) -> Result<HuggingFaceDatasetImportSummary, DataFailure> {
+        let _activity = self.state.admit()?;
         self.require_catalog_ready()?;
         let inspection = HuggingFaceDatasetInspection::discover(
             request,
@@ -408,6 +310,7 @@ impl DataCommands {
     }
 
     async fn export_project_on_main_runtime(&self) -> Result<Vec<u8>, DataFailure> {
+        let _activity = self.state.admit()?;
         self.require_catalog_ready()?;
         self.state
             .storage()
@@ -431,36 +334,17 @@ impl DataCommands {
         document: Vec<u8>,
     ) -> Result<ProjectImportSummary, DataFailure> {
         self.require_catalog_ready()?;
-        let token = self
-            .state
-            .catalog_lease()
-            .try_acquire(CatalogLeaseOwner::ProjectImport)
-            .ok_or_else(|| {
-                DataFailure::conflict(
-                    "Wait for the current recording or catalog change before importing a project",
-                )
-            })?;
-        let _reservation = CatalogLeaseReservation {
-            lease: self.state.catalog_lease().clone(),
-            token,
-        };
         if document.is_empty() {
             return Err(DataFailure::invalid(
                 "choose a .spiral-project file to import",
             ));
         }
-        self.require_project_import_idle()?;
-        self.disconnect_all_robots().await?;
         let summary = self
             .state
-            .storage()
-            .import_project_bundle(&document)
-            .await
-            .map_err(DataFailure)?;
-        DataAdapter::new(&self.state)
-            .recover_project_state()
+            .projects()
+            .import(self.state.project(), &document)
             .await?;
-        self.state.auto_connect_saved_robots().await;
+        self.spawn_auto_connect_saved_robots();
         Ok(summary)
     }
 
@@ -487,16 +371,6 @@ impl DataCommands {
         Ok(())
     }
 
-    fn require_project_import_idle(&self) -> Result<(), DataFailure> {
-        let hardware = self.state.hardware().state();
-        if self.import_activity_is_busy(&hardware) {
-            return Err(DataFailure::conflict(
-                "Stop recording, replay, rollout, training, Workflow, or the Workflow Assistant before importing a project",
-            ));
-        }
-        Ok(())
-    }
-
     fn import_activity_is_busy(&self, hardware: &HardwareState) -> bool {
         hardware.recording().is_some()
             || !matches!(hardware.mode(), HardwareModeSelection::Idle)
@@ -512,36 +386,9 @@ impl DataCommands {
             || self.state.workflow_agent().is_active()
     }
 
-    async fn disconnect_all_robots(&self) -> Result<(), DataFailure> {
-        let hardware = self.state.hardware().state();
-        let robot_ids = hardware
-            .connections()
-            .iter()
-            .filter(|(_, connection)| connection.connected())
-            .map(|(robot, _)| robot.clone())
-            .collect::<Vec<_>>();
-        for robot in robot_ids {
-            self.state.hardware().disconnect(&robot).await.map_err(|error| {
-                DataFailure::conflict(format!(
-                    "Could not safely disconnect robot {robot:?} before importing the project: {error}"
-                ))
-            })?;
-        }
-        Ok(())
-    }
-
     fn spawn_auto_connect_saved_robots(&self) {
-        let reconnect_state = self.state.clone();
+        let reconnect_state = self.state.current();
         tokio::spawn(async move { reconnect_state.auto_connect_saved_robots().await });
-    }
-
-    fn complete_project_recovery(&self, project_state_rehydrated: bool) -> bool {
-        let published = ProjectRecoveryPublication::new(project_state_rehydrated)
-            .publish_to(self.state.bootstrap());
-        if published {
-            self.spawn_auto_connect_saved_robots();
-        }
-        published
     }
 }
 
@@ -556,38 +403,6 @@ impl<'a> DataAdapter<'a> {
 }
 
 impl DataCatalogPort for DataAdapter<'_> {
-    fn settings(&self) -> DataSettingsSnapshot {
-        self.state.connection().settings()
-    }
-
-    async fn update_settings(
-        &self,
-        command: UpdateDataSettingsCommand,
-    ) -> Result<DataSettingsUpdate, OperationError> {
-        self.state
-            .connection()
-            .update(
-                command,
-                self.state.bootstrap().current().catalog_available(),
-            )
-            .await
-    }
-
-    async fn refresh_training_readiness(&self) {
-        self.state.training().refresh_readiness().await;
-    }
-
-    async fn test_connection(&self) -> ConnectionCheck {
-        let (ok, message) = self.state.storage().test_spiral().await;
-        ConnectionCheck::new(ok, message)
-    }
-
-    async fn recover_project_state(&self) -> Result<(), OperationError> {
-        self.state.connection().recover_project_state().await?;
-        self.state.training().refresh_readiness().await;
-        Ok(())
-    }
-
     async fn query(&self, command: QueryCommand) -> Result<QueryResult, OperationError> {
         self.state
             .storage()
@@ -776,70 +591,6 @@ impl From<QueryResult> for SpiralQuerySnapshot {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
-enum DestinationChangeAdmission {
-    Ready,
-    DisconnectOrphaned(Vec<String>),
-    Busy,
-}
-
-struct DestinationChangeContext {
-    hardware_busy: bool,
-    connected_robot_ids: Vec<String>,
-    current_robot_ids: Option<BTreeSet<String>>,
-}
-
-impl DestinationChangeContext {
-    fn new(hardware: &HardwareState, current_robot_ids: Option<&BTreeSet<String>>) -> Self {
-        Self {
-            hardware_busy: hardware.recording().is_some()
-                || !matches!(hardware.mode(), HardwareModeSelection::Idle),
-            connected_robot_ids: hardware
-                .connections()
-                .iter()
-                .filter(|(_, connection)| connection.connected())
-                .map(|(id, _)| id.clone())
-                .collect(),
-            current_robot_ids: current_robot_ids.cloned(),
-        }
-    }
-
-    const fn with_active_work(mut self, active: bool) -> Self {
-        self.hardware_busy |= active;
-        self
-    }
-
-    fn admission(self) -> DestinationChangeAdmission {
-        if self.hardware_busy {
-            return DestinationChangeAdmission::Busy;
-        }
-        if self.connected_robot_ids.is_empty() {
-            return DestinationChangeAdmission::Ready;
-        }
-        match self.current_robot_ids {
-            Some(ids) if self.connected_robot_ids.iter().any(|id| ids.contains(id)) => {
-                DestinationChangeAdmission::Busy
-            }
-            Some(ids) => DestinationChangeAdmission::DisconnectOrphaned(
-                self.connected_robot_ids
-                    .into_iter()
-                    .filter(|id| !ids.contains(id))
-                    .collect(),
-            ),
-            None => DestinationChangeAdmission::DisconnectOrphaned(self.connected_robot_ids),
-        }
-    }
-
-    #[cfg(test)]
-    fn idle_with_connection(id: &str) -> Self {
-        Self {
-            hardware_busy: false,
-            connected_robot_ids: vec![id.to_owned()],
-            current_robot_ids: None,
-        }
-    }
-}
-
 impl DataFailure {
     fn invalid(message: impl Into<String>) -> Self {
         Self(message.into())
@@ -880,54 +631,6 @@ mod tests {
     use spiral_robotics_common::settings::{
         DataSettings, SpiralSettings, TrainingRuntimeSettings, VideoSettings,
     };
-    use spiral_robotics_common::status::{BackendReadiness, BackendReadinessState};
-
-    #[test]
-    fn unavailable_catalog_can_detach_idle_hidden_robots_during_cutover() {
-        let hardware = DestinationChangeContext::idle_with_connection("leader");
-        assert_eq!(
-            hardware.admission(),
-            DestinationChangeAdmission::DisconnectOrphaned(vec!["leader".to_owned()]),
-        );
-    }
-
-    #[test]
-    fn visible_connected_robot_still_blocks_destination_cutover() {
-        let mut hardware = DestinationChangeContext::idle_with_connection("leader");
-        hardware.current_robot_ids = Some(BTreeSet::from(["leader".to_owned()]));
-        assert_eq!(hardware.admission(), DestinationChangeAdmission::Busy);
-    }
-
-    #[test]
-    fn active_work_never_uses_the_hidden_robot_recovery_path() {
-        let hardware =
-            DestinationChangeContext::idle_with_connection("leader").with_active_work(true);
-        assert_eq!(hardware.admission(), DestinationChangeAdmission::Busy);
-    }
-
-    #[test]
-    fn failed_opportunistic_recovery_keeps_the_catalog_degraded() {
-        let bootstrap = BootstrapState::new();
-        bootstrap.degraded(false, "run Test connection");
-        assert!(!ProjectRecoveryPublication::new(false).publish_to(&bootstrap));
-        assert_eq!(
-            bootstrap.current(),
-            BackendReadiness::new(
-                BackendReadinessState::Degraded,
-                false,
-                "run Test connection"
-            )
-        );
-    }
-
-    #[test]
-    fn successful_project_recovery_makes_the_catalog_ready() {
-        let bootstrap = BootstrapState::new();
-        bootstrap.degraded(false, "run Test connection");
-        assert!(ProjectRecoveryPublication::new(true).publish_to(&bootstrap));
-        assert_eq!(bootstrap.current().state(), BackendReadinessState::Ready);
-        assert!(bootstrap.current().catalog_available());
-    }
 
     #[test]
     fn data_settings_projection_preserves_values_and_pending_identity() {

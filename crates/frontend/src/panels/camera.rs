@@ -4,6 +4,7 @@ use dioxus::prelude::*;
 
 use crate::client::episode_data::EpisodePreview;
 use crate::client::http::{CameraApiPath, EpisodeApiPath};
+use crate::client::project::ProjectClient;
 use crate::format::ClockPresentation;
 use crate::shell::activity::{LoadState, RecordedSource, TimelineSubject};
 
@@ -58,6 +59,7 @@ pub(crate) fn CameraEditor(
                 let updating = source.state().is_loading();
                 let warning = source.state().reason().map(str::to_owned);
                 let sync_camera = recorded.clone();
+                let scoped_url = ProjectClient::current().scoped_url(&recorded.url);
                 rsx! {
                     div { class: "camera-editor-meta",
                         span {
@@ -75,7 +77,7 @@ pub(crate) fn CameraEditor(
                             key: "{recorded.url}",
                             id: "{element_id}",
                             class: "h-full w-full object-contain",
-                            src: "{recorded.url}",
+                            src: scoped_url,
                             preload: "auto",
                             autoplay: playing,
                             muted: true,
@@ -171,7 +173,7 @@ fn LiveCameraFrame(robot: String, role: String, device: String) -> Element {
         div { class: "camera-editor-frame camera-live-frame",
             img {
                 class: "camera-stream-image",
-                src: device.camera_stream_url(),
+                src: ProjectClient::current().scoped_url(&device.camera_stream_url()),
                 alt: "Live view from the {role} camera on {robot}",
                 loading: "eager",
                 decoding: "sync",

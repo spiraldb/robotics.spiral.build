@@ -72,15 +72,6 @@ impl StorageManager {
             .await
     }
 
-    pub async fn configure_connection(
-        &self,
-        settings: SpiralConnectionSettings,
-    ) -> Result<(), String> {
-        ProjectDatabasePersistence::new(&self.project_store)
-            .configure(settings)
-            .await
-    }
-
     pub fn namespace(&self) -> &str {
         self.project_store.namespace()
     }
