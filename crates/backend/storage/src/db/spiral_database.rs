@@ -1,5 +1,15 @@
 //! Native async Spiral implementation of the database traits.
 
+mod read_transaction;
+
+use read_transaction::ReadTransactionGuard;
+
+#[cfg(test)]
+mod schema_tests;
+
+#[cfg(test)]
+mod native_schema_tests;
+
 use std::fmt;
 use std::sync::Arc;
 
@@ -14,7 +24,7 @@ use spiral_client::lazy_client::LazySpiralClient;
 use spiral_config::{ClientSettings, FragmentsCacheEnabled, MutableConfig as _};
 use spiral_defaults::default_session_with_config;
 use spiral_engine::catalog::{
-    CatalogEntryRequest, RelationName as SpiralRelationName, RelationType,
+    CatalogContext, CatalogEntryRequest, RelationName as SpiralRelationName, RelationType,
 };
 use spiral_engine::exec::QueryCtx;
 use spiral_engine::logical::{
@@ -119,13 +129,12 @@ impl ConfiguredSpiralSession {
             )
             .map_err(DatabaseError::from_external)?;
         connection
-            .relation_catalog_mut()
             .use_catalog(SPIRALDB_CATALOG)
             .map_err(DatabaseError::from_external)?;
         if let Some(project) = &self.project {
             connection
-                .relation_catalog_mut()
-                .use_project(project.clone());
+                .use_project(project.clone())
+                .map_err(DatabaseError::from_external)?;
         }
         Ok(connection)
     }
@@ -261,21 +270,47 @@ impl SpiralConnection {
         relation: RelationName,
     ) -> DatabaseResult<Option<Arc<Schema>>> {
         let target = Self::relation_name(&relation)?;
-        let catalog = self.context.relation_catalog().clone();
-        let session = self.context.session().clone();
-        catalog
-            .bind_relation_opt(&target, &session)
-            .await
-            .map_err(DatabaseError::from_external)?
-            .map(|definition| {
-                session
-                    .vortex()
-                    .arrow()
-                    .to_arrow_schema(definition.definition().dtype())
-                    .map(Arc::new)
-                    .map_err(DatabaseError::from_external)
-            })
-            .transpose()
+        let read_transaction = ReadTransactionGuard::open(&self.context).await?;
+        let schema = async {
+            let transaction = read_transaction.transaction();
+            let relations = transaction.relation_catalog();
+            let (catalog, local_name) = relations
+                .resolve_resources(&target)
+                .map_err(DatabaseError::from_external)?;
+            let explicit_catalog = local_name != target;
+            let catalog_name = if explicit_catalog {
+                target.parts().first().map(|part| part.value.as_str())
+            } else {
+                relations.default_catalog()
+            }
+            .ok_or_else(|| {
+                DatabaseError::invalid_state("schema inspection requires a selected catalog")
+            })?;
+            let session = transaction.session();
+            let context = CatalogContext::new(
+                catalog_name,
+                explicit_catalog,
+                relations.current_project(),
+                relations.current_dataset(),
+                session,
+            )
+            .with_transaction(Some(transaction));
+            catalog
+                .bind_relation(context, &local_name)
+                .await
+                .map_err(DatabaseError::from_external)?
+                .map(|relation| {
+                    session
+                        .vortex()
+                        .arrow()
+                        .to_arrow_schema(relation.definition().dtype())
+                        .map(Arc::new)
+                        .map_err(DatabaseError::from_external)
+                })
+                .transpose()
+        }
+        .await;
+        read_transaction.finish(schema)
     }
 
     async fn list_relations(&mut self) -> DatabaseResult<Vec<RelationMetadata>> {
@@ -306,12 +341,7 @@ impl SpiralConnection {
         let (relation, mode, batches) = ingestion.into_parts();
         let target = Self::relation_name(&relation)?;
         let session = self.context.session().clone();
-        let catalog = self.context.relation_catalog().clone();
-        let exists = catalog
-            .bind_relation_opt(&target, &session)
-            .await
-            .map_err(DatabaseError::from_external)?
-            .is_some();
+        let exists = self.fetch_table_schema(relation.clone()).await?.is_some();
         if matches!(mode, IngestMode::Append | IngestMode::ReplaceExisting) && !exists {
             return Err(DatabaseError::new(
                 DatabaseErrorKind::NotFound,
