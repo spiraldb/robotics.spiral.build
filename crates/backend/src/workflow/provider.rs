@@ -1,17 +1,17 @@
 //! Bounded OpenAI-compatible Chat Completions transport.
 
-use std::collections::VecDeque;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
+use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
 use reqwest::{Client, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use spiral_robotics_storage::workflow_assistant::{ProviderMessage, ProviderToolCall};
 
 const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 const DEFAULT_OPENROUTER_MODEL: &str = "openai/gpt-5.6-terra";
@@ -245,115 +245,10 @@ impl LocalProviderValue {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ProviderMessage {
-    role: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    tool_call_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    tool_calls: Vec<ProviderToolCall>,
-}
-
-impl ProviderMessage {
-    pub(crate) fn text(role: &str, content: impl Into<String>) -> Self {
-        Self {
-            role: role.to_owned(),
-            content: Some(content.into()),
-            tool_call_id: None,
-            tool_calls: Vec::new(),
-        }
-    }
-
-    pub(crate) fn tool(call_id: String, content: String) -> Self {
-        Self {
-            role: "tool".to_owned(),
-            content: Some(content),
-            tool_call_id: Some(call_id),
-            tool_calls: Vec::new(),
-        }
-    }
-
-    pub(crate) fn assistant(content: Option<String>, tool_calls: Vec<ProviderToolCall>) -> Self {
-        Self {
-            role: "assistant".to_owned(),
-            content,
-            tool_call_id: None,
-            tool_calls,
-        }
-    }
-
-    pub(crate) fn role(&self) -> &str {
-        &self.role
-    }
-    #[cfg(test)]
-    pub(crate) fn content(&self) -> Option<&str> {
-        self.content.as_deref()
-    }
-    pub(crate) fn tool_call_id(&self) -> Option<&str> {
-        self.tool_call_id.as_deref()
-    }
-    pub(crate) fn tool_calls(&self) -> &[ProviderToolCall] {
-        &self.tool_calls
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ProviderToolCall {
-    id: String,
-    #[serde(rename = "type")]
-    kind: String,
-    function: ProviderFunctionCall,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ProviderFunctionCall {
-    name: String,
-    arguments: String,
-}
-
 #[derive(Clone, Debug)]
 pub(crate) struct ProviderResponse {
     content: String,
     tool_calls: Vec<ProviderToolCall>,
-}
-
-impl ProviderToolCall {
-    #[cfg(test)]
-    pub(crate) fn test_function(
-        id: impl Into<String>,
-        name: impl Into<String>,
-        arguments: impl Into<String>,
-    ) -> Self {
-        Self {
-            id: id.into(),
-            kind: "function".to_owned(),
-            function: ProviderFunctionCall {
-                name: name.into(),
-                arguments: arguments.into(),
-            },
-        }
-    }
-
-    pub(crate) fn id(&self) -> &str {
-        &self.id
-    }
-    pub(crate) const fn function(&self) -> &ProviderFunctionCall {
-        &self.function
-    }
-}
-
-impl ProviderFunctionCall {
-    pub(crate) fn name(&self) -> &str {
-        &self.name
-    }
-    pub(crate) fn arguments(&self) -> &str {
-        &self.arguments
-    }
 }
 
 impl ProviderResponse {
@@ -396,11 +291,16 @@ struct PendingToolCall {
 struct StreamChunk {
     #[serde(default)]
     choices: Vec<StreamChoice>,
+    #[serde(default)]
+    error: Option<Value>,
 }
 
 #[derive(Deserialize)]
 struct StreamChoice {
+    #[serde(default)]
     delta: StreamDelta,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -437,14 +337,14 @@ pub(crate) struct OpenAiProvider {
 pub(crate) struct ProviderCompletion<'a> {
     messages: &'a [ProviderMessage],
     tools: &'a [Value],
-    cancel: Arc<AtomicBool>,
+    cancel: CancellationToken,
 }
 
 impl<'a> ProviderCompletion<'a> {
     pub(crate) fn new(
         messages: &'a [ProviderMessage],
         tools: &'a [Value],
-        cancel: Arc<AtomicBool>,
+        cancel: CancellationToken,
     ) -> Self {
         Self {
             messages,
@@ -479,7 +379,7 @@ impl OpenAiProvider {
         } = completion;
         let endpoint = self.config.completions_url()?;
         for attempt in 0..MAX_ATTEMPTS {
-            if cancel.load(Ordering::SeqCst) {
+            if cancel.is_cancelled() {
                 return Err("Agent turn cancelled.".to_owned());
             }
             let request = ChatRequest {
@@ -497,7 +397,7 @@ impl OpenAiProvider {
                 .send();
             let response = tokio::select! {
                 response = send => response.map_err(|error| self.config.public_error("request failed", &error.to_string()))?,
-                () = cancel.wait_cancelled() => return Err("Agent turn cancelled.".to_owned()),
+                () = cancel.cancelled() => return Err("Agent turn cancelled.".to_owned()),
             };
             if matches!(
                 response.status(),
@@ -509,19 +409,24 @@ impl OpenAiProvider {
                 let delay = Duration::from_millis(250 * (attempt as u64 + 1));
                 tokio::select! {
                     () = tokio::time::sleep(delay) => {},
-                    () = cancel.wait_cancelled() => return Err("Agent turn cancelled.".to_owned()),
+                    () = cancel.cancelled() => return Err("Agent turn cancelled.".to_owned()),
                 }
                 continue;
             }
             if !response.status().is_success() {
                 let status = response.status();
-                let body = response.bounded_error_body().await.unwrap_or_default();
+                let body = tokio::select! {
+                    body = response.bounded_error_body() => body.unwrap_or_default(),
+                    () = cancel.cancelled() => return Err("Agent turn cancelled.".to_owned()),
+                };
                 let detail = body.public_error_summary();
                 return Err(self
                     .config
                     .public_error(&format!("provider returned {status}"), &detail));
             }
-            return ProviderResponse::from_stream(response, cancel, &mut on_text_delta).await;
+            return ProviderResponse::from_stream(response, cancel, &mut on_text_delta)
+                .await
+                .map_err(|error| self.config.public_error("stream failed", &error));
         }
         Err("The LLM provider remained overloaded after bounded retries.".to_owned())
     }
@@ -530,107 +435,113 @@ impl OpenAiProvider {
 impl ProviderResponse {
     async fn from_stream<F>(
         response: reqwest::Response,
-        cancel: Arc<AtomicBool>,
+        cancel: CancellationToken,
         on_text_delta: &mut F,
     ) -> Result<ProviderResponse, String>
     where
         F: FnMut(&str),
     {
-        let mut stream = response.bytes_stream();
-        // HTTP byte chunks are not UTF-8 character boundaries. Buffer complete
-        // SSE lines as bytes, then decode each line after its newline arrives.
-        let mut buffer = VecDeque::new();
-        let mut searched = 0_usize;
         let mut received = 0_usize;
+        let mut events = response
+            .bytes_stream()
+            .map(move |chunk| {
+                let chunk = chunk.map_err(|error| format!("LLM stream failed: {error}"))?;
+                received = received.saturating_add(chunk.len());
+                if received > MAX_RESPONSE_BYTES {
+                    return Err(
+                        "The LLM provider response exceeded the 2 MiB safety limit.".to_owned()
+                    );
+                }
+                Ok(chunk)
+            })
+            .eventsource();
         let mut content = String::new();
         let mut calls = Vec::<PendingToolCall>::new();
+        let mut completed = false;
         while let Some(next) = tokio::select! {
-            next = stream.next() => next,
-            () = cancel.wait_cancelled() => return Err("Agent turn cancelled.".to_owned()),
+            next = events.next() => next,
+            () = cancel.cancelled() => return Err("Agent turn cancelled.".to_owned()),
         } {
-            let chunk = next.map_err(|error| format!("LLM stream failed: {error}"))?;
-            received = received.saturating_add(chunk.len());
-            if received > MAX_RESPONSE_BYTES {
-                return Err("The LLM provider response exceeded the 2 MiB safety limit.".to_owned());
+            let event = next
+                .map_err(|error| format!("The LLM provider returned invalid SSE data: {error}"))?;
+            let data = event.data.trim();
+            if data == "[DONE]" {
+                completed = true;
+                break;
             }
-            buffer.extend(chunk);
-            while let Some(position) = buffer
-                .iter()
-                .enumerate()
-                .skip(searched)
-                .find_map(|(index, byte)| (*byte == b'\n').then_some(index))
-            {
-                // VecDeque removes the completed prefix without shifting a growing
-                // partial SSE line. Together with `searched`, every received byte
-                // is scanned and copied at most once, even for adversarial streams
-                // with many short lines or multibyte characters split by chunks.
-                let mut line = buffer.drain(..=position).collect::<Vec<_>>();
-                line.pop(); // newline
-                searched = 0;
-                if line.last() == Some(&b'\r') {
-                    line.pop();
-                }
-                let line = std::str::from_utf8(&line)
-                    .map_err(|_| "The LLM provider returned non-UTF-8 stream data.".to_owned())?;
-                let Some(data) = line.strip_prefix("data:") else {
-                    continue;
-                };
-                let data = data.trim();
-                if data.is_empty() || data == "[DONE]" {
-                    continue;
-                }
-                let chunk: StreamChunk = serde_json::from_str(data).map_err(|error| {
-                    format!("The LLM provider returned malformed stream data: {error}")
-                })?;
-                for choice in chunk.choices {
-                    if let Some(delta) = choice.delta.content {
-                        content.push_str(&delta);
-                        on_text_delta(&delta);
-                    }
-                    for delta in choice.delta.tool_calls {
-                        if delta.index >= MAX_STREAM_TOOL_CALLS {
+            let chunk: StreamChunk = serde_json::from_str(data).map_err(|error| {
+                format!("The LLM provider returned malformed stream data: {error}")
+            })?;
+            if let Some(error) = chunk.error {
+                let detail = error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("The provider reported a generation error.");
+                return Err(detail.public_error_summary());
+            }
+            for choice in chunk.choices {
+                if let Some(reason) = choice.finish_reason {
+                    match reason.as_str() {
+                        "stop" | "tool_calls" => completed = true,
+                        _ => {
                             return Err(format!(
-                                "The LLM provider returned a tool-call index outside the 0–{} safety bound.",
-                                MAX_STREAM_TOOL_CALLS - 1
+                                "The LLM provider did not complete the response ({reason})."
                             ));
                         }
-                        if calls.len() <= delta.index {
-                            calls.resize_with(delta.index + 1, PendingToolCall::default);
+                    }
+                }
+                if let Some(delta) = choice.delta.content {
+                    content.push_str(&delta);
+                    on_text_delta(&delta);
+                }
+                for delta in choice.delta.tool_calls {
+                    if delta.index >= MAX_STREAM_TOOL_CALLS {
+                        return Err(format!(
+                            "The LLM provider returned a tool-call index outside the 0–{} safety bound.",
+                            MAX_STREAM_TOOL_CALLS - 1
+                        ));
+                    }
+                    if calls.len() <= delta.index {
+                        calls.resize_with(delta.index + 1, PendingToolCall::default);
+                    }
+                    let call = &mut calls[delta.index];
+                    if let Some(id) = delta.id {
+                        call.id.push_str(&id);
+                    }
+                    if let Some(function) = delta.function {
+                        if let Some(name) = function.name {
+                            call.name.push_str(&name);
                         }
-                        let call = &mut calls[delta.index];
-                        if let Some(id) = delta.id {
-                            call.id.push_str(&id);
-                        }
-                        if let Some(function) = delta.function {
-                            if let Some(name) = function.name {
-                                call.name.push_str(&name);
-                            }
-                            if let Some(arguments) = function.arguments {
-                                call.arguments.push_str(&arguments);
-                            }
+                        if let Some(arguments) = function.arguments {
+                            call.arguments.push_str(&arguments);
                         }
                     }
                 }
             }
-            searched = buffer.len();
         }
-        if !buffer.is_empty() {
-            let tail = buffer.into_iter().collect::<Vec<_>>();
-            std::str::from_utf8(&tail)
-                .map_err(|_| "The LLM provider returned non-UTF-8 stream data.".to_owned())?;
+        if !completed {
+            return Err("The LLM provider stream ended before completing its response.".to_owned());
         }
+        let mut ids = std::collections::BTreeSet::new();
         let tool_calls = calls
             .into_iter()
-            .filter(|call| !call.id.is_empty() || !call.name.is_empty())
-            .map(|call| ProviderToolCall {
-                id: call.id,
-                kind: "function".to_owned(),
-                function: ProviderFunctionCall {
-                    name: call.name,
-                    arguments: call.arguments,
-                },
+            .map(|call| {
+                if call.id.is_empty()
+                    || call.name.is_empty()
+                    || !ids.insert(call.id.clone())
+                    || !serde_json::from_str::<Value>(&call.arguments)
+                        .is_ok_and(|value| value.is_object())
+                {
+                    return Err(
+                        "The LLM provider returned an incomplete or invalid tool call.".to_owned(),
+                    );
+                }
+                Ok(ProviderToolCall::new(call.id, call.name, call.arguments))
             })
-            .collect();
+            .collect::<Result<Vec<_>, String>>()?;
+        if content.is_empty() && tool_calls.is_empty() {
+            return Err("The LLM provider completed without a message or tool call.".to_owned());
+        }
         Ok(Self {
             content,
             tool_calls,
@@ -669,18 +580,6 @@ impl ProviderErrorBody for str {
     }
 }
 
-trait CancellationWait {
-    async fn wait_cancelled(&self);
-}
-
-impl CancellationWait for AtomicBool {
-    async fn wait_cancelled(&self) {
-        while !self.load(Ordering::SeqCst) {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -690,7 +589,8 @@ mod tests {
     use axum::response::IntoResponse;
     use axum::routing::post;
     use std::collections::BTreeMap;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn write_private_local_env(contents: &str) -> tempfile::NamedTempFile {
         use std::io::Write;
@@ -705,6 +605,64 @@ mod tests {
                 .unwrap();
         }
         file
+    }
+
+    struct StreamFixture;
+    impl StreamFixture {
+        async fn parse(body: &str) -> Result<ProviderResponse, String> {
+            let response = axum::http::Response::builder()
+                .body(body.to_owned())
+                .unwrap()
+                .into();
+            ProviderResponse::from_stream(response, CancellationToken::new(), &mut |_| {}).await
+        }
+    }
+
+    #[tokio::test]
+    async fn multiline_sse_uses_event_boundaries_and_done_stops_the_stream() {
+        let body = concat!(
+            "data: {\"choices\":\ndata: [{\"delta\":{\"content\":\"hello\"}}]}\n\n",
+            "data: [DONE]\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\" ignored\"}}]}\n\n"
+        );
+        assert_eq!(StreamFixture::parse(body).await.unwrap().content(), "hello");
+    }
+
+    #[tokio::test]
+    async fn incomplete_error_and_truncated_tool_streams_are_rejected() {
+        for body in [
+            "data: {\"choices\":[{\"delta\":{\"content\":\"unfinished\"}}]}\n\n",
+            "data: {\"error\":{\"message\":\"generation failed\"},\"choices\":[{\"delta\":{},\"finish_reason\":\"error\"}]}\n\ndata: [DONE]\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\ndata: [DONE]\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call\",\"function\":{\"name\":\"run_query\",\"arguments\":\"{\"}}]}}]}\n\ndata: [DONE]\n\n",
+        ] {
+            assert!(StreamFixture::parse(body).await.is_err(), "{body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelling_an_idle_stream_wakes_the_pending_request() {
+        let body = reqwest::Body::wrap_stream(futures_util::stream::pending::<
+            Result<Bytes, std::io::Error>,
+        >());
+        let response = axum::http::Response::builder().body(body).unwrap().into();
+        let cancel = CancellationToken::new();
+        let request_cancel = cancel.clone();
+        let mut request = tokio::spawn(async move {
+            ProviderResponse::from_stream(response, request_cancel, &mut |_| {}).await
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(5), &mut request)
+                .await
+                .is_err()
+        );
+        cancel.cancel();
+        let error = tokio::time::timeout(Duration::from_secs(1), request)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(error.contains("cancelled"));
     }
 
     #[test]
@@ -794,22 +752,13 @@ mod tests {
 
     #[test]
     fn provider_messages_round_trip_tool_calls() {
-        let message = ProviderMessage {
-            role: "assistant".to_owned(),
-            content: None,
-            tool_call_id: None,
-            tool_calls: vec![ProviderToolCall {
-                id: "call-1".to_owned(),
-                kind: "function".to_owned(),
-                function: ProviderFunctionCall {
-                    name: "list_relations".to_owned(),
-                    arguments: "{}".to_owned(),
-                },
-            }],
-        };
+        let message = ProviderMessage::assistant(
+            None,
+            vec![ProviderToolCall::new("call-1", "list_relations", "{}")],
+        );
         let decoded: ProviderMessage =
             serde_json::from_value(serde_json::to_value(&message).unwrap()).unwrap();
-        assert_eq!(decoded.tool_calls[0].function.name, "list_relations");
+        assert_eq!(decoded.tool_calls()[0].function().name(), "list_relations");
     }
 
     async fn test_provider(app: Router) -> OpenAiProvider {
@@ -844,15 +793,15 @@ mod tests {
                 ProviderCompletion::new(
                     &[ProviderMessage::text("user", "show relations")],
                     &[serde_json::json!({"type":"function"})],
-                    Arc::new(AtomicBool::new(false)),
+                    CancellationToken::new(),
                 ),
                 |delta| deltas.push_str(delta),
             )
             .await
             .unwrap();
         assert_eq!(deltas, "I will ");
-        assert_eq!(response.tool_calls[0].function.name, "list_relations");
-        assert_eq!(response.tool_calls[0].function.arguments, "{}");
+        assert_eq!(response.tool_calls[0].function().name(), "list_relations");
+        assert_eq!(response.tool_calls[0].function().arguments(), "{}");
     }
 
     #[tokio::test]
@@ -869,19 +818,22 @@ mod tests {
         let provider = test_provider(app).await;
         let response = provider
             .complete(
-                ProviderCompletion::new(&[], &[], Arc::new(AtomicBool::new(false))),
+                ProviderCompletion::new(&[], &[], CancellationToken::new()),
                 |_| {},
             )
             .await
             .unwrap();
         assert_eq!(response.tool_calls.len(), 2);
-        assert_eq!(response.tool_calls[0].function.name, "describe_relations");
         assert_eq!(
-            response.tool_calls[0].function.arguments,
+            response.tool_calls[0].function().name(),
+            "describe_relations"
+        );
+        assert_eq!(
+            response.tool_calls[0].function().arguments(),
             "{\"relations\":[\"demo.frames\"]}"
         );
         assert_eq!(
-            response.tool_calls[1].function.name,
+            response.tool_calls[1].function().name(),
             "list_model_capabilities"
         );
     }
@@ -901,7 +853,7 @@ mod tests {
         let provider = test_provider(app).await;
         let error = provider
             .complete(
-                ProviderCompletion::new(&[], &[], Arc::new(AtomicBool::new(false))),
+                ProviderCompletion::new(&[], &[], CancellationToken::new()),
                 |_| {},
             )
             .await
@@ -940,7 +892,7 @@ mod tests {
         let mut deltas = String::new();
         let response = provider
             .complete(
-                ProviderCompletion::new(&[], &[], Arc::new(AtomicBool::new(false))),
+                ProviderCompletion::new(&[], &[], CancellationToken::new()),
                 |delta| deltas.push_str(delta),
             )
             .await
@@ -976,7 +928,7 @@ mod tests {
                 ProviderCompletion::new(
                     &[ProviderMessage::text("user", "hello")],
                     &[],
-                    Arc::new(AtomicBool::new(false)),
+                    CancellationToken::new(),
                 ),
                 |_| {},
             )
@@ -1003,7 +955,7 @@ mod tests {
                 ProviderCompletion::new(
                     &[ProviderMessage::text("user", "hello")],
                     &[],
-                    Arc::new(AtomicBool::new(false)),
+                    CancellationToken::new(),
                 ),
                 |_| {},
             )
@@ -1011,7 +963,8 @@ mod tests {
             .unwrap_err();
         assert!(error.contains("malformed stream data"));
 
-        let cancel = Arc::new(AtomicBool::new(true));
+        let cancel = CancellationToken::new();
+        cancel.cancel();
         let error = provider
             .complete(ProviderCompletion::new(&[], &[], cancel), |_| {})
             .await
@@ -1028,7 +981,7 @@ mod tests {
         let provider = test_provider(app).await;
         let error = provider
             .complete(
-                ProviderCompletion::new(&[], &[], Arc::new(AtomicBool::new(false))),
+                ProviderCompletion::new(&[], &[], CancellationToken::new()),
                 |_| {},
             )
             .await
@@ -1053,7 +1006,7 @@ mod tests {
         let provider = test_provider(app).await;
         let error = provider
             .complete(
-                ProviderCompletion::new(&[], &[], Arc::new(AtomicBool::new(false))),
+                ProviderCompletion::new(&[], &[], CancellationToken::new()),
                 |_| {},
             )
             .await

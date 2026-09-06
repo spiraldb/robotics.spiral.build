@@ -86,7 +86,7 @@ impl<'a> TryFrom<&'a str> for QualifiedRelation<'a> {
 
 /// Workflow SQL whose node references can be inspected or substituted.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct WorkflowSql<'a>(&'a str);
+pub struct WorkflowSql<'a>(&'a str);
 
 impl<'a> From<&'a str> for WorkflowSql<'a> {
     fn from(sql: &'a str) -> Self {
@@ -99,7 +99,7 @@ impl<'a> From<&'a str> for WorkflowSql<'a> {
 /// Repeated placeholders are preserved intentionally: a read-only query may
 /// reference the same upstream relation more than once with different aliases.
 impl WorkflowSql<'_> {
-    pub(crate) fn node_placeholders(self) -> Result<Vec<String>, WorkflowSyntaxError> {
+    pub fn node_placeholders(self) -> Result<Vec<String>, WorkflowSyntaxError> {
         let sql = self.0;
         let mut placeholders = Vec::new();
         let mut cursor = 0_usize;

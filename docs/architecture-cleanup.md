@@ -6,6 +6,11 @@ percentage reduction also requires narrowing the second, especially Workflow.
 This pass removes approximately 1,000 lines without removing product features.
 It is a first structural cleanup, not a claim that the larger reduction is done.
 
+The subsequent [Workflow architecture audit](workflow-architecture-audit.md)
+traces execution, Assistant lifecycle, persistence, and restore in detail. It
+identifies reductions that preserve the graph and revises the fixed-pipeline
+recommendation below; the listed product cuts remain optional.
+
 The starting working tree contained 113,264 lines across 214 Rust, Python,
 JavaScript, and CSS source/test files. Counts include comments and blank lines;
 they exclude dependencies, generated assets, lockfiles, and documentation.
@@ -71,12 +76,11 @@ enforces an additional invariant. Ports remain useful around physical effects,
 compensation, and replaceable compute implementations. A pass-through read does
 not need its own generic interface, adapter, result model, and fake.
 
-The next highest-confidence consolidation is persisted Assistant history.
-`workflow/agent.rs` and `storage/transfer/bundle.rs` describe overlapping document,
-conversation, session, message, and provider-tool structures, and separately
-validate tool exchanges. One storage-owned document codec could serve normal
-loading and bundle validation. Keep strict import validation and version checks;
-moving provider history into browser contracts would put it in the wrong layer.
+The subsequent Workflow implementation now gives persisted Assistant history one
+storage owner, uses standard SSE framing and cancellation, removes the deferred
+Assistant resume loop, and shares graph-source derivation and feature schemas.
+Its [implementation and validation record](workflow-architecture-audit.md)
+accounts for moved code, retained tests, behavior changes, and remaining work.
 
 For larger product cuts, evaluate these in order:
 

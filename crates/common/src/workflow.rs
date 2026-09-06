@@ -920,22 +920,20 @@ struct MessageIdentity {
     id: String,
     sequence: u64,
     role: WorkflowAgentRole,
-    #[serde(default)]
     created_ms: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct MessageContent {
     phase: WorkflowAgentMessagePhase,
-    #[serde(default)]
     text: String,
-    #[serde(default)]
     tools: Vec<WorkflowAgentToolSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     run_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkflowAgentMessage {
     #[serde(flatten)]
     identity: MessageIdentity,
@@ -1051,14 +1049,12 @@ struct SessionIdentity {
     #[serde(default, alias = "session_id")]
     conversation_id: String,
     revision: u64,
-    #[serde(default)]
     updated_ms: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct SessionActivity {
     phase: WorkflowAgentPhase,
-    #[serde(default)]
     messages: Vec<WorkflowAgentMessage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     active_turn_id: Option<String>,
@@ -1069,6 +1065,7 @@ struct SessionActivity {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkflowAgentSession {
     #[serde(flatten)]
     identity: SessionIdentity,
@@ -1578,6 +1575,14 @@ impl WorkflowSpec {
                 .push(edge.source.as_str());
         }
 
+        let topology = WorkflowTopology {
+            nodes,
+            incoming,
+            outgoing,
+        };
+        let nodes = &topology.nodes;
+        let incoming = &topology.incoming;
+        let outgoing = &topology.outgoing;
         let table_roots = spec
             .nodes
             .iter()
@@ -1672,25 +1677,7 @@ impl WorkflowSpec {
             _ => {}
         }
             if let WorkflowNodeConfig::Model { features } = &node.config {
-                let mut table_sources = BTreeSet::new();
-                let mut visited = BTreeSet::new();
-                let mut pending = incoming.get(node.id.as_str()).cloned().unwrap_or_default();
-                while let Some(upstream_id) = pending.pop() {
-                    if !visited.insert(upstream_id) {
-                        continue;
-                    }
-                    let Some(upstream) = nodes.get(upstream_id) else {
-                        continue;
-                    };
-                    match &upstream.config {
-                        WorkflowNodeConfig::Table { relation } => {
-                            table_sources.insert(relation.as_str());
-                        }
-                        _ => {
-                            pending.extend(incoming.get(upstream_id).into_iter().flatten().copied())
-                        }
-                    }
-                }
+                let table_sources = topology.source_relations(&node.id);
                 if table_sources.len() != 1 {
                     report.errors.push(WorkflowValidationIssue::new("model_source_count", "A Model feature cache must belong to exactly one authoritative source relation.", "Build the candidate Query from one source Table; join other evidence only after the Model.").with_node_id(&node.id));
                 } else if let Some(source) = table_sources.first()
@@ -1703,7 +1690,7 @@ impl WorkflowSpec {
             }
         }
 
-        if self.topological_order().is_err() {
+        if topology.ordered_nodes().is_err() {
             report.errors.push(WorkflowValidationIssue::new(
                 "workflow_cycle",
                 "Workflow lineage must be acyclic.",
@@ -1714,47 +1701,36 @@ impl WorkflowSpec {
     }
 
     pub fn topological_order(&self) -> Result<Vec<String>, String> {
-        let spec = self;
-        let mut in_degree = spec
+        let topology = WorkflowTopology::from(self);
+        if topology.nodes.len() != self.nodes.len() {
+            return Err("Workflow node identities must be unique.".to_owned());
+        }
+        topology.ordered_nodes()
+    }
+
+    /// Derive model applicability from graph lineage in both the editor and backend.
+    pub fn normalize_model_sources(&mut self) {
+        let topology = WorkflowTopology::from(&*self);
+        let sources = self
             .nodes
             .iter()
-            .map(|node| (node.id.as_str(), 0_usize))
+            .filter(|node| matches!(node.config, WorkflowNodeConfig::Model { .. }))
+            .map(|node| {
+                let relations = topology.source_relations(&node.id);
+                let source = if relations.len() == 1 {
+                    relations.into_iter().next().unwrap().to_owned()
+                } else {
+                    String::new()
+                };
+                (node.id.clone(), source)
+            })
             .collect::<BTreeMap<_, _>>();
-        let mut outgoing: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-        for edge in &spec.edges {
-            if !in_degree.contains_key(edge.source.as_str()) {
-                return Err(format!("unknown source {:?}", edge.source));
-            }
-            let Some(degree) = in_degree.get_mut(edge.target.as_str()) else {
-                return Err(format!("unknown target {:?}", edge.target));
-            };
-            *degree += 1;
-            outgoing
-                .entry(edge.source.as_str())
-                .or_default()
-                .push(edge.target.as_str());
-        }
-        let mut ready = in_degree
-            .iter()
-            .filter_map(|(id, degree)| (*degree == 0).then_some(*id))
-            .collect::<VecDeque<_>>();
-        let mut ordered = Vec::with_capacity(spec.nodes.len());
-        while let Some(id) = ready.pop_front() {
-            ordered.push(id.to_owned());
-            for target in outgoing.get(id).into_iter().flatten() {
-                let degree = in_degree
-                    .get_mut(target)
-                    .expect("known edges have known targets");
-                *degree -= 1;
-                if *degree == 0 {
-                    ready.push_back(target);
+        for node in &mut self.nodes {
+            if let WorkflowNodeConfig::Model { features } = &mut node.config {
+                for feature in features {
+                    feature.set_source_relation(sources[&node.id].clone());
                 }
             }
-        }
-        if ordered.len() == spec.nodes.len() {
-            Ok(ordered)
-        } else {
-            Err("workflow contains a cycle".to_owned())
         }
     }
 
@@ -2147,6 +2123,101 @@ impl WorkflowQuarantineSummary {
     }
 }
 
+/// One indexed representation of lineage, shared by validation and normalization.
+struct WorkflowTopology<'a> {
+    nodes: BTreeMap<&'a str, &'a WorkflowNodeSpec>,
+    incoming: BTreeMap<&'a str, Vec<&'a str>>,
+    outgoing: BTreeMap<&'a str, Vec<&'a str>>,
+}
+
+impl<'a> From<&'a WorkflowSpec> for WorkflowTopology<'a> {
+    fn from(spec: &'a WorkflowSpec) -> Self {
+        let mut topology = Self {
+            nodes: spec
+                .nodes
+                .iter()
+                .map(|node| (node.id.as_str(), node))
+                .collect(),
+            incoming: BTreeMap::new(),
+            outgoing: BTreeMap::new(),
+        };
+        for edge in &spec.edges {
+            topology
+                .incoming
+                .entry(&edge.target)
+                .or_default()
+                .push(&edge.source);
+            topology
+                .outgoing
+                .entry(&edge.source)
+                .or_default()
+                .push(&edge.target);
+        }
+        topology
+    }
+}
+
+impl<'a> WorkflowTopology<'a> {
+    fn source_relations(&self, node_id: &str) -> BTreeSet<&'a str> {
+        let mut sources = BTreeSet::new();
+        let mut visited = BTreeSet::new();
+        let mut pending = self.incoming.get(node_id).cloned().unwrap_or_default();
+        while let Some(upstream) = pending.pop() {
+            if !visited.insert(upstream) {
+                continue;
+            }
+            match self.nodes.get(upstream).map(|node| &node.config) {
+                Some(WorkflowNodeConfig::Table { relation }) => {
+                    sources.insert(relation.as_str());
+                }
+                Some(_) => {
+                    pending.extend(self.incoming.get(upstream).into_iter().flatten().copied())
+                }
+                None => {}
+            }
+        }
+        sources
+    }
+
+    fn ordered_nodes(&self) -> Result<Vec<String>, String> {
+        for source in self.outgoing.keys() {
+            if !self.nodes.contains_key(source) {
+                return Err(format!("unknown source {source:?}"));
+            }
+        }
+        for target in self.incoming.keys() {
+            if !self.nodes.contains_key(target) {
+                return Err(format!("unknown target {target:?}"));
+            }
+        }
+        let mut degrees = self
+            .nodes
+            .keys()
+            .map(|id| (*id, self.incoming.get(id).map_or(0, Vec::len)))
+            .collect::<BTreeMap<_, _>>();
+        let mut ready = degrees
+            .iter()
+            .filter_map(|(id, degree)| (*degree == 0).then_some(*id))
+            .collect::<VecDeque<_>>();
+        let mut ordered = Vec::with_capacity(self.nodes.len());
+        while let Some(id) = ready.pop_front() {
+            ordered.push(id.to_owned());
+            for target in self.outgoing.get(id).into_iter().flatten() {
+                let degree = degrees.get_mut(target).expect("edges were checked");
+                *degree -= 1;
+                if *degree == 0 {
+                    ready.push_back(target);
+                }
+            }
+        }
+        if ordered.len() == self.nodes.len() {
+            Ok(ordered)
+        } else {
+            Err("workflow contains a cycle".to_owned())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2322,9 +2393,56 @@ mod tests {
     }
 
     #[test]
+    fn model_source_normalization_follows_lineage_and_clears_ambiguous_or_missing_sources() {
+        let mut spec = runnable_spec();
+        spec.nodes.push(WorkflowNodeSpec::new(
+            "model",
+            "Features",
+            WorkflowNodeConfig::Model {
+                features: vec![feature("stale.source", "is_raining_feature", "rain")],
+            },
+        ));
+        spec.edges.push(WorkflowEdgeSpec::new("query", "model"));
+        spec.normalize_model_sources();
+        let source = |spec: &WorkflowSpec| match &spec.nodes.last().unwrap().config {
+            WorkflowNodeConfig::Model { features } => {
+                features[0].applicability().source_relation().to_owned()
+            }
+            _ => unreachable!(),
+        };
+        assert_eq!(source(&spec), "pick_place.camera_frames");
+        spec.nodes.insert(
+            0,
+            WorkflowNodeSpec::new(
+                "other",
+                "Other frames",
+                WorkflowNodeConfig::Table {
+                    relation: "other.frames".to_owned(),
+                },
+            ),
+        );
+        spec.edges.push(WorkflowEdgeSpec::new("other", "query"));
+        spec.normalize_model_sources();
+        assert!(source(&spec).is_empty());
+        assert!(
+            spec.validate()
+                .errors
+                .iter()
+                .any(|issue| issue.code == "model_source_count")
+        );
+        spec.edges.retain(|edge| edge.source != "other");
+        spec.normalize_model_sources();
+        assert_eq!(source(&spec), "pick_place.camera_frames");
+        spec.edges.retain(|edge| edge.target != "model");
+        spec.normalize_model_sources();
+        assert!(source(&spec).is_empty());
+    }
+
+    #[test]
     fn graph_validation_rejects_duplicates_cycles_and_nonterminal_results() {
         let mut duplicate = runnable_spec();
         duplicate.nodes.push(duplicate.nodes[0].clone());
+        assert!(duplicate.topological_order().is_err());
         assert!(
             duplicate
                 .validate()

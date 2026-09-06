@@ -18,9 +18,8 @@ use serde::{Deserialize, Serialize};
 use spiral_robotics_common::datasets::ProjectImportSummary;
 use spiral_robotics_common::sql::{QualifiedRelation, UnquotedSqlIdentifier};
 use spiral_robotics_common::workflow::{
-    DEFAULT_WORKFLOW_ID, MAX_SIGLIP_CONCEPT_LENGTH, MAX_WORKFLOW_FEATURE_DESCRIPTION_LENGTH,
-    MAX_WORKFLOW_FEATURE_STREAMS, WorkflowAgentMessagePhase, WorkflowAgentPhase, WorkflowAgentRole,
-    WorkflowAgentToolPhase, WorkflowFeatureApplicability, WorkflowFeatureDefinition,
+    MAX_SIGLIP_CONCEPT_LENGTH, MAX_WORKFLOW_FEATURE_DESCRIPTION_LENGTH,
+    MAX_WORKFLOW_FEATURE_STREAMS, WorkflowFeatureApplicability, WorkflowFeatureDefinition,
 };
 
 use crate::db::ArrowColumns;
@@ -30,209 +29,26 @@ use crate::episodes::EpisodeRelations;
 use crate::rollout_runs::RolloutBundleSection;
 use crate::settings::StudioPreferenceBundleSection;
 use crate::training::TrainingBundleSection;
-use crate::workflow_documents::{
-    MAX_WORKFLOW_AGENT_CONVERSATION_TITLE_CHARS, MAX_WORKFLOW_AGENT_CONVERSATIONS,
-    MAX_WORKFLOW_AGENT_MESSAGES_PER_CONVERSATION, WorkflowDocumentBundleSection,
+use crate::workflow_documents::WorkflowDocumentBundleSection;
+use crate::workflow_features::{
+    CACHE_KEY_FIELDS, FEATURE_VALUE_SEMANTICS, MAX_FEATURE_CACHE_COLUMNS, MAX_FEATURE_CACHE_ROWS,
+    MAX_FEATURE_REGISTRY_ROWS, SIGLIP_BASE_MODEL_ID, SIGLIP_BASE_REPOSITORY, SIGLIP_BASE_REVISION,
+    WorkflowFeatureBundleSection, WorkflowFeatureSchema,
 };
-use crate::workflow_features::WorkflowFeatureBundleSection;
 
 const PROJECT_MAGIC: &[u8; 8] = b"SPRPROJ1";
 const PROJECT_FORMAT: &str = "spiral-robotics-project";
 const FORMAT_VERSION: u32 = 1;
 const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
 const MAX_ENTRY_NAME_BYTES: usize = 256;
-const MAX_FEATURE_REGISTRY_ROWS: usize = 4_096;
-const MAX_FEATURE_CACHE_ROWS: usize = 1_000_000;
-const MAX_FEATURE_CACHE_COLUMNS: usize = 256;
-pub const SIGLIP_BASE_MODEL_ID: &str = "siglip-base";
-pub const SIGLIP_BASE_REPOSITORY: &str = "google/siglip-base-patch16-224";
-pub const SIGLIP_BASE_REVISION: &str = "7fd15f0689c79d79e38b1c2e2e2370a7bf2761ed";
 const MAX_ARROW_MESSAGE_METADATA_BYTES: usize = MAX_MANIFEST_BYTES;
 const MAX_ARROW_DECODED_BYTES: usize = ProjectBundle::MAX_BYTES;
 const MAX_ARROW_RECORD_BATCH_ROWS: usize = MAX_FEATURE_CACHE_ROWS;
 const MAX_ARROW_DECODED_ROWS: usize = MAX_FEATURE_CACHE_ROWS;
 const MAX_ARROW_SCHEMA_FIELDS: usize = MAX_FEATURE_CACHE_COLUMNS + CACHE_KEY_FIELDS.len();
+#[cfg(test)]
 const WORKFLOW_AGENT_DOCUMENT_SCHEMA_VERSION: u64 = 2;
-const MAX_WORKFLOW_AGENT_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
-const FEATURE_VALUE_SEMANTICS: &str = "sigmoid_probability_0_1";
-const CACHE_KEY_FIELDS: [(&str, DataType); 5] = [
-    ("episode_id", DataType::Utf8),
-    ("stream_id", DataType::Utf8),
-    ("segment_index", DataType::UInt32),
-    ("frame_index", DataType::UInt64),
-    ("episode_time_ns", DataType::UInt64),
-];
-
 struct WorkflowArrow;
-
-impl WorkflowArrow {
-    fn cache_key_may_be_nullable(name: &str) -> bool {
-        matches!(name, "frame_index" | "episode_time_ns")
-    }
-}
-
-#[allow(dead_code)]
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct BundleAgentDocumentV2 {
-    schema_version: u64,
-    revision: u64,
-    active_conversation_id: String,
-    conversations: Vec<BundleAgentConversation>,
-}
-
-#[allow(dead_code)]
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct BundleAgentConversation {
-    conversation_id: String,
-    title: String,
-    created_ms: u64,
-    updated_ms: u64,
-    session: BundleAgentSession,
-    provider_messages: Vec<BundleProviderMessage>,
-    #[serde(default)]
-    owned_run_id: Option<String>,
-}
-
-#[allow(dead_code)]
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct BundleAgentSession {
-    #[serde(flatten)]
-    identity: BundleAgentSessionIdentity,
-    messages: Vec<BundleAgentMessage>,
-    #[serde(flatten)]
-    lifecycle: BundleAgentSessionLifecycle,
-}
-
-#[allow(dead_code)]
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct BundleAgentSessionIdentity {
-    workflow_id: String,
-    #[serde(default, alias = "session_id")]
-    conversation_id: String,
-    revision: u64,
-}
-
-#[allow(dead_code)]
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct BundleAgentSessionLifecycle {
-    phase: WorkflowAgentPhase,
-    #[serde(default)]
-    active_turn_id: Option<String>,
-    #[serde(default)]
-    deferred_run_id: Option<String>,
-    #[serde(default)]
-    error: Option<String>,
-    updated_ms: u64,
-}
-
-#[allow(dead_code)]
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct BundleAgentMessage {
-    #[serde(flatten)]
-    identity: BundleAgentMessageIdentity,
-    #[serde(flatten)]
-    content: BundleAgentMessageContent,
-    #[serde(flatten)]
-    provenance: BundleAgentMessageProvenance,
-}
-
-#[allow(dead_code)]
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct BundleAgentMessageIdentity {
-    id: String,
-    sequence: u64,
-    role: WorkflowAgentRole,
-}
-
-#[allow(dead_code)]
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct BundleAgentMessageContent {
-    phase: WorkflowAgentMessagePhase,
-    text: String,
-    tools: Vec<BundleAgentToolSummary>,
-}
-
-#[allow(dead_code)]
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct BundleAgentMessageProvenance {
-    #[serde(default)]
-    run_id: Option<String>,
-    created_ms: u64,
-}
-
-#[allow(dead_code)]
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct BundleAgentToolSummary {
-    call_id: String,
-    name: String,
-    phase: WorkflowAgentToolPhase,
-    summary: String,
-    #[serde(default)]
-    error: Option<String>,
-    #[serde(default)]
-    receipt: Option<BundleAgentArtifactReceipt>,
-}
-
-#[allow(dead_code)]
-#[derive(Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum BundleAgentArtifactReceipt {
-    Graph {
-        label: String,
-        revision: u64,
-    },
-    Run {
-        label: String,
-        run_id: String,
-    },
-    Results {
-        label: String,
-        run_id: String,
-        #[serde(default)]
-        row_count: Option<usize>,
-    },
-}
-
-#[allow(dead_code)]
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct BundleProviderMessage {
-    role: String,
-    #[serde(default)]
-    content: Option<String>,
-    #[serde(default)]
-    tool_call_id: Option<String>,
-    #[serde(default)]
-    tool_calls: Vec<BundleProviderToolCall>,
-}
-
-#[allow(dead_code)]
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct BundleProviderToolCall {
-    id: String,
-    #[serde(rename = "type")]
-    kind: String,
-    function: BundleProviderFunctionCall,
-}
-
-#[allow(dead_code)]
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct BundleProviderFunctionCall {
-    name: String,
-    arguments: String,
-}
 
 /// Browser transfers are memory-backed at the Axum/storage boundary. Keep the
 /// cap low enough that one import and its decoded Arrow batch cannot exhaust a
@@ -1203,7 +1019,7 @@ impl ProjectBundle {
                 let mut relation = ProjectBundle
                     .decode_managed_entries_with_budget(vec![(table, payload)], &mut budget)?;
                 if table == Table::WorkflowRuns {
-                    BundleAgentDocumentV2::validate_batches(&relation[0].1)?;
+                    AssistantBundleHistory::validate_batches(&relation[0].1)?;
                 }
                 decoded.push(DecodedProjectRelation {
                     relation: ProjectRelation::Managed(table),
@@ -1237,7 +1053,9 @@ impl ProjectBundle {
     }
 }
 
-impl BundleAgentDocumentV2 {
+struct AssistantBundleHistory;
+
+impl AssistantBundleHistory {
     fn validate_batches(batches: &[RecordBatch]) -> Result<(), String> {
         let mut keys = BTreeSet::new();
         for batch in batches {
@@ -1265,213 +1083,14 @@ impl BundleAgentDocumentV2 {
                     .ok_or_else(|| {
                         "project Assistant history has an invalid snapshot_json".to_owned()
                     })?;
-                BundleAgentDocumentV2::validate_json(snapshot)?;
+                AssistantBundleHistory::validate_json(snapshot)?;
             }
         }
         Ok(())
     }
 
     fn validate_json(encoded: &str) -> Result<(), String> {
-        if encoded.len() > MAX_WORKFLOW_AGENT_DOCUMENT_BYTES {
-            return Err("project Assistant history exceeds the 16 MiB bound".to_owned());
-        }
-        let value: serde_json::Value = serde_json::from_str(encoded)
-            .map_err(|error| format!("project Assistant history is invalid JSON: {error}"))?;
-        let Some(object) = value.as_object() else {
-            return Err("project Assistant history must be a JSON object".to_owned());
-        };
-
-        let conversations = object.get("conversations").ok_or_else(|| {
-            "project Assistant history does not match the current document shape".to_owned()
-        })?;
-        let canonical =
-            serde_json::from_value::<BundleAgentDocumentV2>(value.clone()).map_err(|error| {
-                format!(
-                    "project Assistant history does not match the current document shape: {error}"
-                )
-            })?;
-        if canonical.conversations.iter().any(|conversation| {
-            !BundleAgentDocumentV2::provider_history_is_structurally_valid(
-                &conversation.provider_messages,
-                conversation.session.lifecycle.phase.active(),
-            )
-        }) {
-            return Err(
-                "project Assistant provider history has an invalid role or tool exchange"
-                    .to_owned(),
-            );
-        }
-        if canonical.schema_version != WORKFLOW_AGENT_DOCUMENT_SCHEMA_VERSION {
-            return Err("project Assistant history uses an unsupported schema version".to_owned());
-        }
-        let conversations = conversations
-            .as_array()
-            .ok_or_else(|| "project Assistant conversations must be a JSON array".to_owned())?;
-        if conversations.is_empty() || conversations.len() > MAX_WORKFLOW_AGENT_CONVERSATIONS {
-            return Err(format!(
-                "project Assistant history must contain 1–{MAX_WORKFLOW_AGENT_CONVERSATIONS} conversations"
-            ));
-        }
-        let mut ids = BTreeSet::new();
-        for conversation in conversations {
-            let conversation = conversation
-                .as_object()
-                .ok_or_else(|| "project Assistant conversation must be a JSON object".to_owned())?;
-            let id = BundleAgentDocumentV2::bounded_json_string(
-                conversation.get("conversation_id"),
-                128,
-                "conversation id",
-            )?;
-            if !ids.insert(id) {
-                return Err(
-                    "project Assistant history has duplicate conversation identities".to_owned(),
-                );
-            }
-            let title = BundleAgentDocumentV2::bounded_json_string(
-                conversation.get("title"),
-                MAX_WORKFLOW_AGENT_CONVERSATION_TITLE_CHARS,
-                "conversation title",
-            )?;
-            if title.trim().is_empty() {
-                return Err("project Assistant conversation title cannot be empty".to_owned());
-            }
-            let session = conversation
-                .get("session")
-                .and_then(serde_json::Value::as_object)
-                .ok_or_else(|| {
-                    "project Assistant conversation is missing its session".to_owned()
-                })?;
-            if session
-                .get("workflow_id")
-                .and_then(serde_json::Value::as_str)
-                != Some(DEFAULT_WORKFLOW_ID)
-            {
-                return Err(
-                    "project Assistant session belongs to an unsupported Workflow".to_owned(),
-                );
-            }
-            if session
-                .get("conversation_id")
-                .and_then(serde_json::Value::as_str)
-                != Some(id)
-            {
-                return Err(
-                    "project Assistant session identity does not match its conversation".to_owned(),
-                );
-            }
-            BundleAgentDocumentV2::validate_agent_messages(session.get("messages"))?;
-            BundleAgentDocumentV2::validate_provider_messages(
-                conversation.get("provider_messages"),
-            )?;
-        }
-        let active = object
-            .get("active_conversation_id")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| "project Assistant history has no active conversation".to_owned())?;
-        if !ids.contains(active) {
-            return Err("project Assistant active conversation does not exist".to_owned());
-        }
-        Ok(())
-    }
-
-    fn validate_agent_messages(messages: Option<&serde_json::Value>) -> Result<(), String> {
-        let messages = messages
-            .and_then(serde_json::Value::as_array)
-            .ok_or_else(|| "project Assistant messages must be a JSON array".to_owned())?;
-        if messages.len() > MAX_WORKFLOW_AGENT_MESSAGES_PER_CONVERSATION {
-            return Err(format!(
-                "project Assistant conversation exceeds its {MAX_WORKFLOW_AGENT_MESSAGES_PER_CONVERSATION}-message bound"
-            ));
-        }
-        let mut ids = BTreeSet::new();
-        for message in messages {
-            let id = message
-                .get("id")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "project Assistant message has no identity".to_owned())?;
-            if id.is_empty() || id.len() > 128 || !ids.insert(id) {
-                return Err(
-                    "project Assistant history has invalid or duplicate message identities"
-                        .to_owned(),
-                );
-            }
-        }
-        Ok(())
-    }
-
-    fn validate_provider_messages(messages: Option<&serde_json::Value>) -> Result<(), String> {
-        let Some(messages) = messages else {
-            return Ok(());
-        };
-        let messages = messages
-            .as_array()
-            .ok_or_else(|| "project Assistant provider history must be a JSON array".to_owned())?;
-        if messages.len() > MAX_WORKFLOW_AGENT_MESSAGES_PER_CONVERSATION {
-            return Err(format!(
-                "project Assistant provider history exceeds its {MAX_WORKFLOW_AGENT_MESSAGES_PER_CONVERSATION}-message bound"
-            ));
-        }
-        Ok(())
-    }
-
-    fn provider_history_is_structurally_valid(
-        messages: &[BundleProviderMessage],
-        allow_incomplete_tail: bool,
-    ) -> bool {
-        let mut pending: Option<BTreeSet<&str>> = None;
-        for message in messages {
-            if !matches!(message.role.as_str(), "user" | "assistant" | "tool") {
-                return false;
-            }
-            if let Some(expected) = pending.as_mut() {
-                if message.role != "tool"
-                    || message
-                        .tool_call_id
-                        .as_deref()
-                        .is_none_or(|id| !expected.remove(id))
-                {
-                    return false;
-                }
-                if expected.is_empty() {
-                    pending = None;
-                }
-                continue;
-            }
-            if message.role == "tool" {
-                return false;
-            }
-            if !message.tool_calls.is_empty() {
-                if message.role != "assistant" {
-                    return false;
-                }
-                let expected = message
-                    .tool_calls
-                    .iter()
-                    .map(|call| call.id.as_str())
-                    .collect::<BTreeSet<_>>();
-                if expected.len() != message.tool_calls.len()
-                    || expected.iter().any(|id| id.is_empty())
-                {
-                    return false;
-                }
-                pending = Some(expected);
-            }
-        }
-        pending.is_none() || allow_incomplete_tail
-    }
-
-    fn bounded_json_string<'a>(
-        value: Option<&'a serde_json::Value>,
-        max_chars: usize,
-        label: &str,
-    ) -> Result<&'a str, String> {
-        let value = value
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| format!("project Assistant {label} is invalid"))?;
-        if value.is_empty() || value.chars().count() > max_chars {
-            return Err(format!("project Assistant {label} exceeds its bound"));
-        }
-        Ok(value)
+        crate::workflow_assistant::AssistantDocument::decode(encoded).map(|_| ())
     }
 }
 
@@ -1551,7 +1170,7 @@ impl WorkflowBundleRegistry {
         let mut features_per_cache = BTreeMap::<String, usize>::new();
         let mut cache_sources = BTreeMap::<String, String>::new();
         for batch in batches {
-            Self::validate_schema(batch.schema().as_ref())?;
+            WorkflowFeatureSchema::validate_registry(batch.schema().as_ref())?;
             for row in 0..batch.num_rows() {
                 if registry.entries.len() >= max_rows {
                     return Err(format!(
@@ -1656,46 +1275,6 @@ impl WorkflowBundleRegistry {
             }
         }
         Ok(registry)
-    }
-
-    fn validate_schema(schema: &Schema) -> Result<(), String> {
-        let expected = [
-            ("source_relation", DataType::Utf8, false),
-            ("cache_relation", DataType::Utf8, false),
-            ("feature_name", DataType::Utf8, false),
-            ("description", DataType::Utf8, false),
-            ("concept", DataType::Utf8, false),
-            ("media_field", DataType::Utf8, false),
-            (
-                "stream_ids",
-                DataType::List(Arc::new(Field::new("item", DataType::Utf8, false))),
-                false,
-            ),
-            ("producer_model_id", DataType::Utf8, false),
-            ("producer_repository", DataType::Utf8, false),
-            ("artifact_revision", DataType::Utf8, false),
-            ("value_semantics", DataType::Utf8, false),
-            ("definition_version", DataType::UInt32, false),
-            ("created_at_ms", DataType::UInt64, false),
-            ("updated_at_ms", DataType::UInt64, false),
-        ];
-        if schema.fields().len() != expected.len()
-            || schema
-                .fields()
-                .iter()
-                .zip(expected)
-                .any(|(actual, (name, data_type, nullable))| {
-                    actual.name() != name
-                        || actual.is_nullable() != nullable
-                        || !WorkflowArrow::storage_type_matches(actual.data_type(), &data_type)
-                })
-        {
-            return Err(
-                "Workflow feature registry has an incompatible canonical 14-field schema"
-                    .to_owned(),
-            );
-        }
-        Ok(())
     }
 
     fn validate_definition(definition: &WorkflowFeatureDefinition) -> Result<(), String> {
@@ -1885,8 +1464,8 @@ impl WorkflowCacheValidator<'_> {
         for (index, (name, expected)) in CACHE_KEY_FIELDS.iter().enumerate() {
             let field = schema.field(index);
             if field.name() != name
-                || (field.is_nullable() && !WorkflowArrow::cache_key_may_be_nullable(name))
-                || !WorkflowArrow::storage_type_matches(field.data_type(), expected)
+                || (field.is_nullable() && !WorkflowFeatureSchema::cache_key_may_be_nullable(name))
+                || !WorkflowFeatureSchema::storage_type_matches(field.data_type(), expected)
             {
                 return Err(format!(
                     "Workflow feature cache key field {index} must use compatible {name} {expected:?} storage"
@@ -1973,26 +1552,6 @@ impl WorkflowArrow {
                 .downcast_ref::<StringViewArray>()
                 .map(|values| values.value(row))
         }
-    }
-
-    fn storage_type_matches(actual: &DataType, expected: &DataType) -> bool {
-        actual == expected
-            || matches!(
-                (actual, expected),
-                (
-                    DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View,
-                    DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
-                )
-            )
-            || match (actual, expected) {
-                (DataType::List(actual), DataType::List(expected)) => {
-                    actual.name() == expected.name()
-                        && actual.is_nullable() == expected.is_nullable()
-                        && actual.metadata() == expected.metadata()
-                        && Self::storage_type_matches(actual.data_type(), expected.data_type())
-                }
-                _ => false,
-            }
     }
 }
 
@@ -2439,6 +1998,7 @@ impl BundleClock {
 
 #[cfg(test)]
 mod tests {
+    use crate::workflow_documents::MAX_WORKFLOW_AGENT_CONVERSATIONS;
     use std::fs;
     use std::io::Write as _;
     use std::process::Command;
@@ -2786,7 +2346,7 @@ mod tests {
                 agent_conversation("conversation-b")
             ]
         });
-        BundleAgentDocumentV2::validate_json(&valid.to_string()).unwrap();
+        AssistantBundleHistory::validate_json(&valid.to_string()).unwrap();
 
         let mut schema_less = valid.clone();
         schema_less
@@ -2794,15 +2354,15 @@ mod tests {
             .unwrap()
             .remove("schema_version");
         assert!(
-            BundleAgentDocumentV2::validate_json(&schema_less.to_string())
+            AssistantBundleHistory::validate_json(&schema_less.to_string())
                 .unwrap_err()
-                .contains("current document shape")
+                .contains("schema 0 is not supported")
         );
 
         let mut unknown_selection = valid.clone();
         unknown_selection["active_conversation_id"] = serde_json::json!("missing");
         assert!(
-            BundleAgentDocumentV2::validate_json(&unknown_selection.to_string())
+            AssistantBundleHistory::validate_json(&unknown_selection.to_string())
                 .unwrap_err()
                 .contains("active conversation")
         );
@@ -2812,7 +2372,7 @@ mod tests {
             serde_json::json!([agent_conversation("same"), agent_conversation("same")]);
         duplicate["active_conversation_id"] = serde_json::json!("same");
         assert!(
-            BundleAgentDocumentV2::validate_json(&duplicate.to_string())
+            AssistantBundleHistory::validate_json(&duplicate.to_string())
                 .unwrap_err()
                 .contains("duplicate")
         );
@@ -2828,7 +2388,7 @@ mod tests {
             "conversations": too_many
         });
         assert!(
-            BundleAgentDocumentV2::validate_json(&over_limit.to_string())
+            AssistantBundleHistory::validate_json(&over_limit.to_string())
                 .unwrap_err()
                 .contains("1–20")
         );
@@ -2839,7 +2399,7 @@ mod tests {
             .unwrap()
             .remove("created_ms");
         assert!(
-            BundleAgentDocumentV2::validate_json(&missing_timestamp.to_string())
+            AssistantBundleHistory::validate_json(&missing_timestamp.to_string())
                 .unwrap_err()
                 .contains("current document shape")
         );
@@ -2848,7 +2408,7 @@ mod tests {
         unknown_nested["conversations"][0]["session"]["messages"][0]["future_field"] =
             serde_json::json!(true);
         assert!(
-            BundleAgentDocumentV2::validate_json(&unknown_nested.to_string())
+            AssistantBundleHistory::validate_json(&unknown_nested.to_string())
                 .unwrap_err()
                 .contains("current document shape")
         );
@@ -2856,7 +2416,7 @@ mod tests {
         let mut unknown_top_level = valid;
         unknown_top_level["future_field"] = serde_json::json!(true);
         assert!(
-            BundleAgentDocumentV2::validate_json(&unknown_top_level.to_string())
+            AssistantBundleHistory::validate_json(&unknown_top_level.to_string())
                 .unwrap_err()
                 .contains("current document shape")
         );
@@ -2869,7 +2429,7 @@ mod tests {
         });
         foreign_workflow["conversations"][0]["session"]["workflow_id"] = serde_json::json!("other");
         assert!(
-            BundleAgentDocumentV2::validate_json(&foreign_workflow.to_string())
+            AssistantBundleHistory::validate_json(&foreign_workflow.to_string())
                 .unwrap_err()
                 .contains("unsupported Workflow")
         );
@@ -2882,7 +2442,7 @@ mod tests {
                 "conversations": [agent_conversation("conversation-a")]
             });
             injected["conversations"][0]["provider_messages"][0]["role"] = serde_json::json!(role);
-            let error = BundleAgentDocumentV2::validate_json(&injected.to_string()).unwrap_err();
+            let error = AssistantBundleHistory::validate_json(&injected.to_string()).unwrap_err();
             assert!(error.contains("invalid role"), "unexpected error: {error}");
         }
     }
@@ -3333,12 +2893,15 @@ mod tests {
     fn project_registry_accepts_pinned_spiral_nested_utf8view_normalization_only() {
         let expected = DataType::List(Arc::new(Field::new("item", DataType::Utf8, false)));
         let normalized = DataType::List(Arc::new(Field::new("item", DataType::Utf8View, false)));
-        assert!(WorkflowArrow::storage_type_matches(&normalized, &expected));
-        assert!(!WorkflowArrow::storage_type_matches(
+        assert!(WorkflowFeatureSchema::storage_type_matches(
+            &normalized,
+            &expected
+        ));
+        assert!(!WorkflowFeatureSchema::storage_type_matches(
             &DataType::List(Arc::new(Field::new("item", DataType::BinaryView, false,))),
             &expected
         ));
-        assert!(!WorkflowArrow::storage_type_matches(
+        assert!(!WorkflowFeatureSchema::storage_type_matches(
             &DataType::List(Arc::new(Field::new("item", DataType::Utf8View, true,))),
             &expected
         ));

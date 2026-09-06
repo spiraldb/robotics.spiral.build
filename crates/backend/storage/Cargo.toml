@@ -38,6 +38,7 @@ spiraldb-table.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
 tracing = "0.1"
 url = "2"
+uuid = { version = "1", features = ["v4"] }
 vortex-array.workspace = true
 vortex-arrow.workspace = true
 vortex-error.workspace = true

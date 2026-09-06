@@ -6,4 +6,4 @@ pub(crate) mod workflow;
 pub use query::{
     InvalidSqlIdentifier, QueryPolicyError, ReadOnlyQuery, ReadOnlyQueryMode, UnquotedSqlIdentifier,
 };
-pub use workflow::{QualifiedRelation, WorkflowSyntaxError};
+pub use workflow::{QualifiedRelation, WorkflowSql, WorkflowSyntaxError};

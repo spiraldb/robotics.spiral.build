@@ -3756,6 +3756,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "eventsource-stream"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "74fef4569247a5f429d9156b9d0a2599914385dd189c539334c625d8099d90ab"
+dependencies = [
+ "futures-core",
+ "nom",
+ "pin-project-lite",
+]
+
+[[package]]
 name = "exponential-decay-histogram"
 version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10664,6 +10675,7 @@ dependencies = [
  "clap",
  "dioxus",
  "dirs",
+ "eventsource-stream",
  "futures",
  "futures-util",
  "hf-hub",
@@ -10684,6 +10696,7 @@ dependencies = [
  "tokenizers",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "tower-http 0.7.0",
  "tracing",
  "tracing-subscriber",
@@ -10778,6 +10791,7 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "uuid",
  "vortex-array",
  "vortex-arrow",
  "vortex-error",

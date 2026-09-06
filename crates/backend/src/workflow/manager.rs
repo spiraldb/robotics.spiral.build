@@ -6,6 +6,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
+use tokio_util::sync::CancellationToken;
 
 use crate::OperationError;
 use crate::clock::SystemTimeMillis;
@@ -15,7 +16,7 @@ use crate::workflow::service::{
 };
 use serde::{Deserialize, Serialize};
 use spiral_robotics_common::relations::{RelationCatalog, SpiralQuerySnapshot};
-use spiral_robotics_common::sql::QualifiedRelation;
+use spiral_robotics_common::sql::{QualifiedRelation, WorkflowSql};
 use spiral_robotics_common::workflow::{
     WorkflowCommand, WorkflowNodeConfig, WorkflowNodePhase, WorkflowNodeSnapshot,
     WorkflowQuarantineSummary, WorkflowRunPhase, WorkflowRunSnapshot, WorkflowSnapshot,
@@ -280,7 +281,7 @@ impl WorkflowIdentity {
 
 struct ActiveRun {
     run_id: String,
-    cancel: Arc<AtomicBool>,
+    cancel: CancellationToken,
     publication_gate: Arc<AsyncMutex<()>>,
     task: Option<tokio::task::JoinHandle<()>>,
     terminal_persistence_failed: bool,
@@ -306,12 +307,16 @@ impl FailureCancellationPolicy {
 
 struct WorkflowExecution {
     run_id: String,
-    cancel: Arc<AtomicBool>,
+    cancel: CancellationToken,
     publication_gate: Arc<AsyncMutex<()>>,
 }
 
 impl WorkflowExecution {
-    fn new(run_id: String, cancel: Arc<AtomicBool>, publication_gate: Arc<AsyncMutex<()>>) -> Self {
+    fn new(
+        run_id: String,
+        cancel: CancellationToken,
+        publication_gate: Arc<AsyncMutex<()>>,
+    ) -> Self {
         Self {
             run_id,
             cancel,
@@ -448,6 +453,35 @@ impl WorkflowManager {
         }
     }
 
+    pub(crate) async fn wait_for_terminal(
+        &self,
+        run_id: &str,
+        cancel: CancellationToken,
+    ) -> Result<WorkflowRunSnapshot, String> {
+        let (mut state, mut updates) = self.subscription();
+        loop {
+            if cancel.is_cancelled() {
+                return Err("Agent turn cancelled.".to_owned());
+            }
+            if state.snapshot().run_id() != Some(run_id) {
+                return Err(
+                    "The active Workflow run changed while the Assistant was waiting.".to_owned(),
+                );
+            }
+            if state.snapshot().phase().terminal() {
+                return Ok(state.snapshot().clone());
+            }
+            state = tokio::select! {
+                update = updates.recv() => match update {
+                    Ok(state) => state,
+                    Err(broadcast::error::RecvError::Lagged(_)) => self.state(),
+                    Err(broadcast::error::RecvError::Closed) => return Err("Workflow updates stopped while waiting.".to_owned()),
+                },
+                () = cancel.cancelled() => return Err("Agent turn cancelled.".to_owned()),
+            };
+        }
+    }
+
     pub(crate) async fn prepare_from_storage(&self) -> Result<(), OperationError> {
         let document = self.stored_document().await?;
         self.install_hydrated_document(document)
@@ -576,7 +610,7 @@ impl WorkflowManager {
             )));
         }
         workflow.set_revision(current.workflow().revision());
-        workflow.derive_model_outputs();
+        workflow.normalize_model_sources();
         let report = workflow.validate();
         Ok((workflow, report))
     }
@@ -637,7 +671,7 @@ impl WorkflowManager {
                 .next_revision()?;
         let mut workflow = requested_workflow;
         workflow.set_revision(next_revision);
-        workflow.derive_model_outputs();
+        workflow.normalize_model_sources();
         let validation = workflow.validate();
         let empty_draft = workflow.nodes().is_empty() && workflow.edges().is_empty();
         if !workflow.save_allowed(validation.valid()) {
@@ -695,7 +729,7 @@ impl WorkflowManager {
             .validate()?;
 
         let run_id = self.inner.identity.next_run_id();
-        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel = CancellationToken::new();
         let publication_gate = Arc::new(AsyncMutex::new(()));
         let snapshot = document
             .workflow()
@@ -749,7 +783,7 @@ impl WorkflowManager {
         };
         if let Some((publication_gate, cancel, task)) = control {
             let publication = publication_gate.lock().await;
-            cancel.store(true, Ordering::SeqCst);
+            cancel.cancel();
             drop(publication);
             if let Some(task) = task {
                 let _ = task.await;
@@ -776,7 +810,7 @@ impl WorkflowManager {
             )
         };
         let publication = publication_gate.lock().await;
-        cancel.store(true, Ordering::SeqCst);
+        cancel.cancel();
         let document = self.inner.document.recover_lock().clone();
         if document.snapshot().run_id() != Some(run_id.as_str()) {
             return Err(OperationError::Conflict(
@@ -1312,7 +1346,7 @@ impl WorkflowManager {
             .recover_lock()
             .as_ref()
             .filter(|active| active.run_id == run_id)
-            .map(|control| control.cancel.load(Ordering::SeqCst))
+            .map(|control| control.cancel.is_cancelled())
         else {
             return;
         };
@@ -1380,7 +1414,7 @@ impl WorkflowManager {
             .recover_lock()
             .as_ref()
             .filter(|active| active.run_id == run_id)
-            .map(|control| control.cancel.load(Ordering::SeqCst))
+            .map(|control| control.cancel.is_cancelled())
         else {
             return;
         };
@@ -1465,8 +1499,8 @@ impl WorkflowManager {
         *self.inner.active.recover_lock() = None;
     }
 
-    fn cancelled(&self, run_id: &str, cancel: &AtomicBool) -> bool {
-        cancel.load(Ordering::SeqCst)
+    fn cancelled(&self, run_id: &str, cancel: &CancellationToken) -> bool {
+        cancel.is_cancelled()
             || self
                 .inner
                 .active
@@ -1624,61 +1658,6 @@ enum ResolvedNodeOutput {
     Query(String),
 }
 
-#[derive(Clone, Copy)]
-struct WorkflowSql<'a>(&'a str);
-
-impl<'a> From<&'a str> for WorkflowSql<'a> {
-    fn from(sql: &'a str) -> Self {
-        Self(sql)
-    }
-}
-
-impl WorkflowSql<'_> {
-    const PLACEHOLDER_PREFIX: &'static str = "{{node:";
-
-    fn node_placeholders(self) -> Result<Vec<String>, String> {
-        let sql = self.0;
-        let mut placeholders = Vec::new();
-        let mut cursor = 0_usize;
-        while let Some(relative_start) = sql[cursor..].find("{{") {
-            let start = cursor + relative_start;
-            if !sql[start..].starts_with(Self::PLACEHOLDER_PREFIX) {
-                return Err(format!(
-                    "Malformed Workflow placeholder at byte {start}; expected {{{{node:<id>}}}}",
-                ));
-            }
-            let id_start = start + Self::PLACEHOLDER_PREFIX.len();
-            let Some(relative_end) = sql[id_start..].find("}}") else {
-                return Err(format!("Unterminated Workflow placeholder at byte {start}",));
-            };
-            let end = id_start + relative_end;
-            let id = &sql[id_start..end];
-            if !Self::valid_node_id(id) {
-                return Err(format!(
-                    "Workflow placeholder {id:?} is not a valid node ID",
-                ));
-            }
-            placeholders.push(id.to_owned());
-            cursor = end + 2;
-        }
-        if let Some(relative_end) = sql[cursor..].find("}}") {
-            return Err(format!(
-                "Unexpected Workflow placeholder terminator at byte {}",
-                cursor + relative_end,
-            ));
-        }
-        Ok(placeholders)
-    }
-
-    fn valid_node_id(node_id: &str) -> bool {
-        let mut bytes = node_id.bytes();
-        bytes
-            .next()
-            .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
-            && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-    }
-}
-
 trait ResolvedNodeOutputs {
     fn substitute_in(&self, sql: &str) -> Result<String, String>;
 }
@@ -1686,7 +1665,10 @@ trait ResolvedNodeOutputs {
 impl ResolvedNodeOutputs for BTreeMap<String, ResolvedNodeOutput> {
     fn substitute_in(&self, sql: &str) -> Result<String, String> {
         let mut substituted = sql.to_owned();
-        for id in WorkflowSql::from(sql).node_placeholders()? {
+        for id in WorkflowSql::from(sql)
+            .node_placeholders()
+            .map_err(|error| error.to_string())?
+        {
             let output = self.get(&id).ok_or_else(|| {
                 format!("Workflow query references unresolved node placeholder {id:?}")
             })?;
@@ -1705,8 +1687,6 @@ impl ResolvedNodeOutputs for BTreeMap<String, ResolvedNodeOutput> {
 }
 
 trait WorkflowOutputs {
-    fn derive_model_outputs(&mut self);
-    fn model_source_relation(&self, model_id: &str) -> Option<String>;
     fn first_table_id(&self) -> Option<&str>;
     fn content_changed(&self, next: &Self) -> bool;
     fn saved_node_snapshots(
@@ -1723,57 +1703,6 @@ trait WorkflowOutputs {
 }
 
 impl WorkflowOutputs for WorkflowSpec {
-    fn derive_model_outputs(&mut self) {
-        let source_relations = self
-            .nodes()
-            .iter()
-            .filter(|node| matches!(node.config(), WorkflowNodeConfig::Model { .. }))
-            .map(|node| (node.id().to_owned(), self.model_source_relation(node.id())))
-            .collect::<BTreeMap<_, _>>();
-        for node in self.nodes_mut() {
-            let node_id = node.id().to_owned();
-            if let WorkflowNodeConfig::Model { features } = node.config_mut() {
-                let source = source_relations.get(&node_id).cloned().flatten();
-                if let Some(source) = source.as_deref() {
-                    for feature in features {
-                        feature.set_source_relation(source.to_owned());
-                    }
-                }
-            }
-        }
-    }
-
-    fn model_source_relation(&self, model_id: &str) -> Option<String> {
-        let mut sources = std::collections::BTreeSet::new();
-        let mut visited = std::collections::BTreeSet::new();
-        let mut pending = self
-            .edges()
-            .iter()
-            .filter(|edge| edge.target() == model_id)
-            .map(|edge| edge.source())
-            .collect::<Vec<_>>();
-        while let Some(node_id) = pending.pop() {
-            if !visited.insert(node_id) {
-                continue;
-            }
-            let node = self.nodes().iter().find(|node| node.id() == node_id)?;
-            match &node.config() {
-                WorkflowNodeConfig::Table { relation } => {
-                    sources.insert(relation.clone());
-                }
-                _ => pending.extend(
-                    self.edges()
-                        .iter()
-                        .filter(|edge| edge.target() == node_id)
-                        .map(|edge| edge.source()),
-                ),
-            }
-        }
-        (sources.len() == 1)
-            .then(|| sources.into_iter().next())
-            .flatten()
-    }
-
     fn first_table_id(&self) -> Option<&str> {
         self.nodes().iter().find_map(|node| {
             matches!(node.config(), WorkflowNodeConfig::Table { .. }).then_some(node.id())
@@ -2060,7 +1989,7 @@ mod tests {
     #[test]
     fn model_output_is_one_shared_server_owned_feature_cache() {
         let mut workflow = siglip_video_workflow("media.manifest", "model");
-        workflow.derive_model_outputs();
+        workflow.normalize_model_sources();
         let config = workflow
             .nodes()
             .iter()
@@ -2085,7 +2014,7 @@ mod tests {
     #[tokio::test]
     async fn wire_snapshot_carries_the_namespace_qualified_model_output() {
         let mut workflow = siglip_video_workflow("media.manifest", "model");
-        workflow.derive_model_outputs();
+        workflow.normalize_model_sources();
         let document =
             WorkflowDocument::new(workflow.clone(), WorkflowRunSnapshot::idle_for(&workflow));
         let project_store = Arc::new(
@@ -2176,11 +2105,34 @@ mod tests {
         *manager.inner.document.recover_lock() = WorkflowDocument::new(workflow, snapshot);
         *manager.inner.active.recover_lock() = Some(ActiveRun {
             run_id: run_id.clone(),
-            cancel: Arc::new(AtomicBool::new(false)),
+            cancel: CancellationToken::new(),
             publication_gate: Arc::new(AsyncMutex::new(())),
             task: None,
             terminal_persistence_failed: false,
         });
+        let waiting_manager = manager.clone();
+        let waiting_run_id = run_id.clone();
+        let mut waiting = tokio::spawn(async move {
+            waiting_manager
+                .wait_for_terminal(&waiting_run_id, CancellationToken::new())
+                .await
+        });
+        let cancelled_wait = CancellationToken::new();
+        cancelled_wait.cancel();
+        assert!(
+            manager
+                .wait_for_terminal(&run_id, cancelled_wait)
+                .await
+                .unwrap_err()
+                .contains("cancelled")
+        );
+        assert!(
+            manager
+                .wait_for_terminal("another-run", CancellationToken::new())
+                .await
+                .unwrap_err()
+                .contains("changed")
+        );
         let (_, mut updates) = manager.subscription();
         manager
             .inner
@@ -2202,6 +2154,16 @@ mod tests {
             .expect("the recovery state must be published");
         assert_eq!(published.snapshot().phase(), WorkflowRunPhase::Running);
 
+        assert!(
+            tokio::time::timeout(Duration::from_millis(5), &mut waiting)
+                .await
+                .is_err(),
+            "a failed terminal save must not complete the pending Assistant tool"
+        );
+        // Force a lagging subscriber; it must recover from authoritative state.
+        for _ in 0..256 {
+            let _ = manager.inner.updates.send(manager.state());
+        }
         manager
             .inner
             .persistence
@@ -2215,6 +2177,12 @@ mod tests {
         assert_eq!(recovered.phase(), WorkflowRunPhase::Cancelled);
         assert!(recovered.error().is_none());
         assert!(manager.inner.active.lock().unwrap().is_none());
+        let terminal = tokio::time::timeout(Duration::from_secs(1), waiting)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(terminal.phase(), WorkflowRunPhase::Cancelled);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2266,7 +2234,7 @@ mod tests {
     #[test]
     fn query_only_graph_edits_preserve_model_fingerprint_for_safe_reuse() {
         let mut workflow = siglip_video_workflow("media.manifest", "model");
-        workflow.derive_model_outputs();
+        workflow.normalize_model_sources();
         let mut previous = WorkflowRunSnapshot::idle_for(&workflow);
         let metadata = WorkflowModelRunMetadata::new("siglip-base", "revision")
             .with_cache_relation(StorageSchema::workflow_feature_cache_relation(
@@ -2335,7 +2303,7 @@ mod tests {
             unreachable!()
         };
         features[0].set_source_relation("provider.chosen");
-        workflow.derive_model_outputs();
+        workflow.normalize_model_sources();
         let config = workflow
             .nodes()
             .iter()
@@ -2545,7 +2513,7 @@ mod tests {
         );
         let mut workflow = siglip_video_workflow(&manifest_relation, &model_node_id);
         set_video_candidate_sql(&mut workflow, &media_relation);
-        workflow.derive_model_outputs();
+        workflow.normalize_model_sources();
         let output_relation = workflow
             .nodes()
             .iter()

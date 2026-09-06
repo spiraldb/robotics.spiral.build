@@ -6,8 +6,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use tokio_util::sync::CancellationToken;
 
 use arrow_array::builder::{ListBuilder, StringBuilder};
 use arrow_array::{
@@ -34,8 +34,10 @@ use spiral_robotics_common::workflow::{
     MAX_WORKFLOW_FEATURE_STREAMS, WorkflowFeatureDefinition, WorkflowModelRunMetadata,
     WorkflowNodeProgress, WorkflowQuarantineSummary,
 };
-use spiral_robotics_storage::bundle::{
-    SIGLIP_BASE_MODEL_ID, SIGLIP_BASE_REPOSITORY, SIGLIP_BASE_REVISION,
+use spiral_robotics_storage::workflow_features::{
+    CACHE_KEY_FIELDS, FEATURE_VALUE_SEMANTICS, MAX_FEATURE_CACHE_COLUMNS, MAX_FEATURE_CACHE_ROWS,
+    MAX_FEATURE_REGISTRY_ROWS, SIGLIP_BASE_MODEL_ID, SIGLIP_BASE_REPOSITORY, SIGLIP_BASE_REVISION,
+    WorkflowFeatureSchema,
 };
 use tokenizers::Tokenizer;
 use tokenizers::utils::padding::{PaddingDirection, PaddingParams, PaddingStrategy};
@@ -50,26 +52,7 @@ const MAX_QUARANTINE_EXAMPLES: usize = 20;
 const DEFAULT_MODEL_INPUT_BUDGET_BYTES: usize = 8 * 1024 * 1024;
 const MIN_MODEL_CHUNK_ROWS: usize = 1;
 const MAX_MODEL_CHUNK_ROWS: usize = 16;
-const CACHE_KEY_FIELDS: [(&str, DataType); 5] = [
-    ("episode_id", DataType::Utf8),
-    ("stream_id", DataType::Utf8),
-    ("segment_index", DataType::UInt32),
-    ("frame_index", DataType::UInt64),
-    ("episode_time_ns", DataType::UInt64),
-];
-const FEATURE_VALUE_SEMANTICS: &str = "sigmoid_probability_0_1";
 const MODEL_RUN_CANCELLED: &str = "Workflow Model run was cancelled.";
-const MAX_FEATURE_REGISTRY_ROWS: usize = 4_096;
-const MAX_FEATURE_CACHE_ROWS: usize = 1_000_000;
-const MAX_FEATURE_CACHE_COLUMNS: usize = 256;
-
-struct CacheKeySchema;
-
-impl CacheKeySchema {
-    fn declaration_may_be_nullable(name: &str) -> bool {
-        matches!(name, "frame_index" | "episode_time_ns")
-    }
-}
 
 pub(crate) struct ModelRunRequest {
     candidate_sql: String,
@@ -154,7 +137,7 @@ pub(crate) enum ModelRunEvent {
 pub(crate) struct ModelRunContext {
     project_store: Arc<ProjectStore>,
     request: ModelRunRequest,
-    cancel: Arc<AtomicBool>,
+    cancel: CancellationToken,
     publication_gate: Arc<AsyncMutex<()>>,
 }
 
@@ -162,7 +145,7 @@ impl ModelRunContext {
     pub(crate) fn new(
         project_store: Arc<ProjectStore>,
         request: ModelRunRequest,
-        cancel: Arc<AtomicBool>,
+        cancel: CancellationToken,
     ) -> Self {
         Self {
             project_store,
@@ -834,14 +817,14 @@ struct CandidateScan {
 struct CandidateScanRequest<'a> {
     sql: &'a str,
     features: &'a [WorkflowFeatureDefinition],
-    cancel: &'a AtomicBool,
+    cancel: &'a CancellationToken,
 }
 
 impl<'a> CandidateScanRequest<'a> {
     fn new(
         sql: &'a str,
         features: &'a [WorkflowFeatureDefinition],
-        cancel: &'a AtomicBool,
+        cancel: &'a CancellationToken,
     ) -> Self {
         Self {
             sql,
@@ -912,7 +895,7 @@ impl CandidateSchemaValidation for Schema {
             // Spiral conservatively marks values projected from table-generating
             // functions as nullable even after an explicit non-null filter. Runtime
             // row decoding still rejects every null identity value.
-            if !field.data_type().storage_matches(expected) {
+            if !WorkflowFeatureSchema::storage_type_matches(field.data_type(), expected) {
                 return Err(format!(
                     "Workflow candidate field {name:?} must use {expected:?} storage."
                 ));
@@ -944,7 +927,7 @@ impl FeatureRegistry {
         let Some(schema) = connection.relation_schema(&relation).await? else {
             return Ok(FeatureRegistry::default());
         };
-        Self::validate_schema(&schema)?;
+        WorkflowFeatureSchema::validate_registry(&schema)?;
         let mut reader = connection
             .execute_query(format!("SELECT * FROM {relation}"))
             .await?;
@@ -1145,53 +1128,6 @@ impl FeatureRegistryEntry {
 }
 
 impl FeatureRegistry {
-    fn schema() -> SchemaRef {
-        Arc::new(Schema::new(vec![
-            Field::new("source_relation", DataType::Utf8, false),
-            Field::new("cache_relation", DataType::Utf8, false),
-            Field::new("feature_name", DataType::Utf8, false),
-            Field::new("description", DataType::Utf8, false),
-            Field::new("concept", DataType::Utf8, false),
-            Field::new("media_field", DataType::Utf8, false),
-            Field::new(
-                "stream_ids",
-                DataType::List(Arc::new(Field::new("item", DataType::Utf8, false))),
-                false,
-            ),
-            Field::new("producer_model_id", DataType::Utf8, false),
-            Field::new("producer_repository", DataType::Utf8, false),
-            Field::new("artifact_revision", DataType::Utf8, false),
-            Field::new("value_semantics", DataType::Utf8, false),
-            Field::new("definition_version", DataType::UInt32, false),
-            Field::new("created_at_ms", DataType::UInt64, false),
-            Field::new("updated_at_ms", DataType::UInt64, false),
-        ]))
-    }
-}
-
-impl FeatureRegistry {
-    fn validate_schema(schema: &Schema) -> Result<(), String> {
-        let expected = Self::schema();
-        if schema.fields().len() != expected.fields().len()
-            || schema
-                .fields()
-                .iter()
-                .zip(expected.fields())
-                .any(|(actual, expected)| {
-                    actual.name() != expected.name()
-                        || actual.is_nullable() != expected.is_nullable()
-                        || !actual.data_type().storage_matches(expected.data_type())
-                })
-        {
-            return Err(format!(
-                "Workflow feature registry has an incompatible schema. Studio will not replace it. Expected {expected:?}; actual {schema:?}."
-            ));
-        }
-        Ok(())
-    }
-}
-
-impl FeatureRegistry {
     fn record_batch(&self) -> Result<RecordBatch, String> {
         let entries = self.entries.values().collect::<Vec<_>>();
         let text = |value: fn(&FeatureRegistryEntry) -> &str| {
@@ -1211,7 +1147,7 @@ impl FeatureRegistry {
             streams.append(true);
         }
         RecordBatch::try_new(
-            Self::schema(),
+            WorkflowFeatureSchema::registry(),
             vec![
                 text(|entry| entry.definition.applicability().source_relation()),
                 text(|entry| &entry.cache_relation),
@@ -1311,8 +1247,8 @@ impl FeatureCache {
         for (index, (name, expected)) in CACHE_KEY_FIELDS.iter().enumerate() {
             let field = schema.field(index);
             if field.name() != name
-                || (field.is_nullable() && !CacheKeySchema::declaration_may_be_nullable(name))
-                || !field.data_type().storage_matches(expected)
+                || (field.is_nullable() && !WorkflowFeatureSchema::cache_key_may_be_nullable(name))
+                || !WorkflowFeatureSchema::storage_type_matches(field.data_type(), expected)
             {
                 return Err(format!(
                     "Workflow feature cache key field {index} must use compatible {name} {expected:?} storage."
@@ -1356,7 +1292,7 @@ impl FeatureCache {
 struct CandidateBatchProducer {
     sql: String,
     chunk_rows: usize,
-    cancel: Arc<AtomicBool>,
+    cancel: CancellationToken,
     sender: Option<mpsc::Sender<Result<RecordBatch, String>>>,
 }
 
@@ -1368,7 +1304,7 @@ struct ModelBackfillOutput {
 }
 
 impl CandidateBatchProducer {
-    fn new(sql: String, chunk_rows: usize, cancel: Arc<AtomicBool>) -> Self {
+    fn new(sql: String, chunk_rows: usize, cancel: CancellationToken) -> Self {
         Self {
             sql,
             chunk_rows,
@@ -1388,7 +1324,7 @@ impl CandidateBatchProducer {
         let mut connection = project_store.connect().await?;
         let mut reader = connection.execute_query(sql).await?;
         while let Some(batch) = reader.next().await {
-            if self.cancel.is_model_cancelled() {
+            if self.cancel.is_cancelled() {
                 return Ok(());
             }
             let batch = batch.map_err(|error| format!("reading Workflow candidates: {error}"))?;
@@ -1725,12 +1661,12 @@ impl<'a> FeaturePublication<'a> {
 }
 
 struct PublicationGuard<'a> {
-    cancel: &'a AtomicBool,
+    cancel: &'a CancellationToken,
     publication_gate: &'a AsyncMutex<()>,
 }
 
 impl<'a> PublicationGuard<'a> {
-    fn new(cancel: &'a AtomicBool, publication_gate: &'a AsyncMutex<()>) -> Self {
+    fn new(cancel: &'a CancellationToken, publication_gate: &'a AsyncMutex<()>) -> Self {
         Self {
             cancel,
             publication_gate,
@@ -1796,7 +1732,7 @@ impl FeatureCache {
                 Field::new(
                     *name,
                     data_type.clone(),
-                    CacheKeySchema::declaration_may_be_nullable(name),
+                    WorkflowFeatureSchema::cache_key_may_be_nullable(name),
                 )
             })
             .collect::<Vec<_>>();
@@ -1925,40 +1861,6 @@ impl ArrowArrayValueExt for dyn arrow_array::Array + '_ {
         };
         let values = values.as_any().downcast_ref::<UInt8Array>()?;
         (values.null_count() == 0).then(|| values.values().to_vec())
-    }
-}
-
-trait StorageDataTypeExt {
-    fn storage_matches(&self, expected: &DataType) -> bool;
-}
-
-impl StorageDataTypeExt for DataType {
-    fn storage_matches(&self, expected: &DataType) -> bool {
-        self == expected
-            || matches!(
-                (self, expected),
-                (
-                    DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View,
-                    DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
-                ) | (
-                    DataType::Binary | DataType::LargeBinary | DataType::BinaryView,
-                    DataType::Binary | DataType::LargeBinary | DataType::BinaryView
-                )
-            )
-            || match (self, expected) {
-                // Spiral's pinned Vortex Arrow export canonicalizes nested Utf8
-                // values to Utf8View while preserving the List container and child
-                // field identity/nullability. This is storage-equivalent to the
-                // canonical List<Utf8> Studio writes; no other nested type drift is
-                // accepted.
-                (DataType::List(actual), DataType::List(expected)) => {
-                    actual.name() == expected.name()
-                        && actual.is_nullable() == expected.is_nullable()
-                        && actual.metadata() == expected.metadata()
-                        && actual.data_type().storage_matches(expected.data_type())
-                }
-                _ => false,
-            }
     }
 }
 
@@ -2462,17 +2364,12 @@ impl TimedInstantExt for Instant {
 }
 
 trait ModelCancellation {
-    fn is_model_cancelled(&self) -> bool;
     fn ensure_model_active(&self) -> Result<(), String>;
 }
 
-impl ModelCancellation for AtomicBool {
-    fn is_model_cancelled(&self) -> bool {
-        self.load(Ordering::SeqCst)
-    }
-
+impl ModelCancellation for CancellationToken {
     fn ensure_model_active(&self) -> Result<(), String> {
-        if self.is_model_cancelled() {
+        if self.is_cancelled() {
             Err(MODEL_RUN_CANCELLED.to_owned())
         } else {
             Ok(())
@@ -2927,7 +2824,7 @@ mod tests {
 
         let batch = registry.record_batch().unwrap();
         assert_eq!(batch.num_rows(), 2);
-        assert_eq!(batch.schema(), FeatureRegistry::schema());
+        assert_eq!(batch.schema(), WorkflowFeatureSchema::registry());
         assert_eq!(
             batch
                 .column_by_name("value_semantics")
@@ -2945,17 +2842,20 @@ mod tests {
         let expected = DataType::List(Arc::new(Field::new("item", DataType::Utf8, false)));
         let spiral_round_trip =
             DataType::List(Arc::new(Field::new("item", DataType::Utf8View, false)));
-        assert!(spiral_round_trip.storage_matches(&expected));
-        assert!(
-            !DataType::List(Arc::new(Field::new("item", DataType::BinaryView, false,)))
-                .storage_matches(&expected)
-        );
-        assert!(
-            !DataType::List(Arc::new(Field::new("item", DataType::Utf8View, true,)))
-                .storage_matches(&expected)
-        );
+        assert!(WorkflowFeatureSchema::storage_type_matches(
+            &spiral_round_trip,
+            &expected
+        ));
+        assert!(!WorkflowFeatureSchema::storage_type_matches(
+            &DataType::List(Arc::new(Field::new("item", DataType::BinaryView, false))),
+            &expected
+        ));
+        assert!(!WorkflowFeatureSchema::storage_type_matches(
+            &DataType::List(Arc::new(Field::new("item", DataType::Utf8View, true))),
+            &expected
+        ));
 
-        let canonical = FeatureRegistry::schema();
+        let canonical = WorkflowFeatureSchema::registry();
         let normalized_fields = canonical
             .fields()
             .iter()
@@ -2972,7 +2872,7 @@ mod tests {
                     .with_metadata(field.metadata().clone())
             })
             .collect::<Vec<_>>();
-        FeatureRegistry::validate_schema(&Schema::new(normalized_fields))
+        WorkflowFeatureSchema::validate_registry(&Schema::new(normalized_fields))
             .expect("pinned Spiral Utf8View normalization is storage-equivalent");
 
         let view = StringViewArray::from(vec!["camera.top"]);
@@ -3122,7 +3022,7 @@ mod tests {
     #[tokio::test]
     async fn publication_gate_linearizes_commit_before_or_cancellation_before_publication() {
         let gate = Arc::new(AsyncMutex::new(()));
-        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel = CancellationToken::new();
         let publication = gate.lock().await;
         let cancel_gate = gate.clone();
         let cancel_token = cancel.clone();
@@ -3130,16 +3030,16 @@ mod tests {
         let cancelling = tokio::spawn(async move {
             let _ = started_tx.send(());
             let _gate = cancel_gate.lock().await;
-            cancel_token.store(true, Ordering::SeqCst);
+            cancel_token.cancel();
         });
         started_rx.await.unwrap();
         assert!(
-            !cancel.load(Ordering::SeqCst),
+            !cancel.is_cancelled(),
             "a cancellation cannot cross a publication that already owns the gate"
         );
         drop(publication);
         cancelling.await.unwrap();
-        assert!(cancel.load(Ordering::SeqCst));
+        assert!(cancel.is_cancelled());
 
         let cancelled_gate = gate.lock().await;
         assert!(cancel.ensure_model_active().is_err());
@@ -3545,7 +3445,7 @@ mod tests {
                 output_relation.clone(),
                 features,
             ),
-            Arc::new(AtomicBool::new(false)),
+            CancellationToken::new(),
         )
         .with_publication_gate(Arc::new(AsyncMutex::new(())))
         .run(event_sender)

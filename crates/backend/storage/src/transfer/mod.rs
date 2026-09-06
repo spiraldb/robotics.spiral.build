@@ -4,9 +4,7 @@ mod bundle;
 mod ingestion;
 
 pub(crate) use bundle::ManagedRelationCatalog;
-pub use bundle::{
-    ProjectBundle, SIGLIP_BASE_MODEL_ID, SIGLIP_BASE_REPOSITORY, SIGLIP_BASE_REVISION,
-};
+pub use bundle::ProjectBundle;
 pub use ingestion::HuggingFaceDatasetDiscovery;
 
 use spiral_robotics_common::datasets::ProjectImportSummary;

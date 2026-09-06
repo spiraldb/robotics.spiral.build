@@ -1511,7 +1511,6 @@ trait WorkflowDraft {
         model_id: &str,
         features: &[WorkflowFeatureDefinition],
     );
-    fn normalize_model_sources(&mut self);
     fn revision_conflicts_with(&self, server: &WorkflowSpec) -> bool;
     fn empty_draft(&self) -> WorkflowSpec;
 }
@@ -1725,54 +1724,6 @@ impl WorkflowDraft for WorkflowSpec {
     /// Keep deterministic server-owned Model fields visible and valid while the
     /// user edits its one authoritative source Table. The backend repeats this
     /// normalization at admission; the browser never chooses a cache relation.
-    fn normalize_model_sources(&mut self) {
-        let workflow = self;
-        let incoming = workflow.edges().iter().fold(
-            BTreeMap::<String, Vec<String>>::new(),
-            |mut incoming, edge| {
-                incoming
-                    .entry(edge.target().to_owned())
-                    .or_default()
-                    .push(edge.source().to_owned());
-                incoming
-            },
-        );
-        let nodes = workflow
-            .nodes()
-            .iter()
-            .map(|node| (node.id().to_owned(), node.config().to_owned()))
-            .collect::<BTreeMap<_, _>>();
-        for node in workflow.nodes_mut() {
-            let node_id = node.id().to_owned();
-            let WorkflowNodeConfig::Model { features } = node.config_mut() else {
-                continue;
-            };
-            let mut sources = BTreeSet::new();
-            let mut visited = BTreeSet::new();
-            let mut pending = incoming.get(node_id.as_str()).cloned().unwrap_or_default();
-            while let Some(upstream_id) = pending.pop() {
-                if !visited.insert(upstream_id.clone()) {
-                    continue;
-                }
-                match nodes.get(&upstream_id) {
-                    Some(WorkflowNodeConfig::Table { relation }) if !relation.is_empty() => {
-                        sources.insert(relation.clone());
-                    }
-                    Some(_) => {
-                        pending.extend(incoming.get(&upstream_id).cloned().unwrap_or_default())
-                    }
-                    None => {}
-                }
-            }
-            let source = (sources.len() == 1)
-                .then(|| sources.into_iter().next())
-                .flatten();
-            for feature in features {
-                feature.set_source_relation(source.clone().unwrap_or_default());
-            }
-        }
-    }
-
     fn revision_conflicts_with(&self, server: &WorkflowSpec) -> bool {
         self != server && self.revision() != server.revision()
     }

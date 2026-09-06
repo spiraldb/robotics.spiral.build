@@ -7,15 +7,14 @@ mod rollout_runs;
 mod settings;
 mod training;
 mod transfer;
+pub mod workflow_assistant;
 pub mod workflow_documents;
-mod workflow_features;
+pub mod workflow_features;
 
 pub mod bundle {
     //! Portable single-file snapshots of the Studio-owned Spiral namespace.
 
-    pub use crate::transfer::{
-        ProjectBundle, SIGLIP_BASE_MODEL_ID, SIGLIP_BASE_REPOSITORY, SIGLIP_BASE_REVISION,
-    };
+    pub use crate::transfer::ProjectBundle;
 }
 
 pub mod checkpoints {
