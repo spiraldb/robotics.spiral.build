@@ -13,6 +13,7 @@ use spiral_robotics_common::identity::DatasetId;
 use spiral_robotics_common::recording::{DatasetSummary, EpisodeInfo, EpisodeListItem};
 
 use crate::activities::data::catalog::ManagedTable;
+use crate::activities::data::dataset_catalog::{DatasetCatalogState, DatasetLoadRequest};
 use crate::activities::data::query_result::{
     DEFAULT_QUERY_ROWS, QueryExecutionPresentation, QueryState, QueryTab,
 };
@@ -44,16 +45,6 @@ struct EpisodeLoadResult {
     episode: String,
     expected_frames: u64,
     result: Result<Arc<EpisodeData>, String>,
-}
-
-#[derive(Clone, Debug, Default)]
-struct DatasetCatalogState {
-    datasets: Vec<DatasetSummary>,
-    loading: bool,
-    loaded: bool,
-    selection_initialized: bool,
-    error: Option<String>,
-    request_sequence: u64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -328,40 +319,23 @@ impl DataController {
     }
 
     pub(crate) fn datasets(&self) -> Vec<DatasetSummary> {
-        self.dataset_catalog.read().datasets.clone()
+        self.dataset_catalog.read().datasets().to_vec()
     }
 
     pub(crate) fn datasets_loading(&self) -> bool {
-        self.dataset_catalog.read().loading
+        self.dataset_catalog.read().loading()
     }
 
     pub(crate) fn datasets_loaded(&self) -> bool {
-        self.dataset_catalog.read().loaded
+        self.dataset_catalog.read().loaded()
     }
 
     pub(crate) fn dataset_catalog_error(&self) -> Option<String> {
-        self.dataset_catalog.read().error.clone()
+        self.dataset_catalog.read().error().map(str::to_owned)
     }
 
     pub(crate) fn initialize_dataset_selection(mut self, current: &str) -> Option<String> {
-        let mut catalog = self.dataset_catalog.write();
-        if !catalog.loaded || catalog.selection_initialized {
-            return None;
-        }
-        catalog.selection_initialized = true;
-        if catalog
-            .datasets
-            .iter()
-            .any(|dataset| dataset.id() == current)
-        {
-            return None;
-        }
-        catalog
-            .datasets
-            .iter()
-            .find(|dataset| dataset.id() == "default")
-            .or_else(|| catalog.datasets.first())
-            .map(|dataset| dataset.id().to_owned())
+        self.dataset_catalog.write().initialize_selection(current)
     }
 
     pub(crate) fn episodes_loading(&self, dataset_id: &str) -> bool {
@@ -390,39 +364,41 @@ impl DataController {
         }
     }
 
-    pub(crate) async fn load_datasets(mut self) -> Result<(), String> {
-        let request_sequence = {
-            let mut catalog = self.dataset_catalog.write();
-            catalog.request_sequence += 1;
-            catalog.loading = true;
-            catalog.error = None;
-            catalog.request_sequence
-        };
-        match ProjectClient::current()
+    /// Called reactively by any dataset consumer. The session-owned request
+    /// survives navigation, and failure consumes this session's automatic attempt.
+    pub(crate) fn request_datasets(self) {
+        self.spawn_dataset_load(DatasetLoadRequest::Automatic);
+    }
+
+    pub(crate) fn retry_datasets(self) {
+        self.spawn_dataset_load(DatasetLoadRequest::Reload);
+    }
+
+    fn spawn_dataset_load(self, request: DatasetLoadRequest) {
+        if self.begin_dataset_load(request) {
+            ProjectClient::current().spawn(async move {
+                // The shared selector feedback owns background and Retry errors.
+                let _ = self.fetch_datasets().await;
+            });
+        }
+    }
+
+    fn begin_dataset_load(mut self, request: DatasetLoadRequest) -> bool {
+        let available = crate::shell::project::ProjectSessionSignals::current().storage_available();
+        // Subscribe before claiming, and never write when no request is admitted:
+        // a no-op write would reschedule the consumer's effect indefinitely.
+        if !self.dataset_catalog.read().can_request(request, available) {
+            return false;
+        }
+        self.dataset_catalog.write().begin(request, available)
+    }
+
+    async fn fetch_datasets(mut self) -> Result<(), String> {
+        let result = ProjectClient::current()
             .list_datasets()
             .await
-            .map_err(|error| error.to_string())
-        {
-            Ok(datasets) => {
-                let mut catalog = self.dataset_catalog.write();
-                if catalog.request_sequence != request_sequence {
-                    return Ok(());
-                }
-                catalog.datasets = datasets;
-                catalog.loading = false;
-                catalog.loaded = true;
-                Ok(())
-            }
-            Err(error) => {
-                let mut catalog = self.dataset_catalog.write();
-                if catalog.request_sequence != request_sequence {
-                    return Ok(());
-                }
-                catalog.loading = false;
-                catalog.error = Some(error.clone());
-                Err(format!("Could not load datasets: {error}"))
-            }
-        }
+            .map_err(|error| error.to_string());
+        self.dataset_catalog.write().finish(result)
     }
 
     /// Replace one dataset's episode catalog while retaining full data only
@@ -498,7 +474,12 @@ impl DataController {
     }
 
     pub(crate) async fn reload_dataset(self, dataset_id: String) -> Result<(), String> {
-        self.load_datasets().await?;
+        if !self.begin_dataset_load(DatasetLoadRequest::Reload) {
+            return Err(
+                "Wait for the project and the current dataset request before reloading.".to_owned(),
+            );
+        }
+        self.fetch_datasets().await?;
         self.load_episodes(dataset_id).await
     }
 
@@ -539,15 +520,9 @@ impl DataController {
             .retain(|entry| entry.summary.id() != episode);
     }
 
-    pub(crate) fn invalidate_catalogs(mut self) {
-        let mut datasets = self.dataset_catalog.write();
-        datasets.request_sequence += 1;
-        datasets.loading = false;
-        datasets.loaded = false;
-        datasets.selection_initialized = false;
-        datasets.error = None;
-        drop(datasets);
-
+    // Dataset failures belong to the session and must survive ordinary settings
+    // saves. A successful project replacement remounts the whole controller.
+    pub(crate) fn invalidate_episode_catalog(mut self) {
         let mut episodes = self.episode_catalog.write();
         episodes.request_sequence += 1;
         episodes.loading = false;

@@ -1,5 +1,6 @@
 //! Live screen workbench: capture, control, and selected-arm state.
 
+use crate::activities::data::dataset_catalog::DatasetCatalogFeedback;
 use std::collections::BTreeSet;
 
 use crate::components::interaction::{
@@ -47,12 +48,7 @@ fn CaptureSection() -> Element {
     let data = studio.data_controller();
     let mut selected_dataset = studio.selected_dataset();
     let recording = studio.recording();
-    let sessions = crate::shell::project::ProjectSessionSignals::current();
-    use_effect(move || {
-        if sessions.storage_available() && !data.datasets_loaded() && !data.datasets_loading() {
-            studio.run_utility("", data.load_datasets());
-        }
-    });
+    use_effect(move || data.request_datasets());
     let dataset_ids = data
         .datasets()
         .into_iter()
@@ -84,6 +80,7 @@ fn CaptureSection() -> Element {
             datalist { id: "live-dataset-options",
                 for id in dataset_ids { option { value: "{id}" } }
             }
+            DatasetCatalogFeedback {}
             p {
                 if recording.is_some() {
                     "Dataset assignment is locked until this episode finishes."

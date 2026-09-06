@@ -5,6 +5,7 @@
 //! or replays episodes; neither tool has to impersonate
 //! navigation for the other.
 
+use crate::activities::data::dataset_catalog::DatasetCatalogFeedback;
 use crate::client::project::ProjectClient;
 use std::collections::BTreeSet;
 
@@ -40,17 +41,8 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
     let mut deleting_episode = use_signal(|| None::<String>);
     let sessions = crate::shell::project::ProjectSessionSignals::current();
 
-    // Load the tiny dataset index before choosing which episode subset to read.
-    use_effect(move || {
-        let storage_available = sessions.storage_available();
-        if storage_available
-            && !data.datasets_loaded()
-            && !data.datasets_loading()
-            && data.dataset_catalog_error().is_none()
-        {
-            studio.run_utility("", data.load_datasets());
-        }
-    });
+    // All consumers share the controller's session-scoped request policy.
+    use_effect(move || data.request_datasets());
 
     // Preserve a known selection; otherwise initialize deterministically from
     // the default dataset or the first stored dataset.
@@ -105,7 +97,6 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
     let datasets_loading = data.datasets_loading();
     let catalog_loading = data.episodes_loading(&dataset_id);
     let catalog_loaded = data.episodes_loaded(&dataset_id);
-    let dataset_error = data.dataset_catalog_error();
     let catalog_error = data.episode_catalog_error(&dataset_id);
     let catalog_issues = data.episode_catalog_issues(&dataset_id);
     let backend_readiness = studio.snapshot().read().readiness().clone();
@@ -184,6 +175,10 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
                 }
             }
 
+            div { class: "mx-2 mt-2 empty:hidden",
+                DatasetCatalogFeedback {}
+            }
+
             if adding_data() && dataset_valid && storage_available {
                 HuggingFaceImport {
                     key: "{dataset_id}",
@@ -193,12 +188,6 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
             }
 
             div { class: "min-h-0 flex-1 overflow-y-auto",
-                if let Some(error) = dataset_error {
-                    div { class: "mx-2 mt-2 rounded bg-danger-soft px-2 py-1.5 text-[11px] text-danger", role: "alert",
-                        strong { class: "block font-medium", "Datasets unavailable" }
-                        span { "{error}" }
-                    }
-                }
                 if let Some(error) = catalog_error {
                     div { class: "mx-2 mt-2 rounded bg-danger-soft px-2 py-1.5 text-[11px] text-danger", role: "alert",
                         strong { class: "block font-medium", "Episodes unavailable" }

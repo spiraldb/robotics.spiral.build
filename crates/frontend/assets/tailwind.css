@@ -596,6 +596,9 @@
     --tw-font-weight: var(--font-weight-medium);
     font-weight: var(--font-weight-medium);
   }
+  .break-words {
+    overflow-wrap: break-word;
+  }
   .whitespace-nowrap {
     white-space: nowrap;
   }
@@ -633,6 +636,9 @@
   .select-none {
     -webkit-user-select: none;
     user-select: none;
+  }
+  .empty\:hidden:empty {
+    display: none;
   }
   .focus-visible\:outline-offset-0:focus-visible {
     outline-offset: 0px;

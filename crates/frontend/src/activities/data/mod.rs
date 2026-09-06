@@ -1,6 +1,7 @@
 //! Data screen: episode browsing, querying, and durable screen state.
 
 pub(crate) mod catalog;
+pub(crate) mod dataset_catalog;
 pub(crate) mod query_result;
 pub(crate) mod relations;
 pub(crate) mod screen;

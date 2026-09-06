@@ -477,7 +477,7 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
                                     .await
                                     .map_err(|error| error.to_string())?;
                                 data.set_selected_episode(None);
-                                data.invalidate_catalogs();
+                                data.invalidate_episode_catalog();
                                 let settings = ProjectClient::current().data_settings()
                                     .await
                                     .map_err(|error| error.to_string())?;

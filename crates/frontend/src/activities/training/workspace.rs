@@ -1,5 +1,6 @@
 //! Training setup and run monitoring.
 
+use crate::activities::data::dataset_catalog::DatasetCatalogFeedback;
 use std::collections::BTreeSet;
 
 use crate::components::interaction::{
@@ -187,12 +188,7 @@ fn TrainingRunControl(
     let mut selected_dataset = studio.selected_dataset();
     let controller = studio.training_controller();
     let config = controller.config();
-    let sessions = crate::shell::project::ProjectSessionSignals::current();
-    use_effect(move || {
-        if sessions.storage_available() && !data.datasets_loaded() && !data.datasets_loading() {
-            studio.run_utility("", data.load_datasets());
-        }
-    });
+    use_effect(move || data.request_datasets());
     let dataset_ids = data
         .datasets()
         .into_iter()
@@ -321,6 +317,7 @@ fn TrainingRunControl(
                         }
                     }
                 }
+                DatasetCatalogFeedback {}
                 dl { class: "training-source-meta",
                     div { dt { "Cameras" } dd { "{camera_summary}" } }
                 }

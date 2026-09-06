@@ -195,7 +195,7 @@ fn ProjectStudioShell(session: ProjectSessionInfo) -> Element {
                                 move |_| {
                                     studio.refresh_settings();
                                     studio.refresh_relation_catalog();
-                                    data.invalidate_catalogs();
+                                    data.invalidate_episode_catalog();
                                 },
                                 move |busy| settings_busy.set(busy),
                             ),
