@@ -3,6 +3,8 @@
 use dioxus::prelude::*;
 use spiral_robotics_common::recording::DatasetSummary;
 
+use crate::client::CommandError;
+
 use crate::components::interaction::{Action, ActionPurpose, ActionVariant};
 use crate::shell::project::ProjectSessionSignals;
 use crate::shell::state::studio;
@@ -14,7 +16,7 @@ pub(super) enum DatasetCatalogState {
     Loading(Option<LoadedDatasets>),
     Ready(LoadedDatasets),
     Failed {
-        message: String,
+        error: CommandError,
         previous: Option<LoadedDatasets>,
     },
 }
@@ -52,9 +54,9 @@ impl DatasetCatalogState {
         matches!(self, Self::Loading(_))
     }
 
-    pub(super) fn error(&self) -> Option<&str> {
+    pub(super) fn error(&self) -> Option<&CommandError> {
         match self {
-            Self::Failed { message, .. } => Some(message),
+            Self::Failed { error, .. } => Some(error),
             _ => None,
         }
     }
@@ -85,7 +87,7 @@ impl DatasetCatalogState {
 
     pub(super) fn finish(
         &mut self,
-        result: Result<Vec<DatasetSummary>, String>,
+        result: Result<Vec<DatasetSummary>, CommandError>,
     ) -> Result<(), String> {
         let Self::Loading(previous) = std::mem::take(self) else {
             unreachable!("only the admitted dataset request can complete");
@@ -99,10 +101,10 @@ impl DatasetCatalogState {
                 });
                 Ok(())
             }
-            Err(message) => {
-                let error = format!("Could not load datasets: {message}");
-                *self = Self::Failed { message, previous };
-                Err(error)
+            Err(error) => {
+                let message = format!("Could not load datasets: {error}");
+                *self = Self::Failed { error, previous };
+                Err(message)
             }
         }
     }
@@ -150,17 +152,20 @@ pub(crate) fn DatasetCatalogFeedback() -> Element {
             div { class: "min-w-0 rounded bg-danger-soft px-2 py-1.5 text-[11px] text-danger", role: "status",
                 strong { class: "block font-medium", "Could not load datasets" }
                 div { class: "break-words", "{error}" }
-                Action {
-                    purpose: ActionPurpose::Retry,
-                    variant: ActionVariant::Outline,
-                    class: "mt-1",
-                    disabled: !available,
-                    aria_label: "Retry loading datasets",
-                    onclick: move |_| data.retry_datasets(),
-                    "Retry"
-                }
-                if !available {
-                    div { class: "mt-1", "Retry when the project is available." }
+                div { class: "mt-1", "{error.recovery_guidance()}" }
+                if error.retryable() {
+                    Action {
+                        purpose: ActionPurpose::Retry,
+                        variant: ActionVariant::Outline,
+                        class: "mt-1",
+                        disabled: !available,
+                        aria_label: "Retry loading datasets",
+                        onclick: move |_| data.retry_datasets(),
+                        "Retry"
+                    }
+                    if !available {
+                        div { class: "mt-1", "Retry when the project is available." }
+                    }
                 }
             }
         } else if loading {
@@ -172,6 +177,7 @@ pub(crate) fn DatasetCatalogFeedback() -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use spiral_robotics_common::command_failure::CommandFailureCode;
 
     #[test]
     fn automatic_loading_waits_for_readiness_and_claims_only_one_request() {
@@ -192,12 +198,18 @@ mod tests {
         assert!(catalog.begin(DatasetLoadRequest::Automatic, true));
         assert!(
             catalog
-                .finish(Err("catalog unavailable".to_owned()))
+                .finish(Err(CommandError::new(
+                    CommandFailureCode::ProjectUnavailable,
+                    "catalog unavailable"
+                )))
                 .is_err()
         );
         for available in [true, true, false, true] {
             assert!(!catalog.begin(DatasetLoadRequest::Automatic, available));
-            assert_eq!(catalog.error(), Some("catalog unavailable"));
+            assert_eq!(
+                catalog.error().unwrap().code(),
+                CommandFailureCode::ProjectUnavailable
+            );
         }
         assert!(!catalog.begin(DatasetLoadRequest::Reload, false));
         assert!(catalog.begin(DatasetLoadRequest::Reload, true));
@@ -219,7 +231,14 @@ mod tests {
         );
         assert!(catalog.begin(DatasetLoadRequest::Reload, true));
         assert_eq!(catalog.datasets()[0].id(), "default");
-        assert!(catalog.finish(Err("connection lost".to_owned())).is_err());
+        assert!(
+            catalog
+                .finish(Err(CommandError::new(
+                    CommandFailureCode::Transport,
+                    "connection lost"
+                )))
+                .is_err()
+        );
         assert!(catalog.loaded());
         assert_eq!(catalog.datasets()[0].id(), "default");
         assert_eq!(catalog.initialize_selection("user-draft"), None);

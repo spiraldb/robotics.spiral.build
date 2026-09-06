@@ -32,7 +32,6 @@ use crate::data::queries::EpisodeQueries;
 use crate::recording_session::RecordingSessionManager;
 use crate::robotics::cameras::{CameraManager, Frame};
 use crate::robotics::video::{VideoAsset, VideoCapture, VideoEncoderSettings};
-use crate::robots::discovery::CameraDiscoveryPort;
 use crate::robots::service::RobotCatalogActions;
 use crate::robots::workspace::RobotWorkspace;
 use crate::rollout::manager::RolloutManager;
@@ -305,8 +304,7 @@ impl AppState {
             issues.push(issue.to_owned());
         }
 
-        let cameras =
-            crate::device_commands::CameraDiscoveryAdapter::new(state.cameras().clone()).cameras();
+        let cameras = state.cameras().statuses();
         StudioSnapshot::new(readiness, "SpiralDB", hardware.mode_status().clone())
             .with_robots(robots)
             .with_cameras(cameras)

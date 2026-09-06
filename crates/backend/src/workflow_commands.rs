@@ -4,9 +4,9 @@ use spiral_robotics_common::workflow::{
     WorkflowAgentCommand, WorkflowAgentSnapshot, WorkflowCommand, WorkflowSnapshot,
 };
 
-use crate::OperationError;
+use crate::BackendCommandError;
 use crate::data::catalog_lease::CatalogLeaseOwner;
-use crate::main_runtime::{MainRuntime, MainRuntimeFailure};
+use crate::main_runtime::MainRuntime;
 
 /// Narrow command facade shared with the Studio's server-function handlers.
 #[derive(Clone)]
@@ -14,10 +14,6 @@ pub struct WorkflowCommands {
     main_runtime: MainRuntime,
     state: crate::http::routes::AppState,
 }
-
-/// One Workflow command failure whose backend message is shown verbatim by Studio.
-#[derive(Debug)]
-pub struct WorkflowFailure(String);
 
 impl WorkflowCommands {
     pub(crate) fn new(main_runtime: MainRuntime, state: crate::http::routes::AppState) -> Self {
@@ -27,14 +23,14 @@ impl WorkflowCommands {
         }
     }
 
-    pub fn for_session(&self, session_id: &str) -> Result<Self, WorkflowFailure> {
+    pub fn for_session(&self, session_id: &str) -> Result<Self, BackendCommandError> {
         Ok(Self::new(
             self.main_runtime.clone(),
             self.state.for_session(session_id)?,
         ))
     }
 
-    pub async fn snapshot(&self) -> Result<WorkflowSnapshot, WorkflowFailure> {
+    pub async fn snapshot(&self) -> Result<WorkflowSnapshot, BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
         self.main_runtime
@@ -49,7 +45,7 @@ impl WorkflowCommands {
     pub async fn command(
         &self,
         command: WorkflowCommand,
-    ) -> Result<WorkflowSnapshot, WorkflowFailure> {
+    ) -> Result<WorkflowSnapshot, BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
         self.main_runtime
@@ -62,7 +58,7 @@ impl WorkflowCommands {
                 let token = commands.state.catalog_lease()
                     .try_acquire(CatalogLeaseOwner::WorkflowStart)
                     .ok_or_else(|| {
-                        WorkflowFailure::conflict(
+                        BackendCommandError::conflict(
                             "Wait for the current recording or catalog change before changing Workflow",
                         )
                     })?;
@@ -72,7 +68,7 @@ impl WorkflowCommands {
                         released,
                         "Workflow command releases its admission lease once"
                     );
-                    return Err(WorkflowFailure::conflict(
+                    return Err(BackendCommandError::conflict(
                         "Wait for the active Assistant turn before changing Workflow manually",
                     ));
                 }
@@ -87,7 +83,7 @@ impl WorkflowCommands {
             .await?
     }
 
-    pub async fn agent_snapshot(&self) -> Result<WorkflowAgentSnapshot, WorkflowFailure> {
+    pub async fn agent_snapshot(&self) -> Result<WorkflowAgentSnapshot, BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
         self.main_runtime
@@ -102,7 +98,7 @@ impl WorkflowCommands {
     pub async fn agent_command(
         &self,
         command: WorkflowAgentCommand,
-    ) -> Result<WorkflowAgentSnapshot, WorkflowFailure> {
+    ) -> Result<WorkflowAgentSnapshot, BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
         self.main_runtime
@@ -114,7 +110,7 @@ impl WorkflowCommands {
                         .current()
                         .catalog_available()
                 {
-                    return Err(WorkflowFailure::conflict(
+                    return Err(BackendCommandError::conflict(
                         "Configure or reconnect Spiral before changing Assistant conversations.",
                     ));
                 }
@@ -128,7 +124,7 @@ impl WorkflowCommands {
                         commands.state.catalog_lease()
                             .try_acquire(CatalogLeaseOwner::WorkflowAgentHistory)
                             .ok_or_else(|| {
-                                WorkflowFailure::conflict(
+                                BackendCommandError::conflict(
                                     "Wait for the current recording or catalog change before changing Assistant conversations",
                                 )
                             })?,
@@ -149,36 +145,10 @@ impl WorkflowCommands {
             .await?
     }
 
-    fn require_catalog_ready(&self) -> Result<(), WorkflowFailure> {
+    fn require_catalog_ready(&self) -> Result<(), BackendCommandError> {
         match self.state.bootstrap().catalog_unavailable() {
-            Some(detail) => Err(WorkflowFailure(format!(
-                "Studio catalog is not ready: {detail}"
-            ))),
+            Some(error) => Err(error.into()),
             None => Ok(()),
         }
-    }
-}
-
-impl WorkflowFailure {
-    fn conflict(message: impl Into<String>) -> Self {
-        Self(message.into())
-    }
-}
-
-impl std::fmt::Display for WorkflowFailure {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.0)
-    }
-}
-
-impl From<OperationError> for WorkflowFailure {
-    fn from(error: OperationError) -> Self {
-        Self(error.to_string())
-    }
-}
-
-impl From<MainRuntimeFailure> for WorkflowFailure {
-    fn from(error: MainRuntimeFailure) -> Self {
-        Self(error.to_string())
     }
 }

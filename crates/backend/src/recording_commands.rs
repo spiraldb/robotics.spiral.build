@@ -4,20 +4,19 @@ use std::collections::BTreeSet;
 #[cfg(test)]
 use std::sync::Arc;
 
-use crate::OperationError;
 use crate::data::catalog::{
     DeleteEpisodeCommand, EpisodeActivity, EpisodeCatalogActions, EpisodeCatalogPort,
 };
 use crate::data::catalog_lease::CatalogLeaseToken;
 #[cfg(test)]
 use crate::data::catalog_lease::{CatalogLeaseOwner, CatalogMutationLease};
-use crate::data::queries::{EpisodeQueries, EpisodeQueryPort};
+use crate::data::queries::EpisodeQueries;
 use crate::data::seek::{
     ActiveRecording, PhysicalSeekActions, PhysicalSeekPlan, PhysicalSeekPort, RecordedSample,
     SampledArm, SeekActivity, SeekControlMode, SeekEpisodeCommand, SeekTarget, SeekableEpisode,
 };
 use crate::http::routes::AppState;
-use crate::main_runtime::{MainRuntime, MainRuntimeFailure};
+use crate::main_runtime::MainRuntime;
 use crate::recording::{
     RecordingActions, RecordingContext, RecordingDraftRequest, RecordingPort, RecordingResult,
     ReplayActions, ReplayEpisode, ReplayPlan, ReplayPort, ReplayTrajectory,
@@ -25,16 +24,14 @@ use crate::recording::{
     StartRecordingCommand, StartReplayCommand, StopRecordingCommand, TeleoperationPair,
 };
 use crate::robotics::video::{CameraCaptureSpec, VideoAsset, VideoCapture, VideoCaptureRequest};
-use crate::robots::workspace::RobotRecord;
+use crate::{BackendCommandError, OperationError};
 use spiral_robotics_common::recording::{
-    DatasetSummary, EpisodeArmScalarSamples, EpisodeInfo, EpisodeInspectionArm,
-    EpisodeInspectionSnapshot, EpisodeListItem, EpisodeOptionalFrameMatrix,
-    EpisodeVideoAssetMetadata, EpisodeVideoFormat, EpisodeVideoIdentity, EpisodeVideoTimeline,
+    DatasetSummary, EpisodeInfo, EpisodeInspectionSnapshot, EpisodeListItem,
 };
 use spiral_robotics_hardware::ModeSelection as HardwareModeSelection;
 use spiral_robotics_storage::episodes::{
-    ArmCondition, EpisodeArmCollection as _, EpisodeInspection, EpisodeRecordingRequest,
-    EpisodeWriter, JointMotorLimits, RobotPlaybackRequest,
+    ArmCondition, EpisodeArmCollection as _, EpisodeRecordingRequest, EpisodeWriter,
+    JointMotorLimits, RobotPlaybackRequest,
 };
 
 /// Concrete recording/replay adapter kept at the backend edge.
@@ -390,12 +387,12 @@ impl ReplayPort for RecordingAdapter<'_> {
 }
 
 /// SpiralDB and control-state adapter for episode catalog actions.
-pub(crate) struct EpisodeAdapter<'a> {
+struct EpisodeAdapter<'a> {
     state: &'a AppState,
 }
 
 impl<'a> EpisodeAdapter<'a> {
-    pub(crate) fn new(state: &'a AppState) -> Self {
+    fn new(state: &'a AppState) -> Self {
         Self { state }
     }
 }
@@ -423,193 +420,6 @@ impl EpisodeCatalogPort for EpisodeAdapter<'_> {
             .map_err(OperationError::from)?;
 
         Ok(())
-    }
-}
-
-impl EpisodeQueryPort for EpisodeAdapter<'_> {
-    async fn episodes(&self, dataset_id: &str) -> Vec<EpisodeListItem> {
-        self.state.episodes().list_in_dataset(dataset_id).await
-    }
-
-    async fn ensure_episode_exists(&self, episode: &str) -> Result<(), OperationError> {
-        self.state
-            .episodes()
-            .get(episode)
-            .await
-            .map(|_| ())
-            .map_err(OperationError::from)
-    }
-
-    async fn inspection(
-        &self,
-        episode: String,
-    ) -> Result<EpisodeInspectionSnapshot, OperationError> {
-        let inspection = self.state.episodes().inspection(&episode);
-        let saved_robots = self.state.workspace().list();
-        let (inspection, saved_robots) = tokio::join!(inspection, saved_robots);
-        Ok(inspection
-            .map_err(OperationError::from)?
-            .into_snapshot(&saved_robots))
-    }
-}
-
-/// Projects a stored inspection into the wire snapshot.
-///
-/// Both types are foreign to this crate, so the row-major to frame-major
-/// transposition hangs off the stored value as a local extension trait rather
-/// than a `From` impl.
-trait InspectionProjection {
-    fn into_snapshot(self, saved_robots: &[RobotRecord]) -> EpisodeInspectionSnapshot;
-}
-
-impl InspectionProjection for EpisodeInspection {
-    fn into_snapshot(self, saved_robots: &[RobotRecord]) -> EpisodeInspectionSnapshot {
-        let inspection = self;
-        let (episode, summary, videos) = inspection.into_parts();
-        let samples = episode.samples();
-        let arms = episode
-            .start()
-            .arms()
-            .iter()
-            .enumerate()
-            .map(|(arm_index, arm)| {
-                let joint_count = arm.joints().len();
-                let calibration = saved_robots
-                    .iter()
-                    .find(|robot| robot.id() == arm.id())
-                    .cloned()
-                    .and_then(|record| record.calibration().ok().flatten());
-                let normalized = samples
-                    .iter()
-                    .flat_map(|sample| sample.normalized()[arm_index].iter().copied())
-                    .collect();
-                let raw = samples
-                    .iter()
-                    .flat_map(|sample| sample.raw()[arm_index].iter().copied())
-                    .collect();
-                let degrees = samples
-                    .iter()
-                    .flat_map(|sample| {
-                        sample.raw()[arm_index]
-                            .iter()
-                            .zip(arm.joints())
-                            .map(|(raw, joint)| {
-                                calibration
-                                    .as_ref()
-                                    .and_then(|calibration| calibration.motors().get(joint))
-                                    .map(|motor| motor.degrees_from_center(*raw))
-                            })
-                    })
-                    .collect();
-                let velocity = OptionalFrameMatrix::new(samples, joint_count, |sample, index| {
-                    sample
-                        .velocity()
-                        .and_then(|arms| arms.get(index))
-                        .map(Vec::as_slice)
-                })
-                .for_arm(arm_index);
-                let effort = OptionalFrameMatrix::new(samples, joint_count, |sample, index| {
-                    sample
-                        .effort()
-                        .and_then(|arms| arms.get(index))
-                        .map(Vec::as_slice)
-                })
-                .for_arm(arm_index);
-                let action = OptionalFrameMatrix::new(samples, joint_count, |sample, index| {
-                    sample
-                        .action()
-                        .get(index)
-                        .and_then(Option::as_ref)
-                        .map(Vec::as_slice)
-                })
-                .for_arm(arm_index);
-                EpisodeInspectionArm::new(
-                    arm.id(),
-                    arm.joints().to_vec(),
-                    EpisodeArmScalarSamples::new(normalized, raw).with_degrees(degrees),
-                )
-                .with_velocity(velocity)
-                .with_effort(effort)
-                .with_action(action)
-            })
-            .collect();
-        EpisodeInspectionSnapshot::new(
-            summary,
-            samples.iter().map(|sample| sample.seconds()).collect(),
-            samples
-                .iter()
-                .map(|sample| sample.follow_error_degrees())
-                .collect(),
-        )
-        .with_arms(arms)
-        .with_videos(
-            videos
-                .into_iter()
-                .map(|video| {
-                    let size = video.size();
-                    let timing = video.timing();
-                    let segment = video.segment();
-                    EpisodeVideoAssetMetadata::new(
-                        EpisodeVideoIdentity::new(
-                            video.stream_id(),
-                            video.camera_id(),
-                            segment.index(),
-                        ),
-                        EpisodeVideoFormat::new(size.width(), size.height(), timing.fps()),
-                        EpisodeVideoTimeline::new(
-                            timing.frames(),
-                            video.duration_seconds(),
-                            segment.timeline_offset_seconds(),
-                        ),
-                    )
-                })
-                .collect(),
-        )
-    }
-}
-
-struct OptionalFrameMatrix<'a, F> {
-    samples: &'a [spiral_robotics_storage::episodes::Sample],
-    joint_count: usize,
-    values_at: F,
-}
-
-impl<'samples, F> OptionalFrameMatrix<'samples, F>
-where
-    F: for<'sample> Fn(
-        &'sample spiral_robotics_storage::episodes::Sample,
-        usize,
-    ) -> Option<&'sample [Option<f64>]>,
-{
-    fn new(
-        samples: &'samples [spiral_robotics_storage::episodes::Sample],
-        joint_count: usize,
-        values_at: F,
-    ) -> Self {
-        Self {
-            samples,
-            joint_count,
-            values_at,
-        }
-    }
-
-    fn for_arm(self, arm_index: usize) -> EpisodeOptionalFrameMatrix {
-        let mut present = Vec::with_capacity(self.samples.len());
-        let mut values = Vec::with_capacity(self.samples.len().saturating_mul(self.joint_count));
-        for sample in self.samples {
-            match (self.values_at)(sample, arm_index) {
-                Some(frame) => {
-                    debug_assert_eq!(frame.len(), self.joint_count);
-                    present.push(true);
-                    values.extend(frame.iter().copied());
-                }
-                None => {
-                    present.push(false);
-                    values.extend(std::iter::repeat_n(None, self.joint_count));
-                }
-            }
-        }
-        EpisodeOptionalFrameMatrix::new(present, values)
     }
 }
 
@@ -731,12 +541,8 @@ pub struct RecordingCommands {
     state: AppState,
 }
 
-/// One recording command failure whose backend message is shown verbatim by Studio.
-#[derive(Debug)]
-pub struct RecordingFailure(String);
-
 impl RecordingCommands {
-    pub fn for_session(&self, session_id: &str) -> Result<Self, RecordingFailure> {
+    pub fn for_session(&self, session_id: &str) -> Result<Self, BackendCommandError> {
         Ok(Self::new(
             self.main_runtime.clone(),
             self.state.for_session(session_id)?,
@@ -750,7 +556,7 @@ impl RecordingCommands {
         }
     }
 
-    pub async fn datasets(&self) -> Result<Vec<DatasetSummary>, RecordingFailure> {
+    pub async fn datasets(&self) -> Result<Vec<DatasetSummary>, BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
         self.main_runtime
@@ -770,7 +576,7 @@ impl RecordingCommands {
     pub async fn episodes(
         &self,
         dataset_id: String,
-    ) -> Result<(Vec<EpisodeListItem>, Vec<String>), RecordingFailure> {
+    ) -> Result<(Vec<EpisodeListItem>, Vec<String>), BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
         self.main_runtime
@@ -786,7 +592,7 @@ impl RecordingCommands {
                     .recording()
                     .as_ref()
                     .map(|progress| progress.episode().to_owned());
-                let episodes = EpisodeQueries::new(&EpisodeAdapter::new(&commands.state))
+                let episodes = EpisodeQueries::new(&commands.state)
                     .list(dataset_id)
                     .await?
                     .into_iter()
@@ -801,7 +607,7 @@ impl RecordingCommands {
     pub async fn start_recording(
         &self,
         dataset_id: String,
-    ) -> Result<EpisodeInfo, RecordingFailure> {
+    ) -> Result<EpisodeInfo, BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
         self.main_runtime
@@ -817,7 +623,7 @@ impl RecordingCommands {
             .await?
     }
 
-    pub async fn stop_recording(&self, keep: bool) -> Result<EpisodeInfo, RecordingFailure> {
+    pub async fn stop_recording(&self, keep: bool) -> Result<EpisodeInfo, BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
         self.main_runtime
@@ -833,7 +639,7 @@ impl RecordingCommands {
             .await?
     }
 
-    pub async fn set_recording_paused(&self, paused: bool) -> Result<(), RecordingFailure> {
+    pub async fn set_recording_paused(&self, paused: bool) -> Result<(), BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
         self.main_runtime
@@ -848,7 +654,7 @@ impl RecordingCommands {
             .await?
     }
 
-    pub async fn delete_episode(&self, id: String) -> Result<(), RecordingFailure> {
+    pub async fn delete_episode(&self, id: String) -> Result<(), BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
         self.main_runtime
@@ -866,14 +672,14 @@ impl RecordingCommands {
     pub async fn inspection(
         &self,
         id: String,
-    ) -> Result<EpisodeInspectionSnapshot, RecordingFailure> {
+    ) -> Result<EpisodeInspectionSnapshot, BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
         self.main_runtime
             .execute(async move {
                 let _activity = activity;
                 commands.require_storage_ready()?;
-                EpisodeQueries::new(&EpisodeAdapter::new(&commands.state))
+                EpisodeQueries::new(&commands.state)
                     .inspection(id)
                     .await
                     .map_err(Into::into)
@@ -888,7 +694,7 @@ impl RecordingCommands {
         robot: String,
         source_arm: Option<String>,
         seconds: f64,
-    ) -> Result<(), RecordingFailure> {
+    ) -> Result<(), BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
         self.main_runtime
@@ -911,7 +717,7 @@ impl RecordingCommands {
         robot: String,
         source_arm: Option<String>,
         start_seconds: f64,
-    ) -> Result<(), RecordingFailure> {
+    ) -> Result<(), BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
         self.main_runtime
@@ -929,7 +735,7 @@ impl RecordingCommands {
             .await?
     }
 
-    pub async fn set_replay_paused(&self, paused: bool) -> Result<(), RecordingFailure> {
+    pub async fn set_replay_paused(&self, paused: bool) -> Result<(), BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
         self.main_runtime
@@ -944,46 +750,18 @@ impl RecordingCommands {
             .await?
     }
 
-    fn require_storage_ready(&self) -> Result<(), RecordingFailure> {
+    fn require_storage_ready(&self) -> Result<(), BackendCommandError> {
         match self.state.bootstrap().storage_unavailable() {
-            Some(detail) => Err(RecordingFailure(format!(
-                "SpiralDB storage is not ready: {detail}"
-            ))),
+            Some(error) => Err(error.into()),
             None => Ok(()),
         }
     }
 
-    fn require_catalog_ready(&self) -> Result<(), RecordingFailure> {
+    fn require_catalog_ready(&self) -> Result<(), BackendCommandError> {
         match self.state.bootstrap().catalog_unavailable() {
-            Some(detail) => Err(RecordingFailure(format!(
-                "Studio catalog is not ready: {detail}"
-            ))),
+            Some(error) => Err(error.into()),
             None => Ok(()),
         }
-    }
-}
-
-impl std::fmt::Display for RecordingFailure {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.0)
-    }
-}
-
-impl From<OperationError> for RecordingFailure {
-    fn from(error: OperationError) -> Self {
-        Self(error.to_string())
-    }
-}
-
-impl From<String> for RecordingFailure {
-    fn from(message: String) -> Self {
-        Self(message)
-    }
-}
-
-impl From<MainRuntimeFailure> for RecordingFailure {
-    fn from(error: MainRuntimeFailure) -> Self {
-        Self(error.to_string())
     }
 }
 

@@ -10680,7 +10680,6 @@ dependencies = [
  "spiral-robotics-inference",
  "spiral-robotics-storage",
  "spiral-robotics-training",
- "syn 2.0.119",
  "tempfile",
  "tokenizers",
  "tokio",

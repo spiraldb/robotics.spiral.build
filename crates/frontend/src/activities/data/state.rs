@@ -330,8 +330,8 @@ impl DataController {
         self.dataset_catalog.read().loaded()
     }
 
-    pub(crate) fn dataset_catalog_error(&self) -> Option<String> {
-        self.dataset_catalog.read().error().map(str::to_owned)
+    pub(crate) fn dataset_catalog_error(&self) -> Option<crate::client::CommandError> {
+        self.dataset_catalog.read().error().cloned()
     }
 
     pub(crate) fn initialize_dataset_selection(mut self, current: &str) -> Option<String> {
@@ -394,10 +394,7 @@ impl DataController {
     }
 
     async fn fetch_datasets(mut self) -> Result<(), String> {
-        let result = ProjectClient::current()
-            .list_datasets()
-            .await
-            .map_err(|error| error.to_string());
+        let result = ProjectClient::current().list_datasets().await;
         self.dataset_catalog.write().finish(result)
     }
 

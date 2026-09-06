@@ -443,7 +443,7 @@ impl AppState {
             Ok(()) => self.current().auto_connect_saved_robots().await,
             Err(error) => {
                 tracing::warn!("could not load initial Spiral project: {error}");
-                self.bootstrap().degraded(false, error.to_string());
+                self.bootstrap().failed(false, &error);
             }
         }
     }

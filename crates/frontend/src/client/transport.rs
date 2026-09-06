@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use dioxus::fullstack::FileStream;
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
+use spiral_robotics_common::command_failure::{CommandFailure, CommandFailureCode};
 use spiral_robotics_common::datasets::{
     HuggingFaceDatasetImportSummary, HuggingFaceDatasetInspection, HuggingFaceDatasetSource,
     ProjectImportSummary,
@@ -40,28 +41,83 @@ use spiral_robotics_backend::WorkflowCommands;
 #[cfg(feature = "server")]
 use spiral_robotics_backend::{DataCommands, DataSettingsChange};
 
-/// Message-only command failure transported as Dioxus typed error details.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub(crate) struct CommandError(String);
+/// Stable command code and message transported as Dioxus typed error details.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(transparent)]
+pub(crate) struct CommandError(CommandFailure);
 
 impl CommandError {
+    pub(crate) fn new(code: CommandFailureCode, message: impl Into<String>) -> Self {
+        Self(CommandFailure::new(code, message))
+    }
+
+    pub(crate) fn code(&self) -> CommandFailureCode {
+        self.0.code()
+    }
+
+    pub(crate) fn retryable(&self) -> bool {
+        !matches!(
+            self.code(),
+            CommandFailureCode::IncompatibleWorkflow
+                | CommandFailureCode::InvalidInput
+                | CommandFailureCode::NotFound
+                | CommandFailureCode::StaleProject
+        )
+    }
+
+    pub(crate) fn recovery_guidance(&self) -> &'static str {
+        match self.code() {
+            CommandFailureCode::ProjectTransition => {
+                "Wait for the project change to finish, then retry."
+            }
+            CommandFailureCode::IncompatibleWorkflow => {
+                "This Studio build cannot open the saved Workflow. Update Studio before retrying."
+            }
+            CommandFailureCode::StaleProject => {
+                "The project changed. Reload this view to continue."
+            }
+            CommandFailureCode::InvalidInput => "Check the supplied values and try again.",
+            CommandFailureCode::NotFound => "Reload this view to check what is still available.",
+            CommandFailureCode::Conflict => "Finish the conflicting operation, then retry.",
+            CommandFailureCode::ProjectUnavailable => {
+                "Reconnect the project in Settings, then retry."
+            }
+            CommandFailureCode::External
+            | CommandFailureCode::Transport
+            | CommandFailureCode::Internal => {
+                "Retry the request. If it keeps failing, check the backend connection."
+            }
+        }
+    }
+
     pub(crate) fn stale_project() -> Self {
-        Self("The project changed before this request completed. Refresh the current project and try again.".to_owned())
+        Self::new(
+            CommandFailureCode::StaleProject,
+            "The project changed before this request completed. Refresh the current project and try again.",
+        )
     }
 }
 
 impl From<ServerFnError> for CommandError {
     fn from(error: ServerFnError) -> Self {
         match error {
-            ServerFnError::ServerError { message, .. } => Self(message),
-            error => Self(error.to_string()),
+            ServerFnError::ServerError {
+                message, details, ..
+            } => details
+                .and_then(|details| serde_json::from_value::<CommandFailure>(details).ok())
+                .map(Self)
+                .unwrap_or_else(|| Self::new(CommandFailureCode::Internal, message)),
+            ServerFnError::Request(message) => {
+                Self::new(CommandFailureCode::Transport, message.to_string())
+            }
+            error => Self::new(CommandFailureCode::Internal, error.to_string()),
         }
     }
 }
 
 impl std::fmt::Display for CommandError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.0)
+        std::fmt::Display::fmt(&self.0, formatter)
     }
 }
 
@@ -72,10 +128,13 @@ impl CommandError {
 
         let file_name = upload.file_name().to_owned();
         if upload.size().is_some_and(|size| size > max_bytes as u64) {
-            return Err(Self(format!(
-                "{file_name} exceeds the {} MiB import limit",
-                max_bytes / (1024 * 1024)
-            )));
+            return Err(Self::new(
+                CommandFailureCode::InvalidInput,
+                format!(
+                    "{file_name} exceeds the {} MiB import limit",
+                    max_bytes / (1024 * 1024)
+                ),
+            ));
         }
         let capacity = upload
             .size()
@@ -84,16 +143,20 @@ impl CommandError {
             .min(max_bytes);
         let mut document = Vec::with_capacity(capacity);
         while let Some(chunk) = upload.next().await {
-            let chunk = chunk.map_err(|error| Self(error.to_string()))?;
+            let chunk = chunk
+                .map_err(|error| Self::new(CommandFailureCode::Transport, error.to_string()))?;
             let received = document
                 .len()
                 .checked_add(chunk.len())
                 .filter(|received| *received <= max_bytes)
                 .ok_or_else(|| {
-                    Self(format!(
-                        "{file_name} exceeds the {} MiB import limit",
-                        max_bytes / (1024 * 1024)
-                    ))
+                    Self::new(
+                        CommandFailureCode::InvalidInput,
+                        format!(
+                            "{file_name} exceeds the {} MiB import limit",
+                            max_bytes / (1024 * 1024)
+                        ),
+                    )
                 })?;
             document.reserve(received - document.len());
             document.extend_from_slice(&chunk);
@@ -105,7 +168,8 @@ impl CommandError {
 #[cfg(feature = "server")]
 impl dioxus::fullstack::AsStatusCode for CommandError {
     fn as_status_code(&self) -> dioxus::fullstack::StatusCode {
-        dioxus::fullstack::StatusCode::INTERNAL_SERVER_ERROR
+        dioxus::fullstack::StatusCode::from_u16(self.code().http_status())
+            .expect("declared command status is valid")
     }
 }
 
@@ -120,11 +184,11 @@ pub(crate) async fn start_training_run(
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .start_training_run(config)
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -135,11 +199,11 @@ pub(crate) async fn stop_training_run(session_id: String, id: String) -> Result<
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .stop_training_run(id)
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -153,11 +217,11 @@ pub(crate) async fn delete_training_run(
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .delete_training_run(id)
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -171,11 +235,11 @@ pub(crate) async fn start_rollout(
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .start_rollout(config)
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -186,11 +250,11 @@ pub(crate) async fn stop_rollout(session_id: String) -> Result<(), CommandError>
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .stop_rollout()
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -203,11 +267,11 @@ pub(crate) async fn workflow_snapshot(
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .snapshot()
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -221,11 +285,11 @@ pub(crate) async fn run_workflow_command(
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .command(command)
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -238,11 +302,11 @@ pub(crate) async fn workflow_agent_snapshot(
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .agent_snapshot()
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -256,11 +320,11 @@ pub(crate) async fn run_workflow_agent_command(
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .agent_command(command)
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -271,11 +335,11 @@ pub(crate) async fn list_datasets(session_id: String) -> Result<Vec<DatasetSumma
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .datasets()
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -289,11 +353,11 @@ pub(crate) async fn list_episodes(
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .episodes(dataset_id)
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -307,11 +371,11 @@ pub(crate) async fn start_recording(
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .start_recording(dataset_id)
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -325,11 +389,11 @@ pub(crate) async fn stop_recording(
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .stop_recording(keep)
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -343,11 +407,11 @@ pub(crate) async fn set_recording_paused(
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .set_recording_paused(paused)
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -358,11 +422,11 @@ pub(crate) async fn delete_episode(session_id: String, id: String) -> Result<(),
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .delete_episode(id)
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -376,11 +440,11 @@ pub(crate) async fn inspect_episode(
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .inspection(id)
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -397,11 +461,11 @@ pub(crate) async fn seek_episode(
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .seek_episode(id, robot, source_arm, seconds)
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -418,11 +482,11 @@ pub(crate) async fn start_replay(
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .start_replay(episode, robot, source_arm, start_seconds)
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -436,11 +500,11 @@ pub(crate) async fn set_replay_paused(
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .set_replay_paused(paused)
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -453,11 +517,11 @@ pub(crate) async fn list_serial_ports(
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .list_ports()
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -471,11 +535,11 @@ pub(crate) async fn identify_serial_port(
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .identify_port(before)
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -486,11 +550,11 @@ pub(crate) async fn refresh_cameras(session_id: String) -> Result<Vec<CameraStat
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .refresh_cameras()
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -501,11 +565,11 @@ pub(crate) async fn list_robots(session_id: String) -> Result<Vec<RobotSummary>,
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .list_robots()
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -519,11 +583,11 @@ pub(crate) async fn create_robot(
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .create_robot(request)
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -537,11 +601,11 @@ pub(crate) async fn import_robot_configuration(
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .import_robot_configuration(document)
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -555,11 +619,11 @@ pub(crate) async fn get_robot(
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .get_robot(id)
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -573,11 +637,11 @@ pub(crate) async fn update_robot(
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .update_robot(request)
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -588,11 +652,11 @@ pub(crate) async fn delete_robot(session_id: String, id: String) -> Result<(), C
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .delete_robot(id)
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -603,11 +667,11 @@ pub(crate) async fn connect_robot(session_id: String, id: String) -> Result<(), 
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .connect_robot(id)
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -618,11 +682,11 @@ pub(crate) async fn disconnect_robot(session_id: String, id: String) -> Result<(
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .disconnect_robot(id)
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -633,11 +697,11 @@ pub(crate) async fn hold_robot(session_id: String, id: String) -> Result<(), Com
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .hold_robot(id)
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -648,11 +712,11 @@ pub(crate) async fn release_robot(session_id: String, id: String) -> Result<(), 
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .release_robot(id)
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -667,11 +731,11 @@ pub(crate) async fn set_robot_goal(
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .set_robot_goal(id, normalized)
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -682,11 +746,11 @@ pub(crate) async fn start_calibration(session_id: String, id: String) -> Result<
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .start_calibration(id)
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -700,11 +764,11 @@ pub(crate) async fn finish_calibration(
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .finish_calibration(id)
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -715,11 +779,11 @@ pub(crate) async fn cancel_calibration(session_id: String, id: String) -> Result
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .cancel_calibration(id)
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -733,11 +797,11 @@ pub(crate) async fn reapply_calibration(
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .reapply_calibration(id)
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -751,11 +815,11 @@ pub(crate) async fn set_mode(
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .set_mode(selection)
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -766,11 +830,11 @@ pub(crate) async fn data_settings(session_id: String) -> Result<DataSettings, Co
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .settings()
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -786,11 +850,11 @@ pub(crate) async fn update_data_settings(
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .update_settings(DataSettingsChange::new(connection, training, video))
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -803,11 +867,11 @@ pub(crate) async fn test_spiral_connection(
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .test_spiral()
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -820,11 +884,11 @@ pub(crate) async fn test_training_runtime(
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .test_training_runtime()
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -835,11 +899,11 @@ pub(crate) async fn relation_catalog(session_id: String) -> Result<RelationCatal
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .relations()
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -854,11 +918,11 @@ pub(crate) async fn run_spiral_query(
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .query(statement, max_rows)
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -872,11 +936,11 @@ pub(crate) async fn inspect_hugging_face_dataset(
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .inspect_hugging_face_dataset(request)
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -890,11 +954,11 @@ pub(crate) async fn import_hugging_face_dataset(
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     commands
         .import_hugging_face_dataset(request)
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
 }
 
 #[server(
@@ -908,12 +972,51 @@ pub(crate) async fn import_project(
     let commands = commands
         .0
         .for_session(&session_id)
-        .map_err(|failure| CommandError(failure.to_string()))?;
+        .map_err(|failure| CommandError(failure.into()))?;
     let document =
         CommandError::read_upload(document, spiral_robotics_backend::MAX_PROJECT_IMPORT_BYTES)
             .await?;
     commands
         .import_project(document)
         .await
-        .map_err(|failure| CommandError(failure.to_string()))
+        .map_err(|failure| CommandError(failure.into()))
+}
+
+#[cfg(test)]
+mod failure_tests {
+    use super::*;
+
+    #[test]
+    fn typed_server_errors_keep_their_code_independently_of_message_text() {
+        for code in [
+            CommandFailureCode::ProjectTransition,
+            CommandFailureCode::ProjectUnavailable,
+            CommandFailureCode::IncompatibleWorkflow,
+            CommandFailureCode::Internal,
+        ] {
+            let original = CommandError::new(code, "same message for every category");
+            let details = serde_json::to_value(&original).unwrap();
+            let transported: CommandError = serde_json::from_value(details.clone()).unwrap();
+            assert_eq!(transported.code(), code);
+            let wrapped = CommandError::from(ServerFnError::ServerError {
+                message: "outer message".into(),
+                code: code.http_status(),
+                details: Some(details),
+            });
+            assert_eq!(wrapped, original);
+            #[cfg(feature = "server")]
+            assert_eq!(
+                dioxus::fullstack::AsStatusCode::as_status_code(&wrapped).as_u16(),
+                code.http_status()
+            );
+        }
+        let compatibility = CommandError::new(CommandFailureCode::IncompatibleWorkflow, "x");
+        assert!(!compatibility.retryable());
+        let unavailable = CommandError::new(CommandFailureCode::ProjectUnavailable, "x");
+        assert!(unavailable.retryable());
+        assert_ne!(
+            compatibility.recovery_guidance(),
+            unavailable.recovery_guidance()
+        );
+    }
 }

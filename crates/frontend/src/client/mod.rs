@@ -7,3 +7,5 @@ pub(crate) mod project;
 mod project_commands;
 mod project_upload;
 mod transport;
+
+pub(crate) use transport::CommandError;

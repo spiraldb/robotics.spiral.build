@@ -78,7 +78,7 @@ struct SettingsOperationSignals {
     testing: Signal<bool>,
     transferring_project: Signal<bool>,
     test_result: Signal<Option<(bool, String)>>,
-    save_error: Signal<Option<String>>,
+    save_error: Signal<Option<crate::client::CommandError>>,
     project_transfer: ProjectTransferSignals,
 }
 
@@ -215,7 +215,10 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
                         };
                         match result {
                             Ok(response) => test_result.set(Some(response)),
-                            Err(error) => test_result.set(Some((false, error.to_string()))),
+                            Err(error) => test_result.set(Some((
+                                false,
+                                format!("{error} {}", error.recovery_guidance()),
+                            ))),
                         }
                         testing.set(false);
                     } else {
@@ -225,7 +228,7 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
                         );
                     }
                 }
-                Err(error) => save_error.set(Some(error.to_string())),
+                Err(error) => save_error.set(Some(error)),
             }
             saving.set(false);
             on_busy_change.call(false);
@@ -430,6 +433,7 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
                     div {
                         strong { "Settings weren’t saved." }
                         span { "{error}" }
+                        span { "{error.recovery_guidance()}" }
                     }
                     Action {
                         purpose: ActionPurpose::Close,

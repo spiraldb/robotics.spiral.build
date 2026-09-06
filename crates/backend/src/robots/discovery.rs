@@ -1,55 +1,119 @@
-//! Framework-neutral discovery actions for serial ports and cameras.
+//! Serial discovery and identification from an unplugged motor bus.
 
 use crate::OperationError;
-use spiral_robotics_common::robots::{CameraStatus, SerialPortSummary};
+use crate::http::routes::AppState;
+use spiral_robotics_common::robots::SerialPortSummary;
+use spiral_robotics_hardware::SerialPortCatalog;
 
-pub(crate) trait SerialPortInventory: Send + Sync {
-    async fn available_port_paths(&self) -> Result<Vec<String>, OperationError>;
+trait SerialPortPresentation {
+    fn kind(&self) -> &'static str;
+    fn description(&self) -> Option<String>;
 }
 
-pub(crate) trait SerialPortQueryPort: Send + Sync {
-    async fn serial_ports(&self) -> Result<Vec<SerialPortSummary>, OperationError>;
+impl SerialPortPresentation for serialport::SerialPortType {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::UsbPort(_) => "usb",
+            Self::BluetoothPort => "bluetooth",
+            Self::PciPort => "pci",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    fn description(&self) -> Option<String> {
+        match self {
+            Self::UsbPort(info) => {
+                let mut details = vec![format!("USB {:04x}:{:04x}", info.vid, info.pid)];
+                if let Some(product) = &info.product {
+                    details.push(product.clone());
+                }
+                if let Some(serial) = &info.serial_number {
+                    details.push(format!("serial {serial}"));
+                }
+                Some(details.join(", "))
+            }
+            Self::BluetoothPort => Some("Bluetooth".to_owned()),
+            Self::PciPort => Some("PCI".to_owned()),
+            Self::Unknown => None,
+        }
+    }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct IdentifySerialPortCommand {
-    before: Vec<String>,
+pub(crate) struct SerialPortDiscovery;
+
+impl SerialPortDiscovery {
+    async fn scan() -> Result<SerialPortCatalog, OperationError> {
+        tokio::task::spawn_blocking(SerialPortCatalog::discover)
+            .await
+            .map_err(|error| OperationError::Internal(error.to_string()))?
+            .map_err(|error| {
+                OperationError::Internal(format!("could not list serial ports: {error}"))
+            })
+    }
+
+    pub(crate) async fn identify(
+        before: Vec<String>,
+    ) -> Result<IdentifiedSerialPort, OperationError> {
+        let after = Self::scan()
+            .await?
+            .into_ports()
+            .into_iter()
+            .map(|port| port.port_name)
+            .collect();
+        Ok(IdentifiedSerialPort::between(before, after))
+    }
 }
 
-#[derive(Debug, PartialEq)]
+impl AppState {
+    pub(crate) async fn serial_ports(&self) -> Result<Vec<SerialPortSummary>, OperationError> {
+        let ports = SerialPortDiscovery::scan().await?;
+        let hardware = self.hardware().state();
+        let in_use = self
+            .workspace()
+            .list()
+            .await
+            .into_iter()
+            .filter(|record| {
+                hardware
+                    .connections()
+                    .get(record.id())
+                    .is_some_and(|connection| connection.connected())
+            })
+            .filter_map(|record| Some((record.port()?.path().to_owned(), record.id().to_owned())))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        Ok(ports
+            .into_ports()
+            .into_iter()
+            .map(|port| {
+                SerialPortSummary::new(
+                    port.port_name.clone(),
+                    port.port_type.kind(),
+                    port.port_type.description(),
+                )
+                .with_owner(in_use.get(&port.port_name).cloned())
+            })
+            .collect())
+    }
+}
+
 pub(crate) struct IdentifiedSerialPort {
     port: Option<String>,
-    removed: Vec<String>,
     message: String,
 }
 
 impl IdentifiedSerialPort {
-    pub(crate) fn into_parts(self) -> (Option<String>, Vec<String>, String) {
-        (self.port, self.removed, self.message)
+    pub(crate) fn into_parts(self) -> (Option<String>, String) {
+        (self.port, self.message)
     }
-}
 
-impl IdentifySerialPortCommand {
-    pub(crate) fn new(before: Vec<String>) -> Self {
-        Self { before }
-    }
-}
-
-impl IdentifySerialPortCommand {
-    pub(crate) async fn execute<P: SerialPortInventory + ?Sized>(
-        self,
-        inventory: &P,
-    ) -> Result<IdentifiedSerialPort, OperationError> {
-        let after = inventory.available_port_paths().await?;
-        let mut removed = self
-            .before
+    fn between(before: Vec<String>, after: Vec<String>) -> Self {
+        let mut removed = before
             .into_iter()
             .filter(|port| !after.contains(port))
             .collect::<Vec<_>>();
         removed.sort();
         removed.dedup();
-
-        let (port, guidance) = match removed.as_slice() {
+        let (port, message) = match removed.as_slice() {
             [port] => (
                 Some(port.clone()),
                 format!("Found the motor bus on {port}. Plug the cable back in."),
@@ -67,167 +131,37 @@ impl IdentifySerialPortCommand {
                 ),
             ),
         };
-        Ok(IdentifiedSerialPort {
-            port,
-            removed,
-            message: guidance,
-        })
+        Self { port, message }
     }
-}
-
-pub(crate) trait CameraDiscoveryPort: Send + Sync {
-    fn cameras(&self) -> Vec<CameraStatus>;
-    async fn refresh_cameras(&self) -> Result<Vec<CameraStatus>, OperationError>;
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
     use super::*;
 
-    struct Inventory {
-        calls: Mutex<usize>,
-        result: Result<Vec<String>, OperationError>,
-    }
-
-    impl SerialPortInventory for Inventory {
-        async fn available_port_paths(&self) -> Result<Vec<String>, OperationError> {
-            *self.calls.lock().unwrap() += 1;
-            self.result.clone()
-        }
-    }
-
-    fn inventory(after: &[&str]) -> Inventory {
-        Inventory {
-            calls: Mutex::new(0),
-            result: Ok(after.iter().map(|port| (*port).to_owned()).collect()),
-        }
-    }
-
-    #[tokio::test]
-    async fn identification_explains_zero_one_and_multiple_disconnections() {
-        let cases = [
-            (
-                vec!["/dev/a"],
-                vec!["/dev/a"],
-                None,
-                Vec::<String>::new(),
-                "No port disappeared",
-            ),
+    #[test]
+    fn identification_explains_zero_one_and_multiple_disconnections() {
+        for (before, after, port, guidance) in [
+            (vec!["/dev/a"], vec!["/dev/a"], None, "No port disappeared"),
             (
                 vec!["/dev/a", "/dev/b"],
                 vec!["/dev/b"],
                 Some("/dev/a"),
-                vec!["/dev/a".to_owned()],
-                "Found the motor bus",
+                "Found the motor bus on /dev/a",
             ),
             (
                 vec!["/dev/b", "/dev/a", "/dev/a"],
                 vec![],
                 None,
-                vec!["/dev/a".to_owned(), "/dev/b".to_owned()],
-                "2 ports disappeared",
+                "2 ports disappeared (/dev/a, /dev/b)",
             ),
-        ];
-
-        for (before, after, port, removed, guidance) in cases {
-            let inventory = inventory(&after);
-            let result = IdentifySerialPortCommand {
-                before: before.into_iter().map(str::to_owned).collect(),
-            }
-            .execute(&inventory)
-            .await
-            .unwrap();
-            let (result_port, result_removed, message) = result.into_parts();
-            assert_eq!(result_port.as_deref(), port);
-            assert_eq!(result_removed, removed);
-            assert!(message.contains(guidance));
-            assert_eq!(*inventory.calls.lock().unwrap(), 1);
+        ] {
+            let result = IdentifiedSerialPort::between(
+                before.into_iter().map(str::to_owned).collect(),
+                after.into_iter().map(str::to_owned).collect(),
+            );
+            assert_eq!(result.port.as_deref(), port);
+            assert!(result.message.contains(guidance));
         }
-    }
-
-    #[tokio::test]
-    async fn inventory_failure_is_preserved_without_fabricating_guidance() {
-        let inventory = Inventory {
-            calls: Mutex::new(0),
-            result: Err(OperationError::Internal("serial scan failed".to_owned())),
-        };
-        assert_eq!(
-            IdentifySerialPortCommand {
-                before: vec!["/dev/a".to_owned()],
-            }
-            .execute(&inventory)
-            .await,
-            Err(OperationError::Internal("serial scan failed".to_owned()))
-        );
-        assert_eq!(*inventory.calls.lock().unwrap(), 1);
-    }
-
-    struct Cameras {
-        calls: Mutex<usize>,
-        result: Result<Vec<CameraStatus>, OperationError>,
-    }
-
-    impl CameraDiscoveryPort for Cameras {
-        fn cameras(&self) -> Vec<CameraStatus> {
-            self.result.clone().unwrap_or_default()
-        }
-
-        async fn refresh_cameras(&self) -> Result<Vec<CameraStatus>, OperationError> {
-            *self.calls.lock().unwrap() += 1;
-            self.result.clone()
-        }
-    }
-
-    struct Ports {
-        calls: Mutex<usize>,
-        result: Result<Vec<SerialPortSummary>, OperationError>,
-    }
-
-    impl SerialPortQueryPort for Ports {
-        async fn serial_ports(&self) -> Result<Vec<SerialPortSummary>, OperationError> {
-            *self.calls.lock().unwrap() += 1;
-            self.result.clone()
-        }
-    }
-
-    #[tokio::test]
-    async fn serial_port_query_delegates_once_and_preserves_plain_projection() {
-        let expected = vec![
-            SerialPortSummary::new("/dev/tty.robot", "usb", Some("arm".to_owned()))
-                .with_owner(Some("follower".to_owned())),
-        ];
-        let ports = Ports {
-            calls: Mutex::new(0),
-            result: Ok(expected.clone()),
-        };
-
-        assert_eq!(ports.serial_ports().await.unwrap(), expected);
-        assert_eq!(*ports.calls.lock().unwrap(), 1);
-    }
-
-    #[tokio::test]
-    async fn camera_refresh_delegates_once_and_preserves_success_or_failure() {
-        let cameras = Cameras {
-            calls: Mutex::new(0),
-            result: Ok(vec![CameraStatus::new(
-                "wrist",
-                "Wrist",
-                spiral_robotics_common::robots::CameraStreamFormat::new(640, 480, 30),
-            )]),
-        };
-        assert_eq!(cameras.refresh_cameras().await.unwrap()[0].id(), "wrist");
-        assert_eq!(*cameras.calls.lock().unwrap(), 1);
-
-        let cameras = Cameras {
-            calls: Mutex::new(0),
-            result: Err(OperationError::Internal("refresh task stopped".to_owned())),
-        };
-        assert_eq!(
-            cameras.refresh_cameras().await,
-            Err(OperationError::Internal("refresh task stopped".to_owned()))
-        );
-        assert_eq!(*cameras.calls.lock().unwrap(), 1);
     }
 }

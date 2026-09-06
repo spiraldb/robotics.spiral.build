@@ -28,10 +28,11 @@ mod training_rollout;
 mod workflow;
 mod workflow_commands;
 
-pub use data_commands::{DataCommands, DataFailure, DataSettingsChange, MAX_PROJECT_IMPORT_BYTES};
-pub use device_commands::{DeviceCommands, DeviceFailure};
+pub use data_commands::{DataCommands, DataSettingsChange, MAX_PROJECT_IMPORT_BYTES};
+pub use device_commands::DeviceCommands;
+pub use error::BackendCommandError;
 pub(crate) use error::OperationError;
 pub use http::server::StudioServer;
-pub use recording_commands::{RecordingCommands, RecordingFailure};
-pub use training_rollout::{TrainingRolloutCommands, TrainingRolloutFailure};
-pub use workflow_commands::{WorkflowCommands, WorkflowFailure};
+pub use recording_commands::RecordingCommands;
+pub use training_rollout::TrainingRolloutCommands;
+pub use workflow_commands::WorkflowCommands;

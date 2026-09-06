@@ -1,154 +1,32 @@
 //! Device commands exposed to fullstack delivery adapters.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
-use crate::OperationError;
 use crate::data::catalog_lease::{CatalogLeaseOwner, CatalogLeaseToken, CatalogMutationLease};
 use crate::http::routes::AppState;
-use crate::main_runtime::{MainRuntime, MainRuntimeFailure};
-use crate::robotics::cameras::CameraManager;
+use crate::main_runtime::MainRuntime;
 use crate::robots::calibration::{
     CalibrationActions, CalibrationControlActions, CalibrationHistoryActions,
     CalibrationHistoryActivity, CalibrationHistoryPort, CalibrationUpdate, RobotCalibrationStore,
 };
 use crate::robots::control::{RobotControlActions, RobotControlCommand};
-use crate::robots::discovery::{
-    CameraDiscoveryPort, IdentifySerialPortCommand, SerialPortInventory, SerialPortQueryPort,
-};
+use crate::robots::discovery::SerialPortDiscovery;
 use crate::robots::mode::{ModeActions, OperatorMode};
 use crate::robots::service::{
-    AutoConnectOutcome, AutoConnectStatus, CameraAssignment, CreateRobotCommand, RobotActions,
-    RobotCatalogActions, RobotConnectionActions, RobotConnectionPort, RobotConnectionSpec,
-    RobotStore, SavedRobot, SerialPortConfiguration, UpdateRobotCommand,
+    AutoConnectOutcome, AutoConnectStatus, CameraAssignment, RobotActions, RobotCatalogActions,
+    RobotConnectionActions, RobotConnectionPort, RobotConnectionSpec, RobotStore, SavedRobot,
 };
 use crate::robots::workspace::{RobotRecord, RobotWorkspace, WorkspaceError};
+use crate::{BackendCommandError, OperationError};
 use bytes::Bytes;
 use serde_json::{Map, Value};
 use spiral_robotics_common::robots::{
-    CameraBinding, CameraStatus, ConnectionStatus, ModeSelection, NewRobot, RobotSummary,
-    RobotUpdate, SerialPortSummary,
+    CameraBinding, CameraStatus, ConnectionStatus, ModeSelection, NewRobot, PortSettings,
+    RobotSummary, RobotUpdate, SerialPortSummary,
 };
 use spiral_robotics_hardware::ModeSelection as HardwareModeSelection;
-use spiral_robotics_hardware::{Calibration, MotorSpec, RobotSpec, SerialPortCatalog};
+use spiral_robotics_hardware::{Calibration, MotorSpec, RobotSpec};
 use spiral_robotics_storage::episodes::ReappliedEpisodePositions;
-
-trait SerialPortPresentation {
-    fn kind(&self) -> &'static str;
-    fn description(&self) -> Option<String>;
-}
-
-impl SerialPortPresentation for serialport::SerialPortType {
-    fn kind(&self) -> &'static str {
-        match self {
-            Self::UsbPort(_) => "usb",
-            Self::BluetoothPort => "bluetooth",
-            Self::PciPort => "pci",
-            Self::Unknown => "unknown",
-        }
-    }
-
-    fn description(&self) -> Option<String> {
-        match self {
-            Self::UsbPort(info) => {
-                let mut details = vec![format!("USB {:04x}:{:04x}", info.vid, info.pid)];
-                if let Some(product) = &info.product {
-                    details.push(product.clone());
-                }
-                if let Some(serial) = &info.serial_number {
-                    details.push(format!("serial {serial}"));
-                }
-                Some(details.join(", "))
-            }
-            Self::BluetoothPort => Some("Bluetooth".to_owned()),
-            Self::PciPort => Some("PCI".to_owned()),
-            Self::Unknown => None,
-        }
-    }
-}
-
-struct SystemSerialPortInventory;
-
-impl SerialPortInventory for SystemSerialPortInventory {
-    async fn available_port_paths(&self) -> Result<Vec<String>, OperationError> {
-        tokio::task::spawn_blocking(SerialPortCatalog::discover)
-            .await
-            .map_err(|error| OperationError::Internal(error.to_string()))?
-            .map(|ports| {
-                ports
-                    .into_ports()
-                    .into_iter()
-                    .map(|port| port.port_name)
-                    .collect()
-            })
-            .map_err(|error| OperationError::Internal(error.to_string()))
-    }
-}
-
-struct SerialPortQueryAdapter<'a> {
-    state: &'a AppState,
-}
-
-impl SerialPortQueryPort for SerialPortQueryAdapter<'_> {
-    async fn serial_ports(&self) -> Result<Vec<SerialPortSummary>, OperationError> {
-        let ports = tokio::task::spawn_blocking(SerialPortCatalog::discover)
-            .await
-            .map_err(|error| OperationError::Internal(error.to_string()))?
-            .map_err(|error| {
-                OperationError::Internal(format!("could not list serial ports: {error}"))
-            })?;
-        let hardware = self.state.hardware().state();
-        let in_use = self
-            .state
-            .workspace()
-            .list()
-            .await
-            .into_iter()
-            .filter(|record| {
-                hardware
-                    .connections()
-                    .get(record.id())
-                    .is_some_and(|connection| connection.connected())
-            })
-            .filter_map(|record| Some((record.port()?.path().to_owned(), record.id().to_owned())))
-            .collect::<std::collections::BTreeMap<_, _>>();
-        Ok(ports
-            .into_ports()
-            .into_iter()
-            .map(|port| {
-                SerialPortSummary::new(
-                    port.port_name.clone(),
-                    port.port_type.kind(),
-                    port.port_type.description(),
-                )
-                .with_owner(in_use.get(&port.port_name).cloned())
-            })
-            .collect())
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct CameraDiscoveryAdapter(Arc<CameraManager>);
-
-impl CameraDiscoveryAdapter {
-    pub(crate) fn new(camera_manager: Arc<CameraManager>) -> Self {
-        Self(camera_manager)
-    }
-}
-
-impl CameraDiscoveryPort for CameraDiscoveryAdapter {
-    fn cameras(&self) -> Vec<CameraStatus> {
-        self.0.statuses()
-    }
-
-    async fn refresh_cameras(&self) -> Result<Vec<CameraStatus>, OperationError> {
-        let cameras = self.0.clone();
-        tokio::task::spawn_blocking(move || cameras.refresh_blocking())
-            .await
-            .map_err(|error| OperationError::Internal(error.to_string()))?;
-        Ok(self.0.statuses())
-    }
-}
 
 /// Adapts cached JSON robot documents and the live control thread to plain
 /// capability commands. JSON preservation, wire summaries, and concrete
@@ -316,7 +194,7 @@ impl RobotStore for RobotAdapter<'_> {
         let calibration = record.calibration().map_err(OperationError::from)?;
         Ok(RobotConnectionSpec::new(
             record.id(),
-            SerialPortConfiguration::new(port.path(), port.baud_rate()),
+            PortSettings::new(port.path(), port.baud_rate()),
             motors,
         )
         .with_calibration(calibration))
@@ -532,12 +410,8 @@ pub struct DeviceCommands {
     state: AppState,
 }
 
-/// One device command failure whose backend message is shown verbatim by Studio.
-#[derive(Debug)]
-pub struct DeviceFailure(String);
-
 impl DeviceCommands {
-    pub fn for_session(&self, session_id: &str) -> Result<Self, DeviceFailure> {
+    pub fn for_session(&self, session_id: &str) -> Result<Self, BackendCommandError> {
         Ok(Self::new(
             self.main_runtime.clone(),
             self.state.for_session(session_id)?,
@@ -551,19 +425,14 @@ impl DeviceCommands {
         }
     }
 
-    pub async fn list_ports(&self) -> Result<Vec<SerialPortSummary>, DeviceFailure> {
+    pub async fn list_ports(&self) -> Result<Vec<SerialPortSummary>, BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
         self.main_runtime
             .execute(async move {
                 let _activity = activity;
                 commands.require_catalog_ready()?;
-                SerialPortQueryAdapter {
-                    state: &commands.state,
-                }
-                .serial_ports()
-                .await
-                .map_err(Into::into)
+                commands.state.serial_ports().await.map_err(Into::into)
             })
             .await?
     }
@@ -571,37 +440,30 @@ impl DeviceCommands {
     pub async fn identify_port(
         &self,
         before: Vec<String>,
-    ) -> Result<(Option<String>, String), DeviceFailure> {
+    ) -> Result<(Option<String>, String), BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
         self.main_runtime
             .execute(async move {
                 let _activity = activity;
                 commands.require_catalog_ready()?;
-                let (port, _, message) = IdentifySerialPortCommand::new(before)
-                    .execute(&SystemSerialPortInventory)
-                    .await?
-                    .into_parts();
-                Ok((port, message))
+                Ok(SerialPortDiscovery::identify(before).await?.into_parts())
             })
             .await?
     }
 
-    pub async fn refresh_cameras(&self) -> Result<Vec<CameraStatus>, DeviceFailure> {
+    pub async fn refresh_cameras(&self) -> Result<Vec<CameraStatus>, BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
         self.main_runtime
             .execute(async move {
                 let _activity = activity;
-                CameraDiscoveryAdapter::new(commands.state.cameras().clone())
-                    .refresh_cameras()
-                    .await
-                    .map_err(Into::into)
+                commands.state.cameras().refresh().await.map_err(Into::into)
             })
             .await?
     }
 
-    pub async fn list_robots(&self) -> Result<Vec<RobotSummary>, DeviceFailure> {
+    pub async fn list_robots(&self) -> Result<Vec<RobotSummary>, BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
         self.main_runtime
@@ -626,25 +488,18 @@ impl DeviceCommands {
             .await?
     }
 
-    pub async fn create_robot(&self, request: NewRobot) -> Result<RobotSummary, DeviceFailure> {
+    pub async fn create_robot(
+        &self,
+        request: NewRobot,
+    ) -> Result<RobotSummary, BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
         self.main_runtime
             .execute(async move {
                 let _activity = activity;
                 commands.require_catalog_ready()?;
-                let (id, robot_type, port) = request.into_parts();
-                let (port_path, baud_rate) = match port {
-                    Some(port) => (Some(port.path().to_owned()), Some(port.baud_rate())),
-                    None => (None, None),
-                };
                 let adapter = RobotAdapter::new(&commands.state);
-                let robot = RobotCatalogActions::new(&adapter)
-                    .create(
-                        CreateRobotCommand::new(id, robot_type, port_path)
-                            .with_baud_rate(baud_rate),
-                    )
-                    .await?;
+                let robot = RobotCatalogActions::new(&adapter).create(request).await?;
                 RobotActions::new(&adapter, &adapter)
                     .auto_connect_robot(robot.id().to_owned())
                     .await
@@ -658,7 +513,7 @@ impl DeviceCommands {
     pub async fn import_robot_configuration(
         &self,
         document: Vec<u8>,
-    ) -> Result<RobotSummary, DeviceFailure> {
+    ) -> Result<RobotSummary, BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
         self.main_runtime
@@ -666,9 +521,9 @@ impl DeviceCommands {
                 let _activity = activity;
                 commands.require_catalog_ready()?;
                 if document.is_empty() {
-                    return Err(DeviceFailure(
+                    return Err(BackendCommandError::from(OperationError::invalid_input(
                         "choose a robot configuration JSON file to import".to_owned(),
-                    ));
+                    )));
                 }
                 let adapter = RobotAdapter::import(&commands.state, Bytes::from(document));
                 let robot = RobotCatalogActions::new(&adapter)
@@ -683,7 +538,7 @@ impl DeviceCommands {
             .await?
     }
 
-    pub async fn get_robot(&self, id: String) -> Result<RobotSummary, DeviceFailure> {
+    pub async fn get_robot(&self, id: String) -> Result<RobotSummary, BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
         self.main_runtime
@@ -701,7 +556,7 @@ impl DeviceCommands {
     pub async fn update_robot(
         &self,
         request: RobotUpdate<Vec<CameraBinding>>,
-    ) -> Result<RobotSummary, DeviceFailure> {
+    ) -> Result<RobotSummary, BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
         self.main_runtime
@@ -712,21 +567,7 @@ impl DeviceCommands {
                 let adapter = RobotAdapter::new(&commands.state);
                 let should_auto_connect = port.is_some();
                 let robot = RobotActions::new(&adapter, &adapter)
-                    .update(
-                        UpdateRobotCommand::new(
-                            id,
-                            robot_type,
-                            port.map(|port| {
-                                SerialPortConfiguration::new(port.path(), port.baud_rate())
-                            }),
-                        )
-                        .with_cameras(camera_bindings.map(|bindings| {
-                            bindings
-                                .into_iter()
-                                .map(|binding| CameraAssignment::new(binding.name(), binding.id()))
-                                .collect()
-                        })),
-                    )
+                    .update(RobotUpdate::new(id, robot_type, port, camera_bindings))
                     .await?;
                 if should_auto_connect {
                     RobotActions::new(&adapter, &adapter)
@@ -739,7 +580,7 @@ impl DeviceCommands {
             .await?
     }
 
-    pub async fn delete_robot(&self, id: String) -> Result<(), DeviceFailure> {
+    pub async fn delete_robot(&self, id: String) -> Result<(), BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
         self.main_runtime
@@ -755,7 +596,7 @@ impl DeviceCommands {
             .await?
     }
 
-    pub async fn connect_robot(&self, id: String) -> Result<(), DeviceFailure> {
+    pub async fn connect_robot(&self, id: String) -> Result<(), BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
         self.main_runtime
@@ -771,7 +612,7 @@ impl DeviceCommands {
             .await?
     }
 
-    pub async fn disconnect_robot(&self, id: String) -> Result<(), DeviceFailure> {
+    pub async fn disconnect_robot(&self, id: String) -> Result<(), BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
         self.main_runtime
@@ -786,7 +627,7 @@ impl DeviceCommands {
             .await?
     }
 
-    pub async fn hold_robot(&self, id: String) -> Result<(), DeviceFailure> {
+    pub async fn hold_robot(&self, id: String) -> Result<(), BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
         self.main_runtime
@@ -801,7 +642,7 @@ impl DeviceCommands {
             .await?
     }
 
-    pub async fn release_robot(&self, id: String) -> Result<(), DeviceFailure> {
+    pub async fn release_robot(&self, id: String) -> Result<(), BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
         self.main_runtime
@@ -820,7 +661,7 @@ impl DeviceCommands {
         &self,
         id: String,
         normalized: BTreeMap<String, f64>,
-    ) -> Result<(), DeviceFailure> {
+    ) -> Result<(), BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
         self.main_runtime
@@ -838,7 +679,7 @@ impl DeviceCommands {
             .await?
     }
 
-    pub async fn start_calibration(&self, id: String) -> Result<(), DeviceFailure> {
+    pub async fn start_calibration(&self, id: String) -> Result<(), BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
         self.main_runtime
@@ -853,7 +694,10 @@ impl DeviceCommands {
             .await?
     }
 
-    pub async fn finish_calibration(&self, id: String) -> Result<RobotSummary, DeviceFailure> {
+    pub async fn finish_calibration(
+        &self,
+        id: String,
+    ) -> Result<RobotSummary, BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
         self.main_runtime
@@ -874,7 +718,7 @@ impl DeviceCommands {
             .await?
     }
 
-    pub async fn cancel_calibration(&self, id: String) -> Result<(), DeviceFailure> {
+    pub async fn cancel_calibration(&self, id: String) -> Result<(), BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
         self.main_runtime
@@ -892,7 +736,7 @@ impl DeviceCommands {
     pub async fn reapply_calibration(
         &self,
         id: String,
-    ) -> Result<(u64, u64, u64, u64, Vec<String>), DeviceFailure> {
+    ) -> Result<(u64, u64, u64, u64, Vec<String>), BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
         self.main_runtime
@@ -904,13 +748,13 @@ impl DeviceCommands {
                 })
                 .reapply(&id)
                 .await
-                .map_err(DeviceFailure::from)?;
+                .map_err(BackendCommandError::from)?;
                 Ok(outcome.into_parts())
             })
             .await?
     }
 
-    pub async fn set_mode(&self, selection: ModeSelection) -> Result<(), DeviceFailure> {
+    pub async fn set_mode(&self, selection: ModeSelection) -> Result<(), BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
         self.main_runtime
@@ -925,16 +769,16 @@ impl DeviceCommands {
                         OperatorMode::Teleoperate { leader, follower }
                     }
                     ModeSelection::Replay { .. } => {
-                        return Err(DeviceFailure(
+                        return Err(BackendCommandError::from(OperationError::invalid_input(
                             "start a replay with POST /api/episodes/replay, which loads the take first"
                                 .to_owned(),
-                        ));
+                        )));
                     }
                     ModeSelection::Policy { .. } => {
-                        return Err(DeviceFailure(
+                        return Err(BackendCommandError::from(OperationError::invalid_input(
                             "start policy control with POST /api/rollout, which validates and warms the checkpoint first"
                                 .to_owned(),
-                        ));
+                        )));
                     }
                 };
                 ModeActions::new(commands.state.hardware().as_ref())
@@ -945,11 +789,14 @@ impl DeviceCommands {
             .await?
     }
 
-    async fn present_saved_robot(&self, robot: SavedRobot) -> Result<RobotSummary, DeviceFailure> {
+    async fn present_saved_robot(
+        &self,
+        robot: SavedRobot,
+    ) -> Result<RobotSummary, BackendCommandError> {
         self.present_robot(robot.id()).await
     }
 
-    async fn present_robot(&self, id: &str) -> Result<RobotSummary, DeviceFailure> {
+    async fn present_robot(&self, id: &str) -> Result<RobotSummary, BackendCommandError> {
         let connection = self
             .state
             .hardware()
@@ -963,34 +810,14 @@ impl DeviceCommands {
             .get(id)
             .await
             .map(|record| record.summary(connection))
-            .map_err(|error| DeviceFailure(error.to_string()))
+            .map_err(|error| BackendCommandError::from(OperationError::from(error)))
     }
 
-    fn require_catalog_ready(&self) -> Result<(), DeviceFailure> {
+    fn require_catalog_ready(&self) -> Result<(), BackendCommandError> {
         match self.state.bootstrap().catalog_unavailable() {
-            Some(detail) => Err(DeviceFailure(format!(
-                "Studio catalog is not ready: {detail}"
-            ))),
+            Some(error) => Err(error.into()),
             None => Ok(()),
         }
-    }
-}
-
-impl std::fmt::Display for DeviceFailure {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.0)
-    }
-}
-
-impl From<OperationError> for DeviceFailure {
-    fn from(error: OperationError) -> Self {
-        Self(error.to_string())
-    }
-}
-
-impl From<MainRuntimeFailure> for DeviceFailure {
-    fn from(error: MainRuntimeFailure) -> Self {
-        Self(error.to_string())
     }
 }
 

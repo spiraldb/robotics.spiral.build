@@ -2,12 +2,11 @@
 
 use std::collections::BTreeMap;
 
-use spiral_robotics_common::robots::{NewRobot, PortSettings, RobotUpdate};
+use spiral_robotics_common::robots::{CameraBinding, NewRobot, PortSettings, RobotUpdate};
 use spiral_robotics_hardware::{Calibration, MotorSpec};
 
 use crate::OperationError;
 
-const DEFAULT_ROBOT_BAUD_RATE: u32 = 1_000_000;
 const MAX_ROBOT_ID_LENGTH: usize = 64;
 const MAX_CAMERA_ROLE_LENGTH: usize = 64;
 
@@ -39,38 +38,16 @@ impl PlainName {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct SerialPortConfiguration {
-    path: String,
-    baud_rate: u32,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct CreateRobotCommand {
-    id: String,
-    robot_type: Option<String>,
-    port: Option<String>,
-    baud_rate: Option<u32>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CameraAssignment {
     role: String,
     device_id: String,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct UpdateRobotCommand {
-    id: String,
-    robot_type: Option<String>,
-    port: Option<SerialPortConfiguration>,
-    cameras: Option<Vec<CameraAssignment>>,
 }
 
 /// Plain information required to connect a saved robot.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct RobotConnectionSpec {
     id: String,
-    port: SerialPortConfiguration,
+    port: PortSettings,
     motors: BTreeMap<String, MotorSpec>,
     calibration: Option<Calibration>,
 }
@@ -80,47 +57,19 @@ pub(crate) struct SavedRobot {
     id: String,
 }
 
-impl SerialPortConfiguration {
-    pub(crate) fn new(path: impl Into<String>, baud_rate: u32) -> Self {
-        Self {
-            path: path.into(),
-            baud_rate,
-        }
-    }
-    pub(crate) fn path(&self) -> &str {
-        &self.path
-    }
-    pub(crate) const fn baud_rate(&self) -> u32 {
-        self.baud_rate
-    }
+trait RobotPortValidation: Sized {
+    fn validated(self) -> Result<Self, OperationError>;
+}
 
-    fn validated(path: String, baud_rate: u32) -> Result<Self, OperationError> {
-        let path = path.trim().to_owned();
-        if path.is_empty() || path.contains('\0') || baud_rate == 0 {
+impl RobotPortValidation for PortSettings {
+    fn validated(self) -> Result<Self, OperationError> {
+        let path = self.path().trim();
+        if path.is_empty() || path.contains('\0') || self.baud_rate() == 0 {
             return Err(OperationError::invalid_input(
                 "a port needs a non-empty path without NUL bytes and a positive baud rate",
             ));
         }
-        Ok(Self { path, baud_rate })
-    }
-}
-
-impl CreateRobotCommand {
-    pub(crate) fn new(
-        id: impl Into<String>,
-        robot_type: Option<String>,
-        port: Option<String>,
-    ) -> Self {
-        Self {
-            id: id.into(),
-            robot_type,
-            port,
-            baud_rate: None,
-        }
-    }
-    pub(crate) fn with_baud_rate(mut self, baud_rate: Option<u32>) -> Self {
-        self.baud_rate = baud_rate;
-        self
+        Ok(Self::new(path, self.baud_rate()))
     }
 }
 
@@ -139,29 +88,10 @@ impl CameraAssignment {
     }
 }
 
-impl UpdateRobotCommand {
-    pub(crate) fn new(
-        id: impl Into<String>,
-        robot_type: Option<String>,
-        port: Option<SerialPortConfiguration>,
-    ) -> Self {
-        Self {
-            id: id.into(),
-            robot_type,
-            port,
-            cameras: None,
-        }
-    }
-    pub(crate) fn with_cameras(mut self, cameras: Option<Vec<CameraAssignment>>) -> Self {
-        self.cameras = cameras;
-        self
-    }
-}
-
 impl RobotConnectionSpec {
     pub(crate) fn new(
         id: impl Into<String>,
-        port: SerialPortConfiguration,
+        port: PortSettings,
         motors: BTreeMap<String, MotorSpec>,
     ) -> Self {
         Self {
@@ -179,7 +109,7 @@ impl RobotConnectionSpec {
         self,
     ) -> (
         String,
-        SerialPortConfiguration,
+        PortSettings,
         BTreeMap<String, MotorSpec>,
         Option<Calibration>,
     ) {
@@ -248,33 +178,12 @@ impl<'a, R: RobotStore + ?Sized> RobotCatalogActions<'a, R> {
         Self { store }
     }
 
-    pub(crate) async fn create(
-        &self,
-        mut command: CreateRobotCommand,
-    ) -> Result<SavedRobot, OperationError> {
-        command.id = PlainName::parse(
-            "robot id",
-            command.id.trim().to_owned(),
-            MAX_ROBOT_ID_LENGTH,
-        )?
-        .into_string();
-        let port = match (command.port, command.baud_rate) {
-            (None, None) => None,
-            (None, Some(_)) => {
-                return Err(OperationError::InvalidInput(
-                    "a baud rate can only be set with a serial port".to_owned(),
-                ));
-            }
-            (Some(path), baud_rate) => Some(SerialPortConfiguration::validated(
-                path,
-                baud_rate.unwrap_or(DEFAULT_ROBOT_BAUD_RATE),
-            )?),
-        };
+    pub(crate) async fn create(&self, command: NewRobot) -> Result<SavedRobot, OperationError> {
+        let (id, robot_type, port) = command.into_parts();
+        let id = PlainName::parse("robot id", id.trim(), MAX_ROBOT_ID_LENGTH)?.into_string();
+        let port = port.map(RobotPortValidation::validated).transpose()?;
         self.store
-            .create(
-                NewRobot::new(command.id, command.robot_type)
-                    .with_port(port.map(|port| PortSettings::new(port.path, port.baud_rate))),
-            )
+            .create(NewRobot::new(id, robot_type).with_port(port))
             .await
     }
 
@@ -316,61 +225,45 @@ where
 
     pub(crate) async fn update(
         &self,
-        mut command: UpdateRobotCommand,
+        command: RobotUpdate<Vec<CameraBinding>>,
     ) -> Result<SavedRobot, OperationError> {
-        if let Some(port) = command.port.take() {
-            command.port = Some(SerialPortConfiguration::validated(
-                port.path,
-                port.baud_rate,
-            )?);
-            if self.control.is_connected(&command.id) {
-                return Err(OperationError::Conflict(format!(
-                    "disconnect robot {:?} before changing its serial port",
-                    command.id
-                )));
-            }
+        let (id, robot_type, port, cameras) = command.into_parts();
+        let port = port.map(RobotPortValidation::validated).transpose()?;
+        if port.is_some() && self.control.is_connected(&id) {
+            return Err(OperationError::Conflict(format!(
+                "disconnect robot {id:?} before changing its serial port",
+            )));
         }
-        let cameras = match command.cameras {
-            Some(mut assignments) => {
+        let cameras = match cameras {
+            Some(bindings) => {
                 let mut roles = std::collections::BTreeSet::new();
-                for assignment in &mut assignments {
-                    assignment.role = PlainName::parse(
+                let mut assignments = Vec::with_capacity(bindings.len());
+                for binding in bindings {
+                    let role = PlainName::parse(
                         "camera role",
-                        assignment.role.trim().to_owned(),
+                        binding.name().trim(),
                         MAX_CAMERA_ROLE_LENGTH,
                     )?
                     .into_string();
-                    assignment.device_id = assignment.device_id.trim().to_owned();
-                    if !roles.insert(assignment.role.clone()) {
+                    let device_id = binding.id().trim();
+                    if !roles.insert(role.clone()) {
                         return Err(OperationError::InvalidInput(format!(
-                            "camera role {:?} is used more than once",
-                            assignment.role
+                            "camera role {role:?} is used more than once",
                         )));
                     }
-                    if assignment.device_id.is_empty() || assignment.device_id.contains('\0') {
+                    if device_id.is_empty() || device_id.contains('\0') {
                         return Err(OperationError::InvalidInput(format!(
-                            "camera role {:?} needs a device id without NUL bytes",
-                            assignment.role
+                            "camera role {role:?} needs a device id without NUL bytes",
                         )));
                     }
+                    assignments.push(CameraAssignment::new(role, device_id));
                 }
-                Some(
-                    self.store
-                        .camera_configuration(&command.id, &assignments)
-                        .await?,
-                )
+                Some(self.store.camera_configuration(&id, &assignments).await?)
             }
             None => None,
         };
         self.store
-            .update(RobotUpdate::new(
-                command.id,
-                command.robot_type,
-                command
-                    .port
-                    .map(|port| PortSettings::new(port.path, port.baud_rate)),
-                cameras,
-            ))
+            .update(RobotUpdate::new(id, robot_type, port, cameras))
             .await
     }
 
@@ -463,10 +356,7 @@ mod tests {
     fn specification(id: &str) -> RobotConnectionSpec {
         RobotConnectionSpec {
             id: id.to_owned(),
-            port: SerialPortConfiguration {
-                path: format!("/dev/{id}"),
-                baud_rate: 1_000_000,
-            },
+            port: PortSettings::new(format!("/dev/{id}"), 1_000_000),
             motors: BTreeMap::new(),
             calibration: None,
         }
@@ -674,15 +564,12 @@ mod tests {
         let (store, mut control, events) = setup();
         control.connected = true;
         let error = RobotActions::new(&store, &control)
-            .update(UpdateRobotCommand {
-                id: "arm".to_owned(),
-                robot_type: None,
-                port: Some(SerialPortConfiguration {
-                    path: "/dev/new".to_owned(),
-                    baud_rate: 1_000_000,
-                }),
-                cameras: None,
-            })
+            .update(RobotUpdate::new(
+                "arm".to_owned(),
+                None,
+                Some(PortSettings::new("/dev/new".to_owned(), 1_000_000)),
+                None,
+            ))
             .await
             .unwrap_err();
 
@@ -693,24 +580,13 @@ mod tests {
     #[tokio::test]
     async fn malformed_port_updates_never_check_connection_or_persist() {
         for port in [
-            SerialPortConfiguration {
-                path: "  ".to_owned(),
-                baud_rate: 1_000_000,
-            },
-            SerialPortConfiguration {
-                path: "/dev/arm".to_owned(),
-                baud_rate: 0,
-            },
+            PortSettings::new("  ".to_owned(), 1_000_000),
+            PortSettings::new("/dev/arm".to_owned(), 0),
         ] {
             let (store, control, events) = setup();
             assert!(matches!(
                 RobotActions::new(&store, &control)
-                    .update(UpdateRobotCommand {
-                        id: "arm".to_owned(),
-                        robot_type: None,
-                        port: Some(port),
-                        cameras: None,
-                    })
+                    .update(RobotUpdate::new("arm".to_owned(), None, Some(port), None))
                     .await,
                 Err(OperationError::InvalidInput(_))
             ));
@@ -784,18 +660,16 @@ mod tests {
         let (store, control, events) = setup();
 
         let robot = RobotActions::new(&store, &control)
-            .update(UpdateRobotCommand {
-                id: "arm".to_owned(),
-                robot_type: Some("so101_leader".to_owned()),
-                port: Some(SerialPortConfiguration {
-                    path: "/dev/arm".to_owned(),
-                    baud_rate: 1_000_000,
-                }),
-                cameras: Some(vec![CameraAssignment {
-                    role: " wrist ".to_owned(),
-                    device_id: " camera-1 ".to_owned(),
-                }]),
-            })
+            .update(RobotUpdate::new(
+                "arm".to_owned(),
+                Some("so101_leader".to_owned()),
+                Some(PortSettings::new("/dev/arm".to_owned(), 1_000_000)),
+                Some(vec![CameraBinding::new(
+                    " wrist ".to_owned(),
+                    " camera-1 ".to_owned(),
+                    None,
+                )]),
+            ))
             .await
             .unwrap();
 
@@ -816,12 +690,7 @@ mod tests {
         let (store, _control, events) = setup();
         assert_eq!(
             RobotCatalogActions::new(&store)
-                .create(CreateRobotCommand {
-                    id: "arm".to_owned(),
-                    robot_type: None,
-                    port: None,
-                    baud_rate: None,
-                })
+                .create(NewRobot::new("arm".to_owned(), None))
                 .await
                 .unwrap(),
             SavedRobot {
@@ -841,17 +710,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn creation_normalizes_identity_and_applies_the_default_baud() {
+    async fn creation_normalizes_identity_and_preserves_the_requested_baud() {
         let (store, _control, events) = setup();
-        let robot = RobotCatalogActions::new(&store)
-            .create(CreateRobotCommand {
-                id: " arm_1 ".to_owned(),
-                robot_type: None,
-                port: Some(" /dev/robot ".to_owned()),
-                baud_rate: None,
-            })
-            .await
-            .unwrap();
+        let robot =
+            RobotCatalogActions::new(&store)
+                .create(NewRobot::new(" arm_1 ".to_owned(), None).with_port(Some(
+                    PortSettings::new(" /dev/robot ".to_owned(), 1_000_000),
+                )))
+                .await
+                .unwrap();
         assert_eq!(
             robot,
             SavedRobot {
@@ -864,24 +731,10 @@ mod tests {
     #[tokio::test]
     async fn invalid_creation_input_never_reaches_persistence() {
         for command in [
-            CreateRobotCommand {
-                id: "../arm".to_owned(),
-                robot_type: None,
-                port: None,
-                baud_rate: None,
-            },
-            CreateRobotCommand {
-                id: "arm".to_owned(),
-                robot_type: None,
-                port: Some("/dev/arm".to_owned()),
-                baud_rate: Some(0),
-            },
-            CreateRobotCommand {
-                id: "arm".to_owned(),
-                robot_type: None,
-                port: None,
-                baud_rate: Some(1_000_000),
-            },
+            NewRobot::new("../arm".to_owned(), None),
+            NewRobot::new("arm".to_owned(), None)
+                .with_port(Some(PortSettings::new("/dev/arm".to_owned(), 0))),
+            NewRobot::new("arm", None).with_port(Some(PortSettings::new("/dev/arm\0", 1_000_000))),
         ] {
             let (store, _control, events) = setup();
             assert!(matches!(
@@ -895,34 +748,30 @@ mod tests {
     #[tokio::test]
     async fn invalid_camera_assignments_never_assemble_json_or_persist() {
         for cameras in [
-            vec![CameraAssignment {
-                role: "bad role".to_owned(),
-                device_id: "camera-1".to_owned(),
-            }],
+            vec![CameraBinding::new(
+                "bad role".to_owned(),
+                "camera-1".to_owned(),
+                None,
+            )],
             vec![
-                CameraAssignment {
-                    role: "wrist".to_owned(),
-                    device_id: "camera-1".to_owned(),
-                },
-                CameraAssignment {
-                    role: " wrist ".to_owned(),
-                    device_id: "camera-2".to_owned(),
-                },
+                CameraBinding::new("wrist".to_owned(), "camera-1".to_owned(), None),
+                CameraBinding::new(" wrist ".to_owned(), "camera-2".to_owned(), None),
             ],
-            vec![CameraAssignment {
-                role: "wrist".to_owned(),
-                device_id: "  ".to_owned(),
-            }],
+            vec![CameraBinding::new(
+                "wrist".to_owned(),
+                "  ".to_owned(),
+                None,
+            )],
         ] {
             let (store, control, events) = setup();
             assert!(matches!(
                 RobotActions::new(&store, &control)
-                    .update(UpdateRobotCommand {
-                        id: "arm".to_owned(),
-                        robot_type: None,
-                        port: None,
-                        cameras: Some(cameras),
-                    })
+                    .update(RobotUpdate::new(
+                        "arm".to_owned(),
+                        None,
+                        None,
+                        Some(cameras)
+                    ))
                     .await,
                 Err(OperationError::InvalidInput(_))
             ));

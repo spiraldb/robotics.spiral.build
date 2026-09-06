@@ -1,5 +1,6 @@
 use super::recordings::ByteRange;
 use super::*;
+use crate::OperationError;
 use crate::device_commands::CameraConfigurationObject;
 use crate::robots::service::CameraAssignment;
 use serde_json::Map;
@@ -24,7 +25,10 @@ fn bootstrap_lifecycle_controls_catalog_admission() {
     state.degraded(false, "authentication expired");
     assert_eq!(state.current().state(), BackendReadinessState::Degraded);
     assert_eq!(
-        state.catalog_unavailable().as_deref(),
+        state
+            .catalog_unavailable()
+            .as_ref()
+            .map(OperationError::message),
         Some("authentication expired")
     );
 }
@@ -236,4 +240,31 @@ fn spiral_video_ranges_cover_browser_seek_forms() {
     assert_eq!(ByteRange::parse("bytes=0-1,4-5", 100), None);
     assert_eq!(ByteRange::parse("items=0-1", 100), None);
     assert_eq!(ByteRange::parse("bytes=0-1", 0), None);
+}
+
+#[test]
+fn readiness_preserves_compatibility_failures_for_all_project_reads() {
+    use spiral_robotics_common::command_failure::CommandFailureCode;
+    let readiness = ProjectReadiness::new();
+    readiness.failed(
+        false,
+        &OperationError::IncompatibleWorkflow("Saved format unsupported".into()),
+    );
+    assert_eq!(
+        readiness.current().failure_code(),
+        Some(CommandFailureCode::IncompatibleWorkflow)
+    );
+    assert_eq!(
+        readiness.catalog_unavailable().unwrap().code(),
+        CommandFailureCode::IncompatibleWorkflow
+    );
+    assert_eq!(
+        readiness.storage_unavailable().unwrap().code(),
+        CommandFailureCode::IncompatibleWorkflow
+    );
+    readiness.failed(false, &OperationError::External("Connection lost".into()));
+    assert_eq!(
+        readiness.storage_unavailable().unwrap().code(),
+        CommandFailureCode::ProjectUnavailable
+    );
 }

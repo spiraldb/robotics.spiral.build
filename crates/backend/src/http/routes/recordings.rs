@@ -1,7 +1,6 @@
 //! Browser-native episode video delivery.
 
 use super::*;
-use crate::recording_commands::EpisodeAdapter;
 
 impl AppState {
     /// Episode videos stay HTTP because browser video elements issue range requests.
@@ -96,7 +95,7 @@ impl AppState {
         }
         // Looking up the episode first prevents an orphaned media row from becoming
         // an independent serving namespace.
-        EpisodeQueries::new(&EpisodeAdapter::new(&state))
+        EpisodeQueries::new(&state)
             .authorize_asset(id.clone())
             .await
             .map_err(|error| (StatusCode::NOT_FOUND, error.to_string()))?;

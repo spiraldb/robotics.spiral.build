@@ -3,9 +3,9 @@
 use spiral_robotics_common::rollout::{RolloutConfig, RolloutSnapshot};
 use spiral_robotics_common::training::{TrainingConfig, TrainingRun};
 
-use crate::OperationError;
+use crate::BackendCommandError;
 use crate::http::routes::AppState;
-use crate::main_runtime::{MainRuntime, MainRuntimeFailure};
+use crate::main_runtime::MainRuntime;
 use crate::rollout::manager::RolloutManager;
 use crate::training::service::{DeleteTrainingRunCommand, TrainingActions, TrainingRunActivity};
 
@@ -16,10 +16,6 @@ pub struct TrainingRolloutCommands {
     state: AppState,
 }
 
-/// One command failure whose backend message is shown verbatim by Studio.
-#[derive(Debug)]
-pub struct TrainingRolloutFailure(String);
-
 impl TrainingRolloutCommands {
     pub(crate) fn new(main_runtime: MainRuntime, state: AppState) -> Self {
         Self {
@@ -28,7 +24,7 @@ impl TrainingRolloutCommands {
         }
     }
 
-    pub fn for_session(&self, session_id: &str) -> Result<Self, TrainingRolloutFailure> {
+    pub fn for_session(&self, session_id: &str) -> Result<Self, BackendCommandError> {
         Ok(Self::new(
             self.main_runtime.clone(),
             self.state.for_session(session_id)?,
@@ -38,14 +34,14 @@ impl TrainingRolloutCommands {
     pub async fn start_training_run(
         &self,
         config: TrainingConfig,
-    ) -> Result<TrainingRun, TrainingRolloutFailure> {
+    ) -> Result<TrainingRun, BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
         self.main_runtime
             .execute(async move {
                 let _activity = activity;
                 if let Some(detail) = commands.state.bootstrap().catalog_unavailable() {
-                    return Err(TrainingRolloutFailure(detail));
+                    return Err(BackendCommandError::from(detail));
                 }
                 TrainingActions::new(commands.state.training().as_ref())
                     .start(config)
@@ -55,7 +51,7 @@ impl TrainingRolloutCommands {
             .await?
     }
 
-    pub async fn stop_training_run(&self, id: String) -> Result<(), TrainingRolloutFailure> {
+    pub async fn stop_training_run(&self, id: String) -> Result<(), BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
         self.main_runtime
@@ -69,7 +65,7 @@ impl TrainingRolloutCommands {
             .await?
     }
 
-    pub async fn delete_training_run(&self, id: String) -> Result<(), TrainingRolloutFailure> {
+    pub async fn delete_training_run(&self, id: String) -> Result<(), BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
         self.main_runtime
@@ -95,7 +91,7 @@ impl TrainingRolloutCommands {
     pub async fn start_rollout(
         &self,
         config: RolloutConfig,
-    ) -> Result<RolloutSnapshot, TrainingRolloutFailure> {
+    ) -> Result<RolloutSnapshot, BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
         self.main_runtime
@@ -113,7 +109,7 @@ impl TrainingRolloutCommands {
             .await?
     }
 
-    pub async fn stop_rollout(&self) -> Result<(), TrainingRolloutFailure> {
+    pub async fn stop_rollout(&self) -> Result<(), BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
         self.main_runtime
@@ -122,29 +118,5 @@ impl TrainingRolloutCommands {
                 commands.state.rollout().stop().await.map_err(Into::into)
             })
             .await?
-    }
-}
-
-impl std::fmt::Display for TrainingRolloutFailure {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.0)
-    }
-}
-
-impl From<OperationError> for TrainingRolloutFailure {
-    fn from(error: OperationError) -> Self {
-        Self(error.to_string())
-    }
-}
-
-impl From<String> for TrainingRolloutFailure {
-    fn from(message: String) -> Self {
-        Self(message)
-    }
-}
-
-impl From<MainRuntimeFailure> for TrainingRolloutFailure {
-    fn from(error: MainRuntimeFailure) -> Self {
-        Self(error.to_string())
     }
 }

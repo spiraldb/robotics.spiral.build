@@ -4,6 +4,9 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use spiral_robotics_common::project::ProjectSessionInfo;
+use spiral_robotics_common::settings::{
+    DataSettings, SpiralSettings, TrainingRuntimeSettings, VideoSettings,
+};
 use spiral_robotics_hardware::{
     HardwareHandle, HardwareState, ModeSelection as HardwareModeSelection,
 };
@@ -16,9 +19,7 @@ use tokio::sync::{Mutex, watch};
 
 use crate::OperationError;
 use crate::data::catalog_lease::CatalogMutationLease;
-use crate::data::{
-    DataSettingsSnapshot, DataSettingsUpdate, SpiralDestinationSettings, UpdateDataSettingsCommand,
-};
+use crate::data::settings::{DataSettingsUpdate, UpdateDataSettingsCommand};
 use crate::project_admission::{ProjectActivity, ProjectAdmissionGate, ProjectTransition};
 use crate::recording_session::RecordingSessionManager;
 use crate::robotics::cameras::CameraManager;
@@ -70,21 +71,40 @@ impl ProjectReadiness {
     }
 
     pub(crate) fn degraded(&self, catalog_available: bool, detail: impl Into<String>) {
-        self.current.send_replace(BackendReadiness::new(
-            BackendReadinessState::Degraded,
-            catalog_available,
-            detail,
-        ));
+        self.failed(catalog_available, &OperationError::External(detail.into()));
     }
 
-    pub(crate) fn catalog_unavailable(&self) -> Option<String> {
-        let current = self.current();
-        (!current.catalog_available()).then(|| current.detail().to_owned())
+    pub(crate) fn failed(&self, catalog_available: bool, error: &OperationError) {
+        self.current.send_replace(
+            BackendReadiness::new(
+                BackendReadinessState::Degraded,
+                catalog_available,
+                error.message(),
+            )
+            .with_failure_code(error.code()),
+        );
     }
 
-    pub(crate) fn storage_unavailable(&self) -> Option<String> {
+    pub(crate) fn catalog_unavailable(&self) -> Option<OperationError> {
         let current = self.current();
-        (!current.storage_available()).then(|| current.detail().to_owned())
+        (!current.catalog_available()).then(|| Self::unavailable_error(&current))
+    }
+
+    pub(crate) fn storage_unavailable(&self) -> Option<OperationError> {
+        let current = self.current();
+        (!current.storage_available()).then(|| Self::unavailable_error(&current))
+    }
+
+    fn unavailable_error(current: &BackendReadiness) -> OperationError {
+        use spiral_robotics_common::command_failure::CommandFailureCode;
+        let detail = current.detail().to_owned();
+        if current.failure_code() == Some(CommandFailureCode::IncompatibleWorkflow) {
+            OperationError::IncompatibleWorkflow(detail)
+        } else if current.state() == BackendReadinessState::Bootstrapping {
+            OperationError::ProjectTransition(detail)
+        } else {
+            OperationError::ProjectUnavailable(detail)
+        }
     }
 }
 
@@ -256,11 +276,11 @@ impl ProjectSession {
         &self.activities.assistant
     }
 
-    pub(crate) fn settings(&self) -> DataSettingsSnapshot {
+    pub(crate) fn settings(&self) -> DataSettings {
         let connection = self.storage().connection_settings();
         let preferences = self.preferences.get();
-        DataSettingsSnapshot::new(
-            SpiralDestinationSettings::new(
+        DataSettings::new(
+            SpiralSettings::new(
                 connection.endpoint(),
                 connection.spfs_endpoint(),
                 connection.project_id().unwrap_or_default(),
@@ -273,8 +293,8 @@ impl ProjectSession {
                 connection.credentials().is_some(),
             )
             .with_namespace(self.storage().namespace()),
-            preferences.training().endpoint(),
-            preferences.video().enabled(),
+            TrainingRuntimeSettings::new(preferences.training().endpoint()),
+            VideoSettings::new(preferences.video().enabled()),
         )
     }
 
@@ -288,19 +308,38 @@ impl ProjectSession {
         // Preparation only reads and installs private in-memory state. Jobs and
         // hardware effects begin after this entire session has been published.
         tokio::try_join!(
-            self.training().prepare_from_storage(),
+            async {
+                self.training()
+                    .prepare_from_storage()
+                    .await
+                    .map_err(OperationError::External)
+            },
             self.workflow().prepare_from_storage(),
-            self.workflow_agent().prepare_from_storage(),
-            self.rollout().prepare_from_storage(),
+            async {
+                self.workflow_agent()
+                    .prepare_from_storage()
+                    .await
+                    .map_err(OperationError::External)
+            },
+            async {
+                self.rollout()
+                    .prepare_from_storage()
+                    .await
+                    .map_err(OperationError::External)
+            },
             async {
                 self.workspace()
                     .try_list()
                     .await
-                    .map_err(|error| error.to_string())
+                    .map_err(|error| OperationError::External(error.to_string()))
             },
-            self.storage().relation_catalog(),
-        )
-        .map_err(OperationError::External)?;
+            async {
+                self.storage()
+                    .relation_catalog()
+                    .await
+                    .map_err(OperationError::External)
+            },
+        )?;
         self.training().refresh_readiness().await;
         self.readiness.ready();
         Ok(())
@@ -417,8 +456,8 @@ impl ProjectCoordinator {
     pub(crate) fn resolve(&self, session_id: &str) -> Result<Arc<ProjectSession>, OperationError> {
         let current = self.active();
         if current.info().id() != session_id {
-            return Err(OperationError::conflict(
-                "The active project changed. Refresh this view before trying again.",
+            return Err(OperationError::StaleProject(
+                "The active project changed. Refresh this view before trying again.".to_owned(),
             ));
         }
         Ok(current)
@@ -773,6 +812,46 @@ pub(crate) mod tests {
             self.projects.publish(candidate.clone(), transition);
             candidate
         }
+    }
+
+    #[tokio::test]
+    async fn settings_present_the_session_destination_and_preferences_without_secrets() {
+        let fixture = ProjectFixture::new();
+        let connection = fixture
+            .projects
+            .active()
+            .storage()
+            .connection_settings()
+            .with_project("configured_project")
+            .unwrap()
+            .with_credentials(Some(SpiralCredentials::new(
+                "client".to_owned(),
+                "private-secret".to_owned(),
+            )));
+        let session = fixture.projects.factory.create(connection).unwrap();
+        let preferences = session
+            .preferences()
+            .stage_update("http://127.0.0.1:5050", false)
+            .unwrap();
+        session.preferences().replace(preferences);
+        let settings = session.settings();
+        assert_eq!(settings.spiral().project_id(), "configured_project");
+        assert_eq!(settings.spiral().endpoint(), "https://api.spiraldb.dev");
+        assert_eq!(
+            settings.spiral().spfs_endpoint(),
+            "https://spfs.spiraldb.dev"
+        );
+        assert_eq!(settings.spiral().namespace(), "project_lifetime_test");
+        assert_eq!(settings.spiral().client_id(), "client");
+        assert!(settings.spiral().client_secret_configured());
+        assert_eq!(settings.training().endpoint(), "http://127.0.0.1:5050");
+        assert!(!settings.video().enabled());
+        assert!(
+            !serde_json::to_string(&settings)
+                .unwrap()
+                .contains("private-secret")
+        );
+        fixture.projects.hardware().shutdown().await.unwrap();
     }
 
     #[tokio::test]

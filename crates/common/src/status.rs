@@ -1,5 +1,6 @@
 //! Studio bootstrap status and top-level snapshot.
 
+use crate::command_failure::CommandFailureCode;
 use serde::{Deserialize, Serialize};
 
 use crate::robots::{CameraStatus, ModeStatus, RobotSummary};
@@ -50,6 +51,8 @@ pub struct BackendReadiness {
     catalog_available: bool,
     /// Short operator-facing description of the current phase or problem.
     detail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    failure_code: Option<CommandFailureCode>,
 }
 
 impl Default for BackendReadiness {
@@ -59,6 +62,7 @@ impl Default for BackendReadiness {
             storage_available: false,
             catalog_available: false,
             detail: "Starting Studio services".to_owned(),
+            failure_code: None,
         }
     }
 }
@@ -74,6 +78,7 @@ impl BackendReadiness {
             storage_available: catalog_available,
             catalog_available,
             detail: detail.into(),
+            failure_code: None,
         }
     }
     /// Mark the SpiralDB read boundary ready while the remaining Studio
@@ -93,6 +98,13 @@ impl BackendReadiness {
     }
     pub fn detail(&self) -> &str {
         &self.detail
+    }
+    pub fn with_failure_code(mut self, code: CommandFailureCode) -> Self {
+        self.failure_code = Some(code);
+        self
+    }
+    pub const fn failure_code(&self) -> Option<CommandFailureCode> {
+        self.failure_code
     }
 }
 

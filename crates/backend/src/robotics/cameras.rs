@@ -173,6 +173,16 @@ pub(crate) struct CameraManager {
 }
 
 impl CameraManager {
+    pub(crate) async fn refresh(
+        self: &Arc<Self>,
+    ) -> Result<Vec<CameraStatus>, crate::OperationError> {
+        let cameras = self.clone();
+        tokio::task::spawn_blocking(move || cameras.refresh_blocking())
+            .await
+            .map_err(|error| crate::OperationError::Internal(error.to_string()))?;
+        Ok(self.statuses())
+    }
+
     /// Create an empty manager; call [`CameraManager::refresh_blocking`] to populate it.
     pub(crate) fn new() -> Self {
         Self::default()

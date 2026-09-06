@@ -32,7 +32,11 @@ impl ProjectAdmissionGate {
             .map(|ownership| ProjectActivity {
                 _ownership: Arc::new(ownership),
             })
-            .map_err(|_| OperationError::conflict("Wait for the project change to finish"))
+            .map_err(|_| {
+                OperationError::ProjectTransition(
+                    "Wait for the project change to finish".to_owned(),
+                )
+            })
     }
 
     pub(crate) fn begin_transition(&self) -> Result<ProjectTransition, OperationError> {
