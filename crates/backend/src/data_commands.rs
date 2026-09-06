@@ -91,7 +91,7 @@ impl DataCommands {
     pub async fn settings(&self) -> Result<DataSettings, BackendCommandError> {
         let commands = self.clone();
         self.main_runtime
-            .execute(async move { commands.settings_on_main_runtime().await })
+            .read(async move { commands.settings_on_main_runtime().await })
             .await?
     }
 
@@ -176,7 +176,7 @@ impl DataCommands {
     pub async fn relations(&self) -> Result<RelationCatalog, BackendCommandError> {
         let commands = self.clone();
         self.main_runtime
-            .execute(async move { commands.relations_on_main_runtime().await })
+            .read(async move { commands.relations_on_main_runtime().await })
             .await?
     }
 

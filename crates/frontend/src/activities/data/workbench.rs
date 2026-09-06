@@ -39,10 +39,6 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
     let mut adding_data = use_signal(|| false);
     let mut confirming_delete = use_signal(|| None::<String>);
     let mut deleting_episode = use_signal(|| None::<String>);
-    let sessions = crate::shell::project::ProjectSessionSignals::current();
-
-    // All consumers share the controller's session-scoped request policy.
-    use_effect(move || data.request_datasets());
 
     // Preserve a known selection; otherwise initialize deterministically from
     // the default dataset or the first stored dataset.
@@ -50,22 +46,6 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
         let current = studio.selected_dataset().read().trim().to_owned();
         if let Some(dataset_id) = data.initialize_dataset_selection(&current) {
             studio.selected_dataset().set(dataset_id);
-        }
-    });
-
-    // Episode rows are requested only for the active dataset. The request is
-    // restarted when the shared selection changes.
-    use_effect(move || {
-        let dataset_id = studio.selected_dataset().read().trim().to_owned();
-        let storage_available = sessions.storage_available();
-        if storage_available
-            && data.datasets_loaded()
-            && spiral_robotics_common::identity::DatasetId::is_canonical(&dataset_id)
-            && !data.episodes_loaded(&dataset_id)
-            && !data.episodes_loading(&dataset_id)
-            && data.episode_catalog_error(&dataset_id).is_none()
-        {
-            studio.run_utility("", data.load_episodes(dataset_id));
         }
     });
 
@@ -1046,7 +1026,6 @@ impl EpisodeDeletion {
                 deleting.set(None);
                 if result.is_ok() {
                     confirming.set(None);
-                    self.data.remove_episode(&deleted_id);
                     // A slower deletion must not clear a newer choice made while the
                     // request was in flight.
                     if self.data.selected_episode_peek().as_deref() == Some(deleted_id.as_str()) {

@@ -1,6 +1,7 @@
 //! Browser-native camera preview delivery.
 
 use super::*;
+use std::convert::Infallible;
 
 impl AppState {
     /// Camera previews stay HTTP because browser image elements consume MJPEG URLs.

@@ -9,7 +9,6 @@ mod data;
 mod devices;
 mod recordings;
 
-use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,10 +19,9 @@ use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::Response;
-use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::get;
 use bytes::{BufMut, Bytes, BytesMut};
-use futures_util::{Stream, StreamExt};
+use futures_util::StreamExt;
 use serde::Deserialize;
 use spiral_robotics_common::status::StudioSnapshot;
 
@@ -46,12 +44,6 @@ use spiral_robotics_storage::video::{VideoAssetKey, VideoByteRange};
 
 /// Boundary marker separating parts of an MJPEG response.
 const MJPEG_BOUNDARY: &str = "spiral-robotics-frame";
-
-/// How often live telemetry is pushed to the browser.
-const TELEMETRY_INTERVAL: Duration = Duration::from_millis(50);
-
-/// How often the setup-level snapshot is rebuilt and diffed.
-const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(2);
 
 /// A short debounce keeps a just-started recording from being mistaken for an
 /// automatic stop before the next telemetry snapshot is published.
@@ -246,7 +238,6 @@ impl AppState {
             .merge(Self::data_transfer_router())
             .merge(Self::device_bootstrap_router())
             .merge(Self::recording_storage_router())
-            .route("/events", get(Self::events))
             .route("/session", get(Self::session_info))
             .with_state(self)
     }
@@ -316,169 +307,11 @@ impl AppState {
     ) -> axum::Json<spiral_robotics_common::project::ProjectSessionInfo> {
         axum::Json(state.projects().active().info().clone())
     }
-
-    /// Each stream generation owns exactly one session. A replacement first
-    /// announces its identity, then sends fresh snapshots and rebinds receivers.
-    async fn events(
-        State(state): State<Self>,
-    ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-        let stream = async_stream::stream! {
-            let mut sessions = state.projects().subscribe();
-            loop {
-                let project = sessions.borrow_and_update().clone();
-                let scoped = AppState { project, projects: state.projects().clone() };
-                let wire = ProjectEventStream::new(scoped.project().info().id());
-                let (initial_training, mut training) = scoped.training().subscription();
-                let (initial_workflow, mut workflow) = scoped.workflow().subscription();
-                let (initial_agent, mut workflow_agent) = scoped.workflow_agent().subscription();
-                let mut rollout = scoped.rollout().subscribe();
-                let mut readiness = scoped.bootstrap().subscribe();
-                let mut snapshot_timer = tokio::time::interval(SNAPSHOT_INTERVAL);
-                snapshot_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                let mut telemetry_timer = tokio::time::interval(TELEMETRY_INTERVAL);
-                let mut last_snapshot: Option<StudioSnapshot> = None;
-                let mut last_sequence = 0_u64;
-                let mut last_agent_cursor = AgentCursor::from(&initial_agent);
-                if let Ok(event) = Event::default().event("project_session").json_data(scoped.project().info()) { yield Ok(event); }
-                for event in [
-                    wire.encode("training_snapshot", &initial_training),
-                    wire.encode("rollout_state", &scoped.rollout().snapshot()),
-                    wire.encode("workflow_snapshot", &initial_workflow),
-                    wire.encode("workflow_agent", &initial_agent),
-                ].into_iter().flatten() { yield Ok(event); }
-                loop {
-                    tokio::select! {
-                        biased;
-                        changed = sessions.changed() => {
-                            if changed.is_err() { return; }
-                            break;
-                        }
-                        changed = readiness.changed() => {
-                            if changed.is_err() { break; }
-                            let snapshot = tokio::select! {
-                                biased;
-                                _ = sessions.changed() => break,
-                                changed = readiness.changed() => {
-                                    if changed.is_err() { break; }
-                                    readiness.mark_changed();
-                                    continue;
-                                },
-                                snapshot = scoped.snapshot() => snapshot,
-                            };
-                            if let Some(event) = wire.encode("state", &snapshot) { yield Ok(event); }
-                            last_snapshot = Some(snapshot);
-                        }
-                        _ = snapshot_timer.tick() => {
-                            let snapshot = tokio::select! {
-                                biased;
-                                _ = sessions.changed() => break,
-                                // Never emit a ready snapshot assembled before
-                                // a project change began. Rebuild it immediately
-                                // without waiting for catalog I/O to complete.
-                                changed = readiness.changed() => {
-                                    if changed.is_err() { break; }
-                                    readiness.mark_changed();
-                                    continue;
-                                },
-                                snapshot = scoped.snapshot() => snapshot,
-                            };
-                            if last_snapshot.as_ref() != Some(&snapshot) {
-                                if let Some(event) = wire.encode("state", &snapshot) { yield Ok(event); }
-                                last_snapshot = Some(snapshot);
-                            }
-                        }
-                        _ = telemetry_timer.tick() => {
-                            let telemetry = scoped.hardware().state().telemetry().clone();
-                            if telemetry.sequence() != last_sequence {
-                                last_sequence = telemetry.sequence();
-                                if let Some(event) = wire.encode("telemetry", &telemetry) { yield Ok(event); }
-                            }
-                        }
-                        update = training.recv() => {
-                            match update {
-                                Ok(update) => if let Some(event) = wire.encode("training_update", &update) { yield Ok(event); },
-                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                                    let (snapshot, replacement) = scoped.training().subscription();
-                                    training = replacement;
-                                    if let Some(event) = wire.encode("training_snapshot", &snapshot) { yield Ok(event); }
-                                }
-                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                            }
-                        }
-                        update = workflow.recv() => {
-                            if matches!(update, Err(tokio::sync::broadcast::error::RecvError::Closed)) { break; }
-                            if let Some(event) = wire.encode("workflow_snapshot", &scoped.workflow().state()) { yield Ok(event); }
-                        }
-                        update = workflow_agent.recv() => {
-                            if matches!(update, Err(tokio::sync::broadcast::error::RecvError::Closed)) { break; }
-                            let snapshot = scoped.workflow_agent().state();
-                            if last_agent_cursor.advance_to(AgentCursor::from(&snapshot))
-                                && let Some(event) = wire.encode("workflow_agent", &snapshot) {
-                                yield Ok(event);
-                            }
-                        }
-                        changed = rollout.changed() => {
-                            if changed.is_err() { break; }
-                            let snapshot = rollout.borrow_and_update().clone();
-                            if let Some(event) = wire.encode("rollout_state", &snapshot) { yield Ok(event); }
-                        }
-                    }
-                }
-            }
-        };
-        Sse::new(stream).keep_alive(KeepAlive::default())
-    }
-}
-
-struct ProjectEventStream {
-    session_id: String,
-}
-
-impl ProjectEventStream {
-    fn new(session_id: &str) -> Self {
-        Self {
-            session_id: session_id.to_owned(),
-        }
-    }
-
-    fn encode<T: serde::Serialize>(&self, name: &str, payload: &T) -> Option<Event> {
-        Event::default()
-            .event(name)
-            .json_data(spiral_robotics_common::project::ProjectEvent::new(
-                &self.session_id,
-                payload,
-            ))
-            .ok()
-    }
 }
 
 #[derive(Deserialize)]
 struct ProjectQuery {
     session_id: String,
-}
-
-struct AgentCursor {
-    scope_id: String,
-    revision: u64,
-}
-
-impl AgentCursor {
-    fn advance_to(&mut self, next: Self) -> bool {
-        if self.scope_id == next.scope_id && self.revision == next.revision {
-            return false;
-        }
-        *self = next;
-        true
-    }
-}
-
-impl From<&spiral_robotics_common::workflow::WorkflowAgentSnapshot> for AgentCursor {
-    fn from(state: &spiral_robotics_common::workflow::WorkflowAgentSnapshot) -> Self {
-        Self {
-            scope_id: state.scope_id().to_owned(),
-            revision: state.revision(),
-        }
-    }
 }
 
 #[cfg(test)]

@@ -15,9 +15,12 @@
 //!   single request — and no teleoperation jump — can snap an arm across its
 //!   workspace.
 
+use spiral_robotics_common::recording_signals::{
+    RecordingCursor, RecordingSignals, RecordingWindow,
+};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::sync::Mutex;
 use std::sync::mpsc::{self, Sender, TryRecvError};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -942,6 +945,7 @@ impl Replay {
 pub struct HardwareHandle {
     commands: Sender<Command>,
     state: watch::Receiver<HardwareState>,
+    recording_signals: Arc<RwLock<RecordingSignals>>,
     thread: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -950,14 +954,17 @@ impl HardwareHandle {
     pub fn spawn(settings: ControlSettings) -> Self {
         let (commands, requests) = mpsc::channel();
         let (state, receiver) = watch::channel(HardwareState::default());
+        let controller = Controller::new(settings, state);
+        let recording_signals = controller.recording_signals.clone();
         let thread = thread::Builder::new()
             .name("spiral-robotics-control".to_owned())
-            .spawn(move || Controller::new(settings, state).run(&requests))
+            .spawn(move || controller.run(&requests))
             .expect("the control thread must start");
 
         Self {
             commands,
             state: receiver,
+            recording_signals,
             thread: Mutex::new(Some(thread)),
         }
     }
@@ -965,6 +972,19 @@ impl HardwareHandle {
     /// Read the control thread's most recent state.
     pub fn state(&self) -> HardwareState {
         self.state.borrow().clone()
+    }
+
+    pub fn recording_signals(&self, cursor: RecordingCursor) -> RecordingWindow {
+        self.recording_signals
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .window(cursor)
+    }
+    pub fn clear_recording_signals(&self) {
+        self.recording_signals
+            .write()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
     }
 
     /// Observe authoritative states published after control-thread commands.
@@ -1669,6 +1689,7 @@ struct Controller {
     robots: BTreeMap<String, ConnectedRobot>,
     published: PublishedControllerState,
     state: watch::Sender<HardwareState>,
+    recording_signals: Arc<RwLock<RecordingSignals>>,
     operations: ActiveOperations,
     #[cfg(test)]
     use_test_bus: bool,
@@ -1695,6 +1716,8 @@ struct PublishedControllerState {
     sequence: u64,
     loop_hz: f64,
     recording_issue: Option<String>,
+    /// Retain chart samples at 20 Hz independently of browser polling.
+    last_chart_sample: Option<Instant>,
 }
 
 impl Controller {
@@ -1705,6 +1728,7 @@ impl Controller {
             published: PublishedControllerState::default(),
             state,
             operations: ActiveOperations::default(),
+            recording_signals: Arc::new(RwLock::new(RecordingSignals::default())),
             #[cfg(test)]
             use_test_bus: false,
         }
@@ -3238,6 +3262,18 @@ impl Controller {
         };
         // `send_replace` rather than `send`: the latest state must be readable
         // through the handle even at moments when nothing is subscribed.
+        let now = Instant::now();
+        if self
+            .published
+            .last_chart_sample
+            .is_none_or(|last| now.duration_since(last) >= Duration::from_millis(50))
+        {
+            self.recording_signals
+                .write()
+                .unwrap_or_else(|error| error.into_inner())
+                .observe(state.telemetry());
+            self.published.last_chart_sample = Some(now);
+        }
         let _ = self.state.send_replace(state);
     }
 }

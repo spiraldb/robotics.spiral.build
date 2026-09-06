@@ -118,6 +118,7 @@ pub(crate) fn TrainingWorkspace() -> Element {
                     "training-runs",
                     rsx! {
                         TrainingRunDetail {
+                            details_loaded: snapshot.detailed_run_id() == Some(run.id()),
                             run,
                         }
                     },
@@ -188,7 +189,6 @@ fn TrainingRunControl(
     let mut selected_dataset = studio.selected_dataset();
     let controller = studio.training_controller();
     let config = controller.config();
-    use_effect(move || data.request_datasets());
     let dataset_ids = data
         .datasets()
         .into_iter()
@@ -669,7 +669,10 @@ fn TrainingHistoryRow(
 }
 
 #[component]
-fn TrainingRunDetail(run: TrainingRun) -> Element {
+fn TrainingRunDetail(run: TrainingRun, details_loaded: bool) -> Element {
+    if !details_loaded {
+        return rsx! { article { class: "training-run-detail", role: "status", "Loading run details…" } };
+    }
     let progress = if run.config().steps() == 0 {
         0.0
     } else {

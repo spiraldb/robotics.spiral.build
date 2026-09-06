@@ -1020,3 +1020,86 @@ mod failure_tests {
         );
     }
 }
+
+#[cfg(feature = "server")]
+use spiral_robotics_backend::ProjectQueries;
+use spiral_robotics_common::{
+    project::ProjectStatus,
+    recording_signals::{RecordingCursor, RecordingWindow},
+    robots::TelemetryFrame,
+    status::StudioSnapshot,
+    training::TrainingSnapshot,
+};
+
+#[server(endpoint = "server-functions/project/status", queries: Extension<ProjectQueries>)]
+pub(crate) async fn project_status() -> Result<ProjectStatus, CommandError> {
+    Ok(queries.0.status())
+}
+
+#[server(endpoint = "server-functions/project/setup", queries: Extension<ProjectQueries>)]
+pub(crate) async fn fetch_setup(session_id: String) -> Result<StudioSnapshot, CommandError> {
+    let queries = queries
+        .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.into()))?;
+    queries
+        .setup()
+        .await
+        .map_err(|failure| CommandError(failure.into()))
+}
+
+#[server(endpoint = "server-functions/project/telemetry", queries: Extension<ProjectQueries>)]
+pub(crate) async fn fetch_telemetry(session_id: String) -> Result<TelemetryFrame, CommandError> {
+    let queries = queries
+        .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.into()))?;
+    queries
+        .telemetry()
+        .map_err(|failure| CommandError(failure.into()))
+}
+
+#[server(endpoint = "server-functions/project/recording_signals", queries: Extension<ProjectQueries>)]
+pub(crate) async fn fetch_recording_signals(
+    session_id: String,
+    cursor: RecordingCursor,
+) -> Result<RecordingWindow, CommandError> {
+    let queries = queries
+        .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.into()))?;
+    queries
+        .recording_signals(cursor)
+        .map_err(|failure| CommandError(failure.into()))
+}
+
+#[server(endpoint = "server-functions/project/training", queries: Extension<ProjectQueries>)]
+pub(crate) async fn fetch_training(
+    session_id: String,
+    selected: Option<String>,
+) -> Result<TrainingSnapshot, CommandError> {
+    let queries = queries
+        .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.into()))?;
+    queries
+        .training(selected)
+        .map_err(|failure| CommandError(failure.into()))
+}
+
+#[server(endpoint = "server-functions/project/rollout", queries: Extension<ProjectQueries>)]
+pub(crate) async fn fetch_rollout(session_id: String) -> Result<RolloutSnapshot, CommandError> {
+    let queries = queries
+        .0
+        .for_session(&session_id)
+        .map_err(|failure| CommandError(failure.into()))?;
+    queries
+        .rollout()
+        .map_err(|failure| CommandError(failure.into()))
+}
+
+impl From<CommandError> for String {
+    fn from(error: CommandError) -> Self {
+        error.to_string()
+    }
+}

@@ -106,7 +106,7 @@ fn episode_catalog_and_full_data_belong_to_the_data_controller() {
     for ownership in [
         "episode_catalog: Signal<EpisodeCatalogState>",
         "episode_loader: Resource<Option<EpisodeLoadResult>>",
-        "info: EpisodeInfo",
+        "summary: EpisodeListItem",
         "full_data: Option<Arc<EpisodeData>>",
         "Ready(Arc<EpisodeData>)",
     ] {
@@ -123,16 +123,12 @@ fn episode_catalog_and_full_data_belong_to_the_data_controller() {
         !studio.contains("episode_catalog"),
         "the episode catalog must not drift back into Studio-wide state",
     );
-    for catalog_load in [
-        "!data.episodes_loaded(&dataset_id)",
-        "!data.episodes_loading(&dataset_id)",
-        "data.load_episodes(dataset_id)",
-    ] {
-        assert!(
-            episodes.contains(catalog_load),
-            "the Episodes panel is missing dataset-scoped catalog loading {catalog_load:?}",
-        );
-    }
+    assert!(
+        !episodes.contains("data.load_episodes("),
+        "the panel must not own a second catalog loader"
+    );
+    assert!(data.contains("fn use_polling"));
+    assert!(data.contains("QueryDomain::Data"));
     assert!(
         workspace.contains("match data.selected_episode_data()"),
         "Data renderers must derive directly from the selected resource",
@@ -155,14 +151,17 @@ fn workflow_backend_state_has_one_frontend_owner() {
 
     assert!(!studio.contains("workflow_state: Signal"));
     assert!(!studio.contains("workflow_agent_state: Signal"));
-    assert!(studio.contains("workflow.accept_streamed_state"));
-    assert!(studio.contains("workflow.accept_streamed_agent"));
+    assert!(studio.contains("self.workflow_controller().use_polling(self)"));
+    assert!(workflow.contains("fn accept_fetched_state"));
+    assert!(workflow.contains("fn accept_fetched_agent"));
+    assert!(!workflow.contains("reconcile_state_command"));
+    assert!(!workflow.contains("accept_streamed"));
     assert!(workflow.contains("pub(crate) fn accepted_state"));
     assert!(frame.contains("studio.workflow_controller().accepted_state()"));
 }
 
 #[test]
-fn studio_is_the_only_session_context_and_owns_session_lived_controllers() {
+fn project_lifetime_contexts_wrap_the_session_owned_feature_controllers() {
     let frontend = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let source_root = frontend.join("src");
     let studio = fs::read_to_string(source_root.join("shell/state.rs"))
@@ -173,18 +172,29 @@ fn studio_is_the_only_session_context_and_owns_session_lived_controllers() {
             let source = fs::read_to_string(&path)
                 .unwrap_or_else(|error| panic!("could not read {}: {error}", path.display()));
             source
+                .split("#[cfg(test)]")
+                .next()
+                .unwrap()
                 .match_indices("use_context_provider")
                 .map(move |(offset, _)| (path.clone(), offset))
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
 
-    assert_eq!(
-        providers.len(),
-        1,
-        "only Studio may publish session context"
-    );
-    assert!(providers[0].0.ends_with("src/shell/state.rs"));
+    let allowed = [
+        "src/shell/state.rs",
+        "src/shell/project.rs",
+        "src/shell/routes.rs",
+        "src/client/queries.rs",
+    ];
+    assert_eq!(providers.len(), allowed.len());
+    for (path, _) in &providers {
+        assert!(
+            allowed.iter().any(|allowed| path.ends_with(allowed)),
+            "unexpected context owner: {}",
+            path.display()
+        );
+    }
     for controller in [
         "data: DataController",
         "workflow: WorkflowController",
@@ -231,7 +241,7 @@ fn relation_schemas_belong_to_studio_while_exact_counts_are_data_view_scoped() {
     let frontend = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let studio = fs::read_to_string(frontend.join("src/shell/state.rs"))
         .expect("Studio state source should be readable");
-    let server_functions = fs::read_to_string(frontend.join("src/client/server_fns.rs"))
+    let server_functions = fs::read_to_string(frontend.join("src/client/transport.rs"))
         .expect("server function source should be readable");
     let routes = fs::read_to_string(frontend.join("src/shell/routes.rs"))
         .expect("Studio routes source should be readable");

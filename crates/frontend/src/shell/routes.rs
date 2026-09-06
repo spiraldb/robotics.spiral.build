@@ -84,7 +84,7 @@ pub(crate) fn StudioRouter() -> Element {
 #[component]
 fn StudioShell() -> Element {
     let sessions = ProjectSessionSignals::use_provider();
-    sessions.use_event_stream();
+    sessions.use_polling();
     let session = sessions.mounted_session();
     rsx! {
         document::Stylesheet { href: TAILWIND }
@@ -115,16 +115,13 @@ fn ProjectStudioShell(session: ProjectSessionInfo) -> Element {
         mut project_setup_prompted,
     } = StudioShellSignals::use_signals();
     let settings_result = studio.settings_result();
-    let loaded_settings = settings_result
-        .as_ref()
-        .and_then(|result| result.as_ref().ok())
-        .cloned();
+    let loaded_settings = studio.loaded_settings();
     let settings_error = settings_result
         .as_ref()
         .and_then(|result| result.as_ref().err())
         .cloned();
     let data = studio.data_controller();
-    studio.use_event_stream();
+    studio.use_polling();
     let timeline = studio.timeline_controller();
     let settings_are_open = settings_open();
     use_effect(use_reactive((&loaded_settings,), move |(settings,)| {

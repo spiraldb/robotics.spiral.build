@@ -26,40 +26,83 @@ use spiral_robotics_common::workflow::{
 };
 
 use super::project::ProjectClient;
+use super::queries::QueryDomain::*;
 use super::transport;
 use super::transport::CommandError;
 
 impl ProjectClient {
+    pub(crate) fn setup_snapshot(
+        &self,
+    ) -> impl Future<Output = Result<spiral_robotics_common::status::StudioSnapshot, CommandError>> + use<>
+    {
+        self.request(transport::fetch_setup)
+    }
+    pub(crate) fn telemetry_snapshot(
+        &self,
+    ) -> impl Future<Output = Result<spiral_robotics_common::robots::TelemetryFrame, CommandError>> + use<>
+    {
+        self.request(transport::fetch_telemetry)
+    }
+    pub(crate) fn recording_window(
+        &self,
+        cursor: spiral_robotics_common::recording_signals::RecordingCursor,
+    ) -> impl Future<
+        Output = Result<spiral_robotics_common::recording_signals::RecordingWindow, CommandError>,
+    > + use<> {
+        self.request(move |id| transport::fetch_recording_signals(id, cursor))
+    }
+    pub(crate) fn training_snapshot(
+        &self,
+        selected: Option<String>,
+    ) -> impl Future<
+        Output = Result<spiral_robotics_common::training::TrainingSnapshot, CommandError>,
+    > + use<> {
+        self.request(move |id| transport::fetch_training(id, selected))
+    }
+    pub(crate) fn rollout_snapshot(
+        &self,
+    ) -> impl Future<Output = Result<RolloutSnapshot, CommandError>> + use<> {
+        self.request(transport::fetch_rollout)
+    }
+
     pub(crate) fn start_training_run(
         &self,
         config: TrainingConfig,
     ) -> impl Future<Output = Result<TrainingRun, CommandError>> + use<> {
-        self.request(move |session_id| transport::start_training_run(session_id, config))
+        self.mutate(&[Training], move |session_id| {
+            transport::start_training_run(session_id, config)
+        })
     }
 
     pub(crate) fn stop_training_run(
         &self,
         id: String,
     ) -> impl Future<Output = Result<(), CommandError>> + use<> {
-        self.request(move |session_id| transport::stop_training_run(session_id, id))
+        self.mutate(&[Training], move |session_id| {
+            transport::stop_training_run(session_id, id)
+        })
     }
 
     pub(crate) fn delete_training_run(
         &self,
         id: String,
     ) -> impl Future<Output = Result<(), CommandError>> + use<> {
-        self.request(move |session_id| transport::delete_training_run(session_id, id))
+        self.mutate(&[Training, Catalog], move |session_id| {
+            transport::delete_training_run(session_id, id)
+        })
     }
 
     pub(crate) fn start_rollout(
         &self,
         config: RolloutConfig,
     ) -> impl Future<Output = Result<RolloutSnapshot, CommandError>> + use<> {
-        self.request(move |session_id| transport::start_rollout(session_id, config))
+        self.mutate(&[Rollout, Setup, Telemetry], move |session_id| {
+            transport::start_rollout(session_id, config)
+        })
     }
 
     pub(crate) fn stop_rollout(&self) -> impl Future<Output = Result<(), CommandError>> + use<> {
-        self.request(transport::stop_rollout)
+        self.mutate(&[Rollout, Setup, Telemetry], transport::stop_rollout)
     }
 
     pub(crate) fn workflow_snapshot(
@@ -72,7 +115,9 @@ impl ProjectClient {
         &self,
         command: WorkflowCommand,
     ) -> impl Future<Output = Result<WorkflowSnapshot, CommandError>> + use<> {
-        self.request(move |session_id| transport::run_workflow_command(session_id, command))
+        self.mutate(&[Workflow, Catalog], move |session_id| {
+            transport::run_workflow_command(session_id, command)
+        })
     }
 
     pub(crate) fn workflow_agent_snapshot(
@@ -85,7 +130,9 @@ impl ProjectClient {
         &self,
         command: WorkflowAgentCommand,
     ) -> impl Future<Output = Result<WorkflowAgentSnapshot, CommandError>> + use<> {
-        self.request(move |session_id| transport::run_workflow_agent_command(session_id, command))
+        self.mutate(&[Assistant, Workflow, Catalog], move |session_id| {
+            transport::run_workflow_agent_command(session_id, command)
+        })
     }
 
     pub(crate) fn list_datasets(
@@ -106,28 +153,37 @@ impl ProjectClient {
         &self,
         dataset_id: String,
     ) -> impl Future<Output = Result<EpisodeInfo, CommandError>> + use<> {
-        self.request(move |session_id| transport::start_recording(session_id, dataset_id))
+        self.mutate(&[Telemetry, Recording, Setup], move |session_id| {
+            transport::start_recording(session_id, dataset_id)
+        })
     }
 
     pub(crate) fn stop_recording(
         &self,
         keep: bool,
     ) -> impl Future<Output = Result<EpisodeInfo, CommandError>> + use<> {
-        self.request(move |session_id| transport::stop_recording(session_id, keep))
+        self.mutate(
+            &[Telemetry, Recording, Data, Catalog, Setup],
+            move |session_id| transport::stop_recording(session_id, keep),
+        )
     }
 
     pub(crate) fn set_recording_paused(
         &self,
         paused: bool,
     ) -> impl Future<Output = Result<(), CommandError>> + use<> {
-        self.request(move |session_id| transport::set_recording_paused(session_id, paused))
+        self.mutate(&[Telemetry, Recording], move |session_id| {
+            transport::set_recording_paused(session_id, paused)
+        })
     }
 
     pub(crate) fn delete_episode(
         &self,
         id: String,
     ) -> impl Future<Output = Result<(), CommandError>> + use<> {
-        self.request(move |session_id| transport::delete_episode(session_id, id))
+        self.mutate(&[Data, Catalog], move |session_id| {
+            transport::delete_episode(session_id, id)
+        })
     }
 
     pub(crate) fn inspect_episode(
@@ -144,7 +200,7 @@ impl ProjectClient {
         source_arm: Option<String>,
         seconds: f64,
     ) -> impl Future<Output = Result<(), CommandError>> + use<> {
-        self.request(move |session_id| {
+        self.mutate(&[Telemetry, Setup], move |session_id| {
             transport::seek_episode(session_id, id, robot, source_arm, seconds)
         })
     }
@@ -156,7 +212,7 @@ impl ProjectClient {
         source_arm: Option<String>,
         start_seconds: f64,
     ) -> impl Future<Output = Result<(), CommandError>> + use<> {
-        self.request(move |session_id| {
+        self.mutate(&[Telemetry, Setup], move |session_id| {
             transport::start_replay(session_id, episode, robot, source_arm, start_seconds)
         })
     }
@@ -165,7 +221,9 @@ impl ProjectClient {
         &self,
         paused: bool,
     ) -> impl Future<Output = Result<(), CommandError>> + use<> {
-        self.request(move |session_id| transport::set_replay_paused(session_id, paused))
+        self.mutate(&[Telemetry], move |session_id| {
+            transport::set_replay_paused(session_id, paused)
+        })
     }
 
     pub(crate) fn list_serial_ports(
@@ -184,63 +242,79 @@ impl ProjectClient {
     pub(crate) fn refresh_cameras(
         &self,
     ) -> impl Future<Output = Result<Vec<CameraStatus>, CommandError>> + use<> {
-        self.request(transport::refresh_cameras)
+        self.mutate(&[Setup], transport::refresh_cameras)
     }
 
     pub(crate) fn create_robot(
         &self,
         request: NewRobot,
     ) -> impl Future<Output = Result<RobotSummary, CommandError>> + use<> {
-        self.request(move |session_id| transport::create_robot(session_id, request))
+        self.mutate(&[Setup, Catalog], move |session_id| {
+            transport::create_robot(session_id, request)
+        })
     }
 
     pub(crate) fn import_robot_configuration(
         &self,
         document: Vec<u8>,
     ) -> impl Future<Output = Result<RobotSummary, CommandError>> + use<> {
-        self.request(move |session_id| transport::import_robot_configuration(session_id, document))
+        self.mutate(&[Setup, Catalog], move |session_id| {
+            transport::import_robot_configuration(session_id, document)
+        })
     }
 
     pub(crate) fn update_robot(
         &self,
         request: RobotUpdate<Vec<CameraBinding>>,
     ) -> impl Future<Output = Result<RobotSummary, CommandError>> + use<> {
-        self.request(move |session_id| transport::update_robot(session_id, request))
+        self.mutate(&[Setup], move |session_id| {
+            transport::update_robot(session_id, request)
+        })
     }
 
     pub(crate) fn delete_robot(
         &self,
         id: String,
     ) -> impl Future<Output = Result<(), CommandError>> + use<> {
-        self.request(move |session_id| transport::delete_robot(session_id, id))
+        self.mutate(&[Setup, Catalog], move |session_id| {
+            transport::delete_robot(session_id, id)
+        })
     }
 
     pub(crate) fn connect_robot(
         &self,
         id: String,
     ) -> impl Future<Output = Result<(), CommandError>> + use<> {
-        self.request(move |session_id| transport::connect_robot(session_id, id))
+        self.mutate(&[Setup, Telemetry], move |session_id| {
+            transport::connect_robot(session_id, id)
+        })
     }
 
     pub(crate) fn disconnect_robot(
         &self,
         id: String,
     ) -> impl Future<Output = Result<(), CommandError>> + use<> {
-        self.request(move |session_id| transport::disconnect_robot(session_id, id))
+        self.mutate(&[Setup, Telemetry], move |session_id| {
+            transport::disconnect_robot(session_id, id)
+        })
     }
 
     pub(crate) fn hold_robot(
         &self,
         id: String,
     ) -> impl Future<Output = Result<(), CommandError>> + use<> {
-        self.request(move |session_id| transport::hold_robot(session_id, id))
+        self.mutate(&[Telemetry], move |session_id| {
+            transport::hold_robot(session_id, id)
+        })
     }
 
     pub(crate) fn release_robot(
         &self,
         id: String,
     ) -> impl Future<Output = Result<(), CommandError>> + use<> {
-        self.request(move |session_id| transport::release_robot(session_id, id))
+        self.mutate(&[Telemetry], move |session_id| {
+            transport::release_robot(session_id, id)
+        })
     }
 
     pub(crate) fn set_robot_goal(
@@ -248,42 +322,54 @@ impl ProjectClient {
         id: String,
         normalized: BTreeMap<String, f64>,
     ) -> impl Future<Output = Result<(), CommandError>> + use<> {
-        self.request(move |session_id| transport::set_robot_goal(session_id, id, normalized))
+        self.mutate(&[Telemetry], move |session_id| {
+            transport::set_robot_goal(session_id, id, normalized)
+        })
     }
 
     pub(crate) fn start_calibration(
         &self,
         id: String,
     ) -> impl Future<Output = Result<(), CommandError>> + use<> {
-        self.request(move |session_id| transport::start_calibration(session_id, id))
+        self.mutate(&[Telemetry, Setup], move |session_id| {
+            transport::start_calibration(session_id, id)
+        })
     }
 
     pub(crate) fn finish_calibration(
         &self,
         id: String,
     ) -> impl Future<Output = Result<RobotSummary, CommandError>> + use<> {
-        self.request(move |session_id| transport::finish_calibration(session_id, id))
+        self.mutate(&[Telemetry, Setup], move |session_id| {
+            transport::finish_calibration(session_id, id)
+        })
     }
 
     pub(crate) fn cancel_calibration(
         &self,
         id: String,
     ) -> impl Future<Output = Result<(), CommandError>> + use<> {
-        self.request(move |session_id| transport::cancel_calibration(session_id, id))
+        self.mutate(&[Telemetry, Setup], move |session_id| {
+            transport::cancel_calibration(session_id, id)
+        })
     }
 
     pub(crate) fn reapply_calibration(
         &self,
         id: String,
     ) -> impl Future<Output = Result<(u64, u64, u64, u64, Vec<String>), CommandError>> + use<> {
-        self.request(move |session_id| transport::reapply_calibration(session_id, id))
+        self.mutate(&[Telemetry, Setup], move |session_id| {
+            transport::reapply_calibration(session_id, id)
+        })
     }
 
     pub(crate) fn set_mode(
         &self,
         selection: ModeSelection,
     ) -> impl Future<Output = Result<(), CommandError>> + use<> {
-        self.request(move |session_id| transport::set_mode(session_id, selection))
+        self.mutate(&[Setup, Telemetry], move |session_id| {
+            transport::set_mode(session_id, selection)
+        })
     }
 
     pub(crate) fn data_settings(
@@ -298,21 +384,27 @@ impl ProjectClient {
         training: TrainingRuntimeSettings,
         video: VideoSettings,
     ) -> impl Future<Output = Result<DataSettings, CommandError>> + use<> {
-        self.request(move |session_id| {
-            transport::update_data_settings(session_id, connection, training, video)
-        })
+        self.mutate(
+            &[Project, Settings, Setup, Training, Assistant, Catalog, Data],
+            move |session_id| {
+                transport::update_data_settings(session_id, connection, training, video)
+            },
+        )
     }
 
     pub(crate) fn test_spiral_connection(
         &self,
     ) -> impl Future<Output = Result<(bool, String), CommandError>> + use<> {
-        self.request(transport::test_spiral_connection)
+        self.mutate(
+            &[Project, Settings, Setup, Catalog, Data],
+            transport::test_spiral_connection,
+        )
     }
 
     pub(crate) fn test_training_runtime(
         &self,
     ) -> impl Future<Output = Result<(bool, String), CommandError>> + use<> {
-        self.request(transport::test_training_runtime)
+        self.mutate(&[Training], transport::test_training_runtime)
     }
 
     pub(crate) fn relation_catalog(
@@ -340,17 +432,24 @@ impl ProjectClient {
         &self,
         request: HuggingFaceDatasetSource,
     ) -> impl Future<Output = Result<HuggingFaceDatasetImportSummary, CommandError>> + use<> {
-        self.request(move |session_id| transport::import_hugging_face_dataset(session_id, request))
+        self.mutate(&[Data, Catalog], move |session_id| {
+            transport::import_hugging_face_dataset(session_id, request)
+        })
     }
 
     pub(crate) fn import_project(
         &self,
         document: FileStream,
     ) -> impl Future<Output = Result<ProjectImportSummary, CommandError>> + use<> {
-        self.request(move |session_id| {
-            transport::import_project(super::project_upload::ProjectUpload::new(
-                session_id, document,
-            ))
-        })
+        self.mutate(
+            &[
+                Project, Settings, Catalog, Data, Training, Workflow, Assistant,
+            ],
+            move |session_id| {
+                transport::import_project(super::project_upload::ProjectUpload::new(
+                    session_id, document,
+                ))
+            },
+        )
     }
 }

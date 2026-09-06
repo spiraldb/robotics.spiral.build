@@ -15,8 +15,8 @@ use crate::activities::data::state::DataController;
 use crate::activities::rollout::state::RolloutController;
 use crate::activities::training::state::TrainingController;
 use crate::activities::workflow::state::WorkflowController;
-use crate::client::http::StudioEvent;
 use crate::client::project::ProjectClient;
+use crate::client::queries::{QueryDomain, QueryPolicy, QueryRefresh};
 
 use crate::panels::timeline::signals::SignalStore;
 use crate::panels::timeline::state::TimelineController;
@@ -113,16 +113,17 @@ struct BackendSignals {
     training: Signal<TrainingSnapshot>,
     /// Backend-owned remote inference and motor-control lifecycle.
     rollout: Signal<RolloutSnapshot>,
-    /// True while the event stream is connected.
+    /// True while the project status read is healthy.
     live: Signal<bool>,
-    /// Wall-clock time of the last valid event and a periodically updated clock.
-    last_event_ms: Signal<f64>,
+    /// Wall-clock time of the last new telemetry sample and a periodically updated clock.
+    last_telemetry_ms: Signal<f64>,
     clock_ms: Signal<f64>,
 }
 
 #[derive(Clone, Copy)]
 struct StudioProjectResources {
     settings: Resource<Result<DataSettings, String>>,
+    loaded_settings: Signal<Option<DataSettings>>,
     configuration: Memo<StudioConfiguration>,
     relation_catalog: Resource<Result<RelationCatalog, String>>,
 }
@@ -143,10 +144,8 @@ struct StudioDataSignals {
     selected_dataset: Signal<String>,
     /// Joint angles for the take being recorded, or the last one recorded.
     ///
-    /// Filled from the event stream rather than from the panel that draws it:
-    /// a take captured with the Signals region collapsed is still a take, and
-    /// arriving to find it empty would be the interface deciding what was
-    /// measured. See [`crate::panels::timeline::signals`].
+    /// Fetched from the hardware-owned sample history even while the Timeline
+    /// is collapsed, and caught up by cursor after a connection gap.
     recording_signals: Signal<SignalStore>,
 }
 
@@ -189,7 +188,7 @@ impl BackendSignals {
             training: use_signal(TrainingSnapshot::default),
             rollout: use_signal(RolloutSnapshot::default),
             live: use_signal(|| false),
-            last_event_ms: use_signal(|| 0.0),
+            last_telemetry_ms: use_signal(|| 0.0),
             // Keep the server's first render identical to the browser's first
             // render; the browser clock starts with the client tasks below.
             clock_ms: use_signal(|| 0.0),
@@ -200,18 +199,23 @@ impl BackendSignals {
 impl StudioProjectResources {
     fn use_resources() -> Self {
         let sessions = ProjectSessionSignals::current();
-        let settings = use_resource(|| async {
+        let settings = QueryPolicy::new(QueryDomain::Settings, 10_000).use_resource(|| async {
             ProjectClient::current()
                 .data_settings()
                 .await
                 .map_err(|error| error.to_string())
         });
-        let settings_result = settings.read_unchecked().to_owned();
-        let loaded_settings = settings_result
-            .as_ref()
-            .and_then(|result| result.as_ref().ok())
-            .cloned();
-        let configuration = use_memo(use_reactive((&loaded_settings,), move |(settings,)| {
+        let mut loaded_settings = use_signal(|| None::<DataSettings>);
+        use_effect(move || {
+            let result = settings.read();
+            if let Some(Ok(value)) = result.as_ref()
+                && loaded_settings.peek().as_ref() != Some(value)
+            {
+                loaded_settings.set(Some(value.clone()));
+            }
+        });
+        let loaded_configuration = loaded_settings.read().to_owned();
+        let configuration = use_memo(use_reactive((&loaded_configuration,), move |(settings,)| {
             StudioConfiguration {
                 dataset: settings
                     .as_ref()
@@ -224,29 +228,22 @@ impl StudioProjectResources {
             }
         }));
         let query_available = configuration().spiral_query_available;
-        let relation_catalog = use_resource(use_reactive(
-            (&query_available,),
-            move |(query_available,)| {
-                let available = sessions.catalog_available();
-                async move {
-                    // The resource restarts when readiness changes. Keep it
-                    // pending without issuing a request while loading/offline.
-                    if !available {
-                        return std::future::pending().await;
-                    }
-                    if query_available {
-                        ProjectClient::current()
-                            .relation_catalog()
-                            .await
-                            .map_err(|error| error.to_string())
-                    } else {
-                        Ok(RelationCatalog::default())
-                    }
+        let relation_catalog = QueryPolicy::new(QueryDomain::Catalog, 10_000).use_when(
+            move || sessions.catalog_available(),
+            use_reactive((&query_available,), move |(query_available,)| async move {
+                if query_available {
+                    ProjectClient::current()
+                        .relation_catalog()
+                        .await
+                        .map_err(|error| error.to_string())
+                } else {
+                    Ok(RelationCatalog::default())
                 }
-            },
-        ));
+            }),
+        );
         Self {
             settings,
+            loaded_settings,
             configuration,
             relation_catalog,
         }
@@ -301,29 +298,24 @@ impl Studio {
         }
     }
 
-    pub(crate) const fn snapshot(self) -> Signal<StudioSnapshot> {
-        self.backend.snapshot
+    pub(crate) fn snapshot(self) -> ReadSignal<StudioSnapshot> {
+        self.backend.snapshot.into()
     }
 
-    pub(crate) const fn telemetry(self) -> Signal<TelemetryFrame> {
-        self.backend.telemetry
+    pub(crate) fn telemetry(self) -> ReadSignal<TelemetryFrame> {
+        self.backend.telemetry.into()
     }
 
-    pub(crate) const fn training(self) -> Signal<TrainingSnapshot> {
-        self.backend.training
+    pub(crate) fn training(self) -> ReadSignal<TrainingSnapshot> {
+        self.backend.training.into()
     }
 
-    pub(crate) const fn rollout(self) -> Signal<RolloutSnapshot> {
-        self.backend.rollout
+    pub(crate) fn rollout(self) -> ReadSignal<RolloutSnapshot> {
+        self.backend.rollout.into()
     }
 
-    pub(crate) const fn live(self) -> Signal<bool> {
-        self.backend.live
-    }
-
-    #[cfg(all(feature = "web", target_arch = "wasm32"))]
-    const fn last_event_ms(self) -> Signal<f64> {
-        self.backend.last_event_ms
+    pub(crate) fn live(self) -> ReadSignal<bool> {
+        self.backend.live.into()
     }
 
     pub(crate) const fn clock_ms(self) -> Signal<f64> {
@@ -346,20 +338,24 @@ impl Studio {
         self.data.selected_dataset
     }
 
-    pub(crate) const fn recording_signals(self) -> Signal<SignalStore> {
-        self.data.recording_signals
+    pub(crate) fn recording_signals(self) -> ReadSignal<SignalStore> {
+        self.data.recording_signals.into()
     }
 
     pub(crate) fn configuration(&self) -> StudioConfiguration {
         self.project.current_configuration()
     }
 
+    pub(crate) fn loaded_settings(&self) -> Option<DataSettings> {
+        self.project.loaded_settings.read().to_owned()
+    }
+
     pub(crate) fn settings_result(&self) -> Option<Result<DataSettings, String>> {
         self.project.settings.read_unchecked().to_owned()
     }
 
-    pub(crate) fn refresh_settings(mut self) {
-        self.project.settings.restart();
+    pub(crate) fn refresh_settings(self) {
+        QueryRefresh::current().invalidate(&[QueryDomain::Settings]);
     }
 
     pub(crate) fn relation_catalog_result(&self) -> Option<Result<RelationCatalog, String>> {
@@ -370,8 +366,8 @@ impl Studio {
         self.relation_catalog_result().and_then(Result::ok)
     }
 
-    pub(crate) fn refresh_relation_catalog(mut self) {
-        self.project.relation_catalog.restart();
+    pub(crate) fn refresh_relation_catalog(self) {
+        QueryRefresh::current().invalidate(&[QueryDomain::Catalog]);
     }
 
     pub(crate) const fn data_controller(self) -> DataController {
@@ -412,15 +408,6 @@ impl Studio {
             notifications,
             interaction,
         });
-        let sessions = ProjectSessionSignals::current();
-        use_resource(move || {
-            let available = sessions.catalog_available();
-            async move {
-                if available {
-                    studio.workflow_controller().load(studio).await;
-                }
-            }
-        });
         let mut default_selection = studio.selection();
         use_effect(move || {
             let next = {
@@ -451,41 +438,86 @@ impl Studio {
         studio
     }
 
-    /// Follow the one backend stream and hand feature events directly to the
-    /// controller that owns their accepted state.
-    pub(crate) fn use_event_stream(self) {
-        let client = use_hook(ProjectClient::current);
+    /// Each fetched value has one writer. UI components receive read-only
+    /// handles; commands invalidate these resources through ProjectClient.
+    pub(crate) fn use_polling(mut self) {
         let sessions = ProjectSessionSignals::current();
-        let workflow = self.workflow_controller();
+        use_effect(move || self.backend.live.set(sessions.connected()));
+        let setup = QueryPolicy::new(QueryDomain::Setup, 2_000)
+            .use_resource(|| ProjectClient::current().setup_snapshot());
         use_effect(move || {
-            // An old subtree can be scheduled once more before its key is
-            // replaced. It must leave the new session's inbox untouched.
-            if client.require_current().is_err() {
-                return;
-            }
-            self.live().set(sessions.connected());
-            for event in sessions.take_events() {
-                #[cfg(all(feature = "web", target_arch = "wasm32"))]
-                self.last_event_ms().set(js_sys::Date::now());
-                match event {
-                    StudioEvent::Snapshot(value) => self.snapshot().set(*value),
-                    StudioEvent::TrainingSnapshot(value) => self.training().set(*value),
-                    StudioEvent::TrainingUpdate(update) => self.training().write().apply(*update),
-                    StudioEvent::Rollout(value) => self.rollout().set(*value),
-                    StudioEvent::WorkflowState(value) => {
-                        workflow.accept_streamed_state(*value, self)
-                    }
-                    StudioEvent::WorkflowAgent(value) => workflow.accept_streamed_agent(*value),
-                    StudioEvent::Telemetry(frame) => {
-                        let mut recording_signals = self.recording_signals();
-                        if frame.recording().is_some() || recording_signals.peek().live() {
-                            recording_signals.write().observe(&frame);
-                        }
-                        self.telemetry().set(*frame);
-                    }
-                }
+            let result = setup.read();
+            if setup.finished()
+                && let Some(Ok(value)) = result.as_ref()
+                && *self.backend.snapshot.peek() != *value
+            {
+                self.backend.snapshot.set(value.clone());
             }
         });
+        let telemetry = QueryPolicy::new(QueryDomain::Telemetry, 50)
+            .use_resource(|| ProjectClient::current().telemetry_snapshot());
+        use_effect(move || {
+            let result = telemetry.read();
+            if telemetry.finished()
+                && let Some(Ok(frame)) = result.as_ref()
+                && self.backend.telemetry.peek().sequence() != frame.sequence()
+            {
+                self.backend.last_telemetry_ms.set(Self::now_ms());
+                self.backend.telemetry.set(frame.clone());
+            }
+        });
+        let recording = QueryPolicy::new(QueryDomain::Recording, 200).use_resource(move || {
+            let cursor = self.data.recording_signals.peek().cursor();
+            ProjectClient::current().recording_window(cursor)
+        });
+        use_effect(move || {
+            let result = recording.read();
+            if recording.finished()
+                && let Some(Ok(window)) = result.as_ref()
+                && window.changes(&self.data.recording_signals.peek())
+            {
+                self.data
+                    .recording_signals
+                    .write()
+                    .apply_window(window.clone());
+            }
+        });
+        let route = use_route::<crate::shell::routes::StudioRoute>();
+        let training_active = use_memo(move || self.backend.training.read().active_run().is_some());
+        let training = QueryPolicy::new(QueryDomain::Training, 1_000)
+            .with_activity(training_active.into())
+            .use_resource(use_reactive((&route,), move |(route,)| {
+                let selected = if matches!(route, crate::shell::routes::StudioRoute::Training {}) {
+                    self.training_controller().selected_run()
+                } else {
+                    None
+                };
+                ProjectClient::current().training_snapshot(selected)
+            }));
+        use_effect(move || {
+            let result = training.read();
+            if training.finished()
+                && let Some(Ok(value)) = result.as_ref()
+                && *self.backend.training.peek() != *value
+            {
+                self.backend.training.set(value.clone());
+            }
+        });
+        let rollout_active = use_memo(move || self.backend.rollout.read().phase().active());
+        let rollout = QueryPolicy::new(QueryDomain::Rollout, 500)
+            .with_activity(rollout_active.into())
+            .use_resource(|| ProjectClient::current().rollout_snapshot());
+        use_effect(move || {
+            let result = rollout.read();
+            if rollout.finished()
+                && let Some(Ok(value)) = result.as_ref()
+                && *self.backend.rollout.peek() != *value
+            {
+                self.backend.rollout.set(value.clone());
+            }
+        });
+        self.workflow_controller().use_polling(self);
+        self.data_controller().use_polling(self);
     }
 
     /// One robot's live readings, present only while it is connected.
@@ -502,17 +534,17 @@ impl Studio {
             .cloned()
     }
 
-    /// Normal controls require both an open stream and a recent event.
+    /// Normal controls require current project readiness and fresh hardware samples.
     pub(crate) fn controls_available(&self) -> bool {
         let age = self.telemetry_age_seconds();
         (self.backend.live)()
-            && self.backend.snapshot.read().readiness().catalog_available()
+            && ProjectSessionSignals::current().catalog_available()
             && age.is_finite()
             && age < 2.5
     }
 
     pub(crate) fn telemetry_age_seconds(&self) -> f64 {
-        let last = (self.backend.last_event_ms)();
+        let last = (self.backend.last_telemetry_ms)();
         if last <= 0.0 {
             return f64::INFINITY;
         }
@@ -629,8 +661,7 @@ impl Studio {
     }
 
     /// Send a command whose only purpose is to move the system toward idle.
-    /// This remains available during an event-stream outage because the HTTP
-    /// command path may still be healthy while telemetry reconnects.
+    /// This remains available when telemetry reads fail; the backend still checks command admission.
     pub(crate) fn run_safety<F>(&self, success: impl Into<String>, future: F)
     where
         F: Future<Output = Result<(), String>> + 'static,

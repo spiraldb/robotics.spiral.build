@@ -1,109 +1,57 @@
-//! Process-level event delivery and the lifetime of mounted project state.
-
+//! The process-owned project read determines the lifetime of mounted UI state.
 use crate::client::project::{ProjectClient, ProjectSessionState};
+use crate::client::queries::{QueryDomain, QueryPolicy, QueryRefresh};
+use crate::client::{CommandError, transport};
 use dioxus::prelude::*;
-use spiral_robotics_common::project::ProjectSessionInfo;
-
-#[cfg(any(test, all(feature = "web", target_arch = "wasm32")))]
-use crate::client::http::ProjectStreamMessage;
-use crate::client::http::StudioEvent;
+use spiral_robotics_common::project::{ProjectSessionInfo, ProjectStatus};
 
 #[derive(Clone, Copy)]
 pub(crate) struct ProjectSessionSignals {
     state: Signal<ProjectSessionState>,
-    events: Signal<Vec<StudioEvent>>,
+    refresh: QueryRefresh,
 }
-
 impl ProjectSessionSignals {
     pub(crate) fn use_provider() -> Self {
+        let refresh = QueryRefresh::use_provider();
         let state = use_signal(ProjectSessionState::default);
-        let events = use_signal(Vec::new);
-        use_context_provider(|| Self { state, events })
+        use_context_provider(|| Self { state, refresh })
     }
-
     pub(crate) fn current() -> Self {
-        consume_context::<Self>()
+        consume_context()
     }
-
-    /// Keep the last announced project mounted while its stream reconnects.
     pub(crate) fn mounted_session(self) -> Option<ProjectSessionInfo> {
         self.state.read().session().cloned()
     }
-
     pub(crate) fn client(self, session: ProjectSessionInfo) -> ProjectClient {
-        ProjectClient::new(session, self.state.into())
+        ProjectClient::new(session, self.state.into(), self.refresh)
     }
-
     pub(crate) fn connected(self) -> bool {
         self.state.read().connected()
     }
-
     pub(crate) fn storage_available(self) -> bool {
         self.state.read().storage_available()
     }
-
     pub(crate) fn catalog_available(self) -> bool {
         self.state.read().catalog_available()
     }
-
-    pub(crate) fn take_events(mut self) -> Vec<StudioEvent> {
-        if self.events.read().is_empty() {
-            return Vec::new();
-        }
-        std::mem::take(&mut *self.events.write())
-    }
-
-    #[cfg(any(test, all(feature = "web", target_arch = "wasm32")))]
-    pub(crate) fn accept(mut self, message: ProjectStreamMessage) {
-        match message {
-            ProjectStreamMessage::Session(session) => {
-                let previous = self.state.peek().clone();
-                let next = previous.clone().announced(session);
-                if previous.session() != next.session() {
-                    self.events.write().clear();
-                }
-                self.replace_state(next);
-            }
-            ProjectStreamMessage::Event(event) => {
-                let (session_id, payload) = event.into_parts();
-                if self.state.peek().accepts_events_from(&session_id) {
-                    if let StudioEvent::Snapshot(snapshot) = &payload {
-                        let next = self
-                            .state
-                            .peek()
-                            .clone()
-                            .with_readiness(&session_id, snapshot.readiness().clone());
-                        self.replace_state(next);
-                    }
-                    self.events.write().push(payload);
-                }
-            }
-            ProjectStreamMessage::Connected(connected) => {
-                if !connected {
-                    self.events.write().clear();
-                }
-                let next = self.state.peek().clone().connection_changed(connected);
-                self.replace_state(next);
-            }
+    pub(crate) fn accept(mut self, result: Result<ProjectStatus, CommandError>) {
+        let next = match result {
+            Ok(status) => ProjectSessionState::Ready(status),
+            Err(_) => ProjectSessionState::Unavailable(self.state.peek().session().cloned()),
+        };
+        if *self.state.peek() != next {
+            self.state.set(next);
         }
     }
-
-    #[cfg(any(test, all(feature = "web", target_arch = "wasm32")))]
-    fn replace_state(mut self, state: ProjectSessionState) {
-        if *self.state.peek() != state {
-            self.state.set(state);
-        }
-    }
-
-    pub(crate) fn use_event_stream(self) {
-        #[cfg(all(feature = "web", target_arch = "wasm32"))]
-        use_future(move || async move {
-            loop {
-                let _ =
-                    crate::client::http::Http::stream_events(move |message| self.accept(message))
-                        .await;
-                self.accept(ProjectStreamMessage::Connected(false));
-                gloo_timers::future::TimeoutFuture::new(1_000).await;
+    pub(crate) fn use_polling(self) {
+        let status =
+            QueryPolicy::new(QueryDomain::Project, 1_000).use_resource(transport::project_status);
+        use_effect(move || {
+            let result = status.read();
+            if status.finished()
+                && let Some(result) = result.as_ref()
+            {
+                self.accept(result.clone());
             }
         });
     }
@@ -115,8 +63,7 @@ mod tests {
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
 
-    use spiral_robotics_common::project::ProjectEvent;
-    use spiral_robotics_common::status::{BackendReadiness, BackendReadinessState, StudioSnapshot};
+    use spiral_robotics_common::status::{BackendReadiness, BackendReadinessState};
 
     use super::*;
 
@@ -167,42 +114,21 @@ mod tests {
             self.0.borrow().sessions.unwrap()
         }
 
-        fn connect(&self) {
-            self.sessions()
-                .accept(ProjectStreamMessage::Connected(true));
+        fn fetched(&self, id: &str, state: BackendReadinessState) {
+            self.sessions().accept(Ok(ProjectStatus::new(
+                ProjectSessionInfo::new(id, "same_project"),
+                BackendReadiness::new(
+                    state,
+                    state == BackendReadinessState::Ready,
+                    "Project readiness",
+                ),
+            )));
         }
-
-        fn announce(&self, id: &str) {
-            self.sessions()
-                .accept(ProjectStreamMessage::Session(ProjectSessionInfo::new(
-                    id,
-                    "same_project",
-                )));
-        }
-
-        fn snapshot(&self, id: &str) {
-            self.sessions()
-                .accept(ProjectStreamMessage::Event(ProjectEvent::new(
-                    id,
-                    StudioEvent::Snapshot(Box::default()),
-                )));
-        }
-
-        fn readiness(&self, id: &str, state: BackendReadinessState) {
-            let readiness = BackendReadiness::new(
-                state,
-                state == BackendReadinessState::Ready,
-                "Project readiness changed",
-            );
-            self.sessions()
-                .accept(ProjectStreamMessage::Event(ProjectEvent::new(
-                    id,
-                    StudioEvent::Snapshot(Box::new(StudioSnapshot::new(
-                        readiness,
-                        "SpiralDB",
-                        Default::default(),
-                    ))),
-                )));
+        fn unavailable(&self) {
+            self.sessions().accept(Err(CommandError::new(
+                spiral_robotics_common::command_failure::CommandFailureCode::Transport,
+                "connection lost",
+            )));
         }
     }
 
@@ -234,94 +160,32 @@ mod tests {
     }
 
     #[test]
-    fn project_readiness_pauses_resources_without_replacing_the_mount() {
+    fn failed_status_read_preserves_drafts_and_restored_readiness_restarts_resources() {
         let harness = SessionHarness::default();
         let mut dom = VirtualDom::new_with_props(SessionHarness::render, harness.clone());
         dom.rebuild_in_place();
-        dom.in_runtime(|| {
-            harness.connect();
-            harness.announce("first");
-        });
+        dom.in_runtime(|| harness.fetched("first", BackendReadinessState::Ready));
         dom.render_immediate_to_vec();
-        assert_eq!(harness.0.borrow().requests.get(), 0);
         let mut draft = harness.0.borrow().mounts[0].draft;
-        dom.in_runtime(|| {
-            draft.set("unsaved draft".to_owned());
-            harness.readiness("first", BackendReadinessState::Ready);
-            assert!(harness.sessions().storage_available());
-        });
+        dom.in_runtime(|| draft.set("unsaved".to_owned()));
         dom.render_immediate_to_vec();
         assert_eq!(harness.0.borrow().requests.get(), 1);
-        dom.in_runtime(|| {
-            harness.announce("first");
-            harness.readiness("first", BackendReadinessState::Ready);
-        });
-        dom.render_immediate_to_vec();
-        assert_eq!(
-            harness.0.borrow().requests.get(),
-            1,
-            "duplicate announcements and snapshots must not reload resources"
-        );
-
-        dom.in_runtime(|| {
-            harness.readiness("first", BackendReadinessState::Bootstrapping);
-            assert!(!harness.sessions().storage_available());
-        });
+        dom.in_runtime(|| harness.fetched("first", BackendReadinessState::Ready));
         dom.render_immediate_to_vec();
         assert_eq!(harness.0.borrow().requests.get(), 1);
-        // A failed change restores the old session, including the draft.
-        dom.in_runtime(|| harness.readiness("first", BackendReadinessState::Ready));
+        dom.in_runtime(|| harness.unavailable());
         dom.render_immediate_to_vec();
-        assert_eq!(harness.0.borrow().requests.get(), 2);
+        assert!(!harness.sessions().catalog_available());
+        assert_eq!(&*draft.peek(), "unsaved");
+        dom.in_runtime(|| harness.fetched("first", BackendReadinessState::Ready));
+        dom.render_immediate_to_vec();
         assert_eq!(harness.0.borrow().mounts.len(), 1);
-        assert_eq!(&*draft.peek(), "unsaved draft");
-
-        dom.in_runtime(|| {
-            harness
-                .sessions()
-                .accept(ProjectStreamMessage::Connected(false));
-        });
+        assert_eq!(harness.0.borrow().requests.get(), 2);
+        assert_eq!(&*draft.peek(), "unsaved");
+        dom.in_runtime(|| harness.fetched("first", BackendReadinessState::Bootstrapping));
         dom.render_immediate_to_vec();
-        dom.in_runtime(|| {
-            harness
-                .sessions()
-                .accept(ProjectStreamMessage::Connected(true))
-        });
-        dom.render_immediate_to_vec();
-        assert_eq!(
-            harness.0.borrow().requests.get(),
-            2,
-            "reopening the stream must wait for a fresh snapshot"
-        );
-        dom.in_runtime(|| harness.readiness("first", BackendReadinessState::Ready));
-        dom.render_immediate_to_vec();
-        assert_eq!(
-            harness.0.borrow().requests.get(),
-            2,
-            "readiness before the reconnect's session announcement must be ignored"
-        );
-        dom.in_runtime(|| {
-            harness.announce("first");
-            harness.readiness("first", BackendReadinessState::Ready);
-        });
-        dom.render_immediate_to_vec();
-        assert_eq!(harness.0.borrow().requests.get(), 3);
-
-        dom.in_runtime(|| {
-            harness.announce("second");
-            harness.readiness("first", BackendReadinessState::Ready);
-            assert!(!harness.sessions().catalog_available());
-            harness.readiness("second", BackendReadinessState::Degraded);
-        });
-        dom.render_immediate_to_vec();
-        assert_eq!(
-            harness.0.borrow().requests.get(),
-            3,
-            "failed startup must not dispatch requests"
-        );
-        dom.in_runtime(|| harness.readiness("second", BackendReadinessState::Ready));
-        dom.render_immediate_to_vec();
-        assert_eq!(harness.0.borrow().requests.get(), 4);
+        assert!(!harness.sessions().catalog_available());
+        assert_eq!(harness.0.borrow().mounts.len(), 1);
     }
 
     #[test]
@@ -330,8 +194,7 @@ mod tests {
         let mut dom = VirtualDom::new_with_props(SessionHarness::render, harness.clone());
         dom.rebuild_in_place();
         dom.in_runtime(|| {
-            harness.connect();
-            harness.announce("first");
+            harness.fetched("first", BackendReadinessState::Ready);
         });
         dom.render_immediate_to_vec();
         let old_client = harness.0.borrow().mounts[0].client.clone();
@@ -350,8 +213,8 @@ mod tests {
         assert!(old_client.accept_response(Ok(7)).is_ok());
         let request_created_in_old_project = old_client.test_training_runtime();
 
-        dom.in_runtime(|| harness.announce("second"));
-        // Reject completion as soon as the announcement arrives, even before
+        dom.in_runtime(|| harness.fetched("second", BackendReadinessState::Ready));
+        // Reject completion as soon as the status is fetched, even before
         // Dioxus has committed disposal of the previous keyed subtree.
         assert!(old_client.accept_response(Ok(7)).is_err());
         assert!(
@@ -373,44 +236,12 @@ mod tests {
     }
 
     #[test]
-    fn announcement_drops_old_events_and_buffers_new_initial_snapshots() {
-        let harness = SessionHarness::default();
-        let mut dom = VirtualDom::new_with_props(SessionHarness::render, harness.clone());
-        dom.rebuild_in_place();
-        dom.in_runtime(|| {
-            harness.connect();
-            harness.announce("first");
-            harness.snapshot("first");
-            harness.announce("second");
-            harness.snapshot("first");
-            harness.snapshot("second");
-            assert_eq!(harness.sessions().take_events().len(), 1);
-            harness.snapshot("second");
-            harness.announce("second");
-            assert_eq!(
-                harness.sessions().take_events().len(),
-                1,
-                "reconnects retain the same mount's events"
-            );
-            harness
-                .sessions()
-                .accept(ProjectStreamMessage::Connected(true));
-            assert!(harness.sessions().connected());
-            harness
-                .sessions()
-                .accept(ProjectStreamMessage::Connected(false));
-            assert!(!harness.sessions().connected());
-        });
-    }
-
-    #[test]
     fn media_links_capture_the_mount_and_preserve_existing_query_parameters() {
         let harness = SessionHarness::default();
         let mut dom = VirtualDom::new_with_props(SessionHarness::render, harness.clone());
         dom.rebuild_in_place();
         dom.in_runtime(|| {
-            harness.connect();
-            harness.announce("session /one");
+            harness.fetched("session /one", BackendReadinessState::Ready);
         });
         dom.render_immediate_to_vec();
         let client = harness.0.borrow().mounts[0].client.clone();

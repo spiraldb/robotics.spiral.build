@@ -1037,21 +1037,61 @@ impl TrainingRun {
     }
 }
 
-/// Complete training state published through the Studio event stream.
+/// Backend training state and its query projection.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct TrainingSnapshot {
     #[serde(default)]
     readiness: TrainingReadiness,
     runs: Vec<TrainingRun>,
+    /// Present on query projections, identifying the run with complete details.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    detailed_run_id: Option<String>,
 }
 
 impl TrainingSnapshot {
     pub fn new(readiness: TrainingReadiness, runs: Vec<TrainingRun>) -> Self {
-        Self { readiness, runs }
+        Self {
+            readiness,
+            runs,
+            detailed_run_id: None,
+        }
     }
     pub const fn readiness(&self) -> &TrainingReadiness {
         &self.readiness
     }
+    /// The run catalog includes the latest metric and checkpoints; only the
+    /// selected run carries chart history and logs. Never clone every history
+    /// just to answer a polling request.
+    pub fn for_display(&self, selected: Option<&str>) -> Self {
+        let mut result = Self::new(
+            self.readiness.clone(),
+            self.runs
+                .iter()
+                .map(|run| {
+                    if Some(run.id()) == selected {
+                        return run.clone();
+                    }
+                    TrainingRun {
+                        identity: run.identity.clone(),
+                        lifecycle: run.lifecycle.clone(),
+                        history: TrainingRunHistory {
+                            metrics: run.metrics().last().cloned().into_iter().collect(),
+                            checkpoints: run.checkpoints().to_vec(),
+                            logs: Vec::new(),
+                        },
+                    }
+                })
+                .collect(),
+        );
+        result.detailed_run_id = selected
+            .filter(|id| self.runs.iter().any(|run| run.id() == *id))
+            .map(str::to_owned);
+        result
+    }
+    pub fn detailed_run_id(&self) -> Option<&str> {
+        self.detailed_run_id.as_deref()
+    }
+
     pub fn runs(&self) -> &[TrainingRun] {
         &self.runs
     }
@@ -1064,10 +1104,9 @@ pub(crate) const MAX_TRAINING_LOG_LINES: usize = 120;
 const MAX_TRAINING_CHECKPOINTS: usize = 1_000;
 pub const MAX_TRAINING_HISTORY_RUNS: usize = 40;
 
-/// Incremental training event sent after the initial snapshot.
+/// Internal training state transition.
 ///
-/// Metrics are intentionally one point at a time: republishing every retained
-/// run for every optimizer step made event bandwidth grow with history.
+/// The backend folds these transitions into its retained run history.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TrainingUpdate {
@@ -1478,5 +1517,30 @@ mod tests {
         });
 
         assert_eq!(snapshot, restored);
+    }
+    #[test]
+    fn polling_sends_full_history_only_for_the_selected_run() {
+        let runs = ["a", "b"]
+            .into_iter()
+            .map(|id| {
+                TrainingRun::starting(id, TrainingConfig::default())
+                    .with_metrics(vec![
+                        TrainingMetricPoint::new(1, 2.0),
+                        TrainingMetricPoint::new(2, 1.0),
+                    ])
+                    .with_logs(vec!["retained log".to_owned()])
+                    .with_checkpoints(vec![TrainingCheckpoint::new(2, 1)])
+            })
+            .collect();
+        let history = TrainingSnapshot::new(TrainingReadiness::default(), runs);
+        let display = history.for_display(Some("b"));
+        assert_eq!(display.runs()[0].metrics().len(), 1);
+        assert!(display.runs()[0].logs().is_empty());
+        assert_eq!(
+            display.runs()[0].checkpoints(),
+            history.runs()[0].checkpoints()
+        );
+        assert_eq!(display.runs()[1], history.runs()[1]);
+        assert_eq!(history.runs()[0].metrics().len(), 2);
     }
 }

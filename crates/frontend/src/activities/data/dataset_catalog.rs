@@ -27,12 +27,6 @@ pub(super) struct LoadedDatasets {
     selection_initialized: bool,
 }
 
-#[derive(Clone, Copy)]
-pub(super) enum DatasetLoadRequest {
-    Automatic,
-    Reload,
-}
-
 impl DatasetCatalogState {
     fn snapshot(&self) -> Option<&LoadedDatasets> {
         match self {
@@ -46,10 +40,6 @@ impl DatasetCatalogState {
         self.snapshot().map_or(&[], |snapshot| &snapshot.datasets)
     }
 
-    pub(super) fn loaded(&self) -> bool {
-        self.snapshot().is_some()
-    }
-
     pub(super) fn loading(&self) -> bool {
         matches!(self, Self::Loading(_))
     }
@@ -61,52 +51,22 @@ impl DatasetCatalogState {
         }
     }
 
-    pub(super) fn can_request(&self, request: DatasetLoadRequest, available: bool) -> bool {
-        available
-            && match request {
-                DatasetLoadRequest::Automatic => matches!(self, Self::NotRequested),
-                DatasetLoadRequest::Reload => !self.loading(),
-            }
+    pub(super) fn pending(&mut self) {
+        if !self.loading() {
+            *self = Self::Loading(self.snapshot().cloned());
+        }
     }
 
-    /// Claim synchronously, before spawning: another mounted consumer cannot
-    /// launch the same request while its future is waiting to be polled.
-    pub(super) fn begin(&mut self, request: DatasetLoadRequest, available: bool) -> bool {
-        if !self.can_request(request, available) {
-            return false;
-        }
-        let previous = match std::mem::take(self) {
-            Self::NotRequested => None,
-            Self::Ready(snapshot) => Some(snapshot),
-            Self::Failed { previous, .. } => previous,
-            Self::Loading(_) => unreachable!("an in-flight dataset request cannot be replaced"),
+    pub(super) fn accept(&mut self, result: Result<Vec<DatasetSummary>, CommandError>) {
+        let previous = self.snapshot().cloned();
+        *self = match result {
+            Ok(datasets) => Self::Ready(LoadedDatasets {
+                datasets,
+                selection_initialized: previous
+                    .is_some_and(|snapshot| snapshot.selection_initialized),
+            }),
+            Err(error) => Self::Failed { error, previous },
         };
-        *self = Self::Loading(previous);
-        true
-    }
-
-    pub(super) fn finish(
-        &mut self,
-        result: Result<Vec<DatasetSummary>, CommandError>,
-    ) -> Result<(), String> {
-        let Self::Loading(previous) = std::mem::take(self) else {
-            unreachable!("only the admitted dataset request can complete");
-        };
-        match result {
-            Ok(datasets) => {
-                *self = Self::Ready(LoadedDatasets {
-                    datasets,
-                    selection_initialized: previous
-                        .is_some_and(|snapshot| snapshot.selection_initialized),
-                });
-                Ok(())
-            }
-            Err(error) => {
-                let message = format!("Could not load datasets: {error}");
-                *self = Self::Failed { error, previous };
-                Err(message)
-            }
-        }
     }
 
     pub(super) fn initialize_selection(&mut self, current: &str) -> Option<String> {
@@ -178,72 +138,27 @@ pub(crate) fn DatasetCatalogFeedback() -> Element {
 mod tests {
     use super::*;
     use spiral_robotics_common::command_failure::CommandFailureCode;
-
     #[test]
-    fn automatic_loading_waits_for_readiness_and_claims_only_one_request() {
+    fn failed_refresh_preserves_rows_and_selection_then_recovers() {
         let mut catalog = DatasetCatalogState::default();
-        assert!(!catalog.begin(DatasetLoadRequest::Automatic, false));
-        assert!(catalog.begin(DatasetLoadRequest::Automatic, true));
-        // Other consumers and rapid Retry clicks cannot overlap this request.
-        assert!(!catalog.begin(DatasetLoadRequest::Automatic, true));
-        assert!(!catalog.begin(DatasetLoadRequest::Reload, true));
-        catalog.finish(Ok(Vec::new())).unwrap();
-        assert!(catalog.loaded());
-        assert!(!catalog.begin(DatasetLoadRequest::Automatic, true));
-    }
-
-    #[test]
-    fn failure_survives_new_consumers_and_readiness_changes_until_explicit_retry() {
-        let mut catalog = DatasetCatalogState::default();
-        assert!(catalog.begin(DatasetLoadRequest::Automatic, true));
-        assert!(
-            catalog
-                .finish(Err(CommandError::new(
-                    CommandFailureCode::ProjectUnavailable,
-                    "catalog unavailable"
-                )))
-                .is_err()
-        );
-        for available in [true, true, false, true] {
-            assert!(!catalog.begin(DatasetLoadRequest::Automatic, available));
-            assert_eq!(
-                catalog.error().unwrap().code(),
-                CommandFailureCode::ProjectUnavailable
-            );
-        }
-        assert!(!catalog.begin(DatasetLoadRequest::Reload, false));
-        assert!(catalog.begin(DatasetLoadRequest::Reload, true));
-        catalog.finish(Ok(Vec::new())).unwrap();
-        assert!(catalog.loaded());
-        assert_eq!(catalog.error(), None);
-    }
-
-    #[test]
-    fn failed_refresh_preserves_datasets_and_the_users_selection() {
-        let mut catalog = DatasetCatalogState::default();
-        assert!(catalog.begin(DatasetLoadRequest::Automatic, true));
-        catalog
-            .finish(Ok(vec![DatasetSummary::new("default", "Default", 0)]))
-            .unwrap();
+        catalog.accept(Ok(vec![DatasetSummary::new("default", "Default", 0)]));
         assert_eq!(
             catalog.initialize_selection("missing"),
             Some("default".to_owned())
         );
-        assert!(catalog.begin(DatasetLoadRequest::Reload, true));
+        catalog.pending();
+        assert!(catalog.loading());
         assert_eq!(catalog.datasets()[0].id(), "default");
-        assert!(
-            catalog
-                .finish(Err(CommandError::new(
-                    CommandFailureCode::Transport,
-                    "connection lost"
-                )))
-                .is_err()
-        );
-        assert!(catalog.loaded());
+        catalog.accept(Err(CommandError::new(
+            CommandFailureCode::Transport,
+            "connection lost",
+        )));
         assert_eq!(catalog.datasets()[0].id(), "default");
+        assert!(catalog.error().is_some());
         assert_eq!(catalog.initialize_selection("user-draft"), None);
-        assert!(catalog.begin(DatasetLoadRequest::Reload, true));
-        catalog.finish(Ok(Vec::new())).unwrap();
+        catalog.pending();
+        catalog.accept(Ok(Vec::new()));
+        assert!(catalog.error().is_none());
         assert_eq!(catalog.initialize_selection("user-draft"), None);
     }
 }

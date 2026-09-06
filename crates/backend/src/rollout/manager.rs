@@ -615,10 +615,6 @@ impl RolloutManager {
         self.lifecycle.state.borrow().clone()
     }
 
-    pub(crate) fn subscribe(&self) -> watch::Receiver<RolloutSnapshot> {
-        self.lifecycle.state.subscribe()
-    }
-
     pub(crate) async fn start(
         self: &Arc<Self>,
         config: RolloutConfig,

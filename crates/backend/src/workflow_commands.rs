@@ -34,7 +34,7 @@ impl WorkflowCommands {
         let commands = self.clone();
         let activity = commands.state.admit()?;
         self.main_runtime
-            .execute(async move {
+            .read(async move {
                 let _activity = activity;
                 commands.require_catalog_ready()?;
                 Ok(commands.state.workflow().state())
@@ -87,7 +87,7 @@ impl WorkflowCommands {
         let commands = self.clone();
         let activity = commands.state.admit()?;
         self.main_runtime
-            .execute(async move {
+            .read(async move {
                 let _activity = activity;
                 commands.require_catalog_ready()?;
                 Ok(commands.state.workflow_agent().state())

@@ -6,6 +6,7 @@ pub(crate) mod http;
 pub(crate) mod project;
 mod project_commands;
 mod project_upload;
-mod transport;
+pub(crate) mod queries;
+pub(crate) mod transport;
 
 pub(crate) use transport::CommandError;

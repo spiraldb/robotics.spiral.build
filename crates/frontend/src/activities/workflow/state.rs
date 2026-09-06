@@ -2,9 +2,10 @@
 //!
 //! Canvas geometry and inspector selection are browser interaction state. The
 //! saved graph, validation, execution phases, and result payload are backend
-//! truth and reconcile through HTTP plus the one shared SSE stream.
+//! truth, refreshed exclusively by the project-scoped queries.
 
 use crate::client::project::ProjectClient;
+use crate::client::queries::{QueryDomain, QueryPolicy, QueryRefresh};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use dioxus::prelude::*;
@@ -290,6 +291,20 @@ struct WorkflowGraphSignals {
 struct WorkflowDocumentSignals {
     server: Signal<WorkflowSnapshot>,
     draft: Signal<WorkflowSpec>,
+    saved: Signal<Option<WorkflowSaveReceipt>>,
+}
+
+/// A save receipt acknowledges a submitted draft, without installing a
+/// command response into the fetched server state.
+#[derive(Clone)]
+struct WorkflowSaveReceipt {
+    submitted: WorkflowSpec,
+    revision: u64,
+}
+impl WorkflowSaveReceipt {
+    fn acknowledges(&self, draft: &WorkflowSpec, fetched: &WorkflowSpec) -> bool {
+        draft == &self.submitted && fetched.revision() >= self.revision
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -325,6 +340,7 @@ impl WorkflowController {
             document: WorkflowDocumentSignals {
                 server: use_signal(move || initial),
                 draft: use_signal(move || initial_spec),
+                saved: use_signal(|| None),
             },
             lifecycle: WorkflowLifecycleSignals {
                 loaded: use_signal(|| false),
@@ -826,6 +842,7 @@ impl WorkflowController {
             .command
             .set(Some(WorkflowPendingCommand::Applying));
         let requested_scope_id = self.document.server.peek().scope_id().to_owned();
+        let submitted = self.document.draft.peek().to_owned();
         let request = WorkflowRequest::apply(
             requested_scope_id.clone(),
             self.document.draft.peek().revision(),
@@ -838,12 +855,15 @@ impl WorkflowController {
                 .map_err(|error| error.to_string());
             self.finish_command(&requested_scope_id);
             match response {
-                Ok(response) => self.accept_applied_state(response, &requested_scope_id),
+                Ok(response) => {
+                    self.document.saved.set(Some(WorkflowSaveReceipt {
+                        submitted,
+                        revision: response.workflow().revision(),
+                    }));
+                    QueryRefresh::current().invalidate(&[QueryDomain::Workflow]);
+                }
                 Err(error) => {
                     studio.report_from(MessageSource::Workflow, error);
-                    if let Ok(state) = ProjectClient::current().workflow_snapshot().await {
-                        self.reconcile_state_command(state, &requested_scope_id);
-                    }
                 }
             }
         });
@@ -869,9 +889,7 @@ impl WorkflowController {
                 .map_err(|error| error.to_string());
             self.finish_command(&requested_scope_id);
             match response {
-                Ok(state) => {
-                    self.reconcile_state_command(state, &requested_scope_id);
-                }
+                Ok(_) => {}
                 Err(error) => studio.report_from(MessageSource::Workflow, error),
             }
         });
@@ -893,9 +911,7 @@ impl WorkflowController {
                 .map_err(|error| error.to_string());
             self.finish_command(&requested_scope_id);
             match response {
-                Ok(state) => {
-                    self.reconcile_state_command(state, &requested_scope_id);
-                }
+                Ok(_) => {}
                 Err(error) => studio.report_from(MessageSource::Workflow, error),
             }
         });
@@ -922,9 +938,7 @@ impl WorkflowController {
                 .map_err(|error| error.to_string());
             self.assistant.agent_command.set(None);
             match response {
-                Ok(state) => {
-                    self.reconcile_agent_command(state, request.scope_id());
-                }
+                Ok(_) => {}
                 Err(error) => {
                     self.assistant.agent_error.set(Some(error.clone()));
                     studio.report_from(MessageSource::Workflow, error);
@@ -959,9 +973,7 @@ impl WorkflowController {
                 .map_err(|error| error.to_string());
             self.assistant.agent_command.set(None);
             match response {
-                Ok(state) => {
-                    self.reconcile_agent_command(state, request.scope_id());
-                }
+                Ok(_) => {}
                 Err(error) => {
                     self.assistant.agent_error.set(Some(error.clone()));
                     studio.report_from(MessageSource::Workflow, error);
@@ -998,8 +1010,8 @@ impl WorkflowController {
                 .map_err(|error| error.to_string());
             self.assistant.agent_command.set(None);
             match response {
-                Ok(state) => {
-                    if self.reconcile_agent_command(state, request.scope_id()) {
+                Ok(_) => {
+                    if self.assistant.agent.peek().scope_id() == request.scope_id() {
                         let key = AgentDraftKey::new(
                             request.scope_id(),
                             request
@@ -1012,9 +1024,6 @@ impl WorkflowController {
                 Err(error) => {
                     self.assistant.agent_error.set(Some(error.clone()));
                     studio.report_from(MessageSource::Workflow, error);
-                    if let Ok(state) = ProjectClient::current().workflow_agent_snapshot().await {
-                        self.reconcile_agent_command(state, request.scope_id());
-                    }
                 }
             }
         });
@@ -1044,9 +1053,7 @@ impl WorkflowController {
                 .map_err(|error| error.to_string());
             self.assistant.agent_command.set(None);
             match response {
-                Ok(state) => {
-                    self.reconcile_agent_command(state, request.scope_id());
-                }
+                Ok(_) => {}
                 Err(error) => {
                     self.assistant.agent_error.set(Some(error.clone()));
                     studio.report_from(MessageSource::Workflow, error);
@@ -1073,87 +1080,80 @@ impl WorkflowController {
         }
     }
 
-    pub(crate) async fn load(mut self, studio: Studio) {
-        let workflow_bootstrap_scope = self.document.server.peek().scope_id().to_owned();
-        let state_loaded = match ProjectClient::current()
-            .workflow_snapshot()
-            .await
-            .map_err(|error| error.to_string())
-        {
-            Ok(state) => self
-                .reconcile_state_bootstrap(state, &workflow_bootstrap_scope)
-                .is_some_and(|scope_changed| {
-                    if scope_changed {
-                        studio.refresh_relation_catalog();
-                    }
-                    true
-                }),
-            Err(error) => {
-                if !*self.lifecycle.loaded.peek() {
-                    self.lifecycle.load_error.set(Some(error.clone()));
-                }
-                studio.report_from(MessageSource::Workflow, error);
-                false
-            }
-        };
-        let agent_bootstrap_scope = self.assistant.agent.peek().scope_id().to_owned();
-        match ProjectClient::current()
-            .workflow_agent_snapshot()
-            .await
-            .map_err(|error| error.to_string())
-        {
-            Ok(state) => self.reconcile_agent_bootstrap(state, &agent_bootstrap_scope),
-            Err(error) => {
-                if !*self.assistant.agent_loaded.peek() {
-                    self.assistant.agent_error.set(Some(error.clone()));
-                }
-                studio.report_from(MessageSource::Workflow, error);
-            }
-        }
-        if state_loaded {
-            self.lifecycle.loaded.set(true);
-        }
-    }
-
-    fn accept_applied_state(mut self, state: WorkflowSnapshot, requested_scope_id: &str) {
-        let current = self.document.server.peek().to_owned();
-        if current.scope_id() != requested_scope_id
-            || state.scope_id() != requested_scope_id
-            || state.workflow().id() != current.workflow().id()
-            || state.workflow().revision() < current.workflow().revision()
-        {
-            return;
-        }
-        if state.workflow().revision() == current.workflow().revision() {
-            // The save event may win the race against the command response. In
-            // that case acknowledge the graph without replacing a newer run
-            // snapshot that arrived on SSE in the meantime.
-            if state.workflow() != current.workflow() {
+    pub(crate) fn use_polling(mut self, studio: Studio) {
+        let sessions = crate::shell::project::ProjectSessionSignals::current();
+        let workflow_active = use_memo(move || {
+            !self.loaded() || self.snapshot().phase().active() || self.command().is_some()
+        });
+        let workflow = QueryPolicy::new(QueryDomain::Workflow, 500)
+            .with_activity(workflow_active.into())
+            .use_when(
+                move || sessions.catalog_available(),
+                || ProjectClient::current().workflow_snapshot(),
+            );
+        use_effect(move || {
+            let result = workflow.read();
+            if !workflow.finished() {
                 return;
             }
-            self.document.draft.set(current.workflow().to_owned());
-            if current.snapshot().accepts(state.snapshot()) {
-                self.document.server.set(state);
+            match result.as_ref() {
+                Some(Ok(state)) => {
+                    if self.accept_fetched_state(state.clone()) {
+                        studio.refresh_relation_catalog();
+                    }
+                }
+                Some(Err(error)) => self.lifecycle.load_error.set(Some(error.to_string())),
+                None => {}
             }
-        } else {
-            self.document.draft.set(state.workflow().to_owned());
-            self.document.server.set(state);
-        }
-        self.lifecycle.load_error.set(None);
-        self.sync_graph();
+        });
+        let assistant_active = use_memo(move || {
+            !self.agent_loaded()
+                || self.assistant.agent.read().session().phase().active()
+                || self.agent_command().is_some()
+        });
+        let agent = QueryPolicy::new(QueryDomain::Assistant, 500)
+            .with_activity(assistant_active.into())
+            .use_when(
+                move || sessions.catalog_available(),
+                || ProjectClient::current().workflow_agent_snapshot(),
+            );
+        use_effect(move || {
+            let result = agent.read();
+            if !agent.finished() {
+                return;
+            }
+            match result.as_ref() {
+                Some(Ok(state)) => self.accept_fetched_agent(state.clone()),
+                Some(Err(error)) => self.assistant.agent_error.set(Some(error.to_string())),
+                None => {}
+            }
+        });
     }
 
-    fn reconcile_state(mut self, state: WorkflowSnapshot) -> bool {
+    fn accept_fetched_state(mut self, state: WorkflowSnapshot) -> bool {
         if !self.document.server.peek().accepts(&state) {
             return false;
         }
-        // This path runs inside the shell's Workflow SSE effect. Keep draft
-        // comparison untracked so the effect subscribes only to the incoming
-        // backend signal instead of retriggering itself after writing server
-        // state or graph projection.
+        if *self.document.server.peek() == state && self.document.saved.peek().is_none() {
+            self.lifecycle.load_error.set(None);
+            self.lifecycle.loaded.set(true);
+            return false;
+        }
         let scope_changed = state.scope_id() != self.document.server.peek().scope_id();
+        let saved = self.document.saved.peek().clone();
+        let acknowledged = saved.as_ref().is_some_and(|receipt| {
+            receipt.acknowledges(&self.document.draft.peek(), state.workflow())
+        });
         let keep_local_draft = !scope_changed
+            && !acknowledged
             && *self.document.draft.peek() != *self.document.server.peek().workflow();
+        if scope_changed
+            || saved
+                .as_ref()
+                .is_some_and(|receipt| state.workflow().revision() >= receipt.revision)
+        {
+            self.document.saved.set(None);
+        }
         if scope_changed {
             self.graph.ui.set(WorkflowUiState::default());
             self.lifecycle.command.set(None);
@@ -1168,85 +1168,27 @@ impl WorkflowController {
         scope_changed
     }
 
-    pub(crate) fn accept_streamed_state(self, state: WorkflowSnapshot, studio: Studio) {
-        if self.reconcile_state(state) {
-            studio.refresh_relation_catalog();
-        }
-    }
-
-    fn reconcile_state_command(self, state: WorkflowSnapshot, requested_scope_id: &str) -> bool {
-        if self.document.server.peek().scope_id() != requested_scope_id
-            || state.scope_id() != requested_scope_id
-        {
-            return false;
-        }
-        self.reconcile_state(state);
-        true
-    }
-
     fn finish_command(mut self, requested_scope_id: &str) {
         if self.document.server.peek().scope_id() == requested_scope_id {
             self.lifecycle.command.set(None);
         }
     }
 
-    fn reconcile_state_bootstrap(
-        self,
-        state: WorkflowSnapshot,
-        requested_scope_id: &str,
-    ) -> Option<bool> {
-        let current = self.document.server.peek();
-        if current.scope_id() != requested_scope_id && state.scope_id() != current.scope_id() {
-            return None;
-        }
-        drop(current);
-        Some(self.reconcile_state(state))
-    }
-
-    fn reconcile_agent(mut self, state: WorkflowAgentSnapshot) {
+    fn accept_fetched_agent(mut self, state: WorkflowAgentSnapshot) {
         let current = self.assistant.agent.peek();
-        if !current.accepts_streamed(&state) {
+        if !current.accepts_fetched(&state) {
             return;
         }
+        let changed = *current != state;
         drop(current);
+        if !changed {
+            self.assistant.agent_loaded.set(true);
+            self.assistant.agent_error.set(None);
+            return;
+        }
         self.assistant.agent.set(state);
         self.assistant.agent_loaded.set(true);
         self.assistant.agent_error.set(None);
-    }
-
-    pub(crate) fn accept_streamed_agent(self, state: WorkflowAgentSnapshot) {
-        self.reconcile_agent(state);
-    }
-
-    fn reconcile_agent_command(
-        self,
-        state: WorkflowAgentSnapshot,
-        requested_scope_id: &str,
-    ) -> bool {
-        if !self
-            .assistant
-            .agent
-            .peek()
-            .accepts_command_response(&state, requested_scope_id)
-        {
-            // A command issued before a project reload cannot replace the
-            // authoritative state from the newer server scope when its HTTP
-            // response arrives late.
-            return false;
-        }
-        self.reconcile_agent(state);
-        true
-    }
-
-    fn reconcile_agent_bootstrap(self, state: WorkflowAgentSnapshot, requested_scope_id: &str) {
-        let current = self.assistant.agent.peek();
-        if !current.accepts_bootstrap(&state, requested_scope_id) {
-            // A slower GET from the prior project/import scope must not replace
-            // a newer authoritative scope already delivered over SSE.
-            return;
-        }
-        drop(current);
-        self.reconcile_agent(state);
     }
 
     fn sync_graph(mut self) {
@@ -1335,36 +1277,12 @@ impl WorkflowArtifactNavigation for WorkflowAgentArtifactReceipt {
 }
 
 trait WorkflowAgentReconciliation {
-    fn accepts_streamed(&self, incoming: &WorkflowAgentSnapshot) -> bool;
-    fn accepts_command_response(
-        &self,
-        incoming: &WorkflowAgentSnapshot,
-        requested_scope_id: &str,
-    ) -> bool;
-    fn accepts_bootstrap(&self, incoming: &WorkflowAgentSnapshot, requested_scope_id: &str)
-    -> bool;
+    fn accepts_fetched(&self, incoming: &WorkflowAgentSnapshot) -> bool;
 }
-
 impl WorkflowAgentReconciliation for WorkflowAgentSnapshot {
-    fn accepts_streamed(&self, incoming: &WorkflowAgentSnapshot) -> bool {
+    fn accepts_fetched(&self, incoming: &WorkflowAgentSnapshot) -> bool {
         incoming.session().workflow_id() == self.session().workflow_id()
             && (incoming.scope_id() != self.scope_id() || incoming.revision() >= self.revision())
-    }
-
-    fn accepts_command_response(
-        &self,
-        incoming: &WorkflowAgentSnapshot,
-        requested_scope_id: &str,
-    ) -> bool {
-        self.scope_id() == requested_scope_id && incoming.scope_id() == requested_scope_id
-    }
-
-    fn accepts_bootstrap(
-        &self,
-        incoming: &WorkflowAgentSnapshot,
-        requested_scope_id: &str,
-    ) -> bool {
-        self.scope_id() == requested_scope_id || incoming.scope_id() == self.scope_id()
     }
 }
 
@@ -2430,7 +2348,7 @@ mod tests {
     }
 
     #[test]
-    fn slower_bootstrap_response_cannot_regress_newer_sse_state() {
+    fn fetched_workflow_revisions_do_not_regress() {
         let mut current = WorkflowSnapshot::default();
         current.set_scope_id("project-a-scope");
         current.workflow_mut().set_revision(2);
@@ -2461,32 +2379,26 @@ mod tests {
     }
 
     #[test]
-    fn slower_agent_bootstrap_cannot_regress_streamed_history() {
+    fn fetched_agent_history_rejects_revision_regression() {
         let mut current = WorkflowAgentSnapshot::default();
         current.set_scope_id("project-a-scope");
         current.set_revision(8);
         let mut stale = current.clone();
         stale.set_revision(7);
-        assert!(!current.accepts_streamed(&stale));
+        assert!(!current.accepts_fetched(&stale));
         let mut next = current.clone();
         next.set_revision(9);
-        assert!(current.accepts_streamed(&next));
+        assert!(current.accepts_fetched(&next));
         next.session_mut().set_workflow_id("other");
-        assert!(!current.accepts_streamed(&next));
+        assert!(!current.accepts_fetched(&next));
 
         let mut project_b = current.clone();
         project_b.set_scope_id("project-b-scope");
         project_b.set_revision(1);
         assert!(
-            current.accepts_streamed(&project_b),
+            current.accepts_fetched(&project_b),
             "a new project scope owns an independent revision sequence"
         );
-        assert!(!project_b.accepts_bootstrap(&current, "project-a-scope"));
-        assert!(project_b.accepts_bootstrap(&project_b, "project-a-scope"));
-        let mut command_response = current.clone();
-        command_response.set_revision(command_response.revision() + 1);
-        assert!(current.accepts_command_response(&command_response, "project-a-scope"));
-        assert!(!project_b.accepts_command_response(&command_response, "project-a-scope"));
     }
 
     #[test]
@@ -2633,5 +2545,18 @@ mod tests {
             .snapshot_mut()
             .set_updated_ms(current.snapshot().updated_ms());
         assert!(!current.snapshot().accepts(late_cancel.snapshot()));
+    }
+    #[test]
+    fn a_save_receipt_waits_for_the_fetched_revision_and_preserves_later_edits() {
+        let submitted = WorkflowSpec::new("workflow", "submitted").with_revision(2);
+        let receipt = WorkflowSaveReceipt {
+            submitted: submitted.clone(),
+            revision: 3,
+        };
+        assert!(!receipt.acknowledges(&submitted, &submitted));
+        let fetched = submitted.clone().with_revision(3);
+        assert!(receipt.acknowledges(&submitted, &fetched));
+        let edited = WorkflowSpec::new("workflow", "edited during save").with_revision(2);
+        assert!(!receipt.acknowledges(&edited, &fetched));
     }
 }

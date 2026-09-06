@@ -6,6 +6,7 @@
 //! entry.
 
 use crate::client::project::ProjectClient;
+use crate::client::queries::{QueryDomain, QueryPolicy, QueryRefresh};
 use std::sync::Arc;
 
 use dioxus::prelude::*;
@@ -13,7 +14,7 @@ use spiral_robotics_common::identity::DatasetId;
 use spiral_robotics_common::recording::{DatasetSummary, EpisodeInfo, EpisodeListItem};
 
 use crate::activities::data::catalog::ManagedTable;
-use crate::activities::data::dataset_catalog::{DatasetCatalogState, DatasetLoadRequest};
+use crate::activities::data::dataset_catalog::DatasetCatalogState;
 use crate::activities::data::query_result::{
     DEFAULT_QUERY_ROWS, QueryExecutionPresentation, QueryState, QueryTab,
 };
@@ -55,7 +56,6 @@ struct EpisodeCatalogState {
     loading: bool,
     loaded: bool,
     error: Option<String>,
-    request_sequence: u64,
 }
 
 /// One catalog record and the full data loaded for that same stable identity.
@@ -326,10 +326,6 @@ impl DataController {
         self.dataset_catalog.read().loading()
     }
 
-    pub(crate) fn datasets_loaded(&self) -> bool {
-        self.dataset_catalog.read().loaded()
-    }
-
     pub(crate) fn dataset_catalog_error(&self) -> Option<crate::client::CommandError> {
         self.dataset_catalog.read().error().cloned()
     }
@@ -364,168 +360,103 @@ impl DataController {
         }
     }
 
-    /// Called reactively by any dataset consumer. The session-owned request
-    /// survives navigation, and failure consumes this session's automatic attempt.
-    pub(crate) fn request_datasets(self) {
-        self.spawn_dataset_load(DatasetLoadRequest::Automatic);
-    }
-
-    pub(crate) fn retry_datasets(self) {
-        self.spawn_dataset_load(DatasetLoadRequest::Reload);
-    }
-
-    fn spawn_dataset_load(self, request: DatasetLoadRequest) {
-        if self.begin_dataset_load(request) {
-            ProjectClient::current().spawn(async move {
-                // The shared selector feedback owns background and Retry errors.
-                let _ = self.fetch_datasets().await;
-            });
-        }
-    }
-
-    fn begin_dataset_load(mut self, request: DatasetLoadRequest) -> bool {
-        let available = crate::shell::project::ProjectSessionSignals::current().storage_available();
-        // Subscribe before claiming, and never write when no request is admitted:
-        // a no-op write would reschedule the consumer's effect indefinitely.
-        if !self.dataset_catalog.read().can_request(request, available) {
-            return false;
-        }
-        self.dataset_catalog.write().begin(request, available)
-    }
-
-    async fn fetch_datasets(mut self) -> Result<(), String> {
-        let result = ProjectClient::current().list_datasets().await;
-        self.dataset_catalog.write().finish(result)
-    }
-
-    /// Replace one dataset's episode catalog while retaining full data only
-    /// when the stable episode identity and persisted frame count still match.
-    pub(crate) async fn load_episodes(mut self, dataset_id: String) -> Result<(), String> {
-        let dataset_id = DatasetId::try_from(dataset_id.as_str())
-            .map(String::from)
-            .map_err(|_| "Could not load episodes: the dataset ID is invalid.".to_owned())?;
-        let request_sequence = {
-            let mut catalog = self.episode_catalog.write();
-            catalog.request_sequence += 1;
-            if catalog.dataset_id.as_deref() != Some(dataset_id.as_str()) {
-                catalog.dataset_id = Some(dataset_id.clone());
-                catalog.episodes.clear();
-                catalog.issues.clear();
-                catalog.loaded = false;
+    /// Both catalogs are fetched by the session, independent of which activity
+    /// is mounted. Mutations and Retry invalidate these same query owners.
+    pub(crate) fn use_polling(mut self, studio: Studio) {
+        let sessions = crate::shell::project::ProjectSessionSignals::current();
+        let datasets = QueryPolicy::new(QueryDomain::Data, 5_000).use_when(
+            move || sessions.storage_available(),
+            || ProjectClient::current().list_datasets(),
+        );
+        use_effect(move || {
+            let result = datasets.read();
+            let pending = *datasets.state().read() == UseResourceState::Pending;
+            if pending {
+                self.dataset_catalog.write().pending();
+            } else if let Some(result) = result.as_ref() {
+                self.dataset_catalog.write().accept(result.clone());
             }
-            catalog.loading = true;
-            catalog.error = None;
-            catalog.request_sequence
-        };
-        match ProjectClient::current()
-            .list_episodes(dataset_id.clone())
-            .await
-            .map_err(|error| error.to_string())
-        {
-            Ok((episodes, issues)) => {
-                let mut catalog = self.episode_catalog.write();
-                if catalog.request_sequence != request_sequence
-                    || catalog.dataset_id.as_deref() != Some(dataset_id.as_str())
-                {
-                    return Ok(());
-                }
-                let previous = std::mem::take(&mut catalog.episodes);
-                let entries = episodes
-                    .into_iter()
-                    .map(|summary| {
-                        if let Some(entry) = previous
-                            .iter()
-                            .find(|entry| entry.summary.id() == summary.id())
-                            .cloned()
-                        {
-                            entry.replace_summary(summary)
-                        } else {
-                            EpisodeEntry::new(summary)
-                        }
-                    })
-                    .collect();
-                catalog.episodes = entries;
-                catalog.issues = issues;
-                catalog.loading = false;
-                catalog.loaded = true;
-                drop(catalog);
-                if self.selected_episode.peek().is_some() {
-                    self.episode_loader.restart();
-                }
-                Ok(())
+        });
+        let episodes = QueryPolicy::new(QueryDomain::Data, 5_000).use_when(move || sessions.storage_available(), move || {
+            let dataset = studio.selected_dataset().read().to_owned();
+            async move {
+                let dataset = DatasetId::try_from(dataset.as_str()).map(String::from)
+                    .map_err(|error| crate::client::CommandError::new(spiral_robotics_common::command_failure::CommandFailureCode::InvalidInput, error.to_string()))?;
+                let result = ProjectClient::current().list_episodes(dataset.clone()).await?;
+                Ok::<_, crate::client::CommandError>((dataset, result))
             }
-            Err(error) => {
-                let mut catalog = self.episode_catalog.write();
-                if catalog.request_sequence != request_sequence
-                    || catalog.dataset_id.as_deref() != Some(dataset_id.as_str())
-                {
-                    return Ok(());
-                }
-                catalog.loading = false;
-                catalog.error = Some(error.clone());
-                Err(format!(
-                    "Could not load episodes for dataset {dataset_id}: {error}"
-                ))
+        });
+        use_effect(move || {
+            let result = episodes.read();
+            let pending = *episodes.state().read() == UseResourceState::Pending;
+            let dataset = studio.selected_dataset().read().to_owned();
+            if self.episode_catalog.peek().dataset_id.as_deref() != Some(&dataset) {
+                self.episode_catalog.set(EpisodeCatalogState {
+                    dataset_id: Some(dataset.clone()),
+                    ..Default::default()
+                });
             }
-        }
+            if pending {
+                self.episode_catalog.write().loading = true;
+            } else {
+                match result.as_ref() {
+                    Some(Ok((loaded_dataset, (entries, issues)))) if loaded_dataset == &dataset => {
+                        self.accept_episodes(entries.clone(), issues.clone());
+                    }
+                    Some(Err(error)) => {
+                        let mut catalog = self.episode_catalog.write();
+                        catalog.loading = false;
+                        catalog.error = Some(error.to_string());
+                    }
+                    _ => {}
+                }
+            }
+        });
     }
 
-    pub(crate) async fn reload_dataset(self, dataset_id: String) -> Result<(), String> {
-        if !self.begin_dataset_load(DatasetLoadRequest::Reload) {
-            return Err(
-                "Wait for the project and the current dataset request before reloading.".to_owned(),
-            );
-        }
-        self.fetch_datasets().await?;
-        self.load_episodes(dataset_id).await
-    }
-
-    /// Apply the authoritative response from a known episode mutation.
-    pub(crate) fn upsert_episode(mut self, info: EpisodeInfo) {
-        let summary = EpisodeListItem::from(&info);
-        if self.episode_catalog.peek().dataset_id.as_deref() != Some(summary.dataset_id()) {
-            return;
-        }
-        let selected = self.selected_episode.peek().as_deref() == Some(summary.id());
+    fn accept_episodes(mut self, episodes: Vec<EpisodeListItem>, issues: Vec<String>) {
         let mut catalog = self.episode_catalog.write();
-        if let Some(index) = catalog
+        let changed = !catalog
             .episodes
             .iter()
-            .position(|entry| entry.summary.id() == summary.id())
-        {
-            let existing = catalog.episodes.remove(index);
-            catalog.episodes.push(existing.replace_summary(summary));
-        } else {
-            catalog.episodes.push(EpisodeEntry::new(summary));
-        }
-        catalog.episodes.sort_by(|left, right| {
-            left.summary
-                .started_ms()
-                .cmp(&right.summary.started_ms())
-                .then_with(|| left.summary.id().cmp(right.summary.id()))
-        });
+            .map(|entry| &entry.summary)
+            .eq(episodes.iter());
+        let previous = std::mem::take(&mut catalog.episodes);
+        catalog.episodes = episodes
+            .into_iter()
+            .map(|summary| {
+                previous
+                    .iter()
+                    .find(|entry| entry.summary.id() == summary.id())
+                    .cloned()
+                    .map_or_else(
+                        || EpisodeEntry::new(summary.clone()),
+                        |entry| entry.replace_summary(summary.clone()),
+                    )
+            })
+            .collect();
+        catalog.issues = issues;
+        catalog.loading = false;
+        catalog.loaded = true;
+        catalog.error = None;
         drop(catalog);
-        if selected {
+        if changed && self.selected_episode.peek().is_some() {
             self.episode_loader.restart();
         }
     }
 
-    pub(crate) fn remove_episode(mut self, episode: &str) {
-        self.episode_catalog
-            .write()
-            .episodes
-            .retain(|entry| entry.summary.id() != episode);
+    pub(crate) fn retry_datasets(self) {
+        QueryRefresh::current().invalidate(&[QueryDomain::Data]);
     }
 
-    // Dataset failures belong to the session and must survive ordinary settings
-    // saves. A successful project replacement remounts the whole controller.
-    pub(crate) fn invalidate_episode_catalog(mut self) {
-        let mut episodes = self.episode_catalog.write();
-        episodes.request_sequence += 1;
-        episodes.loading = false;
-        episodes.loaded = false;
-        episodes.error = None;
-        episodes.issues.clear();
+    pub(crate) async fn reload_dataset(self, dataset_id: String) -> Result<(), String> {
+        DatasetId::try_from(dataset_id.as_str()).map_err(|error| error.to_string())?;
+        self.invalidate_episode_catalog();
+        Ok(())
+    }
+
+    pub(crate) fn invalidate_episode_catalog(self) {
+        QueryRefresh::current().invalidate(&[QueryDomain::Data]);
     }
 
     fn sync_dataset(mut self, namespace: &str, dataset_id: &str) {

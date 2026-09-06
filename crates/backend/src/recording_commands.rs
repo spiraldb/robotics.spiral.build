@@ -560,7 +560,7 @@ impl RecordingCommands {
         let commands = self.clone();
         let activity = commands.state.admit()?;
         self.main_runtime
-            .execute(async move {
+            .read(async move {
                 let _activity = activity;
                 commands.require_storage_ready()?;
                 commands
@@ -580,7 +580,7 @@ impl RecordingCommands {
         let commands = self.clone();
         let activity = commands.state.admit()?;
         self.main_runtime
-            .execute(async move {
+            .read(async move {
                 let _activity = activity;
                 commands.require_storage_ready()?;
                 // A paused take has a readable SpiralDB checkpoint. Hide its catalog row

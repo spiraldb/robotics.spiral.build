@@ -68,6 +68,8 @@ struct SettingsPanelState {
 #[derive(Clone, Copy)]
 struct SettingsDraftSignals {
     current: Signal<DataSettings>,
+    base: Signal<DataSettings>,
+    saved: Signal<Option<DataSettings>>,
     client_secret: Signal<String>,
     section: Signal<SettingsSection>,
 }
@@ -92,6 +94,11 @@ impl SettingsPanelState {
     fn use_state(initial: DataSettings, section: SettingsSection) -> Self {
         Self {
             draft: SettingsDraftSignals {
+                base: use_signal({
+                    let initial = initial.clone();
+                    move || initial
+                }),
+                saved: use_signal(|| None),
                 current: use_signal(move || initial),
                 client_secret: use_signal(String::new),
                 section: use_signal(move || section),
@@ -134,6 +141,8 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
         draft:
             SettingsDraftSignals {
                 mut current,
+                mut base,
+                mut saved,
                 mut client_secret,
                 mut section,
             },
@@ -163,11 +172,25 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
     });
 
     use_effect(use_reactive((&initial,), move |(initial,)| {
+        let acknowledged = saved();
+        let busy = saving() || transferring_project();
         if let Some(settings) = initial
-            && !saving.peek().to_owned()
-            && !transferring_project.peek().to_owned()
+            && !busy
+            && *base.peek() != settings
         {
-            current.set(settings);
+            let unchanged = *current.peek() == *base.peek();
+            let saved_draft = acknowledged
+                .as_ref()
+                .is_some_and(|submitted| submitted == &*current.peek());
+            if (unchanged || saved_draft) && *current.peek() != settings {
+                current.set(settings.clone());
+            }
+            if *base.peek() != settings {
+                base.set(settings);
+            }
+            if acknowledged.is_some() {
+                saved.set(None);
+            }
         }
     }));
 
@@ -178,6 +201,9 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
         save_error.set(None);
         saving.set(true);
         on_busy_change.call(true);
+        let submitted = current();
+        let destination_changed =
+            submitted.spiral() != base.peek().spiral() || !client_secret.peek().is_empty();
         let connection = SpiralConnectionUpdate::new(
             current().spiral().endpoint(),
             current().spiral().spfs_endpoint(),
@@ -195,11 +221,12 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
                 .update_data_settings(connection, training, video)
                 .await
             {
-                Ok(settings) => {
-                    current.set(settings);
+                Ok(_) => {
+                    saved.set(Some(submitted));
                     client_secret.set(String::new());
                     on_saved.call(());
-                    if let Some(connection_test) = connection_test {
+                    if let Some(connection_test) = connection_test.filter(|_| !destination_changed)
+                    {
                         testing.set(true);
                         test_result.set(None);
                         let result = match connection_test {
@@ -482,10 +509,7 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
                                     .map_err(|error| error.to_string())?;
                                 data.set_selected_episode(None);
                                 data.invalidate_episode_catalog();
-                                let settings = ProjectClient::current().data_settings()
-                                    .await
-                                    .map_err(|error| error.to_string())?;
-                                Ok::<_, String>((result, settings))
+                                Ok::<_, String>(result)
                             })
                             .await
                         else {
@@ -493,8 +517,7 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
                             return;
                         };
                         match outcome {
-                            Ok((result, settings)) => {
-                                current.set(settings);
+                            Ok(result) => {
                                 on_saved.call(());
                                 pending_project_file.set(None);
                                 project_transfer_error.set(None);

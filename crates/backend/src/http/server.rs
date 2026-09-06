@@ -25,7 +25,7 @@ use tracing_subscriber::EnvFilter;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-/// Browser event streams are intentionally long lived, so graceful draining
+/// Camera streams are intentionally long lived, so graceful draining
 /// gets a short deadline instead of being allowed to hold process exit open.
 const SERVER_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(750);
 /// Motor and camera cleanup normally completes within one control/frame cycle;
@@ -302,7 +302,7 @@ impl ServerStartup {
         let workflow_commands = WorkflowCommands::new(main_runtime.clone(), state.clone());
         let recording_commands = RecordingCommands::new(main_runtime.clone(), state.clone());
         let device_commands = DeviceCommands::new(main_runtime.clone(), state.clone());
-        let data_commands = DataCommands::new(main_runtime, state.clone());
+        let data_commands = DataCommands::new(main_runtime.clone(), state.clone());
         let listener = tokio::net::TcpListener::bind(bind).await?;
         let address = listener.local_addr()?;
 
@@ -320,7 +320,11 @@ impl ServerStartup {
         // Dioxus 0.7.10's server-only extractors read the request context;
         // ServeConfig context providers are installed only in the SSR VirtualDom.
         let app = dioxus::server::router(app)
-            .nest("/api", state.api_router())
+            .nest("/api", state.clone().api_router())
+            .layer(axum::Extension(crate::ProjectQueries::new(
+                state.clone(),
+                main_runtime.clone(),
+            )))
             .layer(axum::Extension(training_rollout_commands))
             .layer(axum::Extension(workflow_commands))
             .layer(axum::Extension(recording_commands))
@@ -330,7 +334,7 @@ impl ServerStartup {
 
         // Both the server and this task observe the same edge. The server begins
         // graceful draining immediately; this task enforces a deadline because
-        // SSE connections are designed not to finish on their own.
+        // Camera connections are designed not to finish on their own.
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let signal_task = tokio::spawn(ShutdownSignal::listen(shutdown_tx));
         let server_result = {

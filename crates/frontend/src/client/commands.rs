@@ -103,7 +103,7 @@ impl Studio {
                 .stop_recording(completion.keep)
                 .await
                 .map_err(|error| error.to_string())?;
-            completion.data.upsert_episode(summary.clone());
+            completion.data.invalidate_episode_catalog();
             if completion.keep {
                 studio.report_episode_success(
                     format!(

@@ -569,7 +569,7 @@ It produces one atomic **Activity Projection**:
 Workbench intent ──────┐
 Timeline action ───────┼──→ Activity Controller ──→ Activity Projection
 Panel focus intent ────┤                                  ├── Primary visualization
-Backend event ─────────┘                                  ├── Camera panels
+Fetched backend state ─┘                                  ├── Camera panels
                                                           ├── Signal lanes
                                                           └── Timeline or inference evidence
 ```
@@ -690,7 +690,7 @@ explicit no-episode context`.
 
 **Apply and run a Workflow:** `Node inspector edits → revision-checked Apply →
 Workflow backend → optional pinned SigLIP feature-cache backfill → read-only Query →
-run/cancel snapshot events → reconciled Canvas + bounded media-aware Results`,
+refetched run/cancel state → Canvas + bounded media-aware Results`,
 while browser-owned node geometry and panel focus remain stable. The controlled
 Add/Remove model actions rewrite the Table→Query lineage and placeholder as one
 topology change; they never expose arbitrary graph editing.
@@ -698,10 +698,9 @@ topology change; they never expose arbitrary graph editing.
 **Ask the Workflow Assistant:** `Composer → backend-owned provider turn →
 relation/model inspection → read-only SQL candidate definition → validated
 graph save → optional Workflow run → bounded query inspection → durable thread
-+ named agent SSE`. The selected conversation alone supplies provider context;
++ fetched Assistant state`. The selected conversation alone supplies provider context;
 server-scoped create/select changes conversation state without changing the
-Workflow graph or run. Text and compact tool summaries stream in the Assistant
-lane. When a run exceeds the bounded
+Workflow graph or run. The Assistant lane periodically fetches text and compact tool summaries. When a run exceeds the bounded
 wait, the backend publishes its terminal state, appends a synthetic completion,
 and resumes the same turn. Saved canvas state, run snapshots, and Results are
 authoritative throughout; Assistant activity never creates a browser-local
@@ -1006,7 +1005,7 @@ This is the signature component system.
   strip avoid a duplicate evidence surface.
 - **Focus, history, and reload:** Pointer selection or Enter/Space from a focused
   node opens the Node inspector; initial rendering leaves Assistant active.
-  Workflow and `workflow_agent` SSE/reconnect updates preserve node geometry and
+  Workflow and Assistant query refreshes preserve node geometry and
   never steal panel focus. The backend persists bounded Assistant conversations
   and tool summaries as one server-owned schema-v2 envelope in the active Spiral
   project; only the selected conversation is provider context, while
@@ -1178,14 +1177,12 @@ ambient browser selection—decides whether execution may begin.
 - **One storage layer:** Episodes remain one newest-first SpiralDB ledger. No
   location grouping, publication badge, Push action, retry queue, or local
   fallback appears because there is no second durable store to reconcile.
-- **Catalog refresh:** The Data Activity Controller loads Episodes when Data
-  first opens and retains them across route changes. Known recording, deletion,
-  and import results update the controller-owned catalog; one compact Refresh
-  action in the Episodes header explicitly reloads the catalog and catalog
-  issues in one request. Each `EpisodeInfo` entry owns its
-  unloaded/loading/ready/failed full-data state, so inspection and playback use
-  the attached episode data instead of a second Data cache. None uses
-  polling or the live event stream.
+- **Catalog refresh:** The session owns one fetched dataset catalog and one
+  fetched episode catalog for the selected dataset. They refresh every five
+  seconds, on Retry/Refresh, and after recording, deletion, and import commands.
+  Command responses never insert or remove catalog rows. Each episode entry
+  caches its immutable full data; a changed frame count invalidates that cache.
+  Query failures retain the last successful rows and the user's selection.
 - **Form decision:** This is an incumbent-surface extension, exempt from a
   concept roll because the operator explicitly retained the existing ordered
   episode list and rejected location grouping or a new ingestion composition.

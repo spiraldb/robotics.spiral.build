@@ -1,4 +1,4 @@
-//! Backend-owned Workflow agent, tool loop, durable session, and SSE state.
+//! Backend-owned Workflow agent, tool loop, durable session, and query state.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,7 +18,6 @@ use spiral_robotics_common::workflow::{
     WorkflowAgentSnapshot, WorkflowAgentToolPhase, WorkflowAgentToolSummary, WorkflowCommand,
     WorkflowNodeConfig, WorkflowRunPhase, WorkflowSpec,
 };
-use tokio::sync::broadcast;
 
 use crate::workflow::manager::WorkflowManager;
 use crate::workflow::provider::{
@@ -56,7 +55,6 @@ struct WorkflowAgentInner {
     scope_id: Mutex<String>,
     document: Mutex<AgentDocument>,
     turn: AgentTurnState,
-    updates: broadcast::Sender<()>,
 }
 
 struct AgentTurnState {
@@ -547,7 +545,6 @@ impl WorkflowAgentManager {
                 (None, ProviderReadiness::public(false))
             }
         };
-        let (updates, _) = broadcast::channel(128);
         Self {
             inner: Arc::new(WorkflowAgentInner {
                 services: WorkflowAgentServices {
@@ -564,7 +561,6 @@ impl WorkflowAgentManager {
                     mutation: tokio::sync::Mutex::new(()),
                     recovery_pending: AtomicBool::new(false),
                 },
-                updates,
             }),
         }
     }
@@ -581,7 +577,6 @@ impl WorkflowAgentManager {
             .turn
             .recovery_pending
             .store(rewrite, Ordering::SeqCst);
-        self.publish();
         Ok(())
     }
 
@@ -618,12 +613,6 @@ impl WorkflowAgentManager {
 
     pub(crate) fn is_active(&self) -> bool {
         self.inner.turn.active.recover_lock().is_some()
-    }
-
-    pub(crate) fn subscription(&self) -> (WorkflowAgentSnapshot, broadcast::Receiver<()>) {
-        let document = self.inner.document.recover_lock();
-        let updates = self.inner.updates.subscribe();
-        (self.state_for(&document), updates)
     }
 
     pub(crate) async fn command(
@@ -702,7 +691,6 @@ impl WorkflowAgentManager {
             .map_err(OperationError::External)?;
         let state = self.state_for(&candidate);
         *self.inner.document.recover_lock() = candidate;
-        self.publish();
         Ok(state)
     }
 
@@ -742,7 +730,6 @@ impl WorkflowAgentManager {
             .map_err(OperationError::External)?;
         let state = self.state_for(&candidate);
         *self.inner.document.recover_lock() = candidate;
-        self.publish();
         Ok(state)
     }
 
@@ -937,7 +924,6 @@ impl WorkflowAgentManager {
                 owned_run_id: owned_run_id.clone(),
                 task: None,
             });
-            self.publish();
             let manager = self.clone();
             let task_conversation_id = conversation_id.clone();
             let task_turn_id = turn_id.clone();
@@ -1013,7 +999,6 @@ impl WorkflowAgentManager {
                 }
             }
         }
-        self.publish();
         self.cancel_owned_run(&owned_run_id).await;
         if let Some(task) = task {
             let _ = task.await;
@@ -1446,7 +1431,6 @@ impl WorkflowAgentManager {
         }
         let _ = document.bump_conversation(conversation_id);
         drop(document);
-        self.publish();
     }
 
     async fn record_provider_response(
@@ -1512,7 +1496,6 @@ impl WorkflowAgentManager {
         ));
         document.bump_conversation(conversation_id)?;
         drop(document);
-        self.publish();
         Ok(())
     }
 
@@ -1529,7 +1512,6 @@ impl WorkflowAgentManager {
             .with_completed_tool(identity, completion)?;
         self.persist_document(&candidate).await?;
         *self.inner.document.recover_lock() = candidate;
-        self.publish();
         Ok(())
     }
 
@@ -1624,7 +1606,6 @@ impl WorkflowAgentManager {
         // live document is never left with an inactive orphaned tool exchange.
         *self.inner.document.recover_lock() = candidate;
         *self.inner.turn.active.recover_lock() = None;
-        self.publish();
     }
 
     async fn mark_waiting(&self, identity: TurnIdentity<'_>, run_id: &str) -> Result<(), String> {
@@ -1644,7 +1625,6 @@ impl WorkflowAgentManager {
         candidate.bump_conversation(identity.conversation_id)?;
         self.persist_document(&candidate).await?;
         *self.inner.document.recover_lock() = candidate;
-        self.publish();
         Ok(())
     }
 
@@ -1689,10 +1669,6 @@ impl WorkflowAgentManager {
             .storage
             .save_workflow_agent_document(&document.persisted()?)
             .await
-    }
-
-    fn publish(&self) {
-        let _ = self.inner.updates.send(());
     }
 }
 

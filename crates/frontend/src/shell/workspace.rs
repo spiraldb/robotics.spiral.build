@@ -1,5 +1,6 @@
 //! Reactive assembly of the persisted frontend panel workspace.
 
+use crate::panels::timeline::panel::RecordingTimeline;
 use std::sync::Arc;
 
 use dioxus::prelude::*;

@@ -1,0 +1,343 @@
+//! Shared lifecycle for fetched state: scoped cancellation, invalidation,
+//! deadlines, and completion-based polling. Timers never cancel a slow read.
+use super::CommandError;
+use dioxus::prelude::*;
+use std::future::Future;
+
+#[derive(Clone, Copy)]
+pub(crate) enum QueryDomain {
+    Project,
+    Setup,
+    Telemetry,
+    Recording,
+    Training,
+    Rollout,
+    Workflow,
+    Assistant,
+    Settings,
+    Catalog,
+    Data,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct QueryRefresh {
+    revisions: [Signal<u64>; 11],
+}
+impl QueryRefresh {
+    pub(crate) fn use_provider() -> Self {
+        use_context_provider(|| Self {
+            revisions: std::array::from_fn(|_| Signal::new(0)),
+        })
+    }
+    pub(crate) fn current() -> Self {
+        consume_context()
+    }
+    pub(crate) fn invalidate(self, domains: &[QueryDomain]) {
+        for domain in domains {
+            let mut revision = self.revisions[*domain as usize];
+            let next = *revision.peek() + 1;
+            revision.set(next);
+        }
+    }
+    fn revision(self, domain: QueryDomain) -> Signal<u64> {
+        self.revisions[domain as usize]
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct QueryPolicy {
+    domain: QueryDomain,
+    #[cfg_attr(not(all(feature = "web", target_arch = "wasm32")), allow(dead_code))]
+    interval_ms: u32,
+    #[cfg_attr(not(all(feature = "web", target_arch = "wasm32")), allow(dead_code))]
+    active: Option<ReadSignal<bool>>,
+}
+impl QueryPolicy {
+    pub(crate) const fn new(domain: QueryDomain, interval_ms: u32) -> Self {
+        Self {
+            domain,
+            interval_ms,
+            active: None,
+        }
+    }
+
+    /// Background jobs refresh quickly while active and slow down when idle.
+    /// The timer reads this flag without restarting an in-flight request.
+    pub(crate) fn with_activity(mut self, active: ReadSignal<bool>) -> Self {
+        self.active = Some(active);
+        self
+    }
+
+    /// Reactive inputs and command invalidations cancel obsolete reads. A timer
+    /// waits for completion before starting its delay, so requests never pile up.
+    pub(crate) fn use_resource<
+        T: 'static,
+        E: From<CommandError> + 'static,
+        F: Future<Output = Result<T, E>> + 'static,
+    >(
+        self,
+        fetch: impl FnMut() -> F + 'static,
+    ) -> Resource<Result<T, E>> {
+        self.use_when(|| true, fetch)
+    }
+
+    pub(crate) fn use_when<
+        T: 'static,
+        E: From<CommandError> + 'static,
+        F: Future<Output = Result<T, E>> + 'static,
+    >(
+        self,
+        mut available: impl FnMut() -> bool + 'static,
+        mut fetch: impl FnMut() -> F + 'static,
+    ) -> Resource<Result<T, E>> {
+        let revision = QueryRefresh::current().revision(self.domain);
+        let resource = use_resource(move || {
+            let _ = revision();
+            let enabled = available();
+            let request = fetch();
+            async move {
+                if !enabled {
+                    return std::future::pending().await;
+                }
+                Self::with_deadline(request).await
+            }
+        });
+        #[cfg(all(feature = "web", target_arch = "wasm32"))]
+        self.use_timer(resource, gloo_timers::future::TimeoutFuture::new);
+        resource
+    }
+
+    #[cfg(any(test, all(feature = "web", target_arch = "wasm32")))]
+    fn use_timer<T: 'static, E: 'static, Delay: Future<Output = ()> + 'static>(
+        self,
+        mut resource: Resource<Result<T, E>>,
+        mut delay: impl FnMut(u32) -> Delay + 'static,
+    ) {
+        // This timer depends on the read's lifecycle. Restarting a read cancels
+        // its old timer; completing it starts a new delay. Neither a slow read
+        // nor a paused resource has a running refresh timer.
+        use_resource(move || {
+            let ready = *resource.state().read() == UseResourceState::Ready;
+            let completed_task = resource.task();
+            let active = self.active.is_none_or(|active| *active.read());
+            let normal_interval = if active {
+                self.interval_ms
+            } else {
+                self.interval_ms.max(5_000)
+            };
+            let failed = resource.peek().as_ref().is_some_and(Result::is_err);
+            #[cfg(all(feature = "web", target_arch = "wasm32"))]
+            let hidden = web_sys::window()
+                .and_then(|window| window.document())
+                .is_some_and(|document| document.hidden());
+            #[cfg(not(all(feature = "web", target_arch = "wasm32")))]
+            let hidden = false;
+            let interval = normal_interval.max(if hidden {
+                5_000
+            } else if failed {
+                1_000
+            } else {
+                0
+            });
+            let timer = ready.then(|| delay(interval));
+            async move {
+                if let Some(timer) = timer {
+                    timer.await;
+                    if resource.finished() && resource.task() == completed_task {
+                        resource.restart();
+                    }
+                }
+            }
+        });
+    }
+
+    async fn with_deadline<T, E: From<CommandError>>(
+        request: impl Future<Output = Result<T, E>>,
+    ) -> Result<T, E> {
+        #[cfg(all(feature = "web", target_arch = "wasm32"))]
+        {
+            use futures_util::future::{Either, select};
+            match select(
+                Box::pin(request),
+                Box::pin(gloo_timers::future::TimeoutFuture::new(10_000)),
+            )
+            .await
+            {
+                Either::Left((result, _)) => result,
+                Either::Right(_) => Err(CommandError::new(
+                    spiral_robotics_common::command_failure::CommandFailureCode::Transport,
+                    "The backend read timed out. Retrying automatically.",
+                )
+                .into()),
+            }
+        }
+        #[cfg(not(all(feature = "web", target_arch = "wasm32")))]
+        request.await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        cell::{Cell, RefCell},
+        rc::Rc,
+        task::{Poll, Waker},
+    };
+
+    #[derive(Default)]
+    struct ControlledRead {
+        answer: Cell<Option<u32>>,
+        waker: RefCell<Option<Waker>>,
+        dropped: Cell<bool>,
+    }
+    impl ControlledRead {
+        fn complete(&self, value: u32) {
+            self.answer.set(Some(value));
+            if let Some(waker) = self.waker.borrow_mut().take() {
+                waker.wake();
+            }
+        }
+    }
+    struct ReadFuture(Rc<ControlledRead>);
+    impl Future for ReadFuture {
+        type Output = Result<u32, CommandError>;
+        fn poll(
+            self: std::pin::Pin<&mut Self>,
+            context: &mut std::task::Context<'_>,
+        ) -> Poll<Self::Output> {
+            if let Some(value) = self.0.answer.get() {
+                Poll::Ready(Ok(value))
+            } else {
+                *self.0.waker.borrow_mut() = Some(context.waker().clone());
+                Poll::Pending
+            }
+        }
+    }
+    impl Drop for ReadFuture {
+        fn drop(&mut self) {
+            self.0.dropped.set(true);
+        }
+    }
+    #[derive(Clone, Default)]
+    struct QueryHarness(Rc<RefCell<QueryObservation>>);
+    #[derive(Default)]
+    struct QueryObservation {
+        refresh: Option<QueryRefresh>,
+        resource: Option<Resource<Result<u32, CommandError>>>,
+        available: Option<Signal<bool>>,
+        reads: Vec<Rc<ControlledRead>>,
+        delays: Vec<Rc<ControlledRead>>,
+    }
+    impl QueryHarness {
+        fn render(self) -> Element {
+            let refresh = QueryRefresh::use_provider();
+            let available = use_signal(|| true);
+            let observations = self.0.clone();
+            let resource = QueryPolicy::new(QueryDomain::Workflow, 500).use_when(
+                move || *available.read(),
+                move || {
+                    let read = Rc::new(ControlledRead::default());
+                    observations.borrow_mut().reads.push(read.clone());
+                    ReadFuture(read)
+                },
+            );
+            let timings = self.0.clone();
+            QueryPolicy::new(QueryDomain::Workflow, 500).use_timer(resource, move |_| {
+                let timer = Rc::new(ControlledRead::default());
+                timings.borrow_mut().delays.push(timer.clone());
+                async move {
+                    let _ = ReadFuture(timer).await;
+                }
+            });
+            {
+                let mut state = self.0.borrow_mut();
+                state.refresh = Some(refresh);
+                state.resource = Some(resource);
+                state.available = Some(available);
+            }
+            rsx! {}
+        }
+        fn refresh(&self) {
+            self.0
+                .borrow()
+                .refresh
+                .unwrap()
+                .invalidate(&[QueryDomain::Workflow]);
+        }
+        fn result(&self) -> Option<Result<u32, CommandError>> {
+            self.0.borrow().resource.unwrap().peek().clone()
+        }
+    }
+
+    #[test]
+    fn invalidation_cancels_the_old_read_and_only_the_new_result_is_visible() {
+        let harness = QueryHarness::default();
+        let mut dom = VirtualDom::new_with_props(QueryHarness::render, harness.clone());
+        dom.rebuild_in_place();
+        dom.render_immediate_to_vec();
+        let old = harness.0.borrow().reads[0].clone();
+        dom.in_runtime(|| harness.refresh());
+        dom.render_immediate_to_vec();
+        assert!(old.dropped.get());
+        let new = harness.0.borrow().reads.last().unwrap().clone();
+        assert!(!Rc::ptr_eq(&old, &new));
+        old.complete(1);
+        dom.render_immediate_to_vec();
+        assert!(harness.result().is_none());
+        new.complete(2);
+        dom.render_immediate_to_vec();
+        assert_eq!(harness.result(), Some(Ok(2)));
+        drop(dom);
+    }
+
+    #[test]
+    fn unavailable_readiness_cancels_reads_and_recovers_through_the_same_owner() {
+        let harness = QueryHarness::default();
+        let mut dom = VirtualDom::new_with_props(QueryHarness::render, harness.clone());
+        dom.rebuild_in_place();
+        dom.render_immediate_to_vec();
+        let first = harness.0.borrow().reads[0].clone();
+        let mut available = harness.0.borrow().available.unwrap();
+        dom.in_runtime(|| available.set(false));
+        dom.render_immediate_to_vec();
+        assert!(first.dropped.get());
+        assert!(harness.result().is_none());
+        dom.in_runtime(|| available.set(true));
+        dom.render_immediate_to_vec();
+        harness.0.borrow().reads.last().unwrap().complete(7);
+        dom.render_immediate_to_vec();
+        assert_eq!(harness.result(), Some(Ok(7)));
+        let resource = harness.0.borrow().resource.unwrap();
+        dom.in_runtime(|| harness.refresh());
+        dom.render_immediate_to_vec();
+        let pending = harness.0.borrow().reads.last().unwrap().clone();
+        assert!(!resource.finished());
+        drop(dom);
+        assert!(pending.dropped.get());
+    }
+    #[test]
+    fn an_expired_old_timer_neither_overlaps_nor_cancels_a_slow_invalidated_read() {
+        let harness = QueryHarness::default();
+        let mut dom = VirtualDom::new_with_props(QueryHarness::render, harness.clone());
+        dom.rebuild_in_place();
+        dom.render_immediate_to_vec();
+        assert!(harness.0.borrow().delays.is_empty());
+        harness.0.borrow().reads[0].complete(1);
+        dom.render_immediate_to_vec();
+        let old_timer = harness.0.borrow().delays.last().unwrap().clone();
+        dom.in_runtime(|| harness.refresh());
+        dom.render_immediate_to_vec();
+        let pending = harness.0.borrow().reads[1].clone();
+        old_timer.complete(0);
+        dom.render_immediate_to_vec();
+        assert_eq!(harness.0.borrow().reads.len(), 2);
+        assert!(!pending.dropped.get());
+        pending.complete(2);
+        dom.render_immediate_to_vec();
+        assert_eq!(harness.result(), Some(Ok(2)));
+        harness.0.borrow().delays.last().unwrap().complete(0);
+        dom.render_immediate_to_vec();
+        assert_eq!(harness.0.borrow().reads.len(), 3);
+    }
+}

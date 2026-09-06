@@ -219,8 +219,12 @@ impl RecordedTimelineTraces {
 
 /// Convert the studio's existing take signal store into the timeline's fixed
 /// six-lane view model. Each lane overlays the arms that reported that joint.
-impl SignalStore {
-    pub(crate) fn timeline_lanes(&self) -> [TimelineSignalLane; 6] {
+pub(crate) trait RecordingTimeline {
+    fn timeline_lanes(&self) -> [TimelineSignalLane; 6];
+}
+
+impl RecordingTimeline for SignalStore {
+    fn timeline_lanes(&self) -> [TimelineSignalLane; 6] {
         std::array::from_fn(|index| {
             let definition = SO101_JOINTS[index];
             let series = self

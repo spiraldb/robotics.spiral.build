@@ -48,7 +48,6 @@ fn CaptureSection() -> Element {
     let data = studio.data_controller();
     let mut selected_dataset = studio.selected_dataset();
     let recording = studio.recording();
-    use_effect(move || data.request_datasets());
     let dataset_ids = data
         .datasets()
         .into_iter()

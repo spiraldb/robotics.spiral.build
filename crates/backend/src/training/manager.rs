@@ -18,7 +18,6 @@ use spiral_robotics_training::{
     TrainingJobPhase, TrainingJobPlan, TrainingJobRequest, TrainingJobSnapshot, TrainingOptimizer,
     TrainingProgress, TrainingRuntimeSelection, TrainingSchedule,
 };
-use tokio::sync::broadcast;
 
 use crate::OperationError;
 use crate::adapters::clock::SystemClock;
@@ -43,7 +42,6 @@ struct TrainingManagerInner {
     clock: Arc<dyn Clock>,
     run_ids: StableIdSequence,
     snapshot: Mutex<TrainingSnapshot>,
-    updates: broadcast::Sender<TrainingUpdate>,
     runtime: TrainingRuntimeState,
 }
 
@@ -174,7 +172,6 @@ impl TrainingManager {
         training_backend: Arc<dyn TrainingBackend>,
         project_admission: Arc<ProjectAdmissionGate>,
     ) -> Self {
-        let (updates, _) = broadcast::channel(512);
         Self {
             inner: Arc::new(TrainingManagerInner {
                 storage,
@@ -182,7 +179,6 @@ impl TrainingManager {
                 clock: Arc::new(SystemClock),
                 run_ids: StableIdSequence::new("train", 0),
                 snapshot: Mutex::new(TrainingSnapshot::default()),
-                updates,
                 runtime: TrainingRuntimeState {
                     project_admission,
                     controls: Mutex::new(BTreeMap::new()),
@@ -215,9 +211,6 @@ impl TrainingManager {
         snapshot = TrainingSnapshot::new(current.readiness().clone(), retained_runs);
         *current = snapshot.clone();
         drop(current);
-        let _ = self.inner.updates.send(TrainingUpdate::Snapshot {
-            snapshot: Box::new(snapshot.clone()),
-        });
         Ok(())
     }
 
@@ -248,6 +241,10 @@ impl TrainingManager {
         self.inner.snapshot.recover_lock().clone()
     }
 
+    pub(crate) fn display_snapshot(&self, selected: Option<&str>) -> TrainingSnapshot {
+        self.inner.snapshot.recover_lock().for_display(selected)
+    }
+
     async fn restored_snapshot(&self) -> Result<TrainingSnapshot, String> {
         let runs = self.inner.storage.load_training_history().await?;
         Ok(TrainingSnapshot::new(TrainingReadiness::default(), runs))
@@ -255,15 +252,6 @@ impl TrainingManager {
 
     async fn persist(&self, snapshot: &TrainingSnapshot) -> Result<(), String> {
         self.inner.storage.save_training_history(snapshot).await
-    }
-
-    /// Capture the initial state and subscribe to later changes as one ordered
-    /// operation. Publishers send while holding the same snapshot lock, so an
-    /// update can appear in the snapshot or the receiver, never both.
-    pub(crate) fn subscription(&self) -> (TrainingSnapshot, broadcast::Receiver<TrainingUpdate>) {
-        let snapshot = self.inner.snapshot.recover_lock();
-        let updates = self.inner.updates.subscribe();
-        (snapshot.clone(), updates)
     }
 
     pub(crate) async fn refresh_readiness(&self) -> TrainingReadiness {
@@ -369,12 +357,11 @@ impl TrainingManager {
                 ));
             }
             let mut candidate = snapshot.clone();
-            candidate.apply(update.clone());
+            candidate.apply(update);
             candidate
         };
         self.persist(&candidate).await?;
         *self.inner.snapshot.recover_lock() = candidate;
-        let _ = self.inner.updates.send(update);
         Ok(())
     }
 
@@ -797,12 +784,10 @@ impl TrainingManager {
             return;
         };
         // The persistence boundary itself is unavailable, so this terminal
-        // evidence can only be kept in memory and broadcast. Retrying the same
+        // evidence can only be kept in memory. Retrying the same
         // failed write here would hide the failure behind recursion.
-        snapshot.apply(log_update.clone());
-        snapshot.apply(state_update.clone());
-        let _ = self.inner.updates.send(log_update);
-        let _ = self.inner.updates.send(state_update);
+        snapshot.apply(log_update);
+        snapshot.apply(state_update);
     }
 
     async fn push_log(&self, run_id: &str, line: String) {
@@ -820,12 +805,11 @@ impl TrainingManager {
     async fn apply_update(&self, update: TrainingUpdate, persist: bool) -> Result<(), String> {
         let _mutation = self.inner.runtime.mutation.lock().await;
         let mut candidate = self.inner.snapshot.recover_lock().clone();
-        candidate.apply(update.clone());
+        candidate.apply(update);
         if persist {
             self.persist(&candidate).await?;
         }
         *self.inner.snapshot.recover_lock() = candidate;
-        let _ = self.inner.updates.send(update);
         Ok(())
     }
 }
@@ -912,14 +896,13 @@ impl TrainingCoordinatorPort for TrainingManager {
         // share one lock, so concurrent starts cannot both become active.
         let _mutation = self.inner.runtime.mutation.lock().await;
         let snapshot = self.inner.snapshot.recover_lock().clone();
-        let (candidate, update) = self
+        let candidate = self
             .admitted_snapshot(&snapshot, run)
             .map_err(OperationError::conflict)?;
         self.persist(&candidate)
             .await
             .map_err(OperationError::External)?;
         *self.inner.snapshot.recover_lock() = candidate;
-        let _ = self.inner.updates.send(update);
         Ok(())
     }
 
@@ -1005,7 +988,7 @@ impl TrainingManager {
         &self,
         snapshot: &TrainingSnapshot,
         run: TrainingRun,
-    ) -> Result<(TrainingSnapshot, TrainingUpdate), String> {
+    ) -> Result<TrainingSnapshot, String> {
         let mut registry = snapshot.run_registry()?;
         registry.admit(RunRecord::new(run.id(), run.phase().into()))?;
         let retained = registry
@@ -1014,7 +997,7 @@ impl TrainingManager {
             .collect::<std::collections::BTreeSet<_>>();
         let update = TrainingUpdate::RunAdded { run: Box::new(run) };
         let mut candidate = snapshot.clone();
-        candidate.apply(update.clone());
+        candidate.apply(update);
         let removed = candidate
             .runs()
             .iter()
@@ -1024,7 +1007,7 @@ impl TrainingManager {
         for run_id in removed {
             candidate.apply(TrainingUpdate::RunRemoved { run_id });
         }
-        Ok((candidate, update))
+        Ok(candidate)
     }
 }
 

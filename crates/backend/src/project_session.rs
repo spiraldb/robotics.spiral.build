@@ -50,6 +50,7 @@ impl ProjectReadiness {
         self.current.borrow().clone()
     }
 
+    #[cfg(test)]
     pub(crate) fn subscribe(&self) -> tokio::sync::watch::Receiver<BackendReadiness> {
         self.current.subscribe()
     }
@@ -440,6 +441,7 @@ impl ProjectCoordinator {
     pub(crate) fn active(&self) -> Arc<ProjectSession> {
         self.active.borrow().clone()
     }
+    #[cfg(test)]
     pub(crate) fn subscribe(&self) -> watch::Receiver<Arc<ProjectSession>> {
         self.active.subscribe()
     }
@@ -537,6 +539,7 @@ impl ProjectCoordinator {
     }
 
     fn publish(&self, candidate: Arc<ProjectSession>, transition: PendingProjectChange) {
+        self.hardware().clear_recording_signals();
         let previous = self.active.send_replace(candidate.clone());
         candidate.activate(transition.into_activity());
         tokio::spawn(async move {

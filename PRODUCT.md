@@ -133,7 +133,7 @@ The deployment boundary is deliberately simple:
 
 ```text
 Browser frontend
-      │ HTTP + event stream
+      │ HTTP commands + frontend-initiated reads
       ▼
 Spiral Robotics backend
       ├── robot connections and safety

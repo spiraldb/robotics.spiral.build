@@ -1,4 +1,4 @@
-//! Project lifetime identities shared by commands and event delivery.
+//! Project lifetime identities shared by commands and fetched state.
 
 use serde::{Deserialize, Serialize};
 
@@ -26,46 +26,21 @@ impl ProjectSessionInfo {
     }
 }
 
-/// A payload belongs to exactly one activated project lifetime.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ProjectEvent<T> {
-    session_id: String,
-    payload: T,
+/// Identity and readiness are fetched together from one captured project.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct ProjectStatus {
+    session: ProjectSessionInfo,
+    readiness: crate::status::BackendReadiness,
 }
 
-impl<T> ProjectEvent<T> {
-    pub fn new(session_id: impl Into<String>, payload: T) -> Self {
-        Self {
-            session_id: session_id.into(),
-            payload,
-        }
+impl ProjectStatus {
+    pub fn new(session: ProjectSessionInfo, readiness: crate::status::BackendReadiness) -> Self {
+        Self { session, readiness }
     }
-
-    pub fn session_id(&self) -> &str {
-        &self.session_id
+    pub fn session(&self) -> &ProjectSessionInfo {
+        &self.session
     }
-
-    pub fn into_parts(self) -> (String, T) {
-        (self.session_id, self.payload)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn reopening_the_same_project_has_a_distinct_lifetime() {
-        let first = ProjectSessionInfo::new("session-a", "robotics");
-        let second = ProjectSessionInfo::new("session-b", "robotics");
-        assert_ne!(first, second);
-        assert_eq!(first.project_id(), second.project_id());
-    }
-
-    #[test]
-    fn event_identity_survives_transport() {
-        let encoded = serde_json::to_string(&ProjectEvent::new("session-a", vec![1, 2])).unwrap();
-        let decoded: ProjectEvent<Vec<u32>> = serde_json::from_str(&encoded).unwrap();
-        assert_eq!(decoded.into_parts(), ("session-a".to_owned(), vec![1, 2]));
+    pub fn readiness(&self) -> &crate::status::BackendReadiness {
+        &self.readiness
     }
 }
