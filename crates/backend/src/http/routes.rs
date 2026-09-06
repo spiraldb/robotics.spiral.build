@@ -360,6 +360,11 @@ impl AppState {
                             let snapshot = tokio::select! {
                                 biased;
                                 _ = sessions.changed() => break,
+                                changed = readiness.changed() => {
+                                    if changed.is_err() { break; }
+                                    readiness.mark_changed();
+                                    continue;
+                                },
                                 snapshot = scoped.snapshot() => snapshot,
                             };
                             if let Some(event) = wire.encode("state", &snapshot) { yield Ok(event); }
@@ -369,6 +374,14 @@ impl AppState {
                             let snapshot = tokio::select! {
                                 biased;
                                 _ = sessions.changed() => break,
+                                // Never emit a ready snapshot assembled before
+                                // a project change began. Rebuild it immediately
+                                // without waiting for catalog I/O to complete.
+                                changed = readiness.changed() => {
+                                    if changed.is_err() { break; }
+                                    readiness.mark_changed();
+                                    continue;
+                                },
                                 snapshot = scoped.snapshot() => snapshot,
                             };
                             if last_snapshot.as_ref() != Some(&snapshot) {

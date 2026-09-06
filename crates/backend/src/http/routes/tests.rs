@@ -54,6 +54,34 @@ async fn event_stream_announces_replacement_before_its_scoped_snapshots() {
         assert!(frame.contains(&format!("event: {expected}\n")));
         assert!(frame.contains(&format!("\"session_id\":\"{}\"", original.info().id())));
     }
+    original
+        .readiness()
+        .bootstrapping("Loading the next project");
+    let bytes = tokio::time::timeout(Duration::from_secs(1), stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let frame = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(frame.contains("event: state\n"));
+    assert!(frame.contains("Loading the next project"));
+    assert!(frame.contains("\"storage_available\":false"));
+    assert!(frame.contains("\"catalog_available\":false"));
+    assert!(frame.contains(original.info().id()));
+
+    original
+        .readiness()
+        .degraded(false, "Original project availability restored");
+    let bytes = tokio::time::timeout(Duration::from_secs(1), stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let frame = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(frame.contains("event: state\n"));
+    assert!(frame.contains("Original project availability restored"));
+    assert!(frame.contains(original.info().id()));
+
     let replacement = fixture.replace("project_b");
     let announcement = tokio::time::timeout(Duration::from_secs(1), stream.next())
         .await

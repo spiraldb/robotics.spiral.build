@@ -199,6 +199,7 @@ impl BackendSignals {
 
 impl StudioProjectResources {
     fn use_resources() -> Self {
+        let sessions = ProjectSessionSignals::current();
         let settings = use_resource(|| async {
             ProjectClient::current()
                 .data_settings()
@@ -225,14 +226,22 @@ impl StudioProjectResources {
         let query_available = configuration().spiral_query_available;
         let relation_catalog = use_resource(use_reactive(
             (&query_available,),
-            move |(query_available,)| async move {
-                if query_available {
-                    ProjectClient::current()
-                        .relation_catalog()
-                        .await
-                        .map_err(|error| error.to_string())
-                } else {
-                    Ok(RelationCatalog::default())
+            move |(query_available,)| {
+                let available = sessions.catalog_available();
+                async move {
+                    // The resource restarts when readiness changes. Keep it
+                    // pending without issuing a request while loading/offline.
+                    if !available {
+                        return std::future::pending().await;
+                    }
+                    if query_available {
+                        ProjectClient::current()
+                            .relation_catalog()
+                            .await
+                            .map_err(|error| error.to_string())
+                    } else {
+                        Ok(RelationCatalog::default())
+                    }
                 }
             },
         ));
@@ -403,8 +412,14 @@ impl Studio {
             notifications,
             interaction,
         });
-        use_future(move || async move {
-            studio.workflow_controller().load(studio).await;
+        let sessions = ProjectSessionSignals::current();
+        use_resource(move || {
+            let available = sessions.catalog_available();
+            async move {
+                if available {
+                    studio.workflow_controller().load(studio).await;
+                }
+            }
         });
         let mut default_selection = studio.selection();
         use_effect(move || {

@@ -17,6 +17,7 @@ use spiral_robotics_common::robots::{
 };
 
 use crate::panels::scene::ScenePalette;
+use crate::shell::project::ProjectSessionSignals;
 use crate::shell::state::{Selection, Studio, studio};
 use crate::tasks::SingleFlight;
 
@@ -36,11 +37,18 @@ pub(super) fn RobotPanel() -> Element {
     let studio = studio();
     let robots = studio.snapshot().read().robots().to_owned();
     let focused = studio.focused();
-    let mut ports = use_resource(|| async {
-        ProjectClient::current()
-            .list_serial_ports()
-            .await
-            .map_err(|error| error.to_string())
+    let sessions = ProjectSessionSignals::current();
+    let mut ports = use_resource(move || {
+        let available = sessions.catalog_available();
+        async move {
+            if !available {
+                return std::future::pending().await;
+            }
+            ProjectClient::current()
+                .list_serial_ports()
+                .await
+                .map_err(|error| error.to_string())
+        }
     });
     let port_catalog =
         PortCatalogState::new(ports.read_unchecked().to_owned(), move |()| ports.restart());

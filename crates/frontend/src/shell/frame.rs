@@ -116,7 +116,7 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
     } else {
         match snapshot.readiness().state() {
             BackendReadinessState::Bootstrapping => {
-                ("Starting…", "background: var(--tone-caution)")
+                ("Loading project…", "background: var(--tone-caution)")
             }
             BackendReadinessState::Ready
                 if !matches!(mode, Activity::Training | Activity::Workflow) && !connected =>

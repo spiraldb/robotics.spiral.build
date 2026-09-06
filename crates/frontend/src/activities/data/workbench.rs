@@ -38,10 +38,11 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
     let mut adding_data = use_signal(|| false);
     let mut confirming_delete = use_signal(|| None::<String>);
     let mut deleting_episode = use_signal(|| None::<String>);
+    let sessions = crate::shell::project::ProjectSessionSignals::current();
 
     // Load the tiny dataset index before choosing which episode subset to read.
     use_effect(move || {
-        let storage_available = studio.snapshot().read().readiness().storage_available();
+        let storage_available = sessions.storage_available();
         if storage_available
             && !data.datasets_loaded()
             && !data.datasets_loading()
@@ -64,7 +65,7 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
     // restarted when the shared selection changes.
     use_effect(move || {
         let dataset_id = studio.selected_dataset().read().trim().to_owned();
-        let storage_available = studio.snapshot().read().readiness().storage_available();
+        let storage_available = sessions.storage_available();
         if storage_available
             && data.datasets_loaded()
             && spiral_robotics_common::identity::DatasetId::is_canonical(&dataset_id)
@@ -633,6 +634,8 @@ impl ByteCountPresentation for u64 {
 pub(crate) fn QueryPanel(namespace: String, dataset_id: String, query_available: bool) -> Element {
     let studio = studio();
     let controller = studio.data_controller();
+    let catalog_available =
+        crate::shell::project::ProjectSessionSignals::current().catalog_available();
     let relation_result = studio.relation_catalog_result();
     let relation_error = relation_result
         .as_ref()
@@ -668,7 +671,9 @@ pub(crate) fn QueryPanel(namespace: String, dataset_id: String, query_available:
                 summary {
                     span { "Database relations" }
                     small {
-                        if relation_result.is_none() && query_available {
+                        if !catalog_available {
+                            "Waiting for project"
+                        } else if relation_result.is_none() && query_available {
                             "Discovering…"
                         } else {
                             "{schema_relations.len()} relations · {namespace}"

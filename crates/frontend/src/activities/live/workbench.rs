@@ -47,8 +47,9 @@ fn CaptureSection() -> Element {
     let data = studio.data_controller();
     let mut selected_dataset = studio.selected_dataset();
     let recording = studio.recording();
+    let sessions = crate::shell::project::ProjectSessionSignals::current();
     use_effect(move || {
-        if !data.datasets_loaded() && !data.datasets_loading() {
+        if sessions.storage_available() && !data.datasets_loaded() && !data.datasets_loading() {
             studio.run_utility("", data.load_datasets());
         }
     });

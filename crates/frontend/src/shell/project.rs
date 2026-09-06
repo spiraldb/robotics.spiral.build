@@ -1,5 +1,6 @@
 //! Process-level event delivery and the lifetime of mounted project state.
 
+use crate::client::project::{ProjectClient, ProjectSessionState};
 use dioxus::prelude::*;
 use spiral_robotics_common::project::ProjectSessionInfo;
 
@@ -9,33 +10,40 @@ use crate::client::http::StudioEvent;
 
 #[derive(Clone, Copy)]
 pub(crate) struct ProjectSessionSignals {
-    active: Signal<Option<ProjectSessionInfo>>,
+    state: Signal<ProjectSessionState>,
     events: Signal<Vec<StudioEvent>>,
-    connected: Signal<bool>,
 }
 
 impl ProjectSessionSignals {
     pub(crate) fn use_provider() -> Self {
-        let active = use_signal(|| None);
+        let state = use_signal(ProjectSessionState::default);
         let events = use_signal(Vec::new);
-        let connected = use_signal(|| false);
-        use_context_provider(|| Self {
-            active,
-            events,
-            connected,
-        })
+        use_context_provider(|| Self { state, events })
     }
 
     pub(crate) fn current() -> Self {
         consume_context::<Self>()
     }
 
-    pub(crate) fn active(self) -> Signal<Option<ProjectSessionInfo>> {
-        self.active
+    /// Keep the last announced project mounted while its stream reconnects.
+    pub(crate) fn mounted_session(self) -> Option<ProjectSessionInfo> {
+        self.state.read().session().cloned()
+    }
+
+    pub(crate) fn client(self, session: ProjectSessionInfo) -> ProjectClient {
+        ProjectClient::new(session, self.state.into())
     }
 
     pub(crate) fn connected(self) -> bool {
-        *self.connected.read()
+        self.state.read().connected()
+    }
+
+    pub(crate) fn storage_available(self) -> bool {
+        self.state.read().storage_available()
+    }
+
+    pub(crate) fn catalog_available(self) -> bool {
+        self.state.read().catalog_available()
     }
 
     pub(crate) fn take_events(mut self) -> Vec<StudioEvent> {
@@ -49,25 +57,41 @@ impl ProjectSessionSignals {
     pub(crate) fn accept(mut self, message: ProjectStreamMessage) {
         match message {
             ProjectStreamMessage::Session(session) => {
-                if self.active.peek().as_ref() != Some(&session) {
-                    // Reset before publishing the new key. Initial snapshots
-                    // remain buffered until the new subtree mounts its effect.
+                let previous = self.state.peek().clone();
+                let next = previous.clone().announced(session);
+                if previous.session() != next.session() {
                     self.events.write().clear();
-                    self.active.set(Some(session));
                 }
+                self.replace_state(next);
             }
             ProjectStreamMessage::Event(event) => {
                 let (session_id, payload) = event.into_parts();
-                if self
-                    .active
-                    .peek()
-                    .as_ref()
-                    .is_some_and(|active| active.id() == session_id)
-                {
+                if self.state.peek().accepts_events_from(&session_id) {
+                    if let StudioEvent::Snapshot(snapshot) = &payload {
+                        let next = self
+                            .state
+                            .peek()
+                            .clone()
+                            .with_readiness(&session_id, snapshot.readiness().clone());
+                        self.replace_state(next);
+                    }
                     self.events.write().push(payload);
                 }
             }
-            ProjectStreamMessage::Connected(connected) => self.connected.set(connected),
+            ProjectStreamMessage::Connected(connected) => {
+                if !connected {
+                    self.events.write().clear();
+                }
+                let next = self.state.peek().clone().connection_changed(connected);
+                self.replace_state(next);
+            }
+        }
+    }
+
+    #[cfg(any(test, all(feature = "web", target_arch = "wasm32")))]
+    fn replace_state(mut self, state: ProjectSessionState) {
+        if *self.state.peek() != state {
+            self.state.set(state);
         }
     }
 
@@ -92,9 +116,9 @@ mod tests {
     use std::rc::Rc;
 
     use spiral_robotics_common::project::ProjectEvent;
+    use spiral_robotics_common::status::{BackendReadiness, BackendReadinessState, StudioSnapshot};
 
     use super::*;
-    use crate::client::project::ProjectClient;
 
     #[derive(Clone, Default)]
     struct SessionHarness(Rc<RefCell<ObservedProjectState>>);
@@ -110,6 +134,7 @@ mod tests {
         sessions: Option<ProjectSessionSignals>,
         mounts: Vec<ProjectMountProbe>,
         canceled: Rc<Cell<usize>>,
+        requests: Rc<Cell<usize>>,
     }
 
     struct ProjectMountProbe {
@@ -130,7 +155,7 @@ mod tests {
         fn render(self) -> Element {
             let sessions = ProjectSessionSignals::use_provider();
             self.0.borrow_mut().sessions = Some(sessions);
-            let session = sessions.active().read().clone();
+            let session = sessions.mounted_session();
             rsx! {
                 if let Some(session) = session {
                     ProjectProbe { key: "{session.id()}", session, harness: self }
@@ -140,6 +165,11 @@ mod tests {
 
         fn sessions(&self) -> ProjectSessionSignals {
             self.0.borrow().sessions.unwrap()
+        }
+
+        fn connect(&self) {
+            self.sessions()
+                .accept(ProjectStreamMessage::Connected(true));
         }
 
         fn announce(&self, id: &str) {
@@ -157,14 +187,42 @@ mod tests {
                     StudioEvent::Snapshot(Box::default()),
                 )));
         }
+
+        fn readiness(&self, id: &str, state: BackendReadinessState) {
+            let readiness = BackendReadiness::new(
+                state,
+                state == BackendReadinessState::Ready,
+                "Project readiness changed",
+            );
+            self.sessions()
+                .accept(ProjectStreamMessage::Event(ProjectEvent::new(
+                    id,
+                    StudioEvent::Snapshot(Box::new(StudioSnapshot::new(
+                        readiness,
+                        "SpiralDB",
+                        Default::default(),
+                    ))),
+                )));
+        }
     }
 
     #[component]
     fn ProjectProbe(session: ProjectSessionInfo, harness: SessionHarness) -> Element {
         let sessions = ProjectSessionSignals::current();
-        let client = use_context_provider(|| ProjectClient::new(session, sessions.active()));
+        let client = use_context_provider(|| sessions.client(session));
         let draft = use_signal(|| "initial draft".to_owned());
         let selected_run = use_signal(|| None);
+        let requests = use_hook(|| harness.0.borrow().requests.clone());
+        use_resource(move || {
+            let available = sessions.catalog_available();
+            let requests = requests.clone();
+            async move {
+                if !available {
+                    return std::future::pending().await;
+                }
+                requests.set(requests.get() + 1);
+            }
+        });
         use_hook(|| {
             harness.0.borrow_mut().mounts.push(ProjectMountProbe {
                 client,
@@ -176,11 +234,105 @@ mod tests {
     }
 
     #[test]
+    fn project_readiness_pauses_resources_without_replacing_the_mount() {
+        let harness = SessionHarness::default();
+        let mut dom = VirtualDom::new_with_props(SessionHarness::render, harness.clone());
+        dom.rebuild_in_place();
+        dom.in_runtime(|| {
+            harness.connect();
+            harness.announce("first");
+        });
+        dom.render_immediate_to_vec();
+        assert_eq!(harness.0.borrow().requests.get(), 0);
+        let mut draft = harness.0.borrow().mounts[0].draft;
+        dom.in_runtime(|| {
+            draft.set("unsaved draft".to_owned());
+            harness.readiness("first", BackendReadinessState::Ready);
+            assert!(harness.sessions().storage_available());
+        });
+        dom.render_immediate_to_vec();
+        assert_eq!(harness.0.borrow().requests.get(), 1);
+        dom.in_runtime(|| {
+            harness.announce("first");
+            harness.readiness("first", BackendReadinessState::Ready);
+        });
+        dom.render_immediate_to_vec();
+        assert_eq!(
+            harness.0.borrow().requests.get(),
+            1,
+            "duplicate announcements and snapshots must not reload resources"
+        );
+
+        dom.in_runtime(|| {
+            harness.readiness("first", BackendReadinessState::Bootstrapping);
+            assert!(!harness.sessions().storage_available());
+        });
+        dom.render_immediate_to_vec();
+        assert_eq!(harness.0.borrow().requests.get(), 1);
+        // A failed change restores the old session, including the draft.
+        dom.in_runtime(|| harness.readiness("first", BackendReadinessState::Ready));
+        dom.render_immediate_to_vec();
+        assert_eq!(harness.0.borrow().requests.get(), 2);
+        assert_eq!(harness.0.borrow().mounts.len(), 1);
+        assert_eq!(&*draft.peek(), "unsaved draft");
+
+        dom.in_runtime(|| {
+            harness
+                .sessions()
+                .accept(ProjectStreamMessage::Connected(false));
+        });
+        dom.render_immediate_to_vec();
+        dom.in_runtime(|| {
+            harness
+                .sessions()
+                .accept(ProjectStreamMessage::Connected(true))
+        });
+        dom.render_immediate_to_vec();
+        assert_eq!(
+            harness.0.borrow().requests.get(),
+            2,
+            "reopening the stream must wait for a fresh snapshot"
+        );
+        dom.in_runtime(|| harness.readiness("first", BackendReadinessState::Ready));
+        dom.render_immediate_to_vec();
+        assert_eq!(
+            harness.0.borrow().requests.get(),
+            2,
+            "readiness before the reconnect's session announcement must be ignored"
+        );
+        dom.in_runtime(|| {
+            harness.announce("first");
+            harness.readiness("first", BackendReadinessState::Ready);
+        });
+        dom.render_immediate_to_vec();
+        assert_eq!(harness.0.borrow().requests.get(), 3);
+
+        dom.in_runtime(|| {
+            harness.announce("second");
+            harness.readiness("first", BackendReadinessState::Ready);
+            assert!(!harness.sessions().catalog_available());
+            harness.readiness("second", BackendReadinessState::Degraded);
+        });
+        dom.render_immediate_to_vec();
+        assert_eq!(
+            harness.0.borrow().requests.get(),
+            3,
+            "failed startup must not dispatch requests"
+        );
+        dom.in_runtime(|| harness.readiness("second", BackendReadinessState::Ready));
+        dom.render_immediate_to_vec();
+        assert_eq!(harness.0.borrow().requests.get(), 4);
+    }
+
+    #[test]
     fn project_key_replaces_local_state_and_cancels_its_requests() {
         let harness = SessionHarness::default();
         let mut dom = VirtualDom::new_with_props(SessionHarness::render, harness.clone());
         dom.rebuild_in_place();
-        dom.in_runtime(|| harness.announce("first"));
+        dom.in_runtime(|| {
+            harness.connect();
+            harness.announce("first");
+        });
         dom.render_immediate_to_vec();
         let old_client = harness.0.borrow().mounts[0].client.clone();
         let mut old_draft = harness.0.borrow().mounts[0].draft;
@@ -226,6 +378,7 @@ mod tests {
         let mut dom = VirtualDom::new_with_props(SessionHarness::render, harness.clone());
         dom.rebuild_in_place();
         dom.in_runtime(|| {
+            harness.connect();
             harness.announce("first");
             harness.snapshot("first");
             harness.announce("second");
@@ -255,7 +408,10 @@ mod tests {
         let harness = SessionHarness::default();
         let mut dom = VirtualDom::new_with_props(SessionHarness::render, harness.clone());
         dom.rebuild_in_place();
-        dom.in_runtime(|| harness.announce("session /one"));
+        dom.in_runtime(|| {
+            harness.connect();
+            harness.announce("session /one");
+        });
         dom.render_immediate_to_vec();
         let client = harness.0.borrow().mounts[0].client.clone();
         assert_eq!(

@@ -138,7 +138,9 @@ impl DataController {
         let selected_episode = use_signal(|| None::<String>);
         let dataset_catalog = use_signal(DatasetCatalogState::default);
         let episode_catalog = use_signal(EpisodeCatalogState::default);
+        let sessions = crate::shell::project::ProjectSessionSignals::current();
         let episode_loader = use_resource(move || {
+            let available = sessions.storage_available();
             let selected = selected_episode();
             let source = selected.and_then(|episode| {
                 episode_catalog
@@ -155,6 +157,9 @@ impl DataController {
                     })
             });
             async move {
+                if !available {
+                    return std::future::pending().await;
+                }
                 let (episode, expected_frames, cached) = source?;
                 let result = match cached {
                     Some(data) => Ok(data),

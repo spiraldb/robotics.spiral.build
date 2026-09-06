@@ -5,7 +5,6 @@ use dioxus::prelude::*;
 
 use crate::activities::training::workspace::TrainingWorkspace;
 use crate::activities::workflow::workspace::WorkflowWorkspace;
-use crate::client::project::ProjectClient;
 use crate::settings::panel::SettingsPanel;
 use crate::shell::activity::Activity;
 use crate::shell::frame::{ActivityRail, StatusBar};
@@ -86,7 +85,7 @@ pub(crate) fn StudioRouter() -> Element {
 fn StudioShell() -> Element {
     let sessions = ProjectSessionSignals::use_provider();
     sessions.use_event_stream();
-    let session = sessions.active().read().clone();
+    let session = sessions.mounted_session();
     rsx! {
         document::Stylesheet { href: TAILWIND }
         if let Some(session) = session {
@@ -104,7 +103,7 @@ fn StudioShell() -> Element {
 #[component]
 fn ProjectStudioShell(session: ProjectSessionInfo) -> Element {
     let sessions = ProjectSessionSignals::current();
-    use_context_provider(|| ProjectClient::new(session, sessions.active()));
+    use_context_provider(|| sessions.client(session));
     let studio = Studio::use_studio();
     let route = use_route::<StudioRoute>();
     let activity = route.activity();

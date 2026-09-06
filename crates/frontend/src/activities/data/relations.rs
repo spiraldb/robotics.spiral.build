@@ -185,10 +185,15 @@ pub(crate) fn RelationsPanel(namespace: String, query_available: bool) -> Elemen
     let controller = studio.data_controller();
     let mut selected = use_signal(|| None::<String>);
     let count_namespace = namespace.clone();
+    let sessions = crate::shell::project::ProjectSessionSignals::current();
     let mut counts = use_resource(move || {
+        let available = sessions.catalog_available();
         let catalog = studio.relation_catalog();
         let namespace = count_namespace.clone();
         async move {
+            if !available {
+                return std::future::pending().await;
+            }
             let Some(catalog) = query_available.then_some(catalog).flatten() else {
                 return Ok(None);
             };
@@ -244,8 +249,12 @@ pub(crate) fn RelationsPanel(namespace: String, query_available: bool) -> Elemen
     ));
 
     let mut preview = use_resource(move || {
+        let available = sessions.catalog_available();
         let relation = selected();
         async move {
+            if !available {
+                return std::future::pending().await;
+            }
             let Some(relation) = relation else {
                 return Ok(None);
             };

@@ -19,7 +19,7 @@ use crate::data::catalog_lease::CatalogMutationLease;
 use crate::data::{
     DataSettingsSnapshot, DataSettingsUpdate, SpiralDestinationSettings, UpdateDataSettingsCommand,
 };
-use crate::project_admission::{ProjectActivity, ProjectAdmissionGate};
+use crate::project_admission::{ProjectActivity, ProjectAdmissionGate, ProjectTransition};
 use crate::recording_session::RecordingSessionManager;
 use crate::robotics::cameras::CameraManager;
 use crate::robotics::video::VideoEncoderSettings;
@@ -356,6 +356,31 @@ pub(crate) struct ProjectCoordinator {
     backend_state: Arc<BackendStateStore>,
 }
 
+/// Readiness follows the same lifetime as exclusive project admission. Dropping
+/// a failed or canceled change restores the original session after unlocking.
+struct PendingProjectChange {
+    transition: Option<ProjectTransition>,
+    readiness: ProjectReadiness,
+    previous: BackendReadiness,
+}
+
+impl PendingProjectChange {
+    fn into_activity(mut self) -> ProjectActivity {
+        // Publication retires the original session; its readiness must not be
+        // restored and mistaken for a usable old session by an event subscriber.
+        self.transition.take().unwrap().into_activity()
+    }
+}
+
+impl Drop for PendingProjectChange {
+    fn drop(&mut self) {
+        if let Some(transition) = self.transition.take() {
+            drop(transition);
+            self.readiness.current.send_replace(self.previous.clone());
+        }
+    }
+}
+
 impl ProjectCoordinator {
     pub(crate) fn new(
         factory: ProjectSessionFactory,
@@ -403,6 +428,22 @@ impl ProjectCoordinator {
         let activity = self.factory.admission.admit_activity()?;
         self.resolve(session_id)?;
         Ok(activity)
+    }
+
+    fn begin_change(
+        &self,
+        origin: &ProjectSession,
+        detail: &str,
+    ) -> Result<PendingProjectChange, OperationError> {
+        let transition = self.factory.admission.begin_transition()?;
+        let readiness = origin.readiness().clone();
+        let previous = readiness.current();
+        readiness.bootstrapping(detail);
+        Ok(PendingProjectChange {
+            transition: Some(transition),
+            readiness,
+            previous,
+        })
     }
 
     async fn require_idle(
@@ -456,11 +497,7 @@ impl ProjectCoordinator {
         }
     }
 
-    fn publish(
-        &self,
-        candidate: Arc<ProjectSession>,
-        transition: crate::project_admission::ProjectTransition,
-    ) {
+    fn publish(&self, candidate: Arc<ProjectSession>, transition: PendingProjectChange) {
         let previous = self.active.send_replace(candidate.clone());
         candidate.activate(transition.into_activity());
         tokio::spawn(async move {
@@ -520,7 +557,8 @@ impl ProjectCoordinator {
             origin.preferences().replace(preferences);
             return Ok(DataSettingsUpdate::new(origin.settings(), false));
         }
-        let transition = self.factory.admission.begin_transition()?;
+        let transition =
+            self.begin_change(origin, "Connecting to SpiralDB and loading the project")?;
         self.require_idle(
             origin,
             if connection == previous {
@@ -558,7 +596,8 @@ impl ProjectCoordinator {
     pub(crate) async fn recover(&self, origin: &ProjectSession) -> Result<(), OperationError> {
         let _serialization = self.transition.lock().await;
         self.resolve(origin.info().id())?;
-        let transition = self.factory.admission.begin_transition()?;
+        let transition =
+            self.begin_change(origin, "Connecting to SpiralDB and loading the project")?;
         self.require_idle(origin, ProjectChangeKind::Reload).await?;
         origin
             .rollout()
@@ -580,7 +619,7 @@ impl ProjectCoordinator {
     ) -> Result<spiral_robotics_common::datasets::ProjectImportSummary, OperationError> {
         let _serialization = self.transition.lock().await;
         self.resolve(origin.info().id())?;
-        let transition = self.factory.admission.begin_transition()?;
+        let transition = self.begin_change(origin, "Importing and loading the project")?;
         self.require_idle(origin, ProjectChangeKind::Import).await?;
         // Import uses a separate store at the same immutable destination. Its
         // database transaction is owned by the existing native bundle importer.
@@ -727,7 +766,10 @@ pub(crate) mod tests {
                 .with_project(project_id)
                 .unwrap();
             let candidate = self.projects.factory.create(connection).unwrap();
-            let transition = self.projects.factory.admission.begin_transition().unwrap();
+            let transition = self
+                .projects
+                .begin_change(&self.projects.active(), "Loading the project")
+                .unwrap();
             self.projects.publish(candidate.clone(), transition);
             candidate
         }
@@ -737,6 +779,10 @@ pub(crate) mod tests {
     async fn failed_preparation_keeps_the_published_session_and_releases_admission() {
         let fixture = ProjectFixture::new();
         let original = fixture.projects.active();
+        original
+            .readiness()
+            .degraded(true, "History recovery needs attention");
+        let previous_readiness = original.readiness().current();
         let announcements = fixture.projects.subscribe();
         // No configured project: the real storage preparation fails locally,
         // before contacting Spiral, after acquiring transition ownership.
@@ -744,7 +790,43 @@ pub(crate) mod tests {
         assert!(Arc::ptr_eq(&fixture.projects.active(), &original));
         assert!(!announcements.has_changed().unwrap());
         assert!(fixture.projects.admit(original.info().id()).is_ok());
+        assert_eq!(original.readiness().current(), previous_readiness);
         assert!(fixture.projects.backend_state.project_id().is_none());
+        fixture.projects.hardware().shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn canceled_change_restores_readiness_and_releases_admission() {
+        let fixture = ProjectFixture::new();
+        let original = fixture.projects.active();
+        original.readiness().ready();
+        let previous_readiness = original.readiness().current();
+        let mut readiness = original.readiness().subscribe();
+        let projects = fixture.projects.clone();
+        let (started, started_receiver) = tokio::sync::oneshot::channel();
+        let change = tokio::spawn(async move {
+            let session = projects.active();
+            let _change = projects
+                .begin_change(&session, "Loading another project")
+                .unwrap();
+            started.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        started_receiver.await.unwrap();
+        readiness.changed().await.unwrap();
+        let loading = readiness.borrow_and_update().clone();
+        assert_eq!(loading.state(), BackendReadinessState::Bootstrapping);
+        assert_eq!(loading.detail(), "Loading another project");
+        assert!(!loading.catalog_available());
+        assert!(!loading.storage_available());
+        assert!(fixture.projects.admit(original.info().id()).is_err());
+
+        change.abort();
+        assert!(change.await.unwrap_err().is_cancelled());
+        readiness.changed().await.unwrap();
+        assert_eq!(*readiness.borrow_and_update(), previous_readiness);
+        assert!(Arc::ptr_eq(&fixture.projects.active(), &original));
+        assert!(fixture.projects.admit(original.info().id()).is_ok());
         fixture.projects.hardware().shutdown().await.unwrap();
     }
 
@@ -752,10 +834,15 @@ pub(crate) mod tests {
     async fn publication_rejects_stale_requests_without_retargeting_old_storage() {
         let fixture = ProjectFixture::new();
         let original = fixture.projects.active();
+        original.readiness().ready();
         let old_connection = original.storage().connection_settings();
         let replacement = fixture.replace("project_b");
         assert!(!Arc::ptr_eq(&original, &replacement));
         assert_ne!(original.info().id(), replacement.info().id());
+        assert_eq!(
+            original.readiness().current().state(),
+            BackendReadinessState::Bootstrapping
+        );
         assert!(original.storage().connection_settings() == old_connection);
         assert_eq!(
             replacement.storage().connection_settings().project_id(),
@@ -771,6 +858,8 @@ pub(crate) mod tests {
     async fn admitted_request_blocks_replacement_until_its_last_owner_finishes() {
         let fixture = ProjectFixture::new();
         let original = fixture.projects.active();
+        original.readiness().ready();
+        let readiness = original.readiness().subscribe();
         let request = fixture.projects.admit(original.info().id()).unwrap();
         let background = request.clone();
         drop(request);
@@ -779,6 +868,10 @@ pub(crate) mod tests {
             Err(OperationError::Conflict(_))
         ));
         assert!(Arc::ptr_eq(&fixture.projects.active(), &original));
+        assert!(
+            !readiness.has_changed().unwrap(),
+            "rejected admission must not pause the project"
+        );
         drop(background);
         let replacement = fixture.replace("project_b");
         assert_eq!(fixture.projects.active().info(), replacement.info());
