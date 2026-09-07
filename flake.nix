@@ -64,6 +64,32 @@
           linuxBuildInputs = pkgs.lib.optionals pkgs.stdenv.isLinux [
             pkgs.v4l-utils
           ];
+          # Standalone driver archives are verified against Spiral's release
+          # manifest. Rust builds never compile the embedded engine.
+          adbcManifest = builtins.fromJSON (builtins.readFile ./drivers/spiral-adbc.json);
+          adbcTarget = {
+            aarch64-darwin = "aarch64-apple-darwin";
+            aarch64-linux = "aarch64-unknown-linux-gnu";
+            x86_64-linux = "x86_64-unknown-linux-gnu";
+          }.${system};
+          adbcArtifact = adbcManifest.artifacts.${adbcTarget};
+          adbcLibrary = "libadbc_driver_spiraldb${pkgs.stdenv.hostPlatform.extensions.sharedLibrary}";
+          spiralAdbc = pkgs.stdenvNoCC.mkDerivation {
+            pname = "spiral-adbc";
+            version = adbcManifest.version;
+            src = pkgs.fetchurl {
+              inherit (adbcArtifact) url sha256;
+            };
+            nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.autoPatchelfHook ];
+            buildInputs = pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.stdenv.cc.cc.lib ];
+            dontBuild = true;
+            installPhase = ''
+              runHook preInstall
+              mkdir -p "$out/lib"
+              cp ${adbcLibrary} "$out/lib/"
+              runHook postInstall
+            '';
+          };
           sharedShell = {
             packages =
               [
@@ -78,11 +104,18 @@
               ]
               ++ nativeBuildInputs
               ++ linuxBuildInputs;
+            # Preserve an explicitly selected validation build while the public
+            # release manifest catches up with upstream transaction fixes.
+            shellHook = ''
+              export SPIRALDB_ADBC_DRIVER="''${SPIRALDB_ADBC_DRIVER:-${spiralAdbc}/lib/${adbcLibrary}}"
+            '';
             ASAN_SYMBOLIZER_PATH = "${llvmPackages.llvm}/bin/llvm-symbolizer";
             LIBCLANG_PATH = "${llvmPackages.libclang.lib}/lib";
           };
         in
         {
+          packages.spiral-adbc = spiralAdbc;
+
           devShells.default = pkgs.mkShell (sharedShell // {
             packages =
               sharedShell.packages

@@ -182,7 +182,7 @@ impl ProjectSessionFactory {
             uuid::Uuid::new_v4().to_string(),
             connection.project_id().unwrap_or_default().to_owned(),
         );
-        let database = Arc::new(spiral_robotics_storage::SpiralDatabase::new(
+        let database = Arc::new(spiral_robotics_storage::AdbcDatabase::new(
             connection.clone(),
         ));
         let store = Arc::new(

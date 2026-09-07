@@ -579,13 +579,13 @@ mod tests {
         .unwrap();
         let first = {
             let settings = initial.clone().with_project("project_a").unwrap();
-            let database = Arc::new(crate::SpiralDatabase::new(settings.clone()));
+            let database = Arc::new(crate::AdbcDatabase::new(settings.clone()));
             ProjectStore::new(settings, "spiral_robotics".to_owned(), database)
         }
         .unwrap();
         let second = {
             let settings = initial.clone().with_project("project_b").unwrap();
-            let database = Arc::new(crate::SpiralDatabase::new(settings.clone()));
+            let database = Arc::new(crate::AdbcDatabase::new(settings.clone()));
             ProjectStore::new(settings, "spiral_robotics".to_owned(), database)
         }
         .unwrap();
@@ -598,7 +598,7 @@ mod tests {
         assert_eq!(first.project_id(), "project_a");
         let unconfigured = {
             let settings = initial;
-            let database = Arc::new(crate::SpiralDatabase::new(settings.clone()));
+            let database = Arc::new(crate::AdbcDatabase::new(settings.clone()));
             ProjectStore::new(settings, "spiral_robotics".to_owned(), database)
         }
         .unwrap();

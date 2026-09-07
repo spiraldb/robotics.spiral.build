@@ -1,9 +1,3 @@
 [net]
-# SpiralDB is a private Git dependency. Use the system Git client so Cargo can
-# reuse the developer's normal credential helper and CI Git configuration.
+# Reuse the system Git credential helper for the remaining Git dependencies.
 git-fetch-with-cli = true
-
-[unstable]
-# SpiralDB's default plugin stack builds its video runtime as a Cargo artifact
-# dependency, even when consumed through the native ADBC driver crate.
-bindeps = true

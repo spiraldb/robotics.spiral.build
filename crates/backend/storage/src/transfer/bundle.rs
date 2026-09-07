@@ -4045,7 +4045,7 @@ mod tests {
         .with_credentials(stored_credentials());
         Arc::new(
             {
-                let database = Arc::new(crate::SpiralDatabase::new(settings.clone()));
+                let database = Arc::new(crate::AdbcDatabase::new(settings.clone()));
                 ProjectStore::new(settings, namespace, database)
             }
             .expect("the Spiral E2E project store must be valid"),

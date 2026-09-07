@@ -22,6 +22,8 @@ dead_code = "deny"
 unreachable_pub = "deny"
 
 [workspace.dependencies]
+adbc_core = "0.24.0"
+adbc_driver_manager = "0.24.0"
 base64 = "0.22"
 candle-core = "=0.11.0"
 candle-nn = "=0.11.0"
@@ -34,17 +36,6 @@ spiral-robotics-frontend = { path = "crates/frontend" }
 spiral-robotics-storage = { path = "crates/backend/storage" }
 spiral-robotics-training = { path = "crates/backend/training" }
 spiral-robotics-viewport = { path = "crates/frontend/viewport" }
-spiral-client = { git = "https://github.com/spiraldb/spiraldb.git", branch = "develop" }
-spiral-config = { git = "https://github.com/spiraldb/spiraldb.git", branch = "develop" }
-spiral-defaults = { git = "https://github.com/spiraldb/spiraldb.git", branch = "develop" }
-spiral-engine = { git = "https://github.com/spiraldb/spiraldb.git", branch = "develop" }
-spiral-session = { git = "https://github.com/spiraldb/spiraldb.git", branch = "develop" }
-spiraldb-catalog = { git = "https://github.com/spiraldb/spiraldb.git", branch = "develop" }
-spiraldb-control-plane = { git = "https://github.com/spiraldb/spiraldb.git", branch = "develop" }
-spiraldb-table = { git = "https://github.com/spiraldb/spiraldb.git", branch = "develop" }
-vortex-array = { git = "https://github.com/vortex-data/vortex.git", rev = "ee1ac2521bb477d26797b300c8d0fdd17101fb0c" }
-vortex-arrow = { git = "https://github.com/vortex-data/vortex.git", rev = "ee1ac2521bb477d26797b300c8d0fdd17101fb0c" }
-vortex-error = { git = "https://github.com/vortex-data/vortex.git", rev = "ee1ac2521bb477d26797b300c8d0fdd17101fb0c" }
 clap = { version = "4.5", features = ["derive"] }
 dioxus = { version = "0.7.10", default-features = false }
 dioxus-flow = { git = "https://github.com/XiangpengHao/dioxus-flow", rev = "a85262445c1707a397511d63a049e3c6d59ab927" }

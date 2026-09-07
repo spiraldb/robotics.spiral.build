@@ -1,5 +1,4 @@
-# SpiralDB's Git workspace manifest currently uses Cargo's nightly-only
-# profile-rustflags feature, so consumers must parse it with the same toolchain.
+# Keep development aligned with the Nix and CI toolchain.
 [toolchain]
 channel = "nightly-2026-06-29"
 components = ["rustfmt", "clippy"]

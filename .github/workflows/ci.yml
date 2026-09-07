@@ -16,12 +16,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
-      # Clippy invokes Cargo as a subprocess, so use Cargo's inherited
-      # configuration form rather than a command-line `-Z` flag.
-      CARGO_UNSTABLE_AVOID_DEV_DEPS: "true"
       CI_RUST_PACKAGES: >-
         -p spiral-robotics-common
         -p spiral-robotics-storage
+        -p spiral-robotics-backend
         -p spiral-robotics-frontend
         -p spiral-robotics-hardware
         -p spiral-robotics-inference
@@ -61,10 +59,8 @@ jobs:
             --all-targets --locked -- \
             -D warnings -A clippy::suspicious-else-formatting
 
-      # The native Studio backend is omitted until a separate SpiralDB
-      # integration lane exists. Explicit package selection and
-      # `avoid-dev-deps` keep Cargo's lock resolver off the backend and its
-      # private driver source. Standard CI uses the pinned nightly toolchain.
+      # The Nix shell supplies the pinned standalone ADBC library. Its offline
+      # contract tests exercise native execution without hosted services.
       - name: Test without external services
         run: |
           read -r -a package_args <<< "$CI_RUST_PACKAGES"

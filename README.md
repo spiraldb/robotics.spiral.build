@@ -22,6 +22,13 @@ The easiest way to setup dev env is to use [nix](https://nixos.org/download.html
 nix develop .
 ```
 
+Studio uses a standalone Spiral ADBC library. Set `SPIRALDB_ADBC_DRIVER` to
+its absolute path, or place the library beside the server executable. The Nix
+shell preserves an explicit selection and otherwise supplies the published
+archive. That archive is currently stale: hosted persistence requires a driver
+built from current upstream. See [database setup and the validated build](docs/database-boundary.md)
+before starting Studio.
+
 Start the studio with:
 
 ```console

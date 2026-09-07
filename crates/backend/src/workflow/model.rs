@@ -3120,9 +3120,8 @@ mod tests {
         let project_store = Arc::new(
             {
                 let settings = connection;
-                let database = Arc::new(spiral_robotics_storage::SpiralDatabase::new(
-                    settings.clone(),
-                ));
+                let database =
+                    Arc::new(spiral_robotics_storage::AdbcDatabase::new(settings.clone()));
                 ProjectStore::new(settings, "spiral_robotics".to_owned(), database)
             }
             .expect("the Workflow registry project store must be valid"),
@@ -3370,9 +3369,8 @@ mod tests {
         let project_store = Arc::new(
             {
                 let settings = connection;
-                let database = Arc::new(spiral_robotics_storage::SpiralDatabase::new(
-                    settings.clone(),
-                ));
+                let database =
+                    Arc::new(spiral_robotics_storage::AdbcDatabase::new(settings.clone()));
                 ProjectStore::new(settings, namespace.clone(), database)
             }
             .expect("the Workflow golden project store must be valid"),

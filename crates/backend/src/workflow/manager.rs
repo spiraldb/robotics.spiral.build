@@ -2024,9 +2024,8 @@ mod tests {
                     "https://spfs.spiraldb.dev".to_owned(),
                 )
                 .expect("the unconfigured test connection is valid");
-                let database = Arc::new(spiral_robotics_storage::SpiralDatabase::new(
-                    settings.clone(),
-                ));
+                let database =
+                    Arc::new(spiral_robotics_storage::AdbcDatabase::new(settings.clone()));
                 ProjectStore::new(settings, "studio".to_owned(), database)
             }
             .expect("the unconfigured test project_store is valid"),
@@ -2095,9 +2094,8 @@ mod tests {
                     "https://spfs.spiraldb.dev".to_owned(),
                 )
                 .expect("the unconfigured test connection is valid");
-                let database = Arc::new(spiral_robotics_storage::SpiralDatabase::new(
-                    settings.clone(),
-                ));
+                let database =
+                    Arc::new(spiral_robotics_storage::AdbcDatabase::new(settings.clone()));
                 ProjectStore::new(settings, "workflow_terminal_failure".to_owned(), database)
             }
             .expect("the unconfigured test project_store is valid"),
@@ -2200,9 +2198,8 @@ mod tests {
                     "https://spfs.spiraldb.dev".to_owned(),
                 )
                 .expect("the unconfigured test connection is valid");
-                let database = Arc::new(spiral_robotics_storage::SpiralDatabase::new(
-                    settings.clone(),
-                ));
+                let database =
+                    Arc::new(spiral_robotics_storage::AdbcDatabase::new(settings.clone()));
                 ProjectStore::new(settings, "workflow_scope_reload".to_owned(), database)
             }
             .expect("the unconfigured test project_store is valid"),
@@ -2371,9 +2368,8 @@ mod tests {
         let project_store = Arc::new(
             {
                 let settings = connection;
-                let database = Arc::new(spiral_robotics_storage::SpiralDatabase::new(
-                    settings.clone(),
-                ));
+                let database =
+                    Arc::new(spiral_robotics_storage::AdbcDatabase::new(settings.clone()));
                 ProjectStore::new(settings, namespace.clone(), database)
             }
             .expect("the Workflow E2E project store must be valid"),
@@ -2517,9 +2513,8 @@ mod tests {
         let project_store = Arc::new(
             {
                 let settings = connection;
-                let database = Arc::new(spiral_robotics_storage::SpiralDatabase::new(
-                    settings.clone(),
-                ));
+                let database =
+                    Arc::new(spiral_robotics_storage::AdbcDatabase::new(settings.clone()));
                 ProjectStore::new(settings, namespace.clone(), database)
             }
             .expect("the Workflow SigLIP project store must be valid"),

@@ -12,6 +12,10 @@ workspace = true
 test-support = []
 
 [dependencies]
+adbc_core.workspace = true
+adbc_driver_manager.workspace = true
+arrow-buffer = "58.4.0"
+arrow-data = "58.4.0"
 spiral-robotics-common.workspace = true
 spiral-robotics-hardware.workspace = true
 arrow-array = "58.4.0"
@@ -27,23 +31,14 @@ reqwest = { version = "0.12.28", default-features = false, features = ["json", "
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
-spiral-client.workspace = true
-spiral-config.workspace = true
-spiral-defaults.workspace = true
-spiral-engine.workspace = true
-spiral-session.workspace = true
-spiraldb-catalog.workspace = true
-spiraldb-control-plane.workspace = true
-spiraldb-table.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
 tracing = "0.1"
 url = "2"
 uuid = { version = "1", features = ["v4"] }
-vortex-array.workspace = true
-vortex-arrow.workspace = true
-vortex-error.workspace = true
 
 [dev-dependencies]
+futures = { version = "0.3", features = ["async-await"] }
+tokio = { version = "1", features = ["macros", "time"] }
 spiral-robotics-common = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 

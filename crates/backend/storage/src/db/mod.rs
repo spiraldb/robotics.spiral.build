@@ -4,11 +4,11 @@
 //! connection lifecycle, SQL construction, physical schema, and Arrow row
 //! decoding. Product persistence belongs to the feature modules above it.
 
+mod adbc_database;
 mod arrow_rows;
 mod database;
 mod project_store;
 mod schema;
-mod spiral_database;
 mod sql;
 
 pub(crate) use arrow_rows::{
@@ -29,7 +29,7 @@ pub use schema::{
 pub(crate) use sql::ProjectQueries;
 pub use sql::SpiralSql;
 
-pub use spiral_database::SpiralDatabase;
+pub use adbc_database::AdbcDatabase;
 
 #[cfg(test)]
 mod contract_tests;
