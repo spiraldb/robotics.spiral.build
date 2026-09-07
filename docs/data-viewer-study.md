@@ -27,7 +27,7 @@ Primary code references:
 - [Data panel composition](../crates/frontend/src/activities/data/screen.rs)
 - [Import and native materialization](../crates/backend/storage/src/transfer/ingestion.rs)
 - [Dataset identity](../crates/common/src/recording.rs)
-- [Episode playback loading](../crates/frontend/src/client/episode_data.rs)
+- [Episode playback loading](../crates/frontend/src/activities/data/episode_cache.rs)
 - [Query result rendering](../crates/frontend/src/activities/data/query_result.rs)
 
 Some documentation is stale: PRODUCT.md still says no ingestion implementation exists, and parts of DESIGN.md describe an earlier Data composition. The code above is the evidence for this study. No product/design documents were changed.

@@ -5,6 +5,11 @@
 //! while another delivery mechanism can provide different adapters without
 //! changing session ordering, validation, or rollback policy.
 
+pub(crate) mod commands;
+pub(crate) mod http;
+pub(crate) mod supervisor;
+pub(crate) mod video_http;
+
 use std::collections::BTreeMap;
 
 use spiral_robotics_common::identity::DatasetId;

@@ -10,15 +10,16 @@ use dioxus_workbench::{LayoutNode, SplitAxis};
 use spiral_robotics_common::recording::{ReplayPhase, ReplayPurpose};
 use spiral_robotics_common::robots::ModeSelection;
 
+use crate::activities::data::episode_cache;
 use crate::activities::data::query_result::QueryResultView;
 use crate::activities::data::relations::RelationsPanel;
 use crate::activities::data::state::{DataController, EpisodeDataState};
 use crate::activities::data::workbench::{EpisodeIdPresentation, EpisodesPanel, QueryPanel};
+use crate::activities::live::recording_actions;
 use crate::activities::live::workbench::LiveWorkbench;
 use crate::activities::rollout::workspace::{
     InferencePanel, RobotFleet, RolloutWorkbench, TrainingSnapshotRollout,
 };
-use crate::client::{commands, episode_data};
 use crate::panels::camera::{CameraEditor, CameraEditorSource, RecordedCameraSourceRequest};
 use crate::panels::timeline::panel::{
     RecordedTimelineTraces, SignalSource, StudioTimeline, StudioTimelineState,
@@ -37,7 +38,7 @@ use crate::shell::activity::{
 use crate::shell::layout::PanelLayoutDefinition;
 use crate::shell::state::Studio;
 
-use episode_data::{
+use episode_cache::{
     EpisodePlaybackTime, EpisodePreview, EpisodePreviewRequest, EpisodePreviewSignals,
 };
 
@@ -763,7 +764,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
                         match recording {
                             Some(recording) => studio.stop_recording(
                                 recording.episode(),
-                                commands::RecordingCompletion::new(data, true, EventHandler::new(move |_: spiral_robotics_common::recording::EpisodeInfo| {
+                                recording_actions::RecordingCompletion::new(data, true, EventHandler::new(move |_: spiral_robotics_common::recording::EpisodeInfo| {
                                     let next_revision = episode_preview_revision.peek().wrapping_add(1);
                                     episode_preview_revision.set(next_revision);
                                     episode_preview_state.set(None);
@@ -793,7 +794,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
                         if let Some(recording) = recording {
                             studio.stop_recording(
                                 recording.episode(),
-                                commands::RecordingCompletion::new(data, false, EventHandler::new(move |_| {
+                                recording_actions::RecordingCompletion::new(data, false, EventHandler::new(move |_| {
                                     let next_revision = episode_preview_revision.peek().wrapping_add(1);
                                     episode_preview_revision.set(next_revision);
                                     episode_preview_state.set(None);
@@ -1053,7 +1054,9 @@ impl Studio {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::episode_data::{EpisodeTimeline, TimelineSample, VideoAssetMetadata};
+    use crate::activities::data::episode_cache::{
+        EpisodeTimeline, TimelineSample, VideoAssetMetadata,
+    };
     use spiral_robotics_common::recording::{
         EpisodeInfo, EpisodeVideoFormat, EpisodeVideoIdentity, EpisodeVideoTimeline,
         ReplayIdentity, ReplayTimeline, ReplayTransport,

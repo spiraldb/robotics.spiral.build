@@ -1,20 +1,13 @@
 //! Native HTTP runtime for the Spiral Robotics backend.
 
-use std::future::IntoFuture;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use crate::data_commands::DataCommands;
-use crate::device_commands::DeviceCommands;
-use crate::http::routes::AppState;
-use crate::main_runtime::MainRuntime;
-use crate::recording_commands::RecordingCommands;
+use crate::project_session::context::ProjectContext;
 use crate::robotics::cameras::CameraManager;
 use crate::robotics::video::VideoEncoderSettings;
-use crate::training_rollout::TrainingRolloutCommands;
-use crate::workflow_commands::WorkflowCommands;
 use clap::Parser;
 use spiral_robotics_hardware::{
     CameraRuntime, ControlSettings, DEFAULT_MAX_STEP_COUNTS, DEFAULT_TELEOP_MAX_STEP_COUNTS,
@@ -295,14 +288,7 @@ impl ServerStartup {
         let projects =
             crate::project_session::ProjectCoordinator::new(factory, backend_state, connection)
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
-        let state = AppState::new(projects);
-        let main_runtime = MainRuntime::current();
-        let training_rollout_commands =
-            TrainingRolloutCommands::new(main_runtime.clone(), state.clone());
-        let workflow_commands = WorkflowCommands::new(main_runtime.clone(), state.clone());
-        let recording_commands = RecordingCommands::new(main_runtime.clone(), state.clone());
-        let device_commands = DeviceCommands::new(main_runtime.clone(), state.clone());
-        let data_commands = DataCommands::new(main_runtime.clone(), state.clone());
+        let state = ProjectContext::new(projects);
         let listener = tokio::net::TcpListener::bind(bind).await?;
         let address = listener.local_addr()?;
 
@@ -311,25 +297,16 @@ impl ServerStartup {
         println!("Spiral Robotics Studio is running at {public_url}");
 
         let bootstrap = tokio::spawn(
-            state
-                .clone()
-                .bootstrap_services(!arguments.video.no_cameras),
+            crate::project_session::bootstrap::ProjectBootstrap::new(state.clone())
+                .run(!arguments.video.no_cameras),
         );
-        let video_monitor = tokio::spawn(state.clone().monitor_video_recording());
+        let video_monitor = tokio::spawn(
+            crate::recording::supervisor::RecordingSupervisor::new(state.clone())
+                .monitor_video_recording(),
+        );
         let cleanup_state = state.clone();
-        // Dioxus 0.7.10's server-only extractors read the request context;
-        // ServeConfig context providers are installed only in the SSR VirtualDom.
         let app = dioxus::server::router(app)
-            .nest("/api", state.clone().api_router())
-            .layer(axum::Extension(crate::ProjectQueries::new(
-                state.clone(),
-                main_runtime.clone(),
-            )))
-            .layer(axum::Extension(training_rollout_commands))
-            .layer(axum::Extension(workflow_commands))
-            .layer(axum::Extension(recording_commands))
-            .layer(axum::Extension(device_commands))
-            .layer(axum::Extension(data_commands))
+            .nest("/api", super::routes::StudioApi::router(state.clone()))
             .layer(tower_http::trace::TraceLayer::new_for_http());
 
         // Both the server and this task observe the same edge. The server begins
@@ -363,7 +340,9 @@ impl ServerStartup {
             if let Err(error) = hardware.shutdown().await {
                 tracing::error!("hardware shutdown did not verify every motor release: {error}");
             }
-            cleanup_state.finish_stale_video_capture().await;
+            crate::recording::supervisor::RecordingSupervisor::new(cleanup_state)
+                .finish_stale_video_capture()
+                .await;
             let camera_result = tokio::task::spawn_blocking({
                 let cameras = cameras.clone();
                 move || cameras.shutdown()
@@ -415,41 +394,6 @@ impl ServerAccessArguments {
             ),
         )
         .into())
-    }
-}
-
-/// Warm external services and hydrate durable state after the HTTP listener
-/// is already accepting requests. Catalog and camera I/O are independent and
-/// therefore progress concurrently.
-impl AppState {
-    async fn bootstrap_services(self, discover_cameras: bool) {
-        let catalog = self.bootstrap_catalog();
-        let camera = async {
-            if !discover_cameras {
-                return;
-            }
-            let cameras = self.cameras().clone();
-            if let Err(error) =
-                tokio::task::spawn_blocking(move || cameras.refresh_blocking()).await
-            {
-                let message = format!("camera discovery task stopped: {error}");
-                tracing::warn!("{message}");
-                self.cameras().note_issue(message);
-            }
-        };
-        tokio::join!(catalog, camera);
-    }
-
-    async fn bootstrap_catalog(&self) {
-        self.bootstrap()
-            .bootstrapping("Connecting to SpiralDB and loading the project");
-        match self.projects().recover(self.project()).await {
-            Ok(()) => self.current().auto_connect_saved_robots().await,
-            Err(error) => {
-                tracing::warn!("could not load initial Spiral project: {error}");
-                self.bootstrap().failed(false, &error);
-            }
-        }
     }
 }
 

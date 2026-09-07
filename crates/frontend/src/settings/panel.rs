@@ -1,11 +1,11 @@
 //! Settings screen for robots, SpiralDB, training, and video.
 
-use crate::client::project::ProjectClient;
 use crate::components::interaction::{
     Action, ActionLink, ActionPurpose, ActionVariant, BlockingConfirmation, BrowserFocus,
     CloseIcon, ConfirmationCopy, ConfirmationDismissal, ConfirmationResponse, FileAction,
     FileInput, Toggle,
 };
+use crate::settings::SettingsClient;
 use dioxus::prelude::*;
 use spiral_robotics_common::settings::{DataSettings, SpiralConnectionUpdate};
 
@@ -79,7 +79,7 @@ struct SettingsOperationSignals {
     saving: Signal<bool>,
     testing: Signal<bool>,
     transferring_project: Signal<bool>,
-    test_result: Signal<Option<(bool, String)>>,
+    test_result: Signal<Option<spiral_robotics_common::settings::ConnectionTest>>,
     save_error: Signal<Option<crate::client::CommandError>>,
     project_transfer: ProjectTransferSignals,
 }
@@ -217,8 +217,10 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
         let training = current().training().to_owned();
         let video = current().video().to_owned();
         spawn(async move {
-            match ProjectClient::current()
-                .update_data_settings(connection, training, video)
+            match SettingsClient::current()
+                .update_data_settings(spiral_robotics_common::settings::SettingsUpdate::new(
+                    connection, training, video,
+                ))
                 .await
             {
                 Ok(_) => {
@@ -231,10 +233,10 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
                         test_result.set(None);
                         let result = match connection_test {
                             SettingsSection::Spiral => {
-                                ProjectClient::current().test_spiral_connection().await
+                                SettingsClient::current().test_spiral_connection().await
                             }
                             SettingsSection::Training => {
-                                ProjectClient::current().test_training_runtime().await
+                                SettingsClient::current().test_training_runtime().await
                             }
                             SettingsSection::Robots | SettingsSection::Video => unreachable!(
                                 "only connection-backed settings sections can request a test"
@@ -242,10 +244,12 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
                         };
                         match result {
                             Ok(response) => test_result.set(Some(response)),
-                            Err(error) => test_result.set(Some((
-                                false,
-                                format!("{error} {}", error.recovery_guidance()),
-                            ))),
+                            Err(error) => test_result.set(Some(
+                                spiral_robotics_common::settings::ConnectionTest::new(
+                                    false,
+                                    format!("{error} {}", error.recovery_guidance()),
+                                ),
+                            )),
                         }
                         testing.set(false);
                     } else {
@@ -444,9 +448,9 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
                         }
                         if let Some(response) = test_result() {
                             p {
-                                class: if response.0 { "connection-test connection-test-ok" } else { "connection-test connection-test-failed" },
+                                class: if response.connected() { "connection-test connection-test-ok" } else { "connection-test connection-test-failed" },
                                 role: "status",
-                                "{response.1}"
+                                "{response.message()}"
                             }
                         }
                     }
@@ -504,7 +508,7 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
                     on_busy_change.call(true);
                     spawn(async move {
                         let Some(outcome) = SingleFlight::run(transferring_project, async {
-                                let result = ProjectClient::current().import_project(file.into())
+                                let result = SettingsClient::current().import_project(file)
                                     .await
                                     .map_err(|error| error.to_string())?;
                                 data.set_selected_episode(None);

@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 const MAX_SAMPLES: usize = 36_000;
 const TRIM_CHUNK: usize = 3_600;
 /// One joint's measured angle at every sample in a take.
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct JointSignal {
     name: String,
@@ -23,6 +24,7 @@ impl JointSignal {
 }
 
 /// One arm's joint signals, in the order first reported by that arm.
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ArmSignals {
     id: String,
@@ -43,6 +45,7 @@ impl ArmSignals {
 ///
 /// All arms share one time column because the control loop samples them on the
 /// same frame. Every joint vector is kept index-aligned with that column.
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct RecordingSignals {
     take: Option<String>,
@@ -168,6 +171,7 @@ impl RecordingSignals {
 }
 
 /// The next sample wanted by a client, scoped to a take generation.
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct RecordingCursor {
     generation: u64,
@@ -176,6 +180,7 @@ pub struct RecordingCursor {
 
 /// A bounded page of backend-retained samples. Offset gaps explicitly replace
 /// the local window rather than silently joining unrelated samples.
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RecordingWindow(RecordingSignals);
 

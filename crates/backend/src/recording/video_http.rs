@@ -1,29 +1,55 @@
 //! Browser-native episode video delivery.
 
-use super::*;
+use crate::data::queries::EpisodeQueries;
+use crate::http::contract::{ApiRoutes, MediaEndpoint};
+use crate::project_session::context::ProjectContext;
+use axum::{
+    body::Body,
+    extract::{Path, Query, State},
+    http::{HeaderMap, StatusCode, header},
+    response::Response,
+    routing::get,
+};
+use bytes::Bytes;
+use serde::Deserialize;
+use spiral_robotics_storage::video::{VideoAssetKey, VideoByteRange};
 
-impl AppState {
+pub(crate) struct EpisodeVideo;
+
+impl EpisodeVideo {
     /// Episode videos stay HTTP because browser video elements issue range requests.
-    pub(super) fn recording_storage_router() -> Router<Self> {
-        Router::new().route("/episodes/{id}/videos/{stream}", get(Self::episode_video))
+    pub(crate) fn register(routes: &mut ApiRoutes) {
+        routes.media("/episodes/{id}/videos/{stream}", MediaEndpoint::new(get(Self::episode_video), serde_json::json!({"get": {
+            "operationId": "episode_video", "parameters": [
+                {"name": "id", "in": "path", "required": true, "schema": {"type": "string"}},
+                {"name": "stream", "in": "path", "required": true, "schema": {"type": "string"}},
+                {"name": "session_id", "in": "query", "required": true, "schema": {"type": "string"}},
+                {"name": "segment", "in": "query", "required": false, "schema": {"type": "integer", "minimum": 0, "default": 0}},
+                {"name": "Range", "in": "header", "required": false, "schema": {"type": "string"}}
+            ],
+            "responses": {
+                "200": {"description": "Complete video", "content": {"video/mp4": {"schema": {"type": "string", "format": "binary"}}}},
+                "206": {"description": "Requested byte range", "content": {"video/mp4": {"schema": {"type": "string", "format": "binary"}}}}
+            }
+        }})["get"].take()));
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct ByteRange {
+pub(crate) struct ByteRange {
     start: u64,
     end: u64,
 }
 
 #[cfg(test)]
 impl ByteRange {
-    pub(super) const fn new(start: u64, end: u64) -> Self {
+    pub(crate) const fn new(start: u64, end: u64) -> Self {
         Self { start, end }
     }
 }
 
 impl ByteRange {
-    pub(super) fn parse(value: &str, length: u64) -> Option<Self> {
+    pub(crate) fn parse(value: &str, length: u64) -> Option<Self> {
         if length == 0 {
             return None;
         }
@@ -71,9 +97,9 @@ struct LocalVideoQuery {
     segment: Option<u32>,
 }
 
-impl AppState {
+impl EpisodeVideo {
     async fn episode_video(
-        State(state): State<Self>,
+        State(state): State<ProjectContext>,
         (Path((id, stream)), Query(query), headers): (
             Path<(String, String)>,
             Query<LocalVideoQuery>,

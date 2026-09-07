@@ -7,7 +7,6 @@
 //! assignments, and calibration. Live consumes that configuration without
 //! mixing setup work into the operating surface.
 
-use crate::client::project::ProjectClient;
 use crate::components::interaction::{
     Action, ActionPurpose, ActionVariant, ChevronIcon, FileAction, FileInput, UnassignIcon,
 };
@@ -44,7 +43,7 @@ pub(super) fn RobotPanel() -> Element {
             if !available {
                 return std::future::pending().await;
             }
-            ProjectClient::current()
+            RobotClient::current()
                 .list_serial_ports()
                 .await
                 .map_err(|error| error.to_string())
@@ -199,7 +198,7 @@ fn NewRobotForm() -> Element {
         let selected_name = name.clone();
         studio.run_utility(format!("Created {name}."), async move {
             let Some(result) = SingleFlight::run(creating, async move {
-                ProjectClient::current()
+                RobotClient::current()
                     .create_robot(request)
                     .await
                     .map_err(|error| error.to_string())
@@ -305,7 +304,7 @@ fn ImportRobotConfiguration() -> Element {
                                 .read_bytes()
                                 .await
                                 .map_err(|error| format!("Could not read {}: {error}", file.name()))?;
-                            ProjectClient::current().import_robot_configuration(bytes.to_vec())
+                            RobotClient::current().import_robot_configuration(bytes.to_vec())
                                 .await
                                 .map_err(|error| error.to_string())
                         })
@@ -476,9 +475,9 @@ fn ConnectionAction(robot: RobotSummary, sweeping: bool) -> Element {
                 studio.run("", async move {
                     SingleFlight::run(pending, async move {
                         let result = if connected {
-                            ProjectClient::current().disconnect_robot(id).await
+                            RobotClient::current().disconnect_robot(id).await
                         } else {
-                            ProjectClient::current().connect_robot(id).await
+                            RobotClient::current().connect_robot(id).await
                         };
                         result.map_err(|error| error.to_string())
                     })
@@ -571,7 +570,7 @@ fn PortSection(robot: RobotSummary, state: PortSectionState) -> Element {
                             let Some(result) = SingleFlight::run(
                                 starting_identify,
                                 async move {
-                                    ProjectClient::current().list_serial_ports()
+                                    RobotClient::current().list_serial_ports()
                                         .await
                                         .map_err(|error| error.to_string())
                                 },
@@ -677,7 +676,7 @@ impl Studio {
             PortSettings::new(assignment.path.clone(), assignment.baud_rate),
         );
         self.run(format!("Assigned {}.", assignment.path), async move {
-            ProjectClient::current()
+            RobotClient::current()
                 .update_robot(request)
                 .await
                 .map_err(|error| error.to_string())
@@ -745,7 +744,7 @@ fn IdentifyPort(
                                 let Some(result) = SingleFlight::run(
                                     checking,
                                     async move {
-                                        ProjectClient::current().identify_serial_port(before)
+                                        RobotClient::current().identify_serial_port(before)
                                             .await
                                             .map_err(|error| error.to_string())
                                     },
@@ -755,12 +754,12 @@ fn IdentifyPort(
                                     return;
                                 };
                                 match result {
-                                    Ok((port, message)) => match port {
+                                    Ok(identification) => match identification.port() {
                                         Some(port) => {
-                                            on_found.call(port);
-                                            step.set(IdentifyStep::Finished(message));
+                                            on_found.call(port.to_owned());
+                                            step.set(IdentifyStep::Finished(identification.message().to_owned()));
                                         }
-                                        None => studio.report(message),
+                                        None => studio.report(identification.message()),
                                     },
                                     Err(error) => studio.report(error),
                                 }
@@ -837,7 +836,7 @@ fn CameraSection(robot: RobotSummary) -> Element {
                             if let Some(Err(error)) = SingleFlight::run(
                                 scanning,
                                 async move {
-                                    ProjectClient::current().refresh_cameras()
+                                    RobotClient::current().refresh_cameras()
                                         .await
                                         .map_err(|error| error.to_string())
                                         .map(|_| ())
@@ -983,7 +982,7 @@ impl Studio {
         let request = RobotUpdate::with_cameras(assignments.robot_id, assignments.bindings);
         self.run("", async move {
             SingleFlight::run(assignments.saving, async move {
-                ProjectClient::current()
+                RobotClient::current()
                     .update_robot(request)
                     .await
                     .map_err(|error| error.to_string())
@@ -1010,3 +1009,6 @@ impl CameraAssignments {
         }
     }
 }
+
+mod client;
+pub(crate) use client::RobotClient;

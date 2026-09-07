@@ -1,12 +1,30 @@
 //! Browser-native camera preview delivery.
 
-use super::*;
+use crate::http::contract::{ApiRoutes, MediaEndpoint};
+use crate::project_session::context::ProjectContext;
+use crate::robotics::cameras::Frame;
+use axum::{
+    body::Body,
+    extract::{Query, State},
+    http::{StatusCode, header},
+    response::Response,
+    routing::get,
+};
+use bytes::{BufMut, Bytes, BytesMut};
+use futures_util::StreamExt;
+use serde::Deserialize;
+
 use std::convert::Infallible;
 
-impl AppState {
+pub(crate) struct CameraPreview;
+
+impl CameraPreview {
     /// Camera previews stay HTTP because browser image elements consume MJPEG URLs.
-    pub(super) fn device_bootstrap_router() -> Router<Self> {
-        Router::new().route("/cameras/stream.mjpeg", get(Self::camera_stream))
+    pub(crate) fn register(routes: &mut ApiRoutes) {
+        routes.media("/cameras/stream.mjpeg", MediaEndpoint::new(get(Self::camera_stream), serde_json::json!({"get": {
+            "operationId": "camera_stream", "parameters": [{"name": "id", "in": "query", "required": true, "schema": {"type": "string"}}],
+            "responses": {"200": {"description": "Live JPEG frames", "content": {"multipart/x-mixed-replace": {"schema": {"type": "string", "format": "binary"}}}}}
+        }})["get"].take()));
     }
 }
 
@@ -17,9 +35,9 @@ struct CameraQuery {
     id: String,
 }
 
-impl AppState {
+impl CameraPreview {
     async fn camera_stream(
-        State(state): State<Self>,
+        State(state): State<ProjectContext>,
         Query(query): Query<CameraQuery>,
     ) -> Result<Response, (StatusCode, String)> {
         let receiver = state
@@ -53,7 +71,7 @@ impl AppState {
 
 impl Frame {
     /// Wrap this JPEG as a part of a `multipart/x-mixed-replace` response.
-    pub(super) fn multipart_part(&self) -> Bytes {
+    pub(crate) fn multipart_part(&self) -> Bytes {
         let mut part = BytesMut::with_capacity(self.bytes().len() + 96);
         part.put_slice(b"--");
         part.put_slice(MJPEG_BOUNDARY.as_bytes());
@@ -65,3 +83,5 @@ impl Frame {
         part.freeze()
     }
 }
+
+const MJPEG_BOUNDARY: &str = "spiral-robotics-frame";

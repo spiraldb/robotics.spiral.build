@@ -100,7 +100,7 @@ fn episode_catalog_and_full_data_belong_to_the_data_controller() {
         .expect("Episodes panel source should be readable");
     let workspace = fs::read_to_string(frontend.join("src/shell/workspace.rs"))
         .expect("Episode workspace source should be readable");
-    let preview = fs::read_to_string(frontend.join("src/client/episode_data.rs"))
+    let preview = fs::read_to_string(frontend.join("src/activities/data/episode_cache.rs"))
         .expect("Episode preview source should be readable");
 
     for ownership in [
@@ -241,8 +241,6 @@ fn relation_schemas_belong_to_studio_while_exact_counts_are_data_view_scoped() {
     let frontend = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let studio = fs::read_to_string(frontend.join("src/shell/state.rs"))
         .expect("Studio state source should be readable");
-    let server_functions = fs::read_to_string(frontend.join("src/client/transport.rs"))
-        .expect("server function source should be readable");
     let routes = fs::read_to_string(frontend.join("src/shell/routes.rs"))
         .expect("Studio routes source should be readable");
     let data_state = fs::read_to_string(frontend.join("src/activities/data/state.rs"))
@@ -256,7 +254,6 @@ fn relation_schemas_belong_to_studio_while_exact_counts_are_data_view_scoped() {
 
     assert!(studio.contains("relation_catalog: Resource<Result<RelationCatalog, String>>"));
     assert_eq!(studio.matches("relation_catalog()").count(), 1);
-    assert!(server_functions.contains("endpoint = \"server-functions/data/relations\""));
     assert!(routes.contains("Studio::use_studio"));
     assert!(!frontend.join("src/shell/catalog.rs").exists());
     assert!(!query.contains("get::<RelationCatalog>"));

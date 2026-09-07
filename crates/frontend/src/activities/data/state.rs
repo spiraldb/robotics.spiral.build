@@ -5,7 +5,7 @@
 //! resource, while successful immutable episode data is cached on its catalog
 //! entry.
 
-use crate::client::project::ProjectClient;
+use crate::activities::data::DatasetClient;
 use crate::client::queries::{QueryDomain, QueryPolicy, QueryRefresh};
 use std::sync::Arc;
 
@@ -15,12 +15,12 @@ use spiral_robotics_common::recording::{DatasetSummary, EpisodeInfo, EpisodeList
 
 use crate::activities::data::catalog::ManagedTable;
 use crate::activities::data::dataset_catalog::DatasetCatalogState;
+use crate::activities::data::episode_cache::EpisodeData;
 use crate::activities::data::query_result::{
     DEFAULT_QUERY_ROWS, QueryExecutionPresentation, QueryState, QueryTab,
 };
 use crate::activities::data::sql_draft::GeneratedSqlDraft;
 use crate::activities::data::workbench::QueryPresetSql;
-use crate::client::episode_data::EpisodeData;
 
 use crate::shell::notifications::MessageSource;
 use crate::shell::state::Studio;
@@ -366,7 +366,7 @@ impl DataController {
         let sessions = crate::shell::project::ProjectSessionSignals::current();
         let datasets = QueryPolicy::new(QueryDomain::Data, 5_000).use_when(
             move || sessions.storage_available(),
-            || ProjectClient::current().list_datasets(),
+            || DatasetClient::current().list_datasets(),
         );
         use_effect(move || {
             let result = datasets.read();
@@ -382,7 +382,7 @@ impl DataController {
             async move {
                 let dataset = DatasetId::try_from(dataset.as_str()).map(String::from)
                     .map_err(|error| crate::client::CommandError::new(spiral_robotics_common::command_failure::CommandFailureCode::InvalidInput, error.to_string()))?;
-                let result = ProjectClient::current().list_episodes(dataset.clone()).await?;
+                let result = DatasetClient::current().list_episodes(dataset.clone()).await?;
                 Ok::<_, crate::client::CommandError>((dataset, result))
             }
         });
@@ -400,8 +400,11 @@ impl DataController {
                 self.episode_catalog.write().loading = true;
             } else {
                 match result.as_ref() {
-                    Some(Ok((loaded_dataset, (entries, issues)))) if loaded_dataset == &dataset => {
-                        self.accept_episodes(entries.clone(), issues.clone());
+                    Some(Ok((loaded_dataset, catalog))) if loaded_dataset == &dataset => {
+                        self.accept_episodes(
+                            catalog.episodes().to_vec(),
+                            catalog.warnings().to_vec(),
+                        );
                     }
                     Some(Err(error)) => {
                         let mut catalog = self.episode_catalog.write();
@@ -572,7 +575,7 @@ impl DataController {
         // controller and its generation guard are shell-owned, so completion
         // must outlive the button that launched it.
         crate::client::project::ProjectClient::current().spawn(async move {
-            let outcome = ProjectClient::current()
+            let outcome = DatasetClient::current()
                 .run_spiral_query(statement.clone(), rows)
                 .await
                 .map_err(|error| error.to_string());

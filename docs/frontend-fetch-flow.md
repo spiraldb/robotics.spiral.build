@@ -1,5 +1,8 @@
 # Frontend state comes from reads
 
+The frontend uses the backend-owned [HTTP API](http-api.md): GET snapshots and
+explicit JSON commands, with no Dioxus server-function transport.
+
 The backend owns project state. The browser owns selections, drafts, panel layout,
 and a cached copy of fetched state. A command changes the backend and invalidates
 related queries. Its response can acknowledge a save or provide a new ID, but does
@@ -7,10 +10,10 @@ not replace a fetched value.
 
 ```mermaid
 flowchart LR
-    UI[UI action] --> Command[ProjectClient command]
+    UI[UI action] --> Command[Feature client command]
     Command --> Backend[Backend project session]
     Command --> Refresh[Invalidate affected queries]
-    Timer[Refresh timer] --> Read[ProjectClient query]
+    Timer[Refresh timer] --> Read[Feature client query]
     Refresh --> Read
     Read --> Backend
     Backend --> Result[Fetched result]
@@ -25,15 +28,18 @@ flowchart LR
    readiness gating, and read deadlines. It uses ordinary Dioxus resources.
 2. `crates/frontend/src/client/project.rs` captures a project ID before a request
    starts and checks it again before delivering the response. Mutations invalidate
-   the domains listed in `project_commands.rs`, including after partial failures.
+   the domains declared by the feature client, including after partial failures.
+   Feature clients live beside their consuming UI, such as
+   `activities/training/client.rs`; the project client has no feature methods.
 3. `crates/frontend/src/shell/project.rs` fetches project identity and readiness
    together. A new ID replaces the keyed project subtree in `shell/routes.rs`.
    A failed read keeps the same subtree and its drafts but withdraws readiness.
 4. `crates/frontend/src/shell/state.rs` installs fetched setup, telemetry, training,
    and rollout values and exposes read-only signals. Workflow and Data controllers
    own their feature-specific fetched projections and local editing state.
-5. `crates/backend/src/project_queries.rs` exposes cheap reads separately from the
-   setup query, which may access the catalog. The backend's project admission lock
+5. `crates/backend/src/project_session/queries.rs` exposes project reads;
+   `project_session/setup.rs` owns the catalog-backed setup projection. Training,
+   rollout, and recording own their snapshots beside their commands. The backend's project admission lock
    still prevents reads or commands from crossing a project replacement.
 
 ## Refresh behavior

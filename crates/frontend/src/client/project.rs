@@ -7,7 +7,8 @@ use dioxus::prelude::*;
 use spiral_robotics_common::project::ProjectSessionInfo;
 
 use super::http::UrlComponent;
-use super::transport::CommandError;
+use super::transport::{CommandError, HttpRequest};
+use serde::de::DeserializeOwned;
 
 /// A failed read retains identity (and local drafts), but withdraws readiness.
 #[derive(Clone, Default, PartialEq)]
@@ -75,18 +76,17 @@ impl ProjectClient {
 
     /// Capture the mount before returning a future, then guard both transport
     /// dispatch and response delivery against a later session announcement.
-    pub(super) fn request<T, SendRequest, RequestFuture>(
+    pub(crate) fn request<T: DeserializeOwned + 'static>(
         &self,
-        send_request: SendRequest,
-    ) -> impl Future<Output = Result<T, CommandError>> + use<T, SendRequest, RequestFuture>
-    where
-        SendRequest: FnOnce(String) -> RequestFuture,
-        RequestFuture: Future<Output = Result<T, CommandError>>,
-    {
+        request: HttpRequest,
+    ) -> impl Future<Output = Result<T, CommandError>> + use<T> {
         let client = self.clone();
         async move {
             client.require_current()?;
-            let response = send_request(client.session_id().to_owned()).await;
+            let response = request
+                .for_session(client.session_id().to_owned())
+                .send()
+                .await;
             if response.as_ref().err().is_some_and(|error| {
                 error.code()
                     == spiral_robotics_common::command_failure::CommandFailureCode::StaleProject
@@ -96,22 +96,16 @@ impl ProjectClient {
             client.accept_response(response)
         }
     }
-
-    pub(super) fn mutate<T, SendRequest, RequestFuture>(
+    pub(crate) fn mutate<T: DeserializeOwned + 'static>(
         &self,
         domains: &'static [QueryDomain],
-        send_request: SendRequest,
-    ) -> impl Future<Output = Result<T, CommandError>> + use<T, SendRequest, RequestFuture>
-    where
-        SendRequest: FnOnce(String) -> RequestFuture,
-        RequestFuture: Future<Output = Result<T, CommandError>>,
-    {
-        let request = self.request(send_request);
+        request: HttpRequest,
+    ) -> impl Future<Output = Result<T, CommandError>> + use<T> {
+        let request = self.request(request);
         let refresh = self.refresh;
         async move {
             let result = request.await;
-            // Failures may follow partial backend work. Refetch either way;
-            // never retry a mutation or install its response as fetched state.
+            // A failure may follow partial backend work. Refetch either way.
             refresh.invalidate(domains);
             result
         }

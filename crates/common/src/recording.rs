@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 /// once, and stops. Raw observations and actions are immutable; the operator's
 /// judgement may change, and normalized measured state may be re-derived from
 /// raw counts after the originating arm is recalibrated.
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct EpisodeInfo {
     #[serde(flatten)]
@@ -20,6 +21,7 @@ pub struct EpisodeInfo {
 
 /// Episode-level fields shown in the dataset list. Arm and stream layout is
 /// intentionally absent and is loaded only through episode inspection.
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct EpisodeListItem {
     #[serde(flatten)]
@@ -30,6 +32,7 @@ pub struct EpisodeListItem {
     assessment: EpisodeAssessment,
 }
 
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 struct EpisodeListIdentity {
     id: String,
@@ -37,6 +40,7 @@ struct EpisodeListIdentity {
     source: String,
 }
 
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 struct EpisodeIdentity {
     /// Stable identifier for the episode and all of its related rows.
@@ -50,6 +54,7 @@ struct EpisodeIdentity {
     source: String,
 }
 
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 struct EpisodeTimeline {
     frames: u64,
@@ -70,6 +75,7 @@ struct EpisodeTimeline {
     started_ms: i64,
 }
 
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 struct EpisodeAssessment {
     /// Largest gap between a measured and a commanded joint angle during the
@@ -87,6 +93,7 @@ struct EpisodeAssessment {
 
 /// One logical dataset known to Studio, including datasets whose native
 /// imported relations do not project into Studio's recorded-episode schema.
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DatasetSummary {
     id: String,
@@ -284,6 +291,7 @@ impl EpisodeIdentity {
 /// The frame clock and arm tracks are columnar: arm and joint identities occur
 /// once, while every visual seek indexes the flat frame-major matrices in
 /// memory. Video bytes remain separate range-addressable resources.
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct EpisodeInspectionSnapshot {
     episode: EpisodeInfo,
@@ -338,6 +346,7 @@ impl EpisodeInspectionSnapshot {
 /// All recorded scalar channels for one arm, sharing one frame and joint
 /// ordering. A matrix value for frame `f`, joint `j` is stored at
 /// `f * joints.len() + j`.
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct EpisodeInspectionArm {
     arm: String,
@@ -350,6 +359,7 @@ pub struct EpisodeInspectionArm {
 }
 
 /// Dense scalar matrices that are present for every recorded arm frame.
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct EpisodeArmScalarSamples {
     normalized: Vec<Option<f64>>,
@@ -432,6 +442,7 @@ impl EpisodeInspectionArm {
 /// A channel that may be absent for an entire arm at an individual frame.
 /// `present` has one entry per frame; `values` remains frame-major and uses
 /// nulls for unavailable joints without repeating arm or joint names.
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct EpisodeOptionalFrameMatrix {
     present: Vec<bool>,
@@ -453,6 +464,7 @@ impl EpisodeOptionalFrameMatrix {
 
 /// Filesystem-free metadata needed to align a browser-native video with the
 /// episode clock. The MP4 payload deliberately does not travel in the snapshot.
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct EpisodeVideoAssetMetadata {
     #[serde(flatten)]
@@ -463,6 +475,7 @@ pub struct EpisodeVideoAssetMetadata {
     timeline: EpisodeVideoTimeline,
 }
 
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct EpisodeVideoIdentity {
     stream_id: String,
@@ -470,6 +483,7 @@ pub struct EpisodeVideoIdentity {
     segment_index: u32,
 }
 
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 pub struct EpisodeVideoFormat {
     width: u32,
@@ -477,6 +491,7 @@ pub struct EpisodeVideoFormat {
     fps: u32,
 }
 
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 pub struct EpisodeVideoTimeline {
     frames: u64,
@@ -547,6 +562,7 @@ impl EpisodeVideoAssetMetadata {
 }
 
 /// One arm's presence in a take.
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct EpisodeArm {
     id: String,
@@ -607,6 +623,7 @@ mod tests {
 }
 
 /// A take being captured right now.
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct RecordingProgress {
     #[serde(flatten)]
@@ -617,6 +634,7 @@ pub struct RecordingProgress {
     state: RecordingState,
 }
 
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RecordingIdentity {
     /// Identifier the finished take will have.
@@ -645,6 +663,7 @@ impl RecordingIdentity {
     }
 }
 
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct RecordingClock {
     frames: u64,
@@ -672,6 +691,7 @@ impl RecordingClock {
     }
 }
 
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct RecordingState {
     /// Whether samples and camera frames are currently being omitted.
@@ -739,6 +759,7 @@ impl RecordingProgress {
 /// `after_seconds` is expressed on the gap-free active timeline. This keeps
 /// replay and dataset sampling contiguous while retaining enough provenance to
 /// display or audit every omitted wall-clock interval.
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 pub struct RecordingGap {
     after_seconds: f64,
@@ -763,6 +784,7 @@ impl RecordingGap {
 }
 
 /// Why a replay trajectory is loaded.
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReplayPurpose {
@@ -774,6 +796,7 @@ pub enum ReplayPurpose {
 }
 
 /// Whether a replay is positioning the arm or advancing through the episode.
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReplayPhase {
@@ -784,6 +807,7 @@ pub enum ReplayPhase {
 }
 
 /// An episode being played back right now.
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ReplayProgress {
     #[serde(flatten)]
@@ -794,6 +818,7 @@ pub struct ReplayProgress {
     transport: ReplayTransport,
 }
 
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ReplayIdentity {
     episode: String,
@@ -810,6 +835,7 @@ impl ReplayIdentity {
     }
 }
 
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct ReplayTimeline {
     /// Frames played so far.
@@ -834,6 +860,7 @@ impl ReplayTimeline {
     }
 }
 
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ReplayTransport {
     /// Whether this is Timeline transport or a one-pose physical seek.
@@ -958,3 +985,8 @@ mod progress_tests {
         assert!(!EpisodeTest::episode(0, None).usable());
     }
 }
+
+mod requests;
+pub use requests::{
+    EpisodeCatalog, EpisodeSeek, PauseUpdate, RecordingFinish, RecordingStart, ReplayStart,
+};

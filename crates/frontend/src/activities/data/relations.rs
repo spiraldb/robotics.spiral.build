@@ -1,6 +1,6 @@
 //! User-facing project relation map and bounded row preview.
 
-use crate::client::project::ProjectClient;
+use crate::activities::data::DatasetClient;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::components::interaction::{Action, ActionPurpose, ActionVariant, RefreshIcon};
@@ -201,7 +201,7 @@ pub(crate) fn RelationsPanel(namespace: String, query_available: bool) -> Elemen
             let Some((statement, max_rows)) = relations.count_query() else {
                 return Ok(None);
             };
-            ProjectClient::current()
+            DatasetClient::current()
                 .run_spiral_query(statement, max_rows)
                 .await
                 .map_err(|error| error.to_string())
@@ -261,7 +261,7 @@ pub(crate) fn RelationsPanel(namespace: String, query_available: bool) -> Elemen
             if !query_available {
                 return Ok(None);
             }
-            ProjectClient::current()
+            DatasetClient::current()
                 .run_spiral_query(relation.preview_sql(), PREVIEW_ROWS)
                 .await
                 .map_err(|error| error.to_string())

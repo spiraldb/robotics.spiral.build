@@ -10680,6 +10680,7 @@ dependencies = [
  "libc",
  "reqwest 0.12.28",
  "safetensors 0.7.0",
+ "schemars 1.2.2",
  "serde",
  "serde_json",
  "serialport",
@@ -10694,6 +10695,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-util",
+ "tower",
  "tower-http 0.7.0",
  "tracing",
  "tracing-subscriber",
@@ -10705,6 +10707,7 @@ dependencies = [
 name = "spiral-robotics-common"
 version = "0.1.0"
 dependencies = [
+ "schemars 1.2.2",
  "serde",
  "serde_json",
 ]
@@ -10724,7 +10727,7 @@ dependencies = [
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
- "spiral-robotics-backend",
+ "serde_urlencoded",
  "spiral-robotics-common",
  "spiral-robotics-viewport",
  "tempfile",

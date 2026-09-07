@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct QueryColumn {
     name: String,
@@ -43,6 +44,7 @@ impl QueryColumn {
 /// Schema-only catalog used by relation consumers such as Data and Workflow.
 /// Scope is attached by the activity manager so an asynchronous catalog read
 /// cannot be reconciled into a different Spiral project.
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RelationCatalog {
     #[serde(default)]
@@ -90,6 +92,7 @@ impl RelationCatalog {
     }
 }
 
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CatalogRelation {
     name: String,
@@ -135,6 +138,7 @@ impl CatalogRelation {
     }
 }
 
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct SpiralQuerySnapshot {
     columns: Vec<QueryColumn>,
@@ -176,3 +180,6 @@ impl SpiralQuerySnapshot {
         self.elapsed_ms
     }
 }
+
+mod requests;
+pub use requests::QueryRequest;

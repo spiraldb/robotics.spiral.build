@@ -8,3 +8,8 @@ pub(crate) mod screen;
 pub(crate) mod sql_draft;
 pub(crate) mod state;
 pub(crate) mod workbench;
+
+mod client;
+pub(crate) use client::DatasetClient;
+
+pub(crate) mod episode_cache;

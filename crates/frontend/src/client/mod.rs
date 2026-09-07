@@ -1,11 +1,7 @@
-//! Frontend boundary to backend data and commands.
+//! Shared HTTP transport, project lifetime, and polling policy. Feature clients live with their UI.
 
-pub(crate) mod commands;
-pub(crate) mod episode_data;
 pub(crate) mod http;
 pub(crate) mod project;
-mod project_commands;
-mod project_upload;
 pub(crate) mod queries;
 pub(crate) mod transport;
 

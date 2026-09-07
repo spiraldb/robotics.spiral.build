@@ -23,6 +23,8 @@ spiral-robotics-backend = { workspace = true, optional = true }
 spiral-robotics-frontend.workspace = true
 dioxus = { workspace = true, features = [
     "launch",
+    # DX must launch both processes; HTTP routes are owned by the backend.
+    "fullstack",
 ] }
 
 [[bin]]

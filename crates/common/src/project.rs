@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// One activated project lifetime. Reopening the same project creates a new ID.
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProjectSessionInfo {
     id: String,
@@ -27,6 +28,7 @@ impl ProjectSessionInfo {
 }
 
 /// Identity and readiness are fetched together from one captured project.
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ProjectStatus {
     session: ProjectSessionInfo,

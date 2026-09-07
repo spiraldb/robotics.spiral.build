@@ -6,6 +6,7 @@ pub const DEFAULT_SPIRAL_ENDPOINT: &str = "https://api.spiraldb.dev";
 pub const DEFAULT_SPIRAL_SPFS_ENDPOINT: &str = "https://spfs.spiraldb.dev";
 
 /// The immutable Spiral destination plus project-owned Studio preferences.
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DataSettings {
     spiral: SpiralSettings,
@@ -50,6 +51,7 @@ impl DataSettings {
 }
 
 /// HTTP and Arrow IPC endpoint selected for future training sessions.
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TrainingRuntimeSettings {
     endpoint: String,
@@ -79,6 +81,7 @@ impl TrainingRuntimeSettings {
     }
 }
 
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SpiralSettings {
     /// Spiral control-plane API endpoint.
@@ -180,6 +183,7 @@ impl SpiralSettings {
     }
 }
 
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct VideoSettings {
     enabled: bool,
@@ -205,6 +209,7 @@ impl VideoSettings {
 }
 
 /// Spiral connection and write-only credential changes from the settings screen.
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SpiralConnectionUpdate {
     #[serde(default = "SpiralConnectionUpdate::default_spiral_endpoint")]
@@ -281,3 +286,6 @@ impl Default for SpiralConnectionUpdate {
         )
     }
 }
+
+mod requests;
+pub use requests::{ConnectionTest, SettingsUpdate};

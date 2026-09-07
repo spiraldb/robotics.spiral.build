@@ -7,9 +7,7 @@ use spiral_robotics_common::datasets::{
     ProjectImportSummary,
 };
 use spiral_robotics_common::relations::{RelationCatalog, SpiralQuerySnapshot};
-use spiral_robotics_common::settings::{
-    DataSettings, SpiralConnectionUpdate, TrainingRuntimeSettings, VideoSettings,
-};
+use spiral_robotics_common::settings::{ConnectionTest, DataSettings, SettingsUpdate};
 use spiral_robotics_hardware::{HardwareState, ModeSelection as HardwareModeSelection};
 use spiral_robotics_storage::ingestion::HuggingFaceDatasetDiscovery as _;
 
@@ -17,10 +15,9 @@ use crate::BackendCommandError;
 use crate::data::catalog_lease::{CatalogLeaseOwner, CatalogLeaseToken, CatalogMutationLease};
 use crate::data::query::QueryCommand;
 use crate::data::settings::UpdateDataSettingsCommand;
-use crate::http::routes::AppState;
-use crate::main_runtime::MainRuntime;
+use crate::project_session::context::ProjectContext;
 
-pub const MAX_PROJECT_IMPORT_BYTES: usize =
+pub(crate) const MAX_PROJECT_IMPORT_BYTES: usize =
     spiral_robotics_storage::bundle::ProjectBundle::MAX_BYTES;
 
 struct CatalogLeaseReservation {
@@ -35,83 +32,40 @@ impl Drop for CatalogLeaseReservation {
     }
 }
 
-/// Narrow command facade shared with Studio's server-function and file-transfer handlers.
+/// Project-bound data operations, independent of HTTP delivery.
 #[derive(Clone)]
-pub struct DataCommands {
-    main_runtime: MainRuntime,
-    state: AppState,
+pub(crate) struct DataCommands {
+    state: ProjectContext,
 }
 
 /// Settings values admitted together by the data command facade.
-pub struct DataSettingsChange {
-    connection: SpiralConnectionUpdate,
-    training: TrainingRuntimeSettings,
-    video: VideoSettings,
-}
-
-impl DataSettingsChange {
-    pub fn new(
-        connection: SpiralConnectionUpdate,
-        training: TrainingRuntimeSettings,
-        video: VideoSettings,
-    ) -> Self {
-        Self {
-            connection,
-            training,
-            video,
-        }
-    }
-
-    fn into_parts(
-        self,
-    ) -> (
-        SpiralConnectionUpdate,
-        TrainingRuntimeSettings,
-        VideoSettings,
-    ) {
-        (self.connection, self.training, self.video)
-    }
-}
-
 impl DataCommands {
-    pub fn for_session(&self, session_id: &str) -> Result<Self, BackendCommandError> {
-        Ok(Self::new(
-            self.main_runtime.clone(),
-            self.state.for_session(session_id)?,
-        ))
-    }
-
-    pub(crate) fn new(main_runtime: MainRuntime, state: AppState) -> Self {
-        Self {
-            main_runtime,
-            state,
-        }
-    }
-
-    pub async fn settings(&self) -> Result<DataSettings, BackendCommandError> {
+    pub(crate) async fn settings(&self) -> Result<DataSettings, BackendCommandError> {
         let commands = self.clone();
-        self.main_runtime
-            .read(async move { commands.settings_on_main_runtime().await })
+        self.state
+            .tasks()
+            .read(async move { commands.settings_in_project().await })
             .await?
     }
 
-    async fn settings_on_main_runtime(&self) -> Result<DataSettings, BackendCommandError> {
+    async fn settings_in_project(&self) -> Result<DataSettings, BackendCommandError> {
         Ok(self.state.project().settings())
     }
 
-    pub async fn update_settings(
+    pub(crate) async fn update_settings(
         &self,
-        change: DataSettingsChange,
+        change: SettingsUpdate,
     ) -> Result<DataSettings, BackendCommandError> {
         let commands = self.clone();
-        self.main_runtime
-            .execute(async move { commands.update_settings_on_main_runtime(change).await })
+        self.state
+            .tasks()
+            .execute(async move { commands.update_settings_in_project(change).await })
             .await?
     }
 
-    async fn update_settings_on_main_runtime(
+    async fn update_settings_in_project(
         &self,
-        change: DataSettingsChange,
+        change: SettingsUpdate,
     ) -> Result<DataSettings, BackendCommandError> {
         let (connection, training, video) = change.into_parts();
         let (endpoint, spfs, project, client_id, secret, clear_secret) = connection.into_parts();
@@ -139,18 +93,19 @@ impl DataCommands {
         Ok(settings)
     }
 
-    pub async fn test_spiral(&self) -> Result<(bool, String), BackendCommandError> {
+    pub(crate) async fn test_spiral(&self) -> Result<ConnectionTest, BackendCommandError> {
         let commands = self.clone();
-        self.main_runtime
-            .execute(async move { commands.test_spiral_on_main_runtime().await })
+        self.state
+            .tasks()
+            .execute(async move { commands.test_spiral_in_project().await })
             .await?
     }
 
-    async fn test_spiral_on_main_runtime(&self) -> Result<(bool, String), BackendCommandError> {
+    async fn test_spiral_in_project(&self) -> Result<ConnectionTest, BackendCommandError> {
         match self.state.projects().recover(self.state.project()).await {
             Ok(()) => {
                 self.spawn_auto_connect_saved_robots();
-                Ok((
+                Ok(ConnectionTest::new(
                     true,
                     "Connected to SpiralDB and loaded the project".to_owned(),
                 ))
@@ -159,28 +114,34 @@ impl DataCommands {
         }
     }
 
-    pub async fn test_training_runtime(&self) -> Result<(bool, String), BackendCommandError> {
-        let commands = self.clone();
-        self.main_runtime
-            .execute(async move { commands.test_training_runtime_on_main_runtime().await })
-            .await?
-    }
-
-    async fn test_training_runtime_on_main_runtime(
+    pub(crate) async fn test_training_runtime(
         &self,
-    ) -> Result<(bool, String), BackendCommandError> {
-        let _activity = self.state.admit()?;
-        Ok(self.state.training().test_runtime().await)
-    }
-
-    pub async fn relations(&self) -> Result<RelationCatalog, BackendCommandError> {
+    ) -> Result<ConnectionTest, BackendCommandError> {
         let commands = self.clone();
-        self.main_runtime
-            .read(async move { commands.relations_on_main_runtime().await })
+        self.state
+            .tasks()
+            .execute(async move { commands.test_training_runtime_in_project().await })
             .await?
     }
 
-    async fn relations_on_main_runtime(&self) -> Result<RelationCatalog, BackendCommandError> {
+    async fn test_training_runtime_in_project(
+        &self,
+    ) -> Result<ConnectionTest, BackendCommandError> {
+        let _activity = self.state.admit()?;
+        Ok(ConnectionTest::from(
+            self.state.training().test_runtime().await,
+        ))
+    }
+
+    pub(crate) async fn relations(&self) -> Result<RelationCatalog, BackendCommandError> {
+        let commands = self.clone();
+        self.state
+            .tasks()
+            .read(async move { commands.relations_in_project().await })
+            .await?
+    }
+
+    async fn relations_in_project(&self) -> Result<RelationCatalog, BackendCommandError> {
         let _activity = self.state.admit()?;
         self.require_catalog_ready()?;
         let token = self
@@ -199,18 +160,19 @@ impl DataCommands {
         self.state.workflow().relations().await.map_err(Into::into)
     }
 
-    pub async fn query(
+    pub(crate) async fn query(
         &self,
         statement: String,
         max_rows: usize,
     ) -> Result<SpiralQuerySnapshot, BackendCommandError> {
         let commands = self.clone();
-        self.main_runtime
-            .execute(async move { commands.query_on_main_runtime(statement, max_rows).await })
+        self.state
+            .tasks()
+            .execute(async move { commands.query_in_project(statement, max_rows).await })
             .await?
     }
 
-    async fn query_on_main_runtime(
+    async fn query_in_project(
         &self,
         statement: String,
         max_rows: usize,
@@ -225,21 +187,22 @@ impl DataCommands {
             .map_err(Into::into)
     }
 
-    pub async fn inspect_hugging_face_dataset(
+    pub(crate) async fn inspect_hugging_face_dataset(
         &self,
         request: HuggingFaceDatasetSource,
     ) -> Result<HuggingFaceDatasetInspection, BackendCommandError> {
         let commands = self.clone();
-        self.main_runtime
+        self.state
+            .tasks()
             .execute(async move {
                 commands
-                    .inspect_hugging_face_dataset_on_main_runtime(request)
+                    .inspect_hugging_face_dataset_in_project(request)
                     .await
             })
             .await?
     }
 
-    async fn inspect_hugging_face_dataset_on_main_runtime(
+    async fn inspect_hugging_face_dataset_in_project(
         &self,
         request: HuggingFaceDatasetSource,
     ) -> Result<HuggingFaceDatasetInspection, BackendCommandError> {
@@ -252,21 +215,22 @@ impl DataCommands {
         .map_err(BackendCommandError::from)
     }
 
-    pub async fn import_hugging_face_dataset(
+    pub(crate) async fn import_hugging_face_dataset(
         &self,
         request: HuggingFaceDatasetSource,
     ) -> Result<HuggingFaceDatasetImportSummary, BackendCommandError> {
         let commands = self.clone();
-        self.main_runtime
+        self.state
+            .tasks()
             .execute(async move {
                 commands
-                    .import_hugging_face_dataset_on_main_runtime(request)
+                    .import_hugging_face_dataset_in_project(request)
                     .await
             })
             .await?
     }
 
-    async fn import_hugging_face_dataset_on_main_runtime(
+    async fn import_hugging_face_dataset_in_project(
         &self,
         request: HuggingFaceDatasetSource,
     ) -> Result<HuggingFaceDatasetImportSummary, BackendCommandError> {
@@ -301,12 +265,13 @@ impl DataCommands {
 
     pub(crate) async fn export_project(&self) -> Result<Vec<u8>, BackendCommandError> {
         let commands = self.clone();
-        self.main_runtime
-            .execute(async move { commands.export_project_on_main_runtime().await })
+        self.state
+            .tasks()
+            .execute(async move { commands.export_project_in_project().await })
             .await?
     }
 
-    async fn export_project_on_main_runtime(&self) -> Result<Vec<u8>, BackendCommandError> {
+    async fn export_project_in_project(&self) -> Result<Vec<u8>, BackendCommandError> {
         let _activity = self.state.admit()?;
         self.require_catalog_ready()?;
         self.state
@@ -316,17 +281,18 @@ impl DataCommands {
             .map_err(BackendCommandError::from)
     }
 
-    pub async fn import_project(
+    pub(crate) async fn import_project(
         &self,
         document: Vec<u8>,
     ) -> Result<ProjectImportSummary, BackendCommandError> {
         let commands = self.clone();
-        self.main_runtime
-            .execute(async move { commands.import_project_on_main_runtime(document).await })
+        self.state
+            .tasks()
+            .execute(async move { commands.import_project_in_project(document).await })
             .await?
     }
 
-    async fn import_project_on_main_runtime(
+    async fn import_project_in_project(
         &self,
         document: Vec<u8>,
     ) -> Result<ProjectImportSummary, BackendCommandError> {
@@ -383,6 +349,16 @@ impl DataCommands {
 
     fn spawn_auto_connect_saved_robots(&self) {
         let reconnect_state = self.state.current();
-        tokio::spawn(async move { reconnect_state.auto_connect_saved_robots().await });
+        tokio::spawn(async move {
+            crate::robots::commands::DeviceCommands::from(reconnect_state)
+                .auto_connect_saved_robots()
+                .await
+        });
+    }
+}
+
+impl From<crate::project_session::context::ProjectContext> for DataCommands {
+    fn from(state: crate::project_session::context::ProjectContext) -> Self {
+        Self { state }
     }
 }

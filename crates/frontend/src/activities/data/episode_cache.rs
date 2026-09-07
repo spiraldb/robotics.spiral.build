@@ -6,7 +6,7 @@
 //! small workspace cache below is only for paused recordings outside Data;
 //! physical motion continues through backend-owned validation and control.
 
-use crate::client::project::ProjectClient;
+use crate::activities::data::DatasetClient;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
@@ -260,7 +260,7 @@ impl EpisodeData {
     }
 
     pub(crate) async fn load(episode: &str) -> Result<Arc<Self>, String> {
-        let request = ProjectClient::current().inspect_episode(episode.to_owned());
+        let request = DatasetClient::current().inspect_episode(episode.to_owned());
         EpisodeDataDeadline::run(
             "The episode data",
             RECORDED_REQUEST_TIMEOUT_MS,

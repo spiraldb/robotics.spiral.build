@@ -4,7 +4,7 @@
 //! item, and in-flight command guards therefore belong to the shell rather
 //! than to the mounted Training workspace.
 
-use crate::client::project::ProjectClient;
+use crate::activities::training::TrainingClient;
 use std::collections::BTreeSet;
 
 use dioxus::prelude::*;
@@ -191,7 +191,7 @@ impl TrainingController {
         let mut config_signal = self.draft.config;
         let mut automatic_run_name = self.draft.automatic_run_name;
         spawn(async move {
-            let result = ProjectClient::current()
+            let result = TrainingClient::current()
                 .start_training_run(config)
                 .await
                 .map_err(|error| error.to_string());
@@ -232,7 +232,7 @@ impl TrainingController {
         self.commands.stopping.set(Some(id.clone()));
         let mut stopping = self.commands.stopping;
         studio.run_utility("Stop requested.", async move {
-            let result = ProjectClient::current()
+            let result = TrainingClient::current()
                 .stop_training_run(id)
                 .await
                 .map_err(|error| error.to_string());
@@ -252,7 +252,7 @@ impl TrainingController {
         let mut selected_run = self.history.selected_run;
         let mut opened_runs = self.history.opened_runs;
         studio.run_utility(format!("Deleted run {}.", run.name), async move {
-            let result = ProjectClient::current()
+            let result = TrainingClient::current()
                 .delete_training_run(run_id)
                 .await
                 .map_err(|error| error.to_string());

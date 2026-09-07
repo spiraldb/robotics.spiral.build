@@ -1,7 +1,7 @@
 //! Serial discovery and identification from an unplugged motor bus.
 
 use crate::OperationError;
-use crate::http::routes::AppState;
+use crate::project_session::context::ProjectContext;
 use spiral_robotics_common::robots::SerialPortSummary;
 use spiral_robotics_hardware::SerialPortCatalog;
 
@@ -64,11 +64,13 @@ impl SerialPortDiscovery {
     }
 }
 
-impl AppState {
-    pub(crate) async fn serial_ports(&self) -> Result<Vec<SerialPortSummary>, OperationError> {
+impl SerialPortDiscovery {
+    pub(crate) async fn list(
+        project: &ProjectContext,
+    ) -> Result<Vec<SerialPortSummary>, OperationError> {
         let ports = SerialPortDiscovery::scan().await?;
-        let hardware = self.hardware().state();
-        let in_use = self
+        let hardware = project.hardware().state();
+        let in_use = project
             .workspace()
             .list()
             .await

@@ -1,7 +1,7 @@
 //! The process-owned project read determines the lifetime of mounted UI state.
+use crate::client::CommandError;
 use crate::client::project::{ProjectClient, ProjectSessionState};
 use crate::client::queries::{QueryDomain, QueryPolicy, QueryRefresh};
-use crate::client::{CommandError, transport};
 use dioxus::prelude::*;
 use spiral_robotics_common::project::{ProjectSessionInfo, ProjectStatus};
 
@@ -44,8 +44,10 @@ impl ProjectSessionSignals {
         }
     }
     pub(crate) fn use_polling(self) {
-        let status =
-            QueryPolicy::new(QueryDomain::Project, 1_000).use_resource(transport::project_status);
+        let status = QueryPolicy::new(QueryDomain::Project, 1_000).use_resource(|| {
+            crate::client::transport::HttpRequest::new("GET", "/api/project/status")
+                .send::<spiral_robotics_common::project::ProjectStatus>()
+        });
         use_effect(move || {
             let result = status.read();
             if status.finished()
@@ -211,17 +213,22 @@ mod tests {
         });
         dom.render_immediate_to_vec();
         assert!(old_client.accept_response(Ok(7)).is_ok());
-        let request_created_in_old_project = old_client.test_training_runtime();
+        let request_created_in_old_project = old_client
+            .request::<spiral_robotics_common::settings::ConnectionTest>(
+            crate::client::transport::HttpRequest::new("POST", "/api/settings/training/test"),
+        );
 
         dom.in_runtime(|| harness.fetched("second", BackendReadinessState::Ready));
         // Reject completion as soon as the status is fetched, even before
         // Dioxus has committed disposal of the previous keyed subtree.
         assert!(old_client.accept_response(Ok(7)).is_err());
-        assert!(
+        assert_eq!(
             request_created_in_old_project
                 .now_or_never()
                 .unwrap()
-                .is_err(),
+                .unwrap_err()
+                .code(),
+            spiral_robotics_common::command_failure::CommandFailureCode::StaleProject,
             "a delayed request must reject before transport instead of adopting the new project"
         );
         dom.render_immediate_to_vec();

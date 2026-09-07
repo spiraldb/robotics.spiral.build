@@ -1,4 +1,4 @@
-//! Workflow commands exposed to fullstack delivery adapters.
+//! Workflow application operations.
 
 use spiral_robotics_common::workflow::{
     WorkflowAgentCommand, WorkflowAgentSnapshot, WorkflowCommand, WorkflowSnapshot,
@@ -6,34 +6,19 @@ use spiral_robotics_common::workflow::{
 
 use crate::BackendCommandError;
 use crate::data::catalog_lease::CatalogLeaseOwner;
-use crate::main_runtime::MainRuntime;
 
-/// Narrow command facade shared with the Studio's server-function handlers.
+/// Project-bound operations; the context owns admission and backend task lifetime.
 #[derive(Clone)]
-pub struct WorkflowCommands {
-    main_runtime: MainRuntime,
-    state: crate::http::routes::AppState,
+pub(crate) struct WorkflowCommands {
+    state: crate::project_session::context::ProjectContext,
 }
 
 impl WorkflowCommands {
-    pub(crate) fn new(main_runtime: MainRuntime, state: crate::http::routes::AppState) -> Self {
-        Self {
-            main_runtime,
-            state,
-        }
-    }
-
-    pub fn for_session(&self, session_id: &str) -> Result<Self, BackendCommandError> {
-        Ok(Self::new(
-            self.main_runtime.clone(),
-            self.state.for_session(session_id)?,
-        ))
-    }
-
-    pub async fn snapshot(&self) -> Result<WorkflowSnapshot, BackendCommandError> {
+    pub(crate) async fn snapshot(&self) -> Result<WorkflowSnapshot, BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
-        self.main_runtime
+        self.state
+            .tasks()
             .read(async move {
                 let _activity = activity;
                 commands.require_catalog_ready()?;
@@ -42,13 +27,13 @@ impl WorkflowCommands {
             .await?
     }
 
-    pub async fn command(
+    pub(crate) async fn command(
         &self,
         command: WorkflowCommand,
     ) -> Result<WorkflowSnapshot, BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
-        self.main_runtime
+        self.state.tasks()
             .execute(async move {
                 let _activity = activity;
                 commands.require_catalog_ready()?;
@@ -83,10 +68,13 @@ impl WorkflowCommands {
             .await?
     }
 
-    pub async fn agent_snapshot(&self) -> Result<WorkflowAgentSnapshot, BackendCommandError> {
+    pub(crate) async fn agent_snapshot(
+        &self,
+    ) -> Result<WorkflowAgentSnapshot, BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
-        self.main_runtime
+        self.state
+            .tasks()
             .read(async move {
                 let _activity = activity;
                 commands.require_catalog_ready()?;
@@ -95,13 +83,13 @@ impl WorkflowCommands {
             .await?
     }
 
-    pub async fn agent_command(
+    pub(crate) async fn agent_command(
         &self,
         command: WorkflowAgentCommand,
     ) -> Result<WorkflowAgentSnapshot, BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
-        self.main_runtime
+        self.state.tasks()
             .execute(async move {
                 let _activity = activity;
                 commands.require_catalog_ready()?;
@@ -150,5 +138,11 @@ impl WorkflowCommands {
             Some(error) => Err(error.into()),
             None => Ok(()),
         }
+    }
+}
+
+impl From<crate::project_session::context::ProjectContext> for WorkflowCommands {
+    fn from(state: crate::project_session::context::ProjectContext) -> Self {
+        Self { state }
     }
 }

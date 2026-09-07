@@ -4,3 +4,8 @@ pub(crate) mod actions;
 pub(crate) mod control;
 pub(crate) mod screen;
 pub(crate) mod workbench;
+
+mod client;
+pub(crate) use client::RecordingClient;
+
+pub(crate) mod recording_actions;

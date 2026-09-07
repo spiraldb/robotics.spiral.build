@@ -1,7 +1,7 @@
 //! Episode catalog reads and inspection snapshots.
 
 use crate::OperationError;
-use crate::http::routes::AppState;
+use crate::project_session::context::ProjectContext;
 use crate::robots::workspace::RobotRecord;
 use spiral_robotics_common::identity::DatasetId;
 use spiral_robotics_common::recording::{
@@ -12,11 +12,11 @@ use spiral_robotics_common::recording::{
 use spiral_robotics_storage::episodes::{EpisodeId, EpisodeInspection};
 
 pub(crate) struct EpisodeQueries<'a> {
-    state: &'a AppState,
+    state: &'a ProjectContext,
 }
 
 impl<'a> EpisodeQueries<'a> {
-    pub(crate) fn new(state: &'a AppState) -> Self {
+    pub(crate) fn new(state: &'a ProjectContext) -> Self {
         Self { state }
     }
 

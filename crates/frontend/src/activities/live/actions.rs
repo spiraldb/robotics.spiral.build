@@ -1,6 +1,6 @@
 //! Semantic actions and backend consequences for the Live screen.
 
-use crate::client::project::ProjectClient;
+use crate::settings::robots::RobotClient;
 use dioxus::prelude::WritableExt;
 use spiral_robotics_common::robots::ModeSelection;
 
@@ -30,7 +30,7 @@ impl Studio {
 
     fn hold_robot(self, id: String) {
         self.run("", async move {
-            ProjectClient::current()
+            RobotClient::current()
                 .hold_robot(id)
                 .await
                 .map_err(|error| error.to_string())
@@ -39,7 +39,7 @@ impl Studio {
 
     fn release_robot(self, id: String) {
         self.run_safety("Motors released.", async move {
-            ProjectClient::current()
+            RobotClient::current()
                 .release_robot(id)
                 .await
                 .map_err(|error| error.to_string())
@@ -49,7 +49,7 @@ impl Studio {
     fn set_mode(self, selection: ModeSelection) {
         let stops_motion = matches!(selection, ModeSelection::Idle);
         let future = async move {
-            ProjectClient::current()
+            RobotClient::current()
                 .set_mode(selection)
                 .await
                 .map_err(|error| error.to_string())

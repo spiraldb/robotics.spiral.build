@@ -2,7 +2,7 @@
 
 use dioxus::prelude::*;
 
-use crate::client::episode_data::EpisodePreview;
+use crate::activities::data::episode_cache::EpisodePreview;
 use crate::client::http::{CameraApiPath, EpisodeApiPath};
 use crate::client::project::ProjectClient;
 use crate::format::ClockPresentation;
@@ -529,7 +529,7 @@ trait VideoSegmentTimeline {
     fn distance_from(&self, at: f64) -> f64;
 }
 
-impl VideoSegmentTimeline for crate::client::episode_data::VideoAssetMetadata {
+impl VideoSegmentTimeline for crate::activities::data::episode_cache::VideoAssetMetadata {
     fn distance_from(&self, at: f64) -> f64 {
         let start = self.timeline_offset_seconds().unwrap_or_default();
         let end = start + self.duration_seconds().max(0.0);

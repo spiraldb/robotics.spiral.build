@@ -1,5 +1,12 @@
 //! One owner for project lifetime. Published sessions never change destination.
 
+pub(crate) mod bootstrap;
+pub(crate) mod context;
+pub(crate) mod http;
+pub(crate) mod queries;
+pub(crate) mod setup;
+pub(crate) mod tasks;
+
 use std::collections::BTreeSet;
 use std::sync::Arc;
 

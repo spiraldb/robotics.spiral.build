@@ -84,7 +84,7 @@ impl From<spiral_robotics_storage::episodes::EpisodeError> for OperationError {
 
 /// Failure returned by every backend command facade.
 #[derive(Debug)]
-pub struct BackendCommandError(OperationError);
+pub(crate) struct BackendCommandError(OperationError);
 
 impl BackendCommandError {
     pub(crate) fn invalid(message: impl Into<String>) -> Self {
@@ -116,8 +116,8 @@ impl From<String> for BackendCommandError {
     }
 }
 
-impl From<crate::main_runtime::MainRuntimeFailure> for BackendCommandError {
-    fn from(error: crate::main_runtime::MainRuntimeFailure) -> Self {
+impl From<crate::project_session::tasks::BackendTaskFailure> for BackendCommandError {
+    fn from(error: crate::project_session::tasks::BackendTaskFailure) -> Self {
         Self(OperationError::Internal(error.to_string()))
     }
 }

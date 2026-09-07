@@ -1,6 +1,6 @@
 //! Joint controls for the arm selected on the Live screen.
 
-use crate::client::project::ProjectClient;
+use crate::settings::robots::RobotClient;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -480,7 +480,7 @@ fn JointControls(
                     if normalized.is_empty() {
                         continue;
                     }
-                    if let Err(error) = ProjectClient::current()
+                    if let Err(error) = RobotClient::current()
                         .set_robot_goal(command_robot.clone(), normalized)
                         .await
                         .map_err(|error| error.to_string())

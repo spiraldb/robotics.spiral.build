@@ -10,6 +10,10 @@ executes trained policies through the follower's bounded rollout path.
 SpiralDB is Studio's only persistent storage layer. Studio can transfer the
 complete active project from Settings as one `.spiral-project` file.
 
+The backend HTTP contract and independent-client examples are documented in
+[Studio HTTP API](docs/http-api.md). A running backend serves its schemas at
+`/api/openapi.json`.
+
 ## Development
 
 The easiest way to setup dev env is to use [nix](https://nixos.org/download.html).

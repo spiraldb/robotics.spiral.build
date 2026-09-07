@@ -1,5 +1,11 @@
 //! Application state shared by every Studio feature.
 
+use crate::activities::data::DatasetClient;
+use crate::activities::live::RecordingClient;
+use crate::activities::rollout::RolloutClient;
+use crate::activities::training::TrainingClient;
+use crate::settings::SettingsClient;
+use crate::shell::StudioClient;
 use std::future::Future;
 
 use dioxus::prelude::*;
@@ -15,7 +21,6 @@ use crate::activities::data::state::DataController;
 use crate::activities::rollout::state::RolloutController;
 use crate::activities::training::state::TrainingController;
 use crate::activities::workflow::state::WorkflowController;
-use crate::client::project::ProjectClient;
 use crate::client::queries::{QueryDomain, QueryPolicy, QueryRefresh};
 
 use crate::panels::timeline::signals::SignalStore;
@@ -200,7 +205,7 @@ impl StudioProjectResources {
     fn use_resources() -> Self {
         let sessions = ProjectSessionSignals::current();
         let settings = QueryPolicy::new(QueryDomain::Settings, 10_000).use_resource(|| async {
-            ProjectClient::current()
+            SettingsClient::current()
                 .data_settings()
                 .await
                 .map_err(|error| error.to_string())
@@ -232,7 +237,7 @@ impl StudioProjectResources {
             move || sessions.catalog_available(),
             use_reactive((&query_available,), move |(query_available,)| async move {
                 if query_available {
-                    ProjectClient::current()
+                    DatasetClient::current()
                         .relation_catalog()
                         .await
                         .map_err(|error| error.to_string())
@@ -420,9 +425,6 @@ impl Studio {
                 default_selection.set(Some(next));
             }
         });
-        #[cfg(all(feature = "web", target_arch = "wasm32"))]
-        let studio = studio;
-
         // The clock the studio measures staleness and message prominence
         // against. Notification history does not expire; only its compact
         // status-bar preview does.
@@ -444,7 +446,7 @@ impl Studio {
         let sessions = ProjectSessionSignals::current();
         use_effect(move || self.backend.live.set(sessions.connected()));
         let setup = QueryPolicy::new(QueryDomain::Setup, 2_000)
-            .use_resource(|| ProjectClient::current().setup_snapshot());
+            .use_resource(|| StudioClient::current().setup_snapshot());
         use_effect(move || {
             let result = setup.read();
             if setup.finished()
@@ -455,7 +457,7 @@ impl Studio {
             }
         });
         let telemetry = QueryPolicy::new(QueryDomain::Telemetry, 50)
-            .use_resource(|| ProjectClient::current().telemetry_snapshot());
+            .use_resource(|| StudioClient::current().telemetry_snapshot());
         use_effect(move || {
             let result = telemetry.read();
             if telemetry.finished()
@@ -468,7 +470,7 @@ impl Studio {
         });
         let recording = QueryPolicy::new(QueryDomain::Recording, 200).use_resource(move || {
             let cursor = self.data.recording_signals.peek().cursor();
-            ProjectClient::current().recording_window(cursor)
+            RecordingClient::current().recording_window(cursor)
         });
         use_effect(move || {
             let result = recording.read();
@@ -492,7 +494,7 @@ impl Studio {
                 } else {
                     None
                 };
-                ProjectClient::current().training_snapshot(selected)
+                TrainingClient::current().training_snapshot(selected)
             }));
         use_effect(move || {
             let result = training.read();
@@ -506,7 +508,7 @@ impl Studio {
         let rollout_active = use_memo(move || self.backend.rollout.read().phase().active());
         let rollout = QueryPolicy::new(QueryDomain::Rollout, 500)
             .with_activity(rollout_active.into())
-            .use_resource(|| ProjectClient::current().rollout_snapshot());
+            .use_resource(|| RolloutClient::current().rollout_snapshot());
         use_effect(move || {
             let result = rollout.read();
             if rollout.finished()

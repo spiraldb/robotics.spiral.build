@@ -10,18 +10,16 @@ workspace = true
 
 [features]
 default = []
-server = ["dioxus/server", "dep:spiral-robotics-backend"]
+server = ["dioxus/server"]
 web = ["charming/wasm", "dioxus/web"]
 
 [dependencies]
 charming = { version = "0.6.0", default-features = false }
 spiral-robotics-common.workspace = true
-spiral-robotics-backend = { workspace = true, optional = true }
 spiral-robotics-viewport.workspace = true
 dioxus = { workspace = true, features = [
     "asset",
     "document",
-    "fullstack",
     "hooks",
     "html",
     "logger",
@@ -33,6 +31,7 @@ dioxus-flow.workspace = true
 dioxus-workbench.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_urlencoded = "0.7"
 serde-wasm-bindgen = "0.6"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 gloo-net = { version = "0.7", default-features = false, features = ["http", "json"] }

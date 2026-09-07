@@ -1,8 +1,8 @@
-use crate::client::project::ProjectClient;
 use crate::components::interaction::{
     Action, ActionPurpose, ActionVariant, BlockingConfirmation, ConfirmationCopy,
     ConfirmationDismissal, ConfirmationResponse,
 };
+use crate::settings::robots::RobotClient;
 use dioxus::prelude::*;
 use spiral_robotics_common::robots::{CalibrationJointProgress, CalibrationProgress, RobotSummary};
 use spiral_robotics_viewport as arm;
@@ -66,7 +66,7 @@ pub(super) fn CalibrationSection(
                             let id = recalibrate_id.clone();
                             command.set(Some("start"));
                             studio.run("", async move {
-                                let result = ProjectClient::current().start_calibration(id)
+                                let result = RobotClient::current().start_calibration(id)
                                     .await
                                     .map_err(|error| error.to_string());
                                 command.set(None);
@@ -99,7 +99,7 @@ pub(super) fn CalibrationSection(
                                     let Some(result) = SingleFlight::run(
                                         reapplying,
                                         async move {
-                                            ProjectClient::current().reapply_calibration(id)
+                                            RobotClient::current().reapply_calibration(id)
                                                 .await
                                                 .map_err(|error| error.to_string())
                                         },
@@ -114,10 +114,10 @@ pub(super) fn CalibrationSection(
                                     match result {
                                         Ok(result) => {
                                             studio.report_success(result.reapply_success());
-                                            if !result.4.is_empty() {
+                                            if !result.warnings().is_empty() {
                                                 studio.report_warning_from(
                                                     MessageSource::Studio,
-                                                    result.4.join(" "),
+                                                    result.warnings().join(" "),
                                                 );
                                             }
                                             Ok(())
@@ -166,7 +166,7 @@ pub(super) fn CalibrationSection(
                             let id = id.clone();
                             command.set(Some("finish"));
                             studio.run("Calibration saved.", async move {
-                                let result = ProjectClient::current().finish_calibration(id)
+                                let result = RobotClient::current().finish_calibration(id)
                                     .await
                                     .map_err(|error| error.to_string())
                                     .map(|_| ());
@@ -190,7 +190,7 @@ pub(super) fn CalibrationSection(
                             let id = id.clone();
                             command.set(Some("cancel"));
                             studio.run("", async move {
-                                let result = ProjectClient::current().cancel_calibration(id)
+                                let result = RobotClient::current().cancel_calibration(id)
                                     .await
                                     .map_err(|error| error.to_string());
                                 command.set(None);
@@ -227,18 +227,21 @@ trait CalibrationReapplyPresentation {
     fn reapply_success(&self) -> String;
 }
 
-impl CalibrationReapplyPresentation for (u64, u64, u64, u64, Vec<String>) {
+impl CalibrationReapplyPresentation for spiral_robotics_common::robots::CalibrationApplication {
     fn reapply_success(&self) -> String {
-        let (episodes, frames, unchanged, skipped, _) = self;
-        let noun = if *episodes == 1 { "take" } else { "takes" };
+        let episodes = self.episodes_updated();
+        let frames = self.frames_updated();
+        let unchanged = self.episodes_unchanged();
+        let skipped = self.episodes_skipped();
+        let noun = if episodes == 1 { "take" } else { "takes" };
         let mut message = format!(
             "Reapplied calibration to {episodes} {noun} ({} frames)",
             frames
         );
-        if *unchanged > 0 {
+        if unchanged > 0 {
             message.push_str(&format!("; {unchanged} already matched"));
         }
-        if *skipped > 0 {
+        if skipped > 0 {
             message.push_str(&format!("; {skipped} skipped"));
         }
         message.push('.');

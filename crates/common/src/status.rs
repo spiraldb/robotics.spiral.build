@@ -9,6 +9,7 @@ use crate::robots::{CameraStatus, ModeStatus, RobotSummary};
 ///
 /// This changes only when a robot, camera, or mode changes, so it is sent on
 /// connect and then whenever it actually differs.
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct StudioSnapshot {
     /// Whether backend-owned services are still starting, usable, or running
@@ -29,6 +30,7 @@ pub struct StudioSnapshot {
 }
 
 /// Lifecycle of the backend services needed by the browser application.
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BackendReadinessState {
@@ -39,6 +41,7 @@ pub enum BackendReadinessState {
 }
 
 /// Browser-visible readiness of the backend and its Spiral catalog boundary.
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct BackendReadiness {
     state: BackendReadinessState,

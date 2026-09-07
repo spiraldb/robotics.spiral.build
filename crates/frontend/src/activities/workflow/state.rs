@@ -4,7 +4,7 @@
 //! saved graph, validation, execution phases, and result payload are backend
 //! truth, refreshed exclusively by the project-scoped queries.
 
-use crate::client::project::ProjectClient;
+use crate::activities::workflow::WorkflowClient;
 use crate::client::queries::{QueryDomain, QueryPolicy, QueryRefresh};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -849,7 +849,7 @@ impl WorkflowController {
             self.document.draft.peek().to_owned(),
         );
         crate::client::project::ProjectClient::current().spawn(async move {
-            let response = ProjectClient::current()
+            let response = WorkflowClient::current()
                 .run_workflow_command(request)
                 .await
                 .map_err(|error| error.to_string());
@@ -883,7 +883,7 @@ impl WorkflowController {
             self.document.server.peek().workflow().revision(),
         );
         crate::client::project::ProjectClient::current().spawn(async move {
-            let response = ProjectClient::current()
+            let response = WorkflowClient::current()
                 .run_workflow_command(request)
                 .await
                 .map_err(|error| error.to_string());
@@ -905,7 +905,7 @@ impl WorkflowController {
         let requested_scope_id = self.document.server.peek().scope_id().to_owned();
         let request = WorkflowRequest::cancel(requested_scope_id.clone());
         crate::client::project::ProjectClient::current().spawn(async move {
-            let response = ProjectClient::current()
+            let response = WorkflowClient::current()
                 .run_workflow_command(request)
                 .await
                 .map_err(|error| error.to_string());
@@ -932,7 +932,7 @@ impl WorkflowController {
         self.assistant.agent_error.set(None);
         let request = AgentRequest::create_conversation(current.scope_id(), current.revision());
         crate::client::project::ProjectClient::current().spawn(async move {
-            let response = ProjectClient::current()
+            let response = WorkflowClient::current()
                 .run_workflow_agent_command(request.clone())
                 .await
                 .map_err(|error| error.to_string());
@@ -967,7 +967,7 @@ impl WorkflowController {
             current.revision(),
         );
         crate::client::project::ProjectClient::current().spawn(async move {
-            let response = ProjectClient::current()
+            let response = WorkflowClient::current()
                 .run_workflow_agent_command(request.clone())
                 .await
                 .map_err(|error| error.to_string());
@@ -1004,7 +1004,7 @@ impl WorkflowController {
             expected_revision: state.revision(),
         };
         crate::client::project::ProjectClient::current().spawn(async move {
-            let response = ProjectClient::current()
+            let response = WorkflowClient::current()
                 .run_workflow_agent_command(request.clone())
                 .await
                 .map_err(|error| error.to_string());
@@ -1047,7 +1047,7 @@ impl WorkflowController {
                 current.active_conversation_id(),
                 turn_id,
             );
-            let response = ProjectClient::current()
+            let response = WorkflowClient::current()
                 .run_workflow_agent_command(request.clone())
                 .await
                 .map_err(|error| error.to_string());
@@ -1089,7 +1089,7 @@ impl WorkflowController {
             .with_activity(workflow_active.into())
             .use_when(
                 move || sessions.catalog_available(),
-                || ProjectClient::current().workflow_snapshot(),
+                || WorkflowClient::current().workflow_snapshot(),
             );
         use_effect(move || {
             let result = workflow.read();
@@ -1115,7 +1115,7 @@ impl WorkflowController {
             .with_activity(assistant_active.into())
             .use_when(
                 move || sessions.catalog_available(),
-                || ProjectClient::current().workflow_agent_snapshot(),
+                || WorkflowClient::current().workflow_agent_snapshot(),
             );
         use_effect(move || {
             let result = agent.read();

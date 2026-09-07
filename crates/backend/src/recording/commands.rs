@@ -1,4 +1,5 @@
-//! Recording and replay commands exposed to fullstack delivery adapters.
+//! Recording and replay application operations.
+use spiral_robotics_common::recording_signals::{RecordingCursor, RecordingWindow};
 
 use std::collections::BTreeSet;
 #[cfg(test)]
@@ -15,8 +16,7 @@ use crate::data::seek::{
     ActiveRecording, PhysicalSeekActions, PhysicalSeekPlan, PhysicalSeekPort, RecordedSample,
     SampledArm, SeekActivity, SeekControlMode, SeekEpisodeCommand, SeekTarget, SeekableEpisode,
 };
-use crate::http::routes::AppState;
-use crate::main_runtime::MainRuntime;
+use crate::project_session::context::ProjectContext;
 use crate::recording::{
     RecordingActions, RecordingContext, RecordingDraftRequest, RecordingPort, RecordingResult,
     ReplayActions, ReplayEpisode, ReplayPlan, ReplayPort, ReplayTrajectory,
@@ -25,9 +25,7 @@ use crate::recording::{
 };
 use crate::robotics::video::{CameraCaptureSpec, VideoAsset, VideoCapture, VideoCaptureRequest};
 use crate::{BackendCommandError, OperationError};
-use spiral_robotics_common::recording::{
-    DatasetSummary, EpisodeInfo, EpisodeInspectionSnapshot, EpisodeListItem,
-};
+use spiral_robotics_common::recording::{DatasetSummary, EpisodeInfo, EpisodeInspectionSnapshot};
 use spiral_robotics_hardware::ModeSelection as HardwareModeSelection;
 use spiral_robotics_storage::episodes::{
     ArmCondition, EpisodeArmCollection as _, EpisodeRecordingRequest, EpisodeWriter,
@@ -41,12 +39,12 @@ use spiral_robotics_storage::episodes::{
 /// validation, consequential ordering, and compensation live in the
 /// framework-neutral capability action.
 struct RecordingAdapter<'a> {
-    state: &'a AppState,
+    state: &'a ProjectContext,
     presented_recording: std::sync::Mutex<Option<EpisodeInfo>>,
 }
 
 impl<'a> RecordingAdapter<'a> {
-    fn new(state: &'a AppState) -> Self {
+    fn new(state: &'a ProjectContext) -> Self {
         Self {
             state,
             presented_recording: std::sync::Mutex::new(None),
@@ -111,7 +109,7 @@ impl RecordingPort for RecordingAdapter<'_> {
     }
 
     async fn default_teleoperation_pair(&self) -> Option<TeleoperationPair> {
-        self.state
+        crate::project_session::setup::ProjectSetup::new(self.state)
             .snapshot()
             .await
             .default_teleoperation_pair()
@@ -163,7 +161,7 @@ impl RecordingPort for RecordingAdapter<'_> {
         &self,
         request: RecordingDraftRequest,
     ) -> Result<RecordingDraft, OperationError> {
-        self.state.create_recording_draft(request).await
+        self.assemble_draft(request).await
     }
 
     fn draft_episode(&self, draft: &Self::RecordingDraft) -> String {
@@ -175,7 +173,7 @@ impl RecordingPort for RecordingAdapter<'_> {
         episode: &str,
         arms: &[String],
     ) -> Result<Option<Self::MediaCapture>, OperationError> {
-        self.state.start_recording_media(episode, arms).await
+        self.assemble_media(episode, arms).await
     }
 
     async fn begin_recording(
@@ -234,7 +232,9 @@ impl RecordingPort for RecordingAdapter<'_> {
     }
 
     async fn finish_recording_media(&self, capture: Self::MediaCapture) -> Self::MediaOutput {
-        self.state.finish_video_capture(capture).await
+        crate::recording::supervisor::RecordingSupervisor::new(self.state.clone())
+            .finish_video_capture(capture)
+            .await
     }
 
     fn empty_media_output(&self) -> Self::MediaOutput {
@@ -388,11 +388,11 @@ impl ReplayPort for RecordingAdapter<'_> {
 
 /// SpiralDB and control-state adapter for episode catalog actions.
 struct EpisodeAdapter<'a> {
-    state: &'a AppState,
+    state: &'a ProjectContext,
 }
 
 impl<'a> EpisodeAdapter<'a> {
-    fn new(state: &'a AppState) -> Self {
+    fn new(state: &'a ProjectContext) -> Self {
         Self { state }
     }
 }
@@ -427,7 +427,7 @@ impl EpisodeCatalogPort for EpisodeAdapter<'_> {
 /// handoff share the store's serialization gate, so a coalesced result proves
 /// no stale pose reached hardware.
 struct SeekAdapter<'a> {
-    state: &'a AppState,
+    state: &'a ProjectContext,
 }
 
 impl PhysicalSeekPort for SeekAdapter<'_> {
@@ -447,8 +447,7 @@ impl PhysicalSeekPort for SeekAdapter<'_> {
     }
 
     async fn target(&self, robot: &str) -> Result<Option<SeekTarget>, OperationError> {
-        Ok(self
-            .state
+        Ok(crate::project_session::setup::ProjectSetup::new(self.state)
             .snapshot()
             .await
             .robots()
@@ -534,32 +533,25 @@ impl PhysicalSeekPort for SeekAdapter<'_> {
     }
 }
 
-/// Narrow command facade shared with the Studio's server-function handlers.
+/// Project-bound operations; the context owns admission and backend task lifetime.
 #[derive(Clone)]
-pub struct RecordingCommands {
-    main_runtime: MainRuntime,
-    state: AppState,
+pub(crate) struct RecordingCommands {
+    state: ProjectContext,
 }
 
 impl RecordingCommands {
-    pub fn for_session(&self, session_id: &str) -> Result<Self, BackendCommandError> {
-        Ok(Self::new(
-            self.main_runtime.clone(),
-            self.state.for_session(session_id)?,
-        ))
+    pub(crate) fn recording_signals(
+        &self,
+        cursor: RecordingCursor,
+    ) -> Result<RecordingWindow, BackendCommandError> {
+        let _activity = self.state.admit()?;
+        Ok(self.state.hardware().recording_signals(cursor))
     }
-
-    pub(crate) fn new(main_runtime: MainRuntime, state: AppState) -> Self {
-        Self {
-            main_runtime,
-            state,
-        }
-    }
-
-    pub async fn datasets(&self) -> Result<Vec<DatasetSummary>, BackendCommandError> {
+    pub(crate) async fn datasets(&self) -> Result<Vec<DatasetSummary>, BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
-        self.main_runtime
+        self.state
+            .tasks()
             .read(async move {
                 let _activity = activity;
                 commands.require_storage_ready()?;
@@ -573,13 +565,14 @@ impl RecordingCommands {
             .await?
     }
 
-    pub async fn episodes(
+    pub(crate) async fn episodes(
         &self,
         dataset_id: String,
-    ) -> Result<(Vec<EpisodeListItem>, Vec<String>), BackendCommandError> {
+    ) -> Result<spiral_robotics_common::recording::EpisodeCatalog, BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
-        self.main_runtime
+        self.state
+            .tasks()
             .read(async move {
                 let _activity = activity;
                 commands.require_storage_ready()?;
@@ -598,19 +591,23 @@ impl RecordingCommands {
                     .into_iter()
                     .filter(|episode| Some(episode.id()) != recording.as_deref())
                     .collect();
-                Ok((episodes, commands.state.episodes().issues()))
+                Ok(spiral_robotics_common::recording::EpisodeCatalog::new(
+                    episodes,
+                    commands.state.episodes().issues(),
+                ))
             })
             .await?
     }
 
     /// Begin a take using the configured teleoperation pair.
-    pub async fn start_recording(
+    pub(crate) async fn start_recording(
         &self,
         dataset_id: String,
     ) -> Result<EpisodeInfo, BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
-        self.main_runtime
+        self.state
+            .tasks()
             .execute(async move {
                 let _activity = activity;
                 commands.require_catalog_ready()?;
@@ -623,10 +620,14 @@ impl RecordingCommands {
             .await?
     }
 
-    pub async fn stop_recording(&self, keep: bool) -> Result<EpisodeInfo, BackendCommandError> {
+    pub(crate) async fn stop_recording(
+        &self,
+        keep: bool,
+    ) -> Result<EpisodeInfo, BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
-        self.main_runtime
+        self.state
+            .tasks()
             .execute(async move {
                 let _activity = activity;
                 commands.require_catalog_ready()?;
@@ -639,10 +640,14 @@ impl RecordingCommands {
             .await?
     }
 
-    pub async fn set_recording_paused(&self, paused: bool) -> Result<(), BackendCommandError> {
+    pub(crate) async fn set_recording_paused(
+        &self,
+        paused: bool,
+    ) -> Result<(), BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
-        self.main_runtime
+        self.state
+            .tasks()
             .execute(async move {
                 let _activity = activity;
                 commands.require_catalog_ready()?;
@@ -654,10 +659,11 @@ impl RecordingCommands {
             .await?
     }
 
-    pub async fn delete_episode(&self, id: String) -> Result<(), BackendCommandError> {
+    pub(crate) async fn delete_episode(&self, id: String) -> Result<(), BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
-        self.main_runtime
+        self.state
+            .tasks()
             .execute(async move {
                 let _activity = activity;
                 commands.require_catalog_ready()?;
@@ -669,13 +675,14 @@ impl RecordingCommands {
             .await?
     }
 
-    pub async fn inspection(
+    pub(crate) async fn inspection(
         &self,
         id: String,
     ) -> Result<EpisodeInspectionSnapshot, BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
-        self.main_runtime
+        self.state
+            .tasks()
             .execute(async move {
                 let _activity = activity;
                 commands.require_storage_ready()?;
@@ -688,7 +695,7 @@ impl RecordingCommands {
     }
 
     /// Move a physical follower to one committed recorded sample.
-    pub async fn seek_episode(
+    pub(crate) async fn seek_episode(
         &self,
         id: String,
         robot: String,
@@ -697,7 +704,8 @@ impl RecordingCommands {
     ) -> Result<(), BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
-        self.main_runtime
+        self.state
+            .tasks()
             .execute(async move {
                 let _activity = activity;
                 commands.require_catalog_ready()?;
@@ -711,7 +719,7 @@ impl RecordingCommands {
             .await?
     }
 
-    pub async fn start_replay(
+    pub(crate) async fn start_replay(
         &self,
         episode: String,
         robot: String,
@@ -720,7 +728,8 @@ impl RecordingCommands {
     ) -> Result<(), BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
-        self.main_runtime
+        self.state
+            .tasks()
             .execute(async move {
                 let _activity = activity;
                 commands.require_catalog_ready()?;
@@ -735,10 +744,11 @@ impl RecordingCommands {
             .await?
     }
 
-    pub async fn set_replay_paused(&self, paused: bool) -> Result<(), BackendCommandError> {
+    pub(crate) async fn set_replay_paused(&self, paused: bool) -> Result<(), BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
-        self.main_runtime
+        self.state
+            .tasks()
             .execute(async move {
                 let _activity = activity;
                 commands.require_catalog_ready()?;
@@ -765,19 +775,19 @@ impl RecordingCommands {
     }
 }
 
-impl AppState {
+impl RecordingAdapter<'_> {
     /// Assemble a storage draft from authoritative live telemetry.
     ///
     /// Eligibility, sample-rate admission, consequential ordering, and cleanup
     /// belong to the capability action. This adapter only translates live backend
     /// structures into the episode writer's concrete representation.
-    async fn create_recording_draft(
+    async fn assemble_draft(
         &self,
         request: RecordingDraftRequest,
     ) -> Result<RecordingDraft, OperationError> {
         let (command, source, wanted, sample_hz) = request.into_parts();
         let (dataset_id, _requested_arms, note) = command.into_parts();
-        let hardware = self.hardware().state();
+        let hardware = self.state.hardware().state();
         let connected = hardware
             .robots()
             .iter()
@@ -810,7 +820,7 @@ impl AppState {
                 ))
             })
             .collect::<Result<Vec<_>, OperationError>>()?;
-        let saved_robots = self.workspace().list().await;
+        let saved_robots = self.state.workspace().list().await;
         let arms = spiral_robotics_common::recording::EpisodeArm::from_joint_lists(&arms)
             .map_err(OperationError::from)?
             .into_iter()
@@ -867,6 +877,7 @@ impl AppState {
             .collect();
 
         let writer = self
+            .state
             .episodes()
             .begin_in_dataset(
                 EpisodeRecordingRequest::new(dataset_id.clone(), source.clone(), sample_hz)
@@ -890,13 +901,15 @@ impl AppState {
     }
 
     /// Assemble camera capture for an already-created episode draft.
-    async fn start_recording_media(
+    async fn assemble_media(
         &self,
         episode: &str,
         wanted: &[String],
     ) -> Result<Option<VideoCapture>, OperationError> {
-        if self.preferences().get().video().enabled() {
-            let snapshot = self.snapshot().await;
+        if self.state.preferences().get().video().enabled() {
+            let snapshot = crate::project_session::setup::ProjectSetup::new(self.state)
+                .snapshot()
+                .await;
             let camera_status = snapshot
                 .cameras()
                 .iter()
@@ -924,15 +937,21 @@ impl AppState {
                 }
             }
             VideoCapture::start(
-                self.cameras().clone(),
+                self.state.cameras().clone(),
                 VideoCaptureRequest::new(episode, cameras),
-                self.video_encoder(),
+                self.state.video_encoder(),
             )
             .await
             .map_err(|error| OperationError::InvalidInput(error.to_string()))
         } else {
             Ok(None)
         }
+    }
+}
+
+impl From<crate::project_session::context::ProjectContext> for RecordingCommands {
+    fn from(state: crate::project_session::context::ProjectContext) -> Self {
+        Self { state }
     }
 }
 

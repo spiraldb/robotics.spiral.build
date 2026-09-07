@@ -13,7 +13,10 @@ workspace = true
 
 [features]
 test-support = []
+http-schema = ["dep:schemars"]
 
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+
+schemars = { version = "1.2", optional = true }

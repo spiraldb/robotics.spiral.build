@@ -1,10 +1,11 @@
-//! Consequential Studio command gateway built on server functions.
+//! Consequential Studio command gateway built on the HTTP API.
 //!
 //! Components emit semantic or Timeline intent. The activity controller uses
 //! this module to translate consequential intent into admitted commands. The
 //! backend remains authoritative for recording, replay, hardware, and safety.
 
-use crate::client::project::ProjectClient;
+use crate::activities::live::RecordingClient;
+use crate::settings::robots::RobotClient;
 use dioxus::prelude::*;
 use spiral_robotics_common::recording::EpisodeInfo;
 use spiral_robotics_common::robots::ModeSelection;
@@ -46,7 +47,7 @@ impl Studio {
         }
         let dataset_id = studio.selected_dataset().read().trim().to_owned();
         studio.run("", async move {
-            ProjectClient::current()
+            RecordingClient::current()
                 .start_recording(dataset_id)
                 .await
                 .map_err(|error| error.to_string())
@@ -66,7 +67,7 @@ impl Studio {
             return;
         }
         let future = async move {
-            ProjectClient::current()
+            RecordingClient::current()
                 .set_recording_paused(paused)
                 .await
                 .map_err(|error| error.to_string())
@@ -99,7 +100,7 @@ impl Studio {
             "Recording discarded. Teleoperation stopped."
         };
         studio.run_safety(message, async move {
-            let summary = ProjectClient::current()
+            let summary = RecordingClient::current()
                 .stop_recording(completion.keep)
                 .await
                 .map_err(|error| error.to_string())?;
@@ -185,8 +186,15 @@ impl Studio {
         };
         let episode = episode.id().to_owned();
         studio.run("", async move {
-            ProjectClient::current()
-                .start_replay(episode, robot, source_arm, start_seconds)
+            RecordingClient::current()
+                .start_replay(
+                    spiral_robotics_common::recording::ReplayStart::new(
+                        episode,
+                        robot,
+                        start_seconds,
+                    )
+                    .with_source_arm(source_arm),
+                )
                 .await
                 .map_err(|error| error.to_string())
         });
@@ -199,7 +207,7 @@ impl Studio {
             return;
         }
         let future = async move {
-            ProjectClient::current()
+            RecordingClient::current()
                 .set_replay_paused(paused)
                 .await
                 .map_err(|error| error.to_string())
@@ -220,7 +228,7 @@ impl Studio {
         studio.run_safety(
             "Robot replay stopped. Motors may still be holding position.",
             async move {
-                ProjectClient::current()
+                RobotClient::current()
                     .set_mode(ModeSelection::Idle)
                     .await
                     .map_err(|error| error.to_string())
@@ -269,29 +277,17 @@ impl Studio {
     pub(crate) fn physical_seek(self, episode: String, request: TimelineSeekBody) {
         let studio = self;
         studio.run("", async move {
-            ProjectClient::current()
-                .seek_episode(episode, request.robot, request.source_arm, request.seconds)
+            RecordingClient::current()
+                .seek_episode(
+                    episode,
+                    spiral_robotics_common::recording::EpisodeSeek::new(
+                        request.robot,
+                        request.seconds,
+                    )
+                    .with_source_arm(request.source_arm),
+                )
                 .await
                 .map_err(|error| error.to_string())
         });
-    }
-}
-
-impl Studio {
-    /// Whether global transport shortcuts may act without stealing a text-editing
-    /// keystroke.
-    pub(crate) fn shortcuts_enabled(self) -> bool {
-        let Some(document) = web_sys::window().and_then(|window| window.document()) else {
-            return false;
-        };
-        document
-            .active_element()
-            .map(|element| {
-                !matches!(
-                    element.tag_name().to_uppercase().as_str(),
-                    "INPUT" | "TEXTAREA" | "SELECT"
-                )
-            })
-            .unwrap_or(true)
     }
 }

@@ -5,8 +5,8 @@
 //! or replays episodes; neither tool has to impersonate
 //! navigation for the other.
 
+use crate::activities::data::DatasetClient;
 use crate::activities::data::dataset_catalog::DatasetCatalogFeedback;
-use crate::client::project::ProjectClient;
 use std::collections::BTreeSet;
 
 use crate::components::interaction::{
@@ -417,7 +417,7 @@ fn HuggingFaceImport(dataset_id: String, on_close: EventHandler<()>) -> Element 
                                 let Some(outcome) = SingleFlight::run(
                                     inspecting,
                                     async move {
-                                        ProjectClient::current().inspect_hugging_face_dataset(request)
+                                        DatasetClient::current().inspect_hugging_face_dataset(request)
                                             .await
                                             .map_err(|error| error.to_string())
                                     },
@@ -513,7 +513,7 @@ fn HuggingFaceImport(dataset_id: String, on_close: EventHandler<()>) -> Element 
                                         let Some(outcome) = SingleFlight::run(
                                             importing,
                                             async move {
-                                                ProjectClient::current().import_hugging_face_dataset(import_request)
+                                                DatasetClient::current().import_hugging_face_dataset(import_request)
                                                     .await
                                                     .map_err(|error| error.to_string())
                                             },
@@ -1019,7 +1019,7 @@ impl EpisodeDeletion {
         let mut confirming = self.signals.confirming;
         self.studio
             .run_utility(format!("Deleted {}.", self.id), async move {
-                let result = ProjectClient::current()
+                let result = DatasetClient::current()
                     .delete_episode(deleted_id.clone())
                     .await
                     .map_err(|error| error.to_string());
