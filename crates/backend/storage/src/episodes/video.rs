@@ -12,8 +12,8 @@ use futures::StreamExt as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
+use crate::db::DatabaseSession as _;
 use crate::db::SpiralSql;
-use crate::db::{DatabaseCommand, DatabaseSession as _};
 use crate::db::{ProjectConnection, ProjectStore};
 use crate::db::{Table, column as db};
 
@@ -46,10 +46,8 @@ impl<'a> VideoAssetPersistence<'a> {
     async fn record_batches(&self, sql: String) -> Result<crate::RecordBatchStream, String> {
         let mut connection = self.project_store.connect().await?;
         connection
-            .execute(DatabaseCommand::statement(sql))
+            .query(sql.into())
             .await
-            .map_err(|error| error.to_string())?
-            .into_records()
             .map_err(|error| error.to_string())
     }
 

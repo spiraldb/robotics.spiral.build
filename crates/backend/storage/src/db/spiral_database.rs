@@ -1,4 +1,9 @@
 //! Native async Spiral implementation of the database traits.
+//!
+//! Known conformance gap: dropping a result requests engine cancellation but
+//! does not await it. Rollback during that shutdown can fail with active queries.
+//! `contract_tests::dropped_transaction_waits_for_result_before_rollback` retains
+//! the required behavior as an ignored upstream regression, not a weaker contract.
 
 mod read_transaction;
 
@@ -6,6 +11,9 @@ use read_transaction::ReadTransactionGuard;
 
 #[cfg(test)]
 mod schema_tests;
+
+#[cfg(test)]
+mod contract_tests;
 
 #[cfg(test)]
 mod native_schema_tests;
@@ -39,17 +47,16 @@ use spiral_engine::{EngineRuntime, Morsel, MorselSequence, RelationMeta};
 use spiral_session::SpiralSession;
 use spiraldb_control_plane::SpiralDbConnection;
 use spiraldb_table::{SpiralDbConnectionServices, SpiralDbPlugin};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OnceCell, OwnedSemaphorePermit, Semaphore};
 use url::Url;
 use vortex_array::{ArrayRef, VortexSessionExecute as _};
 use vortex_arrow::ArrowSessionExt as _;
 use vortex_error::{VortexResult, vortex_bail, vortex_err};
 
 use super::database::{
-    BatchIngestion, Database, DatabaseCommand, DatabaseConnection, DatabaseError,
-    DatabaseErrorKind, DatabaseFuture, DatabaseOutput, DatabaseResult, DatabaseSession,
-    DatabaseTransaction, ExecutionSummary, IngestMode, RecordBatchStream, RelationKind,
-    RelationMetadata, RelationName,
+    BatchIngestion, Database, DatabaseConnection, DatabaseError, DatabaseErrorKind, DatabaseFuture,
+    DatabaseResult, DatabaseSession, DatabaseTransaction, ExecutionSummary, IngestMode,
+    RecordBatchStream, RelationKind, RelationMetadata, RelationName, SqlStatement,
 };
 use crate::settings::SpiralConnectionSettings;
 
@@ -57,15 +64,19 @@ const QUERY_BATCH_CAPACITY: usize = 16;
 const SPIRALDB_CATALOG: &str = "spiraldb";
 
 /// Configured database entry point held by application state.
-pub(super) struct SpiralDatabase {
-    configured_session: ConfiguredSpiralSession,
+pub struct SpiralDatabase {
+    settings: SpiralConnectionSettings,
+    configured_session: OnceCell<ConfiguredSpiralSession>,
 }
 
 impl SpiralDatabase {
-    pub(super) fn new(settings: SpiralConnectionSettings) -> DatabaseResult<Self> {
-        Ok(Self {
-            configured_session: ConfiguredSpiralSession::new(&settings)?,
-        })
+    /// Configure the native adapter without starting a runtime or loading settings.
+    /// Initialization happens asynchronously on the first connection request.
+    pub fn new(settings: SpiralConnectionSettings) -> Self {
+        Self {
+            settings,
+            configured_session: OnceCell::new(),
+        }
     }
 }
 
@@ -143,7 +154,19 @@ impl ConfiguredSpiralSession {
 impl Database for SpiralDatabase {
     fn connect(&self) -> DatabaseFuture<'_, Box<dyn DatabaseConnection>> {
         async move {
-            let connection = self.configured_session.open_connection()?;
+            let configured = self
+                .configured_session
+                .get_or_try_init(|| async {
+                    let settings = self.settings.clone();
+                    tokio::task::spawn_blocking(move || ConfiguredSpiralSession::new(&settings))
+                        .await
+                        .map_err(DatabaseError::from_external)?
+                })
+                .await?
+                .clone();
+            let connection = tokio::task::spawn_blocking(move || configured.open_connection())
+                .await
+                .map_err(DatabaseError::from_external)??;
             Ok(Box::new(SpiralConnection::new(connection)) as Box<dyn DatabaseConnection>)
         }
         .boxed()
@@ -152,52 +175,109 @@ impl Database for SpiralDatabase {
 
 struct SpiralConnection {
     context: ConnectionCtx,
+    result_slot: Arc<Semaphore>,
+    cleanup: Arc<ConnectionCleanup>,
+}
+
+/// Shared with result streams so dropping the connection cannot roll back a
+/// transaction while its result is still being consumed.
+struct ConnectionCleanup {
+    context: ConnectionCtx,
+    runtime: tokio::runtime::Handle,
+}
+
+impl Drop for ConnectionCleanup {
+    fn drop(&mut self) {
+        let context = self.context.clone();
+        let runtime = self.runtime.clone();
+        self.runtime.spawn_blocking(move || {
+            // TODO(Spiral): cancellation completion must precede rollback. The
+            // current MorselStream API exposes no completion handle after drop.
+            // Use the upstream completion API here when available; do not poll
+            // query counts or retry rollback to mask the lifecycle gap.
+            let result = if !context.autocommit() {
+                runtime
+                    .block_on(context.rollback())
+                    .map_err(DatabaseError::from_external)
+            } else if context.active_transaction().is_some() {
+                context
+                    .rollback_transaction()
+                    .map_err(DatabaseError::from_external)
+            } else {
+                Ok(())
+            };
+            if let Err(error) = result {
+                tracing::warn!(%error, "could not clean up database connection");
+            }
+        });
+    }
 }
 
 impl SpiralConnection {
     fn new(context: ConnectionCtx) -> Self {
-        Self { context }
+        Self {
+            cleanup: Arc::new(ConnectionCleanup {
+                context: context.clone(),
+                runtime: tokio::runtime::Handle::current(),
+            }),
+            context,
+            result_slot: Arc::new(Semaphore::new(1)),
+        }
     }
 
-    async fn execute_command(
+    /// Preserve Studio's existing empty-DELETE normalization at the driver
+    /// boundary. Other SQL failures must still propagate unchanged.
+    fn is_empty_delete(sql: &SqlStatement, error: &impl fmt::Display) -> bool {
+        error.to_string().contains("without any affected rows")
+            && matches!(
+                spiral_engine::sql::parse_sql_statement(sql.as_str()),
+                Ok(spiral_engine::sql::r#abstract::AbstractStatement::DeleteTable { .. })
+            )
+    }
+
+    fn reserve_operation(&self) -> DatabaseResult<OwnedSemaphorePermit> {
+        self.result_slot.clone().try_acquire_owned().map_err(|_| {
+            DatabaseError::invalid_state(
+                "connection has an active result stream; consume or drop it first",
+            )
+        })
+    }
+
+    async fn query_records(
         &mut self,
-        command: DatabaseCommand,
-    ) -> DatabaseResult<DatabaseOutput> {
-        match command {
-            DatabaseCommand::Statement(statement) => {
-                match self
-                    .context
-                    .execute_command(statement.as_str())
+        statement: SqlStatement,
+    ) -> DatabaseResult<RecordBatchStream> {
+        let permit = self.reserve_operation()?;
+        let output = self
+            .context
+            .execute_command(statement.as_str())
+            .await
+            .map_err(DatabaseError::from_external)?;
+        let records = match output {
+            CommandOutput::Statement { .. } => {
+                return Err(DatabaseError::invalid_state(
+                    "database command did not produce records",
+                ));
+            }
+            CommandOutput::Query { relation, options } => {
+                Self::query_output(relation, options).await?
+            }
+            CommandOutput::Report(report) => {
+                let rendered = report
+                    .execute()
                     .await
                     .map_err(DatabaseError::from_external)?
-                {
-                    CommandOutput::Statement { .. } => {
-                        Ok(DatabaseOutput::AffectedRows(ExecutionSummary))
-                    }
-                    CommandOutput::Query { relation, options } => {
-                        Self::query_output(relation, options).await
-                    }
-                    CommandOutput::Report(report) => {
-                        let rendered = report
-                            .execute()
-                            .await
-                            .map_err(DatabaseError::from_external)?
-                            .to_string();
-                        Ok(DatabaseOutput::Records(Self::report_stream(rendered)?))
-                    }
-                }
+                    .to_string();
+                Self::report_stream(rendered)?
             }
-            DatabaseCommand::Ingest(ingestion) => {
-                self.ingest(ingestion).await?;
-                Ok(DatabaseOutput::AffectedRows(ExecutionSummary))
-            }
-        }
+        };
+        Ok(records.retain(self.cleanup.clone()).retain(permit))
     }
 
     async fn query_output(
         relation: Relation,
         options: spiral_engine::QueryOptions,
-    ) -> DatabaseResult<DatabaseOutput> {
+    ) -> DatabaseResult<RecordBatchStream> {
         let session = relation.session().clone();
         let schema = Arc::new(
             session
@@ -227,9 +307,7 @@ impl SpiralConnection {
             })
             .buffered(QUERY_BATCH_CAPACITY)
             .boxed();
-        Ok(DatabaseOutput::Records(RecordBatchStream::new(
-            schema, batches,
-        )))
+        Ok(RecordBatchStream::new(schema, batches))
     }
 
     fn record_batch(session: &SpiralSession, array: ArrayRef) -> DatabaseResult<RecordBatch> {
@@ -337,7 +415,7 @@ impl SpiralConnection {
             .collect()
     }
 
-    async fn ingest(&mut self, ingestion: BatchIngestion) -> DatabaseResult<()> {
+    async fn ingest_batches(&mut self, ingestion: BatchIngestion) -> DatabaseResult<()> {
         let (relation, mode, batches) = ingestion.into_parts();
         let target = Self::relation_name(&relation)?;
         let session = self.context.session().clone();
@@ -404,16 +482,46 @@ impl SpiralConnection {
 }
 
 impl DatabaseSession for SpiralConnection {
-    fn execute(&mut self, command: DatabaseCommand) -> DatabaseFuture<'_, DatabaseOutput> {
-        async move { self.execute_command(command).await }.boxed()
+    fn query(&mut self, sql: SqlStatement) -> DatabaseFuture<'_, RecordBatchStream> {
+        async move { self.query_records(sql).await }.boxed()
+    }
+
+    fn execute_update(&mut self, sql: SqlStatement) -> DatabaseFuture<'_, ExecutionSummary> {
+        async move {
+            let _permit = self.reserve_operation()?;
+            match self.context.execute(sql.as_str()).await {
+                Ok(_) => Ok(ExecutionSummary),
+                Err(error) if Self::is_empty_delete(&sql, &error) => Ok(ExecutionSummary),
+                Err(error) => Err(DatabaseError::from_external(error)),
+            }
+        }
+        .boxed()
+    }
+
+    fn ingest(&mut self, ingestion: BatchIngestion) -> DatabaseFuture<'_, ExecutionSummary> {
+        async move {
+            let _permit = self.reserve_operation()?;
+            self.ingest_batches(ingestion)
+                .await
+                .map(|()| ExecutionSummary)
+        }
+        .boxed()
     }
 
     fn table_schema(&mut self, relation: RelationName) -> DatabaseFuture<'_, Option<Arc<Schema>>> {
-        async move { self.fetch_table_schema(relation).await }.boxed()
+        async move {
+            let _permit = self.reserve_operation()?;
+            self.fetch_table_schema(relation).await
+        }
+        .boxed()
     }
 
     fn relations(&mut self) -> DatabaseFuture<'_, Vec<RelationMetadata>> {
-        async move { self.list_relations().await }.boxed()
+        async move {
+            let _permit = self.reserve_operation()?;
+            self.list_relations().await
+        }
+        .boxed()
     }
 }
 
@@ -421,6 +529,7 @@ impl DatabaseConnection for SpiralConnection {
     fn begin(self: Box<Self>) -> DatabaseFuture<'static, Box<dyn DatabaseTransaction>> {
         async move {
             let connection = *self;
+            let _permit = connection.reserve_operation()?;
             connection
                 .context
                 .set_autocommit(false)
@@ -437,8 +546,16 @@ struct SpiralTransaction {
 }
 
 impl DatabaseSession for SpiralTransaction {
-    fn execute(&mut self, command: DatabaseCommand) -> DatabaseFuture<'_, DatabaseOutput> {
-        self.connection.execute(command)
+    fn query(&mut self, sql: SqlStatement) -> DatabaseFuture<'_, RecordBatchStream> {
+        self.connection.query(sql)
+    }
+
+    fn execute_update(&mut self, sql: SqlStatement) -> DatabaseFuture<'_, ExecutionSummary> {
+        self.connection.execute_update(sql)
+    }
+
+    fn ingest(&mut self, ingestion: BatchIngestion) -> DatabaseFuture<'_, ExecutionSummary> {
+        self.connection.ingest(ingestion)
     }
 
     fn table_schema(&mut self, relation: RelationName) -> DatabaseFuture<'_, Option<Arc<Schema>>> {
@@ -453,6 +570,7 @@ impl DatabaseSession for SpiralTransaction {
 impl DatabaseTransaction for SpiralTransaction {
     fn commit(self: Box<Self>) -> DatabaseFuture<'static, ExecutionSummary> {
         async move {
+            let _permit = self.connection.reserve_operation()?;
             self.connection
                 .context
                 .commit()
@@ -465,6 +583,7 @@ impl DatabaseTransaction for SpiralTransaction {
 
     fn rollback(self: Box<Self>) -> DatabaseFuture<'static, ()> {
         async move {
+            let _permit = self.connection.reserve_operation()?;
             self.connection
                 .context
                 .rollback()

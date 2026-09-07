@@ -27,7 +27,7 @@ use spiral_robotics_common::relations::{
 };
 use spiral_robotics_common::sql::QualifiedRelation;
 
-use super::database::{DatabaseCommand, DatabaseSession, RelationKind};
+use super::database::{DatabaseSession, RelationKind};
 use super::project_store::{ProjectConnection, ProjectStore};
 use super::schema::{self as spiral, Table, column};
 use crate::episodes::video::{VideoAssetKey, VideoByteRange};
@@ -670,12 +670,9 @@ impl QueryExecution<'_> {
             return Err("Spiral query is too large".to_owned());
         }
         let started = Instant::now();
-        let output = connection
-            .execute(DatabaseCommand::statement(sql))
+        let mut records = connection
+            .query(sql.into())
             .await
-            .map_err(|error| format!("executing Spiral query: {error}"))?;
-        let mut records = output
-            .into_records()
             .map_err(|error| format!("executing Spiral query: {error}"))?;
         let schema = Arc::clone(records.schema());
         let columns = schema

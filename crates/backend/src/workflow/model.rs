@@ -3118,8 +3118,14 @@ mod tests {
         .expect("the Workflow registry connection must be valid")
         .with_credentials(stored.as_ref().and_then(BackendStateStore::credentials));
         let project_store = Arc::new(
-            ProjectStore::new(connection, "spiral_robotics".to_owned())
-                .expect("the Workflow registry project store must be valid"),
+            {
+                let settings = connection;
+                let database = Arc::new(spiral_robotics_storage::SpiralDatabase::new(
+                    settings.clone(),
+                ));
+                ProjectStore::new(settings, "spiral_robotics".to_owned(), database)
+            }
+            .expect("the Workflow registry project store must be valid"),
         );
         let readiness = StorageManager::new(project_store.clone())
             .test_spiral()
@@ -3362,8 +3368,14 @@ mod tests {
         .expect("the Workflow golden connection must be valid")
         .with_credentials(stored.as_ref().and_then(BackendStateStore::credentials));
         let project_store = Arc::new(
-            ProjectStore::new(connection, namespace.clone())
-                .expect("the Workflow golden project store must be valid"),
+            {
+                let settings = connection;
+                let database = Arc::new(spiral_robotics_storage::SpiralDatabase::new(
+                    settings.clone(),
+                ));
+                ProjectStore::new(settings, namespace.clone(), database)
+            }
+            .expect("the Workflow golden project store must be valid"),
         );
         let cleanup = GoldenRelations {
             project_store: project_store.clone(),

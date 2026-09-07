@@ -475,7 +475,7 @@ impl RobotWorkspace {
             .await
             .map_err(WorkspaceError::Invalid)?;
         connection
-            .execute_delete_sql(&format!(
+            .execute_update_sql(&format!(
                 "DELETE FROM {relation} WHERE {ROBOT_IDENTIFIER_COLUMN} = {id}"
             ))
             .await
@@ -537,7 +537,7 @@ impl RobotWorkspace {
             .await
             .map_err(WorkspaceError::Invalid)?;
         connection
-            .execute_delete_sql(&format!(
+            .execute_update_sql(&format!(
                 "DELETE FROM {relation} WHERE {ROBOT_IDENTIFIER_COLUMN} = {id_sql}"
             ))
             .await

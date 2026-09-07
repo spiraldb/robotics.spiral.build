@@ -9,9 +9,9 @@ use arrow_array::{
 };
 use futures::StreamExt as _;
 
+use crate::db::DatabaseSession as _;
 use crate::db::ProjectStore;
 use crate::db::SpiralSql;
-use crate::db::{DatabaseCommand, DatabaseSession as _};
 use crate::db::{Table, column as db};
 use crate::manager::StorageManager;
 
@@ -135,11 +135,8 @@ impl<'a> TrainingCheckpointPersistence<'a> {
         let target = Table::TrainingCheckpoints.qualified_name(self.project_store.namespace());
         let mut connection = self.project_store.connect().await?;
         connection
-            .execute(DatabaseCommand::statement(SpiralSql::delete_training_run(
-                &target, &run_id,
-            )))
+            .execute_update(SpiralSql::delete_training_run(&target, &run_id).into())
             .await
-            .and_then(crate::DatabaseOutput::into_summary)
             .map(|_| ())
             .map_err(|error| {
                 format!("deleting training run {run_id:?} checkpoints from {target}: {error}")
@@ -149,10 +146,8 @@ impl<'a> TrainingCheckpointPersistence<'a> {
     async fn record_batches(&self, sql: String) -> Result<crate::RecordBatchStream, String> {
         let mut connection = self.project_store.connect().await?;
         connection
-            .execute(DatabaseCommand::statement(sql))
+            .query(sql.into())
             .await
-            .map_err(|error| error.to_string())?
-            .into_records()
             .map_err(|error| error.to_string())
     }
 }

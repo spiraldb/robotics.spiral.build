@@ -13,10 +13,10 @@ use arrow_schema::{DataType, Field, Schema};
 use futures::{FutureExt as _, StreamExt as _};
 
 use super::database::{
-    Database, DatabaseCommand, DatabaseConnection, DatabaseError, DatabaseFuture, DatabaseOutput,
-    DatabaseSession, DatabaseTransaction, RecordBatchStream, RelationName,
+    BatchIngestion, Database, DatabaseConnection, DatabaseError, DatabaseErrorKind, DatabaseFuture,
+    DatabaseResult, DatabaseSession, DatabaseTransaction, ExecutionSummary, RecordBatchStream,
+    RelationName, SqlStatement,
 };
-use super::spiral_database::SpiralDatabase;
 use crate::LEGACY_PROJECT_ERROR;
 use crate::settings::{SpiralConnectionSettings, SpiralCredentials};
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard};
@@ -27,13 +27,6 @@ use crate::transfer::ManagedRelationCatalog;
 
 const SPIRAL_UNAVAILABLE_PREFIX: &str = "SpiralDB is unavailable at ";
 const BLOB_EXTENSION_NAME: &str = "spql.io.Blob";
-const TRANSPORT_FAILURE_MARKERS: [&str; 5] = [
-    "error sending request for url",
-    "connection refused",
-    "failed to connect",
-    "tcp connect error",
-    "dns error",
-];
 
 pub(crate) struct StorageClock;
 
@@ -52,7 +45,7 @@ impl StorageClock {
 pub struct ProjectConnection {
     database: Arc<dyn Database>,
     state: ProjectConnectionState,
-    _operation: ProjectOperationLease,
+    operation: Arc<ProjectOperationLease>,
 }
 
 enum ProjectConnectionState {
@@ -85,15 +78,12 @@ impl ProjectConnection {
     async fn open(
         database: Arc<dyn Database>,
         operation: ProjectOperationLease,
-    ) -> Result<Self, String> {
-        let connection = database
-            .connect()
-            .await
-            .map_err(|error| error.to_string())?;
+    ) -> DatabaseResult<Self> {
+        let connection = database.connect().await?;
         Ok(Self {
             database,
             state: ProjectConnectionState::Autocommit(connection),
-            _operation: operation,
+            operation: Arc::new(operation),
         })
     }
 
@@ -105,9 +95,8 @@ impl ProjectConnection {
         &mut self,
         sql: impl AsRef<str>,
     ) -> Result<RecordBatchStream, String> {
-        self.execute(DatabaseCommand::statement(sql.as_ref()))
+        self.query(sql.as_ref().into())
             .await
-            .and_then(DatabaseOutput::into_records)
             .map_err(|error| error.to_string())
     }
 
@@ -216,9 +205,8 @@ impl ProjectConnection {
     /// Materialize a whole bounded, storage-owned relation.
     pub(crate) async fn read_batches(&mut self, sql: &str) -> Result<Vec<RecordBatch>, String> {
         let mut records = self
-            .execute(DatabaseCommand::statement(sql))
+            .query(sql.into())
             .await
-            .and_then(DatabaseOutput::into_records)
             .map_err(|error| format!("reading Spiral rows: {error}"))?;
         let mut batches = Vec::new();
         while let Some(batch) = records.next().await {
@@ -331,20 +319,10 @@ impl ProjectConnection {
     }
 
     pub async fn execute_update_sql(&mut self, sql: &str) -> Result<(), String> {
-        self.execute(DatabaseCommand::statement(sql))
+        self.execute_update(sql.into())
             .await
-            .and_then(DatabaseOutput::into_summary)
             .map(|_| ())
             .map_err(|error| error.to_string())
-    }
-
-    /// Spiral reports a no-op DELETE as an execution error. Cleanup callers
-    /// intentionally treat that driver-specific result as success.
-    pub async fn execute_delete_sql(&mut self, sql: &str) -> Result<(), String> {
-        match self.execute_update_sql(sql).await {
-            Err(error) if error.contains("without any affected rows") => Ok(()),
-            result => result,
-        }
     }
 
     /// Ensure the durable root relation that acts as the managed namespace.
@@ -409,69 +387,66 @@ impl<'a> BatchWrite<'a> {
             BatchWriteMode::ReplaceOrCreate => crate::IngestMode::ReplaceOrCreate,
         };
         let batches = futures::stream::iter(self.batches.into_iter().map(Ok)).boxed();
-        let command = DatabaseCommand::ingest(crate::BatchIngestion::new(
+        let ingestion = crate::BatchIngestion::new(
             relation,
             mode,
             crate::RecordBatchStream::new(schema, batches),
-        ));
-        connection
-            .execute(command)
-            .await
-            .and_then(DatabaseOutput::into_summary)
-            .map_err(|error| {
-                if matches!(
-                    self.mode,
-                    BatchWriteMode::ReplaceExisting | BatchWriteMode::ReplaceOrCreate
-                ) {
-                    format!("replacing Spiral table {}: {error}", self.target)
-                } else if matches!(self.mode, BatchWriteMode::CreateOrAppend) {
-                    format!("creating Spiral table {}: {error}", self.target)
-                } else {
-                    format!("ingesting Spiral table {}: {error}", self.target)
-                }
-            })?;
+        );
+        connection.ingest(ingestion).await.map_err(|error| {
+            if matches!(
+                self.mode,
+                BatchWriteMode::ReplaceExisting | BatchWriteMode::ReplaceOrCreate
+            ) {
+                format!("replacing Spiral table {}: {error}", self.target)
+            } else if matches!(self.mode, BatchWriteMode::CreateOrAppend) {
+                format!("creating Spiral table {}: {error}", self.target)
+            } else {
+                format!("ingesting Spiral table {}: {error}", self.target)
+            }
+        })?;
         Ok(())
     }
 }
 
-impl DatabaseSession for ProjectConnection {
-    fn execute(&mut self, command: DatabaseCommand) -> DatabaseFuture<'_, DatabaseOutput> {
-        match &mut self.state {
-            ProjectConnectionState::Autocommit(connection) => connection.execute(command),
-            ProjectConnectionState::Transaction(transaction) => transaction.execute(command),
-            ProjectConnectionState::Closed => async {
-                Err(DatabaseError::invalid_state(
-                    "database connection is closed",
-                ))
-            }
-            .boxed(),
+impl ProjectConnectionState {
+    fn session(&mut self) -> Result<&mut dyn DatabaseSession, DatabaseError> {
+        match self {
+            Self::Autocommit(connection) => Ok(connection.as_mut()),
+            Self::Transaction(transaction) => Ok(transaction.as_mut()),
+            Self::Closed => Err(DatabaseError::invalid_state(
+                "database connection is closed",
+            )),
         }
+    }
+}
+
+impl DatabaseSession for ProjectConnection {
+    fn query(&mut self, sql: SqlStatement) -> DatabaseFuture<'_, RecordBatchStream> {
+        async move {
+            let records = self.state.session()?.query(sql).await?;
+            // The project lock must cover consumption, including streams returned
+            // from helpers whose local ProjectConnection has already been dropped.
+            Ok(records
+                .retain(self.operation.clone())
+                .retain(self.database.clone()))
+        }
+        .boxed()
+    }
+
+    fn execute_update(&mut self, sql: SqlStatement) -> DatabaseFuture<'_, ExecutionSummary> {
+        async move { self.state.session()?.execute_update(sql).await }.boxed()
+    }
+
+    fn ingest(&mut self, ingestion: BatchIngestion) -> DatabaseFuture<'_, ExecutionSummary> {
+        async move { self.state.session()?.ingest(ingestion).await }.boxed()
     }
 
     fn table_schema(&mut self, relation: RelationName) -> DatabaseFuture<'_, Option<Arc<Schema>>> {
-        match &mut self.state {
-            ProjectConnectionState::Autocommit(connection) => connection.table_schema(relation),
-            ProjectConnectionState::Transaction(transaction) => transaction.table_schema(relation),
-            ProjectConnectionState::Closed => async {
-                Err(DatabaseError::invalid_state(
-                    "database connection is closed",
-                ))
-            }
-            .boxed(),
-        }
+        async move { self.state.session()?.table_schema(relation).await }.boxed()
     }
 
     fn relations(&mut self) -> DatabaseFuture<'_, Vec<crate::RelationMetadata>> {
-        match &mut self.state {
-            ProjectConnectionState::Autocommit(connection) => connection.relations(),
-            ProjectConnectionState::Transaction(transaction) => transaction.relations(),
-            ProjectConnectionState::Closed => async {
-                Err(DatabaseError::invalid_state(
-                    "database connection is closed",
-                ))
-            }
-            .boxed(),
-        }
+        async move { self.state.session()?.relations().await }.boxed()
     }
 }
 
@@ -480,7 +455,7 @@ impl DatabaseSession for ProjectConnection {
 pub struct ProjectStore {
     connection_settings: SpiralConnectionSettings,
     namespace: String,
-    database: Arc<SpiralDatabase>,
+    database: Arc<dyn Database>,
     async_operation_gate: Arc<tokio::sync::RwLock<()>>,
 }
 
@@ -491,16 +466,9 @@ impl ProjectStore {
         message.starts_with(SPIRAL_UNAVAILABLE_PREFIX)
     }
 
-    fn present_error(endpoint: &str, error: String) -> String {
-        if Self::is_unavailable_error(&error) {
-            return error;
-        }
-        let normalized = error.to_ascii_lowercase();
-        if !TRANSPORT_FAILURE_MARKERS
-            .iter()
-            .any(|marker| normalized.contains(marker))
-        {
-            return error;
+    fn present_error(endpoint: &str, error: DatabaseError) -> String {
+        if error.kind() != DatabaseErrorKind::Unavailable {
+            return error.to_string();
         }
         tracing::warn!(spiral_endpoint = endpoint, detail = %error, "SpiralDB transport failed");
         format!(
@@ -511,13 +479,11 @@ impl ProjectStore {
     pub fn new(
         connection_settings: SpiralConnectionSettings,
         namespace: String,
+        database: Arc<dyn Database>,
     ) -> Result<Self, String> {
         if !super::schema::StorageSchema::is_identifier(&namespace) {
             return Err("Spiral namespace is not a safe SQL identifier".to_owned());
         }
-        let database = Arc::new(
-            SpiralDatabase::new(connection_settings.clone()).map_err(|error| error.to_string())?,
-        );
         Ok(Self {
             connection_settings,
             namespace,
@@ -553,7 +519,7 @@ impl ProjectStore {
         self.connection_settings.project_id().is_some()
     }
 
-    /// Initialize the native database adapter and force one authenticated
+    /// Initialize the configured database adapter and force one authenticated
     /// project-catalog lookup without mutating project data.
     pub(crate) async fn prewarm(&self) -> Result<(), String> {
         let relation = RelationName::parse(&self.namespace).map_err(|error| error.to_string())?;
@@ -593,7 +559,7 @@ impl ProjectStore {
             })?;
             settings.endpoint().to_owned()
         };
-        let database = Arc::clone(&self.database) as Arc<dyn Database>;
+        let database = Arc::clone(&self.database);
         ProjectConnection::open(database, operation)
             .await
             .map_err(|error| Self::present_error(&endpoint, error))
@@ -611,15 +577,17 @@ mod tests {
             "https://spfs.spiraldb.dev".to_owned(),
         )
         .unwrap();
-        let first = ProjectStore::new(
-            initial.clone().with_project("project_a").unwrap(),
-            "spiral_robotics".to_owned(),
-        )
+        let first = {
+            let settings = initial.clone().with_project("project_a").unwrap();
+            let database = Arc::new(crate::SpiralDatabase::new(settings.clone()));
+            ProjectStore::new(settings, "spiral_robotics".to_owned(), database)
+        }
         .unwrap();
-        let second = ProjectStore::new(
-            initial.clone().with_project("project_b").unwrap(),
-            "spiral_robotics".to_owned(),
-        )
+        let second = {
+            let settings = initial.clone().with_project("project_b").unwrap();
+            let database = Arc::new(crate::SpiralDatabase::new(settings.clone()));
+            ProjectStore::new(settings, "spiral_robotics".to_owned(), database)
+        }
         .unwrap();
         assert_eq!(first.project_id(), "project_a");
         assert_eq!(second.project_id(), "project_b");
@@ -628,7 +596,12 @@ mod tests {
             .with_project("project_c")
             .unwrap();
         assert_eq!(first.project_id(), "project_a");
-        let unconfigured = ProjectStore::new(initial, "spiral_robotics".to_owned()).unwrap();
+        let unconfigured = {
+            let settings = initial;
+            let database = Arc::new(crate::SpiralDatabase::new(settings.clone()));
+            ProjectStore::new(settings, "spiral_robotics".to_owned(), database)
+        }
+        .unwrap();
         assert!(!unconfigured.is_configured());
         assert!(
             unconfigured
@@ -644,7 +617,7 @@ mod tests {
     fn transport_failures_become_actionable_without_rewriting_validation() {
         let unavailable = ProjectStore::present_error(
             "http://127.0.0.1:4279",
-            "pinning project failed: error sending request for url".to_owned(),
+            DatabaseError::new(DatabaseErrorKind::Unavailable, "driver transport failed"),
         );
         assert_eq!(
             unavailable,
@@ -654,7 +627,10 @@ mod tests {
 
         let invalid = "episode bundle has the wrong format".to_owned();
         assert_eq!(
-            ProjectStore::present_error("http://127.0.0.1:4279", invalid.clone()),
+            ProjectStore::present_error(
+                "http://127.0.0.1:4279",
+                DatabaseError::invalid_input(invalid.clone())
+            ),
             invalid
         );
     }

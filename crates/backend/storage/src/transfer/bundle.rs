@@ -4044,8 +4044,11 @@ mod tests {
         .expect("the Spiral E2E project must be valid")
         .with_credentials(stored_credentials());
         Arc::new(
-            ProjectStore::new(settings, namespace)
-                .expect("the Spiral E2E project store must be valid"),
+            {
+                let database = Arc::new(crate::SpiralDatabase::new(settings.clone()));
+                ProjectStore::new(settings, namespace, database)
+            }
+            .expect("the Spiral E2E project store must be valid"),
         )
     }
 

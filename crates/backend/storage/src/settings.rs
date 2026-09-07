@@ -84,7 +84,7 @@ impl<'a> StudioPreferencePersistence<'a> {
             .map_err(|error| format!("encoding Studio preferences: {error}"))?;
         let mut connection = self.project_store.connect().await?;
         connection
-            .execute_delete_sql(&format!(
+            .execute_update_sql(&format!(
                 "DELETE FROM {relation} WHERE {} = 'preferences'",
                 db::KEY
             ))

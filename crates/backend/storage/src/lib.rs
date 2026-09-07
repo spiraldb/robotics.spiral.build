@@ -39,18 +39,17 @@ pub mod video {
 
 // Keep the cross-crate storage boundary flat and explicit. The modules behind
 // these exports describe implementation mechanisms, not product features.
-pub use db::SpiralSql;
 pub use db::{
-    BatchIngestion, Database, DatabaseCommand, DatabaseConnection, DatabaseError,
-    DatabaseErrorKind, DatabaseFuture, DatabaseOutput, DatabaseResult, DatabaseSession,
-    DatabaseTransaction, ExecutionSummary, IngestMode, RecordBatchStream, RelationKind,
-    RelationMetadata, RelationName, SqlStatement,
+    BatchIngestion, Database, DatabaseConnection, DatabaseError, DatabaseErrorKind, DatabaseFuture,
+    DatabaseResult, DatabaseSession, DatabaseTransaction, ExecutionSummary, IngestMode,
+    RecordBatchStream, RelationKind, RelationMetadata, RelationName, SqlStatement,
 };
 pub use db::{ProjectConnection, ProjectStore};
 pub use db::{
     ROBOT_CONFIGURATION_COLUMN, ROBOT_IDENTIFIER_COLUMN, ROBOT_UPDATED_MILLIS_COLUMN,
     SCHEMA_VERSION, StorageSchema,
 };
+pub use db::{SpiralDatabase, SpiralSql};
 pub use manager::StorageManager;
 pub use settings::{
     BackendStateStore, ServiceEndpoint, SpiralConnectionSettings, SpiralCredentials,

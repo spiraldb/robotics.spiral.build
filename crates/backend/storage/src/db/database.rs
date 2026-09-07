@@ -18,15 +18,27 @@ pub type DatabaseFuture<'a, T> = BoxFuture<'a, DatabaseResult<T>>;
 /// A fallible Arrow stream that retains its schema even when it has no rows.
 pub struct RecordBatchStream {
     schema: Arc<Schema>,
-    batches: BoxStream<'static, DatabaseResult<RecordBatch>>,
+    batches: Option<BoxStream<'static, DatabaseResult<RecordBatch>>>,
+    retained: Vec<Box<dyn Send + Sync>>,
 }
 
 impl RecordBatchStream {
-    pub(crate) fn new(
+    pub fn new(
         schema: Arc<Schema>,
         batches: BoxStream<'static, DatabaseResult<RecordBatch>>,
     ) -> Self {
-        Self { schema, batches }
+        Self {
+            schema,
+            batches: Some(batches),
+            retained: Vec::new(),
+        }
+    }
+
+    /// Keep resources alive until EOF, an error, or stream drop. The input
+    /// stream is released before these resources so driver cleanup can finish.
+    pub(crate) fn retain(mut self, resource: impl Send + Sync + 'static) -> Self {
+        self.retained.push(Box::new(resource));
+        self
     }
 
     pub fn schema(&self) -> &Arc<Schema> {
@@ -41,18 +53,41 @@ impl Stream for RecordBatchStream {
         mut self: std::pin::Pin<&mut Self>,
         context: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
-        self.batches.as_mut().poll_next(context)
+        let Some(batches) = self.batches.as_mut() else {
+            return std::task::Poll::Ready(None);
+        };
+        let next = batches.as_mut().poll_next(context);
+        if matches!(next, std::task::Poll::Ready(None | Some(Err(_)))) {
+            self.batches = None;
+            self.retained.clear();
+        }
+        next
     }
 }
 
-/// Opens independent logical connections to one configured database.
+/// Opens independent logical connections to one immutable database configuration.
+/// Initialization and connection admission must not block the async executor.
 pub trait Database: Send + Sync {
     fn connect(&self) -> DatabaseFuture<'_, Box<dyn DatabaseConnection>>;
 }
 
 /// Operations shared by autocommit connections and explicit transactions.
+///
+/// Calls and stream polling must not block the async executor. Queries return
+/// owned, bounded streams retaining their driver resources even after the
+/// connection handle is dropped. EOF, an error, or drop releases the stream.
+/// While a result is active, other operations return `InvalidState` instead of
+/// waiting for that stream to be consumed. Separate connections are independent.
+///
+/// All operations use the caller's transaction, including ingestion and schema
+/// inspection. Dropping an operation future stops waiting, but does not promise
+/// cancellation of an in-flight write or rollback of a completed commit.
 pub trait DatabaseSession: Send + 'static {
-    fn execute(&mut self, command: DatabaseCommand) -> DatabaseFuture<'_, DatabaseOutput>;
+    fn query(&mut self, sql: SqlStatement) -> DatabaseFuture<'_, RecordBatchStream>;
+
+    fn execute_update(&mut self, sql: SqlStatement) -> DatabaseFuture<'_, ExecutionSummary>;
+
+    fn ingest(&mut self, ingestion: BatchIngestion) -> DatabaseFuture<'_, ExecutionSummary>;
 
     fn table_schema(&mut self, relation: RelationName) -> DatabaseFuture<'_, Option<Arc<Schema>>>;
 
@@ -65,65 +100,27 @@ pub trait DatabaseConnection: DatabaseSession {
 }
 
 /// An explicit transaction that has exactly one terminal action.
+/// Dropping an unfinished transaction schedules rollback without blocking the
+/// dropping thread. Cleanup waits for any active stream; resources cannot be
+/// reused before cleanup completes. Driver failures remain observable errors.
 pub trait DatabaseTransaction: DatabaseSession {
     fn commit(self: Box<Self>) -> DatabaseFuture<'static, ExecutionSummary>;
 
     fn rollback(self: Box<Self>) -> DatabaseFuture<'static, ()>;
 }
 
-/// One database operation. SQL and Arrow ingestion share the same execution
-/// boundary even though their inputs differ.
-pub enum DatabaseCommand {
-    Statement(SqlStatement),
-    Ingest(BatchIngestion),
-}
-
-impl DatabaseCommand {
-    pub(crate) fn statement(sql: impl Into<String>) -> Self {
-        Self::Statement(SqlStatement::new(sql))
-    }
-
-    pub(crate) fn ingest(ingestion: BatchIngestion) -> Self {
-        Self::Ingest(ingestion)
-    }
-}
-
-/// The only two outcomes visible across the database boundary.
-pub enum DatabaseOutput {
-    Records(RecordBatchStream),
-    AffectedRows(ExecutionSummary),
-}
-
-impl DatabaseOutput {
-    pub(crate) fn into_records(self) -> DatabaseResult<RecordBatchStream> {
-        match self {
-            Self::Records(records) => Ok(records),
-            Self::AffectedRows(_) => Err(DatabaseError::invalid_state(
-                "database command did not produce records",
-            )),
-        }
-    }
-
-    pub(crate) fn into_summary(self) -> DatabaseResult<ExecutionSummary> {
-        match self {
-            Self::AffectedRows(summary) => Ok(summary),
-            Self::Records(_) => Err(DatabaseError::invalid_state(
-                "database command produced records instead of an update count",
-            )),
-        }
-    }
-}
-
 /// Owned SQL text passed through the async database boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SqlStatement(String);
 
-impl SqlStatement {
-    pub(crate) fn new(sql: impl Into<String>) -> Self {
+impl<T: Into<String>> From<T> for SqlStatement {
+    fn from(sql: T) -> Self {
         Self(sql.into())
     }
+}
 
-    pub(crate) fn as_str(&self) -> &str {
+impl SqlStatement {
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 }
@@ -133,7 +130,7 @@ impl SqlStatement {
 pub struct RelationName(String);
 
 impl RelationName {
-    pub(crate) fn parse(name: impl Into<String>) -> DatabaseResult<Self> {
+    pub fn parse(name: impl Into<String>) -> DatabaseResult<Self> {
         let name = name.into();
         if name.is_empty() || name.split('.').any(str::is_empty) {
             return Err(DatabaseError::invalid_input(
@@ -143,7 +140,7 @@ impl RelationName {
         Ok(Self(name))
     }
 
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 
@@ -160,11 +157,7 @@ pub struct BatchIngestion {
 }
 
 impl BatchIngestion {
-    pub(crate) fn new(
-        relation: RelationName,
-        mode: IngestMode,
-        batches: RecordBatchStream,
-    ) -> Self {
+    pub fn new(relation: RelationName, mode: IngestMode, batches: RecordBatchStream) -> Self {
         Self {
             relation,
             mode,
@@ -172,7 +165,7 @@ impl BatchIngestion {
         }
     }
 
-    pub(crate) fn into_parts(self) -> (RelationName, IngestMode, RecordBatchStream) {
+    pub fn into_parts(self) -> (RelationName, IngestMode, RecordBatchStream) {
         (self.relation, self.mode, self.batches)
     }
 }
@@ -195,11 +188,11 @@ pub struct RelationMetadata {
 }
 
 impl RelationMetadata {
-    pub(crate) fn new(name: RelationName, kind: RelationKind) -> Self {
+    pub fn new(name: RelationName, kind: RelationKind) -> Self {
         Self { name, kind }
     }
 
-    pub(crate) fn into_parts(self) -> (RelationName, RelationKind) {
+    pub fn into_parts(self) -> (RelationName, RelationKind) {
         (self.name, self.kind)
     }
 }
@@ -218,6 +211,7 @@ pub enum DatabaseErrorKind {
     NotFound,
     Conflict,
     Cancelled,
+    Unsupported,
     Internal,
 }
 
@@ -228,7 +222,7 @@ pub struct DatabaseError {
 }
 
 impl DatabaseError {
-    pub(crate) fn new(kind: DatabaseErrorKind, message: impl Into<String>) -> Self {
+    pub fn new(kind: DatabaseErrorKind, message: impl Into<String>) -> Self {
         Self {
             kind,
             message: message.into(),
@@ -243,6 +237,10 @@ impl DatabaseError {
         Self::new(DatabaseErrorKind::InvalidState, message)
     }
 
+    pub fn kind(&self) -> DatabaseErrorKind {
+        self.kind
+    }
+
     pub(crate) fn message(&self) -> &str {
         &self.message
     }
@@ -255,3 +253,50 @@ impl fmt::Display for DatabaseError {
 }
 
 impl std::error::Error for DatabaseError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt as _;
+
+    #[tokio::test]
+    async fn stream_error_is_terminal_and_releases_retained_resources() {
+        let schema = Arc::new(Schema::empty());
+        let resource = Arc::new(());
+        let weak = Arc::downgrade(&resource);
+        let mut records = RecordBatchStream::new(
+            schema.clone(),
+            futures::stream::iter([
+                Err(DatabaseError::new(
+                    DatabaseErrorKind::Unavailable,
+                    "reader failed",
+                )),
+                Ok(RecordBatch::new_empty(schema)),
+            ])
+            .boxed(),
+        )
+        .retain(resource);
+        assert!(weak.upgrade().is_some());
+        assert_eq!(
+            records.next().await.unwrap().unwrap_err().kind(),
+            DatabaseErrorKind::Unavailable
+        );
+        assert!(weak.upgrade().is_none());
+        assert!(records.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn pending_stream_keeps_resources_until_drop() {
+        let resource = Arc::new(());
+        let weak = Arc::downgrade(&resource);
+        let mut records = RecordBatchStream::new(
+            Arc::new(Schema::empty()),
+            futures::stream::pending().boxed(),
+        )
+        .retain(resource);
+        assert!(futures::poll!(records.next()).is_pending());
+        assert!(weak.upgrade().is_some());
+        drop(records);
+        assert!(weak.upgrade().is_none());
+    }
+}

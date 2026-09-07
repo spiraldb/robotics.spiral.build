@@ -182,8 +182,11 @@ impl ProjectSessionFactory {
             uuid::Uuid::new_v4().to_string(),
             connection.project_id().unwrap_or_default().to_owned(),
         );
+        let database = Arc::new(spiral_robotics_storage::SpiralDatabase::new(
+            connection.clone(),
+        ));
         let store = Arc::new(
-            ProjectStore::new(connection, self.namespace.clone())
+            ProjectStore::new(connection, self.namespace.clone(), database)
                 .map_err(OperationError::External)?,
         );
         let workspace = Arc::new(RobotWorkspace::new(store.clone()));

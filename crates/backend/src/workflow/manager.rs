@@ -2018,14 +2018,17 @@ mod tests {
         let document =
             WorkflowDocument::new(workflow.clone(), WorkflowRunSnapshot::idle_for(&workflow));
         let project_store = Arc::new(
-            ProjectStore::new(
-                SpiralConnectionSettings::new(
+            {
+                let settings = SpiralConnectionSettings::new(
                     "https://api.spiraldb.dev".to_owned(),
                     "https://spfs.spiraldb.dev".to_owned(),
                 )
-                .expect("the unconfigured test connection is valid"),
-                "studio".to_owned(),
-            )
+                .expect("the unconfigured test connection is valid");
+                let database = Arc::new(spiral_robotics_storage::SpiralDatabase::new(
+                    settings.clone(),
+                ));
+                ProjectStore::new(settings, "studio".to_owned(), database)
+            }
             .expect("the unconfigured test project_store is valid"),
         );
         let manager = WorkflowManager::new(Arc::new(StorageManager::new(project_store)));
@@ -2086,14 +2089,17 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn terminal_save_failure_keeps_the_run_active_and_cancel_can_retry_finalization() {
         let project_store = Arc::new(
-            ProjectStore::new(
-                SpiralConnectionSettings::new(
+            {
+                let settings = SpiralConnectionSettings::new(
                     "https://api.spiraldb.dev".to_owned(),
                     "https://spfs.spiraldb.dev".to_owned(),
                 )
-                .expect("the unconfigured test connection is valid"),
-                "workflow_terminal_failure".to_owned(),
-            )
+                .expect("the unconfigured test connection is valid");
+                let database = Arc::new(spiral_robotics_storage::SpiralDatabase::new(
+                    settings.clone(),
+                ));
+                ProjectStore::new(settings, "workflow_terminal_failure".to_owned(), database)
+            }
             .expect("the unconfigured test project_store is valid"),
         );
         let manager = WorkflowManager::new(Arc::new(StorageManager::new(project_store)));
@@ -2188,14 +2194,17 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn authoritative_project_reload_gets_a_new_scope_for_a_lower_revision() {
         let project_store = Arc::new(
-            ProjectStore::new(
-                SpiralConnectionSettings::new(
+            {
+                let settings = SpiralConnectionSettings::new(
                     "https://api.spiraldb.dev".to_owned(),
                     "https://spfs.spiraldb.dev".to_owned(),
                 )
-                .expect("the unconfigured test connection is valid"),
-                "workflow_scope_reload".to_owned(),
-            )
+                .expect("the unconfigured test connection is valid");
+                let database = Arc::new(spiral_robotics_storage::SpiralDatabase::new(
+                    settings.clone(),
+                ));
+                ProjectStore::new(settings, "workflow_scope_reload".to_owned(), database)
+            }
             .expect("the unconfigured test project_store is valid"),
         );
         let manager = WorkflowManager::new(Arc::new(StorageManager::new(project_store)));
@@ -2360,8 +2369,14 @@ mod tests {
         .expect("the Workflow E2E connection must be valid")
         .with_credentials(stored.as_ref().and_then(BackendStateStore::credentials));
         let project_store = Arc::new(
-            ProjectStore::new(connection, namespace.clone())
-                .expect("the Workflow E2E project store must be valid"),
+            {
+                let settings = connection;
+                let database = Arc::new(spiral_robotics_storage::SpiralDatabase::new(
+                    settings.clone(),
+                ));
+                ProjectStore::new(settings, namespace.clone(), database)
+            }
+            .expect("the Workflow E2E project store must be valid"),
         );
         let seed_relation = format!("{namespace}.seed_values");
         let mut cleanup = WorkflowTestNamespace::new(
@@ -2500,8 +2515,14 @@ mod tests {
         .expect("the Workflow SigLIP connection must be valid")
         .with_credentials(stored.as_ref().and_then(BackendStateStore::credentials));
         let project_store = Arc::new(
-            ProjectStore::new(connection, namespace.clone())
-                .expect("the Workflow SigLIP project store must be valid"),
+            {
+                let settings = connection;
+                let database = Arc::new(spiral_robotics_storage::SpiralDatabase::new(
+                    settings.clone(),
+                ));
+                ProjectStore::new(settings, namespace.clone(), database)
+            }
+            .expect("the Workflow SigLIP project store must be valid"),
         );
         let manifest_relation = format!("{namespace}.video_assets");
         let media_relation = format!("{namespace}.video.assets");

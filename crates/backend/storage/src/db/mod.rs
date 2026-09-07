@@ -15,10 +15,9 @@ pub(crate) use arrow_rows::{
     ArrowColumns, ListColumnBuilder, OptionalFloatListColumn, StringListColumn, UnsignedListColumn,
 };
 pub use database::{
-    BatchIngestion, Database, DatabaseCommand, DatabaseConnection, DatabaseError,
-    DatabaseErrorKind, DatabaseFuture, DatabaseOutput, DatabaseResult, DatabaseSession,
-    DatabaseTransaction, ExecutionSummary, IngestMode, RecordBatchStream, RelationKind,
-    RelationMetadata, RelationName, SqlStatement,
+    BatchIngestion, Database, DatabaseConnection, DatabaseError, DatabaseErrorKind, DatabaseFuture,
+    DatabaseResult, DatabaseSession, DatabaseTransaction, ExecutionSummary, IngestMode,
+    RecordBatchStream, RelationKind, RelationMetadata, RelationName, SqlStatement,
 };
 pub use project_store::{ProjectConnection, ProjectStore};
 pub(crate) use project_store::{ProjectDatabasePersistence, StorageClock};
@@ -29,3 +28,8 @@ pub use schema::{
 };
 pub(crate) use sql::ProjectQueries;
 pub use sql::SpiralSql;
+
+pub use spiral_database::SpiralDatabase;
+
+#[cfg(test)]
+mod contract_tests;

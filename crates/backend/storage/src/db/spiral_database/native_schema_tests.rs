@@ -9,7 +9,7 @@ use futures::{FutureExt as _, StreamExt as _, TryStreamExt as _};
 use serde::Deserialize;
 
 use super::{
-    BatchIngestion, ConfiguredSpiralSession, DatabaseCommand, DatabaseError, DatabaseResult,
+    BatchIngestion, ConfiguredSpiralSession, DatabaseError, DatabaseResult, DatabaseSession,
     IngestMode, RecordBatchStream, RelationName as DatabaseRelationName, SpiralConnection,
 };
 use crate::settings::{SpiralConnectionSettings, SpiralCredentials};
@@ -118,12 +118,8 @@ impl NativeSchemaFixture {
                 .is_some()
         );
         let rows = observer
-            .execute_command(DatabaseCommand::statement(format!(
-                "SELECT id FROM {}",
-                self.committed.as_str()
-            )))
+            .query(format!("SELECT id FROM {}", self.committed.as_str()).into())
             .await?
-            .into_records()?
             .try_collect::<Vec<_>>()
             .await?;
         assert_eq!(rows.iter().map(RecordBatch::num_rows).sum::<usize>(), 2);
@@ -134,10 +130,13 @@ impl NativeSchemaFixture {
             .await
             .map_err(DatabaseError::from_external)?;
         self.connection
-            .execute_command(DatabaseCommand::statement(format!(
-                "CREATE TABLE {} ENGINE 'arbor' AS SELECT 2 AS id",
-                self.pending.as_str()
-            )))
+            .execute_update(
+                format!(
+                    "CREATE TABLE {} ENGINE 'arbor' AS SELECT 2 AS id",
+                    self.pending.as_str()
+                )
+                .into(),
+            )
             .await?;
         let transaction = self.connection.context.active_transaction().unwrap();
         assert!(
@@ -172,10 +171,7 @@ impl NativeSchemaFixture {
         );
 
         self.connection
-            .execute_command(DatabaseCommand::statement(format!(
-                "DROP TABLE {}",
-                self.pending.as_str()
-            )))
+            .execute_update(format!("DROP TABLE {}", self.pending.as_str()).into())
             .await?;
         assert!(
             self.connection
@@ -214,10 +210,7 @@ impl NativeSchemaFixture {
         let mut cleanup = SpiralConnection::new(self.configured.open_connection()?);
         for name in [&self.committed, &self.pending] {
             cleanup
-                .execute_command(DatabaseCommand::statement(format!(
-                    "DROP TABLE IF EXISTS {}",
-                    name.as_str()
-                )))
+                .execute_update(format!("DROP TABLE IF EXISTS {}", name.as_str()).into())
                 .await?;
         }
         Ok(())
@@ -234,4 +227,14 @@ async fn native_schema_inspection_supports_ingestion_and_transaction_visibility(
         .await
         .expect("remove only this test's tables");
     outcome.unwrap().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires SPIRAL_SCHEMA_TEST_CONFIG pointing to local Spiral API/SpFS client JSON"]
+async fn native_persistence_contract() {
+    let database = Arc::new(super::SpiralDatabase::new(LocalSpiralConfig::load()));
+    crate::db::contract_tests::DatabaseContract::new(database)
+        .ingestion_and_transactions()
+        .await
+        .unwrap();
 }

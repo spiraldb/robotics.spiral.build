@@ -2209,7 +2209,7 @@ impl ProjectConnection {
         for table in super::EpisodeRelations::DELETION_RELATIONS {
             let target = table.qualified_name(namespace);
             connection
-                .execute_delete_sql(&SpiralSql::delete_episode(&target, episode_id))
+                .execute_update_sql(&SpiralSql::delete_episode(&target, episode_id))
                 .await
                 .map_err(|error| format!("clearing prior Spiral rows in {target}: {error}"))?;
         }
