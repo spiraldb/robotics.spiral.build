@@ -21,12 +21,13 @@ Loading and database initialization happen on the first async `connect`.
 Endpoints and credentials are passed as database options, without changing
 process environment variables.
 
-`drivers/spiral-adbc.json` pins the official archive URLs and SHA-256 digests.
+`flake.nix` pins the official version and SHA-256 archive digests in
+`adbcVersion` and `adbcArchiveHashes`.
 The Nix development and CI shells install that archive and set the library
 path; `nix build .#spiral-adbc` produces a separate driver package. For a
 standalone deployment, include its library beside the server or supply the
-absolute override. An upstream validation build can use that same override
-without adding a Spiral source dependency to Studio.
+absolute override. The `local-driver` development shell selects an upstream
+validation build without adding a Spiral source dependency to Studio.
 
 **Use a current-upstream build until a qualifying release is published.** The
 adapter passed the full hosted persistence contract against a locally built
@@ -38,11 +39,25 @@ the offline storage suite.
 For this workspace's validated local build, run from the repository root:
 
 ```sh
-export SPIRALDB_ADBC_DRIVER="$(pwd)/target/debug/libadbc_driver_spiraldb.dylib"
+nix develop .#local-driver
 ```
 
-That debug library was built from an isolated upstream source checkout; it is
-not a distributable release and depends on this machine's Homebrew OpenSSL.
+The shell sets `SPIRALDB_ADBC_DRIVER` to the platform's shared library in
+`target/release` and checks that it exists. Build it from an isolated upstream
+source checkout using the flake's `adbc-build` shell, which supplies upstream's
+August 10 compiler, OpenSSL, and FFmpeg while Studio keeps its own compiler pin:
+
+```sh
+# Run from the upstream Spiral checkout so its Cargo configuration applies.
+nix develop /absolute/path/to/rerobot#adbc-build --command cargo build \
+  --release --locked -p adbc-driver-spiraldb \
+  --target-dir /absolute/path/to/rerobot/target
+```
+
+This is a locally built release library; its native dependencies live in the
+Nix store, so it is not a standalone redistributable archive.
+The September 7 release build is 185.2 MiB and passes all 375 regular
+storage/backend tests plus the three hosted persistence regressions.
 Studio's Cargo dependency graph contains no Spiral or Vortex source packages.
 
 As checked on September 7, 2026, the public [release manifest](https://downloads.spiraldb.com/adbc/latest.json)
@@ -104,10 +119,10 @@ or native fallback is added to Studio.
 
 ## Verification
 
-Run the regular storage and backend suites with the driver path configured:
+Run the regular storage and backend suites through the flake's validation shell:
 
 ```sh
-cargo test -p spiral-robotics-storage -p spiral-robotics-backend --lib --locked
+nix develop .#local-driver --command cargo test -p spiral-robotics-storage -p spiral-robotics-backend --lib --locked
 ```
 
 The storage suite includes offline execution through the actual shared library,

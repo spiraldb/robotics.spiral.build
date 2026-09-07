@@ -32,7 +32,7 @@
             overlays = [ (import rust-overlay) ];
           };
           llvmPackages = pkgs.llvmPackages_latest;
-          # Pin the complete Rust toolchain so development stays aligned.
+          # This flake owns the toolchain, tools, and exported build environment.
           rustToolchain = pkgs.rust-bin.nightly."2026-06-29".default.override {
             extensions = [
               "rust-src"
@@ -44,6 +44,8 @@
             # The studio's web interface compiles to WebAssembly.
             targets = [ "wasm32-unknown-unknown" ];
           };
+          # Current upstream Spiral requires this compiler for driver builds.
+          adbcBuildToolchain = pkgs.rust-bin.nightly."2026-08-10".minimal;
           # nixpkgs kept Tailwind 3 under the unsuffixed name for a while.
           tailwind = pkgs.tailwindcss_4 or pkgs.tailwindcss;
           # `dx` builds the web client and native server as one fullstack app,
@@ -64,21 +66,28 @@
           linuxBuildInputs = pkgs.lib.optionals pkgs.stdenv.isLinux [
             pkgs.v4l-utils
           ];
-          # Standalone driver archives are verified against Spiral's release
-          # manifest. Rust builds never compile the embedded engine.
-          adbcManifest = builtins.fromJSON (builtins.readFile ./drivers/spiral-adbc.json);
-          adbcTarget = {
-            aarch64-darwin = "aarch64-apple-darwin";
-            aarch64-linux = "aarch64-unknown-linux-gnu";
-            x86_64-linux = "x86_64-unknown-linux-gnu";
-          }.${system};
-          adbcArtifact = adbcManifest.artifacts.${adbcTarget};
+          # Pin the official standalone release and its archive checksums here.
+          # Rust builds never compile the embedded engine.
+          adbcVersion = "0.16.26";
+          adbcArchiveHashes = {
+            aarch64-apple-darwin = "37df6fd5c8601c2d97675742a9646d4023e8c3239dac0d2cf3a0266de3bdd427";
+            aarch64-unknown-linux-gnu = "1221685bc4dbe1cadd4ccc2389d8b83aa81786749b0f86ddf2a6d65f16365ada";
+            x86_64-unknown-linux-gnu = "74f2c17200ca653cac22d5423603581222464c496787ea450768c5d649794982";
+          };
+          adbcTarget =
+            {
+              aarch64-darwin = "aarch64-apple-darwin";
+              aarch64-linux = "aarch64-unknown-linux-gnu";
+              x86_64-linux = "x86_64-unknown-linux-gnu";
+            }
+            .${system};
           adbcLibrary = "libadbc_driver_spiraldb${pkgs.stdenv.hostPlatform.extensions.sharedLibrary}";
           spiralAdbc = pkgs.stdenvNoCC.mkDerivation {
             pname = "spiral-adbc";
-            version = adbcManifest.version;
+            version = adbcVersion;
             src = pkgs.fetchurl {
-              inherit (adbcArtifact) url sha256;
+              url = "https://downloads.spiraldb.com/adbc/${adbcVersion}/adbc-driver-spiraldb-${adbcVersion}-${adbcTarget}.tar.gz";
+              sha256 = adbcArchiveHashes.${adbcTarget};
             };
             nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.autoPatchelfHook ];
             buildInputs = pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.stdenv.cc.cc.lib ];
@@ -91,32 +100,26 @@
             '';
           };
           sharedShell = {
-            packages =
-              [
-                rustToolchain
-                pkgs.actionlint
-                pkgs.pkg-config
-                pkgs.python312
-                pkgs.ruff
-                tailwind
-                pkgs.uv
-                llvmPackages.llvm
-              ]
-              ++ nativeBuildInputs
-              ++ linuxBuildInputs;
-            # Preserve an explicitly selected validation build while the public
-            # release manifest catches up with upstream transaction fixes.
-            shellHook = ''
-              export SPIRALDB_ADBC_DRIVER="''${SPIRALDB_ADBC_DRIVER:-${spiralAdbc}/lib/${adbcLibrary}}"
-            '';
+            packages = [
+              rustToolchain
+              pkgs.git
+              pkgs.actionlint
+              pkgs.pkg-config
+              pkgs.python312
+              pkgs.ruff
+              tailwind
+              pkgs.uv
+              llvmPackages.llvm
+            ]
+            ++ nativeBuildInputs
+            ++ linuxBuildInputs;
+            CARGO_NET_GIT_FETCH_WITH_CLI = "true";
+            NO_DOWNLOADS = "1";
+            SPIRALDB_ADBC_DRIVER = "${spiralAdbc}/lib/${adbcLibrary}";
             ASAN_SYMBOLIZER_PATH = "${llvmPackages.llvm}/bin/llvm-symbolizer";
             LIBCLANG_PATH = "${llvmPackages.libclang.lib}/lib";
           };
-        in
-        {
-          packages.spiral-adbc = spiralAdbc;
-
-          devShells.default = pkgs.mkShell (sharedShell // {
+          developmentShell = sharedShell // {
             packages =
               sharedShell.packages
               ++ [
@@ -125,12 +128,48 @@
                 pkgs.ffmpeg
               ]
               ++ webBuildInputs;
-            # Make `dx` use pinned tools rather than downloading its own copies
-            # at build time.
-            NO_DOWNLOADS = "1";
-          });
+          };
+        in
+        {
+          formatter = pkgs.nixfmt;
+          packages.spiral-adbc = spiralAdbc;
 
+          devShells.default = pkgs.mkShell developmentShell;
           devShells.ci = pkgs.mkShell sharedShell;
+
+          devShells.adbc-build = pkgs.mkShell (
+            developmentShell
+            // {
+              packages = (pkgs.lib.remove rustToolchain developmentShell.packages) ++ [
+                adbcBuildToolchain
+                pkgs.openssl
+              ];
+              # openssl-sys otherwise prefers Homebrew on macOS over pkg-config.
+              OPENSSL_INCLUDE_DIR = "${pkgs.openssl.dev}/include";
+              OPENSSL_LIB_DIR = "${pkgs.openssl.out}/lib";
+            }
+          );
+
+          # Explicit validation environment until the public release includes
+          # the upstream persistence fixes. No hand-written exports are needed.
+          devShells.local-driver = pkgs.mkShell (
+            developmentShell
+            // {
+              SPIRALDB_ADBC_DRIVER = "";
+              shellHook = ''
+                if ! studio_root=$(git rev-parse --show-toplevel); then
+                  echo "Enter the local-driver shell from the Studio checkout." >&2
+                  return 1
+                fi
+                export SPIRALDB_ADBC_DRIVER="$studio_root/target/release/${adbcLibrary}"
+                unset studio_root
+                if [ ! -f "$SPIRALDB_ADBC_DRIVER" ]; then
+                  echo "Build the upstream ADBC library first; expected $SPIRALDB_ADBC_DRIVER" >&2
+                  return 1
+                fi
+              '';
+            }
+          );
         }
       );
 }

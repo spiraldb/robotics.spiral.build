@@ -1,3 +1,0 @@
-[net]
-# Reuse the system Git credential helper for the remaining Git dependencies.
-git-fetch-with-cli = true

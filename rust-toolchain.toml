@@ -1,5 +1,0 @@
-# Keep development aligned with the Nix and CI toolchain.
-[toolchain]
-channel = "nightly-2026-06-29"
-components = ["rustfmt", "clippy"]
-profile = "minimal"

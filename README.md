@@ -16,18 +16,21 @@ The backend HTTP contract and independent-client examples are documented in
 
 ## Development
 
-The easiest way to setup dev env is to use [nix](https://nixos.org/download.html).
+Use [Nix](https://nixos.org/download.html) for development. `flake.nix` and
+`flake.lock` own the Rust toolchain, build tools, standalone ADBC driver, and
+their environment variables. With direnv, `.envrc` loads the same default shell.
 
 ```console
 nix develop .
 ```
 
-Studio uses a standalone Spiral ADBC library. Set `SPIRALDB_ADBC_DRIVER` to
-its absolute path, or place the library beside the server executable. The Nix
-shell preserves an explicit selection and otherwise supplies the published
-archive. That archive is currently stale: hosted persistence requires a driver
-built from current upstream. See [database setup and the validated build](docs/database-boundary.md)
-before starting Studio.
+The default and CI shells select the pinned published Spiral ADBC library.
+That archive is currently stale: hosted persistence requires a driver built
+from current upstream. For this workspace's local release build, enter
+`nix develop .#local-driver` instead. This shell selects the local library
+automatically; see [database setup](docs/database-boundary.md) for its location.
+
+Run CI commands with `nix develop .#ci --command <command>`.
 
 Start the studio with:
 
