@@ -58,6 +58,7 @@ struct WorkflowAgentInner {
 }
 
 struct AgentTurnState {
+    loaded: tokio::sync::OnceCell<()>,
     active: Mutex<Option<ActiveTurn>>,
     mutation: tokio::sync::Mutex<()>,
     recovery_pending: AtomicBool,
@@ -557,12 +558,32 @@ impl WorkflowAgentManager {
                 scope_id: Mutex::new(AgentIdentifier::next("agent-scope")),
                 document: Mutex::new(AgentDocument::default()),
                 turn: AgentTurnState {
+                    loaded: tokio::sync::OnceCell::new(),
                     active: Mutex::new(None),
                     mutation: tokio::sync::Mutex::new(()),
                     recovery_pending: AtomicBool::new(false),
                 },
             }),
         }
+    }
+
+    pub(crate) async fn ensure_loaded(&self) -> Result<(), String> {
+        self.inner
+            .turn
+            .loaded
+            .get_or_try_init(|| async {
+                self.inner
+                    .services
+                    .workflow
+                    .ensure_loaded()
+                    .await
+                    .map_err(|error| error.to_string())?;
+                self.prepare_from_storage().await?;
+                self.persist_recovery().await?;
+                Ok::<(), String>(())
+            })
+            .await
+            .map(|_| ())
     }
 
     /// Candidate preparation validates history without rewriting it or starting a turn.

@@ -3,6 +3,7 @@
 mod db;
 pub mod episodes;
 mod manager;
+mod native_datasets;
 mod rollout_runs;
 mod settings;
 mod training;

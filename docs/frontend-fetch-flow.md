@@ -34,9 +34,10 @@ flowchart LR
 3. `crates/frontend/src/shell/project.rs` fetches project identity and readiness
    together. A new ID replaces the keyed project subtree in `shell/routes.rs`.
    A failed read keeps the same subtree and its drafts but withdraws readiness.
-4. `crates/frontend/src/shell/state.rs` installs fetched setup, telemetry, training,
-   and rollout values and exposes read-only signals. Workflow and Data controllers
-   own their feature-specific fetched projections and local editing state.
+4. `crates/frontend/src/shell/state.rs` installs fetched setup, telemetry, and
+   rollout values. Training and Workflow create their controllers and history
+   resources inside their mounted workspaces. The shell keeps only compact
+   status-bar summaries for these features, not their histories or drafts.
 5. `crates/backend/src/project_session/queries.rs` exposes project reads;
    `project_session/setup.rs` owns the catalog-backed setup projection. Training,
    rollout, and recording own their snapshots beside their commands. The backend's project admission lock
@@ -58,8 +59,10 @@ flowchart LR
 An invalidation refreshes the affected resources immediately. The timer waits for
 completion before counting its delay; it never launches overlapping reads or
 restarts a slow read just because another interval elapsed. Changed query inputs
-and invalidations cancel obsolete reads. Backend polling reads are cancellable and
-time out after eight seconds; the browser uses a ten-second deadline.
+and invalidations cancel obsolete reads. Ordinary backend polling reads are cancellable and
+time out after eight seconds; the browser uses a ten-second deadline. First-use
+Training and Workflow recovery continues on the backend if the requesting view
+closes, because recovery may persist an interrupted job or resume monitoring.
 Failed reads retry no faster than once per second, and background browser tabs
 slow down to at least five seconds. Mutations are never automatically retried.
 Project disposal cancels its frontend tasks; backend-owned jobs retain their own
@@ -69,6 +72,19 @@ Telemetry freshness advances only when the hardware sequence advances. Successfu
 polls of a frozen sample do not make robot controls appear fresh.
 
 ## History and editing
+
+Training history is requested only while Training is mounted, or while Rollout
+needs runs and checkpoint choices. Workflow and Assistant history is requested
+only while Workflow is mounted. Leaving these views drops their browser state
+and polling; reopening them reads the current backend state. Unsaved drafts and
+local selections therefore have the same lifetime as their view.
+
+The backend loads each feature once on its first request, sharing concurrent
+initialization attempts and retrying failed loads. Recovery finishes under project
+admission before commands can modify history. Remote training execution continues
+without the browser; after a backend restart, Studio reattaches monitoring when
+Training or Rollout first requests that history. Closing a view does not stop an
+already admitted job.
 
 Training queries include the run catalog, latest metrics, and checkpoints, plus
 full bounded history only for the selected run while Training is the current

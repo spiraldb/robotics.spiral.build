@@ -78,9 +78,4 @@ debug = 0
 
 [profile.server-release]
 inherits = "release"
-# Dioxus reserves this profile for the native fullstack server. Preserve
-# release optimization while making warm release rebuilds incremental. Keep
-# the release default unit count: the server's broad dependency graph already
-# supplies cold-build parallelism, and 256 units only adds link/I/O pressure.
-codegen-units = 16
 incremental = true

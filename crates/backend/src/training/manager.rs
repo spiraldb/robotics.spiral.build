@@ -46,6 +46,7 @@ struct TrainingManagerInner {
 }
 
 struct TrainingRuntimeState {
+    loaded: tokio::sync::OnceCell<()>,
     project_admission: Arc<ProjectAdmissionGate>,
     controls: Mutex<BTreeMap<String, Arc<AtomicBool>>>,
     mutation: tokio::sync::Mutex<()>,
@@ -180,12 +181,29 @@ impl TrainingManager {
                 run_ids: StableIdSequence::new("train", 0),
                 snapshot: Mutex::new(TrainingSnapshot::default()),
                 runtime: TrainingRuntimeState {
+                    loaded: tokio::sync::OnceCell::new(),
                     project_admission,
                     controls: Mutex::new(BTreeMap::new()),
                     mutation: tokio::sync::Mutex::new(()),
                 },
             }),
         }
+    }
+
+    /// Load history once on the first Training or Rollout request. Remote jobs
+    /// own execution; monitoring starts here and survives browser navigation.
+    pub(crate) async fn ensure_loaded(&self, activity: ProjectActivity) -> Result<(), String> {
+        self.inner
+            .runtime
+            .loaded
+            .get_or_try_init(|| async {
+                self.prepare_from_storage().await?;
+                self.resume_prepared_runs(activity);
+                self.refresh_readiness().await;
+                Ok::<(), String>(())
+            })
+            .await
+            .map(|_| ())
     }
 
     /// Load a candidate without launching jobs or touching shared hardware.

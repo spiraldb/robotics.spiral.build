@@ -3,9 +3,10 @@
 use crate::activities::data::DatasetClient;
 use crate::activities::live::RecordingClient;
 use crate::activities::rollout::RolloutClient;
-use crate::activities::training::TrainingClient;
+use crate::activities::training::history::TrainingHistory;
 use crate::settings::SettingsClient;
 use crate::shell::StudioClient;
+use crate::shell::frame::{TrainingStatus, WorkflowStatusProjection};
 use std::future::Future;
 
 use dioxus::prelude::*;
@@ -111,11 +112,17 @@ pub(crate) struct Studio {
 }
 
 #[derive(Clone, Copy)]
+struct FeatureStatusSignals {
+    training: Signal<TrainingStatus>,
+    workflow: Signal<Option<WorkflowStatusProjection>>,
+}
+
+#[derive(Clone, Copy)]
 struct BackendSignals {
     snapshot: Signal<StudioSnapshot>,
     telemetry: Signal<TelemetryFrame>,
-    /// Backend-owned lifecycle and metric history for remote policy training.
-    training: Signal<TrainingSnapshot>,
+    /// Compact display summaries; feature views own their fetched histories.
+    features: FeatureStatusSignals,
     /// Backend-owned remote inference and motor-control lifecycle.
     rollout: Signal<RolloutSnapshot>,
     /// True while the project status read is healthy.
@@ -136,8 +143,7 @@ struct StudioProjectResources {
 #[derive(Clone, Copy)]
 struct StudioControllers {
     data: DataController,
-    workflow: WorkflowController,
-    training: TrainingController,
+
     rollout: RolloutController,
     timeline: TimelineController,
 }
@@ -190,7 +196,10 @@ impl BackendSignals {
         Self {
             snapshot: use_signal(StudioSnapshot::default),
             telemetry: use_signal(TelemetryFrame::default),
-            training: use_signal(TrainingSnapshot::default),
+            features: FeatureStatusSignals {
+                training: use_signal(TrainingStatus::default),
+                workflow: use_signal(|| None),
+            },
             rollout: use_signal(RolloutSnapshot::default),
             live: use_signal(|| false),
             last_telemetry_ms: use_signal(|| 0.0),
@@ -283,8 +292,7 @@ impl StudioControllers {
         let selected_dataset = data.selected_dataset.read().to_owned();
         Self {
             data: DataController::use_controller(&configuration.dataset, &selected_dataset),
-            workflow: WorkflowController::use_controller(project.relation_catalog),
-            training: TrainingController::use_controller(&configuration.dataset, &selected_dataset),
+
             rollout: RolloutController::use_controller(),
             timeline: TimelineController::use_controller(),
         }
@@ -312,7 +320,7 @@ impl Studio {
     }
 
     pub(crate) fn training(self) -> ReadSignal<TrainingSnapshot> {
-        self.backend.training.into()
+        TrainingHistory::current().snapshot()
     }
 
     pub(crate) fn rollout(self) -> ReadSignal<RolloutSnapshot> {
@@ -379,12 +387,25 @@ impl Studio {
         self.controllers.data
     }
 
-    pub(crate) const fn workflow_controller(self) -> WorkflowController {
-        self.controllers.workflow
+    pub(crate) fn workflow_controller(self) -> WorkflowController {
+        consume_context()
     }
 
-    pub(crate) const fn training_controller(self) -> TrainingController {
-        self.controllers.training
+    pub(crate) fn training_controller(self) -> TrainingController {
+        consume_context()
+    }
+
+    pub(crate) fn training_status(self) -> Signal<TrainingStatus> {
+        self.backend.features.training
+    }
+
+    pub(crate) fn workflow_status(self) -> Signal<Option<WorkflowStatusProjection>> {
+        self.backend.features.workflow
+    }
+
+    pub(crate) fn use_workflow_controller(self) -> WorkflowController {
+        let controller = WorkflowController::use_controller(self.project.relation_catalog);
+        use_context_provider(|| controller)
     }
 
     pub(crate) const fn rollout_controller(self) -> RolloutController {
@@ -484,27 +505,6 @@ impl Studio {
                     .apply_window(window.clone());
             }
         });
-        let route = use_route::<crate::shell::routes::StudioRoute>();
-        let training_active = use_memo(move || self.backend.training.read().active_run().is_some());
-        let training = QueryPolicy::new(QueryDomain::Training, 1_000)
-            .with_activity(training_active.into())
-            .use_resource(use_reactive((&route,), move |(route,)| {
-                let selected = if matches!(route, crate::shell::routes::StudioRoute::Training {}) {
-                    self.training_controller().selected_run()
-                } else {
-                    None
-                };
-                TrainingClient::current().training_snapshot(selected)
-            }));
-        use_effect(move || {
-            let result = training.read();
-            if training.finished()
-                && let Some(Ok(value)) = result.as_ref()
-                && *self.backend.training.peek() != *value
-            {
-                self.backend.training.set(value.clone());
-            }
-        });
         let rollout_active = use_memo(move || self.backend.rollout.read().phase().active());
         let rollout = QueryPolicy::new(QueryDomain::Rollout, 500)
             .with_activity(rollout_active.into())
@@ -518,7 +518,6 @@ impl Studio {
                 self.backend.rollout.set(value.clone());
             }
         });
-        self.workflow_controller().use_polling(self);
         self.data_controller().use_polling(self);
     }
 

@@ -7,12 +7,17 @@ use axum::Json;
 use spiral_robotics_common::datasets::{
     HuggingFaceDatasetImportSummary, HuggingFaceDatasetInspection, HuggingFaceDatasetSource,
 };
+use spiral_robotics_common::native_datasets::{
+    NativeDatasetInspection, NativeDatasetSelection, NativeDatasetSummary,
+};
 use spiral_robotics_common::relations::{QueryRequest, RelationCatalog, SpiralQuerySnapshot};
 
 pub(crate) struct DatasetQueryEndpoints;
 
 impl DatasetQueryEndpoints {
     pub(crate) fn register(routes: &mut ApiRoutes) {
+        routes.get("/native-datasets", Self::native_datasets);
+        routes.post("/native-datasets/inspect", Self::inspect_native_dataset);
         routes.get("/relations", Self::relation_catalog);
         routes.post("/queries", Self::run_spiral_query);
         routes.post(
@@ -23,6 +28,17 @@ impl DatasetQueryEndpoints {
             "/datasets/hugging-face/import",
             Self::import_hugging_face_dataset,
         );
+    }
+    async fn native_datasets(
+        ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,
+    ) -> Result<Json<Vec<NativeDatasetSummary>>, HttpFailure> {
+        Ok(Json(commands.native_datasets().await?))
+    }
+    async fn inspect_native_dataset(
+        ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,
+        ApiJson(selection): ApiJson<NativeDatasetSelection>,
+    ) -> Result<Json<NativeDatasetInspection>, HttpFailure> {
+        Ok(Json(commands.inspect_native_dataset(selection).await?))
     }
     async fn relation_catalog(
         ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,

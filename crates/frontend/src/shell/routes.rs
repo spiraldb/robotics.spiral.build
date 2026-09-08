@@ -79,8 +79,8 @@ pub(crate) fn StudioRouter() -> Element {
     rsx! { Router::<StudioRoute> {} }
 }
 
-/// Controllers and settings live above the route outlet so drafts, selected
-/// runs, messages, and long-running backend commands survive navigation.
+/// Shared connection settings and hardware state live above the route outlet.
+/// Training and Workflow own their browser state below it; jobs live on the backend.
 #[component]
 fn StudioShell() -> Element {
     let sessions = ProjectSessionSignals::use_provider();

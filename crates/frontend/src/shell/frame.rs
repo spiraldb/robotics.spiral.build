@@ -107,8 +107,8 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
     let studio = crate::shell::state::studio();
     let snapshot = studio.snapshot().read().to_owned();
     let telemetry = studio.telemetry().read().to_owned();
-    let training = studio.training().read().to_owned();
-    let workflow = studio.workflow_controller().accepted_state();
+    let training = studio.training_status().read().clone();
+    let workflow = studio.workflow_status().read().clone();
     let connected = studio.controls_available();
     let backend_connected = (studio.live())();
     let (service_label, service_style) = if !backend_connected {
@@ -151,8 +151,7 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
         1 => Some("1 robot problem".to_owned()),
         count => Some(format!("{count} robot problems")),
     };
-    let training_problem_count =
-        snapshot.issues().len() + usize::from(!training.readiness().ready());
+    let training_problem_count = snapshot.issues().len() + usize::from(!training.ready);
     let training_problems_label = format!(
         "{training_problem_count} {}",
         if training_problem_count == 1 {
@@ -169,18 +168,20 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
             recording.dataset_id(),
         )
     });
-    let training_run = training.active_run();
-    let training_phase = training_run.map(|run| run.phase().label());
-    let training_step =
-        training_run.map(|run| format!("step {} / {}", run.current_step(), run.config().steps()));
-    let training_runs_label = format!("{} runs", training.runs().len());
-    let workflow_status = WorkflowStatusContext {
-        state: workflow.as_ref(),
-        backend_connected,
-        readiness: snapshot.readiness().state(),
-        catalog_available: snapshot.readiness().catalog_available(),
-    }
-    .project();
+    let training_phase = training.phase.as_deref();
+    let training_step = training.step.as_deref();
+    let training_runs_label = format!("{} runs", training.runs);
+    let workflow_status = workflow
+        .filter(|_| backend_connected && snapshot.readiness().catalog_available())
+        .unwrap_or_else(|| {
+            WorkflowStatusContext {
+                state: None,
+                backend_connected,
+                readiness: snapshot.readiness().state(),
+                catalog_available: snapshot.readiness().catalog_available(),
+            }
+            .project()
+        });
     let center = studio.notifications().read().to_owned();
     let now = (studio.clock_ms())();
     let unread = center.unread_count();
@@ -311,7 +312,7 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
                         "{service_label}"
                     }
                     span { class: "status-bar-item",
-                        if training.readiness().ready() { "Training ready" } else { "Training unavailable" }
+                        if training.ready { "Training ready" } else { "Training unavailable" }
                     }
                     span { class: "status-bar-item", "{training_runs_label}" }
                 }
@@ -434,11 +435,42 @@ fn NotificationTrigger(unread: usize, open: bool) -> Element {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
-struct WorkflowStatusProjection {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct WorkflowStatusProjection {
     domain: String,
     phase: String,
     graph: String,
+}
+
+impl From<&WorkflowSnapshot> for WorkflowStatusProjection {
+    fn from(state: &WorkflowSnapshot) -> Self {
+        WorkflowStatusContext {
+            state: Some(state),
+            backend_connected: true,
+            readiness: BackendReadinessState::Ready,
+            catalog_available: true,
+        }
+        .project()
+    }
+}
+
+#[derive(Clone, Default, PartialEq)]
+pub(crate) struct TrainingStatus {
+    ready: bool,
+    runs: usize,
+    phase: Option<String>,
+    step: Option<String>,
+}
+impl From<&spiral_robotics_common::training::TrainingSnapshot> for TrainingStatus {
+    fn from(snapshot: &spiral_robotics_common::training::TrainingSnapshot) -> Self {
+        let run = snapshot.active_run();
+        Self {
+            ready: snapshot.readiness().ready(),
+            runs: snapshot.runs().len(),
+            phase: run.map(|run| run.phase().label().to_owned()),
+            step: run.map(|run| format!("step {} / {}", run.current_step(), run.config().steps())),
+        }
+    }
 }
 
 struct WorkflowStatusContext<'a> {

@@ -44,7 +44,7 @@ impl TrainingEndpoints {
         ApiQuery(selection): ApiQuery<TrainingSelection>,
     ) -> Result<Json<TrainingSnapshot>, HttpFailure> {
         let selected = selection.into_selected();
-        let result = commands.snapshot(selected)?;
+        let result = commands.snapshot(selected).await?;
         Ok(Json(result))
     }
 }

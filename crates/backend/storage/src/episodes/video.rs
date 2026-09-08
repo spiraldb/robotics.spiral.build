@@ -14,8 +14,8 @@ use sha2::{Digest as _, Sha256};
 
 use crate::db::DatabaseSession as _;
 use crate::db::SpiralSql;
+use crate::db::column as db;
 use crate::db::{ProjectConnection, ProjectStore};
-use crate::db::{Table, column as db};
 
 const BLOB_EXTENSION_NAME: &str = "spql.io.Blob";
 
@@ -578,45 +578,6 @@ impl VideoAssetRecordBatch for RecordBatch {
         columns[payload_index] = VideoAssetStorage::inline_blob_array(&payloads)?;
         RecordBatch::try_new(schema, columns)
             .map_err(|error| format!("normalizing video asset Blob batch: {error}"))
-    }
-}
-
-impl ProjectConnection {
-    pub(crate) async fn ensure_video_assets_blob_relation(
-        &mut self,
-        namespace: &str,
-    ) -> Result<(), String> {
-        let connection = self;
-        let assets = Table::VideoAssets.qualified_name(namespace);
-        let Some(schema) = connection.relation_schema(&assets).await? else {
-            return Err(format!(
-                "managed Spiral relation {assets} is missing; run Settings → SpiralDB → Test connection to provision it"
-            ));
-        };
-        let payload = schema
-            .field_with_name(db::PAYLOAD)
-            .map_err(|error| format!("stored video assets are missing {}: {error}", db::PAYLOAD))?;
-        if payload
-            .metadata()
-            .get(EXTENSION_TYPE_NAME_KEY)
-            .is_some_and(|name| name == BLOB_EXTENSION_NAME)
-        {
-            return Ok(());
-        }
-        if !matches!(
-            payload.data_type(),
-            DataType::Binary | DataType::LargeBinary | DataType::BinaryView
-        ) {
-            return Err(format!(
-                "stored video asset {} must be a Spiral Blob or Arrow binary, got {}",
-                db::PAYLOAD,
-                payload.data_type(),
-            ));
-        }
-        connection
-            .execute_update_sql(&SpiralSql::migrate_video_assets_to_blob(&assets))
-            .await
-            .map_err(|error| format!("migrating video assets from Binary to Blob: {error}"))
     }
 }
 

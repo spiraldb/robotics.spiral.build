@@ -30,6 +30,18 @@ pub struct StorageManager {
 }
 
 impl StorageManager {
+    pub async fn legacy_recording_available(&self) -> Result<bool, String> {
+        let mut connection = self.project_store.connect().await?;
+        for table in crate::episodes::EpisodeRelations::RELATIONS {
+            if !connection
+                .table_exists(&table.qualified_name(self.namespace()))
+                .await?
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
     pub fn new(project_store: Arc<ProjectStore>) -> Self {
         Self { project_store }
     }

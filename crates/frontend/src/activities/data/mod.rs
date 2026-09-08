@@ -2,6 +2,7 @@
 
 pub(crate) mod catalog;
 pub(crate) mod dataset_catalog;
+pub(crate) mod native_datasets;
 pub(crate) mod query_result;
 pub(crate) mod relations;
 pub(crate) mod screen;

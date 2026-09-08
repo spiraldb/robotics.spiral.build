@@ -36,6 +36,18 @@ pub(crate) enum Table {
 }
 
 impl Table {
+    /// Legacy recording relations can be read/restored explicitly, but startup
+    /// no longer provisions them now that MCAP owns new dataset imports.
+    pub(crate) const fn is_legacy_recording(self) -> bool {
+        matches!(
+            self,
+            Self::Datasets
+                | Self::Episodes
+                | Self::EpisodeStreams
+                | Self::JointSamples
+                | Self::VideoAssets
+        )
+    }
     /// Relations shown in the Data schema browser.
     ///
     /// Ordered so a parent relation always precedes the child relations that

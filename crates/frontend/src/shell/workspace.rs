@@ -11,10 +11,11 @@ use spiral_robotics_common::recording::{ReplayPhase, ReplayPurpose};
 use spiral_robotics_common::robots::ModeSelection;
 
 use crate::activities::data::episode_cache;
+use crate::activities::data::native_datasets::NativeDatasetsPanel;
 use crate::activities::data::query_result::QueryResultView;
 use crate::activities::data::relations::RelationsPanel;
 use crate::activities::data::state::{DataController, EpisodeDataState};
-use crate::activities::data::workbench::{EpisodeIdPresentation, EpisodesPanel, QueryPanel};
+use crate::activities::data::workbench::{EpisodeIdPresentation, QueryPanel};
 use crate::activities::live::recording_actions;
 use crate::activities::live::workbench::LiveWorkbench;
 use crate::activities::rollout::workspace::{
@@ -675,9 +676,9 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
         Activity::Data => {
             let episodes = Panel::new(
                 "episodes",
-                "Episodes",
+                "Datasets",
                 "episodes",
-                rsx! { EpisodesPanel { namespace: dataset } },
+                rsx! { NativeDatasetsPanel {} },
             )
             .with_class("episodes-workbench-editor");
             let query = Panel::new(
@@ -703,14 +704,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
             .with_class("relations-editor");
             ScreenWorkspaceDefinition::for_data(
                 crate::activities::data::screen::DataWorkbenchPanels::new(episodes, query),
-                crate::activities::data::screen::DataEvidencePanels::new(
-                    query_result,
-                    relations,
-                    crate::activities::data::screen::DataContextPanels::new(
-                        dock_panels,
-                        timeline_panel,
-                    ),
-                ),
+                crate::activities::data::screen::DataEvidencePanels::new(query_result, relations),
             )
         }
         Activity::Rollout => {

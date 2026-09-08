@@ -19,9 +19,10 @@ impl WorkflowCommands {
         let activity = commands.state.admit()?;
         self.state
             .tasks()
-            .read(async move {
+            .execute(async move {
                 let _activity = activity;
                 commands.require_catalog_ready()?;
+                commands.state.workflow_agent().ensure_loaded().await?;
                 Ok(commands.state.workflow().state())
             })
             .await?
@@ -37,6 +38,7 @@ impl WorkflowCommands {
             .execute(async move {
                 let _activity = activity;
                 commands.require_catalog_ready()?;
+                commands.state.workflow_agent().ensure_loaded().await?;
                 if matches!(&command, WorkflowCommand::Cancel { .. }) {
                     return commands.state.workflow().command(command).await.map_err(Into::into);
                 }
@@ -75,9 +77,10 @@ impl WorkflowCommands {
         let activity = commands.state.admit()?;
         self.state
             .tasks()
-            .read(async move {
+            .execute(async move {
                 let _activity = activity;
                 commands.require_catalog_ready()?;
+                commands.state.workflow_agent().ensure_loaded().await?;
                 Ok(commands.state.workflow_agent().state())
             })
             .await?
@@ -93,6 +96,7 @@ impl WorkflowCommands {
             .execute(async move {
                 let _activity = activity;
                 commands.require_catalog_ready()?;
+                commands.state.workflow_agent().ensure_loaded().await?;
                 if !matches!(&command, WorkflowAgentCommand::Cancel { .. })
                     && !commands.state.bootstrap()
                         .current()

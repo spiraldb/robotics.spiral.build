@@ -76,6 +76,7 @@ mod tests {
         assert!(
             crate::training::commands::TrainingCommands::from(scoped.state.clone())
                 .snapshot(None)
+                .await
                 .is_err()
         );
         assert!(

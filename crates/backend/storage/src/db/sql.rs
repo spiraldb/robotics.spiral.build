@@ -267,27 +267,6 @@ impl SpiralSql {
         )
     }
 
-    pub(crate) fn migrate_video_assets_to_blob(assets: &str) -> String {
-        format!(
-            "CREATE OR REPLACE TABLE {assets} ENGINE 'arbor' AS SELECT \
-         {episode_id}, {stream_id}, {segment_index}, {timeline_offset}, {camera_id}, \
-         spql.blob.inline({payload}, {byte_size}, 'video/mp4') AS {payload}, \
-         {byte_size}, {width}, {height}, {fps}, {frames}, {media_relation} FROM {assets}",
-            episode_id = column::EPISODE_ID,
-            stream_id = column::STREAM_ID,
-            segment_index = column::SEGMENT_INDEX,
-            timeline_offset = column::TIMELINE_OFFSET_NS,
-            camera_id = column::CAMERA_ID,
-            payload = column::PAYLOAD,
-            byte_size = column::BYTE_SIZE,
-            width = column::WIDTH,
-            height = column::HEIGHT,
-            fps = column::FPS,
-            frames = column::FRAMES,
-            media_relation = column::MEDIA_RELATION,
-        )
-    }
-
     pub(crate) fn create_video_dataset(dataset: &str, sources: &str) -> String {
         format!(
             "CREATE DATASET {dataset} USING spql.mp4.dataset FROM {sources} \
@@ -379,6 +358,9 @@ impl<'a> ProjectQueries<'a> {
     pub(crate) async fn datasets(&self) -> Result<Vec<DatasetSummary>, String> {
         let relation = Table::Datasets.qualified_name(self.project_store.namespace());
         let mut connection = self.project_store.connect().await?;
+        if !connection.table_exists(&relation).await? {
+            return Ok(Vec::new());
+        }
         let sql = format!(
             "SELECT {id}, {name}, {created}, {description} FROM {relation} ORDER BY {created}, {id}",
             id = column::DATASET_ID,
@@ -437,13 +419,24 @@ impl<'a> ProjectQueries<'a> {
             .map_err(|error| error.to_string())?;
         let mut relations = Vec::with_capacity(catalog.len());
         let mut skipped = 0_usize;
-        for entry in catalog {
-            let (relation_name, kind) = entry.into_parts();
-            if QualifiedRelation::try_from(relation_name.as_str()).is_err() {
-                skipped += 1;
-                continue;
-            }
-            let schema = match connection.table_schema(relation_name.clone()).await {
+        let catalog = catalog
+            .into_iter()
+            .filter_map(|entry| {
+                let (name, kind) = entry.into_parts();
+                if QualifiedRelation::try_from(name.as_str()).is_err() {
+                    skipped += 1;
+                    None
+                } else {
+                    Some((name, kind))
+                }
+            })
+            .collect::<Vec<_>>();
+        let schemas = connection
+            .relation_schemas(catalog.iter().map(|(name, _)| name.clone()).collect())
+            .await
+            .map_err(|error| error.to_string())?;
+        for ((relation_name, kind), (_, schema)) in catalog.into_iter().zip(schemas) {
+            let schema = match schema {
                 Ok(Some(schema)) => schema,
                 Ok(None) => {
                     skipped += 1;

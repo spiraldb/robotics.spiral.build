@@ -320,19 +320,6 @@ impl ProjectSession {
         // hardware effects begin after this entire session has been published.
         tokio::try_join!(
             async {
-                self.training()
-                    .prepare_from_storage()
-                    .await
-                    .map_err(OperationError::External)
-            },
-            self.workflow().prepare_from_storage(),
-            async {
-                self.workflow_agent()
-                    .prepare_from_storage()
-                    .await
-                    .map_err(OperationError::External)
-            },
-            async {
                 self.rollout()
                     .prepare_from_storage()
                     .await
@@ -344,35 +331,13 @@ impl ProjectSession {
                     .await
                     .map_err(|error| OperationError::External(error.to_string()))
             },
-            async {
-                self.storage()
-                    .relation_catalog()
-                    .await
-                    .map_err(OperationError::External)
-            },
         )?;
-        self.training().refresh_readiness().await;
         self.readiness.ready();
         Ok(())
     }
 
-    fn activate(self: &Arc<Self>, activity: ProjectActivity) {
+    fn activate(self: &Arc<Self>, _activity: ProjectActivity) {
         self.rollout().activate();
-        self.training().resume_prepared_runs(activity.clone());
-        let session = self.clone();
-        tokio::spawn(async move {
-            // Recovery writes belong to the published session and finish before
-            // another replacement can begin. Each manager serializes this save
-            // with commands so it cannot overwrite a newer edit.
-            let _activity = activity;
-            let (workflow, assistant) = tokio::join!(
-                session.workflow().persist_recovery(),
-                session.workflow_agent().persist_recovery()
-            );
-            if let Err(error) = workflow.and(assistant) {
-                session.readiness().degraded(true, format!("The project loaded, but recovered history could not be saved: {error}. Test the connection to retry."));
-            }
-        });
     }
 
     fn busy(&self) -> bool {

@@ -69,6 +69,17 @@ published archive as a qualified replacement for the native adapter until the
 hosted contract passes. Update the archive pin when a qualifying release is
 published; a source fix alone does not update the downloaded library.
 
+## Current local driver refresh
+
+The local driver was rebuilt from the unchanged checkout
+`/private/tmp/spiraldb-dataset-catalog-pr`, commit `2f0ffed61`, which includes the
+Dataset classification fix and current MCAP readers. Studio on port 62701 was
+restarted with this library and reports its project ready. Direct checks confirm
+that ADBC table listing excludes datasets while retaining child tables,
+`DESCRIBE "default"` succeeds, and the imported 52 episodes / 66,549 messages
+remain readable. The library hash and results are recorded in
+`exports/native-mcap-2026-09-07/driver-rebuild-validation.json`.
+
 ## Async execution and ownership
 
 - Blocking initialization, connections, operations, reader polling, and driver
@@ -139,3 +150,15 @@ cargo test -p spiral-robotics-storage adbc_transactional_ingestion_stays_isolate
 cargo test -p spiral-robotics-storage adbc_hosted_noop_delete_succeeds -- --ignored
 cargo test -p spiral-robotics-storage dropped_transaction_waits_for_result_before_rollback -- --ignored
 ```
+
+## Startup and schema checks
+
+Project startup checks Studio tables and loads preferences, robot configuration,
+and rollout safety state. Training history, Workflow, Assistant history, and the
+full relation catalog no longer block project readiness. Training and Workflow
+load on first use from their corresponding views.
+
+Managed-table verification and relation discovery read schemas concurrently on
+up to eight independent ADBC connections. The reads retain their parent project
+operation lock and preserve input order and individual errors. Parallel schema
+reads reject explicit transactions, whose schema reads must use that transaction.

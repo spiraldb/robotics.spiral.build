@@ -40,8 +40,14 @@ const TRAINING_CHART_POINT_BUDGET: usize = 1_200;
 pub(crate) fn TrainingWorkspace() -> Element {
     let studio = studio();
     let dataset_id = studio.selected_dataset().read().to_owned();
-    let controller = studio.training_controller();
-    let snapshot = studio.training().read().to_owned();
+    let controller = super::state::TrainingController::use_controller(
+        &studio.configuration().dataset().to_owned(),
+        &dataset_id,
+    );
+    let controller = use_context_provider(|| controller);
+    let training_history =
+        super::history::TrainingHistory::use_history(move || controller.selected_run());
+    let snapshot = training_history.snapshot().read().to_owned();
     let run_names = snapshot
         .runs()
         .iter()
@@ -151,6 +157,11 @@ pub(crate) fn TrainingWorkspace() -> Element {
     ));
 
     rsx! {
+        if let Some(error) = training_history.error() {
+            p { role: "alert", class: "p-3 text-xs text-danger", "{error}" }
+        } else if !training_history.loaded() {
+            p { role: "status", class: "p-3 text-xs text-ink-soft", "Loading training history…" }
+        } else {
         PanelWorkspace {
             panels,
             initial_layout: layout,
@@ -174,6 +185,7 @@ pub(crate) fn TrainingWorkspace() -> Element {
                 }
             },
             on_resize: move |_| {},
+        }
         }
     }
 }

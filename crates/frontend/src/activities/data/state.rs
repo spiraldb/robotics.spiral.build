@@ -13,14 +13,13 @@ use dioxus::prelude::*;
 use spiral_robotics_common::identity::DatasetId;
 use spiral_robotics_common::recording::{DatasetSummary, EpisodeInfo, EpisodeListItem};
 
-use crate::activities::data::catalog::ManagedTable;
 use crate::activities::data::dataset_catalog::DatasetCatalogState;
 use crate::activities::data::episode_cache::EpisodeData;
 use crate::activities::data::query_result::{
     DEFAULT_QUERY_ROWS, QueryExecutionPresentation, QueryState, QueryTab,
 };
 use crate::activities::data::sql_draft::GeneratedSqlDraft;
-use crate::activities::data::workbench::QueryPresetSql;
+use spiral_robotics_common::native_datasets::NativeDatasetSelection;
 
 use crate::shell::notifications::MessageSource;
 use crate::shell::state::Studio;
@@ -123,8 +122,11 @@ struct QueryExecutionSignals {
 impl DataController {
     /// Create the Data state owned by the Studio session. None of these
     /// signals depends on the Data workbench being mounted.
-    pub(crate) fn use_controller(namespace: &str, dataset_id: &str) -> Self {
-        let initial_sql = ManagedTable::Episodes.scoped_sql(namespace, dataset_id);
+    pub(crate) fn use_controller(_namespace: &str, dataset_id: &str) -> Self {
+        let initial_sql =
+            NativeDatasetSelection::new(dataset_id.split('.').map(str::to_owned).collect())
+                .map(|selection| selection.episodes_sql())
+                .unwrap_or_default();
         let sql_value = initial_sql.clone();
         let selected_episode = use_signal(|| None::<String>);
         let dataset_catalog = use_signal(DatasetCatalogState::default);
@@ -201,17 +203,11 @@ impl DataController {
             };
             controller.cache_episode_data(loaded);
         });
-        let namespace_dependency = namespace.to_owned();
         let dataset_dependency = dataset_id.to_owned();
-        use_effect(use_reactive(
-            (&namespace_dependency, &dataset_dependency),
-            move |(namespace, dataset_id)| controller.sync_dataset(&namespace, &dataset_id),
-        ));
+        use_effect(use_reactive((&dataset_dependency,), move |(dataset_id,)| {
+            controller.sync_dataset(&dataset_id)
+        }));
         controller
-    }
-
-    pub(crate) fn selected_episode(&self) -> Option<String> {
-        self.selected_episode.read().to_owned()
     }
 
     pub(crate) fn selected_episode_peek(&self) -> Option<String> {
@@ -247,19 +243,6 @@ impl DataController {
             return;
         }
         entry.full_data = Some(Arc::clone(data));
-    }
-
-    /// Every recorded take in the requested, currently loaded dataset.
-    pub(crate) fn episodes(&self, dataset_id: &str) -> Vec<EpisodeListItem> {
-        let catalog = self.episode_catalog.read();
-        if catalog.dataset_id.as_deref() != Some(dataset_id) {
-            return Vec::new();
-        }
-        catalog
-            .episodes
-            .iter()
-            .map(|entry| entry.summary.clone())
-            .collect()
     }
 
     pub(crate) fn selected_episode_info(&self) -> Option<EpisodeInfo> {
@@ -328,36 +311,6 @@ impl DataController {
 
     pub(crate) fn dataset_catalog_error(&self) -> Option<crate::client::CommandError> {
         self.dataset_catalog.read().error().cloned()
-    }
-
-    pub(crate) fn initialize_dataset_selection(mut self, current: &str) -> Option<String> {
-        self.dataset_catalog.write().initialize_selection(current)
-    }
-
-    pub(crate) fn episodes_loading(&self, dataset_id: &str) -> bool {
-        let catalog = self.episode_catalog.read();
-        catalog.dataset_id.as_deref() == Some(dataset_id) && catalog.loading
-    }
-
-    pub(crate) fn episodes_loaded(&self, dataset_id: &str) -> bool {
-        let catalog = self.episode_catalog.read();
-        catalog.dataset_id.as_deref() == Some(dataset_id) && catalog.loaded
-    }
-
-    pub(crate) fn episode_catalog_error(&self, dataset_id: &str) -> Option<String> {
-        let catalog = self.episode_catalog.read();
-        (catalog.dataset_id.as_deref() == Some(dataset_id))
-            .then(|| catalog.error.clone())
-            .flatten()
-    }
-
-    pub(crate) fn episode_catalog_issues(&self, dataset_id: &str) -> Vec<String> {
-        let catalog = self.episode_catalog.read();
-        if catalog.dataset_id.as_deref() == Some(dataset_id) {
-            catalog.issues.clone()
-        } else {
-            Vec::new()
-        }
     }
 
     /// Both catalogs are fetched by the session, independent of which activity
@@ -452,19 +405,15 @@ impl DataController {
         QueryRefresh::current().invalidate(&[QueryDomain::Data]);
     }
 
-    pub(crate) async fn reload_dataset(self, dataset_id: String) -> Result<(), String> {
-        DatasetId::try_from(dataset_id.as_str()).map_err(|error| error.to_string())?;
-        self.invalidate_episode_catalog();
-        Ok(())
-    }
-
     pub(crate) fn invalidate_episode_catalog(self) {
         QueryRefresh::current().invalidate(&[QueryDomain::Data]);
     }
 
-    fn sync_dataset(mut self, namespace: &str, dataset_id: &str) {
+    fn sync_dataset(mut self, dataset_id: &str) {
         let previous = self.draft.generated_sql.peek().to_owned();
-        let next = ManagedTable::Episodes.scoped_sql(namespace, dataset_id);
+        let next = NativeDatasetSelection::new(dataset_id.split('.').map(str::to_owned).collect())
+            .map(|selection| selection.episodes_sql())
+            .unwrap_or_default();
         if previous == next {
             return;
         }
@@ -656,9 +605,13 @@ impl QuerySqlPresentation for str {
             .windows(2)
             .find(|tokens| tokens[0].eq_ignore_ascii_case("from"))
             .map(|tokens| {
-                tokens[1].trim_matches(|character: char| {
-                    !character.is_alphanumeric() && character != '_' && character != '.'
-                })
+                tokens[1]
+                    .split('(')
+                    .next()
+                    .unwrap_or_default()
+                    .trim_matches(|character: char| {
+                        !character.is_alphanumeric() && character != '_' && character != '.'
+                    })
             })
             .and_then(|relation| relation.rsplit('.').next())
             .filter(|relation| !relation.is_empty());

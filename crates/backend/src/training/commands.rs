@@ -13,12 +13,26 @@ pub(crate) struct TrainingCommands {
 }
 
 impl TrainingCommands {
-    pub(crate) fn snapshot(
+    pub(crate) async fn snapshot(
         &self,
         selected: Option<String>,
     ) -> Result<TrainingSnapshot, BackendCommandError> {
-        let _activity = self.state.admit()?;
-        Ok(self.state.training().display_snapshot(selected.as_deref()))
+        let commands = self.clone();
+        let activity = commands.state.admit()?;
+        self.state
+            .tasks()
+            .execute(async move {
+                commands
+                    .state
+                    .training()
+                    .ensure_loaded(activity.clone())
+                    .await?;
+                Ok(commands
+                    .state
+                    .training()
+                    .display_snapshot(selected.as_deref()))
+            })
+            .await?
     }
     pub(crate) async fn start_training_run(
         &self,
@@ -30,6 +44,11 @@ impl TrainingCommands {
             .tasks()
             .execute(async move {
                 let _activity = activity;
+                commands
+                    .state
+                    .training()
+                    .ensure_loaded(_activity.clone())
+                    .await?;
                 if let Some(detail) = commands.state.bootstrap().catalog_unavailable() {
                     return Err(BackendCommandError::from(detail));
                 }
@@ -48,6 +67,11 @@ impl TrainingCommands {
             .tasks()
             .execute(async move {
                 let _activity = activity;
+                commands
+                    .state
+                    .training()
+                    .ensure_loaded(_activity.clone())
+                    .await?;
                 TrainingActions::new(commands.state.training().as_ref())
                     .stop(&id)
                     .await
@@ -63,6 +87,11 @@ impl TrainingCommands {
             .tasks()
             .execute(async move {
                 let _activity = activity;
+                commands
+                    .state
+                    .training()
+                    .ensure_loaded(_activity.clone())
+                    .await?;
                 let rollout = RolloutManager::snapshot(commands.state.rollout().as_ref());
                 let activity = TrainingRunActivity::new(
                     rollout

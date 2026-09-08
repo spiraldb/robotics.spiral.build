@@ -32,6 +32,10 @@ automatically; see [database setup](docs/database-boundary.md) for its location.
 
 Run CI commands with `nix develop .#ci --command <command>`.
 
+The native MCAP dataset inspector currently requires the `local-driver` shell;
+the pinned release driver predates its query functions. See
+[MCAP import design](docs/mcap-import-design.md).
+
 Start the studio with:
 
 ```console

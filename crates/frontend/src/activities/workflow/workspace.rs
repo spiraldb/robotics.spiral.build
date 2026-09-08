@@ -48,7 +48,18 @@ enum AssistantInline {
 
 #[component]
 pub(crate) fn WorkflowWorkspace() -> Element {
-    let controller = studio().workflow_controller();
+    let studio = studio();
+    let controller = studio.use_workflow_controller();
+    controller.use_polling(studio);
+    use_effect(move || {
+        let status = controller
+            .accepted_state()
+            .as_ref()
+            .map(crate::shell::frame::WorkflowStatusProjection::from);
+        if *studio.workflow_status().peek() != status {
+            studio.workflow_status().set(status);
+        }
+    });
     let panels = vec![
         Panel::new(
             ASSISTANT_PANEL_ID,
@@ -1893,20 +1904,6 @@ mod tests {
                 .unwrap(),
             "other draft"
         );
-    }
-
-    #[test]
-    fn conversation_drafts_are_hoisted_above_route_and_settings_unmounts() {
-        let state = include_str!("state.rs");
-        let workspace = include_str!("workspace.rs");
-        let production_workspace = workspace.split_once("#[cfg(test)]").unwrap().0;
-        let studio = include_str!("../../shell/state.rs");
-        assert!(state.contains("agent_drafts: Signal<BTreeMap<AgentDraftKey, String>>"));
-        assert!(state.contains("agent_drafts: use_signal(BTreeMap::new)"));
-        assert!(workspace.contains("let mut drafts = controller.agent_drafts()"));
-        assert!(!production_workspace.contains("use_signal(BTreeMap::<String, String>::new)"));
-        assert!(studio.contains("workflow: WorkflowController"));
-        assert!(studio.contains("workflow: WorkflowController::use_controller"));
     }
 
     #[test]

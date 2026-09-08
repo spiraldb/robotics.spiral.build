@@ -1,5 +1,8 @@
 //! Data settings, catalog, query, and transfer commands exposed to delivery adapters.
 
+use spiral_robotics_common::native_datasets::{
+    NativeDatasetInspection, NativeDatasetSelection, NativeDatasetSummary,
+};
 use std::sync::Arc;
 
 use spiral_robotics_common::datasets::{
@@ -40,6 +43,42 @@ pub(crate) struct DataCommands {
 
 /// Settings values admitted together by the data command facade.
 impl DataCommands {
+    pub(crate) async fn native_datasets(
+        &self,
+    ) -> Result<Vec<NativeDatasetSummary>, BackendCommandError> {
+        let commands = self.clone();
+        self.state
+            .tasks()
+            .read(async move {
+                let _activity = commands.state.admit()?;
+                commands
+                    .state
+                    .storage()
+                    .native_datasets()
+                    .await
+                    .map_err(Into::into)
+            })
+            .await?
+    }
+
+    pub(crate) async fn inspect_native_dataset(
+        &self,
+        selection: NativeDatasetSelection,
+    ) -> Result<NativeDatasetInspection, BackendCommandError> {
+        let commands = self.clone();
+        self.state
+            .tasks()
+            .read(async move {
+                let _activity = commands.state.admit()?;
+                commands
+                    .state
+                    .storage()
+                    .inspect_native_dataset(selection)
+                    .await
+                    .map_err(Into::into)
+            })
+            .await?
+    }
     pub(crate) async fn settings(&self) -> Result<DataSettings, BackendCommandError> {
         let commands = self.clone();
         self.state

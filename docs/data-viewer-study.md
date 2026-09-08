@@ -1,5 +1,7 @@
 # Data viewer study
 
+**September 7 implementation update:** see [MCAP import and dataset inspection](mcap-import-design.md). The current driver uses native Dataset members and topic readers, not the generated child-table model assumed in this study.
+
 Research date: September 5, 2026. This is a proposal, not an implementation or a confirmed design contract.
 
 The first source is **local or object-storage MCAP recordings**, as selected by the user. The proposed first search scope is recording names, metadata, time, and topic presence; the search-priority question remains unanswered.

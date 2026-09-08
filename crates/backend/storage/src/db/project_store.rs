@@ -108,6 +108,37 @@ impl ProjectConnection {
             .map_err(|error| error.to_string())
     }
 
+    /// Read schemas concurrently on independent connections while retaining this
+    /// operation's project lock. Never escape an explicit transaction's snapshot.
+    pub(crate) async fn relation_schemas(
+        &mut self,
+        names: Vec<RelationName>,
+    ) -> DatabaseResult<Vec<(RelationName, DatabaseResult<Option<Arc<Schema>>>)>> {
+        if !matches!(self.state, ProjectConnectionState::Autocommit(_)) {
+            return Err(DatabaseError::invalid_state(
+                "parallel schema reads require an autocommit connection",
+            ));
+        }
+        let database = self.database.clone();
+        let operation = self.operation.clone();
+        Ok(futures::stream::iter(names.into_iter().map(move |name| {
+            let database = database.clone();
+            let operation = operation.clone();
+            async move {
+                let _operation = operation;
+                let schema = async {
+                    let mut connection = database.connect().await?;
+                    connection.table_schema(name.clone()).await
+                }
+                .await;
+                (name, schema)
+            }
+        }))
+        .buffered(8)
+        .collect()
+        .await)
+    }
+
     /// Enumerate the durable relations advertised by the active Spiral
     /// project. Temporary query-session relations are intentionally absent
     /// from the native project's catalog.
@@ -696,12 +727,12 @@ impl ManagedRelationProvisioning {
             if self.namespace_created {
                 return format!(
                     "created namespace {namespace} · all {} managed relations present",
-                    ManagedRelationCatalog::tables().len()
+                    ManagedRelationProvisioner::tables().len()
                 );
             }
             return format!(
                 "all {} managed relations present",
-                ManagedRelationCatalog::tables().len()
+                ManagedRelationProvisioner::tables().len()
             );
         }
         let relations = self
@@ -724,6 +755,13 @@ struct ManagedRelationProvisioner<'a> {
 }
 
 impl<'a> ManagedRelationProvisioner<'a> {
+    fn tables() -> Vec<Table> {
+        ManagedRelationCatalog::tables()
+            .into_iter()
+            .filter(|table| !table.is_legacy_recording())
+            .collect()
+    }
+
     const fn new(connection: &'a mut ProjectConnection, namespace: &'a str) -> Self {
         Self {
             connection,
@@ -739,9 +777,6 @@ impl<'a> ManagedRelationProvisioner<'a> {
                 .create_managed_relation(self.namespace, *table)
                 .await?;
         }
-        self.connection
-            .ensure_video_assets_blob_relation(self.namespace)
-            .await?;
         Ok(ManagedRelationProvisioning {
             namespace_created,
             created_relations,
@@ -752,9 +787,6 @@ impl<'a> ManagedRelationProvisioner<'a> {
         self.verify_namespace().await?;
         let missing = self.relation_readiness().await?;
         if missing.is_empty() {
-            self.connection
-                .ensure_video_assets_blob_relation(self.namespace)
-                .await?;
             return Ok(());
         }
         let relations = missing
@@ -785,7 +817,7 @@ impl<'a> ManagedRelationProvisioner<'a> {
         Err(format!(
             "SpiralDB namespace {} is missing. Run Settings → SpiralDB → Test connection to provision it and its {} managed relations.",
             self.namespace,
-            ManagedRelationCatalog::tables().len(),
+            ManagedRelationProvisioner::tables().len(),
         ))
     }
 
@@ -811,17 +843,29 @@ impl<'a> ManagedRelationProvisioner<'a> {
     }
 
     async fn relation_readiness(&mut self) -> Result<Vec<Table>, String> {
+        let tables = Self::tables();
+        let names = tables
+            .iter()
+            .map(|table| RelationName::parse(table.qualified_name(self.namespace)))
+            .collect::<DatabaseResult<Vec<_>>>()
+            .map_err(|error| error.to_string())?;
+        let schemas = self
+            .connection
+            .relation_schemas(names)
+            .await
+            .map_err(|error| error.to_string())?;
         let mut missing = Vec::new();
-        for table in ManagedRelationCatalog::tables() {
-            let relation = table.qualified_name(self.namespace);
-            match self.connection.relation_schema(&relation).await {
-                Ok(Some(schema)) => {
-                    Self::validate_existing_relation(table, &relation, &schema)?;
+        for (table, (relation, schema)) in tables.into_iter().zip(schemas) {
+            match schema.map_err(|error| {
+                format!(
+                    "checking Spiral table {relation}: {error}",
+                    relation = relation.as_str()
+                )
+            })? {
+                Some(schema) => {
+                    Self::validate_existing_relation(table, relation.as_str(), &schema)?
                 }
-                Ok(None) => missing.push(table),
-                Err(error) => {
-                    return Err(format!("checking Spiral table {relation}: {error}"));
-                }
+                None => missing.push(table),
             }
         }
         Ok(missing)
@@ -904,6 +948,20 @@ mod managed_relation_tests {
     use crate::episodes::EpisodeRelations;
 
     #[test]
+    fn startup_provisions_application_state_without_recreating_recordings() {
+        let tables = ManagedRelationProvisioner::tables();
+        assert_eq!(tables.len(), 9);
+        assert!(tables.contains(&Table::Robots));
+        assert!(tables.contains(&Table::TrainingRuns));
+        assert!(
+            EpisodeRelations::RELATIONS
+                .iter()
+                .all(|table| !tables.contains(table))
+        );
+        assert!(!tables.contains(&Table::Datasets));
+    }
+
+    #[test]
     fn provisioning_summary_reports_present_and_created_relations() {
         let present = ManagedRelationProvisioning {
             namespace_created: false,
@@ -911,16 +969,16 @@ mod managed_relation_tests {
         };
         assert_eq!(
             present.describe("spiral_robotics"),
-            "all 14 managed relations present"
+            "all 9 managed relations present"
         );
 
         let created = ManagedRelationProvisioning {
             namespace_created: true,
-            created_relations: vec![Table::Datasets, Table::Episodes],
+            created_relations: vec![Table::Robots, Table::StudioSettings],
         };
         assert_eq!(
             created.describe("spiral_robotics"),
-            "created namespace spiral_robotics plus 2 missing relations: datasets, episodes"
+            "created namespace spiral_robotics plus 2 missing relations: robots, studio_settings"
         );
     }
 
@@ -1024,3 +1082,6 @@ mod managed_relation_tests {
         assert!(!error.contains(LEGACY_PROJECT_ERROR), "{error}");
     }
 }
+
+#[cfg(test)]
+mod schema_tests;

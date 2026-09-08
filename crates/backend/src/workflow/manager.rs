@@ -225,6 +225,7 @@ struct WorkflowManagerInner {
 }
 
 struct WorkflowPersistenceState {
+    loaded: tokio::sync::OnceCell<()>,
     mutation: AsyncMutex<()>,
     terminal_error: Mutex<Option<TerminalPersistenceError>>,
     recovery_pending: AtomicBool,
@@ -235,6 +236,7 @@ struct WorkflowPersistenceState {
 impl WorkflowPersistenceState {
     fn new() -> Self {
         Self {
+            loaded: tokio::sync::OnceCell::new(),
             mutation: AsyncMutex::new(()),
             terminal_error: Mutex::new(None),
             recovery_pending: AtomicBool::new(false),
@@ -480,6 +482,21 @@ impl WorkflowManager {
                 () = cancel.cancelled() => return Err("Agent turn cancelled.".to_owned()),
             };
         }
+    }
+
+    pub(crate) async fn ensure_loaded(&self) -> Result<(), OperationError> {
+        self.inner
+            .persistence
+            .loaded
+            .get_or_try_init(|| async {
+                self.prepare_from_storage().await?;
+                self.persist_recovery()
+                    .await
+                    .map_err(OperationError::External)?;
+                Ok::<(), OperationError>(())
+            })
+            .await
+            .map(|_| ())
     }
 
     pub(crate) async fn prepare_from_storage(&self) -> Result<(), OperationError> {

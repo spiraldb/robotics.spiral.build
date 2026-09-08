@@ -74,7 +74,9 @@ pub(crate) fn RolloutWorkbench() -> Element {
     let controller = studio.rollout_controller();
     let mut pending_action = use_signal(|| None::<PendingRolloutAction>);
     let snapshot = studio.snapshot().read().to_owned();
-    let training = studio.training().read().to_owned();
+    let training_history =
+        crate::activities::training::history::TrainingHistory::use_history(|| None);
+    let training = training_history.snapshot().read().to_owned();
     let rollout = studio.rollout().read().to_owned();
     let checkpoints = training.checkpoint_choices();
     let selected_key = controller

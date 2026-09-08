@@ -1,10 +1,9 @@
 //! Dataset requests and their query invalidation policy.
 use crate::client::http::UrlComponent;
 use crate::client::project::ProjectClient;
-use crate::client::queries::QueryDomain::*;
 use crate::client::transport::{CommandError, HttpRequest};
-use spiral_robotics_common::datasets::{
-    HuggingFaceDatasetImportSummary, HuggingFaceDatasetInspection, HuggingFaceDatasetSource,
+use spiral_robotics_common::native_datasets::{
+    NativeDatasetInspection, NativeDatasetSelection, NativeDatasetSummary,
 };
 use spiral_robotics_common::recording::{
     DatasetSummary, EpisodeCatalog, EpisodeInspectionSnapshot,
@@ -16,6 +15,19 @@ pub(crate) struct DatasetClient {
     project: ProjectClient,
 }
 impl DatasetClient {
+    pub(crate) fn native_datasets(
+        &self,
+    ) -> impl Future<Output = Result<Vec<NativeDatasetSummary>, CommandError>> + use<> {
+        self.project
+            .request(HttpRequest::new("GET", "/api/native-datasets"))
+    }
+    pub(crate) fn inspect_native_dataset(
+        &self,
+        selection: NativeDatasetSelection,
+    ) -> impl Future<Output = Result<NativeDatasetInspection, CommandError>> + use<> {
+        self.project
+            .request(HttpRequest::new("POST", "/api/native-datasets/inspect").json(&selection))
+    }
     pub(crate) fn current() -> Self {
         Self {
             project: ProjectClient::current(),
@@ -39,19 +51,6 @@ impl DatasetClient {
                 dataset_id = dataset_id.url_component()
             ),
         ))
-    }
-
-    pub(crate) fn delete_episode(
-        &self,
-        id: String,
-    ) -> impl Future<Output = Result<(), CommandError>> + use<> {
-        self.project.mutate(
-            &[Data, Catalog],
-            HttpRequest::new(
-                "DELETE",
-                format!("/api/episodes/{id}", id = id.url_component()),
-            ),
-        )
     }
 
     pub(crate) fn inspect_episode(
@@ -78,24 +77,6 @@ impl DatasetClient {
     ) -> impl Future<Output = Result<SpiralQuerySnapshot, CommandError>> + use<> {
         self.project.request(
             HttpRequest::new("POST", "/api/queries").json(&QueryRequest::new(statement, max_rows)),
-        )
-    }
-
-    pub(crate) fn inspect_hugging_face_dataset(
-        &self,
-        request: HuggingFaceDatasetSource,
-    ) -> impl Future<Output = Result<HuggingFaceDatasetInspection, CommandError>> + use<> {
-        self.project
-            .request(HttpRequest::new("POST", "/api/datasets/hugging-face/inspect").json(&request))
-    }
-
-    pub(crate) fn import_hugging_face_dataset(
-        &self,
-        request: HuggingFaceDatasetSource,
-    ) -> impl Future<Output = Result<HuggingFaceDatasetImportSummary, CommandError>> + use<> {
-        self.project.mutate(
-            &[Data, Catalog],
-            HttpRequest::new("POST", "/api/datasets/hugging-face/import").json(&request),
         )
     }
 }

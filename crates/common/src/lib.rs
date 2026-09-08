@@ -9,6 +9,7 @@
 pub mod command_failure;
 pub mod datasets;
 pub mod identity;
+pub mod native_datasets;
 pub mod project;
 pub mod recording;
 pub mod recording_signals;

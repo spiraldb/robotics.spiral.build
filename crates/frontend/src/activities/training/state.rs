@@ -1,8 +1,7 @@
 //! Durable state and commands for the Training screen.
 //!
-//! Training can be left while a run is active. The draft, selected history
-//! item, and in-flight command guards therefore belong to the shell rather
-//! than to the mounted Training workspace.
+//! The mounted Training view owns drafts, selection, history and request tasks.
+//! Admitted jobs continue on the backend after the view is closed.
 
 use crate::activities::training::TrainingClient;
 use std::collections::BTreeSet;

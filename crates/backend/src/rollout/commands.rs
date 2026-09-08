@@ -26,6 +26,11 @@ impl RolloutCommands {
             .tasks()
             .execute(async move {
                 let _activity = activity;
+                commands
+                    .state
+                    .training()
+                    .ensure_loaded(_activity.clone())
+                    .await?;
                 let config = TrainingActions::new(commands.state.training().as_ref())
                     .admit_rollout(config)?;
                 commands

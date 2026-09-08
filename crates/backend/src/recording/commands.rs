@@ -578,6 +578,11 @@ impl RecordingCommands {
                 commands.require_storage_ready()?;
                 // A paused take has a readable SpiralDB checkpoint. Hide its catalog row
                 // here because live recording state is delivered through telemetry.
+                if !commands.state.storage().legacy_recording_available().await? {
+                    return Ok(spiral_robotics_common::recording::EpisodeCatalog::new(
+                        Vec::new(), vec!["Legacy recording storage has been retired. Inspect MCAP datasets in Data.".to_owned()],
+                    ));
+                }
                 let recording = commands
                     .state
                     .hardware()
@@ -611,6 +616,9 @@ impl RecordingCommands {
             .execute(async move {
                 let _activity = activity;
                 commands.require_catalog_ready()?;
+                if !commands.state.storage().legacy_recording_available().await? {
+                    return Err(BackendCommandError::conflict("Live recording is unavailable after the MCAP migration. Browse imported datasets in Data; the MCAP recording producer is the next migration step."));
+                }
                 let adapter = RecordingAdapter::new(&commands.state);
                 let result = RecordingActions::new(&adapter)
                     .start(StartRecordingCommand::new(dataset_id, Vec::new(), None))
