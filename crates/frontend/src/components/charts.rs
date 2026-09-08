@@ -11,7 +11,7 @@ use charming::element::{
 use dioxus::prelude::*;
 
 pub(crate) const COLOR_LINE: &str = "#e8e8e6";
-#[cfg(feature = "web")]
+#[cfg(target_arch = "wasm32")]
 pub(crate) const COLOR_INK_SOFT: &str = "#65645f";
 pub(crate) const COLOR_INK_FAINT: &str = "#71706c";
 pub(crate) const COLOR_SURFACE: &str = "#ffffff";
@@ -26,7 +26,7 @@ pub(crate) const COLOR_MEMORY: &str = "#7a58a5";
 
 pub(crate) const MONO_FONT: &str = "ui-monospace, SF Mono, JetBrains Mono, Menlo, monospace";
 
-#[cfg(feature = "web")]
+#[cfg(target_arch = "wasm32")]
 const STUDIO_TOOLTIP_CSS: &str =
     "border-radius: 4px; box-shadow: 0 1px 3px rgba(55, 53, 47, 0.10);";
 
@@ -226,11 +226,11 @@ pub(crate) fn CharmingChart(id: String, chart: Chart, presentation: ChartPresent
         aria_label,
         group,
     } = presentation;
-    #[cfg(not(feature = "web"))]
+    #[cfg(not(target_arch = "wasm32"))]
     let _ = &group;
     let runtime_failed = use_signal(|| false);
 
-    #[cfg(feature = "web")]
+    #[cfg(target_arch = "wasm32")]
     {
         use std::cell::RefCell;
         use std::rc::Rc;
@@ -300,10 +300,10 @@ pub(crate) fn CharmingChart(id: String, chart: Chart, presentation: ChartPresent
     }
 }
 
-#[cfg(feature = "web")]
+#[cfg(target_arch = "wasm32")]
 struct EchartsRuntime;
 
-#[cfg(feature = "web")]
+#[cfg(target_arch = "wasm32")]
 impl EchartsRuntime {
     fn ready() -> bool {
         use wasm_bindgen::JsValue;
@@ -332,7 +332,7 @@ impl EchartsRuntime {
     }
 }
 
-#[cfg(feature = "web")]
+#[cfg(target_arch = "wasm32")]
 struct ChartRenderRequest<'a> {
     id: &'a str,
     chart: &'a Chart,
@@ -341,7 +341,7 @@ struct ChartRenderRequest<'a> {
     observer: &'a std::rc::Rc<std::cell::RefCell<Option<ChartResizeObserver>>>,
 }
 
-#[cfg(feature = "web")]
+#[cfg(target_arch = "wasm32")]
 impl ChartRenderRequest<'_> {
     fn render(self) -> Result<(), ()> {
         if let Some(existing) = self.instance.borrow().as_ref() {
@@ -364,7 +364,7 @@ impl ChartRenderRequest<'_> {
     }
 }
 
-#[cfg(feature = "web")]
+#[cfg(target_arch = "wasm32")]
 trait StudioEcharts {
     fn connect(&self, group: Option<&str>) -> Result<(), ()>;
     fn update(&self, option: &Chart);
@@ -378,7 +378,7 @@ trait StudioEcharts {
     ) -> Result<wasm_bindgen::JsValue, wasm_bindgen::JsValue>;
 }
 
-#[cfg(feature = "web")]
+#[cfg(target_arch = "wasm32")]
 impl StudioEcharts for charming::Echarts {
     fn connect(&self, group: Option<&str>) -> Result<(), ()> {
         use wasm_bindgen::JsCast as _;
@@ -502,13 +502,13 @@ impl StudioEcharts for charming::Echarts {
     }
 }
 
-#[cfg(feature = "web")]
+#[cfg(target_arch = "wasm32")]
 struct ChartResizeObserver {
     observer: web_sys::ResizeObserver,
     _callback: wasm_bindgen::closure::Closure<dyn FnMut(js_sys::Array, web_sys::ResizeObserver)>,
 }
 
-#[cfg(feature = "web")]
+#[cfg(target_arch = "wasm32")]
 impl ChartResizeObserver {
     fn new(
         id: &str,
@@ -548,7 +548,7 @@ impl ChartResizeObserver {
     }
 }
 
-#[cfg(feature = "web")]
+#[cfg(target_arch = "wasm32")]
 impl Drop for ChartResizeObserver {
     fn drop(&mut self) {
         self.observer.disconnect();

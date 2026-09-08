@@ -797,12 +797,12 @@ impl TraceBucket {
 struct EpisodeDataDeadline;
 
 impl EpisodeDataDeadline {
-    #[cfg(all(feature = "web", target_arch = "wasm32"))]
+    #[cfg(target_arch = "wasm32")]
     async fn timer(millis: u32) {
         gloo_timers::future::TimeoutFuture::new(millis).await;
     }
 
-    #[cfg(not(all(feature = "web", target_arch = "wasm32")))]
+    #[cfg(not(target_arch = "wasm32"))]
     async fn timer(_millis: u32) {
         std::future::pending::<()>().await
     }

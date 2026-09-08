@@ -83,6 +83,9 @@ jobs:
           nix develop .#ci --command ruff check training
           nix develop .#ci --command ruff format --check training
 
+      - name: Check native server without the frontend
+        run: nix develop .#ci --command cargo check -p spiral-robotics-studio --features server --locked
+
       - name: Check web target
         run: nix develop .#ci --command cargo check -p spiral-robotics-studio --features web --target wasm32-unknown-unknown
 

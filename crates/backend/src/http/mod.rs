@@ -9,3 +9,5 @@ pub(crate) mod contract;
 
 #[cfg(test)]
 mod contract_tests;
+
+mod web_assets;

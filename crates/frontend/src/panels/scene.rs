@@ -25,9 +25,9 @@ use spiral_robotics_viewport::{
     ArmPose, Command, Condition, Frame as BenchFrame, FrameError, Interaction, Joint, Target,
     Viewport as Bench,
 };
-#[cfg(feature = "web")]
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
-#[cfg(feature = "web")]
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::Closure;
 use web_sys::HtmlCanvasElement;
 
@@ -155,11 +155,11 @@ pub(crate) fn Viewport(
     // Bumped by the window resize listener: the draw below reads it purely so
     // that a resize redraws even when no telemetry is arriving.
     let resized = use_signal(|| 0_u32);
-    #[cfg(feature = "web")]
+    #[cfg(target_arch = "wasm32")]
     let mut resized = resized;
 
     // Held for the life of the component, and dropped — unsubscribing — with it.
-    #[cfg(feature = "web")]
+    #[cfg(target_arch = "wasm32")]
     use_hook(|| {
         Rc::new(WindowListener::new("resize", move || {
             let next = resized.peek().wrapping_add(1);
@@ -931,7 +931,7 @@ struct ViewportDom;
 impl ViewportDom {
     /// Keep receiving moves after the pointer leaves the canvas, so a drag that
     /// runs off the edge of a panel keeps turning the robot.
-    #[cfg(feature = "web")]
+    #[cfg(target_arch = "wasm32")]
     fn capture_pointer(event: &Event<PointerData>) {
         let Some(raw) = event.downcast::<web_sys::PointerEvent>() else {
             return;
@@ -944,10 +944,10 @@ impl ViewportDom {
         }
     }
 
-    #[cfg(not(feature = "web"))]
+    #[cfg(not(target_arch = "wasm32"))]
     fn capture_pointer(_event: &Event<PointerData>) {}
 
-    #[cfg(feature = "web")]
+    #[cfg(target_arch = "wasm32")]
     fn canvas() -> Option<HtmlCanvasElement> {
         web_sys::window()?
             .document()?
@@ -956,20 +956,20 @@ impl ViewportDom {
             .ok()
     }
 
-    #[cfg(not(feature = "web"))]
+    #[cfg(not(target_arch = "wasm32"))]
     fn canvas() -> Option<HtmlCanvasElement> {
         None
     }
 }
 
 /// A window event subscription that ends when the viewport does.
-#[cfg(feature = "web")]
+#[cfg(target_arch = "wasm32")]
 struct WindowListener {
     event: &'static str,
     callback: Closure<dyn FnMut()>,
 }
 
-#[cfg(feature = "web")]
+#[cfg(target_arch = "wasm32")]
 impl WindowListener {
     fn new(event: &'static str, handler: impl FnMut() + 'static) -> Option<Self> {
         let callback = Closure::wrap(Box::new(handler) as Box<dyn FnMut()>);
@@ -980,7 +980,7 @@ impl WindowListener {
     }
 }
 
-#[cfg(feature = "web")]
+#[cfg(target_arch = "wasm32")]
 impl Drop for WindowListener {
     fn drop(&mut self) {
         if let Some(window) = web_sys::window() {

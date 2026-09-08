@@ -8,11 +8,6 @@ publish = false
 [lints]
 workspace = true
 
-[features]
-default = []
-server = ["dioxus/server"]
-web = ["charming/wasm", "dioxus/web"]
-
 [dependencies]
 charming = { version = "0.6.0", default-features = false }
 spiral-robotics-common.workspace = true
@@ -54,6 +49,10 @@ web-sys = { version = "0.3", features = [
     "ResizeObserver",
     "Window",
 ] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+dioxus = { workspace = true, features = ["web"] }
+charming = { version = "0.6.0", default-features = false, features = ["wasm"] }
 
 [dev-dependencies]
 spiral-robotics-common = { workspace = true, features = ["test-support"] }

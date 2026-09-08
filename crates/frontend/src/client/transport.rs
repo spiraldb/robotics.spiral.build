@@ -136,7 +136,7 @@ impl HttpRequest {
     }
 
     pub(crate) async fn send<T: serde::de::DeserializeOwned>(self) -> Result<T, CommandError> {
-        #[cfg(all(feature = "web", target_arch = "wasm32"))]
+        #[cfg(target_arch = "wasm32")]
         {
             use gloo_net::http::{Method, RequestBuilder};
             let abort = RequestCancellation::new()?;
@@ -175,7 +175,7 @@ impl HttpRequest {
             let body = response.text().await.map_err(CommandError::transport)?;
             CommandError::decode_response(status, &body)
         }
-        #[cfg(not(all(feature = "web", target_arch = "wasm32")))]
+        #[cfg(not(target_arch = "wasm32"))]
         {
             // Server rendering has no browser connection or project mount. The
             // mounted browser fetches authoritative state through the same API as
@@ -195,12 +195,12 @@ impl HttpRequest {
 }
 
 impl CommandError {
-    #[cfg(all(feature = "web", target_arch = "wasm32"))]
+    #[cfg(target_arch = "wasm32")]
     fn transport(error: impl std::fmt::Display) -> Self {
         Self::new(CommandFailureCode::Transport, error.to_string())
     }
 
-    #[cfg(any(test, all(feature = "web", target_arch = "wasm32")))]
+    #[cfg(any(test, target_arch = "wasm32"))]
     fn decode_response<T: serde::de::DeserializeOwned>(status: u16, body: &str) -> Result<T, Self> {
         if (200..300).contains(&status) {
             serde_json::from_str(body).map_err(|error| {
@@ -220,9 +220,9 @@ impl CommandError {
     }
 }
 
-#[cfg(all(feature = "web", target_arch = "wasm32"))]
+#[cfg(target_arch = "wasm32")]
 struct RequestCancellation(web_sys::AbortController);
-#[cfg(all(feature = "web", target_arch = "wasm32"))]
+#[cfg(target_arch = "wasm32")]
 impl RequestCancellation {
     fn new() -> Result<Self, CommandError> {
         web_sys::AbortController::new().map(Self).map_err(|_| {
@@ -233,7 +233,7 @@ impl RequestCancellation {
         })
     }
 }
-#[cfg(all(feature = "web", target_arch = "wasm32"))]
+#[cfg(target_arch = "wasm32")]
 impl Drop for RequestCancellation {
     fn drop(&mut self) {
         self.0.abort();

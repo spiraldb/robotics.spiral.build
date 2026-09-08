@@ -8,7 +8,7 @@ use crate::client::project::ProjectClient;
 use crate::format::ClockPresentation;
 use crate::panels::recorded_source::{LoadState, RecordedSource};
 
-#[cfg(feature = "web")]
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::{JsCast as _, JsValue};
 
 /// Camera panels render exactly one declared source. A recorded camera never
@@ -220,7 +220,7 @@ impl RecordedCamera {
     }
 
     fn sync_element(&self, element_id: &str, should_play: bool) {
-        #[cfg(feature = "web")]
+        #[cfg(target_arch = "wasm32")]
         {
             let Some(element) = web_sys::window()
                 .and_then(|window| window.document())
@@ -259,7 +259,7 @@ impl RecordedCamera {
                 let _ = function.call0(element.as_ref());
             }
         }
-        #[cfg(not(feature = "web"))]
+        #[cfg(not(target_arch = "wasm32"))]
         let _ = (element_id, should_play);
     }
 }

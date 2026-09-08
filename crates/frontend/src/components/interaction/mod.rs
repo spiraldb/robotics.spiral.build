@@ -666,7 +666,7 @@ impl BrowserFocus {
         });
     }
 
-    #[cfg(feature = "web")]
+    #[cfg(target_arch = "wasm32")]
     fn element(id: &str) -> bool {
         use wasm_bindgen::JsCast as _;
 
@@ -680,12 +680,12 @@ impl BrowserFocus {
         element.focus().is_ok()
     }
 
-    #[cfg(not(feature = "web"))]
+    #[cfg(not(target_arch = "wasm32"))]
     fn element(_id: &str) -> bool {
         false
     }
 
-    #[cfg(feature = "web")]
+    #[cfg(target_arch = "wasm32")]
     fn select_adjacent_mode(direction: isize) {
         use wasm_bindgen::JsCast as _;
 
@@ -719,10 +719,10 @@ impl BrowserFocus {
         }
     }
 
-    #[cfg(not(feature = "web"))]
+    #[cfg(not(target_arch = "wasm32"))]
     fn select_adjacent_mode(_direction: isize) {}
 
-    #[cfg(feature = "web")]
+    #[cfg(target_arch = "wasm32")]
     fn trap_within(container_id: &str, backwards: bool) -> bool {
         use wasm_bindgen::JsCast as _;
 
@@ -761,7 +761,7 @@ impl BrowserFocus {
             .is_some_and(|element| element.focus().is_ok())
     }
 
-    #[cfg(not(feature = "web"))]
+    #[cfg(not(target_arch = "wasm32"))]
     fn trap_within(_container_id: &str, _backwards: bool) -> bool {
         false
     }

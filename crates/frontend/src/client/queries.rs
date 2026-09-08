@@ -47,9 +47,9 @@ impl QueryRefresh {
 #[derive(Clone, Copy)]
 pub(crate) struct QueryPolicy {
     domain: QueryDomain,
-    #[cfg_attr(not(all(feature = "web", target_arch = "wasm32")), allow(dead_code))]
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     interval_ms: u32,
-    #[cfg_attr(not(all(feature = "web", target_arch = "wasm32")), allow(dead_code))]
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     active: Option<ReadSignal<bool>>,
 }
 impl QueryPolicy {
@@ -102,12 +102,12 @@ impl QueryPolicy {
                 }
             }
         });
-        #[cfg(all(feature = "web", target_arch = "wasm32"))]
+        #[cfg(target_arch = "wasm32")]
         self.use_timer(resource, gloo_timers::future::TimeoutFuture::new);
         resource
     }
 
-    #[cfg(any(test, all(feature = "web", target_arch = "wasm32")))]
+    #[cfg(any(test, target_arch = "wasm32"))]
     fn use_timer<T: 'static, E: 'static, Delay: Future<Output = ()> + 'static>(
         self,
         mut resource: Resource<Result<T, E>>,
@@ -126,11 +126,11 @@ impl QueryPolicy {
                 self.interval_ms.max(5_000)
             };
             let failed = resource.peek().as_ref().is_some_and(Result::is_err);
-            #[cfg(all(feature = "web", target_arch = "wasm32"))]
+            #[cfg(target_arch = "wasm32")]
             let hidden = web_sys::window()
                 .and_then(|window| window.document())
                 .is_some_and(|document| document.hidden());
-            #[cfg(not(all(feature = "web", target_arch = "wasm32")))]
+            #[cfg(not(target_arch = "wasm32"))]
             let hidden = false;
             let interval = normal_interval.max(if hidden {
                 5_000
@@ -154,7 +154,7 @@ impl QueryPolicy {
     async fn with_deadline<T, E: From<CommandError>>(
         request: impl Future<Output = Result<T, E>>,
     ) -> Result<T, E> {
-        #[cfg(all(feature = "web", target_arch = "wasm32"))]
+        #[cfg(target_arch = "wasm32")]
         {
             use futures_util::future::{Either, select};
             match select(
@@ -171,7 +171,7 @@ impl QueryPolicy {
                 .into()),
             }
         }
-        #[cfg(not(all(feature = "web", target_arch = "wasm32")))]
+        #[cfg(not(target_arch = "wasm32"))]
         request.await
     }
 }

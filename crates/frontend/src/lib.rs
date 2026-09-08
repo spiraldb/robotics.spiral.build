@@ -1,4 +1,4 @@
-//! Browser and server-rendered Studio interface.
+//! Browser-only Studio interface. Native compilation is used for unit tests, not SSR.
 //!
 //! The source tree follows the interface users see: product shell,
 //! activities, panels, and shared components.

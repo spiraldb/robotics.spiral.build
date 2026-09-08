@@ -25,7 +25,7 @@ impl NativeEpisode {
         let Some(nanos) = nanos else {
             return "Unknown time".into();
         };
-        #[cfg(all(feature = "web", target_arch = "wasm32"))]
+        #[cfg(target_arch = "wasm32")]
         {
             js_sys::Date::new(&wasm_bindgen::JsValue::from_f64((nanos / 1_000_000) as f64))
                 .to_iso_string()
@@ -33,7 +33,7 @@ impl NativeEpisode {
                 .map(|time| time.replace('T', " ").trim_end_matches('Z').to_owned())
                 .unwrap_or_else(|| "Unknown time".into())
         }
-        #[cfg(not(all(feature = "web", target_arch = "wasm32")))]
+        #[cfg(not(target_arch = "wasm32"))]
         {
             format!("{} ms since Unix epoch", nanos / 1_000_000)
         }

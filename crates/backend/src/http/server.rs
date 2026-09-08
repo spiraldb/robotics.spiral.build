@@ -114,14 +114,14 @@ struct ServerStartup {
     spiral_endpoint: String,
     spiral_spfs_endpoint: String,
     control_settings: ControlSettings,
-    app: fn() -> dioxus::prelude::Element,
+    public: PathBuf,
 }
 
 /// Desktop Studio process launcher.
 pub struct StudioServer;
 
 impl StudioServer {
-    pub fn run(app: fn() -> dioxus::prelude::Element) -> ExitCode {
+    pub fn run() -> ExitCode {
         // Camera probing re-executes this binary as an isolated worker, so this
         // must come before argument parsing.
         match CameraRuntime::run_worker_from_environment() {
@@ -134,10 +134,11 @@ impl StudioServer {
         }
 
         let arguments = StudioServerArguments::parse();
-        let Some(public) = ServerStartup::dioxus_public_directory().filter(|path| path.is_dir())
+        let Some(public) = ServerStartup::dioxus_public_directory()
+            .filter(|path| path.join("index.html").is_file())
         else {
             eprintln!(
-                "error: the Dioxus client bundle is missing; run `dx serve` for development or launch the server produced by `dx bundle`"
+                "error: the Dioxus client bundle is missing; run `dx serve --fullstack` for development or launch the server produced by `dx bundle --fullstack`"
             );
             return ExitCode::FAILURE;
         };
@@ -216,7 +217,7 @@ impl StudioServer {
                 spiral_endpoint,
                 spiral_spfs_endpoint,
                 control_settings,
-                app,
+                public,
             }
             .serve(),
         ) {
@@ -238,14 +239,14 @@ impl ServerStartup {
             spiral_endpoint,
             spiral_spfs_endpoint,
             control_settings,
-            app,
+            public,
         } = self;
         // `dx serve` publishes its chosen address through the standard fullstack
         // environment. An explicit CLI value still wins for standalone launches.
         let bind = arguments
             .access
             .bind
-            .unwrap_or_else(dioxus::cli_config::fullstack_address_or_localhost);
+            .unwrap_or_else(dioxus_cli_config::fullstack_address_or_localhost);
         arguments.access.validate_bind_address(bind)?;
         let spiral_project = arguments
             .spiral
@@ -305,8 +306,8 @@ impl ServerStartup {
                 .monitor_video_recording(),
         );
         let cleanup_state = state.clone();
-        let app = dioxus::server::router(app)
-            .nest("/api", super::routes::StudioApi::router(state.clone()))
+        let app = super::web_assets::StudioWebAssets::new(public)
+            .router(super::routes::StudioApi::router(state.clone()))
             .layer(tower_http::trace::TraceLayer::new_for_http());
 
         // Both the server and this task observe the same edge. The server begins
@@ -367,9 +368,8 @@ impl ServerStartup {
         Ok(())
     }
 
-    /// Resolve only Dioxus's declared public-directory contract. This is a
-    /// guard around Dioxus 0.7's panicking missing-directory path, not bundle
-    /// discovery.
+    /// DX sets the public path during development; a distributed server keeps
+    /// its browser bundle in the adjacent public directory.
     fn dioxus_public_directory() -> Option<PathBuf> {
         std::env::var_os("DIOXUS_PUBLIC_PATH")
             .map(PathBuf::from)

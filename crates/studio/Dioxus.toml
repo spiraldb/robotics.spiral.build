@@ -4,7 +4,7 @@
 # has loaded.
 [application]
 name = "spiral-robotics-studio"
-# Let DX own the stylesheet pipeline too. Both `dx serve` and `dx bundle`
+# Let DX own the stylesheet pipeline too. Both `dx serve --fullstack` and `dx bundle --fullstack`
 # compile it before the client is built, with no checked-in generated CSS.
 tailwind_input = "../frontend/tailwind.css"
 tailwind_output = "../frontend/assets/tailwind.css"

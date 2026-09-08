@@ -40,8 +40,15 @@ Start the studio with:
 
 ```console
 cd crates/studio
-dx serve --release
+dx serve --fullstack --release
 ```
+
+Studio renders entirely in the browser. The native server serves the built HTML,
+JavaScript, WASM, and assets alongside `/api`; it does not compile or render the
+frontend. `--fullstack` tells DX to build and watch both processes, without enabling
+Dioxus SSR or hydration. Build a distributable server and browser bundle with
+`dx bundle --fullstack --release` from `crates/studio`; keep its `public` directory
+beside the server binary.
 
 For a developer-local Workflow Assistant, put the backend-only credential in
 the repository root's ignored `.env.local` file. Studio reads this file
@@ -84,7 +91,7 @@ To connect Studio to a local SpiralDB stack:
 
 ```console
 SPIRAL__DEV=1 \
-dx serve
+dx serve --fullstack
 ```
 
 On first launch, Studio opens **Settings → SpiralDB** so you can enter the

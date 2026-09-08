@@ -306,11 +306,11 @@ impl StudioControllers {
 
 impl Studio {
     fn now_ms() -> f64 {
-        #[cfg(all(feature = "web", target_arch = "wasm32"))]
+        #[cfg(target_arch = "wasm32")]
         {
             js_sys::Date::now()
         }
-        #[cfg(not(all(feature = "web", target_arch = "wasm32")))]
+        #[cfg(not(target_arch = "wasm32"))]
         {
             0.0
         }
@@ -904,7 +904,7 @@ impl StudioProjectState {
                 self.backend.snapshot.set(value.clone());
             }
         });
-        #[cfg(all(feature = "web", target_arch = "wasm32"))]
+        #[cfg(target_arch = "wasm32")]
         use_future(move || async move {
             loop {
                 gloo_timers::future::TimeoutFuture::new(250).await;

@@ -10,22 +10,15 @@ workspace = true
 
 [features]
 default = []
-web = ["dioxus/web", "spiral-robotics-frontend/web"]
-server = [
-    "dioxus/cli-config",
-    "dioxus/server",
-    "dep:spiral-robotics-backend",
-    "spiral-robotics-frontend/server",
-]
+web = ["dep:dioxus", "dep:spiral-robotics-frontend"]
+server = ["dep:spiral-robotics-backend"]
 
-[dependencies]
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+spiral-robotics-frontend = { workspace = true, optional = true }
+dioxus = { workspace = true, features = ["launch", "web"], optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 spiral-robotics-backend = { workspace = true, optional = true }
-spiral-robotics-frontend.workspace = true
-dioxus = { workspace = true, features = [
-    "launch",
-    # DX must launch both processes; HTTP routes are owned by the backend.
-    "fullstack",
-] }
 
 [[bin]]
 name = "spiral-robotics-studio"

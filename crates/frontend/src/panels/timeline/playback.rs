@@ -8,34 +8,29 @@ use spiral_robotics_common::recording::{ReplayPhase, ReplayProgress, ReplayPurpo
 impl TimelineController {
     /// Mount the preview timer in the owning activity. Dropping that scope stops the timer.
     pub(crate) fn use_clock(self, on_sample: EventHandler<(String, f64)>) {
-        #[cfg(not(feature = "web"))]
-        let _ = on_sample;
-        #[cfg(feature = "web")]
-        {
-            let mut playhead = self.playhead_signal();
-            let mut last_tick = self.preview_tick_signal();
-            use_future(move || async move {
-                loop {
-                    gloo_timers::future::TimeoutFuture::new(33).await;
-                    if !self.preview_playing() {
-                        last_tick.set(None);
-                        continue;
-                    }
-                    let Some((episode, duration)) = self.preview_target() else {
-                        self.stop_preview();
-                        continue;
-                    };
-                    let now = js_sys::Date::now() / 1_000.0;
-                    let clock = PreviewClock::new(duration, last_tick.replace(Some(now)));
-                    let next = clock.advance(playhead(), now);
-                    playhead.set(next);
-                    on_sample.call((episode, next));
-                    if next >= duration {
-                        self.stop_preview();
-                    }
+        let mut playhead = self.playhead_signal();
+        let mut last_tick = self.preview_tick_signal();
+        use_future(move || async move {
+            loop {
+                gloo_timers::future::TimeoutFuture::new(33).await;
+                if !self.preview_playing() {
+                    last_tick.set(None);
+                    continue;
                 }
-            });
-        }
+                let Some((episode, duration)) = self.preview_target() else {
+                    self.stop_preview();
+                    continue;
+                };
+                let now = js_sys::Date::now() / 1_000.0;
+                let clock = PreviewClock::new(duration, last_tick.replace(Some(now)));
+                let next = clock.advance(playhead(), now);
+                playhead.set(next);
+                on_sample.call((episode, next));
+                if next >= duration {
+                    self.stop_preview();
+                }
+            }
+        });
     }
 
     pub(crate) fn playback(self, replay: Option<&ReplayProgress>) -> TimelinePlayback {
@@ -61,13 +56,11 @@ impl TimelineController {
 }
 
 /// Bound wall-clock gaps and clamp the final frame to the episode duration.
-#[cfg(any(test, feature = "web"))]
 struct PreviewClock {
     duration: f64,
     previous_tick: Option<f64>,
 }
 
-#[cfg(any(test, feature = "web"))]
 impl PreviewClock {
     fn new(duration: f64, previous_tick: Option<f64>) -> Self {
         Self {

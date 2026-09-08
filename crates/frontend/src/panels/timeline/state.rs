@@ -19,7 +19,6 @@ impl PreviewTransport {
         matches!(self, Self::Playing { .. })
     }
 
-    #[cfg(any(test, feature = "web"))]
     pub(crate) fn target(&self) -> Option<(String, f64)> {
         match self {
             Self::Stopped => None,
@@ -37,7 +36,6 @@ pub(crate) struct TimelineController {
     preview: Signal<PreviewTransport>,
     follow_live: Signal<bool>,
     robot_sync_target: Signal<Option<TimelineTarget>>,
-    #[cfg(feature = "web")]
     preview_tick_seconds: Signal<Option<f64>>,
 }
 
@@ -48,7 +46,6 @@ impl TimelineController {
             preview: Signal::new(PreviewTransport::default()),
             follow_live: Signal::new(true),
             robot_sync_target: Signal::new(None),
-            #[cfg(feature = "web")]
             preview_tick_seconds: Signal::new(None),
         })
     }
@@ -65,7 +62,6 @@ impl TimelineController {
         self.robot_sync_target
     }
 
-    #[cfg(feature = "web")]
     pub(crate) const fn preview_tick_signal(self) -> Signal<Option<f64>> {
         self.preview_tick_seconds
     }
@@ -79,7 +75,6 @@ impl TimelineController {
 
     pub(crate) fn stop_preview(mut self) {
         self.preview.set(PreviewTransport::Stopped);
-        #[cfg(feature = "web")]
         self.preview_tick_seconds.set(None);
     }
 
@@ -87,7 +82,6 @@ impl TimelineController {
         self.preview.read().is_playing()
     }
 
-    #[cfg(feature = "web")]
     pub(crate) fn preview_target(&self) -> Option<(String, f64)> {
         self.preview.read().target()
     }
