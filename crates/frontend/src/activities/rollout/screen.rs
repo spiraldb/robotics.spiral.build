@@ -1,5 +1,6 @@
 //! Route-owned Rollout panel registry and follower-focused composition.
 
+use dioxus::prelude::*;
 use dioxus_workbench::{Panel, PanelLayout};
 
 use crate::shell::activity::PanelRole;
@@ -22,5 +23,17 @@ impl ScreenWorkspaceDefinition {
             .collect::<Vec<_>>();
         let layout: PanelLayout = layout_panels.default_panel_layout_with_workbench(0.27);
         Self::new(panels, layout, "spiral_robotics.panel-layout.v6.rollout")
+    }
+}
+
+#[component]
+pub(crate) fn RolloutWorkspace() -> Element {
+    let studio = crate::shell::state::Studio::use_studio(crate::shell::activity::Activity::Rollout);
+    studio.use_hardware_polling();
+    studio.use_rollout_polling();
+    rsx! {
+        crate::shell::frame::WorkspaceFrame {
+            crate::shell::workspace::EpisodeWorkspace { activity: crate::shell::activity::Activity::Rollout }
+        }
     }
 }

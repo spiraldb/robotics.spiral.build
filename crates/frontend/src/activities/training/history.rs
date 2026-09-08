@@ -1,4 +1,5 @@
-//! History is fetched and retained only by the mounted Training or Rollout view.
+//! Training retains history across route changes and polls only while active.
+//! Rollout requests its own run/checkpoint choices while its workbench is mounted.
 use crate::activities::training::TrainingClient;
 use crate::client::queries::{QueryDomain, QueryPolicy};
 use crate::shell::frame::TrainingStatus;
@@ -34,11 +35,11 @@ impl TrainingHistory {
     fn use_response(
         request: Resource<Result<TrainingSnapshot, crate::client::CommandError>>,
     ) -> Self {
-        let mut history = Self {
-            snapshot: use_signal(TrainingSnapshot::default),
-            error: use_signal(|| None),
-            loaded: use_signal(|| false),
-        };
+        let mut history = crate::shell::view_state::ViewState::use_retained(|| Self {
+            snapshot: Signal::new(TrainingSnapshot::default()),
+            error: Signal::new(None),
+            loaded: Signal::new(false),
+        });
         use_effect(move || {
             let result = request.read();
             if !request.finished() {
@@ -82,6 +83,10 @@ mod tests {
     struct HistoryHarness(Rc<RefCell<Option<(Signal<bool>, TrainingHistory)>>>);
     impl HistoryHarness {
         fn render(self) -> Element {
+            crate::shell::view_state::ProjectViewStates::use_provider();
+            crate::shell::view_state::ViewState::use_provider(
+                crate::shell::activity::Activity::Training,
+            );
             let complete = use_signal(|| false);
             let request = use_resource(move || {
                 let complete = complete();

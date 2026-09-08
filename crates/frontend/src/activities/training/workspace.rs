@@ -37,7 +37,7 @@ const EMPTY_RUN_PANEL_ID: &str = "training-run-empty";
 const TRAINING_CHART_POINT_BUDGET: usize = 1_200;
 
 #[component]
-pub(crate) fn TrainingWorkspace() -> Element {
+fn TrainingPanels() -> Element {
     let studio = studio();
     let dataset_id = studio.selected_dataset().read().to_owned();
     let controller = super::state::TrainingController::use_controller(
@@ -1518,4 +1518,13 @@ mod tests {
         assert_eq!(option["series"][0]["id"], "train-loss");
         assert_eq!(option["series"][1]["id"], "validation-loss");
     }
+}
+
+#[component]
+pub(crate) fn TrainingWorkspace() -> Element {
+    let studio =
+        crate::shell::state::Studio::use_studio(crate::shell::activity::Activity::Training);
+    studio.use_relation_catalog();
+    studio.data_controller().use_polling(studio);
+    rsx! { crate::shell::frame::WorkspaceFrame { TrainingPanels {} } }
 }

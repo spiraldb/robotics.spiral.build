@@ -7,6 +7,7 @@ pub(crate) mod notifications;
 pub(crate) mod project;
 pub(crate) mod routes;
 pub(crate) mod state;
+pub(crate) mod view_state;
 pub(crate) mod workspace;
 
 use crate::components::interaction::UiStyles;

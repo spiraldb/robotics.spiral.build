@@ -1,16 +1,18 @@
 //! URL routes and the low-frequency Studio shell shared by every screen.
 
-use crate::components::interaction::BrowserFocus;
 use dioxus::prelude::*;
 
+use crate::activities::data::screen::DataWorkspace;
+use crate::activities::live::screen::LiveWorkspace;
+use crate::activities::rollout::screen::RolloutWorkspace;
 use crate::activities::training::workspace::TrainingWorkspace;
 use crate::activities::workflow::workspace::WorkflowWorkspace;
-use crate::settings::panel::SettingsPanel;
+use crate::settings::panel::SettingsWorkspace;
 use crate::shell::activity::Activity;
-use crate::shell::frame::{ActivityRail, StatusBar};
+use crate::shell::frame::ActivityRail;
 use crate::shell::project::ProjectSessionSignals;
-use crate::shell::state::Studio;
-use crate::shell::workspace::EpisodeWorkspace;
+use crate::shell::state::StudioProjectState;
+use crate::shell::view_state::ProjectViewStates;
 use spiral_robotics_common::project::ProjectSessionInfo;
 
 const TAILWIND: Asset = asset!("/assets/tailwind.css");
@@ -21,35 +23,18 @@ const FAVICON: &str = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/s
 pub(crate) enum StudioRoute {
     #[layout(StudioShell)]
     #[redirect("/", || StudioRoute::Live {})]
-    #[route("/live")]
+    #[route("/live", LiveWorkspace)]
     Live {},
-    #[route("/data")]
+    #[route("/data", DataWorkspace)]
     Data {},
-    #[route("/workflow")]
+    #[route("/workflow", WorkflowWorkspace)]
     Workflow {},
-    #[route("/training")]
+    #[route("/training", TrainingWorkspace)]
     Training {},
-    #[route("/rollout")]
+    #[route("/rollout", RolloutWorkspace)]
     Rollout {},
-}
-
-#[derive(Clone, Copy)]
-struct StudioShellSignals {
-    settings_open: Signal<bool>,
-    settings_busy: Signal<bool>,
-    settings_was_open: Signal<bool>,
-    project_setup_prompted: Signal<bool>,
-}
-
-impl StudioShellSignals {
-    fn use_signals() -> Self {
-        Self {
-            settings_open: use_signal(|| false),
-            settings_busy: use_signal(|| false),
-            settings_was_open: use_signal(|| false),
-            project_setup_prompted: use_signal(|| false),
-        }
-    }
+    #[route("/settings", SettingsWorkspace)]
+    Settings {},
 }
 
 impl StudioRoute {
@@ -60,7 +45,12 @@ impl StudioRoute {
             Self::Workflow {} => Activity::Workflow,
             Self::Training {} => Activity::Training,
             Self::Rollout {} => Activity::Rollout,
+            Self::Settings {} => Activity::Settings,
         }
+    }
+
+    pub(crate) fn label(&self) -> &'static str {
+        self.activity().label()
     }
 
     pub(crate) const fn for_activity(activity: Activity) -> Self {
@@ -70,7 +60,20 @@ impl StudioRoute {
             Activity::Workflow => Self::Workflow {},
             Activity::Training => Self::Training {},
             Activity::Rollout => Self::Rollout {},
+            Activity::Settings => Self::Settings {},
         }
+    }
+
+    #[cfg(test)]
+    fn all() -> [Self; 6] {
+        [
+            Self::Live {},
+            Self::Data {},
+            Self::Workflow {},
+            Self::Training {},
+            Self::Rollout {},
+            Self::Settings {},
+        ]
     }
 }
 
@@ -79,8 +82,7 @@ pub(crate) fn StudioRouter() -> Element {
     rsx! { Router::<StudioRoute> {} }
 }
 
-/// Shared connection settings and hardware state live above the route outlet.
-/// Training and Workflow own their browser state below it; jobs live on the backend.
+/// Only project connection and configuration reads run above the view sessions.
 #[component]
 fn StudioShell() -> Element {
     let sessions = ProjectSessionSignals::use_provider();
@@ -104,138 +106,44 @@ fn StudioShell() -> Element {
 fn ProjectStudioShell(session: ProjectSessionInfo) -> Element {
     let sessions = ProjectSessionSignals::current();
     use_context_provider(|| sessions.client(session));
-    let studio = Studio::use_studio();
+    ProjectViewStates::use_provider();
+    let project = StudioProjectState::use_provider();
+    project.use_polling();
     let route = use_route::<StudioRoute>();
-    let activity = route.activity();
     let navigator = use_navigator();
-    let StudioShellSignals {
-        mut settings_open,
-        mut settings_busy,
-        mut settings_was_open,
-        mut project_setup_prompted,
-    } = StudioShellSignals::use_signals();
-    let settings_result = studio.settings_result();
-    let loaded_settings = studio.loaded_settings();
-    let settings_error = settings_result
-        .as_ref()
-        .and_then(|result| result.as_ref().err())
-        .cloned();
-    let data = studio.data_controller();
-    studio.use_polling();
-    let timeline = studio.timeline_controller();
-    let settings_are_open = settings_open();
-    use_effect(use_reactive((&loaded_settings,), move |(settings,)| {
-        if settings
+    let mut project_setup_prompted = use_signal(|| false);
+    use_effect(move || {
+        if project
+            .loaded_settings()
             .as_ref()
             .is_some_and(|settings| settings.spiral().project_id().trim().is_empty())
             && !project_setup_prompted()
         {
             project_setup_prompted.set(true);
-            settings_open.set(true);
+            navigator.push(StudioRoute::Settings {});
         }
-    }));
-    use_effect(use_reactive(
-        (&settings_are_open,),
-        move |(settings_are_open,)| {
-            let was_open = settings_was_open();
-            if !settings_are_open && was_open {
-                BrowserFocus::after_render("settings-rail-trigger".to_owned());
-            }
-            if was_open != settings_are_open {
-                settings_was_open.set(settings_are_open);
-            }
-        },
-    ));
-
+    });
+    let title = format!("Spiral Robotics Studio · {}", route.label());
     rsx! {
         document::Script { src: ECHARTS_RUNTIME }
-        document::Title { if settings_are_open { "Spiral Robotics Studio · Settings" } else { "Spiral Robotics Studio · {activity.label()}" } }
+        document::Title { "{title}" }
         document::Link { rel: "icon", href: FAVICON }
         document::Meta { name: "color-scheme", content: "light" }
-
-        div {
-            class: "studio-shell studio-shell-v2",
-            tabindex: "-1",
-            onkeydown: move |event| {
-                if event.key() == Key::Escape && settings_open() && !settings_busy() {
-                    settings_open.set(false);
-                }
-            },
-            div {
-                class: "studio-shell-background",
-                main { class: "studio-v2-body",
+        div { class: "studio-shell studio-shell-v2",
+            div { class: "studio-shell-background",
+                main { class: "studio-v2-body studio-route-layout",
                     ActivityRail {
-                        state: crate::shell::frame::ActivityRailState::new(
-                            activity,
-                            settings_are_open,
-                        ),
+                        activity: route.activity(),
                         on_activity: move |next| {
-                            timeline.stop_preview();
-                            studio.notifications().write().close();
-                            settings_open.set(false);
+                            project.close_notifications();
                             navigator.push(StudioRoute::for_activity(next));
                         },
-                        on_settings: move |_| settings_open.set(true),
                     }
-                    if settings_are_open {
-                        SettingsPanel {
-                            state: crate::settings::panel::SettingsLoadState::new(
-                                loaded_settings.clone(),
-                                settings_error.clone(),
-                            ),
-                            handlers: crate::settings::panel::SettingsPanelHandlers::new(
-                                move |_| {
-                                    if !settings_busy() {
-                                        settings_open.set(false);
-                                    }
-                                },
-                                move |_| {
-                                    studio.refresh_settings();
-                                    studio.refresh_relation_catalog();
-                                    data.invalidate_episode_catalog();
-                                },
-                                move |busy| settings_busy.set(busy),
-                            ),
-                        }
-                    } else {
-                        Outlet::<StudioRoute> {}
-                    }
-                }
-                StatusBar {
-                    mode: activity,
-                    on_open_episode: move |episode| {
-                        data.set_selected_episode(Some(episode));
-                        navigator.push(StudioRoute::Data {});
-                    },
+                    Outlet::<StudioRoute> {}
                 }
             }
         }
     }
-}
-
-#[component]
-fn Live() -> Element {
-    rsx! { EpisodeWorkspace { activity: Activity::Live } }
-}
-
-#[component]
-fn Data() -> Element {
-    rsx! { EpisodeWorkspace { activity: Activity::Data } }
-}
-
-#[component]
-fn Workflow() -> Element {
-    rsx! { WorkflowWorkspace {} }
-}
-
-#[component]
-fn Training() -> Element {
-    rsx! { TrainingWorkspace {} }
-}
-
-#[component]
-fn Rollout() -> Element {
-    rsx! { EpisodeWorkspace { activity: Activity::Rollout } }
 }
 
 #[cfg(test)]
@@ -249,5 +157,10 @@ mod tests {
         assert_eq!(StudioRoute::Workflow {}.to_string(), "/workflow");
         assert_eq!(StudioRoute::Training {}.to_string(), "/training");
         assert_eq!(StudioRoute::Rollout {}.to_string(), "/rollout");
+        assert_eq!(StudioRoute::Settings {}.to_string(), "/settings");
+        for route in StudioRoute::all() {
+            assert_eq!(StudioRoute::for_activity(route.activity()), route);
+        }
+        assert_eq!(StudioRoute::Settings {}.activity(), Activity::Settings);
     }
 }

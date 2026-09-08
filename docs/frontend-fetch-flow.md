@@ -34,29 +34,64 @@ flowchart LR
 3. `crates/frontend/src/shell/project.rs` fetches project identity and readiness
    together. A new ID replaces the keyed project subtree in `shell/routes.rs`.
    A failed read keeps the same subtree and its drafts but withdraws readiness.
-4. `crates/frontend/src/shell/state.rs` installs fetched setup, telemetry, and
-   rollout values. Training and Workflow create their controllers and history
-   resources inside their mounted workspaces. The shell keeps only compact
-   status-bar summaries for these features, not their histories or drafts.
+4. `crates/frontend/src/shell/state.rs` separates `StudioProjectState` from each
+   routed view's `Studio` instance. Project state contains shared configuration,
+   setup/readiness, notifications, and navigation requests. Each feature explicitly
+   starts the reads it needs when its route mounts. `shell/view_state.rs` provides
+   project-lived storage for plain feature values and signals; resources and timers
+   belong to mounted components and are never put in that storage.
 5. `crates/backend/src/project_session/queries.rs` exposes project reads;
    `project_session/setup.rs` owns the catalog-backed setup projection. Training,
    rollout, and recording own their snapshots beside their commands. The backend's project admission lock
    still prevents reads or commands from crossing a project replacement.
 
+## State ownership
+
+| Owner | Retained state |
+| --- | --- |
+| Project shell | Connection/readiness, saved configuration, robot setup snapshot, notifications, cross-view navigation requests |
+| Live | Capture dataset, robot/joint selection, telemetry freshness, recording samples, timeline position |
+| Data | Dataset search, selected dataset/episode/topic/message, episode page, SQL drafts and results, timeline position |
+| Training | Dataset choice, training draft, selected/open runs, accepted history |
+| Workflow | Workflow draft, graph selection, assistant drafts and accepted history, active panel |
+| Rollout | Checkpoint selection, duration draft, robot selection, telemetry and rollout snapshot |
+| Settings | Selected section, unsaved configuration, test/save results, robot selection and calibration telemetry |
+
+All six views, including Settings, are ordinary routed components under the
+`StudioShell` layout. For example, `/live` renders `LiveWorkspace` and `/data`
+renders `DataWorkspace` through `Outlet<StudioRoute>`. Navigating unmounts the
+previous route and mounts the next one. There are no empty route components,
+hidden retained view components, or per-view activity flags.
+
+The shell provides storage, but each feature defines and initializes its own
+state through `ViewState::use_retained`. State is created on first use, keyed by
+activity and Rust type, and its signals belong to the keyed project scope.
+Factories create only plain values and signals, never hooks or asynchronous
+resources. Reusable controllers have separate instances in views that need them;
+changing Live's capture dataset does not change Training's draft.
+
 ## Refresh behavior
 
-| Read | Normal interval after completion |
-| --- | --- |
-| Project identity and readiness | 1 second |
-| Latest telemetry | 50 milliseconds |
-| Recording chart samples | 200 milliseconds |
-| Setup: robots, cameras, mode, issues | 2 seconds |
-| Active Workflow, Assistant, rollout | 500 milliseconds |
-| Active training | 1 second |
-| Idle jobs and dataset/episode catalogs | 5 seconds |
-| Settings and relation catalog | 10 seconds |
+| Read | Owner / when enabled | Interval after completion |
+| --- | --- | --- |
+| Project identity and readiness | Project connection | 1 second |
+| Setup: robots, cameras, mode, issues | Project shell | 2 seconds |
+| Settings | Project shell; shared configuration | 10 seconds |
+| Latest telemetry | Current Live, Rollout, or Settings view | 50 milliseconds |
+| Recording chart samples | Live, with a recording present | 200 milliseconds |
+| Workflow and Assistant | Current Workflow view | 500 milliseconds when busy; 5 seconds idle |
+| Rollout snapshot | Current Rollout view | 500 milliseconds when busy; 5 seconds idle |
+| Training history / checkpoint choices | Current Training or Rollout view | 1 second |
+| Dataset / episode choices for capture and training | Current Live or Training view | 5 seconds |
+| Relation catalog | Current Data, Workflow, or Training view | 10 seconds |
+| Native dataset inspection / previews | Mounted Data panels | On selection or explicit refresh |
 
-An invalidation refreshes the affected resources immediately. The timer waits for
+Settings needs hardware readings for robot calibration and setup commands. This
+is independent of Live's retained telemetry. Data, Training, and Workflow do not
+poll telemetry, recording samples, or rollout status.
+
+An invalidation refreshes enabled resources immediately. Inactive views stay idle
+and fetch with the latest inputs when reactivated. The timer waits for
 completion before counting its delay; it never launches overlapping reads or
 restarts a slow read just because another interval elapsed. Changed query inputs
 and invalidations cancel obsolete reads. Ordinary backend polling reads are cancellable and
@@ -73,11 +108,25 @@ polls of a frozen sample do not make robot controls appear fresh.
 
 ## History and editing
 
-Training history is requested only while Training is mounted, or while Rollout
-needs runs and checkpoint choices. Workflow and Assistant history is requested
-only while Workflow is mounted. Leaving these views drops their browser state
-and polling; reopening them reads the current backend state. Unsaved drafts and
-local selections therefore have the same lifetime as their view.
+Each view retains drafts, selections, and accepted results in project-lived
+storage. Leaving a route unmounts its components, including media streams,
+canvases, resources, and timers. Dioxus cancels those component-owned tasks.
+Returning constructs fresh components, retrieves retained values, and requests
+current backend data. Dock layout uses the workbench's existing persistence.
+
+`QueryPolicy` does not need a view activity flag. An unmounted view has no resource
+to refresh; returning starts a fresh read with current inputs. Every docked panel
+in the current view counts as active, even when its tab is hidden.
+
+Settings is an ordinary `/settings` route. It has no Close/Done action or Escape
+handler that returns to a previous view. Its section and draft survive navigation;
+Discard changes resets the draft without navigating. Explicitly submitted commands
+are owned by the project and can complete after navigation. A project change drops
+all retained values and cancels the project's frontend tasks.
+
+Telemetry freshness is cleared on mount and unmount, so a cached sample cannot
+enable robot controls before an advancing sample arrives. Browser preview playback
+stops on unmount while its timeline position remains retained.
 
 The backend loads each feature once on its first request, sharing concurrent
 initialization attempts and retrying failed loads. Recovery finishes under project

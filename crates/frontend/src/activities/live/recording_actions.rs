@@ -117,7 +117,7 @@ impl Studio {
                     summary.id().to_owned(),
                 );
             }
-            completion.on_completed.call(summary);
+            (completion.on_completed)(summary);
             Ok(())
         });
     }
@@ -240,19 +240,19 @@ impl Studio {
 pub(crate) struct RecordingCompletion {
     data: DataController,
     keep: bool,
-    on_completed: EventHandler<EpisodeInfo>,
+    on_completed: Box<dyn FnOnce(EpisodeInfo)>,
 }
 
 impl RecordingCompletion {
-    pub(crate) const fn new(
+    pub(crate) fn new(
         data: DataController,
         keep: bool,
-        on_completed: EventHandler<EpisodeInfo>,
+        on_completed: impl FnOnce(EpisodeInfo) + 'static,
     ) -> Self {
         Self {
             data,
             keep,
-            on_completed,
+            on_completed: Box::new(on_completed),
         }
     }
 }

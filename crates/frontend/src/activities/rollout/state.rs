@@ -17,10 +17,10 @@ pub(crate) struct RolloutController {
 
 impl RolloutController {
     pub(crate) fn use_controller() -> Self {
-        Self {
-            checkpoint: use_signal(|| None),
-            duration_draft: use_signal(|| DEFAULT_ROLLOUT_DURATION_SECONDS.to_string()),
-        }
+        crate::shell::view_state::ViewState::use_retained(|| Self {
+            checkpoint: Signal::new(None),
+            duration_draft: Signal::new(DEFAULT_ROLLOUT_DURATION_SECONDS.to_string()),
+        })
     }
 
     pub(crate) fn checkpoint(&self) -> Option<String> {

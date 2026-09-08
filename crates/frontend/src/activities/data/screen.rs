@@ -1,6 +1,5 @@
 //! Route-owned Data panel registry and first-open composition.
 
-#[cfg(test)]
 use dioxus::prelude::*;
 use dioxus_workbench::{LayoutNode, Panel, PanelLayout, SplitAxis};
 
@@ -111,5 +110,22 @@ mod tests {
         assert_eq!(tile("query").as_deref(), Some("dataset-inspector"));
         assert_eq!(tile("query-result").as_deref(), Some("dataset-inspector"));
         assert_eq!(tile("relations").as_deref(), Some("dataset-inspector"));
+    }
+}
+
+#[component]
+pub(crate) fn DataWorkspace() -> Element {
+    let studio = crate::shell::state::Studio::use_studio(crate::shell::activity::Activity::Data);
+    studio.use_relation_catalog();
+    let project = consume_context::<crate::shell::state::StudioProjectState>();
+    use_effect(move || {
+        if let Some(episode) = project.take_requested_episode() {
+            studio.data_controller().set_selected_episode(Some(episode));
+        }
+    });
+    rsx! {
+        crate::shell::frame::WorkspaceFrame {
+            crate::shell::workspace::EpisodeWorkspace { activity: crate::shell::activity::Activity::Data }
+        }
     }
 }

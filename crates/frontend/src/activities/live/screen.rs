@@ -1,5 +1,6 @@
 //! Route-owned Live panel registry and first-open composition.
 
+use dioxus::prelude::*;
 use dioxus_workbench::{Panel, PanelLayout};
 
 use crate::shell::activity::PanelRole;
@@ -25,5 +26,18 @@ impl ScreenWorkspaceDefinition {
         let layout: PanelLayout =
             layout_panels.default_panel_layout_with_workbench(LIVE_WORKBENCH_FRACTION);
         Self::new(panels, layout, "spiral_robotics.panel-layout.v7.live")
+    }
+}
+
+#[component]
+pub(crate) fn LiveWorkspace() -> Element {
+    let studio = crate::shell::state::Studio::use_studio(crate::shell::activity::Activity::Live);
+    studio.use_hardware_polling();
+    studio.use_recording_polling();
+    studio.data_controller().use_polling(studio);
+    rsx! {
+        crate::shell::frame::WorkspaceFrame {
+            crate::shell::workspace::EpisodeWorkspace { activity: crate::shell::activity::Activity::Live }
+        }
     }
 }

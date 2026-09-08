@@ -52,14 +52,14 @@ pub(crate) struct TimelineController {
 
 impl TimelineController {
     pub(crate) fn use_controller() -> Self {
-        Self {
-            playhead: use_signal(|| 0.0),
-            preview: use_signal(PreviewTransport::default),
-            follow_live: use_signal(|| true),
-            robot_sync_target: use_signal(|| None),
+        crate::shell::view_state::ViewState::use_retained(|| Self {
+            playhead: Signal::new(0.0),
+            preview: Signal::new(PreviewTransport::default()),
+            follow_live: Signal::new(true),
+            robot_sync_target: Signal::new(None),
             #[cfg(feature = "web")]
-            preview_tick_seconds: use_signal(|| None),
-        }
+            preview_tick_seconds: Signal::new(None),
+        })
     }
 
     pub(crate) const fn playhead_signal(self) -> Signal<f64> {
@@ -238,17 +238,15 @@ impl TimelineActionContext {
                             RecordingCompletion::new(
                                 data,
                                 keep,
-                                EventHandler::new(
-                                    move |_: spiral_robotics_common::recording::EpisodeInfo| {
-                                        episode_data_cache.write().invalidate(&finished_episode);
-                                        let next_revision =
-                                            episode_preview_revision.peek().wrapping_add(1);
-                                        episode_preview_revision.set(next_revision);
-                                        episode_preview_state.set(None);
-                                        automatic_preview_target.set(None);
-                                        interactive_preview_target.set(None);
-                                    },
-                                ),
+                                move |_: spiral_robotics_common::recording::EpisodeInfo| {
+                                    episode_data_cache.write().invalidate(&finished_episode);
+                                    let next_revision =
+                                        episode_preview_revision.peek().wrapping_add(1);
+                                    episode_preview_revision.set(next_revision);
+                                    episode_preview_state.set(None);
+                                    automatic_preview_target.set(None);
+                                    interactive_preview_target.set(None);
+                                },
                             ),
                         );
                     }

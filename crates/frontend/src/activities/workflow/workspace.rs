@@ -47,7 +47,7 @@ enum AssistantInline {
 }
 
 #[component]
-pub(crate) fn WorkflowWorkspace() -> Element {
+fn WorkflowPanels() -> Element {
     let studio = studio();
     let controller = studio.use_workflow_controller();
     controller.use_polling(studio);
@@ -1925,4 +1925,12 @@ mod tests {
             "workflow-run-badge is-warning"
         );
     }
+}
+
+#[component]
+pub(crate) fn WorkflowWorkspace() -> Element {
+    let studio =
+        crate::shell::state::Studio::use_studio(crate::shell::activity::Activity::Workflow);
+    studio.use_relation_catalog();
+    rsx! { crate::shell::frame::WorkspaceFrame { WorkflowPanels {} } }
 }

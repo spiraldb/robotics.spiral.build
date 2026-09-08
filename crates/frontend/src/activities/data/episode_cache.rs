@@ -329,11 +329,11 @@ pub(crate) struct EpisodePreviewSignals {
 
 impl EpisodePreviewSignals {
     pub(crate) fn use_signals() -> Self {
-        Self {
-            state: use_signal(|| None),
-            revision: use_signal(|| 0),
-            cache: use_signal(EpisodeInspectionCache::default),
-        }
+        crate::shell::view_state::ViewState::use_retained(|| Self {
+            state: Signal::new(None),
+            revision: Signal::new(0),
+            cache: Signal::new(EpisodeInspectionCache::default()),
+        })
     }
 
     pub(crate) const fn new(

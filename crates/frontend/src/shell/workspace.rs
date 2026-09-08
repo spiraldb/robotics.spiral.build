@@ -69,6 +69,29 @@ impl ScreenWorkspaceDefinition {
     }
 }
 
+#[derive(Clone, Copy)]
+struct EpisodeWorkspaceSignals {
+    sampled_replay_slot: Signal<Option<(String, u64)>>,
+    automatic_preview_target: Signal<Option<(String, u64)>>,
+    interactive_preview_target: Signal<Option<(String, u64)>>,
+    split_resize_revision: Signal<u64>,
+    #[cfg(feature = "web")]
+    sampled_preview_slot: Signal<Option<(String, u64)>>,
+}
+
+impl EpisodeWorkspaceSignals {
+    fn use_signals() -> Self {
+        crate::shell::view_state::ViewState::use_retained(|| Self {
+            sampled_replay_slot: Signal::new(None),
+            automatic_preview_target: Signal::new(None),
+            interactive_preview_target: Signal::new(None),
+            split_resize_revision: Signal::new(0),
+            #[cfg(feature = "web")]
+            sampled_preview_slot: Signal::new(None),
+        })
+    }
+}
+
 /// Shared episode-clock behavior for the routes that need robot, camera, and
 /// timeline evidence. Each route owns its panel registry and layout; this host
 /// owns only the cross-panel synchronization contract.
@@ -84,18 +107,20 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
     let spiral_query_available = configuration.spiral_query_available();
     let timeline = studio.timeline_controller();
     let mut playhead = timeline.playhead_signal();
-    #[cfg(feature = "web")]
-    let mut sampled_preview_slot = use_signal(|| None::<(String, u64)>);
+    let EpisodeWorkspaceSignals {
+        mut sampled_replay_slot,
+        mut automatic_preview_target,
+        mut interactive_preview_target,
+        mut split_resize_revision,
+        #[cfg(feature = "web")]
+        mut sampled_preview_slot,
+    } = EpisodeWorkspaceSignals::use_signals();
     #[cfg(feature = "web")]
     let mut preview_tick_seconds = timeline.preview_tick_signal();
     let follow_live = timeline.follow_live_signal();
     let mut robot_sync_target = timeline.robot_sync_target_signal();
     let (mut episode_preview_state, mut episode_preview_revision, episode_data_cache) =
         EpisodePreviewSignals::use_signals().into_signals();
-    let mut sampled_replay_slot = use_signal(|| None::<(String, u64)>);
-    let mut automatic_preview_target = use_signal(|| None::<(String, u64)>);
-    let mut interactive_preview_target = use_signal(|| None::<(String, u64)>);
-    let mut split_resize_revision = use_signal(|| 0_u64);
 
     // Visual preview is a controller-owned clock. It advances the one playhead
     // and samples every recorded renderer from the same episode/time identity.
@@ -737,7 +762,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
             .with_class("rollout-inference-editor");
             ScreenWorkspaceDefinition::for_rollout(workbench, dock_panels, inference)
         }
-        Activity::Training | Activity::Workflow => {
+        Activity::Training | Activity::Workflow | Activity::Settings => {
             unreachable!("Training and Workflow own separate route workspaces")
         }
     };
@@ -771,13 +796,13 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
                         match recording {
                             Some(recording) => studio.stop_recording(
                                 recording.episode(),
-                                recording_actions::RecordingCompletion::new(data, true, EventHandler::new(move |_: spiral_robotics_common::recording::EpisodeInfo| {
+                                recording_actions::RecordingCompletion::new(data, true, move |_: spiral_robotics_common::recording::EpisodeInfo| {
                                     let next_revision = episode_preview_revision.peek().wrapping_add(1);
                                     episode_preview_revision.set(next_revision);
                                     episode_preview_state.set(None);
                                     automatic_preview_target.set(None);
                                     interactive_preview_target.set(None);
-                                })),
+                                }),
                             ),
                             None if activity == Activity::Live => studio.start_recording(),
                             None => studio.report("Switch to Live to start recording."),
@@ -801,13 +826,13 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
                         if let Some(recording) = recording {
                             studio.stop_recording(
                                 recording.episode(),
-                                recording_actions::RecordingCompletion::new(data, false, EventHandler::new(move |_| {
+                                recording_actions::RecordingCompletion::new(data, false, move |_| {
                                     let next_revision = episode_preview_revision.peek().wrapping_add(1);
                                     episode_preview_revision.set(next_revision);
                                     episode_preview_state.set(None);
                                     automatic_preview_target.set(None);
                                     interactive_preview_target.set(None);
-                                })),
+                                }),
                             );
                         }
                     }
@@ -881,7 +906,9 @@ impl VisibleTimelineEpisode for Activity {
                 .recording()
                 .map(|recording| recording.episode().to_owned()),
             Activity::Data => data.selected_episode_peek(),
-            Activity::Workflow | Activity::Training | Activity::Rollout => None,
+            Activity::Workflow | Activity::Training | Activity::Rollout | Activity::Settings => {
+                None
+            }
         }
     }
 }

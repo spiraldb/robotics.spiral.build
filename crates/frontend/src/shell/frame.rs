@@ -14,38 +14,15 @@ use crate::format::ClockPresentation;
 use crate::shell::activity::Activity;
 use crate::shell::notifications::MessageAction;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ActivityRailState {
-    activity: Activity,
-    settings_active: bool,
-}
-
-impl ActivityRailState {
-    pub(crate) const fn new(activity: Activity, settings_active: bool) -> Self {
-        Self {
-            activity,
-            settings_active,
-        }
-    }
-}
-
 #[component]
-pub(crate) fn ActivityRail(
-    state: ActivityRailState,
-    on_activity: EventHandler<Activity>,
-    on_settings: EventHandler<()>,
-) -> Element {
-    let ActivityRailState {
-        activity,
-        settings_active,
-    } = state;
+pub(crate) fn ActivityRail(activity: Activity, on_activity: EventHandler<Activity>) -> Element {
     rsx! {
         nav { class: "studio-activity-rail", "aria-label": "Application",
             Action {
                 purpose: ActionPurpose::Navigate,
                 variant: ActionVariant::Row,
-                class: if !settings_active && activity == Activity::Live { "activity-rail-item activity-rail-item-active" } else { "activity-rail-item" },
-                aria_pressed: !settings_active && activity == Activity::Live,
+                class: if activity == Activity::Live { "activity-rail-item activity-rail-item-active" } else { "activity-rail-item" },
+                aria_pressed: activity == Activity::Live,
                 onclick: move |_| on_activity.call(Activity::Live),
                 RobotPanelIcon {}
                 span { "Live" }
@@ -53,8 +30,8 @@ pub(crate) fn ActivityRail(
             Action {
                 purpose: ActionPurpose::Navigate,
                 variant: ActionVariant::Row,
-                class: if !settings_active && activity == Activity::Data { "activity-rail-item activity-rail-item-active" } else { "activity-rail-item" },
-                aria_pressed: !settings_active && activity == Activity::Data,
+                class: if activity == Activity::Data { "activity-rail-item activity-rail-item-active" } else { "activity-rail-item" },
+                aria_pressed: activity == Activity::Data,
                 onclick: move |_| on_activity.call(Activity::Data),
                 DataIcon {}
                 span { "Data" }
@@ -62,8 +39,8 @@ pub(crate) fn ActivityRail(
             Action {
                 purpose: ActionPurpose::Navigate,
                 variant: ActionVariant::Row,
-                class: if !settings_active && activity == Activity::Workflow { "activity-rail-item activity-rail-item-active" } else { "activity-rail-item" },
-                aria_pressed: !settings_active && activity == Activity::Workflow,
+                class: if activity == Activity::Workflow { "activity-rail-item activity-rail-item-active" } else { "activity-rail-item" },
+                aria_pressed: activity == Activity::Workflow,
                 onclick: move |_| on_activity.call(Activity::Workflow),
                 WorkflowIcon {}
                 span { "Workflow" }
@@ -71,8 +48,8 @@ pub(crate) fn ActivityRail(
             Action {
                 purpose: ActionPurpose::Navigate,
                 variant: ActionVariant::Row,
-                class: if !settings_active && activity == Activity::Training { "activity-rail-item activity-rail-item-active" } else { "activity-rail-item" },
-                aria_pressed: !settings_active && activity == Activity::Training,
+                class: if activity == Activity::Training { "activity-rail-item activity-rail-item-active" } else { "activity-rail-item" },
+                aria_pressed: activity == Activity::Training,
                 onclick: move |_| on_activity.call(Activity::Training),
                 TrainingIcon {}
                 span { "Training" }
@@ -80,8 +57,8 @@ pub(crate) fn ActivityRail(
             Action {
                 purpose: ActionPurpose::Navigate,
                 variant: ActionVariant::Row,
-                class: if !settings_active && activity == Activity::Rollout { "activity-rail-item activity-rail-item-active" } else { "activity-rail-item" },
-                aria_pressed: !settings_active && activity == Activity::Rollout,
+                class: if activity == Activity::Rollout { "activity-rail-item activity-rail-item-active" } else { "activity-rail-item" },
+                aria_pressed: activity == Activity::Rollout,
                 onclick: move |_| on_activity.call(Activity::Rollout),
                 RolloutIcon {}
                 span { "Rollout" }
@@ -90,11 +67,11 @@ pub(crate) fn ActivityRail(
                 id: "settings-rail-trigger",
                 purpose: ActionPurpose::Navigate,
                 variant: ActionVariant::Row,
-                class: if settings_active { "activity-rail-item activity-rail-item-active activity-rail-settings" } else { "activity-rail-item activity-rail-settings" },
-                aria_pressed: settings_active,
+                class: if activity == Activity::Settings { "activity-rail-item activity-rail-item-active activity-rail-settings" } else { "activity-rail-item activity-rail-settings" },
+                aria_pressed: activity == Activity::Settings,
                 aria_label: "Settings",
                 title: "Settings",
-                onclick: move |_| on_settings.call(()),
+                onclick: move |_| on_activity.call(Activity::Settings),
                 SettingsIcon {}
                 span { "Settings" }
             }
@@ -102,8 +79,30 @@ pub(crate) fn ActivityRail(
     }
 }
 
+/// Shared chrome around the real routed component. This frame and its children
+/// unmount on navigation; retained feature values live in ProjectViewStates.
 #[component]
-pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -> Element {
+pub(crate) fn WorkspaceFrame(children: Element) -> Element {
+    let project = consume_context::<crate::shell::state::StudioProjectState>();
+    let navigator = use_navigator();
+    let route = use_route::<crate::shell::routes::StudioRoute>();
+    rsx! {
+        div { class: "studio-route-content", {children} }
+        StatusBar { route,
+            on_open_episode: move |episode| {
+                project.open_episode(episode);
+                navigator.push(crate::shell::routes::StudioRoute::Data {});
+            },
+        }
+    }
+}
+
+#[component]
+pub(crate) fn StatusBar(
+    route: crate::shell::routes::StudioRoute,
+    on_open_episode: EventHandler<String>,
+) -> Element {
+    let mode = route.activity();
     let studio = crate::shell::state::studio();
     let snapshot = studio.snapshot().read().to_owned();
     let telemetry = studio.telemetry().read().to_owned();
@@ -119,7 +118,10 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
                 ("Loading project…", "background: var(--tone-caution)")
             }
             BackendReadinessState::Ready
-                if !matches!(mode, Activity::Training | Activity::Workflow) && !connected =>
+                if matches!(
+                    mode,
+                    Activity::Live | Activity::Rollout | Activity::Settings
+                ) && !connected =>
             {
                 ("Reconnecting", "background: var(--tone-danger)")
             }
@@ -141,7 +143,7 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
         .filter(|robot| robot.torque())
         .count();
     let mode_label = snapshot.mode().selection().label();
-    let status_mode = format!("{} · {mode_label}", mode.label());
+    let status_mode = format!("{} · {mode_label}", route.label());
     let arms_label = format!("{connected_arms}/{} arms", snapshot.robots().len());
     // A bench with nothing wrong on it does not need a line saying so, and the
     // count that appears when something is wrong should be able to say "1 robot

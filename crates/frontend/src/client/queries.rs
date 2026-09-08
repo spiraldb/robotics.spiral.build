@@ -94,12 +94,12 @@ impl QueryPolicy {
         let resource = use_resource(move || {
             let _ = revision();
             let enabled = available();
-            let request = fetch();
+            let request = enabled.then(&mut fetch);
             async move {
-                if !enabled {
-                    return std::future::pending().await;
+                match request {
+                    Some(request) => Self::with_deadline(request).await,
+                    None => std::future::pending().await,
                 }
-                Self::with_deadline(request).await
             }
         });
         #[cfg(all(feature = "web", target_arch = "wasm32"))]

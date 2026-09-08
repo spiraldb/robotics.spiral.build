@@ -14,19 +14,18 @@ pub(crate) struct DatasetBrowserSelection {
     revision: Signal<u64>,
     requested_panel: Signal<Option<dioxus_workbench::PanelId>>,
     navigation: DatasetNavigation,
+    search: Signal<String>,
 }
 impl DatasetBrowserSelection {
     pub(crate) fn provide() -> Self {
-        let selected = use_signal(|| None);
-        let revision = use_signal(|| 0);
-        let requested_panel = use_signal(|| None);
-        let navigation = DatasetNavigation::use_navigation();
-        use_context_provider(|| Self {
-            selected,
-            revision,
-            requested_panel,
-            navigation,
-        })
+        let browser = crate::shell::view_state::ViewState::use_retained(|| Self {
+            selected: Signal::new(None),
+            revision: Signal::new(0),
+            requested_panel: Signal::new(None),
+            navigation: DatasetNavigation::new(),
+            search: Signal::new(String::new()),
+        });
+        use_context_provider(|| browser)
     }
     pub(crate) fn requested_panel(self) -> Option<dioxus_workbench::PanelId> {
         (self.requested_panel)()
@@ -47,7 +46,7 @@ impl DatasetBrowserSelection {
 pub(crate) fn NativeDatasetsPanel() -> Element {
     let mut browser = use_context::<DatasetBrowserSelection>();
     let sessions = ProjectSessionSignals::current();
-    let mut search = use_signal(String::new);
+    let mut search = browser.search;
     let mut catalog = use_resource(move || async move {
         if !sessions.storage_available() {
             return Ok(Vec::new());
@@ -166,12 +165,12 @@ struct DatasetNavigation {
     message: Signal<usize>,
 }
 impl DatasetNavigation {
-    fn use_navigation() -> Self {
+    fn new() -> Self {
         Self {
-            section: use_signal(|| DatasetSection::Episodes),
-            episodes: super::native_episodes::EpisodeNavigation::use_navigation(),
-            topic: use_signal(|| None),
-            message: use_signal(|| 0),
+            section: Signal::new(DatasetSection::Episodes),
+            episodes: super::native_episodes::EpisodeNavigation::new(),
+            topic: Signal::new(None),
+            message: Signal::new(0),
         }
     }
     fn reset(mut self) {
@@ -298,6 +297,10 @@ mod navigation_tests {
     struct NavigationHarness(Rc<RefCell<Option<DatasetBrowserSelection>>>);
     impl NavigationHarness {
         fn render(self) -> Element {
+            crate::shell::view_state::ProjectViewStates::use_provider();
+            crate::shell::view_state::ViewState::use_provider(
+                crate::shell::activity::Activity::Data,
+            );
             *self.0.borrow_mut() = Some(DatasetBrowserSelection::provide());
             rsx! {}
         }

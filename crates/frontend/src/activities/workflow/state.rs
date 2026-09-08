@@ -277,7 +277,7 @@ pub(crate) struct WorkflowController {
     document: WorkflowDocumentSignals,
     lifecycle: WorkflowLifecycleSignals,
     assistant: WorkflowAssistantSignals,
-    relation_catalog: Resource<Result<RelationCatalog, String>>,
+    relation_catalog: Signal<Option<Result<RelationCatalog, String>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -325,37 +325,37 @@ struct WorkflowAssistantSignals {
 
 impl WorkflowController {
     pub(crate) fn use_controller(
-        relation_catalog: Resource<Result<RelationCatalog, String>>,
+        relation_catalog: Signal<Option<Result<RelationCatalog, String>>>,
     ) -> Self {
         let initial = WorkflowSnapshot::from_workflow("", WorkflowSpec::default());
         let initial_spec = initial.workflow().to_owned();
         let initial_nodes = initial_spec.graph_nodes(initial.snapshot(), &[]);
         let initial_edges = initial_spec.graph_edges(initial.snapshot());
-        let controller = Self {
+        let controller = crate::shell::view_state::ViewState::use_retained(|| Self {
             graph: WorkflowGraphSignals {
-                nodes: use_signal(move || initial_nodes),
-                edges: use_signal(move || initial_edges),
-                ui: use_signal(WorkflowUiState::default),
+                nodes: Signal::new(initial_nodes),
+                edges: Signal::new(initial_edges),
+                ui: Signal::new(WorkflowUiState::default()),
             },
             document: WorkflowDocumentSignals {
-                server: use_signal(move || initial),
-                draft: use_signal(move || initial_spec),
-                saved: use_signal(|| None),
+                server: Signal::new(initial),
+                draft: Signal::new(initial_spec),
+                saved: Signal::new(None),
             },
             lifecycle: WorkflowLifecycleSignals {
-                loaded: use_signal(|| false),
-                command: use_signal(|| None),
-                load_error: use_signal(|| None),
+                loaded: Signal::new(false),
+                command: Signal::new(None),
+                load_error: Signal::new(None),
             },
             assistant: WorkflowAssistantSignals {
-                agent: use_signal(WorkflowAgentSnapshot::default),
-                agent_loaded: use_signal(|| false),
-                agent_command: use_signal(|| None),
-                agent_error: use_signal(|| None),
-                agent_drafts: use_signal(BTreeMap::new),
+                agent: Signal::new(WorkflowAgentSnapshot::default()),
+                agent_loaded: Signal::new(false),
+                agent_command: Signal::new(None),
+                agent_error: Signal::new(None),
+                agent_drafts: Signal::new(BTreeMap::new()),
             },
             relation_catalog,
-        };
+        });
         use_effect(move || {
             let _catalog_result = relation_catalog.read_unchecked().to_owned();
             controller.sync_graph();

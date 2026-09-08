@@ -2,8 +2,7 @@
 
 use crate::components::interaction::{
     Action, ActionLink, ActionPurpose, ActionVariant, BlockingConfirmation, BrowserFocus,
-    CloseIcon, ConfirmationCopy, ConfirmationDismissal, ConfirmationResponse, FileAction,
-    FileInput, Toggle,
+    ConfirmationCopy, ConfirmationDismissal, ConfirmationResponse, FileAction, FileInput, Toggle,
 };
 use crate::settings::SettingsClient;
 use dioxus::prelude::*;
@@ -37,32 +36,10 @@ impl SettingsLoadState {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
-pub(crate) struct SettingsPanelHandlers {
-    on_close: EventHandler<()>,
-    on_saved: EventHandler<()>,
-    on_busy_change: EventHandler<bool>,
-}
-
-impl SettingsPanelHandlers {
-    pub(crate) fn new(
-        on_close: impl FnMut(()) + 'static,
-        on_saved: impl FnMut(()) + 'static,
-        on_busy_change: impl FnMut(bool) + 'static,
-    ) -> Self {
-        Self {
-            on_close: EventHandler::new(on_close),
-            on_saved: EventHandler::new(on_saved),
-            on_busy_change: EventHandler::new(on_busy_change),
-        }
-    }
-}
-
 #[derive(Clone, Copy)]
 struct SettingsPanelState {
     draft: SettingsDraftSignals,
     operations: SettingsOperationSignals,
-    initial_focus_set: Signal<bool>,
 }
 
 #[derive(Clone, Copy)]
@@ -92,44 +69,35 @@ struct ProjectTransferSignals {
 
 impl SettingsPanelState {
     fn use_state(initial: DataSettings, section: SettingsSection) -> Self {
-        Self {
+        crate::shell::view_state::ViewState::use_retained(|| Self {
             draft: SettingsDraftSignals {
-                base: use_signal({
-                    let initial = initial.clone();
-                    move || initial
-                }),
-                saved: use_signal(|| None),
-                current: use_signal(move || initial),
-                client_secret: use_signal(String::new),
-                section: use_signal(move || section),
+                base: Signal::new(initial.clone()),
+                saved: Signal::new(None),
+                current: Signal::new(initial),
+                client_secret: Signal::new(String::new()),
+                section: Signal::new(section),
             },
             operations: SettingsOperationSignals {
-                saving: use_signal(|| false),
-                testing: use_signal(|| false),
-                transferring_project: use_signal(|| false),
-                test_result: use_signal(|| None),
-                save_error: use_signal(|| None),
+                saving: Signal::new(false),
+                testing: Signal::new(false),
+                transferring_project: Signal::new(false),
+                test_result: Signal::new(None),
+                save_error: Signal::new(None),
                 project_transfer: ProjectTransferSignals {
-                    pending_file: use_signal(|| None),
-                    error: use_signal(|| None),
+                    pending_file: Signal::new(None),
+                    error: Signal::new(None),
                 },
             },
-            initial_focus_set: use_signal(|| false),
-        }
+        })
     }
 }
 
 #[component]
-pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHandlers) -> Element {
+pub(crate) fn SettingsPanel(state: SettingsLoadState) -> Element {
     let SettingsLoadState {
         initial,
         load_error,
     } = state;
-    let SettingsPanelHandlers {
-        on_close,
-        on_saved,
-        on_busy_change,
-    } = handlers;
     let initial_value = initial.clone().unwrap_or_default();
     let settings_loaded = initial.is_some();
     let initial_section = if initial_value.spiral().project_id().trim().is_empty() {
@@ -159,17 +127,16 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
                         error: mut project_transfer_error,
                     },
             },
-        mut initial_focus_set,
     } = SettingsPanelState::use_state(initial_value, initial_section);
     let studio = studio();
     let data = studio.data_controller();
+    let on_saved = move || {
+        studio.refresh_settings();
+        studio.refresh_relation_catalog();
+        data.invalidate_episode_catalog();
+    };
 
-    use_effect(move || {
-        if !initial_focus_set() {
-            BrowserFocus::after_render("data-settings-panel".to_owned());
-            initial_focus_set.set(true);
-        }
-    });
+    use_effect(|| BrowserFocus::after_render("data-settings-panel".to_owned()));
 
     use_effect(use_reactive((&initial,), move |(initial,)| {
         let acknowledged = saved();
@@ -200,7 +167,6 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
         }
         save_error.set(None);
         saving.set(true);
-        on_busy_change.call(true);
         let submitted = current();
         let destination_changed =
             submitted.spiral() != base.peek().spiral() || !client_secret.peek().is_empty();
@@ -216,7 +182,7 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
         );
         let training = current().training().to_owned();
         let video = current().video().to_owned();
-        spawn(async move {
+        crate::client::project::ProjectClient::current().spawn(async move {
             match SettingsClient::current()
                 .update_data_settings(spiral_robotics_common::settings::SettingsUpdate::new(
                     connection, training, video,
@@ -226,7 +192,7 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
                 Ok(_) => {
                     saved.set(Some(submitted));
                     client_secret.set(String::new());
-                    on_saved.call(());
+                    on_saved();
                     if let Some(connection_test) = connection_test.filter(|_| !destination_changed)
                     {
                         testing.set(true);
@@ -262,7 +228,6 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
                 Err(error) => save_error.set(Some(error)),
             }
             saving.set(false);
-            on_busy_change.call(false);
         });
     };
     let configured_destination = current();
@@ -289,15 +254,6 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
                 div {
                     h2 { id: "data-settings-title", "Settings" }
                     p { "Robots, data, training, and video." }
-                }
-                Action {
-                    id: "settings-close-action",
-                    purpose: ActionPurpose::Close,
-                    variant: ActionVariant::Icon,
-                    aria_label: "Close settings",
-                    disabled: saving() || transferring_project(),
-                    onclick: move |_| if !saving() && !transferring_project() { on_close.call(()) },
-                    CloseIcon {}
                 }
             }
             div { class: "settings-layout",
@@ -477,13 +433,12 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
             footer { class: "settings-footer",
                 if section() == SettingsSection::Robots {
                     span { "Robot changes are saved immediately." }
-                    div { Action { purpose: ActionPurpose::Close, variant: ActionVariant::Solid, disabled: saving() || transferring_project(), onclick: move |_| if !saving() && !transferring_project() { on_close.call(()) }, "Done" } }
                 } else {
                     span {
                         "Applies to this Studio."
                     }
                     div {
-                        Action { purpose: ActionPurpose::Cancel, disabled: saving() || transferring_project(), onclick: move |_| if !saving() && !transferring_project() { on_close.call(()) }, "Cancel" }
+                        Action { purpose: ActionPurpose::Cancel, disabled: saving() || transferring_project(), onclick: move |_| { current.set(base()); client_secret.set(String::new()); save_error.set(None); test_result.set(None); }, "Discard changes" }
                         Action { purpose: ActionPurpose::Apply, variant: ActionVariant::Solid, disabled: saving() || transferring_project() || current().spiral().project_id().trim().is_empty(), aria_busy: saving(), onclick: move |_| save(None), if saving() { "Saving…" } else { "Save settings" } }
                     }
                 }
@@ -505,8 +460,7 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
                     }
                     let file = file.clone();
                     project_transfer_error.set(None);
-                    on_busy_change.call(true);
-                    spawn(async move {
+                    crate::client::project::ProjectClient::current().spawn(async move {
                         let Some(outcome) = SingleFlight::run(transferring_project, async {
                                 let result = SettingsClient::current().import_project(file)
                                     .await
@@ -517,12 +471,11 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
                             })
                             .await
                         else {
-                            on_busy_change.call(false);
                             return;
                         };
                         match outcome {
                             Ok(result) => {
-                                on_saved.call(());
+                                on_saved();
                                 pending_project_file.set(None);
                                 project_transfer_error.set(None);
                                 studio.report_success_from(
@@ -542,7 +495,6 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
                                 BrowserFocus::after_render("project-import-input".to_owned());
                             }
                         }
-                        on_busy_change.call(false);
                     });
                 }, move |_| pending_project_file.set(None)),
                 dismissal: ConfirmationDismissal::new("project-import-input")
@@ -625,6 +577,21 @@ fn SettingsField(label: &'static str, value: String, behavior: SettingsInputBeha
         label { class: "settings-field",
             span { class: "label", "{label}" }
             input { class: "field", r#type: if secret { "password" } else { "text" }, value, placeholder, disabled, oninput: move |event| oninput.call(event.value()) }
+        }
+    }
+}
+
+#[component]
+pub(crate) fn SettingsWorkspace() -> Element {
+    let studio =
+        crate::shell::state::Studio::use_studio(crate::shell::activity::Activity::Settings);
+    studio.use_hardware_polling();
+    rsx! {
+        crate::shell::frame::WorkspaceFrame {
+            SettingsPanel { state: SettingsLoadState::new(
+                studio.loaded_settings(),
+                studio.settings_result().and_then(Result::err),
+            ) }
         }
     }
 }

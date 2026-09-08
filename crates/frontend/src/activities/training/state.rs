@@ -1,6 +1,7 @@
 //! Durable state and commands for the Training screen.
 //!
-//! The mounted Training view owns drafts, selection, history and request tasks.
+//! Training retains drafts and selection across route changes. Its reads run only
+//! while Training is active.
 //! Admitted jobs continue on the backend after the view is closed.
 
 use crate::activities::training::TrainingClient;
@@ -64,24 +65,24 @@ impl TrainingController {
             spiral::ManagedTable::Datasets.training_sql_for_dataset(namespace, dataset_id);
         let config_sql = initial_sql.clone();
         let config_dataset = dataset_id.to_owned();
-        let controller = Self {
+        let controller = crate::shell::view_state::ViewState::use_retained(|| Self {
             draft: TrainingDraftSignals {
-                config: use_signal(move || {
+                config: Signal::new({
                     TrainingConfig::for_dataset("act-run-001", config_dataset, config_sql)
                 }),
-                generated_sql: use_signal(move || initial_sql),
-                automatic_run_name: use_signal(|| true),
+                generated_sql: Signal::new(initial_sql),
+                automatic_run_name: Signal::new(true),
             },
             history: TrainingHistorySignals {
-                selected_run: use_signal(|| None),
-                opened_runs: use_signal(Vec::new),
+                selected_run: Signal::new(None),
+                opened_runs: Signal::new(Vec::new()),
             },
             commands: TrainingCommandSignals {
-                starting: use_signal(|| false),
-                stopping: use_signal(|| None),
-                deleting: use_signal(|| None),
+                starting: Signal::new(false),
+                stopping: Signal::new(None),
+                deleting: Signal::new(None),
             },
-        };
+        });
         let namespace_dependency = namespace.to_owned();
         let dataset_dependency = dataset_id.to_owned();
         use_effect(use_reactive(
@@ -189,7 +190,8 @@ impl TrainingController {
         let mut opened_runs = self.history.opened_runs;
         let mut config_signal = self.draft.config;
         let mut automatic_run_name = self.draft.automatic_run_name;
-        spawn(async move {
+        let training = studio.training();
+        crate::client::project::ProjectClient::current().spawn(async move {
             let result = TrainingClient::current()
                 .start_training_run(config)
                 .await
@@ -197,8 +199,7 @@ impl TrainingController {
             starting.set(false);
             match result {
                 Ok(run) => {
-                    let mut existing_names = studio
-                        .training()
+                    let mut existing_names = training
                         .read()
                         .runs()
                         .iter()

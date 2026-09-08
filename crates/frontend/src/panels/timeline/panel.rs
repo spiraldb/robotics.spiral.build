@@ -651,6 +651,7 @@ pub(crate) fn StudioTimeline(
         Activity::Workflow => "Workflow relation timeline",
         Activity::Training => "Training step timeline",
         Activity::Rollout => "Rollout live timeline",
+        Activity::Settings => "Timeline",
     };
     let signal_chart = signal_lanes.chart(duration);
     let signal_chart_label = format!("Six robot joint signals over {}", duration.clock_label());

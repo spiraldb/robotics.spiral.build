@@ -7,8 +7,8 @@
 
 use spiral_robotics_common::recording::{EpisodeInfo, RecordingProgress};
 
-/// The Studio's five primary activities.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+/// Every top-level Studio view, including Settings.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
 pub(crate) enum Activity {
     #[default]
     Live,
@@ -16,9 +16,16 @@ pub(crate) enum Activity {
     Workflow,
     Training,
     Rollout,
+    Settings,
 }
 
 impl Activity {
+    pub(crate) const fn uses_hardware(self) -> bool {
+        matches!(self, Self::Live | Self::Rollout | Self::Settings)
+    }
+    pub(crate) const fn uses_episode_catalog(self) -> bool {
+        matches!(self, Self::Live | Self::Training)
+    }
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Live => "Live",
@@ -26,6 +33,7 @@ impl Activity {
             Self::Workflow => "Workflow",
             Self::Training => "Training",
             Self::Rollout => "Rollout",
+            Self::Settings => "Settings",
         }
     }
 }
@@ -54,6 +62,7 @@ pub(crate) enum TimelineTarget {
 impl TimelineSubject {
     pub(crate) fn empty(activity: Activity) -> Self {
         let reason = match activity {
+            Activity::Settings => "Settings does not use the episode clock.",
             Activity::Live => "Record an episode to begin using the shared clock.",
             Activity::Data => "Select an episode to inspect its shared clock.",
             Activity::Workflow => {
@@ -231,7 +240,7 @@ impl ActivityProjection {
                     timeline: TimelineSubject::empty(activity),
                 },
             },
-            Activity::Training => Self {
+            Activity::Training | Activity::Settings => Self {
                 activity,
                 primary: PrimaryVisualization::EmptyEpisodes,
                 cameras: CameraRegistrySource::None,

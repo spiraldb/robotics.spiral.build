@@ -1,6 +1,6 @@
 //! Durable state and transitions for the Data screen.
 //!
-//! The controller outlives the mounted Data workbench. Views render its
+//! Each retained view owns its controller, which outlives its mounted workbench. Views render its
 //! signals and emit semantic transitions. The selected episode drives one
 //! resource, while successful immutable episode data is cached on its catalog
 //! entry.
@@ -36,6 +36,16 @@ pub(crate) struct DataController {
     dataset_catalog: Signal<DatasetCatalogState>,
     episode_catalog: Signal<EpisodeCatalogState>,
     episode_loader: Resource<Option<EpisodeLoadResult>>,
+    draft: QueryDraftSignals,
+    execution: QueryExecutionSignals,
+}
+
+/// The data choices and query results retained when its routed UI unmounts.
+#[derive(Clone, Copy)]
+struct DataState {
+    selected_episode: Signal<Option<String>>,
+    dataset_catalog: Signal<DatasetCatalogState>,
+    episode_catalog: Signal<EpisodeCatalogState>,
     draft: QueryDraftSignals,
     execution: QueryExecutionSignals,
 }
@@ -120,20 +130,39 @@ struct QueryExecutionSignals {
 }
 
 impl DataController {
-    /// Create the Data state owned by the Studio session. None of these
-    /// signals depends on the Data workbench being mounted.
+    /// Create this view's dataset choices, query drafts, and cached results.
+    /// Project-lived feature state preserves these signals across route changes.
     pub(crate) fn use_controller(_namespace: &str, dataset_id: &str) -> Self {
         let initial_sql =
             NativeDatasetSelection::new(dataset_id.split('.').map(str::to_owned).collect())
                 .map(|selection| selection.episodes_sql())
                 .unwrap_or_default();
-        let sql_value = initial_sql.clone();
-        let selected_episode = use_signal(|| None::<String>);
-        let dataset_catalog = use_signal(DatasetCatalogState::default);
-        let episode_catalog = use_signal(EpisodeCatalogState::default);
+        let DataState {
+            selected_episode,
+            dataset_catalog,
+            episode_catalog,
+            draft,
+            execution,
+        } = crate::shell::view_state::ViewState::use_retained(|| DataState {
+            selected_episode: Signal::new(None),
+            dataset_catalog: Signal::new(DatasetCatalogState::default()),
+            episode_catalog: Signal::new(EpisodeCatalogState::default()),
+            draft: QueryDraftSignals {
+                sql: Signal::new(initial_sql.clone()),
+                generated_sql: Signal::new(initial_sql),
+                max_rows: Signal::new(DEFAULT_QUERY_ROWS),
+            },
+            execution: QueryExecutionSignals {
+                query_tabs: Signal::new(Vec::new()),
+                active_query: Signal::new(None),
+                active_request: Signal::new(None),
+                next_query_id: Signal::new(1),
+            },
+        });
         let sessions = crate::shell::project::ProjectSessionSignals::current();
+        let activity = crate::shell::view_state::ViewState::activity();
         let episode_loader = use_resource(move || {
-            let available = sessions.storage_available();
+            let available = activity.uses_episode_catalog() && sessions.storage_available();
             let selected = selected_episode();
             let source = selected.and_then(|episode| {
                 episode_catalog
@@ -181,17 +210,8 @@ impl DataController {
             dataset_catalog,
             episode_catalog,
             episode_loader,
-            draft: QueryDraftSignals {
-                sql: use_signal(move || sql_value),
-                generated_sql: use_signal(move || initial_sql),
-                max_rows: use_signal(|| DEFAULT_QUERY_ROWS),
-            },
-            execution: QueryExecutionSignals {
-                query_tabs: use_signal(Vec::new),
-                active_query: use_signal(|| None),
-                active_request: use_signal(|| None),
-                next_query_id: use_signal(|| 1),
-            },
+            draft,
+            execution,
         };
         use_effect(move || {
             if episode_loader.state().cloned() != UseResourceState::Ready {
@@ -313,12 +333,13 @@ impl DataController {
         self.dataset_catalog.read().error().cloned()
     }
 
-    /// Both catalogs are fetched by the session, independent of which activity
-    /// is mounted. Mutations and Retry invalidate these same query owners.
+    /// The active Live or Training view fetches its dataset/episode choices.
+    /// Data uses the native dataset browser and does not load these catalogs.
     pub(crate) fn use_polling(mut self, studio: Studio) {
         let sessions = crate::shell::project::ProjectSessionSignals::current();
+        let activity = crate::shell::view_state::ViewState::activity();
         let datasets = QueryPolicy::new(QueryDomain::Data, 5_000).use_when(
-            move || sessions.storage_available(),
+            move || activity.uses_episode_catalog() && sessions.storage_available(),
             || DatasetClient::current().list_datasets(),
         );
         use_effect(move || {
@@ -330,7 +351,7 @@ impl DataController {
                 self.dataset_catalog.write().accept(result.clone());
             }
         });
-        let episodes = QueryPolicy::new(QueryDomain::Data, 5_000).use_when(move || sessions.storage_available(), move || {
+        let episodes = QueryPolicy::new(QueryDomain::Data, 5_000).use_when(move || activity.uses_episode_catalog() && sessions.storage_available(), move || {
             let dataset = studio.selected_dataset().read().to_owned();
             async move {
                 let dataset = DatasetId::try_from(dataset.as_str()).map(String::from)
@@ -521,7 +542,7 @@ impl DataController {
         self.execution.active_request.set(Some(ActiveQuery { id }));
 
         // The Data view may be unmounted while the request is in flight. The
-        // controller and its generation guard are shell-owned, so completion
+        // controller and its generation guard survive route changes, so completion
         // must outlive the button that launched it.
         crate::client::project::ProjectClient::current().spawn(async move {
             let outcome = DatasetClient::current()

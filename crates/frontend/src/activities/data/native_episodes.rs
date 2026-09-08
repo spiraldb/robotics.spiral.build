@@ -72,10 +72,10 @@ pub(super) struct EpisodeNavigation {
     selected: Signal<Option<(usize, NativeEpisode)>>,
 }
 impl EpisodeNavigation {
-    pub(super) fn use_navigation() -> Self {
+    pub(super) fn new() -> Self {
         Self {
-            offset: use_signal(|| 0),
-            selected: use_signal(|| None),
+            offset: Signal::new(0),
+            selected: Signal::new(None),
         }
     }
     pub(super) fn reset(mut self) {

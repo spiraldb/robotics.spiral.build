@@ -1,4 +1,4 @@
-//! Application state shared by every Studio feature.
+//! Project state and separately owned, retained state for each Studio view.
 
 use crate::activities::data::DatasetClient;
 use crate::activities::live::RecordingClient;
@@ -26,10 +26,12 @@ use crate::client::queries::{QueryDomain, QueryPolicy, QueryRefresh};
 
 use crate::panels::timeline::signals::SignalStore;
 use crate::panels::timeline::state::TimelineController;
+use crate::shell::activity::Activity;
 use crate::shell::notifications::{
     MessageAction, MessageNotice, MessageSeverity, MessageSource, NotificationCenterState,
 };
 use crate::shell::project::ProjectSessionSignals;
+use crate::shell::view_state::ViewState;
 
 /// The one selection shared by the hierarchy, viewport, cameras, and inspector.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -99,16 +101,45 @@ impl RobotSelection for [RobotSummary] {
     }
 }
 
-/// Shared frontend state. Session-lived feature controllers are nested here;
-/// route and component interaction state remains with the mounted view.
+/// Project lifetime: connection, configuration, and notifications shared by routes.
+#[derive(Clone, Copy)]
+pub(crate) struct StudioProjectState {
+    backend: ProjectBackendSignals,
+    resources: StudioProjectResources,
+    notifications: Signal<NotificationCenterState>,
+    requested_episode: Signal<Option<String>>,
+}
+
+/// A view's facade over shared project state and its own retained state.
 #[derive(Clone, Copy)]
 pub(crate) struct Studio {
+    project: StudioProjectState,
+    workspace: StudioWorkspaceState,
+}
+
+#[derive(Clone, Copy)]
+struct StudioWorkspaceState {
     backend: BackendSignals,
-    project: StudioProjectResources,
     data: StudioDataSignals,
     controllers: StudioControllers,
-    notifications: Signal<NotificationCenterState>,
     interaction: StudioInteractionSignals,
+    relation_catalog: Signal<Option<Result<RelationCatalog, String>>>,
+    activity: Activity,
+}
+
+#[derive(Clone, Copy)]
+struct StudioViewSignals {
+    backend: BackendSignals,
+    data: StudioDataSignals,
+    interaction: StudioInteractionSignals,
+    relation_catalog: Signal<Option<Result<RelationCatalog, String>>>,
+}
+
+#[derive(Clone, Copy)]
+struct ProjectBackendSignals {
+    snapshot: Signal<StudioSnapshot>,
+    live: Signal<bool>,
+    clock_ms: Signal<f64>,
 }
 
 #[derive(Clone, Copy)]
@@ -119,17 +150,13 @@ struct FeatureStatusSignals {
 
 #[derive(Clone, Copy)]
 struct BackendSignals {
-    snapshot: Signal<StudioSnapshot>,
     telemetry: Signal<TelemetryFrame>,
     /// Compact display summaries; feature views own their fetched histories.
     features: FeatureStatusSignals,
     /// Backend-owned remote inference and motor-control lifecycle.
     rollout: Signal<RolloutSnapshot>,
-    /// True while the project status read is healthy.
-    live: Signal<bool>,
-    /// Wall-clock time of the last new telemetry sample and a periodically updated clock.
+    /// Receipt time of the last advancing hardware sample in this view.
     last_telemetry_ms: Signal<f64>,
-    clock_ms: Signal<f64>,
 }
 
 #[derive(Clone, Copy)]
@@ -137,7 +164,6 @@ struct StudioProjectResources {
     settings: Resource<Result<DataSettings, String>>,
     loaded_settings: Signal<Option<DataSettings>>,
     configuration: Memo<StudioConfiguration>,
-    relation_catalog: Resource<Result<RelationCatalog, String>>,
 }
 
 #[derive(Clone, Copy)]
@@ -150,8 +176,8 @@ struct StudioControllers {
 
 #[derive(Clone, Copy)]
 struct StudioDataSignals {
-    /// Dataset row used by capture, import, Data filtering, and new Training
-    /// runs. This is distinct from the configured Spiral namespace.
+    /// This view's dataset choice for capture or Training. Other views retain
+    /// their own choice; this is distinct from the configured Spiral namespace.
     selected_dataset: Signal<String>,
     /// Joint angles for the take being recorded, or the last one recorded.
     ///
@@ -192,27 +218,21 @@ impl StudioConfiguration {
 }
 
 impl BackendSignals {
-    fn use_signals() -> Self {
+    fn new() -> Self {
         Self {
-            snapshot: use_signal(StudioSnapshot::default),
-            telemetry: use_signal(TelemetryFrame::default),
+            telemetry: Signal::new(TelemetryFrame::default()),
             features: FeatureStatusSignals {
-                training: use_signal(TrainingStatus::default),
-                workflow: use_signal(|| None),
+                training: Signal::new(TrainingStatus::default()),
+                workflow: Signal::new(None),
             },
-            rollout: use_signal(RolloutSnapshot::default),
-            live: use_signal(|| false),
-            last_telemetry_ms: use_signal(|| 0.0),
-            // Keep the server's first render identical to the browser's first
-            // render; the browser clock starts with the client tasks below.
-            clock_ms: use_signal(|| 0.0),
+            rollout: Signal::new(RolloutSnapshot::default()),
+            last_telemetry_ms: Signal::new(0.0),
         }
     }
 }
 
 impl StudioProjectResources {
     fn use_resources() -> Self {
-        let sessions = ProjectSessionSignals::current();
         let settings = QueryPolicy::new(QueryDomain::Settings, 10_000).use_resource(|| async {
             SettingsClient::current()
                 .data_settings()
@@ -241,25 +261,10 @@ impl StudioProjectResources {
                     .is_some_and(|settings| !settings.spiral().project_id().trim().is_empty()),
             }
         }));
-        let query_available = configuration().spiral_query_available;
-        let relation_catalog = QueryPolicy::new(QueryDomain::Catalog, 10_000).use_when(
-            move || sessions.catalog_available(),
-            use_reactive((&query_available,), move |(query_available,)| async move {
-                if query_available {
-                    DatasetClient::current()
-                        .relation_catalog()
-                        .await
-                        .map_err(|error| error.to_string())
-                } else {
-                    Ok(RelationCatalog::default())
-                }
-            }),
-        );
         Self {
             settings,
             loaded_settings,
             configuration,
-            relation_catalog,
         }
     }
 
@@ -269,19 +274,19 @@ impl StudioProjectResources {
 }
 
 impl StudioDataSignals {
-    fn use_signals() -> Self {
+    fn new() -> Self {
         Self {
-            selected_dataset: use_signal(|| "default".to_owned()),
-            recording_signals: use_signal(SignalStore::default),
+            selected_dataset: Signal::new("default".to_owned()),
+            recording_signals: Signal::new(SignalStore::default()),
         }
     }
 }
 
 impl StudioInteractionSignals {
-    fn use_signals() -> Self {
+    fn new() -> Self {
         Self {
-            selected: use_signal(|| None),
-            pointed: use_signal(|| None),
+            selected: Signal::new(None),
+            pointed: Signal::new(None),
         }
     }
 }
@@ -312,11 +317,11 @@ impl Studio {
     }
 
     pub(crate) fn snapshot(self) -> ReadSignal<StudioSnapshot> {
-        self.backend.snapshot.into()
+        self.project.backend.snapshot.into()
     }
 
     pub(crate) fn telemetry(self) -> ReadSignal<TelemetryFrame> {
-        self.backend.telemetry.into()
+        self.workspace.backend.telemetry.into()
     }
 
     pub(crate) fn training(self) -> ReadSignal<TrainingSnapshot> {
@@ -324,47 +329,47 @@ impl Studio {
     }
 
     pub(crate) fn rollout(self) -> ReadSignal<RolloutSnapshot> {
-        self.backend.rollout.into()
+        self.workspace.backend.rollout.into()
     }
 
     pub(crate) fn live(self) -> ReadSignal<bool> {
-        self.backend.live.into()
+        self.project.backend.live.into()
     }
 
     pub(crate) const fn clock_ms(self) -> Signal<f64> {
-        self.backend.clock_ms
+        self.project.backend.clock_ms
     }
 
     pub(crate) const fn notifications(self) -> Signal<NotificationCenterState> {
-        self.notifications
+        self.project.notifications
     }
 
     pub(crate) const fn selection(self) -> Signal<Option<Selection>> {
-        self.interaction.selected
+        self.workspace.interaction.selected
     }
 
     pub(crate) const fn pointed_selection(self) -> Signal<Option<Selection>> {
-        self.interaction.pointed
+        self.workspace.interaction.pointed
     }
 
     pub(crate) const fn selected_dataset(self) -> Signal<String> {
-        self.data.selected_dataset
+        self.workspace.data.selected_dataset
     }
 
     pub(crate) fn recording_signals(self) -> ReadSignal<SignalStore> {
-        self.data.recording_signals.into()
+        self.workspace.data.recording_signals.into()
     }
 
     pub(crate) fn configuration(&self) -> StudioConfiguration {
-        self.project.current_configuration()
+        self.project.resources.current_configuration()
     }
 
     pub(crate) fn loaded_settings(&self) -> Option<DataSettings> {
-        self.project.loaded_settings.read().to_owned()
+        self.project.resources.loaded_settings.read().to_owned()
     }
 
     pub(crate) fn settings_result(&self) -> Option<Result<DataSettings, String>> {
-        self.project.settings.read_unchecked().to_owned()
+        self.project.resources.settings.read_unchecked().to_owned()
     }
 
     pub(crate) fn refresh_settings(self) {
@@ -372,7 +377,7 @@ impl Studio {
     }
 
     pub(crate) fn relation_catalog_result(&self) -> Option<Result<RelationCatalog, String>> {
-        self.project.relation_catalog.read_unchecked().to_owned()
+        self.workspace.relation_catalog.read_unchecked().to_owned()
     }
 
     pub(crate) fn relation_catalog(&self) -> Option<RelationCatalog> {
@@ -384,7 +389,7 @@ impl Studio {
     }
 
     pub(crate) const fn data_controller(self) -> DataController {
-        self.controllers.data
+        self.workspace.controllers.data
     }
 
     pub(crate) fn workflow_controller(self) -> WorkflowController {
@@ -396,43 +401,53 @@ impl Studio {
     }
 
     pub(crate) fn training_status(self) -> Signal<TrainingStatus> {
-        self.backend.features.training
+        self.workspace.backend.features.training
     }
 
     pub(crate) fn workflow_status(self) -> Signal<Option<WorkflowStatusProjection>> {
-        self.backend.features.workflow
+        self.workspace.backend.features.workflow
     }
 
     pub(crate) fn use_workflow_controller(self) -> WorkflowController {
-        let controller = WorkflowController::use_controller(self.project.relation_catalog);
+        let controller = WorkflowController::use_controller(self.workspace.relation_catalog);
         use_context_provider(|| controller)
     }
 
     pub(crate) const fn rollout_controller(self) -> RolloutController {
-        self.controllers.rollout
+        self.workspace.controllers.rollout
     }
 
     pub(crate) const fn timeline_controller(self) -> TimelineController {
-        self.controllers.timeline
+        self.workspace.controllers.timeline
     }
 
-    /// Create the shared state and its project-scoped catalog resource.
-    pub(crate) fn use_studio() -> Self {
-        let backend = BackendSignals::use_signals();
-        let project = StudioProjectResources::use_resources();
-        let data = StudioDataSignals::use_signals();
-        let controllers = StudioControllers::use_controllers(project, data);
-        let notifications = use_signal(NotificationCenterState::default);
-        let interaction = StudioInteractionSignals::use_signals();
-        // Hooks own the lifetime of every nested umbrella. The context
-        // publishes their handles only after the complete session exists.
-        let studio = use_context_provider(|| Self {
+    /// Each routed view retrieves its retained values and owns its mounted resources.
+    pub(crate) fn use_studio(activity: Activity) -> Self {
+        ViewState::use_provider(activity);
+        let project = consume_context::<StudioProjectState>();
+        let signals = ViewState::use_retained(|| StudioViewSignals {
+            backend: BackendSignals::new(),
+            data: StudioDataSignals::new(),
+            interaction: StudioInteractionSignals::new(),
+            relation_catalog: Signal::new(None),
+        });
+        let StudioViewSignals {
             backend,
-            project,
             data,
-            controllers,
-            notifications,
             interaction,
+            relation_catalog,
+        } = signals;
+        let controllers = StudioControllers::use_controllers(project.resources, data);
+        let studio = use_context_provider(|| Self {
+            project,
+            workspace: StudioWorkspaceState {
+                backend,
+                data,
+                controllers,
+                interaction,
+                relation_catalog,
+                activity,
+            },
         });
         let mut default_selection = studio.selection();
         use_effect(move || {
@@ -446,36 +461,41 @@ impl Studio {
                 default_selection.set(Some(next));
             }
         });
-        // The clock the studio measures staleness and message prominence
-        // against. Notification history does not expire; only its compact
-        // status-bar preview does.
-        #[cfg(all(feature = "web", target_arch = "wasm32"))]
-        use_future(move || async move {
-            loop {
-                gloo_timers::future::TimeoutFuture::new(250).await;
-                let now = js_sys::Date::now();
-                studio.clock_ms().set(now);
+        use_drop(move || studio.timeline_controller().stop_preview());
+        studio
+    }
+
+    pub(crate) fn use_relation_catalog(self) {
+        let mut relation_catalog = self.workspace.relation_catalog;
+        let sessions = ProjectSessionSignals::current();
+        let catalog_request = QueryPolicy::new(QueryDomain::Catalog, 10_000).use_when(
+            move || sessions.catalog_available(),
+            || async {
+                DatasetClient::current()
+                    .relation_catalog()
+                    .await
+                    .map_err(|error| error.to_string())
+            },
+        );
+        use_effect(move || {
+            let result = catalog_request.read();
+            if catalog_request.finished()
+                && let Some(value) = result.as_ref()
+            {
+                if relation_catalog.peek().as_ref() != Some(value) {
+                    relation_catalog.set(Some(value.clone()));
+                }
             }
         });
-
-        studio
     }
 
     /// Each fetched value has one writer. UI components receive read-only
     /// handles; commands invalidate these resources through ProjectClient.
-    pub(crate) fn use_polling(mut self) {
-        let sessions = ProjectSessionSignals::current();
-        use_effect(move || self.backend.live.set(sessions.connected()));
-        let setup = QueryPolicy::new(QueryDomain::Setup, 2_000)
-            .use_resource(|| StudioClient::current().setup_snapshot());
-        use_effect(move || {
-            let result = setup.read();
-            if setup.finished()
-                && let Some(Ok(value)) = result.as_ref()
-                && *self.backend.snapshot.peek() != *value
-            {
-                self.backend.snapshot.set(value.clone());
-            }
+    pub(crate) fn use_hardware_polling(mut self) {
+        // A newly mounted view must receive a sample before enabling controls.
+        use_hook(move || self.workspace.backend.last_telemetry_ms.set(0.0));
+        use_drop(move || {
+            self.workspace.backend.last_telemetry_ms.set(0.0);
         });
         let telemetry = QueryPolicy::new(QueryDomain::Telemetry, 50)
             .use_resource(|| StudioClient::current().telemetry_snapshot());
@@ -483,29 +503,41 @@ impl Studio {
             let result = telemetry.read();
             if telemetry.finished()
                 && let Some(Ok(frame)) = result.as_ref()
-                && self.backend.telemetry.peek().sequence() != frame.sequence()
+                && self.workspace.backend.telemetry.peek().sequence() != frame.sequence()
             {
-                self.backend.last_telemetry_ms.set(Self::now_ms());
-                self.backend.telemetry.set(frame.clone());
+                self.workspace.backend.last_telemetry_ms.set(Self::now_ms());
+                self.workspace.backend.telemetry.set(frame.clone());
             }
         });
-        let recording = QueryPolicy::new(QueryDomain::Recording, 200).use_resource(move || {
-            let cursor = self.data.recording_signals.peek().cursor();
-            RecordingClient::current().recording_window(cursor)
-        });
+    }
+
+    pub(crate) fn use_recording_polling(mut self) {
+        let recording_present = use_memo(move || self.recording().is_some());
+        let recording = QueryPolicy::new(QueryDomain::Recording, 200).use_when(
+            move || recording_present(),
+            move || {
+                let cursor = self.workspace.data.recording_signals.peek().cursor();
+                RecordingClient::current().recording_window(cursor)
+            },
+        );
         use_effect(move || {
             let result = recording.read();
             if recording.finished()
                 && let Some(Ok(window)) = result.as_ref()
-                && window.changes(&self.data.recording_signals.peek())
+                && window.changes(&self.workspace.data.recording_signals.peek())
             {
-                self.data
+                self.workspace
+                    .data
                     .recording_signals
                     .write()
                     .apply_window(window.clone());
             }
         });
-        let rollout_active = use_memo(move || self.backend.rollout.read().phase().active());
+    }
+
+    pub(crate) fn use_rollout_polling(mut self) {
+        let rollout_active =
+            use_memo(move || self.workspace.backend.rollout.read().phase().active());
         let rollout = QueryPolicy::new(QueryDomain::Rollout, 500)
             .with_activity(rollout_active.into())
             .use_resource(|| RolloutClient::current().rollout_snapshot());
@@ -513,12 +545,11 @@ impl Studio {
             let result = rollout.read();
             if rollout.finished()
                 && let Some(Ok(value)) = result.as_ref()
-                && *self.backend.rollout.peek() != *value
+                && *self.workspace.backend.rollout.peek() != *value
             {
-                self.backend.rollout.set(value.clone());
+                self.workspace.backend.rollout.set(value.clone());
             }
         });
-        self.data_controller().use_polling(self);
     }
 
     /// One robot's live readings, present only while it is connected.
@@ -526,7 +557,8 @@ impl Studio {
         if !self.controls_available() {
             return None;
         }
-        self.backend
+        self.workspace
+            .backend
             .telemetry
             .read()
             .robots()
@@ -537,19 +569,21 @@ impl Studio {
 
     /// Normal controls require current project readiness and fresh hardware samples.
     pub(crate) fn controls_available(&self) -> bool {
+        let active = self.workspace.activity;
         let age = self.telemetry_age_seconds();
-        (self.backend.live)()
+        active.uses_hardware()
+            && (self.project.backend.live)()
             && ProjectSessionSignals::current().catalog_available()
             && age.is_finite()
             && age < 2.5
     }
 
     pub(crate) fn telemetry_age_seconds(&self) -> f64 {
-        let last = (self.backend.last_telemetry_ms)();
+        let last = (self.workspace.backend.last_telemetry_ms)();
         if last <= 0.0 {
             return f64::INFINITY;
         }
-        (((self.backend.clock_ms)() - last) / 1000.0).max(0.0)
+        (((self.project.backend.clock_ms)() - last) / 1000.0).max(0.0)
     }
 
     /// The arm the side panels are showing.
@@ -559,8 +593,8 @@ impl Studio {
     /// deleted robot from leaving the panels pointed at nothing, without an
     /// effect that writes the signal it reads.
     pub(crate) fn focused(&self) -> Option<RobotSummary> {
-        let robots = self.backend.snapshot.read();
-        let chosen = self.interaction.selected.read();
+        let robots = self.project.backend.snapshot.read();
+        let chosen = self.workspace.interaction.selected.read();
         chosen
             .as_ref()
             .and_then(|selection| {
@@ -582,7 +616,7 @@ impl Studio {
     /// follower" is a thing an operator learns in the first minute and relies on
     /// while looking at the bench rather than the screen.
     pub(crate) fn position_of(&self, id: &str) -> usize {
-        let snapshot = self.backend.snapshot.read();
+        let snapshot = self.project.backend.snapshot.read();
         let kind = snapshot
             .robots()
             .iter()
@@ -611,17 +645,18 @@ impl Studio {
     /// recording that is still running is exactly what an operator needs to know
     /// about while the link is unreliable.
     pub(crate) fn recording(&self) -> Option<RecordingProgress> {
-        self.backend.telemetry.read().recording().cloned()
+        self.workspace.backend.telemetry.read().recording().cloned()
     }
 
     /// The episode being played back right now.
     pub(crate) fn replay(&self) -> Option<ReplayProgress> {
-        self.backend.telemetry.read().replay().cloned()
+        self.workspace.backend.telemetry.read().replay().cloned()
     }
 
     /// Robots whose motor bus is currently open.
     pub(crate) fn connected_robots(&self) -> Vec<RobotSummary> {
-        self.backend
+        self.project
+            .backend
             .snapshot
             .read()
             .robots()
@@ -633,12 +668,18 @@ impl Studio {
 
     /// The mode the studio is in.
     pub(crate) fn mode(&self) -> ModeSelection {
-        self.backend.snapshot.read().mode().selection().to_owned()
+        self.project
+            .backend
+            .snapshot
+            .read()
+            .mode()
+            .selection()
+            .to_owned()
     }
 
     /// Whether the configured mode is actually running.
     pub(crate) fn mode_active(&self) -> bool {
-        self.backend.snapshot.read().mode().active()
+        self.project.backend.snapshot.read().mode().active()
     }
 
     /// True when `id` is the robot the operator is driving by hand.
@@ -744,7 +785,7 @@ impl Studio {
     }
 
     fn notify(&self, notice: MessageNotice) {
-        let mut notifications = self.notifications;
+        let mut notifications = self.project.notifications;
         notifications.write().push(notice, Self::now_ms());
     }
 }
@@ -831,5 +872,61 @@ mod tests {
 
         assert_eq!(robots.default_joint_selection(Some(&camera)), None);
         assert_eq!(robots.default_joint_selection(Some(&joint)), None);
+    }
+}
+
+impl StudioProjectState {
+    pub(crate) fn use_provider() -> Self {
+        let state = Self {
+            backend: ProjectBackendSignals {
+                snapshot: use_signal(StudioSnapshot::default),
+                live: use_signal(|| false),
+                clock_ms: use_signal(|| 0.0),
+            },
+            resources: StudioProjectResources::use_resources(),
+            notifications: use_signal(NotificationCenterState::default),
+            requested_episode: use_signal(|| None),
+        };
+        use_context_provider(|| state)
+    }
+
+    pub(crate) fn use_polling(mut self) {
+        let sessions = ProjectSessionSignals::current();
+        use_effect(move || self.backend.live.set(sessions.connected()));
+        let setup = QueryPolicy::new(QueryDomain::Setup, 2_000)
+            .use_resource(|| StudioClient::current().setup_snapshot());
+        use_effect(move || {
+            let result = setup.read();
+            if setup.finished()
+                && let Some(Ok(value)) = result.as_ref()
+                && *self.backend.snapshot.peek() != *value
+            {
+                self.backend.snapshot.set(value.clone());
+            }
+        });
+        #[cfg(all(feature = "web", target_arch = "wasm32"))]
+        use_future(move || async move {
+            loop {
+                gloo_timers::future::TimeoutFuture::new(250).await;
+                self.backend.clock_ms.set(Studio::now_ms());
+            }
+        });
+    }
+
+    pub(crate) fn loaded_settings(self) -> Option<DataSettings> {
+        self.resources.loaded_settings.read().clone()
+    }
+
+    pub(crate) fn open_episode(mut self, episode: String) {
+        self.requested_episode.set(Some(episode));
+    }
+
+    pub(crate) fn take_requested_episode(mut self) -> Option<String> {
+        let requested = self.requested_episode.read().is_some();
+        requested.then(|| self.requested_episode.take()).flatten()
+    }
+
+    pub(crate) fn close_notifications(mut self) {
+        self.notifications.write().close();
     }
 }
