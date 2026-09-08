@@ -214,7 +214,10 @@ schemas served by `/api/openapi.json`. `—` means no request body.
 
 Dataset import accepts public Hugging Face repositories containing MCAP files. The
 request has `dataset_id`, `repository`, and optional `revision` (default `main`);
-there is no format selector or LeRobot import. Inspection pins a revision and
+imports create `spiral_dataset.<dataset_id>` and
+`spiral_dataset.<dataset_id>_sources`. The dataset namespace is provisioned
+in the import transaction. Studio application state remains in `spiral_robotics`.
+There is no format selector or LeRobot import. Inspection pins a revision and
 lists the native dataset and source relation to create. Import uses Spiral's
 `spql.mcap.dataset` producer, refreshes its population, and checks episode count
 before committing. Existing targets are refused. It does not publish rows into a

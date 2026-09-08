@@ -1,5 +1,9 @@
 # MCAP import and dataset inspection
 
+Update, September 8: the dataset and its source now live at
+`spiral_dataset.default` and `spiral_dataset.default_sources`. The commands below
+record the original migration. See [current namespaces](dataset-namespaces.md).
+
 September 7, 2026. This replaces the older MCAP output-table assumptions in
 `data-viewer-study.md`. The installed ADBC driver uses native Dataset resources,
 `spql.mcap.episodes`, and `spql.mcap.read_topic`; it does not generate `files`,

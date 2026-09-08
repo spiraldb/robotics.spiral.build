@@ -264,12 +264,9 @@ impl DataCommands {
         request: HuggingFaceDatasetSource,
     ) -> Result<HuggingFaceDatasetInspection, BackendCommandError> {
         let _activity = self.state.admit()?;
-        HuggingFaceDatasetInspection::discover(
-            request,
-            self.state.storage().workflow_model_store().namespace(),
-        )
-        .await
-        .map_err(BackendCommandError::from)
+        HuggingFaceDatasetInspection::discover(request)
+            .await
+            .map_err(BackendCommandError::from)
     }
 
     pub(crate) async fn import_hugging_face_dataset(
@@ -293,12 +290,9 @@ impl DataCommands {
     ) -> Result<HuggingFaceDatasetImportSummary, BackendCommandError> {
         let _activity = self.state.admit()?;
         self.require_catalog_ready()?;
-        let inspection = HuggingFaceDatasetInspection::discover(
-            request,
-            self.state.storage().workflow_model_store().namespace(),
-        )
-        .await
-        .map_err(BackendCommandError::from)?;
+        let inspection = HuggingFaceDatasetInspection::discover(request)
+            .await
+            .map_err(BackendCommandError::from)?;
         let token = self
             .state
             .catalog_lease()

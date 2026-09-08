@@ -293,6 +293,10 @@ never becomes the motor-control runtime.
   without materializing encoded video frames.
   The Studio exposes row-limited, read-only query preview and video retrieval
   through the backend.
+- **Data ownership.** `spiral_robotics` holds Studio application state (robots,
+  settings, workflow, training, and rollout records). `spiral_dataset` holds
+  native datasets and their source tables; their association comes from the
+  dataset definition, not name-prefix matching.
 - **Native MCAP ingestion.** Data imports MCAP recordings from a public
   Hugging Face repository into one native Spiral Dataset. Source inspection
   resolves a revision and previews files, size, destination, and warnings

@@ -244,7 +244,10 @@ struct ImportRelations {
     source: String,
 }
 impl ImportRelations {
-    fn new(namespace: &str, dataset_id: &str) -> Self {
+    const NAMESPACE: &str = "spiral_dataset";
+
+    fn new(dataset_id: &str) -> Self {
+        let namespace = Self::NAMESPACE;
         Self {
             dataset: format!("{namespace}.{dataset_id}"),
             source: format!("{namespace}.{dataset_id}_sources"),
@@ -272,11 +275,11 @@ impl ImportRelations {
 #[allow(async_fn_in_trait)]
 pub trait HuggingFaceDatasetDiscovery: Sized {
     /// Resolve one public Hugging Face dataset snapshot without changing Spiral.
-    async fn discover(request: HuggingFaceDatasetSource, namespace: &str) -> Result<Self, String>;
+    async fn discover(request: HuggingFaceDatasetSource) -> Result<Self, String>;
 }
 
 impl HuggingFaceDatasetDiscovery for HuggingFaceDatasetInspection {
-    async fn discover(request: HuggingFaceDatasetSource, namespace: &str) -> Result<Self, String> {
+    async fn discover(request: HuggingFaceDatasetSource) -> Result<Self, String> {
         request.validate_for_discovery()?;
         let dataset_id = request.dataset_id().to_owned();
         let requested_revision = request.revision().to_owned();
@@ -317,7 +320,7 @@ impl HuggingFaceDatasetDiscovery for HuggingFaceDatasetInspection {
                 .checked_add(file.bytes())
                 .ok_or_else(|| "Hugging Face file sizes overflow u64".to_owned())
         })?;
-        let relations = ImportRelations::new(namespace, &dataset_id);
+        let relations = ImportRelations::new(&dataset_id);
         let mut warnings = Vec::new();
         if selected.iter().any(|file| file.bytes() == 0) {
             warnings.push(
@@ -340,8 +343,7 @@ impl StorageManager {
         &self,
         inspection: HuggingFaceDatasetInspection,
     ) -> Result<HuggingFaceDatasetImportSummary, String> {
-        let namespace = self.project_store().namespace().to_owned();
-        let relations = ImportRelations::new(&namespace, inspection.dataset_id());
+        let relations = ImportRelations::new(inspection.dataset_id());
         let resources = self.project_resources().await?;
         if resources
             .iter()
@@ -474,6 +476,9 @@ impl HuggingFaceInspectionStorage for HuggingFaceDatasetInspection {
         connection: &mut ProjectConnection,
         relations: &ImportRelations,
     ) -> Result<(), String> {
+        connection
+            .ensure_dataset_namespace(ImportRelations::NAMESPACE)
+            .await?;
         let files = self.files().iter().collect::<Vec<_>>();
         connection
             .ingest_batch(
@@ -633,15 +638,18 @@ mod tests {
     }
     #[test]
     fn import_uses_native_producer_and_quoted_names() {
-        let target = ImportRelations::new("studio", "pick-place");
+        let target = ImportRelations::new("pick-place");
         assert!(
-            target
-                .create_sql()
-                .contains("CREATE DATASET \"studio\".\"pick-place\" USING spql.mcap.dataset")
+            target.create_sql().contains(
+                "CREATE DATASET \"spiral_dataset\".\"pick-place\" USING spql.mcap.dataset"
+            )
         );
         assert_eq!(
             target.planned(),
-            ["studio.pick-place", "studio.pick-place_sources"]
+            [
+                "spiral_dataset.pick-place",
+                "spiral_dataset.pick-place_sources"
+            ]
         );
     }
     #[test]
