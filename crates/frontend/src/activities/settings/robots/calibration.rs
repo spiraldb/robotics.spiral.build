@@ -1,8 +1,8 @@
+use crate::activities::settings::robots::RobotClient;
 use crate::components::interaction::{
     Action, ActionPurpose, ActionVariant, BlockingConfirmation, ConfirmationCopy,
     ConfirmationDismissal, ConfirmationResponse,
 };
-use crate::settings::robots::RobotClient;
 use dioxus::prelude::*;
 use spiral_robotics_common::robots::{CalibrationJointProgress, CalibrationProgress, RobotSummary};
 use spiral_robotics_viewport as arm;

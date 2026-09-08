@@ -12,7 +12,6 @@ pub(crate) mod client;
 mod components;
 pub(crate) mod format;
 pub(crate) mod panels;
-pub(crate) mod settings;
 pub(crate) mod shell;
 pub(crate) mod tasks;
 

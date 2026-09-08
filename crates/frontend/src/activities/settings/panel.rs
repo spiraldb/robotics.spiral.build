@@ -1,14 +1,14 @@
 //! Settings screen for robots, SpiralDB, training, and video.
 
+use crate::activities::settings::SettingsClient;
 use crate::components::interaction::{
     Action, ActionLink, ActionPurpose, ActionVariant, BlockingConfirmation, BrowserFocus,
     ConfirmationCopy, ConfirmationDismissal, ConfirmationResponse, FileAction, FileInput, Toggle,
 };
-use crate::settings::SettingsClient;
 use dioxus::prelude::*;
 use spiral_robotics_common::settings::{DataSettings, SpiralConnectionUpdate};
 
-use crate::settings::robots::RobotPanel;
+use crate::activities::settings::robots::RobotPanel;
 use crate::shell::notifications::MessageSource;
 use crate::shell::state::studio;
 use crate::tasks::SingleFlight;

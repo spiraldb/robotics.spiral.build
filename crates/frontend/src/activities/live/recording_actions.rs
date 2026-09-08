@@ -5,7 +5,7 @@
 //! backend remains authoritative for recording, replay, hardware, and safety.
 
 use crate::activities::live::RecordingClient;
-use crate::settings::robots::RobotClient;
+use crate::activities::settings::robots::RobotClient;
 use dioxus::prelude::*;
 use spiral_robotics_common::recording::EpisodeInfo;
 use spiral_robotics_common::robots::ModeSelection;

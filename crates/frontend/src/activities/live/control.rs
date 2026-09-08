@@ -1,6 +1,6 @@
 //! Joint controls for the arm selected on the Live screen.
 
-use crate::settings::robots::RobotClient;
+use crate::activities::settings::robots::RobotClient;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;

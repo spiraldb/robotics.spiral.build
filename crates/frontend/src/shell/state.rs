@@ -3,8 +3,8 @@
 use crate::activities::data::DatasetClient;
 use crate::activities::live::RecordingClient;
 use crate::activities::rollout::RolloutClient;
+use crate::activities::settings::SettingsClient;
 use crate::activities::training::history::TrainingHistory;
-use crate::settings::SettingsClient;
 use crate::shell::StudioClient;
 use crate::shell::frame::{TrainingStatus, WorkflowStatusProjection};
 use std::future::Future;

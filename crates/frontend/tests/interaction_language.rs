@@ -214,7 +214,7 @@ fn project_lifetime_contexts_wrap_the_session_owned_feature_controllers() {
 #[test]
 fn serial_port_catalog_is_owned_once_by_the_robots_view() {
     let frontend = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let robots = fs::read_to_string(frontend.join("src/settings/robots/mod.rs"))
+    let robots = fs::read_to_string(frontend.join("src/activities/settings/robots/mod.rs"))
         .expect("Robot settings source should be readable");
     let robot_panel = robots
         .split_once("pub(super) fn RobotPanel")
@@ -361,7 +361,7 @@ fn studio_is_a_strict_desktop_pointer_application() {
 #[test]
 fn failed_project_import_releases_the_blocking_confirmation() {
     let frontend = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let settings = fs::read_to_string(frontend.join("src/settings/panel.rs"))
+    let settings = fs::read_to_string(frontend.join("src/activities/settings/panel.rs"))
         .expect("settings panel source should be readable");
 
     for behavior in [
