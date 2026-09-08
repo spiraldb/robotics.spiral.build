@@ -1,7 +1,7 @@
 //! Camera panel identity, source setup, and independent first-open camera rows.
 
 use super::camera::{CameraEditor, CameraEditorSource, RecordedCameraSourceRequest};
-use crate::shell::state::Selection;
+use crate::shell::robot_workspace::Selection;
 use dioxus::prelude::*;
 use dioxus_workbench::{DockZone, LayoutNode, Panel, PanelId, SplitAxis};
 use spiral_robotics_common::robots::{CameraBinding, RobotSummary};

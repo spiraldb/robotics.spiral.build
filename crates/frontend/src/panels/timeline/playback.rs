@@ -133,10 +133,6 @@ mod tests {
 
     impl ClockHarness {
         fn render(self) -> Element {
-            crate::shell::view_state::ProjectViewStates::use_provider();
-            crate::shell::view_state::ViewState::use_provider(
-                crate::shell::activity::Activity::Live,
-            );
             let active = use_signal(|| true);
             let revision = use_signal(|| 0_u64);
             let timeline = TimelineController::use_controller();

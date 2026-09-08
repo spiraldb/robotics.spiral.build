@@ -18,7 +18,7 @@ pub(crate) struct DatasetBrowserSelection {
 }
 impl DatasetBrowserSelection {
     pub(crate) fn provide() -> Self {
-        let browser = crate::shell::view_state::ViewState::use_retained(|| Self {
+        let browser = use_hook(|| Self {
             selected: Signal::new(None),
             revision: Signal::new(0),
             requested_panel: Signal::new(None),
@@ -47,16 +47,13 @@ pub(crate) fn NativeDatasetsPanel() -> Element {
     let mut browser = use_context::<DatasetBrowserSelection>();
     let sessions = ProjectSessionSignals::current();
     let mut search = browser.search;
-    let workspace = crate::shell::activity::WorkspaceActivity::current();
-    let mut catalog = use_resource(move || async move {
-        if !workspace.is_active() {
-            return std::future::pending().await;
-        }
-        if !sessions.storage_available() {
-            return Ok(Vec::new());
-        }
-        DatasetClient::current().native_datasets().await
-    });
+    let available = use_memo(move || sessions.storage_available());
+    let mut catalog =
+        crate::client::queries::QueryPolicy::on_demand(crate::client::queries::QueryDomain::Data)
+            .use_when(
+                move || *available.read(),
+                || DatasetClient::current().native_datasets(),
+            );
     let catalog_response = catalog.read();
     let pending = *catalog.state().read() == UseResourceState::Pending;
     rsx! {
@@ -114,19 +111,27 @@ pub(crate) fn NativeDatasetsPanel() -> Element {
 #[component]
 pub(crate) fn NativeDatasetInspector() -> Element {
     let browser = use_context::<DatasetBrowserSelection>();
-    let mut inspection = use_resource(move || {
-        let selection = (browser.selected)();
-        let _revision = (browser.revision)();
-        async move {
-            match selection {
-                Some(selection) => DatasetClient::current()
-                    .inspect_native_dataset(selection)
-                    .await
-                    .map(Some),
-                None => Ok(None),
-            }
-        }
+    let available = use_memo(move || {
+        crate::shell::project::ProjectSessionSignals::current().storage_available()
     });
+    let mut inspection =
+        crate::client::queries::QueryPolicy::on_demand(crate::client::queries::QueryDomain::Data)
+            .use_when(
+                move || *available.read(),
+                move || {
+                    let selection = (browser.selected)();
+                    let _revision = (browser.revision)();
+                    async move {
+                        match selection {
+                            Some(selection) => DatasetClient::current()
+                                .inspect_native_dataset(selection)
+                                .await
+                                .map(Some),
+                            None => Ok(None),
+                        }
+                    }
+                },
+            );
     let inspection_response = inspection.read();
     let pending = *inspection.state().read() == UseResourceState::Pending;
     rsx! {
@@ -301,10 +306,6 @@ mod navigation_tests {
     struct NavigationHarness(Rc<RefCell<Option<DatasetBrowserSelection>>>);
     impl NavigationHarness {
         fn render(self) -> Element {
-            crate::shell::view_state::ProjectViewStates::use_provider();
-            crate::shell::view_state::ViewState::use_provider(
-                crate::shell::activity::Activity::Data,
-            );
             *self.0.borrow_mut() = Some(DatasetBrowserSelection::provide());
             rsx! {}
         }

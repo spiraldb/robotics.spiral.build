@@ -1,102 +1,23 @@
-//! Durable state and transitions for the Data screen.
-//!
-//! Each retained view owns its controller, which outlives its mounted workbench. Views render its
-//! signals and emit semantic transitions. The selected episode drives one
-//! resource, while successful immutable episode data is cached on its catalog
-//! entry.
-
+//! SQL drafts and query results owned by the Data workbench.
 use crate::activities::data::DatasetClient;
-use crate::client::queries::{QueryDomain, QueryPolicy, QueryRefresh};
-use std::sync::Arc;
-
-use dioxus::prelude::*;
-use spiral_robotics_common::identity::DatasetId;
-use spiral_robotics_common::recording::{DatasetSummary, EpisodeListItem};
-
-use crate::activities::data::dataset_catalog::DatasetCatalogState;
-use crate::activities::data::episode_cache::EpisodeData;
 use crate::activities::data::query_result::{
     DEFAULT_QUERY_ROWS, QueryExecutionPresentation, QueryState, QueryTab,
 };
-use crate::activities::data::sql_draft::GeneratedSqlDraft;
+use crate::shell::{notifications::MessageSource, state::StudioProjectState};
+use dioxus::prelude::*;
 use spiral_robotics_common::native_datasets::NativeDatasetSelection;
-
-use crate::shell::notifications::MessageSource;
-use crate::shell::state::Studio;
-
 pub(crate) const MAX_QUERY_TABS: usize = 8;
-
 struct ActiveQuery {
     id: u64,
 }
-
 #[derive(Clone, Copy)]
-pub(crate) struct DataController {
-    selected_episode: Signal<Option<String>>,
-    dataset_catalog: Signal<DatasetCatalogState>,
-    episode_catalog: Signal<EpisodeCatalogState>,
-    episode_loader: Resource<Option<EpisodeLoadResult>>,
+pub(crate) struct QueryController {
     draft: QueryDraftSignals,
     execution: QueryExecutionSignals,
 }
-
-/// The data choices and query results retained when its routed UI unmounts.
-#[derive(Clone, Copy)]
-struct DataState {
-    selected_episode: Signal<Option<String>>,
-    dataset_catalog: Signal<DatasetCatalogState>,
-    episode_catalog: Signal<EpisodeCatalogState>,
-    draft: QueryDraftSignals,
-    execution: QueryExecutionSignals,
-}
-
-#[derive(Clone, Debug)]
-struct EpisodeLoadResult {
-    episode: String,
-    expected_frames: u64,
-    result: Result<Arc<EpisodeData>, String>,
-}
-
-#[derive(Clone, Debug, Default)]
-struct EpisodeCatalogState {
-    dataset_id: Option<String>,
-    episodes: Vec<EpisodeEntry>,
-    issues: Vec<String>,
-    loading: bool,
-    loaded: bool,
-    error: Option<String>,
-}
-
-/// One catalog record and the full data loaded for that same stable identity.
-/// Attaching the data to its record prevents a late request from replacing a
-/// different selected episode.
-#[derive(Clone, Debug)]
-struct EpisodeEntry {
-    summary: EpisodeListItem,
-    full_data: Option<Arc<EpisodeData>>,
-}
-
-impl EpisodeEntry {
-    fn new(summary: EpisodeListItem) -> Self {
-        Self {
-            summary,
-            full_data: None,
-        }
-    }
-
-    fn replace_summary(mut self, summary: EpisodeListItem) -> Self {
-        if self.summary.frames() != summary.frames() {
-            self.full_data = None;
-        }
-        self.summary = summary;
-        self
-    }
-}
-
 #[derive(Clone, Copy)]
 struct QueryDraftSignals {
     sql: Signal<String>,
-    generated_sql: Signal<String>,
     max_rows: Signal<usize>,
 }
 
@@ -108,27 +29,17 @@ struct QueryExecutionSignals {
     next_query_id: Signal<u64>,
 }
 
-impl DataController {
-    /// Create this view's dataset choices, query drafts, and cached results.
-    /// Project-lived feature state preserves these signals across route changes.
-    pub(crate) fn use_controller(_namespace: &str, dataset_id: &str) -> Self {
-        let initial_sql =
-            NativeDatasetSelection::new(dataset_id.split('.').map(str::to_owned).collect())
-                .map(|selection| selection.episodes_sql())
-                .unwrap_or_default();
-        let DataState {
-            selected_episode,
-            dataset_catalog,
-            episode_catalog,
-            draft,
-            execution,
-        } = crate::shell::view_state::ViewState::use_retained(|| DataState {
-            selected_episode: Signal::new(None),
-            dataset_catalog: Signal::new(DatasetCatalogState::default()),
-            episode_catalog: Signal::new(EpisodeCatalogState::default()),
+impl QueryController {
+    pub(crate) fn current() -> Self {
+        consume_context()
+    }
+    pub(crate) fn use_provider() -> Self {
+        let initial_sql = NativeDatasetSelection::new(vec!["default".into()])
+            .unwrap()
+            .episodes_sql();
+        use_context_provider(|| Self {
             draft: QueryDraftSignals {
-                sql: Signal::new(initial_sql.clone()),
-                generated_sql: Signal::new(initial_sql),
+                sql: Signal::new(initial_sql),
                 max_rows: Signal::new(DEFAULT_QUERY_ROWS),
             },
             execution: QueryExecutionSignals {
@@ -137,233 +48,8 @@ impl DataController {
                 active_request: Signal::new(None),
                 next_query_id: Signal::new(1),
             },
-        });
-        let sessions = crate::shell::project::ProjectSessionSignals::current();
-        let activity = crate::shell::view_state::ViewState::activity();
-        let episode_loader = use_resource(move || {
-            let available = activity.uses_episode_catalog() && sessions.storage_available();
-            let selected = selected_episode();
-            let source = selected.and_then(|episode| {
-                episode_catalog
-                    .peek()
-                    .episodes
-                    .iter()
-                    .find(|entry| entry.summary.id() == episode)
-                    .map(|entry| {
-                        (
-                            episode,
-                            entry.summary.frames(),
-                            entry.full_data.as_ref().map(Arc::clone),
-                        )
-                    })
-            });
-            async move {
-                if !available {
-                    return std::future::pending().await;
-                }
-                let (episode, expected_frames, cached) = source?;
-                let result = match cached {
-                    Some(data) => Ok(data),
-                    None => EpisodeData::load(&episode).await,
-                }
-                .and_then(|data| {
-                    if data.info().id() == episode && data.info().frames() == expected_frames {
-                        Ok(data)
-                    } else {
-                        Err(format!(
-                            "Episode data did not match the selected catalog entry (expected {episode} with {expected_frames} frames, received {} with {} frames).",
-                            data.info().id(),
-                            data.info().frames(),
-                        ))
-                    }
-                });
-                Some(EpisodeLoadResult {
-                    episode,
-                    expected_frames,
-                    result,
-                })
-            }
-        });
-        let controller = Self {
-            selected_episode,
-            dataset_catalog,
-            episode_catalog,
-            episode_loader,
-            draft,
-            execution,
-        };
-        use_effect(move || {
-            if episode_loader.state().cloned() != UseResourceState::Ready {
-                return;
-            }
-            let loaded = episode_loader.read();
-            let Some(Some(loaded)) = loaded.as_ref() else {
-                return;
-            };
-            controller.cache_episode_data(loaded);
-        });
-        let dataset_dependency = dataset_id.to_owned();
-        use_effect(use_reactive((&dataset_dependency,), move |(dataset_id,)| {
-            controller.sync_dataset(&dataset_id)
-        }));
-        controller
+        })
     }
-
-    pub(crate) fn set_selected_episode(mut self, episode: Option<String>) {
-        if self.selected_episode.peek().as_ref() != episode.as_ref() {
-            self.selected_episode.set(episode);
-        }
-    }
-
-    fn cache_episode_data(mut self, loaded: &EpisodeLoadResult) {
-        let Ok(data) = &loaded.result else {
-            return;
-        };
-        let mut catalog = self.episode_catalog.write();
-        let Some(entry) = catalog
-            .episodes
-            .iter_mut()
-            .find(|entry| entry.summary.id() == loaded.episode)
-        else {
-            return;
-        };
-        if entry.summary.frames() != loaded.expected_frames
-            || data.info().id() != loaded.episode
-            || data.info().frames() != loaded.expected_frames
-            || entry
-                .full_data
-                .as_ref()
-                .is_some_and(|cached| Arc::ptr_eq(cached, data))
-        {
-            return;
-        }
-        entry.full_data = Some(Arc::clone(data));
-    }
-
-    pub(crate) fn datasets(&self) -> Vec<DatasetSummary> {
-        self.dataset_catalog.read().datasets().to_vec()
-    }
-
-    pub(crate) fn datasets_loading(&self) -> bool {
-        self.dataset_catalog.read().loading()
-    }
-
-    pub(crate) fn dataset_catalog_error(&self) -> Option<crate::client::CommandError> {
-        self.dataset_catalog.read().error().cloned()
-    }
-
-    /// The active Live or Training view fetches its dataset/episode choices.
-    /// Data uses the native dataset browser and does not load these catalogs.
-    pub(crate) fn use_polling(mut self, studio: Studio, is_active: ReadSignal<bool>) {
-        let sessions = crate::shell::project::ProjectSessionSignals::current();
-        let activity = crate::shell::view_state::ViewState::activity();
-        let datasets = QueryPolicy::new(QueryDomain::Data, 5_000).use_when(
-            move || is_active() && activity.uses_episode_catalog() && sessions.storage_available(),
-            || DatasetClient::current().list_datasets(),
-        );
-        use_effect(move || {
-            let result = datasets.read();
-            let pending = *datasets.state().read() == UseResourceState::Pending;
-            if pending {
-                self.dataset_catalog.write().pending();
-            } else if let Some(result) = result.as_ref() {
-                self.dataset_catalog.write().accept(result.clone());
-            }
-        });
-        let episodes = QueryPolicy::new(QueryDomain::Data, 5_000).use_when(move || is_active() && activity.uses_episode_catalog() && sessions.storage_available(), move || {
-            let dataset = studio.selected_dataset().read().to_owned();
-            async move {
-                let dataset = DatasetId::try_from(dataset.as_str()).map(String::from)
-                    .map_err(|error| crate::client::CommandError::new(spiral_robotics_common::command_failure::CommandFailureCode::InvalidInput, error.to_string()))?;
-                let result = DatasetClient::current().list_episodes(dataset.clone()).await?;
-                Ok::<_, crate::client::CommandError>((dataset, result))
-            }
-        });
-        use_effect(move || {
-            let result = episodes.read();
-            let pending = *episodes.state().read() == UseResourceState::Pending;
-            let dataset = studio.selected_dataset().read().to_owned();
-            if self.episode_catalog.peek().dataset_id.as_deref() != Some(&dataset) {
-                self.episode_catalog.set(EpisodeCatalogState {
-                    dataset_id: Some(dataset.clone()),
-                    ..Default::default()
-                });
-            }
-            if pending {
-                self.episode_catalog.write().loading = true;
-            } else {
-                match result.as_ref() {
-                    Some(Ok((loaded_dataset, catalog))) if loaded_dataset == &dataset => {
-                        self.accept_episodes(
-                            catalog.episodes().to_vec(),
-                            catalog.warnings().to_vec(),
-                        );
-                    }
-                    Some(Err(error)) => {
-                        let mut catalog = self.episode_catalog.write();
-                        catalog.loading = false;
-                        catalog.error = Some(error.to_string());
-                    }
-                    _ => {}
-                }
-            }
-        });
-    }
-
-    fn accept_episodes(mut self, episodes: Vec<EpisodeListItem>, issues: Vec<String>) {
-        let mut catalog = self.episode_catalog.write();
-        let changed = !catalog
-            .episodes
-            .iter()
-            .map(|entry| &entry.summary)
-            .eq(episodes.iter());
-        let previous = std::mem::take(&mut catalog.episodes);
-        catalog.episodes = episodes
-            .into_iter()
-            .map(|summary| {
-                previous
-                    .iter()
-                    .find(|entry| entry.summary.id() == summary.id())
-                    .cloned()
-                    .map_or_else(
-                        || EpisodeEntry::new(summary.clone()),
-                        |entry| entry.replace_summary(summary.clone()),
-                    )
-            })
-            .collect();
-        catalog.issues = issues;
-        catalog.loading = false;
-        catalog.loaded = true;
-        catalog.error = None;
-        drop(catalog);
-        if changed && self.selected_episode.peek().is_some() {
-            self.episode_loader.restart();
-        }
-    }
-
-    pub(crate) fn retry_datasets(self) {
-        QueryRefresh::current().invalidate(&[QueryDomain::Data]);
-    }
-
-    pub(crate) fn invalidate_episode_catalog(self) {
-        QueryRefresh::current().invalidate(&[QueryDomain::Data]);
-    }
-
-    fn sync_dataset(mut self, dataset_id: &str) {
-        let previous = self.draft.generated_sql.peek().to_owned();
-        let next = NativeDatasetSelection::new(dataset_id.split('.').map(str::to_owned).collect())
-            .map(|selection| selection.episodes_sql())
-            .unwrap_or_default();
-        if previous == next {
-            return;
-        }
-        let mut current = self.draft.sql.peek().to_owned();
-        if current.rebase_generated(&previous, &next) {
-            self.draft.sql.set(current);
-        }
-        self.draft.generated_sql.set(next);
-    }
-
     pub(crate) fn sql(&self) -> String {
         self.draft.sql.read().to_owned()
     }
@@ -424,7 +110,7 @@ impl DataController {
         self.draft.max_rows.set(rows);
     }
 
-    pub(crate) fn run_query(mut self, studio: Studio, query_available: bool) {
+    pub(crate) fn run_query(mut self, studio: StudioProjectState, query_available: bool) {
         if !query_available {
             studio.report_warning_from(
                 MessageSource::Data,
@@ -460,10 +146,8 @@ impl DataController {
 
         self.execution.active_request.set(Some(ActiveQuery { id }));
 
-        // The Data view may be unmounted while the request is in flight. The
-        // controller and its generation guard survive route changes, so completion
-        // must outlive the button that launched it.
-        crate::client::project::ProjectClient::current().spawn(async move {
+        // The request may outlive the initiating panel; the Data workspace owns its result.
+        dioxus::dioxus_core::Runtime::current().spawn(self.draft.sql.origin_scope(), async move {
             let outcome = DatasetClient::current()
                 .run_spiral_query(statement.clone(), rows)
                 .await
@@ -608,5 +292,65 @@ mod tests {
         assert_eq!(tabs.len(), MAX_QUERY_TABS);
         assert_eq!(tabs.first().map(QueryTab::id), Some(2));
         assert_eq!(tabs.last().map(QueryTab::id), Some(99));
+    }
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+    use std::{cell::RefCell, rc::Rc};
+
+    #[derive(Clone, Default)]
+    struct OwnershipHarness(Rc<RefCell<ObservedOwners>>);
+    #[derive(Default)]
+    struct ObservedOwners {
+        mounted: Option<Signal<bool>>,
+        controllers: Vec<QueryController>,
+    }
+    impl OwnershipHarness {
+        fn render(self) -> Element {
+            use_context_provider(|| self.clone());
+            let mounted = use_signal(|| true);
+            self.0.borrow_mut().mounted = Some(mounted);
+            rsx! { if mounted() { QueryOwner {} QueryOwner {} } }
+        }
+    }
+    #[component]
+    fn QueryOwner() -> Element {
+        let controller = QueryController::use_provider();
+        let harness = use_context::<OwnershipHarness>();
+        use_hook(move || harness.0.borrow_mut().controllers.push(controller));
+        rsx! { span { "{controller.sql()}" } }
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn query_state_is_isolated_and_dropped_with_its_component_owner() {
+        let harness = OwnershipHarness::default();
+        let mut dom = VirtualDom::new_with_props(OwnershipHarness::render, harness.clone());
+        dom.rebuild_in_place();
+        let (first, second, mut mounted) = {
+            let observed = harness.0.borrow();
+            (
+                observed.controllers[0],
+                observed.controllers[1],
+                observed.mounted.unwrap(),
+            )
+        };
+        assert_ne!(
+            first.draft.sql.origin_scope(),
+            second.draft.sql.origin_scope()
+        );
+        assert_ne!(first.draft.sql.origin_scope(), ScopeId::ROOT);
+        dom.in_runtime(|| first.set_sql("select 'local draft'".into()));
+        dom.render_immediate_to_vec();
+        assert_ne!(first.sql(), second.sql());
+        dom.in_runtime(|| mounted.set(false));
+        dom.render_immediate_to_vec();
+        assert!(first.draft.sql.try_read().is_err());
+        assert!(second.draft.sql.try_read().is_err());
+        dom.in_runtime(|| mounted.set(true));
+        dom.render_immediate_to_vec();
+        let replacement = harness.0.borrow().controllers[2];
+        assert_ne!(replacement.sql(), "select 'local draft'");
     }
 }

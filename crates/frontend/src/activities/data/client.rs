@@ -5,9 +5,7 @@ use crate::client::transport::{CommandError, HttpRequest};
 use spiral_robotics_common::native_datasets::{
     NativeDatasetInspection, NativeDatasetSelection, NativeDatasetSummary,
 };
-use spiral_robotics_common::recording::{
-    DatasetSummary, EpisodeCatalog, EpisodeInspectionSnapshot,
-};
+use spiral_robotics_common::recording::{DatasetSummary, EpisodeInspectionSnapshot};
 use spiral_robotics_common::relations::{QueryRequest, RelationCatalog, SpiralQuerySnapshot};
 use std::future::Future;
 
@@ -38,19 +36,6 @@ impl DatasetClient {
     ) -> impl Future<Output = Result<Vec<DatasetSummary>, CommandError>> + use<> {
         self.project
             .request(HttpRequest::new("GET", "/api/datasets"))
-    }
-
-    pub(crate) fn list_episodes(
-        &self,
-        dataset_id: String,
-    ) -> impl Future<Output = Result<EpisodeCatalog, CommandError>> + use<> {
-        self.project.request(HttpRequest::new(
-            "GET",
-            format!(
-                "/api/datasets/{dataset_id}/episodes",
-                dataset_id = dataset_id.url_component()
-            ),
-        ))
     }
 
     pub(crate) fn inspect_episode(

@@ -10,12 +10,10 @@ use dioxus::prelude::*;
 use spiral_robotics_common::recording::EpisodeInfo;
 use spiral_robotics_common::robots::ModeSelection;
 
-use crate::activities::data::state::DataController;
-
+use crate::activities::live::session::LiveSession;
 use crate::shell::notifications::MessageSource;
-use crate::shell::state::Studio;
 
-impl Studio {
+impl LiveSession {
     pub(crate) fn recording_blocker(self) -> Option<String> {
         let studio = self;
         if !spiral_robotics_common::identity::DatasetId::is_canonical(
@@ -94,7 +92,6 @@ impl Studio {
                 .stop_recording(completion.keep)
                 .await
                 .map_err(|error| error.to_string())?;
-            completion.data.invalidate_episode_catalog();
             if completion.keep {
                 studio.report_info_from(
                     MessageSource::Live,
@@ -227,19 +224,13 @@ impl Studio {
 }
 
 pub(crate) struct RecordingCompletion {
-    data: DataController,
     keep: bool,
     on_completed: Box<dyn FnOnce(EpisodeInfo)>,
 }
 
 impl RecordingCompletion {
-    pub(crate) fn new(
-        data: DataController,
-        keep: bool,
-        on_completed: impl FnOnce(EpisodeInfo) + 'static,
-    ) -> Self {
+    pub(crate) fn new(keep: bool, on_completed: impl FnOnce(EpisodeInfo) + 'static) -> Self {
         Self {
-            data,
             keep,
             on_completed: Box::new(on_completed),
         }
@@ -262,7 +253,7 @@ impl TimelineSeekBody {
     }
 }
 
-impl Studio {
+impl LiveSession {
     pub(crate) fn physical_seek(self, episode: String, request: TimelineSeekBody) {
         let studio = self;
         studio.run("", async move {

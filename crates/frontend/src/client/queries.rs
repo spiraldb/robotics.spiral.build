@@ -47,14 +47,23 @@ impl QueryRefresh {
 #[derive(Clone, Copy)]
 pub(crate) struct QueryPolicy {
     domain: QueryDomain,
-    interval_ms: u32,
+    interval_ms: Option<u32>,
     active: Option<ReadSignal<bool>>,
 }
 impl QueryPolicy {
     pub(crate) const fn new(domain: QueryDomain, interval_ms: u32) -> Self {
         Self {
             domain,
-            interval_ms,
+            interval_ms: Some(interval_ms),
+            active: None,
+        }
+    }
+
+    /// Fetch once, then keep the result until an input or command invalidates it.
+    pub(crate) const fn on_demand(domain: QueryDomain) -> Self {
+        Self {
+            domain,
+            interval_ms: None,
             active: None,
         }
     }
@@ -100,11 +109,17 @@ impl QueryPolicy {
                 }
             }
         });
-        self.use_timer(resource);
+        if let Some(interval_ms) = self.interval_ms {
+            self.use_timer(resource, interval_ms);
+        }
         resource
     }
 
-    fn use_timer<T: 'static, E: 'static>(self, mut resource: Resource<Result<T, E>>) {
+    fn use_timer<T: 'static, E: 'static>(
+        self,
+        mut resource: Resource<Result<T, E>>,
+        interval_ms: u32,
+    ) {
         // This timer depends on the read's lifecycle. Restarting a read cancels
         // its old timer; completing it starts a new delay. Neither a slow read
         // nor a paused resource has a running refresh timer.
@@ -113,9 +128,9 @@ impl QueryPolicy {
             let completed_task = resource.task();
             let active = self.active.is_none_or(|active| *active.read());
             let normal_interval = if active {
-                self.interval_ms
+                interval_ms
             } else {
-                self.interval_ms.max(5_000)
+                interval_ms.max(5_000)
             };
             let failed = resource.peek().as_ref().is_some_and(Result::is_err);
             let hidden = web_sys::window()
@@ -153,7 +168,7 @@ impl QueryPolicy {
             Either::Left((result, _)) => result,
             Either::Right(_) => Err(CommandError::new(
                 spiral_robotics_common::command_failure::CommandFailureCode::Transport,
-                "The backend read timed out. Retrying automatically.",
+                "The backend read timed out.",
             )
             .into()),
         }
@@ -331,7 +346,7 @@ mod tests {
             result,
             Err(CommandError::new(
                 spiral_robotics_common::command_failure::CommandFailureCode::Transport,
-                "The backend read timed out. Retrying automatically.",
+                "The backend read timed out.",
             ))
         );
         assert!(read.dropped.get());

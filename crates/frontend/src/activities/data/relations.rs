@@ -10,8 +10,6 @@ use spiral_robotics_common::relations::{CatalogRelation, RelationCatalog, Spiral
 use crate::activities::data::catalog::ManagedTable as Table;
 use crate::activities::data::query_result::{QueryExecutionPresentation, QueryState};
 
-use crate::shell::state::studio;
-
 const PREVIEW_ROWS: usize = 5;
 const MAX_COUNTED_RELATIONS: usize = 1_000;
 const MAX_COUNT_QUERY_BYTES: usize = 60 * 1024;
@@ -181,14 +179,13 @@ impl ProjectRelationScope<'_> {
 
 #[component]
 pub(crate) fn RelationsPanel(namespace: String, query_available: bool) -> Element {
-    let studio = studio();
-    let controller = studio.data_controller();
+    let controller = crate::activities::data::state::QueryController::current();
     let mut selected = use_signal(|| None::<String>);
     let count_namespace = namespace.clone();
     let sessions = crate::shell::project::ProjectSessionSignals::current();
     let mut counts = use_resource(move || {
         let available = sessions.catalog_available();
-        let catalog = studio.relation_catalog();
+        let catalog = RelationCatalogState::current().relation_catalog();
         let namespace = count_namespace.clone();
         async move {
             if !available {
@@ -208,7 +205,7 @@ pub(crate) fn RelationsPanel(namespace: String, query_available: bool) -> Elemen
                 .map(Some)
         }
     });
-    let catalog_result = studio.relation_catalog_result();
+    let catalog_result = RelationCatalogState::current().relation_catalog_result();
     let catalog_response = catalog_result
         .as_ref()
         .and_then(|result| result.as_ref().ok())
@@ -328,7 +325,7 @@ pub(crate) fn RelationsPanel(namespace: String, query_available: bool) -> Elemen
                     title: "Refresh table schemas, row counts, relationships, and the active preview",
                     disabled: catalog_result.is_none() && query_available,
                     onclick: move |_| {
-                        studio.refresh_relation_catalog();
+                        RelationCatalogState::refresh();
                         preview.restart();
                     },
                     RefreshIcon {}
@@ -347,7 +344,7 @@ pub(crate) fn RelationsPanel(namespace: String, query_available: bool) -> Elemen
                     Action {
                         purpose: ActionPurpose::Retry,
                         variant: ActionVariant::Outline,
-                        onclick: move |_| studio.refresh_relation_catalog(),
+                        onclick: move |_| RelationCatalogState::refresh(),
                         "Retry"
                     }
                 }
@@ -646,6 +643,54 @@ impl RelationCountPresentation for Option<u64> {
     fn grouped_count(self) -> String {
         self.map(RelationCountPresentation::grouped_count)
             .unwrap_or_else(|| "—".to_owned())
+    }
+}
+
+/// Completed schema reads are local to the workspace, refreshed by catalog mutations.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) struct RelationCatalogState {
+    result: ReadSignal<Option<Result<spiral_robotics_common::relations::RelationCatalog, String>>>,
+}
+impl RelationCatalogState {
+    pub(crate) fn current() -> Self {
+        consume_context()
+    }
+    pub(crate) fn use_provider() -> Self {
+        let sessions = crate::shell::project::ProjectSessionSignals::current();
+        let available = use_memo(move || sessions.catalog_available());
+        let request = crate::client::queries::QueryPolicy::on_demand(
+            crate::client::queries::QueryDomain::Catalog,
+        )
+        .use_when(
+            move || *available.read(),
+            || async {
+                super::DatasetClient::current()
+                    .relation_catalog()
+                    .await
+                    .map_err(|error| error.to_string())
+            },
+        );
+        use_context_provider(|| Self {
+            result: request.value(),
+        })
+    }
+    pub(crate) fn signal(
+        self,
+    ) -> ReadSignal<Option<Result<spiral_robotics_common::relations::RelationCatalog, String>>>
+    {
+        self.result
+    }
+    pub(super) fn relation_catalog_result(
+        self,
+    ) -> Option<Result<spiral_robotics_common::relations::RelationCatalog, String>> {
+        self.result.read().clone()
+    }
+    fn relation_catalog(self) -> Option<spiral_robotics_common::relations::RelationCatalog> {
+        self.relation_catalog_result().and_then(Result::ok)
+    }
+    pub(crate) fn refresh() {
+        crate::client::queries::QueryRefresh::current()
+            .invalidate(&[crate::client::queries::QueryDomain::Catalog]);
     }
 }
 

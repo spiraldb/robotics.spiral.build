@@ -12,12 +12,13 @@ use spiral_robotics_common::robots::ModeSelection;
 
 use crate::activities::live::actions::LiveAction;
 use crate::activities::live::control::JointPanel;
-use crate::shell::state::{Selection, studio};
+use crate::activities::live::session::LiveSession;
+use crate::shell::robot_workspace::Selection;
 
 /// The complete left-hand workbench for operating a connected pair.
 #[component]
 pub(crate) fn LiveWorkbench(on_action: EventHandler<LiveAction>) -> Element {
-    let studio = studio();
+    let studio = LiveSession::current();
     let robots = studio.snapshot().read().robots().to_owned();
 
     rsx! {
@@ -44,8 +45,8 @@ pub(crate) fn LiveWorkbench(on_action: EventHandler<LiveAction>) -> Element {
 
 #[component]
 fn CaptureSection() -> Element {
-    let studio = studio();
-    let data = studio.data_controller();
+    let studio = LiveSession::current();
+    let data = crate::activities::data::dataset_catalog::DatasetChoices::current();
     let mut selected_dataset = studio.selected_dataset();
     let recording = studio.recording();
     let dataset_ids = data
@@ -96,7 +97,7 @@ fn RobotRoster(
     robots: Vec<spiral_robotics_common::robots::RobotSummary>,
     on_select: EventHandler<Option<Selection>>,
 ) -> Element {
-    let studio = studio();
+    let studio = LiveSession::current();
     let focused = studio.focused().map(|robot| robot.id().to_owned());
     let empty = robots.is_empty();
 
@@ -164,7 +165,7 @@ fn RobotRoster(
 
 #[component]
 fn ControlSection(on_action: EventHandler<LiveAction>) -> Element {
-    let studio = studio();
+    let studio = LiveSession::current();
     let focused = studio.focused();
     let telemetry = focused
         .as_ref()

@@ -77,28 +77,54 @@ pub(crate) fn ActivityRail(activity: Activity, on_activity: EventHandler<Activit
     }
 }
 
+/// The frame reads status directly from the feature that owns it; no mirrored signals.
+#[derive(Clone, Copy, Default, PartialEq)]
+pub(crate) enum WorkspaceStatus {
+    #[default]
+    General,
+    Hardware(crate::shell::robot_workspace::RobotWorkspace),
+    Training(crate::activities::training::history::TrainingHistory),
+    Workflow(crate::activities::workflow::state::WorkflowController),
+}
+
 /// Workspace content stays mounted; only the active workspace supplies shell chrome.
 #[component]
-pub(crate) fn WorkspaceFrame(children: Element) -> Element {
+pub(crate) fn WorkspaceFrame(
+    children: Element,
+    #[props(default)] status: WorkspaceStatus,
+) -> Element {
     let workspace = crate::shell::activity::WorkspaceActivity::current();
     let route = crate::shell::routes::StudioRoute::for_activity(workspace.activity());
     rsx! {
         div { class: "studio-route-content", {children} }
         if workspace.is_active() {
-            StatusBar { route }
+            StatusBar { route, status }
         }
     }
 }
 
 #[component]
-fn StatusBar(route: crate::shell::routes::StudioRoute) -> Element {
+fn StatusBar(route: crate::shell::routes::StudioRoute, status: WorkspaceStatus) -> Element {
     let mode = route.activity();
-    let studio = crate::shell::state::studio();
+    let studio = crate::shell::state::StudioProjectState::current();
     let snapshot = studio.snapshot().read().to_owned();
-    let telemetry = studio.telemetry().read().to_owned();
-    let training = studio.training_status().read().clone();
-    let workflow = studio.workflow_status().read().clone();
-    let connected = studio.controls_available();
+    let (telemetry, connected) = match status {
+        WorkspaceStatus::Hardware(robot) => {
+            (robot.telemetry().read().clone(), robot.controls_available())
+        }
+        _ => (Default::default(), false),
+    };
+    let training = match status {
+        WorkspaceStatus::Training(history) => TrainingStatus::from(&*history.snapshot().read()),
+        _ => TrainingStatus::default(),
+    };
+    let workflow = match status {
+        WorkspaceStatus::Workflow(controller) => controller
+            .accepted_state()
+            .as_ref()
+            .map(WorkflowStatusProjection::from),
+        _ => None,
+    };
     let backend_connected = (studio.live())();
     let (service_label, service_style) = if !backend_connected {
         ("Reconnecting", "background: var(--tone-danger)")
@@ -356,7 +382,7 @@ fn StatusBar(route: crate::shell::routes::StudioRoute) -> Element {
 
 #[component]
 fn NotificationTrigger(unread: usize, open: bool) -> Element {
-    let studio = crate::shell::state::studio();
+    let studio = crate::shell::state::StudioProjectState::current();
     rsx! {
         Action {
             id: "notification-center-trigger",

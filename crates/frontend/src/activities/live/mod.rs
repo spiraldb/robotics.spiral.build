@@ -12,3 +12,7 @@ pub(crate) mod recording_actions;
 
 mod playback;
 mod timeline_actions;
+
+pub(crate) mod session;
+
+mod shortcuts;

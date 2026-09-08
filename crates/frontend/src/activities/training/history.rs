@@ -2,12 +2,11 @@
 //! Rollout requests its own run/checkpoint choices while its activity is visible.
 use crate::activities::training::TrainingClient;
 use crate::client::queries::{QueryDomain, QueryPolicy};
-use crate::shell::frame::TrainingStatus;
-use crate::shell::{project::ProjectSessionSignals, state::studio};
+use crate::shell::project::ProjectSessionSignals;
 use dioxus::prelude::*;
 use spiral_robotics_common::training::TrainingSnapshot;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub(crate) struct TrainingHistory {
     snapshot: Signal<TrainingSnapshot>,
     error: Signal<Option<String>>,
@@ -25,20 +24,13 @@ impl TrainingHistory {
             move || TrainingClient::current().training_snapshot(selected()),
         );
         let history = Self::use_response(request);
-        let studio = studio();
-        use_effect(move || {
-            let status = TrainingStatus::from(&*history.snapshot.read());
-            if *studio.training_status().peek() != status {
-                studio.training_status().set(status);
-            }
-        });
         use_context_provider(|| history)
     }
 
     fn use_response(
         request: Resource<Result<TrainingSnapshot, crate::client::CommandError>>,
     ) -> Self {
-        let mut history = crate::shell::view_state::ViewState::use_retained(|| Self {
+        let mut history = use_hook(|| Self {
             snapshot: Signal::new(TrainingSnapshot::default()),
             error: Signal::new(None),
             loaded: Signal::new(false),
@@ -66,8 +58,8 @@ impl TrainingHistory {
     pub(crate) fn current() -> Self {
         consume_context()
     }
-    pub(crate) fn snapshot(self) -> ReadSignal<TrainingSnapshot> {
-        self.snapshot.into()
+    pub(crate) fn snapshot(self) -> MappedSignal<TrainingSnapshot, Signal<TrainingSnapshot>> {
+        self.snapshot.map(|value| value)
     }
     pub(crate) fn error(self) -> Option<String> {
         self.error.read().clone()
@@ -92,10 +84,6 @@ mod tests {
     }
     impl HistoryHarness {
         fn render(self) -> Element {
-            crate::shell::view_state::ProjectViewStates::use_provider();
-            crate::shell::view_state::ViewState::use_provider(
-                crate::shell::activity::Activity::Training,
-            );
             let complete = use_signal(|| false);
             let request = use_resource(move || {
                 let complete = complete();

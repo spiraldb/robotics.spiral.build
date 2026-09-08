@@ -4,6 +4,7 @@ use super::timeline_actions::LiveTimelineActions;
 use crate::activities::data::episode_cache::{
     EpisodePlaybackTime, EpisodePreview, EpisodePreviewRequest, EpisodePreviewSignals,
 };
+use crate::activities::live::session::LiveSession;
 use crate::panels::recorded_source::RecordedSource;
 use crate::panels::timeline::panel::{
     RecordedTimelineTraces, RecordingTimeline, SignalSource, StudioTimelineState, TimelinePlayback,
@@ -11,20 +12,19 @@ use crate::panels::timeline::panel::{
 };
 use crate::panels::timeline::playback::TimelineReplay;
 use crate::panels::timeline::subject::{TimelineSubject, TimelineTarget};
-use crate::shell::state::Studio;
 use dioxus::prelude::*;
 use std::sync::Arc;
 
 #[derive(Clone, Copy)]
 struct LivePreview {
-    studio: Studio,
+    studio: LiveSession,
     preview: EpisodePreviewSignals,
     sampled: Signal<Option<(String, u64)>>,
     interactive: Signal<Option<(String, u64)>>,
 }
 
 impl LivePreview {
-    fn use_preview(studio: Studio) -> Self {
+    fn use_preview(studio: LiveSession) -> Self {
         let preview = EpisodePreviewSignals::use_signals();
         // Throttling is local to the mounted screen; remounting must sample again.
         let session = Self {
@@ -55,10 +55,11 @@ impl LivePreview {
             return;
         }
         self.sampled.set(Some(target));
-        self.studio.request_episode_preview(
-            EpisodePreviewRequest::new(episode, Some(recording.frames()), seconds),
-            self.preview,
-        );
+        self.preview.request(EpisodePreviewRequest::new(
+            episode,
+            Some(recording.frames()),
+            seconds,
+        ));
     }
 
     fn use_recording_clock(self) {
@@ -114,10 +115,8 @@ impl LivePreview {
             if let Some((episode, frames, seconds)) = identity {
                 let mut playhead = self.studio.timeline_controller().playhead_signal();
                 playhead.set(seconds);
-                self.studio.request_episode_preview(
-                    EpisodePreviewRequest::new(episode, Some(frames), seconds),
-                    self.preview,
-                );
+                self.preview
+                    .request(EpisodePreviewRequest::new(episode, Some(frames), seconds));
             }
         }));
     }
@@ -146,7 +145,7 @@ pub(super) struct LiveTimeline {
 }
 
 impl LiveTimeline {
-    pub(super) fn use_timeline(studio: Studio) -> Self {
+    pub(super) fn use_timeline(studio: LiveSession) -> Self {
         let timeline = studio.timeline_controller();
         let playhead = timeline.playhead_signal();
         let follow_live = timeline.follow_live_signal();

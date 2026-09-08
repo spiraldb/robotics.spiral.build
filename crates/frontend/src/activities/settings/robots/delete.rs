@@ -6,13 +6,13 @@ use crate::components::interaction::{
 use dioxus::prelude::*;
 use spiral_robotics_common::robots::RobotSummary;
 
-use crate::shell::state::studio;
+use crate::shell::robot_workspace::RobotWorkspace;
 use crate::tasks::SingleFlight;
 
 /// Deleting an arm destroys its calibration, so it takes a specific second click.
 #[component]
 pub(super) fn DeleteRobotAction(robot: RobotSummary) -> Element {
-    let studio = studio();
+    let studio = RobotWorkspace::current();
     let mut confirming = use_signal(|| false);
     let deleting = use_signal(|| false);
     let id = robot.id().to_owned();

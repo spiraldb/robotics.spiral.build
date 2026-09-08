@@ -23,7 +23,7 @@ use crate::activities::workflow::state::{
 use crate::components::icons::{
     FitViewIcon, ModelNodeIcon, QueryNodeIcon, ResultNodeIcon, TableNodeIcon, WorkflowIcon,
 };
-use crate::shell::state::studio;
+use crate::shell::state::StudioProjectState;
 
 const WORKFLOW_LAYOUT_SCOPE: &str = "workflow-relation-canvas-v3";
 const WORKFLOW_MIN_ZOOM: f64 = 0.70;
@@ -47,19 +47,8 @@ enum AssistantInline {
 }
 
 #[component]
-fn WorkflowPanels(is_active: ReadSignal<bool>) -> Element {
-    let studio = studio();
-    let controller = studio.use_workflow_controller();
-    controller.use_polling(studio, is_active);
-    use_effect(move || {
-        let status = controller
-            .accepted_state()
-            .as_ref()
-            .map(crate::shell::frame::WorkflowStatusProjection::from);
-        if *studio.workflow_status().peek() != status {
-            studio.workflow_status().set(status);
-        }
-    });
+fn WorkflowPanels() -> Element {
+    let controller = crate::activities::workflow::state::WorkflowController::current();
     let panels = vec![
         Panel::new(
             ASSISTANT_PANEL_ID,
@@ -127,8 +116,8 @@ impl WorkflowWorkspaceLayout {
 
 #[component]
 fn WorkflowAssistant() -> Element {
-    let studio = studio();
-    let controller = studio.workflow_controller();
+    let studio = StudioProjectState::current();
+    let controller = crate::activities::workflow::state::WorkflowController::current();
     let state = controller.agent_state();
     let mut follow_latest = use_signal(|| true);
     let mut show_latest_action = use_signal(|| false);
@@ -774,7 +763,7 @@ impl AssistantMarkdownLine for str {
 
 #[component]
 fn WorkflowNodeInspector() -> Element {
-    let controller = studio().workflow_controller();
+    let controller = crate::activities::workflow::state::WorkflowController::current();
     let selected = controller.selected_node_data();
     let relations = controller.relations();
     let snapshot_active = controller.snapshot().phase().active();
@@ -1092,7 +1081,7 @@ fn WorkflowNodeInspector() -> Element {
 }
 
 fn node_validation_issues(node_id: &str) -> Element {
-    let validation = studio().workflow_controller().validation();
+    let validation = crate::activities::workflow::state::WorkflowController::current().validation();
     let issues = validation
         .errors()
         .iter()
@@ -1114,8 +1103,8 @@ fn node_validation_issues(node_id: &str) -> Element {
 
 #[component]
 fn WorkflowCanvas() -> Element {
-    let studio = studio();
-    let controller = studio.workflow_controller();
+    let studio = StudioProjectState::current();
+    let controller = crate::activities::workflow::state::WorkflowController::current();
     let nodes = controller.nodes();
     let edges = controller.edges();
     let flow = use_flow_handle::<WorkflowNodeData>();
@@ -1496,8 +1485,8 @@ fn node_kind_icon(kind: WorkflowNodeKind) -> Element {
 
 #[component]
 fn WorkflowResults() -> Element {
-    let studio = studio();
-    let controller = studio.workflow_controller();
+    let studio = StudioProjectState::current();
+    let controller = crate::activities::workflow::state::WorkflowController::current();
     let snapshot = controller.snapshot();
     let run_reason = controller.run_disabled_reason();
     let can_run_again = matches!(
@@ -1933,8 +1922,9 @@ pub(crate) fn WorkflowWorkspace(is_active: ReadSignal<bool>) -> Element {
         crate::shell::activity::Activity::Workflow,
         is_active,
     );
-    let studio =
-        crate::shell::state::Studio::use_studio(crate::shell::activity::Activity::Workflow);
-    studio.use_relation_catalog(is_active);
-    rsx! { crate::shell::frame::WorkspaceFrame { WorkflowPanels { is_active } } }
+    let catalog = crate::activities::data::relations::RelationCatalogState::use_provider();
+    let controller = super::state::WorkflowController::use_controller(catalog.signal());
+    use_context_provider(|| controller);
+    controller.use_polling(is_active);
+    rsx! { crate::shell::frame::WorkspaceFrame { status: crate::shell::frame::WorkspaceStatus::Workflow(controller), WorkflowPanels {} } }
 }

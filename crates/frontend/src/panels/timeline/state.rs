@@ -41,7 +41,7 @@ pub(crate) struct TimelineController {
 
 impl TimelineController {
     pub(crate) fn use_controller() -> Self {
-        crate::shell::view_state::ViewState::use_retained(|| Self {
+        use_hook(|| Self {
             playhead: Signal::new(0.0),
             preview: Signal::new(PreviewTransport::default()),
             follow_live: Signal::new(true),

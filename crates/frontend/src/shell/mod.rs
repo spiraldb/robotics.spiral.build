@@ -4,9 +4,9 @@ pub(crate) mod activity;
 pub(crate) mod frame;
 pub(crate) mod notifications;
 pub(crate) mod project;
+pub(crate) mod robot_workspace;
 pub(crate) mod routes;
 pub(crate) mod state;
-pub(crate) mod view_state;
 
 use crate::components::interaction::UiStyles;
 use dioxus::prelude::*;
@@ -24,5 +24,3 @@ pub fn App() -> Element {
 
 mod client;
 pub(crate) use client::StudioClient;
-
-mod shortcuts;

@@ -22,7 +22,7 @@ use crate::panels::timeline::panel::{
     TimelineSignalLane, TimelineSignalPoint, TimelineSignalSeries,
 };
 use crate::panels::timeline::signals::SignalNamePresentation;
-use crate::shell::state::Studio;
+use crate::shell::state::StudioProjectState;
 
 const EPISODE_RENDER_HZ: f64 = 30.0;
 const RECORDED_REQUEST_TIMEOUT_MS: u32 = 15_000;
@@ -255,10 +255,6 @@ impl EpisodeData {
         Ok(EpisodePreview::from_inspection(self, sample))
     }
 
-    pub(crate) fn info(&self) -> &EpisodeInfo {
-        self.snapshot.episode()
-    }
-
     pub(crate) async fn load(episode: &str) -> Result<Arc<Self>, String> {
         let request = DatasetClient::current().inspect_episode(episode.to_owned());
         EpisodeDataDeadline::run(
@@ -329,7 +325,7 @@ pub(crate) struct EpisodePreviewSignals {
 
 impl EpisodePreviewSignals {
     pub(crate) fn use_signals() -> Self {
-        crate::shell::view_state::ViewState::use_retained(|| Self {
+        use_hook(|| Self {
             state: Signal::new(None),
             revision: Signal::new(0),
             cache: Signal::new(EpisodeInspectionCache::default()),
@@ -359,13 +355,9 @@ impl EpisodePreviewSignals {
     }
 }
 
-impl Studio {
-    pub(crate) fn request_episode_preview(
-        self,
-        request: EpisodePreviewRequest,
-        signals: EpisodePreviewSignals,
-    ) {
-        let studio = self;
+impl EpisodePreviewSignals {
+    pub(crate) fn request(self, request: EpisodePreviewRequest) {
+        let studio = StudioProjectState::current();
         let EpisodePreviewRequest {
             episode,
             expected_frames,
@@ -375,7 +367,7 @@ impl Studio {
             mut state,
             mut revision,
             mut cache,
-        } = signals;
+        } = self;
         // A controller clock may advance while the one snapshot request is in
         // flight. Record the newest requested time without starting another read;
         // the completion below samples that newest time from the loaded snapshot.
@@ -426,7 +418,7 @@ impl Studio {
                 previous: previous.clone(),
             },
         )));
-        spawn(async move {
+        dioxus::dioxus_core::Runtime::current().spawn(state.origin_scope(), async move {
             let loaded = EpisodeData::load(&episode).await;
             if !revision.peek().eq(&ticket) {
                 return;

@@ -1,10 +1,11 @@
 //! Live owns recording controls, scene, cameras, timeline, and docking.
 
 use super::playback::LiveTimeline;
+use super::session::LiveSession;
 use super::workbench::LiveWorkbench;
 use crate::panels::camera_panel::{AssignedCamera, CameraPanelRows};
 use crate::panels::scene::{Viewport, ViewportPresentation};
-use crate::shell::{activity::Activity, frame::WorkspaceFrame, state::Studio};
+use crate::shell::frame::WorkspaceFrame;
 use dioxus::prelude::*;
 use dioxus_workbench::{LayoutNode, Panel, PanelId, PanelLayout, PanelWorkspace, SplitAxis};
 
@@ -50,21 +51,13 @@ pub(crate) fn LiveWorkspace(is_active: ReadSignal<bool>) -> Element {
         crate::shell::activity::Activity::Live,
         is_active,
     );
-    let studio = Studio::use_studio(Activity::Live);
-    studio.use_hardware_polling(is_active);
-    studio.use_recording_polling(is_active);
-    use_effect(move || {
-        if !is_active() {
-            studio.timeline_controller().stop_preview();
-        }
-    });
-    studio.data_controller().use_polling(studio, is_active);
-    rsx! { WorkspaceFrame { LivePanels {} } }
+    let session = LiveSession::use_provider(is_active);
+    rsx! { WorkspaceFrame { status: crate::shell::frame::WorkspaceStatus::Hardware(session.robot()), LivePanels {} } }
 }
 
 #[component]
 fn LivePanels() -> Element {
-    let studio = crate::shell::state::studio();
+    let studio = crate::activities::live::session::LiveSession::current();
     let timeline = LiveTimeline::use_timeline(studio);
     let actions = timeline.actions();
     let mut resize_revision = use_signal(|| 0_u64);

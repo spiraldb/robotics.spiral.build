@@ -11,7 +11,7 @@ use spiral_robotics_common::training::{TrainingCheckpoint, TrainingRun, Training
 
 use crate::format::LossPresentation;
 use crate::shell::notifications::MessageSource;
-use crate::shell::state::studio;
+use crate::shell::robot_workspace::RobotWorkspace;
 
 const MAX_ROLLOUT_ACTION_STEPS: usize = 20;
 
@@ -70,13 +70,16 @@ impl RobotFleet for [RobotSummary] {
 
 #[component]
 pub(crate) fn RolloutWorkbench() -> Element {
-    let studio = studio();
-    let controller = studio.rollout_controller();
+    let studio = RobotWorkspace::current();
+    let controller = crate::activities::rollout::state::RolloutController::current();
     let mut pending_action = use_signal(|| None::<PendingRolloutAction>);
     let snapshot = studio.snapshot().read().to_owned();
     let training_history = crate::activities::training::history::TrainingHistory::current();
     let training = training_history.snapshot().read().to_owned();
-    let rollout = studio.rollout().read().to_owned();
+    let rollout = super::state::RolloutController::current()
+        .snapshot()
+        .read()
+        .to_owned();
     let checkpoints = training.checkpoint_choices();
     let selected_key = controller
         .checkpoint()
@@ -414,8 +417,10 @@ impl RolloutCameraSummary {
 
 #[component]
 pub(crate) fn InferencePanel() -> Element {
-    let studio = studio();
-    let rollout = studio.rollout().read().to_owned();
+    let rollout = super::state::RolloutController::current()
+        .snapshot()
+        .read()
+        .to_owned();
     let metrics = &rollout.metrics();
     let latency = metrics.last_latency_ms().rollout_metric();
     let model = metrics.last_model_ms().rollout_metric();

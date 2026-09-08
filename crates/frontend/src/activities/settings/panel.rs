@@ -10,7 +10,7 @@ use spiral_robotics_common::settings::{DataSettings, SpiralConnectionUpdate};
 
 use crate::activities::settings::robots::RobotPanel;
 use crate::shell::notifications::MessageSource;
-use crate::shell::state::studio;
+use crate::shell::robot_workspace::RobotWorkspace;
 use crate::tasks::SingleFlight;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,7 +69,7 @@ struct ProjectTransferSignals {
 
 impl SettingsPanelState {
     fn use_state(initial: DataSettings, section: SettingsSection) -> Self {
-        crate::shell::view_state::ViewState::use_retained(|| Self {
+        use_hook(|| Self {
             draft: SettingsDraftSignals {
                 base: Signal::new(initial.clone()),
                 saved: Signal::new(None),
@@ -128,12 +128,9 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState) -> Element {
                     },
             },
     } = SettingsPanelState::use_state(initial_value, initial_section);
-    let studio = studio();
-    let data = studio.data_controller();
+    let studio = RobotWorkspace::current();
     let on_saved = move || {
         studio.refresh_settings();
-        studio.refresh_relation_catalog();
-        data.invalidate_episode_catalog();
     };
 
     let workspace = crate::shell::activity::WorkspaceActivity::current();
@@ -470,9 +467,7 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState) -> Element {
                                 let result = SettingsClient::current().import_project(file)
                                     .await
                                     .map_err(|error| error.to_string())?;
-                                data.set_selected_episode(None);
-                                data.invalidate_episode_catalog();
-                                Ok::<_, String>(result)
+                                                        Ok::<_, String>(result)
                             })
                             .await
                         else {
@@ -592,11 +587,9 @@ pub(crate) fn SettingsWorkspace(is_active: ReadSignal<bool>) -> Element {
         crate::shell::activity::Activity::Settings,
         is_active,
     );
-    let studio =
-        crate::shell::state::Studio::use_studio(crate::shell::activity::Activity::Settings);
-    studio.use_hardware_polling(is_active);
+    let studio = crate::shell::robot_workspace::RobotWorkspace::use_provider(is_active);
     rsx! {
-        crate::shell::frame::WorkspaceFrame {
+        crate::shell::frame::WorkspaceFrame { status: crate::shell::frame::WorkspaceStatus::Hardware(studio),
             SettingsPanel { state: SettingsLoadState::new(
                 studio.loaded_settings(),
                 studio.settings_result().and_then(Result::err),

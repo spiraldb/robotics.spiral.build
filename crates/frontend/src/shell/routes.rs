@@ -12,7 +12,6 @@ use crate::shell::activity::Activity;
 use crate::shell::frame::ActivityRail;
 use crate::shell::project::ProjectSessionSignals;
 use crate::shell::state::StudioProjectState;
-use crate::shell::view_state::ProjectViewStates;
 use spiral_robotics_common::project::ProjectSessionInfo;
 
 const TAILWIND: Asset = asset!("/assets/tailwind.css");
@@ -107,7 +106,6 @@ fn StudioShell() -> Element {
 fn ProjectStudioShell(session: ProjectSessionInfo) -> Element {
     let sessions = ProjectSessionSignals::current();
     use_context_provider(|| sessions.client(session));
-    ProjectViewStates::use_provider();
     let project = StudioProjectState::use_provider();
     project.use_polling();
     let route = use_route::<StudioRoute>();

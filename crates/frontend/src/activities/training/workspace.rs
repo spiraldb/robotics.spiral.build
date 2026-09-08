@@ -31,22 +31,19 @@ use crate::components::charts::{
     MONO_FONT, StudioTooltip, TooltipRateUnit,
 };
 use crate::format::LossPresentation;
-use crate::shell::state::studio;
+use crate::shell::state::StudioProjectState;
 
 const EMPTY_RUN_PANEL_ID: &str = "training-run-empty";
 const TRAINING_CHART_POINT_BUDGET: usize = 1_200;
 
 #[component]
-fn TrainingPanels(is_active: ReadSignal<bool>) -> Element {
-    let studio = studio();
-    let dataset_id = studio.selected_dataset().read().to_owned();
-    let controller = super::state::TrainingController::use_controller(
-        studio.configuration().dataset(),
-        &dataset_id,
-    );
-    let controller = use_context_provider(|| controller);
-    let training_history =
-        super::history::TrainingHistory::use_history(is_active, move || controller.selected_run());
+fn TrainingPanels() -> Element {
+    let dataset_id = crate::activities::data::dataset_catalog::DatasetChoices::current()
+        .selected()
+        .read()
+        .to_owned();
+    let controller = super::state::TrainingController::current();
+    let training_history = super::history::TrainingHistory::current();
     let snapshot = training_history.snapshot().read().to_owned();
     let run_names = snapshot
         .runs()
@@ -196,10 +193,11 @@ fn TrainingRunControl(
     readiness: TrainingReadiness,
     active_run: Option<TrainingRun>,
 ) -> Element {
-    let studio = studio();
-    let data = studio.data_controller();
-    let mut selected_dataset = studio.selected_dataset();
-    let controller = studio.training_controller();
+    let studio = StudioProjectState::current();
+    let data = crate::activities::data::dataset_catalog::DatasetChoices::current();
+    let mut selected_dataset =
+        crate::activities::data::dataset_catalog::DatasetChoices::current().selected();
+    let controller = crate::activities::training::state::TrainingController::current();
     let config = controller.config();
     let dataset_ids = data
         .datasets()
@@ -560,7 +558,7 @@ fn TrainingRunControl(
 
 #[component]
 fn TrainingHistory(history: Vec<TrainingRun>) -> Element {
-    let controller = studio().training_controller();
+    let controller = crate::activities::training::state::TrainingController::current();
     let selected_run = controller.selected_run();
     let confirming_delete = use_signal(|| None::<String>);
     rsx! {
@@ -588,8 +586,8 @@ fn TrainingHistoryRow(
     selected: bool,
     mut confirming_delete: Signal<Option<String>>,
 ) -> Element {
-    let studio = studio();
-    let controller = studio.training_controller();
+    let studio = StudioProjectState::current();
+    let controller = crate::activities::training::state::TrainingController::current();
     let deleting_run = controller.deleting();
     let deleting = deleting_run.as_deref() == Some(run.id());
     let delete_disabled = run.phase().active() || deleting_run.is_some();
@@ -1526,9 +1524,14 @@ pub(crate) fn TrainingWorkspace(is_active: ReadSignal<bool>) -> Element {
         crate::shell::activity::Activity::Training,
         is_active,
     );
-    let studio =
-        crate::shell::state::Studio::use_studio(crate::shell::activity::Activity::Training);
-    studio.use_relation_catalog(is_active);
-    studio.data_controller().use_polling(studio, is_active);
-    rsx! { crate::shell::frame::WorkspaceFrame { TrainingPanels { is_active } } }
+    let studio = crate::shell::state::StudioProjectState::current();
+    let choices = crate::activities::data::dataset_catalog::DatasetChoices::use_provider();
+    let controller = super::state::TrainingController::use_controller(
+        studio.configuration().dataset(),
+        &choices.selected().read(),
+    );
+    use_context_provider(|| controller);
+    let history =
+        super::history::TrainingHistory::use_history(is_active, move || controller.selected_run());
+    rsx! { crate::shell::frame::WorkspaceFrame { status: crate::shell::frame::WorkspaceStatus::Training(history), TrainingPanels {} } }
 }

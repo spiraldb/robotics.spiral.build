@@ -21,7 +21,7 @@ use spiral_robotics_common::workflow::{
 };
 
 use crate::shell::notifications::MessageSource;
-use crate::shell::state::Studio;
+use crate::shell::state::StudioProjectState;
 
 pub(crate) const ASSISTANT_PANEL_ID: &str = "workflow-assistant";
 pub(crate) const NODE_PANEL_ID: &str = "workflow-node";
@@ -271,23 +271,23 @@ impl AgentDraftKey {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub(crate) struct WorkflowController {
     graph: WorkflowGraphSignals,
     document: WorkflowDocumentSignals,
     lifecycle: WorkflowLifecycleSignals,
     assistant: WorkflowAssistantSignals,
-    relation_catalog: Signal<Option<Result<RelationCatalog, String>>>,
+    relation_catalog: ReadSignal<Option<Result<RelationCatalog, String>>>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 struct WorkflowGraphSignals {
     nodes: Signal<Vec<Node<WorkflowNodeData>>>,
     edges: Signal<Vec<Edge>>,
     ui: Signal<WorkflowUiState>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 struct WorkflowDocumentSignals {
     server: Signal<WorkflowSnapshot>,
     draft: Signal<WorkflowSpec>,
@@ -307,14 +307,14 @@ impl WorkflowSaveReceipt {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 struct WorkflowLifecycleSignals {
     loaded: Signal<bool>,
     command: Signal<Option<WorkflowPendingCommand>>,
     load_error: Signal<Option<String>>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 struct WorkflowAssistantSignals {
     agent: Signal<WorkflowAgentSnapshot>,
     agent_loaded: Signal<bool>,
@@ -324,14 +324,17 @@ struct WorkflowAssistantSignals {
 }
 
 impl WorkflowController {
+    pub(crate) fn current() -> Self {
+        consume_context()
+    }
     pub(crate) fn use_controller(
-        relation_catalog: Signal<Option<Result<RelationCatalog, String>>>,
+        relation_catalog: ReadSignal<Option<Result<RelationCatalog, String>>>,
     ) -> Self {
         let initial = WorkflowSnapshot::from_workflow("", WorkflowSpec::default());
         let initial_spec = initial.workflow().to_owned();
         let initial_nodes = initial_spec.graph_nodes(initial.snapshot(), &[]);
         let initial_edges = initial_spec.graph_edges(initial.snapshot());
-        let controller = crate::shell::view_state::ViewState::use_retained(|| Self {
+        let controller = use_hook(|| Self {
             graph: WorkflowGraphSignals {
                 nodes: Signal::new(initial_nodes),
                 edges: Signal::new(initial_edges),
@@ -460,9 +463,7 @@ impl WorkflowController {
         self.assistant.agent_error.read().to_owned()
     }
 
-    /// Shell-hoisted unsent text survives Workflow route and Settings outlet
-    /// unmounts while remaining isolated by project scope and durable
-    /// conversation identity.
+    /// Unsent text belongs to this Workflow workspace, keyed by conversation.
     pub(crate) const fn agent_drafts(self) -> Signal<BTreeMap<AgentDraftKey, String>> {
         self.assistant.agent_drafts
     }
@@ -834,7 +835,7 @@ impl WorkflowController {
         self.select_node(query_id);
     }
 
-    pub(crate) fn apply(mut self, studio: Studio) {
+    pub(crate) fn apply(mut self, studio: StudioProjectState) {
         if self.apply_disabled_reason().is_some() {
             return;
         }
@@ -848,28 +849,31 @@ impl WorkflowController {
             self.document.draft.peek().revision(),
             self.document.draft.peek().to_owned(),
         );
-        crate::client::project::ProjectClient::current().spawn(async move {
-            let response = WorkflowClient::current()
-                .run_workflow_command(request)
-                .await
-                .map_err(|error| error.to_string());
-            self.finish_command(&requested_scope_id);
-            match response {
-                Ok(response) => {
-                    self.document.saved.set(Some(WorkflowSaveReceipt {
-                        submitted,
-                        revision: response.workflow().revision(),
-                    }));
-                    QueryRefresh::current().invalidate(&[QueryDomain::Workflow]);
+        dioxus::dioxus_core::Runtime::current().spawn(
+            self.document.draft.origin_scope(),
+            async move {
+                let response = WorkflowClient::current()
+                    .run_workflow_command(request)
+                    .await
+                    .map_err(|error| error.to_string());
+                self.finish_command(&requested_scope_id);
+                match response {
+                    Ok(response) => {
+                        self.document.saved.set(Some(WorkflowSaveReceipt {
+                            submitted,
+                            revision: response.workflow().revision(),
+                        }));
+                        QueryRefresh::current().invalidate(&[QueryDomain::Workflow]);
+                    }
+                    Err(error) => {
+                        studio.report_from(MessageSource::Workflow, error);
+                    }
                 }
-                Err(error) => {
-                    studio.report_from(MessageSource::Workflow, error);
-                }
-            }
-        });
+            },
+        );
     }
 
-    pub(crate) fn run(mut self, studio: Studio) {
+    pub(crate) fn run(mut self, studio: StudioProjectState) {
         if let Some(reason) = self.run_disabled_reason() {
             studio.report_warning_from(MessageSource::Workflow, reason);
             return;
@@ -882,20 +886,23 @@ impl WorkflowController {
             requested_scope_id.clone(),
             self.document.server.peek().workflow().revision(),
         );
-        crate::client::project::ProjectClient::current().spawn(async move {
-            let response = WorkflowClient::current()
-                .run_workflow_command(request)
-                .await
-                .map_err(|error| error.to_string());
-            self.finish_command(&requested_scope_id);
-            match response {
-                Ok(_) => {}
-                Err(error) => studio.report_from(MessageSource::Workflow, error),
-            }
-        });
+        dioxus::dioxus_core::Runtime::current().spawn(
+            self.document.draft.origin_scope(),
+            async move {
+                let response = WorkflowClient::current()
+                    .run_workflow_command(request)
+                    .await
+                    .map_err(|error| error.to_string());
+                self.finish_command(&requested_scope_id);
+                match response {
+                    Ok(_) => {}
+                    Err(error) => studio.report_from(MessageSource::Workflow, error),
+                }
+            },
+        );
     }
 
-    pub(crate) fn cancel(mut self, studio: Studio) {
+    pub(crate) fn cancel(mut self, studio: StudioProjectState) {
         if !self.snapshot().phase().active() || self.command().is_some() {
             return;
         }
@@ -904,20 +911,23 @@ impl WorkflowController {
             .set(Some(WorkflowPendingCommand::Cancelling));
         let requested_scope_id = self.document.server.peek().scope_id().to_owned();
         let request = WorkflowRequest::cancel(requested_scope_id.clone());
-        crate::client::project::ProjectClient::current().spawn(async move {
-            let response = WorkflowClient::current()
-                .run_workflow_command(request)
-                .await
-                .map_err(|error| error.to_string());
-            self.finish_command(&requested_scope_id);
-            match response {
-                Ok(_) => {}
-                Err(error) => studio.report_from(MessageSource::Workflow, error),
-            }
-        });
+        dioxus::dioxus_core::Runtime::current().spawn(
+            self.document.draft.origin_scope(),
+            async move {
+                let response = WorkflowClient::current()
+                    .run_workflow_command(request)
+                    .await
+                    .map_err(|error| error.to_string());
+                self.finish_command(&requested_scope_id);
+                match response {
+                    Ok(_) => {}
+                    Err(error) => studio.report_from(MessageSource::Workflow, error),
+                }
+            },
+        );
     }
 
-    pub(crate) fn create_agent_conversation(mut self, studio: Studio) {
+    pub(crate) fn create_agent_conversation(mut self, studio: StudioProjectState) {
         let catalog_available = studio.snapshot().read().readiness().catalog_available();
         if self
             .new_agent_conversation_disabled_reason((studio.live())(), catalog_available)
@@ -931,23 +941,30 @@ impl WorkflowController {
             .set(Some(AgentPendingCommand::CreatingConversation));
         self.assistant.agent_error.set(None);
         let request = AgentRequest::create_conversation(current.scope_id(), current.revision());
-        crate::client::project::ProjectClient::current().spawn(async move {
-            let response = WorkflowClient::current()
-                .run_workflow_agent_command(request.clone())
-                .await
-                .map_err(|error| error.to_string());
-            self.assistant.agent_command.set(None);
-            match response {
-                Ok(_) => {}
-                Err(error) => {
-                    self.assistant.agent_error.set(Some(error.clone()));
-                    studio.report_from(MessageSource::Workflow, error);
+        dioxus::dioxus_core::Runtime::current().spawn(
+            self.document.draft.origin_scope(),
+            async move {
+                let response = WorkflowClient::current()
+                    .run_workflow_agent_command(request.clone())
+                    .await
+                    .map_err(|error| error.to_string());
+                self.assistant.agent_command.set(None);
+                match response {
+                    Ok(_) => {}
+                    Err(error) => {
+                        self.assistant.agent_error.set(Some(error.clone()));
+                        studio.report_from(MessageSource::Workflow, error);
+                    }
                 }
-            }
-        });
+            },
+        );
     }
 
-    pub(crate) fn activate_agent_conversation(mut self, conversation_id: String, studio: Studio) {
+    pub(crate) fn activate_agent_conversation(
+        mut self,
+        conversation_id: String,
+        studio: StudioProjectState,
+    ) {
         let current = self.assistant.agent.peek().to_owned();
         let catalog_available = studio.snapshot().read().readiness().catalog_available();
         if conversation_id == current.active_conversation_id()
@@ -966,23 +983,26 @@ impl WorkflowController {
             conversation_id,
             current.revision(),
         );
-        crate::client::project::ProjectClient::current().spawn(async move {
-            let response = WorkflowClient::current()
-                .run_workflow_agent_command(request.clone())
-                .await
-                .map_err(|error| error.to_string());
-            self.assistant.agent_command.set(None);
-            match response {
-                Ok(_) => {}
-                Err(error) => {
-                    self.assistant.agent_error.set(Some(error.clone()));
-                    studio.report_from(MessageSource::Workflow, error);
+        dioxus::dioxus_core::Runtime::current().spawn(
+            self.document.draft.origin_scope(),
+            async move {
+                let response = WorkflowClient::current()
+                    .run_workflow_agent_command(request.clone())
+                    .await
+                    .map_err(|error| error.to_string());
+                self.assistant.agent_command.set(None);
+                match response {
+                    Ok(_) => {}
+                    Err(error) => {
+                        self.assistant.agent_error.set(Some(error.clone()));
+                        studio.report_from(MessageSource::Workflow, error);
+                    }
                 }
-            }
-        });
+            },
+        );
     }
 
-    pub(crate) fn send_agent(mut self, text: String, studio: Studio) {
+    pub(crate) fn send_agent(mut self, text: String, studio: StudioProjectState) {
         let text = text.trim().to_owned();
         let state = self.assistant.agent.peek().to_owned();
         if text.is_empty()
@@ -1003,33 +1023,36 @@ impl WorkflowController {
             text: text.clone(),
             expected_revision: state.revision(),
         };
-        crate::client::project::ProjectClient::current().spawn(async move {
-            let response = WorkflowClient::current()
-                .run_workflow_agent_command(request.clone())
-                .await
-                .map_err(|error| error.to_string());
-            self.assistant.agent_command.set(None);
-            match response {
-                Ok(_) => {
-                    if self.assistant.agent.peek().scope_id() == request.scope_id() {
-                        let key = AgentDraftKey::new(
-                            request.scope_id(),
-                            request
-                                .conversation_id()
-                                .expect("turn commands carry a conversation"),
-                        );
-                        key.clear_if_unchanged(&mut self.assistant.agent_drafts.write(), &text);
+        dioxus::dioxus_core::Runtime::current().spawn(
+            self.document.draft.origin_scope(),
+            async move {
+                let response = WorkflowClient::current()
+                    .run_workflow_agent_command(request.clone())
+                    .await
+                    .map_err(|error| error.to_string());
+                self.assistant.agent_command.set(None);
+                match response {
+                    Ok(_) => {
+                        if self.assistant.agent.peek().scope_id() == request.scope_id() {
+                            let key = AgentDraftKey::new(
+                                request.scope_id(),
+                                request
+                                    .conversation_id()
+                                    .expect("turn commands carry a conversation"),
+                            );
+                            key.clear_if_unchanged(&mut self.assistant.agent_drafts.write(), &text);
+                        }
+                    }
+                    Err(error) => {
+                        self.assistant.agent_error.set(Some(error.clone()));
+                        studio.report_from(MessageSource::Workflow, error);
                     }
                 }
-                Err(error) => {
-                    self.assistant.agent_error.set(Some(error.clone()));
-                    studio.report_from(MessageSource::Workflow, error);
-                }
-            }
-        });
+            },
+        );
     }
 
-    pub(crate) fn cancel_agent(mut self, studio: Studio) {
+    pub(crate) fn cancel_agent(mut self, studio: StudioProjectState) {
         let current = self.assistant.agent.peek().to_owned();
         if !current.session().phase().active() || self.assistant.agent_command.peek().is_some() {
             return;
@@ -1037,32 +1060,35 @@ impl WorkflowController {
         self.assistant
             .agent_command
             .set(Some(AgentPendingCommand::Cancelling));
-        crate::client::project::ProjectClient::current().spawn(async move {
-            let Some(turn_id) = current.session().active_turn_id().to_owned() else {
+        dioxus::dioxus_core::Runtime::current().spawn(
+            self.document.draft.origin_scope(),
+            async move {
+                let Some(turn_id) = current.session().active_turn_id().to_owned() else {
+                    self.assistant.agent_command.set(None);
+                    return;
+                };
+                let request = AgentRequest::cancel(
+                    current.scope_id(),
+                    current.active_conversation_id(),
+                    turn_id,
+                );
+                let response = WorkflowClient::current()
+                    .run_workflow_agent_command(request.clone())
+                    .await
+                    .map_err(|error| error.to_string());
                 self.assistant.agent_command.set(None);
-                return;
-            };
-            let request = AgentRequest::cancel(
-                current.scope_id(),
-                current.active_conversation_id(),
-                turn_id,
-            );
-            let response = WorkflowClient::current()
-                .run_workflow_agent_command(request.clone())
-                .await
-                .map_err(|error| error.to_string());
-            self.assistant.agent_command.set(None);
-            match response {
-                Ok(_) => {}
-                Err(error) => {
-                    self.assistant.agent_error.set(Some(error.clone()));
-                    studio.report_from(MessageSource::Workflow, error);
+                match response {
+                    Ok(_) => {}
+                    Err(error) => {
+                        self.assistant.agent_error.set(Some(error.clone()));
+                        studio.report_from(MessageSource::Workflow, error);
+                    }
                 }
-            }
-        });
+            },
+        );
     }
 
-    pub(crate) fn retry_agent(self, studio: Studio) {
+    pub(crate) fn retry_agent(self, studio: StudioProjectState) {
         let text = self
             .assistant
             .agent
@@ -1080,7 +1106,7 @@ impl WorkflowController {
         }
     }
 
-    pub(crate) fn use_polling(mut self, studio: Studio, is_active: ReadSignal<bool>) {
+    pub(crate) fn use_polling(mut self, is_active: ReadSignal<bool>) {
         let sessions = crate::shell::project::ProjectSessionSignals::current();
         let workflow_active = use_memo(move || {
             !self.loaded() || self.snapshot().phase().active() || self.command().is_some()
@@ -1099,7 +1125,7 @@ impl WorkflowController {
             match result.as_ref() {
                 Some(Ok(state)) => {
                     if self.accept_fetched_state(state.clone()) {
-                        studio.refresh_relation_catalog();
+                        crate::activities::data::relations::RelationCatalogState::refresh();
                     }
                 }
                 Some(Err(error)) => self.lifecycle.load_error.set(Some(error.to_string())),

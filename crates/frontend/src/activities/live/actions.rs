@@ -4,7 +4,8 @@ use crate::activities::settings::robots::RobotClient;
 use dioxus::prelude::WritableExt;
 use spiral_robotics_common::robots::ModeSelection;
 
-use crate::shell::state::{Selection, Studio};
+use crate::activities::live::session::LiveSession;
+use crate::shell::robot_workspace::Selection;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum LiveAction {
@@ -15,7 +16,7 @@ pub(crate) enum LiveAction {
     Teleoperate { leader: String, follower: String },
 }
 
-impl Studio {
+impl LiveSession {
     pub(crate) fn dispatch_live_action(self, action: LiveAction) {
         match action {
             LiveAction::Select(selection) => self.selection().set(selection),

@@ -2,18 +2,19 @@
 use crate::activities::data::catalog::ManagedTable as Table;
 use crate::activities::data::query_result::DEFAULT_QUERY_ROWS;
 use crate::components::interaction::{Action, ActionPurpose, ActionVariant};
-use crate::shell::state::studio;
+use crate::shell::state::StudioProjectState;
 use dioxus::prelude::*;
 use spiral_robotics_common::relations::RelationCatalog;
 const QUERY_ROW_OPTIONS: [usize; 5] = [25, 100, 250, 500, 1_000];
 
 #[component]
 pub(crate) fn QueryPanel(namespace: String, dataset_id: String, query_available: bool) -> Element {
-    let studio = studio();
-    let controller = studio.data_controller();
+    let studio = StudioProjectState::current();
+    let controller = crate::activities::data::state::QueryController::current();
     let catalog_available =
         crate::shell::project::ProjectSessionSignals::current().catalog_available();
-    let relation_result = studio.relation_catalog_result();
+    let relation_result =
+        super::relations::RelationCatalogState::current().relation_catalog_result();
     let relation_error = relation_result
         .as_ref()
         .and_then(|result| result.as_ref().err())
@@ -58,7 +59,7 @@ pub(crate) fn QueryPanel(namespace: String, dataset_id: String, query_available:
                             Action {
                                 purpose: ActionPurpose::Retry,
                                 variant: ActionVariant::Link,
-                                onclick: move |_| studio.refresh_relation_catalog(),
+                                onclick: move |_| super::relations::RelationCatalogState::refresh(),
                                 "Retry"
                             }
                             small { "{problem}" }

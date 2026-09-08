@@ -30,6 +30,7 @@ struct NavigationObservation {
     navigator: Option<(Navigator, ScopeId)>,
     project: Option<Signal<u64>>,
     workspaces: HashMap<Activity, WorkspaceObservation>,
+    refresh: Option<QueryRefresh>,
 }
 
 #[derive(Default)]
@@ -40,6 +41,13 @@ struct WorkspaceObservation {
     is_active: Option<ReadSignal<bool>>,
     requests: Rc<Cell<usize>>,
     cancelled: Rc<Cell<usize>>,
+    catalog: CatalogObservation,
+}
+
+#[derive(Default)]
+struct CatalogObservation {
+    reads: Rc<Cell<usize>>,
+    resource: Option<Resource<Result<usize, crate::client::CommandError>>>,
 }
 
 impl NavigationHarness {
@@ -105,8 +113,9 @@ impl ProbeRoute {
 
 #[component]
 fn ProbeShell() -> Element {
-    QueryRefresh::use_provider();
+    let refresh = QueryRefresh::use_provider();
     let harness = use_context::<NavigationHarness>();
+    harness.0.borrow_mut().refresh = Some(refresh);
     harness.0.borrow_mut().navigator =
         Some((use_navigator(), dioxus::dioxus_core::current_scope_id()));
     let route = use_route::<ProbeRoute>();
@@ -135,7 +144,7 @@ impl Drop for PendingWorkspaceRead {
 #[component]
 fn LocalDraftProbe(activity: Activity, is_active: ReadSignal<bool>) -> Element {
     let harness = use_context::<NavigationHarness>();
-    // Ordinary component state, deliberately independent of ProjectViewStates.
+    // Ordinary component state owned by the retained workspace.
     let mut draft = use_signal(String::new);
     let (requests, cancelled) = {
         let mut observations = harness.0.borrow_mut();
@@ -153,8 +162,9 @@ fn LocalDraftProbe(activity: Activity, is_active: ReadSignal<bool>) -> Element {
             .unwrap()
             .mounts += 1
     });
+    let dropped = harness.clone();
     use_drop(move || {
-        harness
+        dropped
             .0
             .borrow_mut()
             .workspaces
@@ -173,6 +183,23 @@ fn LocalDraftProbe(activity: Activity, is_active: ReadSignal<bool>) -> Element {
             }
         },
     );
+    let catalog_reads = harness.0.borrow().workspaces[&activity]
+        .catalog
+        .reads
+        .clone();
+    let catalog = QueryPolicy::on_demand(QueryDomain::Catalog).use_resource(move || {
+        let count = catalog_reads.get() + 1;
+        catalog_reads.set(count);
+        async move { Ok::<_, crate::client::CommandError>(count) }
+    });
+    harness
+        .0
+        .borrow_mut()
+        .workspaces
+        .get_mut(&activity)
+        .unwrap()
+        .catalog
+        .resource = Some(catalog);
     rsx! { input { value: draft(), oninput: move |event| draft.set(event.value()) } }
 }
 
@@ -249,4 +276,50 @@ fn changing_projects_disposes_active_and_hidden_workspaces() {
     assert_eq!(observed.workspaces[&Activity::Live].drops, 1);
     assert_eq!(observed.workspaces[&Activity::Live].mounts, 2);
     dom.in_runtime(|| assert!(observed.workspaces[&Activity::Live].draft.unwrap()().is_empty()));
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test]
+fn completed_catalog_reads_survive_navigation_and_refresh_only_when_invalidated() {
+    let harness = NavigationHarness::default();
+    let mut dom = VirtualDom::new_with_props(NavigationHarness::render, harness.clone());
+    dom.rebuild_in_place();
+    NavigationHarness::settle(&mut dom);
+    dom.in_runtime(|| harness.navigate(ProbeRoute::Data {}));
+    NavigationHarness::settle(&mut dom);
+    for _ in 0..3 {
+        dom.in_runtime(|| harness.navigate(ProbeRoute::Live {}));
+        NavigationHarness::settle(&mut dom);
+        dom.in_runtime(|| harness.navigate(ProbeRoute::Data {}));
+        NavigationHarness::settle(&mut dom);
+    }
+    {
+        let observed = harness.0.borrow();
+        for workspace in observed.workspaces.values() {
+            assert_eq!(workspace.catalog.reads.get(), 1);
+            assert!(workspace.catalog.resource.unwrap().finished());
+            assert_eq!(*workspace.catalog.resource.unwrap().peek(), Some(Ok(1)));
+        }
+    }
+    let refresh = harness.0.borrow().refresh.unwrap();
+    dom.in_runtime(|| refresh.invalidate(&[QueryDomain::Catalog]));
+    NavigationHarness::settle(&mut dom);
+    dom.in_runtime(|| harness.navigate(ProbeRoute::Live {}));
+    NavigationHarness::settle(&mut dom);
+    {
+        let observed = harness.0.borrow();
+        for workspace in observed.workspaces.values() {
+            assert_eq!(workspace.catalog.reads.get(), 2);
+            assert_eq!(*workspace.catalog.resource.unwrap().peek(), Some(Ok(2)));
+        }
+    }
+    let mut project = harness.0.borrow().project.unwrap();
+    dom.in_runtime(|| project.set(2));
+    NavigationHarness::settle(&mut dom);
+    assert_eq!(
+        harness.0.borrow().workspaces[&Activity::Live]
+            .catalog
+            .reads
+            .get(),
+        3
+    );
 }

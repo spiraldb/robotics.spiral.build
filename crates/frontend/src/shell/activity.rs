@@ -26,12 +26,6 @@ impl Activity {
         ]
     }
 
-    pub(crate) const fn uses_hardware(self) -> bool {
-        matches!(self, Self::Live | Self::Rollout | Self::Settings)
-    }
-    pub(crate) const fn uses_episode_catalog(self) -> bool {
-        matches!(self, Self::Live | Self::Training)
-    }
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Live => "Live",

@@ -31,7 +31,8 @@ use web_sys::HtmlCanvasElement;
 
 use crate::activities::data::episode_cache::{EpisodePreview, TimelineArmSample, TimelineSample};
 use crate::panels::recorded_source::{LoadState, RecordedSource};
-use crate::shell::state::{Selection, studio};
+use crate::shell::robot_workspace::RobotWorkspace;
+use crate::shell::robot_workspace::Selection;
 
 /// The colours arms are told apart by, as WebGL values and as CSS.
 ///
@@ -136,7 +137,7 @@ pub(crate) fn Viewport(
         visible_robot,
         resize_revision,
     } = presentation;
-    let studio = studio();
+    let studio = RobotWorkspace::current();
     let workspace = crate::shell::activity::WorkspaceActivity::current();
     let canvas_dom = use_hook(ViewportDom::new);
     let bench = use_hook(|| Rc::new(RefCell::new(Option::<Bench>::None)));
@@ -503,7 +504,7 @@ pub(crate) fn Viewport(
 /// pointer at all.
 #[component]
 fn HoverNote(hover: Hover, episode_preview: bool) -> Element {
-    let studio = studio();
+    let studio = RobotWorkspace::current();
     let (title, detail) = hover.entity.describe(&studio, episode_preview);
     rsx! {
         div {
@@ -522,7 +523,7 @@ fn HoverNote(hover: Hover, episode_preview: bool) -> Element {
 trait TargetPresentation {
     fn describe(
         &self,
-        studio: &crate::shell::state::Studio,
+        studio: &crate::shell::robot_workspace::RobotWorkspace,
         episode_preview: bool,
     ) -> (String, Option<String>);
 }
@@ -530,7 +531,7 @@ trait TargetPresentation {
 impl TargetPresentation for Target {
     fn describe(
         &self,
-        studio: &crate::shell::state::Studio,
+        studio: &crate::shell::robot_workspace::RobotWorkspace,
         episode_preview: bool,
     ) -> (String, Option<String>) {
         match self {
@@ -580,7 +581,7 @@ impl From<&Target> for Selection {
 /// Selection, hover, and hardware verdicts remain application policy; the
 /// viewport only receives their presentation states for semantic targets.
 struct SceneBuildRequest<'a> {
-    studio: &'a crate::shell::state::Studio,
+    studio: &'a crate::shell::robot_workspace::RobotWorkspace,
     grid: bool,
     source: &'a SceneSource,
     hovered: Option<&'a Target>,
@@ -683,7 +684,7 @@ impl From<&Selection> for Target {
 }
 
 /// Every hardware-owned motor verdict in the current frame.
-impl crate::shell::state::Studio {
+impl crate::shell::robot_workspace::RobotWorkspace {
     fn motor_conditions(self) -> BTreeMap<(String, String), Condition> {
         let telemetry_signal = self.telemetry();
         let telemetry = telemetry_signal.read();
@@ -818,7 +819,7 @@ impl CameraBindingPresentation for spiral_robotics_common::robots::CameraBinding
 /// Which arm is which colour in the scene.
 #[component]
 fn Legend(arms: Vec<RobotSummary>, on_select: EventHandler<Option<Selection>>) -> Element {
-    let studio = studio();
+    let studio = RobotWorkspace::current();
     if arms.is_empty() {
         return rsx! {
             div { class: "pointer-events-none absolute inset-0 flex items-center justify-center",
@@ -891,7 +892,7 @@ fn ViewCube(on_command: EventHandler<Command>) -> Element {
     }
 }
 
-impl crate::shell::state::Studio {
+impl crate::shell::robot_workspace::RobotWorkspace {
     fn framed_robot(&self, visible_robot: Option<&str>) -> Option<String> {
         visible_robot.map(str::to_owned).or_else(|| {
             self.selection()

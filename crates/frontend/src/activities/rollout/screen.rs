@@ -4,7 +4,7 @@ use super::workspace::{InferencePanel, RobotFleet, RolloutWorkbench, TrainingSna
 use crate::panels::camera_panel::{AssignedCamera, CameraPanelRows};
 use crate::panels::scene::SceneSource;
 use crate::panels::scene::{Viewport, ViewportPresentation};
-use crate::shell::{activity::Activity, frame::WorkspaceFrame, state::Studio};
+use crate::shell::{frame::WorkspaceFrame, robot_workspace::RobotWorkspace};
 use dioxus::prelude::*;
 use dioxus_workbench::{LayoutNode, Panel, PanelId, PanelLayout, PanelWorkspace, SplitAxis};
 
@@ -46,13 +46,14 @@ impl RolloutLayout {
 
 struct RolloutCameras;
 impl RolloutCameras {
-    fn assigned(studio: Studio) -> Vec<AssignedCamera> {
+    fn assigned(studio: RobotWorkspace) -> Vec<AssignedCamera> {
         let Some(follower) = studio.snapshot().read().robots().follower() else {
             return Vec::new();
         };
-        let checkpoint = studio.rollout_controller().checkpoint();
-        let roles = studio
-            .training()
+        let checkpoint =
+            crate::activities::rollout::state::RolloutController::current().checkpoint();
+        let roles = crate::activities::training::history::TrainingHistory::current()
+            .snapshot()
             .read()
             .selected_checkpoint_camera_roles(checkpoint.as_deref());
         Self::for_follower(&follower, &roles)
@@ -89,16 +90,15 @@ pub(crate) fn RolloutWorkspace(is_active: ReadSignal<bool>) -> Element {
         crate::shell::activity::Activity::Rollout,
         is_active,
     );
-    let studio = Studio::use_studio(Activity::Rollout);
-    studio.use_hardware_polling(is_active);
-    studio.use_rollout_polling(is_active);
+    let robot = RobotWorkspace::use_provider(is_active);
+    super::state::RolloutController::use_provider(is_active);
     crate::activities::training::history::TrainingHistory::use_history(is_active, || None);
-    rsx! { WorkspaceFrame { RolloutPanels {} } }
+    rsx! { WorkspaceFrame { status: crate::shell::frame::WorkspaceStatus::Hardware(robot), RolloutPanels {} } }
 }
 
 #[component]
 fn RolloutPanels() -> Element {
-    let studio = crate::shell::state::studio();
+    let studio = crate::shell::robot_workspace::RobotWorkspace::current();
     let mut resize_revision = use_signal(|| 0_u64);
     let mut selection = studio.selection();
     let follower = studio
@@ -176,7 +176,7 @@ mod tests {
         );
         assert_eq!(
             cameras[0].selection(),
-            crate::shell::state::Selection::Camera {
+            crate::shell::robot_workspace::Selection::Camera {
                 robot: "follower".to_owned(),
                 role: "top".to_owned()
             }

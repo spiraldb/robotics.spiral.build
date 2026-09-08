@@ -14,7 +14,7 @@ use crate::activities::data::catalog as spiral;
 use crate::activities::data::sql_draft::GeneratedSqlDraft;
 
 use crate::shell::notifications::MessageSource;
-use crate::shell::state::Studio;
+use crate::shell::state::StudioProjectState;
 
 #[derive(Clone, Copy)]
 pub(crate) struct TrainingController {
@@ -60,12 +60,15 @@ impl TrainingRunIdentity {
 }
 
 impl TrainingController {
+    pub(crate) fn current() -> Self {
+        consume_context()
+    }
     pub(crate) fn use_controller(namespace: &str, dataset_id: &str) -> Self {
         let initial_sql =
             spiral::ManagedTable::Datasets.training_sql_for_dataset(namespace, dataset_id);
         let config_sql = initial_sql.clone();
         let config_dataset = dataset_id.to_owned();
-        let controller = crate::shell::view_state::ViewState::use_retained(|| Self {
+        let controller = use_hook(|| Self {
             draft: TrainingDraftSignals {
                 config: Signal::new({
                     TrainingConfig::for_dataset("act-run-001", config_dataset, config_sql)
@@ -179,7 +182,7 @@ impl TrainingController {
         }
     }
 
-    pub(crate) fn start(mut self, studio: Studio) {
+    pub(crate) fn start(mut self, studio: StudioProjectState) {
         if self.commands.starting.peek().to_owned() {
             return;
         }
@@ -190,42 +193,45 @@ impl TrainingController {
         let mut opened_runs = self.history.opened_runs;
         let mut config_signal = self.draft.config;
         let mut automatic_run_name = self.draft.automatic_run_name;
-        let training = studio.training();
-        crate::client::project::ProjectClient::current().spawn(async move {
-            let result = TrainingClient::current()
-                .start_training_run(config)
-                .await
-                .map_err(|error| error.to_string());
-            starting.set(false);
-            match result {
-                Ok(run) => {
-                    let mut existing_names = training
-                        .read()
-                        .runs()
-                        .iter()
-                        .map(|existing| existing.config().run_name().to_owned())
-                        .collect::<Vec<_>>();
-                    if !existing_names
-                        .iter()
-                        .any(|name| name == run.config().run_name())
-                    {
-                        existing_names.push(run.config().run_name().to_owned());
+        let training = crate::activities::training::history::TrainingHistory::current().snapshot();
+        dioxus::dioxus_core::Runtime::current().spawn(
+            self.draft.config.origin_scope(),
+            async move {
+                let result = TrainingClient::current()
+                    .start_training_run(config)
+                    .await
+                    .map_err(|error| error.to_string());
+                starting.set(false);
+                match result {
+                    Ok(run) => {
+                        let mut existing_names = training
+                            .read()
+                            .runs()
+                            .iter()
+                            .map(|existing| existing.config().run_name().to_owned())
+                            .collect::<Vec<_>>();
+                        if !existing_names
+                            .iter()
+                            .any(|name| name == run.config().run_name())
+                        {
+                            existing_names.push(run.config().run_name().to_owned());
+                        }
+                        config_signal
+                            .write()
+                            .set_run_name(existing_names.next_default_run_name());
+                        automatic_run_name.set(true);
+                        if !opened_runs.peek().iter().any(|id| id == run.id()) {
+                            opened_runs.write().push(run.id().to_owned());
+                        }
+                        selected_run.set(Some(run.id().to_owned()));
                     }
-                    config_signal
-                        .write()
-                        .set_run_name(existing_names.next_default_run_name());
-                    automatic_run_name.set(true);
-                    if !opened_runs.peek().iter().any(|id| id == run.id()) {
-                        opened_runs.write().push(run.id().to_owned());
-                    }
-                    selected_run.set(Some(run.id().to_owned()));
+                    Err(error) => studio.report_from(MessageSource::Training, error),
                 }
-                Err(error) => studio.report_from(MessageSource::Training, error),
-            }
-        });
+            },
+        );
     }
 
-    pub(crate) fn stop(mut self, studio: Studio, id: String) {
+    pub(crate) fn stop(mut self, studio: StudioProjectState, id: String) {
         if self.commands.stopping.peek().is_some() {
             return;
         }
@@ -241,7 +247,7 @@ impl TrainingController {
         });
     }
 
-    pub(crate) fn delete(mut self, studio: Studio, run: TrainingRunIdentity) {
+    pub(crate) fn delete(mut self, studio: StudioProjectState, run: TrainingRunIdentity) {
         if self.commands.deleting.peek().is_some() {
             return;
         }

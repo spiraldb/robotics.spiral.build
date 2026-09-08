@@ -17,7 +17,7 @@ use spiral_robotics_common::robots::{
 
 use crate::panels::scene::ScenePalette;
 use crate::shell::project::ProjectSessionSignals;
-use crate::shell::state::{Selection, Studio, studio};
+use crate::shell::robot_workspace::{RobotWorkspace, Selection};
 use crate::tasks::SingleFlight;
 
 mod calibration;
@@ -33,7 +33,7 @@ const ROBOT_TYPES: [(&str, &str); 2] = [
 
 #[component]
 pub(super) fn RobotPanel() -> Element {
-    let studio = studio();
+    let studio = RobotWorkspace::current();
     let robots = studio.snapshot().read().robots().to_owned();
     let focused = studio.focused();
     let sessions = ProjectSessionSignals::current();
@@ -88,7 +88,7 @@ fn RobotEntry(robot: RobotSummary, state: RobotEntryState) -> Element {
         accent,
         port_catalog,
     } = state;
-    let studio = studio();
+    let studio = RobotWorkspace::current();
     let mut chosen = studio.selection();
     // Open on whatever still needs attention. An arm that is wired up and
     // calibrated has nothing to do here, so it starts folded; anything else
@@ -178,7 +178,7 @@ impl RobotEntryState {
 /// Adding an arm, kept folded away so the list stays a list.
 #[component]
 fn NewRobotForm() -> Element {
-    let studio = studio();
+    let studio = RobotWorkspace::current();
     let mut chosen = studio.selection();
     let mut open = use_signal(|| false);
     let mut id = use_signal(String::new);
@@ -284,7 +284,7 @@ fn NewRobotForm() -> Element {
 /// Import a complete robot JSON document as a new instance.
 #[component]
 fn ImportRobotConfiguration() -> Element {
-    let studio = studio();
+    let studio = RobotWorkspace::current();
     let importing = use_signal(|| false);
     let mut chosen = studio.selection();
 
@@ -330,7 +330,7 @@ fn ImportRobotConfiguration() -> Element {
 /// Everything about one arm stored in its SpiralDB configuration row.
 #[component]
 fn RobotSetup(robot: RobotSummary, port_catalog: PortCatalogState) -> Element {
-    let studio = studio();
+    let studio = RobotWorkspace::current();
     let telemetry = studio.robot_telemetry(robot.id());
     let progress = telemetry.and_then(|robot| robot.calibration().cloned());
     let connected = robot.connection().connected();
@@ -443,7 +443,7 @@ impl PortCatalogState {
 
 #[component]
 fn ConnectionAction(robot: RobotSummary, sweeping: bool) -> Element {
-    let studio = studio();
+    let studio = RobotWorkspace::current();
     let pending = use_signal(|| false);
     let id = robot.id().to_owned();
     let connected = robot.connection().connected();
@@ -514,7 +514,7 @@ fn PortSection(robot: RobotSummary, state: PortSectionState) -> Element {
         sweeping,
         on_rescan,
     } = state;
-    let studio = studio();
+    let studio = RobotWorkspace::current();
     let mut identify_step = use_signal(|| IdentifyStep::Idle);
     let starting_identify = use_signal(|| false);
     let current = robot
@@ -669,7 +669,7 @@ fn PortOption(port: SerialPortSummary, owner: String, selected: bool) -> Element
 }
 
 /// Record a serial port on a robot, keeping its existing baud rate.
-impl Studio {
+impl RobotWorkspace {
     fn assign_port(self, assignment: PortAssignment) {
         let request = RobotUpdate::with_port(
             assignment.robot_id,
@@ -715,7 +715,7 @@ fn IdentifyPort(
     step: Signal<IdentifyStep>,
     on_found: EventHandler<String>,
 ) -> Element {
-    let studio = studio();
+    let studio = RobotWorkspace::current();
     let mut step = step;
     let checking = use_signal(|| false);
 
@@ -792,7 +792,7 @@ fn IdentifyPort(
 
 #[component]
 fn CameraSection(robot: RobotSummary) -> Element {
-    let studio = studio();
+    let studio = RobotWorkspace::current();
     let available = studio.snapshot().read().cameras().to_owned();
     let mut role = use_signal(|| "wrist".to_owned());
     let mut device = use_signal(String::new);
@@ -974,7 +974,7 @@ fn CameraSection(robot: RobotSummary) -> Element {
 }
 
 /// Replace a robot's camera assignments.
-impl Studio {
+impl RobotWorkspace {
     fn save_cameras(self, assignments: CameraAssignments) {
         if assignments.saving.peek().to_owned() {
             return;

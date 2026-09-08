@@ -6,7 +6,7 @@ use super::native_datasets::{
 use super::query_result::QueryResultView;
 use super::relations::RelationsPanel;
 use super::workbench::QueryPanel;
-use crate::shell::{activity::Activity, frame::WorkspaceFrame, state::Studio};
+use crate::shell::frame::WorkspaceFrame;
 use dioxus::prelude::*;
 use dioxus_workbench::{LayoutNode, Panel, PanelId, PanelLayout, PanelWorkspace, SplitAxis};
 
@@ -37,18 +37,18 @@ pub(crate) fn DataWorkspace(is_active: ReadSignal<bool>) -> Element {
         crate::shell::activity::Activity::Data,
         is_active,
     );
-    let studio = Studio::use_studio(Activity::Data);
-    studio.use_relation_catalog(is_active);
     rsx! { WorkspaceFrame { DataPanels {} } }
 }
 
 #[component]
 fn DataPanels() -> Element {
-    let studio = crate::shell::state::studio();
+    let studio = crate::shell::state::StudioProjectState::current();
+    let controller = super::state::QueryController::use_provider();
+    super::relations::RelationCatalogState::use_provider();
     let browser = DatasetBrowserSelection::provide();
     let configuration = studio.configuration();
     let namespace = configuration.dataset();
-    let dataset_id = studio.selected_dataset().read().to_owned();
+    let dataset_id = "default";
     let query_available = configuration.spiral_query_available();
     let panels = vec![
         Panel::new(
@@ -86,7 +86,7 @@ fn DataPanels() -> Element {
         )
         .with_class("relations-editor"),
     ];
-    let active_panel = if studio.data_controller().query_running() {
+    let active_panel = if controller.query_running() {
         Some(PanelId::from("query-result"))
     } else {
         browser.requested_panel()

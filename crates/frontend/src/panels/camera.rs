@@ -128,7 +128,7 @@ pub(crate) fn CameraEditor(
 
 #[component]
 fn LiveCameraFrame(robot: String, role: String, device: String) -> Element {
-    let studio = crate::shell::state::studio();
+    let studio = crate::shell::state::StudioProjectState::current();
     let workspace = crate::shell::activity::WorkspaceActivity::current();
     let status = studio
         .snapshot()

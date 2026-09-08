@@ -4,25 +4,25 @@ use super::recording_actions::{RecordingCompletion, TimelineSeekBody};
 use crate::activities::data::episode_cache::{
     EpisodePlaybackTime, EpisodePreviewRequest, EpisodePreviewSignals,
 };
+use crate::activities::live::session::LiveSession;
 use crate::panels::timeline::panel::{
     TimelineAction, TimelineCapabilities, TimelineCaptureAction, TimelineGate,
     TimelinePreviewAction, TimelineRobotSyncAction,
 };
 use crate::panels::timeline::subject::TimelineSubject;
-use crate::shell::state::Studio;
 use dioxus::prelude::*;
 use spiral_robotics_common::robots::ModeSelection;
 
 #[derive(Clone, Copy)]
 pub(super) struct LiveTimelineActions {
-    studio: Studio,
+    studio: LiveSession,
     preview: EpisodePreviewSignals,
     interactive: Signal<Option<(String, u64)>>,
 }
 
 impl LiveTimelineActions {
     pub(super) fn new(
-        studio: Studio,
+        studio: LiveSession,
         preview: EpisodePreviewSignals,
         interactive: Signal<Option<(String, u64)>>,
     ) -> Self {
@@ -35,7 +35,6 @@ impl LiveTimelineActions {
 
     pub(super) fn dispatch(self, subject: TimelineSubject, action: TimelineAction) {
         let studio = self.studio;
-        let data = studio.data_controller();
         let controller = studio.timeline_controller();
         let review_episode = subject.recorded_episode().map(str::to_owned);
         let seek_context = studio.timeline_seek_context(&subject);
@@ -68,7 +67,6 @@ impl LiveTimelineActions {
                         studio.stop_recording(
                             &episode,
                             RecordingCompletion::new(
-                                data,
                                 keep,
                                 move |_: spiral_robotics_common::recording::EpisodeInfo| {
                                     episode_data_cache.write().invalidate(&finished_episode);
@@ -120,14 +118,16 @@ impl LiveTimelineActions {
                         || interactive_preview_target.peek().as_ref() != Some(&target)
                     {
                         interactive_preview_target.set(Some(target));
-                        studio.request_episode_preview(
-                            EpisodePreviewRequest::new(episode, None, request.seconds()),
-                            EpisodePreviewSignals::new(
-                                episode_preview_state,
-                                episode_preview_revision,
-                                episode_data_cache,
-                            ),
-                        );
+                        EpisodePreviewSignals::new(
+                            episode_preview_state,
+                            episode_preview_revision,
+                            episode_data_cache,
+                        )
+                        .request(EpisodePreviewRequest::new(
+                            episode,
+                            None,
+                            request.seconds(),
+                        ));
                     }
                 }
                 if request.committed()
@@ -170,14 +170,16 @@ impl LiveTimelineActions {
                 episode_preview_state.set(None);
                 episode_data_cache.write().invalidate(&episode);
                 {
-                    studio.request_episode_preview(
-                        EpisodePreviewRequest::new(episode, None, playhead()),
-                        EpisodePreviewSignals::new(
-                            episode_preview_state,
-                            episode_preview_revision,
-                            episode_data_cache,
-                        ),
-                    );
+                    EpisodePreviewSignals::new(
+                        episode_preview_state,
+                        episode_preview_revision,
+                        episode_data_cache,
+                    )
+                    .request(EpisodePreviewRequest::new(
+                        episode,
+                        None,
+                        playhead(),
+                    ));
                 }
             }
             _ => studio.report("The Timeline subject changed before the action was applied."),
@@ -233,7 +235,7 @@ impl LiveTimelineActions {
         }
     }
 }
-impl Studio {
+impl LiveSession {
     pub(super) fn live_timeline_capabilities(
         self,
         subject: &TimelineSubject,

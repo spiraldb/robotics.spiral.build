@@ -1,6 +1,6 @@
 //! Keyboard shortcut admission for the mounted studio.
-use crate::shell::state::Studio;
-impl Studio {
+use crate::activities::live::session::LiveSession;
+impl LiveSession {
     /// Whether global transport shortcuts may act without stealing a text-editing
     /// keystroke.
     pub(crate) fn shortcuts_enabled(self) -> bool {

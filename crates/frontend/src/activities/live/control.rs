@@ -14,7 +14,8 @@ use spiral_robotics_common::robots::{
 };
 use spiral_robotics_viewport::{self as arm, ArmPose};
 
-use crate::shell::state::{Selection, studio};
+use crate::activities::live::session::LiveSession;
+use crate::shell::robot_workspace::Selection;
 
 #[derive(Default)]
 struct PendingGoals(BTreeMap<String, f64>);
@@ -38,7 +39,7 @@ pub(crate) fn JointPanel(
     on_select: EventHandler<Option<Selection>>,
     on_point: EventHandler<Option<Selection>>,
 ) -> Element {
-    let studio = studio();
+    let studio = LiveSession::current();
     let Some(robot) = studio.focused() else {
         return rsx! {
             p { class: "px-2 py-1 text-[11px] text-ink-faint", "Add an arm to see its joints." }
@@ -260,7 +261,7 @@ fn ConditionReadout(robot: RobotSummary, telemetry: Option<RobotTelemetry>) -> E
 /// layout at the mercy of the telemetry stream.
 #[component]
 fn MotorDetail(robot: RobotSummary, telemetry: Option<RobotTelemetry>) -> Element {
-    let studio = studio();
+    let studio = LiveSession::current();
     let selected = studio.selection().read().to_owned();
     let Some(name) = selected.and_then(|selection| match selection {
         Selection::Joint {
@@ -445,7 +446,7 @@ fn JointControls(
         on_select,
         on_point,
     } = behavior;
-    let studio = studio();
+    let studio = LiveSession::current();
     let workspace = crate::shell::activity::WorkspaceActivity::current();
     // While a slider is being dragged the arm is still catching up, so the
     // commanded value is shown until the measurement agrees with it. That echo

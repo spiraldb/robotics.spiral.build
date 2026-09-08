@@ -8,7 +8,7 @@ use spiral_robotics_common::robots::{CalibrationJointProgress, CalibrationProgre
 use spiral_robotics_viewport as arm;
 
 use crate::shell::notifications::MessageSource;
-use crate::shell::state::studio;
+use crate::shell::robot_workspace::RobotWorkspace;
 use crate::tasks::SingleFlight;
 
 #[component]
@@ -17,7 +17,7 @@ pub(super) fn CalibrationSection(
     connected: bool,
     progress: Option<CalibrationProgress>,
 ) -> Element {
-    let studio = studio();
+    let studio = RobotWorkspace::current();
     let mut confirming_reapply = use_signal(|| false);
     let reapplying = use_signal(|| false);
     let mut command = use_signal(|| None::<&'static str>);
