@@ -3352,7 +3352,9 @@ mod tests {
             .as_millis();
         let namespace = format!("workflow_golden_{}_{}", std::process::id(), suffix);
         let input_relation = format!("{namespace}.images");
-        let output_relation = format!("{namespace}.scores");
+        let registry_relation = StorageSchema::workflow_feature_registry_relation(&namespace);
+        let output_relation =
+            StorageSchema::workflow_feature_cache_relation(&namespace, &input_relation);
         let connection = SpiralConnectionSettings::new(
             stored
                 .as_ref()
@@ -3377,7 +3379,11 @@ mod tests {
         );
         let cleanup = GoldenRelations {
             project_store: project_store.clone(),
-            relations: vec![input_relation.clone(), output_relation.clone()],
+            relations: vec![
+                input_relation.clone(),
+                output_relation.clone(),
+                registry_relation.clone(),
+            ],
             namespace: namespace.clone(),
         };
 
@@ -3438,6 +3444,17 @@ mod tests {
             .await
             .expect("the golden image namespace must exist");
         connection
+            .replace_or_create_batches(
+                &registry_relation,
+                vec![
+                    FeatureRegistry::default()
+                        .record_batch()
+                        .expect("the empty feature registry must match its schema"),
+                ],
+            )
+            .await
+            .expect("the golden feature registry must exist");
+        connection
             .replace_or_create_batches(&seed_relation, vec![batch])
             .await
             .expect("seeding the golden image relation must succeed");
@@ -3478,7 +3495,8 @@ mod tests {
         assert!(events.iter().any(|event| matches!(
             event,
             ModelRunEvent::Running { progress, .. }
-                if progress.completed() == 2
+                // Progress includes both scored and quarantined feature cells.
+                if progress.completed() == 4
                     && progress.total() == 4
                     && progress.unit() == "feature cells"
         )));
