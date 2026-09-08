@@ -74,6 +74,8 @@ impl ScreenWorkspaceDefinition {
 /// owns only the cross-panel synchronization contract.
 #[component]
 pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
+    let dataset_browser =
+        crate::activities::data::native_datasets::DatasetBrowserSelection::provide();
     let studio = crate::shell::state::studio();
     let data = studio.data_controller();
     let configuration = studio.configuration();
@@ -683,7 +685,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
             .with_class("episodes-workbench-editor");
             let query = Panel::new(
                 "query",
-                "Query",
+                "SQL",
                 "query",
                 rsx! { QueryPanel { namespace: dataset, dataset_id: selected_dataset.clone(), query_available: spiral_query_available } },
             )
@@ -697,14 +699,25 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
             .with_class("query-editor");
             let relations = Panel::new(
                 "relations",
-                "Relations",
+                "Tables",
                 "primary",
                 rsx! { RelationsPanel { namespace: dataset, query_available: spiral_query_available } },
             )
             .with_class("relations-editor");
             ScreenWorkspaceDefinition::for_data(
                 crate::activities::data::screen::DataWorkbenchPanels::new(episodes, query),
-                crate::activities::data::screen::DataEvidencePanels::new(query_result, relations),
+                crate::activities::data::screen::DataEvidencePanels::new(
+                    Panel::new(
+                        "dataset-inspector",
+                        "Inspect",
+                        "dataset-inspector",
+                        rsx! {
+                            crate::activities::data::native_datasets::NativeDatasetInspector {}
+                        },
+                    ),
+                    query_result,
+                    relations,
+                ),
             )
         }
         Activity::Rollout => {
@@ -803,6 +816,10 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
             },
             PanelWorkspace {
                 key: "{projection.activity().label()}",
+                active_panel: if activity == Activity::Data {
+                    if data.query_running() { Some(PanelId::from("query-result")) }
+                    else { dataset_browser.requested_panel() }
+                } else { None },
                 panels: workspace_panels,
                 initial_layout: initial_panel_layout,
                 layout_scope: Some(panel_layout_scope),
@@ -812,6 +829,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
                     split_resize_revision.set(next);
                 },
                 on_panel_activate: move |panel_id: PanelId| {
+                    dataset_browser.clear_request();
                     if let Some((_, PanelRole::Camera(CameraIdentity::Live { robot, role, .. }))) =
                         panel_roles
                             .iter()
