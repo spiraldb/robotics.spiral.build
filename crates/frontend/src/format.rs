@@ -33,14 +33,14 @@ impl LossPresentation for f64 {
 mod tests {
     use super::{ClockPresentation, LossPresentation};
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn clock_format_is_stable_for_invalid_and_elapsed_values() {
         assert_eq!(f64::NAN.clock_label(), "0:00.0");
         assert_eq!((-2.0_f64).clock_label(), "0:00.0");
         assert_eq!(61.25_f64.clock_label(), "1:01.2");
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn loss_precision_is_shared_by_training_and_rollout() {
         assert_eq!(0.125_f64.loss_label(), "0.1250");
         assert_eq!(0.00125_f64.loss_label(), "1.250e-3");

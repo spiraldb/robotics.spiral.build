@@ -306,7 +306,7 @@ mod navigation_tests {
         }
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn revisiting_a_dataset_preserves_location_but_switching_datasets_resets_it() {
         let harness = NavigationHarness::default();
         let mut dom = VirtualDom::new_with_props(NavigationHarness::render, harness.clone());

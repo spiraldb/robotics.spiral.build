@@ -797,14 +797,8 @@ impl TraceBucket {
 struct EpisodeDataDeadline;
 
 impl EpisodeDataDeadline {
-    #[cfg(target_arch = "wasm32")]
     async fn timer(millis: u32) {
         gloo_timers::future::TimeoutFuture::new(millis).await;
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    async fn timer(_millis: u32) {
-        std::future::pending::<()>().await
     }
 
     async fn run<T>(
@@ -865,7 +859,7 @@ mod tests {
             .with_arms(vec![arm])
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn a_cached_snapshot_resolves_nearest_frames_without_another_request() {
         let inspection = Arc::new(EpisodeData::try_new(snapshot()).expect("snapshot"));
         let mut cache = EpisodeInspectionCache::default();
@@ -886,7 +880,7 @@ mod tests {
         assert_eq!(preview.signal_lanes()[0].series()[0].points().len(), 3);
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn a_new_frame_count_invalidates_the_cached_revision() {
         let inspection = Arc::new(EpisodeData::try_new(snapshot()).expect("snapshot"));
         let mut cache = EpisodeInspectionCache::default();
@@ -896,7 +890,7 @@ mod tests {
         assert!(cache.get("take-1", Some(4)).is_none());
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn malformed_frame_matrices_fail_before_becoming_renderable() {
         let malformed =
             snapshot_with_normalized(vec![Some(0.0), Some(0.1), Some(0.5), Some(0.6), Some(1.0)]);

@@ -608,7 +608,7 @@ mod tests {
         QueryColumn::new(name, "Utf8", false).with_semantic_type(semantic_type.map(str::to_owned))
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn image_previews_require_both_semantic_type_and_an_encoded_image() {
         let value = serde_json::json!("data:image/jpeg;base64,preview");
         let image = query_column("frame", Some(IMAGE_EXTENSION_NAME));
@@ -624,7 +624,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn image_semantics_render_as_inline_image_columns() {
         let image = query_column("top_preview", Some(IMAGE_EXTENSION_NAME));
         let tensor = query_column("wrist_preview", Some(VARIABLE_TENSOR_EXTENSION_NAME));
@@ -638,7 +638,7 @@ mod tests {
         assert_eq!(plain.presentation_kind(), "Utf8");
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn inline_image_alt_uses_camera_specific_identity_and_row_position() {
         let column = query_column("wrist_preview", Some(IMAGE_EXTENSION_NAME));
         let row = serde_json::Map::from_iter([
@@ -655,7 +655,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn nulls_and_numbers_have_stable_table_treatment() {
         assert_eq!(None.presentation_class(), "query-value-null");
         assert_eq!(
@@ -672,7 +672,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn video_rows_map_to_the_exact_range_streaming_endpoint() {
         let columns = vec![
             query_column("episode_id", None),
@@ -710,7 +710,7 @@ mod tests {
         assert!(!encoded.needs_video_preview_column());
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn result_tab_keyboard_navigation_wraps_and_close_prefers_the_left_neighbor() {
         let ids = [3, 7, 9];
         assert_eq!(ids.neighbor(3, false), Some(9));

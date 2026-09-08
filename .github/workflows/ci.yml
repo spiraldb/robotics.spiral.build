@@ -87,7 +87,20 @@ jobs:
         run: nix develop .#ci --command cargo check -p spiral-robotics-studio --features server --locked
 
       - name: Check web target
-        run: nix develop .#ci --command cargo check -p spiral-robotics-studio --features web --target wasm32-unknown-unknown
+        run: nix develop .#ci --command cargo check -p spiral-robotics-studio --features web --target wasm32-unknown-unknown --locked
+
+      - name: Lint browser frontend
+        run: |
+          nix develop .#ci --command cargo clippy -p spiral-robotics-frontend \
+            --lib --tests --target wasm32-unknown-unknown --locked -- \
+            -D warnings -A clippy::suspicious-else-formatting
+
+      - name: Test frontend in headless Firefox
+        env:
+          WASM_BINDGEN_TEST_TIMEOUT: 60
+        run: |
+          nix develop .#ci --command cargo test -p spiral-robotics-frontend \
+            --lib --target wasm32-unknown-unknown --locked
 
       - name: Validate inference contracts
         run: nix develop .#ci --command cargo test -p spiral-robotics-inference --no-default-features

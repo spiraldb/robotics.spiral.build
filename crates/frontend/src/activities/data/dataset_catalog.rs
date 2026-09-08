@@ -104,7 +104,7 @@ pub(crate) fn DatasetCatalogFeedback() -> Element {
 mod tests {
     use super::*;
     use spiral_robotics_common::command_failure::CommandFailureCode;
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn failed_refresh_preserves_rows_then_recovers() {
         let mut catalog = DatasetCatalogState::default();
         catalog.accept(Ok(vec![DatasetSummary::new("default", "Default", 0)]));

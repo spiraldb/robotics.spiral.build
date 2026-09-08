@@ -50,6 +50,19 @@ Dioxus SSR or hydration. Build a distributable server and browser bundle with
 `dx bundle --fullstack --release` from `crates/studio`; keep its `public` directory
 beside the server binary.
 
+Frontend unit tests run as WASM in a browser using `wasm-bindgen-test`, including
+the real browser timers and DOM APIs. In the Nix shell, run:
+
+```console
+cargo test -p spiral-robotics-frontend --lib --target wasm32-unknown-unknown --locked
+```
+
+The shell supplies the matching test runner, Firefox, and GeckoDriver on Linux
+and macOS. Tests run in headless Firefox locally and in CI. For interactive
+debugging, set `NO_HEADLESS=1` and open the URL printed by the runner in Firefox.
+Filesystem-based source checks remain native:
+`cargo test -p spiral-robotics-frontend --tests --locked`.
+
 For a developer-local Workflow Assistant, put the backend-only credential in
 the repository root's ignored `.env.local` file. Studio reads this file
 automatically when a corresponding process value is absent, so it works

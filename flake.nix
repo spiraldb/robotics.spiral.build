@@ -55,10 +55,13 @@
           webBuildInputs = [
             pkgs.dioxus-cli # fullstack dx bundle / dx serve
             tailwind # compiles tailwind.css
-            # Must match the `wasm-bindgen` version pinned in
-            # crates/frontend/Cargo.toml; wasm-bindgen refuses a mismatch.
-            pkgs.wasm-bindgen-cli_0_2_126
             pkgs.binaryen # wasm-opt, used for release builds
+          ];
+          browserTestInputs = [
+            # Includes wasm-bindgen-test-runner; must match the frontend pin.
+            pkgs.wasm-bindgen-cli_0_2_126
+            pkgs.firefox
+            pkgs.geckodriver
           ];
           nativeBuildInputs = [
             llvmPackages.libclang
@@ -112,12 +115,30 @@
               llvmPackages.llvm
             ]
             ++ nativeBuildInputs
-            ++ linuxBuildInputs;
+            ++ linuxBuildInputs
+            ++ browserTestInputs;
             CARGO_NET_GIT_FETCH_WITH_CLI = "true";
             NO_DOWNLOADS = "1";
             SPIRALDB_ADBC_DRIVER = "${spiralAdbc}/lib/${adbcLibrary}";
             ASAN_SYMBOLIZER_PATH = "${llvmPackages.llvm}/bin/llvm-symbolizer";
             LIBCLANG_PATH = "${llvmPackages.libclang.lib}/lib";
+            GECKODRIVER = pkgs.lib.getExe pkgs.geckodriver;
+            # Select the pinned browser instead of a host Firefox installation.
+            WASM_BINDGEN_TEST_WEBDRIVER_JSON = pkgs.writeText "studio-webdriver.json" (
+              builtins.toJSON {
+                "moz:firefoxOptions" = {
+                  binary =
+                    if pkgs.stdenv.isDarwin then
+                      "${pkgs.firefox}/Applications/Firefox.app/Contents/MacOS/firefox"
+                    else
+                      pkgs.lib.getExe pkgs.firefox;
+                  args = [
+                    "--width=1280"
+                    "--height=800"
+                  ];
+                };
+              }
+            );
           };
           developmentShell = sharedShell // {
             packages =

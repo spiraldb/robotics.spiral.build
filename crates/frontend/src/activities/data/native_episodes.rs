@@ -25,18 +25,11 @@ impl NativeEpisode {
         let Some(nanos) = nanos else {
             return "Unknown time".into();
         };
-        #[cfg(target_arch = "wasm32")]
-        {
-            js_sys::Date::new(&wasm_bindgen::JsValue::from_f64((nanos / 1_000_000) as f64))
-                .to_iso_string()
-                .as_string()
-                .map(|time| time.replace('T', " ").trim_end_matches('Z').to_owned())
-                .unwrap_or_else(|| "Unknown time".into())
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            format!("{} ms since Unix epoch", nanos / 1_000_000)
-        }
+        js_sys::Date::new(&wasm_bindgen::JsValue::from_f64((nanos / 1_000_000) as f64))
+            .to_iso_string()
+            .as_string()
+            .map(|time| time.replace('T', " ").trim_end_matches('Z').to_owned())
+            .unwrap_or_else(|| "Unknown time".into())
     }
 }
 
@@ -184,7 +177,7 @@ pub(super) fn NativeEpisodeBrowser(
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn episode_pages_keep_the_extra_row_for_navigation_not_display() {
         let rows = (0..51).map(|index| {
             serde_json::json!({"id": format!("recording-{index}"), "message_count": 0, "duration_ns": 0})
@@ -200,7 +193,7 @@ mod tests {
             EpisodePage::from_preview(SpiralQuerySnapshot::new(vec![], vec![], false)).unwrap();
         assert!(!final_page.has_more);
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn malformed_episode_metadata_is_an_error_not_an_empty_catalog() {
         assert!(
             EpisodePage::from_preview(SpiralQuerySnapshot::new(

@@ -667,7 +667,7 @@ mod tests {
         .with_row_count(Some(1))
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn relationships_use_shared_identity_fields_without_claiming_every_column() {
         let links = [
             relation("robot.datasets", &["dataset_id", "name"]),
@@ -684,14 +684,14 @@ mod tests {
         assert_eq!(links[1].keys, ["episode_id"]);
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn counts_are_grouped_for_fast_scanning() {
         assert_eq!(0_u64.grouped_count(), "0");
         assert_eq!(999_u64.grouped_count(), "999");
         assert_eq!(12_345_678_u64.grouped_count(), "12,345,678");
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn project_relation_counts_use_one_read_only_statement() {
         let catalog = RelationCatalog::new(
             vec![
@@ -716,7 +716,7 @@ mod tests {
         .expect("the combined count query must pass the shared read-only policy");
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn project_relation_scope_hides_studio_plumbing_but_keeps_external_relations() {
         let scope = ProjectRelationScope {
             namespace: "robotics",
@@ -737,7 +737,7 @@ mod tests {
         assert!(scope.includes(&relation("customer.annotations", &["episode_id"])));
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn backend_errors_are_replaced_with_recovery_copy() {
         assert_eq!(
             "500: driver exploded at /private/path".catalog_failure_summary(),
