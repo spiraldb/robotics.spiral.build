@@ -319,7 +319,7 @@ impl OpenedTrainingRuns for Vec<String> {
 mod tests {
     use super::{OpenedTrainingRuns, TrainingRunNames};
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn default_run_names_advance_from_history_without_colliding() {
         let names = [
             "act-run-001".to_owned(),
@@ -331,7 +331,7 @@ mod tests {
         assert_eq!(Vec::<String>::new().next_default_run_name(), "act-run-001");
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn closing_selected_run_prefers_the_tab_to_its_right() {
         let mut opened = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
         let selected = opened.selection_after_close(Some("b"), "b");
@@ -339,7 +339,7 @@ mod tests {
         assert_eq!(selected.as_deref(), Some("c"));
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn closing_last_selected_run_falls_back_left_then_to_empty() {
         let mut opened = vec!["a".to_owned(), "b".to_owned()];
         let selected = opened.selection_after_close(Some("b"), "b");
@@ -349,7 +349,7 @@ mod tests {
         assert_eq!(selected, None);
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn closing_background_run_preserves_selection() {
         let mut opened = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
         let selected = opened.selection_after_close(Some("c"), "a");

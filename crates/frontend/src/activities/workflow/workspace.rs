@@ -1714,7 +1714,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn workflow_registers_the_approved_four_panel_composition() {
         let layout = WorkflowWorkspaceLayout::initial();
         let mut tiles = Vec::new();
@@ -1746,7 +1746,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn interaction_language_keeps_run_authority_out_of_assistant() {
         let source = include_str!("workspace.rs");
         let source = source.split("#[cfg(test)]").next().unwrap();
@@ -1771,7 +1771,7 @@ mod tests {
         assert!(!source.contains("MCAP"));
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn assistant_parser_handles_safe_structure_and_incomplete_streams() {
         assert_eq!(
             AssistantDocument::parse(
@@ -1811,7 +1811,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn conversation_and_tool_summaries_stay_specific_without_exposing_provider_plumbing() {
         let conversation =
             WorkflowAgentConversationSummary::new("", "Gripper evidence", 0).with_activity(0, 4);
@@ -1844,7 +1844,7 @@ mod tests {
         assert!(!production.contains("readiness.model"));
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn composer_draft_clears_only_after_the_matching_scoped_turn_is_accepted() {
         let mut drafts = BTreeMap::from([
             (
@@ -1906,7 +1906,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn run_badges_never_color_cancelled_or_interrupted_as_success() {
         assert_eq!(
             WorkflowRunPhase::Cancelled.badge_class(false),

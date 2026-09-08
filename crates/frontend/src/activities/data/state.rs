@@ -567,7 +567,7 @@ mod tests {
 
     use super::{MAX_QUERY_TABS, QuerySqlPresentation, QueryTabs};
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn query_tabs_name_the_first_relation_without_hiding_identity() {
         assert_eq!(
             "SELECT * FROM robotics.episodes".query_title(3),
@@ -576,7 +576,7 @@ mod tests {
         assert_eq!("EXPLAIN SELECT 1".query_title(4), "Query 4");
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn closing_the_active_result_selects_a_neighbor_without_touching_others() {
         let tab = |id| {
             QueryTab::new(
@@ -594,7 +594,7 @@ mod tests {
         assert_eq!(tabs[1].presentation().sql(), "SELECT 3");
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn retained_query_results_are_bounded_to_the_newest_tabs() {
         let tab = |id| {
             QueryTab::new(

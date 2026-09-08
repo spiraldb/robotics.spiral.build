@@ -53,7 +53,7 @@ impl UrlComponent for str {
 mod tests {
     use super::*;
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn device_paths_survive_the_query_string() {
         assert_eq!("/dev/video0".url_component(), "%2Fdev%2Fvideo0");
         assert_eq!(

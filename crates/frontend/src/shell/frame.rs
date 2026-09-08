@@ -542,7 +542,7 @@ impl WorkflowStatusContext<'_> {
 mod tests {
     use super::*;
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn workflow_status_projects_authoritative_graph_and_run_phase() {
         let mut state = WorkflowSnapshot::default();
         state.workflow_mut().set_revision(7);
@@ -561,7 +561,7 @@ mod tests {
         assert_eq!(status.graph, "3 nodes · 2 connections · r7");
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn workflow_status_does_not_invent_state_while_loading_or_unavailable() {
         let loading = WorkflowStatusContext {
             state: None,

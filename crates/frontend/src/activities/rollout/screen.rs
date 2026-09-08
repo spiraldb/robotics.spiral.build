@@ -144,7 +144,7 @@ mod tests {
     use super::*;
     use spiral_robotics_common::robots::{CameraBinding, RobotAvailability, RobotSummary};
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn rollout_camera_panels_follow_checkpoint_order_and_keep_robot_identity() {
         let follower = RobotSummary::new(
             "follower",
@@ -180,7 +180,7 @@ mod tests {
         assert_eq!(RolloutCameras::for_follower(&follower, &[]).len(), 3);
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn rollout_layout_docks_inference_without_registering_a_recording_timeline() {
         let cameras = [AssignedCamera::unassigned_panel()];
         let layout = RolloutLayout::initial(&cameras);

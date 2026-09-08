@@ -25,9 +25,7 @@ use spiral_robotics_viewport::{
     ArmPose, Command, Condition, Frame as BenchFrame, FrameError, Interaction, Joint, Target,
     Viewport as Bench,
 };
-#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
-#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::Closure;
 use web_sys::HtmlCanvasElement;
 
@@ -155,11 +153,9 @@ pub(crate) fn Viewport(
     // Bumped by the window resize listener: the draw below reads it purely so
     // that a resize redraws even when no telemetry is arriving.
     let resized = use_signal(|| 0_u32);
-    #[cfg(target_arch = "wasm32")]
     let mut resized = resized;
 
     // Held for the life of the component, and dropped — unsubscribing — with it.
-    #[cfg(target_arch = "wasm32")]
     use_hook(|| {
         Rc::new(WindowListener::new("resize", move || {
             let next = resized.peek().wrapping_add(1);
@@ -931,7 +927,6 @@ struct ViewportDom;
 impl ViewportDom {
     /// Keep receiving moves after the pointer leaves the canvas, so a drag that
     /// runs off the edge of a panel keeps turning the robot.
-    #[cfg(target_arch = "wasm32")]
     fn capture_pointer(event: &Event<PointerData>) {
         let Some(raw) = event.downcast::<web_sys::PointerEvent>() else {
             return;
@@ -944,10 +939,6 @@ impl ViewportDom {
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    fn capture_pointer(_event: &Event<PointerData>) {}
-
-    #[cfg(target_arch = "wasm32")]
     fn canvas() -> Option<HtmlCanvasElement> {
         web_sys::window()?
             .document()?
@@ -955,21 +946,14 @@ impl ViewportDom {
             .dyn_into()
             .ok()
     }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    fn canvas() -> Option<HtmlCanvasElement> {
-        None
-    }
 }
 
 /// A window event subscription that ends when the viewport does.
-#[cfg(target_arch = "wasm32")]
 struct WindowListener {
     event: &'static str,
     callback: Closure<dyn FnMut()>,
 }
 
-#[cfg(target_arch = "wasm32")]
 impl WindowListener {
     fn new(event: &'static str, handler: impl FnMut() + 'static) -> Option<Self> {
         let callback = Closure::wrap(Box::new(handler) as Box<dyn FnMut()>);
@@ -980,7 +964,6 @@ impl WindowListener {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
 impl Drop for WindowListener {
     fn drop(&mut self) {
         if let Some(window) = web_sys::window() {
@@ -996,7 +979,7 @@ impl Drop for WindowListener {
 mod tests {
     use super::*;
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn recorded_pose_uses_backend_projected_degrees() {
         let sample = TimelineArmSample::new(
             "follower",
@@ -1008,7 +991,7 @@ mod tests {
         assert_eq!(pose.degrees(Joint::ShoulderPan), Some(90.0));
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn recorded_pose_does_not_guess_without_projected_degrees() {
         let sample = TimelineArmSample::new(
             "follower",
@@ -1022,7 +1005,7 @@ mod tests {
 #[cfg(test)]
 mod source_tests {
     use super::*;
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn a_missing_recorded_scene_source_never_falls_back_to_live() {
         assert!(
             matches!(SceneSource::recorded("take-1", None), SceneSource::Recorded(source) if matches!(source.state(), LoadState::Loading { previous: None }))

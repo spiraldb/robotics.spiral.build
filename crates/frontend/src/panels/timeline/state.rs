@@ -91,7 +91,7 @@ impl TimelineController {
 mod tests {
     use super::PreviewTransport;
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn a_preview_cannot_be_playing_without_a_target() {
         assert!(!PreviewTransport::Stopped.is_playing());
         assert_eq!(PreviewTransport::Stopped.target(), None);

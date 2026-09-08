@@ -47,9 +47,7 @@ impl QueryRefresh {
 #[derive(Clone, Copy)]
 pub(crate) struct QueryPolicy {
     domain: QueryDomain,
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     interval_ms: u32,
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     active: Option<ReadSignal<bool>>,
 }
 impl QueryPolicy {
@@ -102,17 +100,11 @@ impl QueryPolicy {
                 }
             }
         });
-        #[cfg(target_arch = "wasm32")]
-        self.use_timer(resource, gloo_timers::future::TimeoutFuture::new);
+        self.use_timer(resource);
         resource
     }
 
-    #[cfg(any(test, target_arch = "wasm32"))]
-    fn use_timer<T: 'static, E: 'static, Delay: Future<Output = ()> + 'static>(
-        self,
-        mut resource: Resource<Result<T, E>>,
-        mut delay: impl FnMut(u32) -> Delay + 'static,
-    ) {
+    fn use_timer<T: 'static, E: 'static>(self, mut resource: Resource<Result<T, E>>) {
         // This timer depends on the read's lifecycle. Restarting a read cancels
         // its old timer; completing it starts a new delay. Neither a slow read
         // nor a paused resource has a running refresh timer.
@@ -126,12 +118,9 @@ impl QueryPolicy {
                 self.interval_ms.max(5_000)
             };
             let failed = resource.peek().as_ref().is_some_and(Result::is_err);
-            #[cfg(target_arch = "wasm32")]
             let hidden = web_sys::window()
                 .and_then(|window| window.document())
                 .is_some_and(|document| document.hidden());
-            #[cfg(not(target_arch = "wasm32"))]
-            let hidden = false;
             let interval = normal_interval.max(if hidden {
                 5_000
             } else if failed {
@@ -139,7 +128,7 @@ impl QueryPolicy {
             } else {
                 0
             });
-            let timer = ready.then(|| delay(interval));
+            let timer = ready.then(|| gloo_timers::future::TimeoutFuture::new(interval));
             async move {
                 if let Some(timer) = timer {
                     timer.await;
@@ -154,25 +143,20 @@ impl QueryPolicy {
     async fn with_deadline<T, E: From<CommandError>>(
         request: impl Future<Output = Result<T, E>>,
     ) -> Result<T, E> {
-        #[cfg(target_arch = "wasm32")]
+        use futures_util::future::{Either, select};
+        match select(
+            Box::pin(request),
+            Box::pin(gloo_timers::future::TimeoutFuture::new(10_000)),
+        )
+        .await
         {
-            use futures_util::future::{Either, select};
-            match select(
-                Box::pin(request),
-                Box::pin(gloo_timers::future::TimeoutFuture::new(10_000)),
+            Either::Left((result, _)) => result,
+            Either::Right(_) => Err(CommandError::new(
+                spiral_robotics_common::command_failure::CommandFailureCode::Transport,
+                "The backend read timed out. Retrying automatically.",
             )
-            .await
-            {
-                Either::Left((result, _)) => result,
-                Either::Right(_) => Err(CommandError::new(
-                    spiral_robotics_common::command_failure::CommandFailureCode::Transport,
-                    "The backend read timed out. Retrying automatically.",
-                )
-                .into()),
-            }
+            .into()),
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        request.await
     }
 }
 
@@ -227,14 +211,13 @@ mod tests {
         resource: Option<Resource<Result<u32, CommandError>>>,
         available: Option<Signal<bool>>,
         reads: Vec<Rc<ControlledRead>>,
-        delays: Vec<Rc<ControlledRead>>,
     }
     impl QueryHarness {
         fn render(self) -> Element {
             let refresh = QueryRefresh::use_provider();
             let available = use_signal(|| true);
             let observations = self.0.clone();
-            let resource = QueryPolicy::new(QueryDomain::Workflow, 500).use_when(
+            let resource = QueryPolicy::new(QueryDomain::Workflow, 20).use_when(
                 move || *available.read(),
                 move || {
                     let read = Rc::new(ControlledRead::default());
@@ -242,14 +225,6 @@ mod tests {
                     ReadFuture(read)
                 },
             );
-            let timings = self.0.clone();
-            QueryPolicy::new(QueryDomain::Workflow, 500).use_timer(resource, move |_| {
-                let timer = Rc::new(ControlledRead::default());
-                timings.borrow_mut().delays.push(timer.clone());
-                async move {
-                    let _ = ReadFuture(timer).await;
-                }
-            });
             {
                 let mut state = self.0.borrow_mut();
                 state.refresh = Some(refresh);
@@ -270,7 +245,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn invalidation_cancels_the_old_read_and_only_the_new_result_is_visible() {
         let harness = QueryHarness::default();
         let mut dom = VirtualDom::new_with_props(QueryHarness::render, harness.clone());
@@ -291,7 +266,7 @@ mod tests {
         drop(dom);
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn unavailable_readiness_cancels_reads_and_recovers_through_the_same_owner() {
         let harness = QueryHarness::default();
         let mut dom = VirtualDom::new_with_props(QueryHarness::render, harness.clone());
@@ -316,28 +291,49 @@ mod tests {
         drop(dom);
         assert!(pending.dropped.get());
     }
-    #[test]
-    fn an_expired_old_timer_neither_overlaps_nor_cancels_a_slow_invalidated_read() {
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    async fn an_expired_old_timer_neither_overlaps_nor_cancels_a_slow_invalidated_read() {
         let harness = QueryHarness::default();
         let mut dom = VirtualDom::new_with_props(QueryHarness::render, harness.clone());
         dom.rebuild_in_place();
         dom.render_immediate_to_vec();
-        assert!(harness.0.borrow().delays.is_empty());
+        // Account for the production background-tab polling interval as well.
+        let interval = if web_sys::window().unwrap().document().unwrap().hidden() {
+            5_100
+        } else {
+            50
+        };
+        gloo_timers::future::TimeoutFuture::new(interval).await;
+        dom.render_immediate_to_vec();
+        assert_eq!(harness.0.borrow().reads.len(), 1);
         harness.0.borrow().reads[0].complete(1);
         dom.render_immediate_to_vec();
-        let old_timer = harness.0.borrow().delays.last().unwrap().clone();
         dom.in_runtime(|| harness.refresh());
         dom.render_immediate_to_vec();
         let pending = harness.0.borrow().reads[1].clone();
-        old_timer.complete(0);
+        gloo_timers::future::TimeoutFuture::new(interval).await;
         dom.render_immediate_to_vec();
         assert_eq!(harness.0.borrow().reads.len(), 2);
         assert!(!pending.dropped.get());
         pending.complete(2);
         dom.render_immediate_to_vec();
         assert_eq!(harness.result(), Some(Ok(2)));
-        harness.0.borrow().delays.last().unwrap().complete(0);
+        gloo_timers::future::TimeoutFuture::new(interval).await;
         dom.render_immediate_to_vec();
         assert_eq!(harness.0.borrow().reads.len(), 3);
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    async fn browser_deadline_drops_a_stalled_read_and_returns_a_transport_error() {
+        let read = Rc::new(ControlledRead::default());
+        let result = QueryPolicy::with_deadline(ReadFuture(read.clone())).await;
+        assert_eq!(
+            result,
+            Err(CommandError::new(
+                spiral_robotics_common::command_failure::CommandFailureCode::Transport,
+                "The backend read timed out. Retrying automatically.",
+            ))
+        );
+        assert!(read.dropped.get());
     }
 }

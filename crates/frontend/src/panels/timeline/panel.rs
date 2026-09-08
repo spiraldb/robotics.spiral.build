@@ -1249,13 +1249,13 @@ impl TimelineSignalLane {
 mod tests {
     use super::*;
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn percent_is_stable_for_invalid_duration() {
         assert_eq!(5.0_f64.percent_of(10.0), 50.0);
         assert_eq!(5.0_f64.percent_of(0.0), 0.0);
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn one_transport_routes_through_the_robot_only_when_sync_is_enabled() {
         assert_eq!(
             TimelinePlayback::Stopped.transport_intent(false),
@@ -1283,7 +1283,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn empty_timeline_ticks_keep_unique_render_identities() {
         let ticks = 0.0_f64.timeline_ticks();
         let identities = ticks
@@ -1295,7 +1295,7 @@ mod tests {
         assert_eq!(identities.len(), ticks.len());
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn an_unscaled_axis_is_unlabelled_and_a_scaled_one_is_not() {
         assert!(
             0.0_f64
@@ -1310,7 +1310,7 @@ mod tests {
         assert_eq!(ticks.last().map(|tick| tick.seconds), Some(8.0));
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn traces_break_at_missing_samples_and_preserve_a_peak() {
         let mut points = (0..600)
             .map(|index| TimelineSignalPoint {
@@ -1334,7 +1334,7 @@ mod tests {
         assert!(rows.len() <= TRACE_POINT_BUDGET + 4);
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn timeline_chart_uses_one_grid_per_canonical_lane() {
         let chart = SignalStore::default().timeline_lanes().chart(12.0);
         let option = serde_json::to_value(chart).expect("timeline chart should serialize");
@@ -1345,7 +1345,7 @@ mod tests {
         assert_eq!(option["animation"], false);
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn canonical_lane_helper_always_returns_six_joint_slots() {
         let lanes = SignalStore::default().timeline_lanes();
         assert_eq!(lanes.len(), 6);
@@ -1353,7 +1353,7 @@ mod tests {
         assert_eq!(lanes[5].joint, "gripper");
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn recorded_wire_lanes_are_reordered_into_the_canonical_six_slots() {
         let response = RecordedTimelineTraces {
             episode: "episode_000007".to_owned(),

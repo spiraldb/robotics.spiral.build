@@ -32,7 +32,7 @@ impl SignalNamePresentation for str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn joint_colours_are_stable_when_a_motor_is_missing() {
         assert_eq!("shoulder_pan".signal_color(), SIGNAL_COLORS[0]);
         assert_eq!("elbow_flex".signal_color(), SIGNAL_COLORS[2]);

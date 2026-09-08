@@ -8,7 +8,6 @@ use crate::client::project::ProjectClient;
 use crate::format::ClockPresentation;
 use crate::panels::recorded_source::{LoadState, RecordedSource};
 
-#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::{JsCast as _, JsValue};
 
 /// Camera panels render exactly one declared source. A recorded camera never
@@ -220,47 +219,41 @@ impl RecordedCamera {
     }
 
     fn sync_element(&self, element_id: &str, should_play: bool) {
-        #[cfg(target_arch = "wasm32")]
-        {
-            let Some(element) = web_sys::window()
-                .and_then(|window| window.document())
-                .and_then(|document| document.get_element_by_id(element_id))
-            else {
-                return;
-            };
-            let target = self.video_seconds.max(0.0);
-            let current = js_sys::Reflect::get(element.as_ref(), &JsValue::from_str("currentTime"))
-                .ok()
-                .and_then(|value| value.as_f64())
-                .unwrap_or(0.0);
-            let seek_threshold = if should_play { 0.25 } else { 0.005 };
-            if (current - target).abs() > seek_threshold {
-                let _ = js_sys::Reflect::set(
-                    element.as_ref(),
-                    &JsValue::from_str("currentTime"),
-                    &JsValue::from_f64(target),
-                );
-            }
-
-            let paused = js_sys::Reflect::get(element.as_ref(), &JsValue::from_str("paused"))
-                .ok()
-                .and_then(|value| value.as_bool())
-                .unwrap_or(!should_play);
-            let method = match (should_play, paused) {
-                (true, true) => Some("play"),
-                (false, false) => Some("pause"),
-                _ => None,
-            };
-            if let Some(method) = method
-                && let Ok(function) =
-                    js_sys::Reflect::get(element.as_ref(), &JsValue::from_str(method))
-                        .and_then(|value| value.dyn_into::<js_sys::Function>())
-            {
-                let _ = function.call0(element.as_ref());
-            }
+        let Some(element) = web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.get_element_by_id(element_id))
+        else {
+            return;
+        };
+        let target = self.video_seconds.max(0.0);
+        let current = js_sys::Reflect::get(element.as_ref(), &JsValue::from_str("currentTime"))
+            .ok()
+            .and_then(|value| value.as_f64())
+            .unwrap_or(0.0);
+        let seek_threshold = if should_play { 0.25 } else { 0.005 };
+        if (current - target).abs() > seek_threshold {
+            let _ = js_sys::Reflect::set(
+                element.as_ref(),
+                &JsValue::from_str("currentTime"),
+                &JsValue::from_f64(target),
+            );
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        let _ = (element_id, should_play);
+
+        let paused = js_sys::Reflect::get(element.as_ref(), &JsValue::from_str("paused"))
+            .ok()
+            .and_then(|value| value.as_bool())
+            .unwrap_or(!should_play);
+        let method = match (should_play, paused) {
+            (true, true) => Some("play"),
+            (false, false) => Some("pause"),
+            _ => None,
+        };
+        if let Some(method) = method
+            && let Ok(function) = js_sys::Reflect::get(element.as_ref(), &JsValue::from_str(method))
+                .and_then(|value| value.dyn_into::<js_sys::Function>())
+        {
+            let _ = function.call0(element.as_ref());
+        }
     }
 }
 
@@ -511,7 +504,7 @@ mod source_tests {
             EpisodeVideoTimeline::new((duration_seconds * 30.0) as u64, duration_seconds, offset),
         )
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn recorded_camera_selects_the_exact_pause_segment() {
         let preview = preview(
             4.25,
@@ -527,7 +520,7 @@ mod source_tests {
             "/api/episodes/take-1/videos/follower.camera.wrist?segment=1"
         );
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn recorded_camera_keeps_legacy_sync_explicitly_approximate() {
         let preview = preview(5.0, vec![video(0, None, 8.0)]);
 
@@ -540,7 +533,7 @@ mod source_tests {
             "/api/episodes/take-1/videos/follower.camera.wrist?segment=0"
         );
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn recorded_video_sync_uses_the_controller_clock_not_a_late_sample_response() {
         let preview = preview(1.0, vec![video(0, Some(0.0), 8.0)]);
 
@@ -551,7 +544,7 @@ mod source_tests {
         assert_eq!(camera.video_seconds(), 5.0);
         assert_eq!(camera.episode_seconds(), 5.0);
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn a_missing_recorded_camera_source_never_falls_back_to_the_live_device() {
         let assigned = (
             "follower".to_owned(),

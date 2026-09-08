@@ -136,71 +136,50 @@ impl HttpRequest {
     }
 
     pub(crate) async fn send<T: serde::de::DeserializeOwned>(self) -> Result<T, CommandError> {
-        #[cfg(target_arch = "wasm32")]
-        {
-            use gloo_net::http::{Method, RequestBuilder};
-            let abort = RequestCancellation::new()?;
-            let mut request = RequestBuilder::new(&self.url?)
-                .method(self.method.parse::<Method>().expect("declared HTTP method"))
-                .header("Accept", "application/json")
-                .abort_signal(Some(&abort.0.signal()));
-            if let Some(session) = self.session {
-                request = request.header("X-Project-Session", &session);
-            }
-            let request = match self.body? {
-                Some(RequestBody::Json(body)) => request
-                    .header("Content-Type", "application/json")
-                    .body(body),
-                Some(RequestBody::Upload(document)) => {
-                    // Hand the browser its native File. It streams the upload without
-                    // allocating another project-sized buffer in WebAssembly.
-                    let file = document
-                        .inner()
-                        .downcast_ref::<web_sys::File>()
-                        .ok_or_else(|| {
-                            CommandError::new(
-                                CommandFailureCode::InvalidInput,
-                                "The selected project is not a browser file.",
-                            )
-                        })?;
-                    request
-                        .header("Content-Type", "application/vnd.spiral-robotics.project")
-                        .body(file.clone())
-                }
-                None => request.build(),
-            }
-            .map_err(CommandError::transport)?;
-            let response = request.send().await.map_err(CommandError::transport)?;
-            let status = response.status();
-            let body = response.text().await.map_err(CommandError::transport)?;
-            CommandError::decode_response(status, &body)
+        use gloo_net::http::{Method, RequestBuilder};
+        let abort = RequestCancellation::new()?;
+        let mut request = RequestBuilder::new(&self.url?)
+            .method(self.method.parse::<Method>().expect("declared HTTP method"))
+            .header("Accept", "application/json")
+            .abort_signal(Some(&abort.0.signal()));
+        if let Some(session) = self.session {
+            request = request.header("X-Project-Session", &session);
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            // Server rendering has no browser connection or project mount. The
-            // mounted browser fetches authoritative state through the same API as
-            // every other client.
-            let _ = (self.method, self.url?, self.session);
-            match self.body? {
-                Some(RequestBody::Json(body)) => drop(body),
-                Some(RequestBody::Upload(document)) => drop(document),
-                None => (),
+        let request = match self.body? {
+            Some(RequestBody::Json(body)) => request
+                .header("Content-Type", "application/json")
+                .body(body),
+            Some(RequestBody::Upload(document)) => {
+                // Hand the browser its native File. It streams the upload without
+                // allocating another project-sized buffer in WebAssembly.
+                let file = document
+                    .inner()
+                    .downcast_ref::<web_sys::File>()
+                    .ok_or_else(|| {
+                        CommandError::new(
+                            CommandFailureCode::InvalidInput,
+                            "The selected project is not a browser file.",
+                        )
+                    })?;
+                request
+                    .header("Content-Type", "application/vnd.spiral-robotics.project")
+                    .body(file.clone())
             }
-            Err(CommandError::new(
-                CommandFailureCode::Transport,
-                "Waiting for the browser connection.",
-            ))
+            None => request.build(),
         }
+        .map_err(CommandError::transport)?;
+        let response = request.send().await.map_err(CommandError::transport)?;
+        let status = response.status();
+        let body = response.text().await.map_err(CommandError::transport)?;
+        CommandError::decode_response(status, &body)
     }
 }
 
 impl CommandError {
-    #[cfg(target_arch = "wasm32")]
     fn transport(error: impl std::fmt::Display) -> Self {
         Self::new(CommandFailureCode::Transport, error.to_string())
     }
 
-    #[cfg(any(test, target_arch = "wasm32"))]
     fn decode_response<T: serde::de::DeserializeOwned>(status: u16, body: &str) -> Result<T, Self> {
         if (200..300).contains(&status) {
             serde_json::from_str(body).map_err(|error| {
@@ -220,9 +199,7 @@ impl CommandError {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
 struct RequestCancellation(web_sys::AbortController);
-#[cfg(target_arch = "wasm32")]
 impl RequestCancellation {
     fn new() -> Result<Self, CommandError> {
         web_sys::AbortController::new().map(Self).map_err(|_| {
@@ -233,7 +210,6 @@ impl RequestCancellation {
         })
     }
 }
-#[cfg(target_arch = "wasm32")]
 impl Drop for RequestCancellation {
     fn drop(&mut self) {
         self.0.abort();
@@ -244,7 +220,7 @@ impl Drop for RequestCancellation {
 mod tests {
     use super::*;
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn failures_use_the_wire_code_and_never_expose_proxy_html() {
         let failure = CommandError::decode_response::<()>(
             409,

@@ -277,7 +277,7 @@ impl EpisodeIdPresentation for str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn presets_are_scoped_to_the_current_dataset() {
         assert_eq!(
             Table::JointSamples.scoped_sql("training", "pick-place"),
@@ -293,7 +293,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn generated_episode_ids_read_as_take_numbers() {
         assert_eq!("episode_000024".short_episode_id(), "#24");
         assert_eq!("imported-pass".short_episode_id(), "imported-pass");

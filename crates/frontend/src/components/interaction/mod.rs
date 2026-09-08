@@ -666,7 +666,6 @@ impl BrowserFocus {
         });
     }
 
-    #[cfg(target_arch = "wasm32")]
     fn element(id: &str) -> bool {
         use wasm_bindgen::JsCast as _;
 
@@ -680,12 +679,6 @@ impl BrowserFocus {
         element.focus().is_ok()
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    fn element(_id: &str) -> bool {
-        false
-    }
-
-    #[cfg(target_arch = "wasm32")]
     fn select_adjacent_mode(direction: isize) {
         use wasm_bindgen::JsCast as _;
 
@@ -719,10 +712,6 @@ impl BrowserFocus {
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    fn select_adjacent_mode(_direction: isize) {}
-
-    #[cfg(target_arch = "wasm32")]
     fn trap_within(container_id: &str, backwards: bool) -> bool {
         use wasm_bindgen::JsCast as _;
 
@@ -760,18 +749,13 @@ impl BrowserFocus {
             .get(next)
             .is_some_and(|element| element.focus().is_ok())
     }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    fn trap_within(_container_id: &str, _backwards: bool) -> bool {
-        false
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{ActionPurpose, ActionSize, ActionVariant};
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn action_vocabulary_is_stable() {
         assert_eq!(ActionPurpose::Delete.as_str(), "delete");
         assert_eq!(ActionPurpose::Remove.as_str(), "remove");
@@ -780,7 +764,7 @@ mod tests {
         assert_eq!(ActionPurpose::Sync.as_str(), "sync");
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn action_classes_separate_presentation_from_layout() {
         assert_eq!(
             ActionVariant::Outline.action_class(ActionSize::Standard, "local-layout"),

@@ -106,20 +106,20 @@ mod tests {
     use super::*;
     use crate::activities::data::episode_cache::EpisodePlaybackTime;
     use spiral_robotics_common::recording::{ReplayIdentity, ReplayTimeline, ReplayTransport};
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn preview_clock_preserves_the_first_frame_and_bounds_delayed_ticks() {
         assert_eq!(PreviewClock::new(10.0, None).advance(2.0, 100.0), 2.0);
         assert_eq!(PreviewClock::new(10.0, Some(1.0)).advance(2.0, 100.0), 2.25);
         assert_eq!(PreviewClock::new(10.0, Some(5.0)).advance(2.0, 4.0), 2.0);
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn preview_clock_samples_the_exact_final_frame() {
         assert_eq!(PreviewClock::new(2.0, Some(1.0)).advance(1.99, 1.2), 2.0);
         assert_eq!(PreviewClock::new(0.0, Some(1.0)).advance(1.0, 1.2), 0.0);
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn recorded_render_slots_bound_sample_fetches_to_thirty_hz() {
         assert_eq!(f64::NAN.replay_slot(), 0);
         assert_eq!(0.0_f64.replay_slot(), 0);
@@ -127,7 +127,7 @@ mod tests {
         assert_eq!(0.034_f64.replay_slot(), 1);
         assert_eq!(1.249_f64.replay_slot(), 37);
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn physical_seek_never_takes_ownership_of_timeline_transport() {
         let mut replay = spiral_robotics_common::recording::ReplayProgress::new(
             ReplayIdentity::new("take-1", "follower"),

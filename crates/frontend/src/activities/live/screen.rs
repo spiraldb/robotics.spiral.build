@@ -106,7 +106,7 @@ fn LivePanels() -> Element {
 mod tests {
     use super::*;
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn live_layout_preserves_named_homes_when_camera_panels_change() {
         let panels = [
             Panel::new("camera:follower:wrist", "Wrist", "cameras", rsx! {}),

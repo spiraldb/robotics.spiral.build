@@ -1937,7 +1937,7 @@ impl NodeProjection<'_> {
 mod tests {
     use super::*;
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn explicit_selection_activates_the_node_inspector() {
         let selected =
             WorkflowUiState::default().reduce(WorkflowUiAction::SelectNode("query".to_owned()));
@@ -1945,7 +1945,7 @@ mod tests {
         assert_eq!(selected.active_panel.as_deref(), Some(NODE_PANEL_ID));
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn default_editor_is_table_query_result_without_a_fake_model() {
         let state = WorkflowSnapshot::from_workflow("", WorkflowSpec::default());
         let kinds = state
@@ -1965,7 +1965,7 @@ mod tests {
         assert!(!state.workflow().has_model());
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn graph_projection_preserves_saved_topology() {
         let workflow = WorkflowSpec::default();
         let snapshot = WorkflowRunSnapshot::idle_for(&workflow);
@@ -1979,7 +1979,7 @@ mod tests {
         assert_eq!(nodes[2].position.x - nodes[1].position.x, 224.0);
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn starting_fresh_preserves_server_identity_but_removes_all_topology() {
         let workflow = WorkflowSpec::new("inspection", "Existing workflow").with_revision(17);
 
@@ -2003,7 +2003,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn only_edges_feeding_the_active_node_animate() {
         let workflow = WorkflowSpec::default();
         let mut snapshot = WorkflowRunSnapshot::idle_for(&workflow);
@@ -2017,7 +2017,7 @@ mod tests {
         assert!(edges[1].class.is_none());
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn inserting_siglip_makes_candidate_backfill_and_final_join_visible() {
         let mut workflow = WorkflowSpec::default();
         let WorkflowNodeConfig::Table { relation } = workflow.nodes_mut()[0].config_mut() else {
@@ -2081,7 +2081,7 @@ mod tests {
         assert!(sql.contains("{{node:siglip}}"));
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn model_fallback_uses_five_topology_ranks_with_two_table_roots() {
         let mut workflow = WorkflowSpec::default();
         let WorkflowNodeConfig::Table { relation } = workflow.nodes_mut()[0].config_mut() else {
@@ -2120,7 +2120,7 @@ mod tests {
         assert_eq!(positions["result"] - positions["feature_query"], 224.0);
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn rejected_model_insertion_never_mutates_a_chained_query_graph() {
         let mut workflow = WorkflowSpec::default();
         workflow
@@ -2146,7 +2146,7 @@ mod tests {
         assert_eq!(workflow, before);
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn configured_source_and_feature_make_the_manual_model_draft_applicable() {
         let mut workflow = WorkflowSpec::default();
         let model_id = workflow.insert_siglip_model().unwrap();
@@ -2215,7 +2215,7 @@ mod tests {
         assert!(sql.contains("features.is_raining_feature"));
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn removing_siglip_restores_the_candidate_query_as_terminal() {
         let mut workflow = WorkflowSpec::default();
         workflow.insert_siglip_model().unwrap();
@@ -2244,7 +2244,7 @@ mod tests {
         assert!(!sql.contains("{{node:siglip}}"));
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn topology_mutation_is_blocked_during_start_command_before_sse_arrives() {
         assert!(
             WorkflowRunPhase::Idle
@@ -2253,7 +2253,7 @@ mod tests {
         assert!(!WorkflowRunPhase::Idle.topology_mutation_blocked(None));
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn model_projection_preserves_authoritative_progress_and_warning_evidence() {
         let node = spiral_robotics_common::workflow::WorkflowNodeSpec::new(
             "siglip",
@@ -2297,7 +2297,7 @@ mod tests {
         assert_eq!(projected.fields(), ["is_red_cube_feature"]);
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn dirty_draft_keeps_its_base_revision_for_conflict_detection() {
         let mut draft = WorkflowSpec::default();
         let mut server = draft.clone();
@@ -2313,7 +2313,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn assistant_receipt_navigation_never_opens_stale_artifacts() {
         let mut state = WorkflowSnapshot::default();
         state.workflow_mut().set_revision(4);
@@ -2347,7 +2347,7 @@ mod tests {
         assert_eq!(old_results.panel_id(&state, false), None);
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn fetched_workflow_revisions_do_not_regress() {
         let mut current = WorkflowSnapshot::default();
         current.set_scope_id("project-a-scope");
@@ -2378,7 +2378,7 @@ mod tests {
         assert!(project_b_relations.matches_scope("project-b-scope", "project-b-scope"));
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn fetched_agent_history_rejects_revision_regression() {
         let mut current = WorkflowAgentSnapshot::default();
         current.set_scope_id("project-a-scope");
@@ -2401,7 +2401,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn conversation_switching_is_gated_only_by_authoritative_active_work() {
         let mut agent = WorkflowAgentSnapshot::default();
         agent.set_history_available(true);
@@ -2492,7 +2492,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn late_run_response_cannot_regress_a_completed_sse_snapshot() {
         let mut current = WorkflowSnapshot::default();
         current
@@ -2520,7 +2520,7 @@ mod tests {
         assert!(!current.accepts(&late_start));
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn late_cancel_response_cannot_regress_a_cancelled_sse_snapshot() {
         let mut current = WorkflowSnapshot::default();
         current
@@ -2546,7 +2546,7 @@ mod tests {
             .set_updated_ms(current.snapshot().updated_ms());
         assert!(!current.snapshot().accepts(late_cancel.snapshot()));
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn a_save_receipt_waits_for_the_fetched_revision_and_preserves_later_edits() {
         let submitted = WorkflowSpec::new("workflow", "submitted").with_revision(2);
         let receipt = WorkflowSaveReceipt {

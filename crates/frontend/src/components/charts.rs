@@ -11,7 +11,6 @@ use charming::element::{
 use dioxus::prelude::*;
 
 pub(crate) const COLOR_LINE: &str = "#e8e8e6";
-#[cfg(target_arch = "wasm32")]
 pub(crate) const COLOR_INK_SOFT: &str = "#65645f";
 pub(crate) const COLOR_INK_FAINT: &str = "#71706c";
 pub(crate) const COLOR_SURFACE: &str = "#ffffff";
@@ -26,7 +25,6 @@ pub(crate) const COLOR_MEMORY: &str = "#7a58a5";
 
 pub(crate) const MONO_FONT: &str = "ui-monospace, SF Mono, JetBrains Mono, Menlo, monospace";
 
-#[cfg(target_arch = "wasm32")]
 const STUDIO_TOOLTIP_CSS: &str =
     "border-radius: 4px; box-shadow: 0 1px 3px rgba(55, 53, 47, 0.10);";
 
@@ -226,66 +224,61 @@ pub(crate) fn CharmingChart(id: String, chart: Chart, presentation: ChartPresent
         aria_label,
         group,
     } = presentation;
-    #[cfg(not(target_arch = "wasm32"))]
-    let _ = &group;
     let runtime_failed = use_signal(|| false);
 
-    #[cfg(target_arch = "wasm32")]
-    {
-        use std::cell::RefCell;
-        use std::rc::Rc;
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
-        use charming::Echarts;
+    use charming::Echarts;
 
-        let instance = use_hook(|| Rc::new(RefCell::new(None::<Echarts>)));
-        let observer = use_hook(|| Rc::new(RefCell::new(None::<ChartResizeObserver>)));
+    let instance = use_hook(|| Rc::new(RefCell::new(None::<Echarts>)));
+    let observer = use_hook(|| Rc::new(RefCell::new(None::<ChartResizeObserver>)));
 
-        let update_instance = Rc::clone(&instance);
-        let update_observer = Rc::clone(&observer);
-        let mut runtime_status = runtime_failed;
-        use_effect(use_reactive(
-            (&id, &chart, &group),
-            move |(id, chart, group)| {
-                let instance = Rc::clone(&update_instance);
-                let observer = Rc::clone(&update_observer);
-                spawn(async move {
-                    for _ in 0..100 {
-                        if EchartsRuntime::ready() {
-                            match (ChartRenderRequest {
-                                id: &id,
-                                chart: &chart,
-                                group: group.as_deref(),
-                                instance: &instance,
-                                observer: &observer,
-                            })
-                            .render()
-                            {
-                                Ok(()) => runtime_status.set(false),
-                                Err(()) => runtime_status.set(true),
-                            }
-                            return;
+    let update_instance = Rc::clone(&instance);
+    let update_observer = Rc::clone(&observer);
+    let mut runtime_status = runtime_failed;
+    use_effect(use_reactive(
+        (&id, &chart, &group),
+        move |(id, chart, group)| {
+            let instance = Rc::clone(&update_instance);
+            let observer = Rc::clone(&update_observer);
+            spawn(async move {
+                for _ in 0..100 {
+                    if EchartsRuntime::ready() {
+                        match (ChartRenderRequest {
+                            id: &id,
+                            chart: &chart,
+                            group: group.as_deref(),
+                            instance: &instance,
+                            observer: &observer,
+                        })
+                        .render()
+                        {
+                            Ok(()) => runtime_status.set(false),
+                            Err(()) => runtime_status.set(true),
                         }
-                        gloo_timers::future::TimeoutFuture::new(20).await;
+                        return;
                     }
-                    runtime_status.set(true);
-                });
-            },
-        ));
+                    gloo_timers::future::TimeoutFuture::new(20).await;
+                }
+                runtime_status.set(true);
+            });
+        },
+    ));
 
-        let cleanup_id = id.clone();
-        let cleanup_instance = Rc::clone(&instance);
-        let cleanup_observer = Rc::clone(&observer);
-        use_drop(move || {
-            cleanup_observer.borrow_mut().take();
-            if let Some(chart) = cleanup_instance.borrow_mut().take() {
-                chart.dispose();
-            } else if EchartsRuntime::ready()
-                && let Some(chart) = EchartsRuntime::existing(&cleanup_id)
-            {
-                chart.dispose();
-            }
-        });
-    }
+    let cleanup_id = id.clone();
+    let cleanup_instance = Rc::clone(&instance);
+    let cleanup_observer = Rc::clone(&observer);
+    use_drop(move || {
+        cleanup_observer.borrow_mut().take();
+        if let Some(chart) = cleanup_instance.borrow_mut().take() {
+            chart.dispose();
+        } else if EchartsRuntime::ready()
+            && let Some(chart) = EchartsRuntime::existing(&cleanup_id)
+        {
+            chart.dispose();
+        }
+    });
 
     rsx! {
         div {
@@ -300,10 +293,8 @@ pub(crate) fn CharmingChart(id: String, chart: Chart, presentation: ChartPresent
     }
 }
 
-#[cfg(target_arch = "wasm32")]
 struct EchartsRuntime;
 
-#[cfg(target_arch = "wasm32")]
 impl EchartsRuntime {
     fn ready() -> bool {
         use wasm_bindgen::JsValue;
@@ -332,7 +323,6 @@ impl EchartsRuntime {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
 struct ChartRenderRequest<'a> {
     id: &'a str,
     chart: &'a Chart,
@@ -341,7 +331,6 @@ struct ChartRenderRequest<'a> {
     observer: &'a std::rc::Rc<std::cell::RefCell<Option<ChartResizeObserver>>>,
 }
 
-#[cfg(target_arch = "wasm32")]
 impl ChartRenderRequest<'_> {
     fn render(self) -> Result<(), ()> {
         if let Some(existing) = self.instance.borrow().as_ref() {
@@ -364,7 +353,6 @@ impl ChartRenderRequest<'_> {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
 trait StudioEcharts {
     fn connect(&self, group: Option<&str>) -> Result<(), ()>;
     fn update(&self, option: &Chart);
@@ -378,7 +366,6 @@ trait StudioEcharts {
     ) -> Result<wasm_bindgen::JsValue, wasm_bindgen::JsValue>;
 }
 
-#[cfg(target_arch = "wasm32")]
 impl StudioEcharts for charming::Echarts {
     fn connect(&self, group: Option<&str>) -> Result<(), ()> {
         use wasm_bindgen::JsCast as _;
@@ -502,13 +489,11 @@ impl StudioEcharts for charming::Echarts {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
 struct ChartResizeObserver {
     observer: web_sys::ResizeObserver,
     _callback: wasm_bindgen::closure::Closure<dyn FnMut(js_sys::Array, web_sys::ResizeObserver)>,
 }
 
-#[cfg(target_arch = "wasm32")]
 impl ChartResizeObserver {
     fn new(
         id: &str,
@@ -548,7 +533,6 @@ impl ChartResizeObserver {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
 impl Drop for ChartResizeObserver {
     fn drop(&mut self) {
         self.observer.disconnect();
@@ -559,32 +543,61 @@ impl Drop for ChartResizeObserver {
 mod tests {
     use super::*;
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn tooltip_formatters_bound_precision_and_keep_single_series_popups_to_one_value() {
         let numeric = serde_json::to_value(StudioTooltip::numeric(3))
             .expect("numeric tooltip should serialize");
-        let numeric_formatter = numeric["valueFormatter"]
-            .as_str()
-            .expect("numeric tooltip should contain a formatter");
-        assert!(numeric_formatter.contains("maximumFractionDigits: 3"));
         assert_eq!(numeric["padding"], serde_json::json!([4.0, 6.0]));
         assert_eq!(numeric["borderColor"], COLOR_LINE);
         assert_eq!(numeric["axisPointer"]["lineStyle"]["opacity"], 0.3);
         assert!(numeric["formatter"].is_null());
 
-        let byte_rate = serde_json::to_value(StudioTooltip::rate(TooltipRateUnit::BytesPerSecond))
-            .expect("rate tooltip should serialize");
-        let byte_formatter = byte_rate["valueFormatter"]
-            .as_str()
-            .expect("rate tooltip should contain a formatter");
-        assert!(byte_formatter.contains("GiB/s"));
-        assert!(byte_formatter.contains("MiB/s"));
-        let byte_popup_formatter = byte_rate["formatter"]
-            .as_str()
-            .expect("single-series tooltip should contain a popup formatter");
-        assert!(byte_popup_formatter.contains("point.value"));
-        assert!(!byte_popup_formatter.contains("seriesName"));
-        assert!(!byte_popup_formatter.contains("axisValue"));
-        assert!(!byte_popup_formatter.contains("<br"));
+        let numeric = TooltipRuntime::from(StudioTooltip::numeric(3));
+        assert_eq!(
+            numeric
+                .format("valueFormatter", 1.23456.into())
+                .replace(',', "."),
+            "1.235"
+        );
+        assert_eq!(
+            numeric.format("valueFormatter", wasm_bindgen::JsValue::NULL),
+            "—"
+        );
+        assert_eq!(numeric.format("valueFormatter", f64::INFINITY.into()), "—");
+
+        let rate = TooltipRuntime::from(StudioTooltip::rate(TooltipRateUnit::BytesPerSecond));
+        assert_eq!(rate.format("valueFormatter", 1_048_576.0.into()), "1 MiB/s");
+        assert_eq!(
+            rate.format("valueFormatter", 1_073_741_824.0.into()),
+            "1 GiB/s"
+        );
+        let point = js_sys::JSON::parse(
+            r#"[{"value":[42,1048576],"seriesName":"Throughput","axisValue":"Step 42"}]"#,
+        )
+        .unwrap();
+        // The popup contains just the value, without series labels or HTML.
+        assert_eq!(rate.format("formatter", point), "1 MiB/s");
+    }
+
+    struct TooltipRuntime(wasm_bindgen::JsValue);
+
+    impl From<Tooltip> for TooltipRuntime {
+        fn from(tooltip: Tooltip) -> Self {
+            Self(serde_wasm_bindgen::to_value(&tooltip).unwrap())
+        }
+    }
+
+    impl TooltipRuntime {
+        fn format(&self, property: &str, value: wasm_bindgen::JsValue) -> String {
+            use wasm_bindgen::JsCast;
+            js_sys::Reflect::get(&self.0, &property.into())
+                .unwrap()
+                .dyn_into::<js_sys::Function>()
+                .expect("tooltip formatter must be a callable JavaScript function")
+                .call1(&wasm_bindgen::JsValue::UNDEFINED, &value)
+                .unwrap()
+                .as_string()
+                .unwrap()
+        }
     }
 }

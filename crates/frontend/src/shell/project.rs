@@ -161,7 +161,7 @@ mod tests {
         rsx! { div { "{draft}" } }
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn failed_status_read_preserves_drafts_and_restored_readiness_restarts_resources() {
         let harness = SessionHarness::default();
         let mut dom = VirtualDom::new_with_props(SessionHarness::render, harness.clone());
@@ -190,7 +190,7 @@ mod tests {
         assert_eq!(harness.0.borrow().mounts.len(), 1);
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn project_key_replaces_local_state_and_cancels_its_requests() {
         let harness = SessionHarness::default();
         let mut dom = VirtualDom::new_with_props(SessionHarness::render, harness.clone());
@@ -242,7 +242,7 @@ mod tests {
         assert_eq!(observed.mounts[1].client.session_id(), "second");
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn media_links_capture_the_mount_and_preserve_existing_query_parameters() {
         let harness = SessionHarness::default();
         let mut dom = VirtualDom::new_with_props(SessionHarness::render, harness.clone());

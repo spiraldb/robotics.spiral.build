@@ -80,7 +80,13 @@ mod tests {
     use std::{cell::RefCell, rc::Rc};
 
     #[derive(Clone, Default)]
-    struct HistoryHarness(Rc<RefCell<Option<(Signal<bool>, TrainingHistory)>>>);
+    struct HistoryHarness(Rc<RefCell<Option<HistoryObservation>>>);
+
+    #[derive(Clone, Copy)]
+    struct HistoryObservation {
+        complete: Signal<bool>,
+        history: TrainingHistory,
+    }
     impl HistoryHarness {
         fn render(self) -> Element {
             crate::shell::view_state::ProjectViewStates::use_provider();
@@ -98,18 +104,21 @@ mod tests {
                 }
             });
             let history = TrainingHistory::use_response(request);
-            *self.0.borrow_mut() = Some((complete, history));
+            *self.0.borrow_mut() = Some(HistoryObservation { complete, history });
             rsx! {}
         }
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn history_leaves_loading_when_its_first_request_completes() {
         let harness = HistoryHarness::default();
         let mut dom = VirtualDom::new_with_props(HistoryHarness::render, harness.clone());
         dom.rebuild_in_place();
         dom.render_immediate_to_vec();
-        let (mut complete, history) = harness.0.borrow().unwrap();
+        let HistoryObservation {
+            mut complete,
+            history,
+        } = harness.0.borrow().unwrap();
         dom.in_runtime(|| assert!(!history.loaded()));
         dom.in_runtime(|| complete.set(true));
         dom.render_immediate_to_vec();

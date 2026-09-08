@@ -60,7 +60,7 @@ impl RolloutDurationDraft for str {
 mod tests {
     use super::RolloutDurationDraft;
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn duration_draft_must_be_a_bounded_whole_number() {
         assert_eq!("30".bounded_duration(), Some(30));
         assert_eq!("".bounded_duration(), None);

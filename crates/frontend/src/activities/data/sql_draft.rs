@@ -20,7 +20,7 @@ impl GeneratedSqlDraft for String {
 mod tests {
     use super::*;
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn untouched_fallback_sql_tracks_the_loaded_dataset() {
         let mut current = "SELECT * FROM spiral_robotics.joint_samples".to_owned();
         assert!(current.rebase_generated(
@@ -30,7 +30,7 @@ mod tests {
         assert_eq!(current, "SELECT * FROM robotics.joint_samples");
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn operator_sql_is_never_rewritten() {
         let mut current = "SELECT state, action FROM experiments.samples".to_owned();
         assert!(!current.rebase_generated(

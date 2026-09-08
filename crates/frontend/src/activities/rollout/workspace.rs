@@ -669,7 +669,7 @@ mod tests {
         )
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn rollout_target_is_always_the_configured_follower() {
         let robots = [
             robot("leader", "so101_leader"),
@@ -681,7 +681,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn blocked_idle_rollout_never_claims_to_be_ready() {
         let rollout = RolloutSnapshot::default();
         assert_eq!(
@@ -691,7 +691,7 @@ mod tests {
         assert_eq!(rollout.runtime_title(None), "Ready");
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn an_active_clamp_warning_uses_the_caution_runtime_state() {
         let rollout = RolloutSnapshot::default()
             .with_lifecycle(RolloutPhase::Running, None)
@@ -703,7 +703,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn rollout_requires_every_assigned_camera() {
         let mut follower = robot("follower", "so101_follower");
         follower = follower.with_cameras(vec![
@@ -742,7 +742,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn rollout_camera_roles_follow_the_recorded_stream_contract() {
         assert_eq!(
             [
@@ -754,7 +754,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn rollout_lists_inference_ready_checkpoints_from_an_active_run() {
         let run = TrainingRun::starting("active-run", TrainingConfig::default())
             .with_source(TrainingSource::default())

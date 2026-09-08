@@ -623,7 +623,7 @@ impl JointCommander {
 mod tests {
     use super::PendingGoals;
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn pending_goals_keep_only_the_latest_value_per_joint() {
         let mut pending = PendingGoals::default();
         pending.replace("elbow".into(), -0.4);

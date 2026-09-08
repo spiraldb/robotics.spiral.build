@@ -112,7 +112,7 @@ fn DataPanels() -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn dataset_inspection_leads_and_sql_tools_remain_available() {
         let layout = DataLayout::initial();
         for id in ["dataset-inspector", "query", "query-result", "relations"] {

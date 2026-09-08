@@ -150,7 +150,7 @@ fn ProjectStudioShell(session: ProjectSessionInfo) -> Element {
 mod tests {
     use super::*;
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn every_primary_screen_has_a_stable_route() {
         assert_eq!(StudioRoute::Live {}.to_string(), "/live");
         assert_eq!(StudioRoute::Data {}.to_string(), "/data");

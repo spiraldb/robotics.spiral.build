@@ -306,14 +306,7 @@ impl StudioControllers {
 
 impl Studio {
     fn now_ms() -> f64 {
-        #[cfg(target_arch = "wasm32")]
-        {
-            js_sys::Date::now()
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            0.0
-        }
+        js_sys::Date::now()
     }
 
     pub(crate) fn snapshot(self) -> ReadSignal<StudioSnapshot> {
@@ -481,10 +474,9 @@ impl Studio {
             let result = catalog_request.read();
             if catalog_request.finished()
                 && let Some(value) = result.as_ref()
+                && relation_catalog.peek().as_ref() != Some(value)
             {
-                if relation_catalog.peek().as_ref() != Some(value) {
-                    relation_catalog.set(Some(value.clone()));
-                }
+                relation_catalog.set(Some(value.clone()));
             }
         });
     }
@@ -514,7 +506,7 @@ impl Studio {
     pub(crate) fn use_recording_polling(mut self) {
         let recording_present = use_memo(move || self.recording().is_some());
         let recording = QueryPolicy::new(QueryDomain::Recording, 200).use_when(
-            move || recording_present(),
+            move || *recording_present.read(),
             move || {
                 let cursor = self.workspace.data.recording_signals.peek().cursor();
                 RecordingClient::current().recording_window(cursor)
@@ -795,86 +787,6 @@ pub(crate) fn studio() -> Studio {
     use_context::<Studio>()
 }
 
-#[cfg(test)]
-mod tests {
-    use spiral_robotics_common::robots::{
-        ConnectionStatus, MotorSummary, RobotAvailability, RobotSummary,
-    };
-
-    use super::{RobotSelection, Selection};
-
-    fn robot(id: &str, motors: &[&str]) -> RobotSummary {
-        RobotSummary::new(
-            id,
-            None,
-            RobotAvailability::new(false, None, ConnectionStatus::default()),
-        )
-        .with_motors(
-            motors
-                .iter()
-                .enumerate()
-                .map(|(index, name)| MotorSummary::new(*name, index as u32 + 1))
-                .collect(),
-        )
-    }
-
-    #[test]
-    fn canonical_selection_keeps_robot_context() {
-        let joint = Selection::Joint {
-            robot: "arm-a".into(),
-            joint: "elbow".into(),
-        };
-        let camera = Selection::Camera {
-            robot: "arm-a".into(),
-            role: "wrist".into(),
-        };
-
-        assert_eq!(joint.robot_id(), "arm-a");
-        assert!(joint.matches_joint("arm-a", "elbow"));
-        assert_eq!(camera.robot_id(), "arm-a");
-        assert!(!camera.matches_robot("arm-b"));
-    }
-
-    #[test]
-    fn the_first_motor_is_the_default_object_on_the_focused_arm() {
-        let robots = [
-            robot("follower", &["shoulder_pan", "elbow_flex"]),
-            robot("leader", &["shoulder_lift"]),
-        ];
-
-        assert_eq!(
-            robots.default_joint_selection(None),
-            Some(Selection::Joint {
-                robot: "follower".into(),
-                joint: "shoulder_pan".into(),
-            })
-        );
-        assert_eq!(
-            robots.default_joint_selection(Some(&Selection::Robot("leader".into()))),
-            Some(Selection::Joint {
-                robot: "leader".into(),
-                joint: "shoulder_lift".into(),
-            })
-        );
-    }
-
-    #[test]
-    fn an_intentional_camera_or_valid_motor_selection_is_preserved() {
-        let robots = [robot("follower", &["shoulder_pan"])];
-        let camera = Selection::Camera {
-            robot: "follower".into(),
-            role: "top".into(),
-        };
-        let joint = Selection::Joint {
-            robot: "follower".into(),
-            joint: "shoulder_pan".into(),
-        };
-
-        assert_eq!(robots.default_joint_selection(Some(&camera)), None);
-        assert_eq!(robots.default_joint_selection(Some(&joint)), None);
-    }
-}
-
 impl StudioProjectState {
     pub(crate) fn use_provider() -> Self {
         let state = Self {
@@ -904,7 +816,6 @@ impl StudioProjectState {
                 self.backend.snapshot.set(value.clone());
             }
         });
-        #[cfg(target_arch = "wasm32")]
         use_future(move || async move {
             loop {
                 gloo_timers::future::TimeoutFuture::new(250).await;
@@ -928,5 +839,85 @@ impl StudioProjectState {
 
     pub(crate) fn close_notifications(mut self) {
         self.notifications.write().close();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use spiral_robotics_common::robots::{
+        ConnectionStatus, MotorSummary, RobotAvailability, RobotSummary,
+    };
+
+    use super::{RobotSelection, Selection};
+
+    fn robot(id: &str, motors: &[&str]) -> RobotSummary {
+        RobotSummary::new(
+            id,
+            None,
+            RobotAvailability::new(false, None, ConnectionStatus::default()),
+        )
+        .with_motors(
+            motors
+                .iter()
+                .enumerate()
+                .map(|(index, name)| MotorSummary::new(*name, index as u32 + 1))
+                .collect(),
+        )
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn canonical_selection_keeps_robot_context() {
+        let joint = Selection::Joint {
+            robot: "arm-a".into(),
+            joint: "elbow".into(),
+        };
+        let camera = Selection::Camera {
+            robot: "arm-a".into(),
+            role: "wrist".into(),
+        };
+
+        assert_eq!(joint.robot_id(), "arm-a");
+        assert!(joint.matches_joint("arm-a", "elbow"));
+        assert_eq!(camera.robot_id(), "arm-a");
+        assert!(!camera.matches_robot("arm-b"));
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn the_first_motor_is_the_default_object_on_the_focused_arm() {
+        let robots = [
+            robot("follower", &["shoulder_pan", "elbow_flex"]),
+            robot("leader", &["shoulder_lift"]),
+        ];
+
+        assert_eq!(
+            robots.default_joint_selection(None),
+            Some(Selection::Joint {
+                robot: "follower".into(),
+                joint: "shoulder_pan".into(),
+            })
+        );
+        assert_eq!(
+            robots.default_joint_selection(Some(&Selection::Robot("leader".into()))),
+            Some(Selection::Joint {
+                robot: "leader".into(),
+                joint: "shoulder_lift".into(),
+            })
+        );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn an_intentional_camera_or_valid_motor_selection_is_preserved() {
+        let robots = [robot("follower", &["shoulder_pan"])];
+        let camera = Selection::Camera {
+            robot: "follower".into(),
+            role: "top".into(),
+        };
+        let joint = Selection::Joint {
+            robot: "follower".into(),
+            joint: "shoulder_pan".into(),
+        };
+
+        assert_eq!(robots.default_joint_selection(Some(&camera)), None);
+        assert_eq!(robots.default_joint_selection(Some(&joint)), None);
     }
 }

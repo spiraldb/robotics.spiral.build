@@ -1,3 +1,5 @@
+#![cfg(not(target_arch = "wasm32"))]
+
 //! Keep product composition in activities and rendering contracts independent of navigation.
 
 use std::{fs, path::PathBuf};

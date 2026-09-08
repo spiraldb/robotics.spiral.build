@@ -252,7 +252,7 @@ impl NotificationCenterState {
 mod tests {
     use super::*;
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn messages_expire_from_the_status_bar_but_remain_in_history() {
         let mut center = NotificationCenterState::default();
         center.push(
@@ -270,7 +270,7 @@ mod tests {
         assert_eq!(center.messages().count(), 1);
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn opening_the_center_marks_every_visible_message_read() {
         let mut center = NotificationCenterState::default();
         center.push(
@@ -285,7 +285,7 @@ mod tests {
         assert_eq!(center.unread_count(), 0);
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn history_is_bounded() {
         let mut center = NotificationCenterState::default();
         for index in 0..MAX_MESSAGES + 5 {

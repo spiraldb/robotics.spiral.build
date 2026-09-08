@@ -41,7 +41,7 @@ fn TrainingPanels() -> Element {
     let studio = studio();
     let dataset_id = studio.selected_dataset().read().to_owned();
     let controller = super::state::TrainingController::use_controller(
-        &studio.configuration().dataset().to_owned(),
+        studio.configuration().dataset(),
         &dataset_id,
     );
     let controller = use_context_provider(|| controller);
@@ -1436,7 +1436,7 @@ mod tests {
 
     use super::*;
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn phase_timings_keep_submillisecond_detail_and_scan_long_uploads_as_seconds() {
         assert_eq!(Some(0.26).formatted_milliseconds(), "0.3 ms");
         assert_eq!(Some(149.4).formatted_milliseconds(), "149 ms");
@@ -1444,7 +1444,7 @@ mod tests {
         assert_eq!(None.formatted_milliseconds(), "—");
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn runtime_device_options_submit_identifiers_instead_of_hardware_labels() {
         assert_eq!(
             "CUDA:0 NVIDIA A100-SXM4-40GB".runtime_device_option(),
@@ -1459,7 +1459,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn default_query_selects_complete_kept_follower_samples() {
         let sql = spiral::ManagedTable::Datasets.training_sql_for_dataset("robotics", "pick-place");
         assert!(sql.contains(&format!(
@@ -1473,7 +1473,7 @@ mod tests {
         assert!(sql.contains("LIKE '%follower%'"));
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn unavailable_training_never_claims_to_be_ready() {
         let readiness =
             TrainingReadiness::new(false, true, "Policy compute runtime is unavailable.");
@@ -1489,7 +1489,7 @@ mod tests {
         assert_ne!(checking.guidance().1, "Training is ready.");
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn throughput_uses_the_optimizer_step_axis_and_slider_zoom() {
         let metrics = vec![TrainingMetricPoint::new(50, 0.0).with_throughput(0.0, 25.0)];
         let chart = ResourceSeries::Throughput.chart(&metrics, 100);
@@ -1503,7 +1503,7 @@ mod tests {
         assert_eq!(50_u64.percent_of(100), 50.0);
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn loss_chart_uses_a_linear_axis_and_slider_zoom_with_stable_series() {
         let run = TrainingRun::default().with_metrics(vec![
             TrainingMetricPoint::new(1, 0.25).with_validation_loss(Some(0.3)),

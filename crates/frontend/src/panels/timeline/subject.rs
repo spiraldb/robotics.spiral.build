@@ -123,7 +123,7 @@ mod tests {
     use super::*;
     use spiral_robotics_common::recording::{RecordingClock, RecordingIdentity, RecordingState};
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn capture_pause_and_resume_change_media_source_without_changing_transport_identity() {
         let recording = |paused| {
             TimelineSubject::Recording(RecordingProgress::new(
@@ -149,7 +149,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn an_empty_timeline_cannot_be_armed_or_replayed() {
         let subject = TimelineSubject::empty("Inspection", "Select a recording.");
         assert!(subject.target().is_none());

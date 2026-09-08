@@ -9,10 +9,12 @@ use std::{
     rc::Rc,
 };
 
+type ActivityStateValues = HashMap<(Activity, TypeId), Box<dyn Any>>;
+
 #[derive(Clone)]
 pub(crate) struct ProjectViewStates {
     owner: ScopeId,
-    values: Rc<RefCell<HashMap<(Activity, TypeId), Box<dyn Any>>>>,
+    values: Rc<RefCell<ActivityStateValues>>,
 }
 
 impl ProjectViewStates {
@@ -163,7 +165,7 @@ mod tests {
         rsx! { input { value: training.config().run_name() } }
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn real_routes_unmount_requests_reuse_state_and_reset_on_project_change() {
         let harness = Harness::default();
         let mut dom = VirtualDom::new_with_props(Harness::render, harness.clone());
