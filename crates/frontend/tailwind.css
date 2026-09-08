@@ -180,61 +180,6 @@
 }
 
 @layer components {
-  .live-save-confirmation {
-    @apply fixed left-16 top-[4.25rem] z-[60] flex items-center gap-1.5 rounded border border-line bg-surface px-2 py-1.5 text-ink;
-    box-shadow: 0 4px 16px rgb(0 0 0 / 0.14);
-    animation: live-save-confirmation 2.1s cubic-bezier(0.16, 1, 0.3, 1) both;
-  }
-
-  .live-save-confirmation svg {
-    @apply shrink-0;
-    width: 1rem;
-    height: 1rem;
-    color: var(--tone-accent-ink);
-  }
-
-  .live-save-confirmation circle {
-    fill: var(--tone-good);
-  }
-
-  .live-save-confirmation path {
-    fill: none;
-    stroke: currentColor;
-    stroke-width: 1.75;
-    stroke-linecap: round;
-    stroke-linejoin: round;
-    stroke-dasharray: 10;
-    animation: live-save-check 2.1s cubic-bezier(0.16, 1, 0.3, 1) both;
-  }
-
-  .live-save-confirmation > span {
-    @apply flex flex-col leading-tight;
-  }
-
-  .live-save-confirmation strong {
-    @apply text-[11px] font-medium;
-  }
-
-  .live-save-confirmation small {
-    @apply font-mono text-[10px] text-ink-faint;
-  }
-
-  @keyframes live-save-confirmation {
-    0% { opacity: 0; clip-path: inset(0 100% 0 0); transform: translateX(-8px); }
-    18%, 72% { opacity: 1; clip-path: inset(0 0 0 0); transform: translateX(0); }
-    100% { opacity: 0; clip-path: inset(0 0 0 0); transform: translateX(-2px); }
-  }
-
-  @keyframes live-save-check {
-    0%, 12% { stroke-dashoffset: 10; }
-    38%, 100% { stroke-dashoffset: 0; }
-  }
-
-  @keyframes live-save-confirmation-reduced {
-    0%, 88% { opacity: 1; }
-    100% { opacity: 0; }
-  }
-
   .activity-rail-settings {
     @apply mt-auto;
   }
@@ -608,13 +553,8 @@
     @apply block text-[10px] text-ink-faint;
   }
 
-  .notification-center-action,
-  .notification-primary-action {
+  .notification-center-action {
     @apply min-h-6 shrink-0 rounded px-1.5 text-[10px];
-  }
-
-  .notification-primary-action {
-    @apply font-medium;
   }
 
   .notification-list {
@@ -3774,14 +3714,6 @@ li:has(.data-episode-select[aria-pressed="true"]) .data-episode-row {
   @media (prefers-reduced-motion: reduce) {
     html {
       scroll-behavior: auto !important;
-    }
-
-    .live-save-confirmation {
-      animation: live-save-confirmation-reduced 2.1s linear both !important;
-    }
-
-    .live-save-confirmation path {
-      animation: none !important;
     }
 
     .training-field input,

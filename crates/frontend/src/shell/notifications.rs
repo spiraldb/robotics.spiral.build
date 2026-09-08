@@ -75,19 +75,6 @@ impl MessageSource {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum MessageAction {
-    OpenEpisode(String),
-}
-
-impl MessageAction {
-    pub(crate) const fn label(&self) -> &'static str {
-        match self {
-            Self::OpenEpisode(_) => "View episode",
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct StudioMessage {
     id: u64,
@@ -96,7 +83,6 @@ pub(crate) struct StudioMessage {
     source: MessageSource,
     timing: MessageTiming,
     read: bool,
-    action: Option<MessageAction>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -134,21 +120,12 @@ impl StudioMessage {
             format!("{}h", (seconds / 3_600.0).floor() as u64)
         }
     }
-
-    pub(crate) const fn is_read(&self) -> bool {
-        self.read
-    }
-
-    pub(crate) const fn action(&self) -> Option<&MessageAction> {
-        self.action.as_ref()
-    }
 }
 
 pub(crate) struct MessageNotice {
     text: String,
     severity: MessageSeverity,
     source: MessageSource,
-    action: Option<MessageAction>,
 }
 
 impl MessageNotice {
@@ -161,13 +138,7 @@ impl MessageNotice {
             text: text.into(),
             severity,
             source,
-            action: None,
         }
-    }
-
-    pub(crate) fn with_action(mut self, action: MessageAction) -> Self {
-        self.action = Some(action);
-        self
     }
 }
 
@@ -184,7 +155,6 @@ impl NotificationCenterState {
             text,
             severity,
             source,
-            action,
         } = notice;
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
@@ -199,7 +169,6 @@ impl NotificationCenterState {
                 prominent_until_ms,
             },
             read: self.open,
-            action,
         });
         while self.messages.len() > MAX_MESSAGES {
             self.messages.pop_front();

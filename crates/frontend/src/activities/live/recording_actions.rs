@@ -11,9 +11,8 @@ use spiral_robotics_common::recording::EpisodeInfo;
 use spiral_robotics_common::robots::ModeSelection;
 
 use crate::activities::data::state::DataController;
-use crate::activities::data::workbench::EpisodeIdPresentation;
 
-use crate::format::ClockPresentation;
+use crate::shell::notifications::MessageSource;
 use crate::shell::state::Studio;
 
 impl Studio {
@@ -90,31 +89,21 @@ impl Studio {
             studio.report("The recording changed before the Timeline action was applied.");
             return;
         }
-        // "Episode saved." named nothing, so the one moment the operator has
-        // earned something was also the moment the interface forgot what it was.
-        // The real facts only exist once the server answers, so the safety message
-        // covers the mode change and the summary replaces it with the take.
-        let message = if completion.keep {
-            "Saving the episode. Teleoperation stopped."
-        } else {
-            "Recording discarded. Teleoperation stopped."
-        };
-        studio.run_safety(message, async move {
+        studio.run_safety("", async move {
             let summary = RecordingClient::current()
                 .stop_recording(completion.keep)
                 .await
                 .map_err(|error| error.to_string())?;
             completion.data.invalidate_episode_catalog();
             if completion.keep {
-                studio.report_episode_success(
-                    format!(
-                        "Episode {} saved to Data · {} — {}, {} frames.",
-                        summary.id().short_episode_id(),
-                        summary.dataset_id(),
-                        summary.duration_seconds().clock_label(),
-                        summary.frames()
-                    ),
-                    summary.id().to_owned(),
+                studio.report_info_from(
+                    MessageSource::Live,
+                    format!("Saving episode to dataset ‘{}’.", summary.dataset_id()),
+                );
+            } else {
+                studio.report_success_from(
+                    MessageSource::Live,
+                    "Recording discarded. Teleoperation stopped.",
                 );
             }
             (completion.on_completed)(summary);

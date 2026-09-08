@@ -5,14 +5,12 @@ use dioxus::prelude::*;
 use spiral_robotics_common::status::BackendReadinessState;
 use spiral_robotics_common::workflow::{WorkflowRunPhase, WorkflowSnapshot};
 
-use crate::activities::data::workbench::EpisodeIdPresentation;
 use crate::components::icons::{
     DataIcon, NotificationIcon, RobotPanelIcon, RolloutIcon, SettingsIcon, TrainingIcon,
     WorkflowIcon,
 };
 use crate::format::ClockPresentation;
 use crate::shell::activity::Activity;
-use crate::shell::notifications::MessageAction;
 
 #[component]
 pub(crate) fn ActivityRail(activity: Activity, on_activity: EventHandler<Activity>) -> Element {
@@ -83,25 +81,15 @@ pub(crate) fn ActivityRail(activity: Activity, on_activity: EventHandler<Activit
 /// unmount on navigation; retained feature values live in ProjectViewStates.
 #[component]
 pub(crate) fn WorkspaceFrame(children: Element) -> Element {
-    let project = consume_context::<crate::shell::state::StudioProjectState>();
-    let navigator = use_navigator();
     let route = use_route::<crate::shell::routes::StudioRoute>();
     rsx! {
         div { class: "studio-route-content", {children} }
-        StatusBar { route,
-            on_open_episode: move |episode| {
-                project.open_episode(episode);
-                navigator.push(crate::shell::routes::StudioRoute::Data {});
-            },
-        }
+        StatusBar { route }
     }
 }
 
 #[component]
-pub(crate) fn StatusBar(
-    route: crate::shell::routes::StudioRoute,
-    on_open_episode: EventHandler<String>,
-) -> Element {
+fn StatusBar(route: crate::shell::routes::StudioRoute) -> Element {
     let mode = route.activity();
     let studio = crate::shell::state::studio();
     let snapshot = studio.snapshot().read().to_owned();
@@ -190,14 +178,6 @@ pub(crate) fn StatusBar(
     let latest = center.latest_prominent(now).cloned();
     let message_count = center.messages().count();
     let center_open = center.open();
-    let saved_to_data = center.messages().rev().find_map(|message| {
-        if message.is_read() {
-            return None;
-        }
-        message
-            .action()
-            .map(|MessageAction::OpenEpisode(episode)| (message.id(), episode.clone()))
-    });
     let mut center_was_open = use_signal(|| false);
     use_effect(use_reactive((&center_open,), move |(center_open,)| {
         let was_open = center_was_open();
@@ -212,12 +192,6 @@ pub(crate) fn StatusBar(
     }));
 
     rsx! {
-        if let Some((message_id, episode)) = saved_to_data {
-            SavedToDataCue {
-                key: "saved-{message_id}",
-                episode,
-            }
-        }
         if center_open {
             aside {
                 id: "notification-center",
@@ -272,24 +246,6 @@ pub(crate) fn StatusBar(
                                 }
                                 p { "{message.text()}" }
                                 div { class: "notification-item-actions",
-                                    if let Some(action) = message.action().cloned() {
-                                        {
-                                            let action_label = action.label();
-                                            let action_for_click = action.clone();
-                                            rsx! { Action {
-                                                purpose: ActionPurpose::Navigate,
-                                                variant: ActionVariant::Solid,
-                                                class: "notification-primary-action",
-                                                onclick: move |_| {
-                                                    match &action_for_click {
-                                                        MessageAction::OpenEpisode(episode) => on_open_episode.call(episode.clone()),
-                                                    }
-                                                    studio.notifications().write().close();
-                                                },
-                                                "{action_label}"
-                                            } }
-                                        }
-                                    }
                                     Action {
                                         purpose: ActionPurpose::Remove,
                                         variant: ActionVariant::Link,
@@ -391,27 +347,6 @@ pub(crate) fn StatusBar(
                     }
                     NotificationTrigger { unread, open: center_open }
                 }
-            }
-        }
-    }
-}
-
-#[component]
-fn SavedToDataCue(episode: String) -> Element {
-    rsx! {
-        div {
-            class: "live-save-confirmation",
-            role: "status",
-            "aria-live": "polite",
-            svg {
-                view_box: "0 0 16 16",
-                "aria-hidden": "true",
-                circle { cx: "8", cy: "8", r: "7" }
-                path { d: "m4.5 8 2.2 2.2 4.8-5" }
-            }
-            span {
-                strong { "Saved to Data" }
-                small { "Episode {episode.short_episode_id()}" }
             }
         }
     }

@@ -6,11 +6,7 @@ use super::native_datasets::{
 use super::query_result::QueryResultView;
 use super::relations::RelationsPanel;
 use super::workbench::QueryPanel;
-use crate::shell::{
-    activity::Activity,
-    frame::WorkspaceFrame,
-    state::{Studio, StudioProjectState},
-};
+use crate::shell::{activity::Activity, frame::WorkspaceFrame, state::Studio};
 use dioxus::prelude::*;
 use dioxus_workbench::{LayoutNode, Panel, PanelId, PanelLayout, PanelWorkspace, SplitAxis};
 
@@ -39,12 +35,6 @@ impl DataLayout {
 pub(crate) fn DataWorkspace() -> Element {
     let studio = Studio::use_studio(Activity::Data);
     studio.use_relation_catalog();
-    let project = consume_context::<StudioProjectState>();
-    use_effect(move || {
-        if let Some(episode) = project.take_requested_episode() {
-            studio.data_controller().set_selected_episode(Some(episode));
-        }
-    });
     rsx! { WorkspaceFrame { DataPanels {} } }
 }
 

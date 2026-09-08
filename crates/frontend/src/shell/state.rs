@@ -28,7 +28,7 @@ use crate::panels::timeline::signals::SignalStore;
 use crate::panels::timeline::state::TimelineController;
 use crate::shell::activity::Activity;
 use crate::shell::notifications::{
-    MessageAction, MessageNotice, MessageSeverity, MessageSource, NotificationCenterState,
+    MessageNotice, MessageSeverity, MessageSource, NotificationCenterState,
 };
 use crate::shell::project::ProjectSessionSignals;
 use crate::shell::view_state::ViewState;
@@ -107,7 +107,6 @@ pub(crate) struct StudioProjectState {
     backend: ProjectBackendSignals,
     resources: StudioProjectResources,
     notifications: Signal<NotificationCenterState>,
-    requested_episode: Signal<Option<String>>,
 }
 
 /// A view's facade over shared project state and its own retained state.
@@ -765,17 +764,6 @@ impl Studio {
         ));
     }
 
-    pub(crate) fn report_episode_success(
-        &self,
-        message: impl Into<String>,
-        episode: impl Into<String>,
-    ) {
-        self.notify(
-            MessageNotice::new(message, MessageSeverity::Success, MessageSource::Live)
-                .with_action(MessageAction::OpenEpisode(episode.into())),
-        );
-    }
-
     fn notify(&self, notice: MessageNotice) {
         let mut notifications = self.project.notifications;
         notifications.write().push(notice, Self::now_ms());
@@ -797,7 +785,6 @@ impl StudioProjectState {
             },
             resources: StudioProjectResources::use_resources(),
             notifications: use_signal(NotificationCenterState::default),
-            requested_episode: use_signal(|| None),
         };
         use_context_provider(|| state)
     }
@@ -826,15 +813,6 @@ impl StudioProjectState {
 
     pub(crate) fn loaded_settings(self) -> Option<DataSettings> {
         self.resources.loaded_settings.read().clone()
-    }
-
-    pub(crate) fn open_episode(mut self, episode: String) {
-        self.requested_episode.set(Some(episode));
-    }
-
-    pub(crate) fn take_requested_episode(mut self) -> Option<String> {
-        let requested = self.requested_episode.read().is_some();
-        requested.then(|| self.requested_episode.take()).flatten()
     }
 
     pub(crate) fn close_notifications(mut self) {
