@@ -63,6 +63,11 @@ debugging, set `NO_HEADLESS=1` and open the URL printed by the runner in Firefox
 Filesystem-based source checks remain native:
 `cargo test -p spiral-robotics-frontend --tests --locked`.
 
+The frontend also supports native type-checking so rust-analyzer can analyze it
+alongside the backend without changing the workspace target. It uses the same
+browser implementation; only WASM registers its unit tests, and the native
+Studio server does not depend on the frontend.
+
 For a developer-local Workflow Assistant, put the backend-only credential in
 the repository root's ignored `.env.local` file. Studio reads this file
 automatically when a corresponding process value is absent, so it works

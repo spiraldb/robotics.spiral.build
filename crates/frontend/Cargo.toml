@@ -8,7 +8,7 @@ publish = false
 [lints]
 workspace = true
 
-[target.'cfg(target_arch = "wasm32")'.dependencies]
+[dependencies]
 charming = { version = "0.6.0", default-features = false, features = ["wasm"] }
 spiral-robotics-common.workspace = true
 spiral-robotics-viewport.workspace = true
@@ -51,7 +51,7 @@ web-sys = { version = "0.3", features = [
     "Window",
 ] }
 
-[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+[dev-dependencies]
 wasm-bindgen-test = "=0.3.76"
 spiral-robotics-common = { workspace = true, features = ["test-support"] }
 spiral-robotics-viewport = { workspace = true, features = ["test-support"] }
