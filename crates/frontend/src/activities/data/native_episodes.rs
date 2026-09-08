@@ -71,10 +71,6 @@ impl EpisodeNavigation {
             selected: Signal::new(None),
         }
     }
-    pub(super) fn reset(mut self) {
-        self.offset.set(0);
-        self.selected.set(None);
-    }
 }
 
 #[component]

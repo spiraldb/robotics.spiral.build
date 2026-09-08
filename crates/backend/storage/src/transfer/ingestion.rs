@@ -1,14 +1,12 @@
 //! Hugging Face discovery and Spiral-native dataset materialization.
 //!
 //! Studio owns only repository inspection and catalog admission. Remote byte
-//! reads, Parquet decoding, MP4 indexing, and MCAP parsing remain inside
+//! reads and MCAP parsing remain inside
 //! Spiral so imported data has the same durable relation semantics as every
 //! other Data/Workflow input.
 
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::db::Table;
 use arrow_array::{
     ArrayRef, BinaryViewArray, RecordBatch, StringArray, StringViewArray, StructArray, UInt64Array,
 };
@@ -17,36 +15,21 @@ use arrow_schema::{DataType, Field, Fields, Schema};
 use reqwest::StatusCode;
 use reqwest::header::LINK;
 use serde::Deserialize;
-use sha2::{Digest as _, Sha256};
 use spiral_robotics_common::datasets::{
-    HuggingFaceDatasetFile, HuggingFaceDatasetFormat, HuggingFaceDatasetImportSummary,
-    HuggingFaceDatasetInspection, HuggingFaceDatasetSource, HuggingFaceImportOutcome,
-    HuggingFaceInspectionContents, HuggingFaceInspectionSource, HuggingFaceResolvedSource,
+    HuggingFaceDatasetFile, HuggingFaceDatasetImportSummary, HuggingFaceDatasetInspection,
+    HuggingFaceDatasetSource, HuggingFaceImportOutcome, HuggingFaceInspectionContents,
+    HuggingFaceInspectionSource, HuggingFaceResolvedSource,
 };
 use url::Url;
 
 use crate::db::ProjectConnection;
 use crate::db::SpiralSql;
-use crate::episodes::EpisodeRelations;
 use crate::manager::StorageManager;
 
 const HUGGING_FACE_ORIGIN: &str = "https://huggingface.co";
 const MAX_TREE_PAGES: usize = 100;
 const MAX_REPOSITORY_FILES: usize = 50_000;
 const BLOB_EXTENSION_NAME: &str = "spql.io.Blob";
-const MCAP_OUTPUTS: [&str; 10] = [
-    "files",
-    "topics",
-    "schemas",
-    "channels",
-    "chunks",
-    "messages",
-    "attachments",
-    "metadata",
-    "indexes",
-    "quarantine",
-];
-
 #[derive(Debug, Deserialize)]
 struct RepositoryInfo {
     sha: String,
@@ -254,136 +237,34 @@ impl HuggingFaceResponse for reqwest::Response {
     }
 }
 
+/// One native dataset and the durable source relation it reads.
 #[derive(Clone, Debug)]
 struct ImportRelations {
-    base: String,
-    source: Option<String>,
-    primary: String,
-    episodes: Option<String>,
-    tasks: Option<String>,
-    video_source: Option<String>,
-    video_dataset: Option<String>,
+    dataset: String,
+    source: String,
 }
-
-#[derive(Clone, Copy)]
-struct ImportTarget<'a> {
-    namespace: &'a str,
-    dataset_id: &'a str,
-}
-
-impl ImportTarget<'_> {
-    fn relations(
-        self,
-        format: HuggingFaceDatasetFormat,
-        files: &[HuggingFaceDatasetFile],
-    ) -> ImportRelations {
-        let namespace = self.namespace;
-        let dataset_id = self.dataset_id;
-        let slug = dataset_id
-            .chars()
-            .map(|character| {
-                if character.is_ascii_alphanumeric() {
-                    character.to_ascii_lowercase()
-                } else {
-                    '_'
-                }
-            })
-            .take(32)
-            .collect::<String>();
-        let digest = Sha256::digest(dataset_id.as_bytes());
-        let hash = digest[..4]
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-        let base = format!("{namespace}.hf_{slug}_{hash}");
-        match format {
-            HuggingFaceDatasetFormat::LeRobot => {
-                let has_episodes = files
-                    .iter()
-                    .any(|file| LeRobotFile::is_episode_metadata(file.path()));
-                let has_tasks = files.iter().any(|file| file.path() == "meta/tasks.parquet");
-                let has_video = files.iter().any(|file| LeRobotFile::is_video(file.path()));
-                ImportRelations {
-                    primary: format!("{base}_frames"),
-                    episodes: has_episodes.then(|| format!("{base}_episodes")),
-                    tasks: has_tasks.then(|| format!("{base}_tasks")),
-                    video_source: has_video.then(|| format!("{base}_video_sources")),
-                    video_dataset: has_video.then(|| format!("{base}_video")),
-                    base,
-                    source: None,
-                }
-            }
-            HuggingFaceDatasetFormat::Mcap => ImportRelations {
-                source: Some(format!("{base}_sources")),
-                primary: base.clone(),
-                episodes: None,
-                tasks: None,
-                video_source: None,
-                video_dataset: None,
-                base,
-            },
-        }
-    }
-}
-
-struct ImportCollision<'a> {
-    namespace: &'a str,
-    dataset_id: &'a str,
-    relations: &'a ImportRelations,
-}
-
-impl ImportCollision<'_> {
-    async fn refuse(self, connection: &mut ProjectConnection) -> Result<(), String> {
-        let datasets = Table::Datasets.qualified_name(self.namespace);
-        if !connection
-            .query_rows(&SpiralSql::dataset_exists(&datasets, self.dataset_id), 1)
-            .await?
-            .rows()
-            .is_empty()
-        {
-            return Err(format!(
-                "dataset {:?} already exists; choose another dataset ID",
-                self.dataset_id
-            ));
-        }
-        if let Some(existing) = connection
-            .list_catalog_relations()
-            .await?
-            .into_iter()
-            .map(|relation| relation.into_name())
-            .find(|name| name.starts_with(&self.relations.base))
-        {
-            return Err(format!(
-                "Spiral relation {existing} already occupies this import target; choose another dataset ID"
-            ));
-        }
-        Ok(())
-    }
-}
-
 impl ImportRelations {
-    fn planned(&self, format: HuggingFaceDatasetFormat) -> Vec<String> {
-        match format {
-            HuggingFaceDatasetFormat::LeRobot => {
-                let mut relations = vec![self.primary.clone()];
-                relations.extend(self.episodes.iter().cloned());
-                relations.extend(self.tasks.iter().cloned());
-                relations.extend(self.video_source.iter().cloned());
-                if let Some(dataset) = &self.video_dataset {
-                    relations.push(format!("{dataset}.assets"));
-                }
-                relations
-            }
-            HuggingFaceDatasetFormat::Mcap => {
-                let mut relations = self.source.iter().cloned().collect::<Vec<_>>();
-                relations.extend(
-                    MCAP_OUTPUTS
-                        .iter()
-                        .map(|output| format!("{}.{output}", self.primary)),
-                );
-                relations
-            }
+    fn new(namespace: &str, dataset_id: &str) -> Self {
+        Self {
+            dataset: format!("{namespace}.{dataset_id}"),
+            source: format!("{namespace}.{dataset_id}_sources"),
         }
+    }
+    fn quoted(name: &str) -> String {
+        name.split('.')
+            .map(|part| format!("\"{}\"", part.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(".")
+    }
+    fn planned(&self) -> Vec<String> {
+        vec![self.dataset.clone(), self.source.clone()]
+    }
+    fn create_sql(&self) -> String {
+        format!(
+            "CREATE DATASET {} USING spql.mcap.dataset FROM {} WITH (key = 'recording', blob = 'source', on_error = 'fail')",
+            Self::quoted(&self.dataset),
+            Self::quoted(&self.source)
+        )
     }
 }
 
@@ -399,7 +280,6 @@ impl HuggingFaceDatasetDiscovery for HuggingFaceDatasetInspection {
         request.validate_for_discovery()?;
         let dataset_id = request.dataset_id().to_owned();
         let requested_revision = request.revision().to_owned();
-        let format = request.format();
         let repository = HuggingFaceRepository::try_from(request.repository())?;
         let client = reqwest::Client::builder()
             .user_agent(concat!(
@@ -431,17 +311,13 @@ impl HuggingFaceDatasetDiscovery for HuggingFaceDatasetInspection {
         }
 
         let entries = repository.tree(&client, &info.sha).await?;
-        let selected = HuggingFaceFileSelection::select(format, entries)?;
+        let selected = HuggingFaceFileSelection::select(entries)?;
         let total_bytes = selected.iter().try_fold(0_u64, |total, file| {
             total
                 .checked_add(file.bytes())
                 .ok_or_else(|| "Hugging Face file sizes overflow u64".to_owned())
         })?;
-        let relations = ImportTarget {
-            namespace,
-            dataset_id: &dataset_id,
-        }
-        .relations(format, &selected);
+        let relations = ImportRelations::new(namespace, &dataset_id);
         let mut warnings = Vec::new();
         if selected.iter().any(|file| file.bytes() == 0) {
             warnings.push(
@@ -449,35 +325,10 @@ impl HuggingFaceDatasetDiscovery for HuggingFaceDatasetInspection {
                 .to_owned(),
         );
         }
-        match format {
-        HuggingFaceDatasetFormat::LeRobot => {
-            let has_episode_metadata = selected
-                .iter()
-                .any(|file| LeRobotFile::is_episode_metadata(file.path()));
-            let has_video = selected.iter().any(|file| LeRobotFile::is_video(file.path()));
-            if !has_episode_metadata {
-                warnings.push(
-                    "No meta/episodes Parquet files were found; this looks like a LeRobot 2.x snapshot, so Studio will materialize frame data without a separate episode-metadata relation."
-                        .to_owned(),
-                );
-            }
-            if has_video {
-                warnings.push(
-                    "Video files will be indexed by Spiral as native MP4 media; frame data and video assets remain separate queryable relations."
-                        .to_owned(),
-                );
-            }
-        }
-        HuggingFaceDatasetFormat::Mcap => warnings.push(
-            "Spiral will quarantine an unreadable MCAP file and continue importing the remaining recordings. Topic-specific output relations are discovered while Spiral parses the files."
-                .to_owned(),
-        ),
-    }
-
-        let source = HuggingFaceInspectionSource::new(dataset_id, repository.0, format)
+        let source = HuggingFaceInspectionSource::new(dataset_id, repository.0)
             .with_revisions(requested_revision, info.sha);
         let contents =
-            HuggingFaceInspectionContents::new(selected, total_bytes, relations.planned(format));
+            HuggingFaceInspectionContents::new(selected, total_bytes, relations.planned());
         Ok(Self::new(source, contents).with_warnings(warnings))
     }
 }
@@ -490,13 +341,16 @@ impl StorageManager {
         inspection: HuggingFaceDatasetInspection,
     ) -> Result<HuggingFaceDatasetImportSummary, String> {
         let namespace = self.project_store().namespace().to_owned();
-        let relations = ImportTarget {
-            namespace: &namespace,
-            dataset_id: inspection.dataset_id(),
+        let relations = ImportRelations::new(&namespace, inspection.dataset_id());
+        let resources = self.project_resources().await?;
+        if resources
+            .iter()
+            .any(|resource| relations.planned().contains(&resource.selection().label()))
+        {
+            return Err(
+                "The dataset or its source already exists; choose another dataset name".to_owned(),
+            );
         }
-        .relations(inspection.format(), inspection.files());
-        let expected_prefix = relations.base.clone();
-        let dataset_id = inspection.dataset_id().to_owned();
         let mut warnings = inspection.warnings().to_vec();
         let mut connection = self.project_store().connect_exclusive().await?;
         if let Err(error) = connection.begin_transaction().await {
@@ -505,24 +359,8 @@ impl StorageManager {
                 "starting Hugging Face import transaction failed and its connection was discarded: {error}"
             ));
         }
-        let mutation = async {
-            ImportCollision {
-                namespace: &namespace,
-                dataset_id: &dataset_id,
-                relations: &relations,
-            }
-            .refuse(&mut connection)
-            .await?;
-            inspection.materialize(&mut connection, &relations).await?;
-            connection
-                .ingest_batch(
-                    &Table::Datasets.qualified_name(&namespace),
-                    inspection.catalog_batch()?,
-                )
-                .await
-        }
-        .await;
-        let connection_reopened = match mutation {
+        let mutation = inspection.materialize(&mut connection, &relations).await;
+        match mutation {
             Ok(()) => {
                 if let Err(error) = connection.commit().await {
                     connection.discard();
@@ -531,13 +369,12 @@ impl StorageManager {
                     ));
                 }
                 match connection.reconnect().await {
-                    Ok(()) => true,
+                    Ok(()) => {}
                     Err(error) => {
                         connection.discard();
                         warnings.push(format!(
                             "Hugging Face rows committed, but the post-commit Spiral connection could not open; relation names are reported from the import plan: {error}"
                         ));
-                        false
                     }
                 }
             }
@@ -555,41 +392,14 @@ impl StorageManager {
             }
         };
 
-        let mut created = if connection_reopened {
-            match connection.list_catalog_relations().await {
-                Ok(relations) => relations
-                    .into_iter()
-                    .map(|relation| relation.into_name())
-                    .filter(|name| name.starts_with(&expected_prefix))
-                    .collect::<Vec<_>>(),
-                Err(error) => {
-                    warnings.push(format!(
-                        "Hugging Face rows committed, but the imported relation catalog could not be inspected; relation names are reported from the import plan: {error}"
-                    ));
-                    relations.planned(inspection.format())
-                }
-            }
-        } else {
-            relations.planned(inspection.format())
-        };
-        created.sort();
-        created.dedup();
-        let suggested_sql = match inspection.format() {
-            HuggingFaceDatasetFormat::LeRobot => format!(
-                "SELECT * FROM {} ORDER BY episode_index, frame_index LIMIT 100",
-                relations.primary
-            ),
-            HuggingFaceDatasetFormat::Mcap => format!(
-                "SELECT * FROM {}.topics ORDER BY recording, topic LIMIT 100",
-                relations.primary
-            ),
-        };
-        let source = HuggingFaceResolvedSource::new(
-            inspection.dataset_id(),
-            inspection.repository(),
-            inspection.format(),
-        )
-        .with_resolved_revision(inspection.resolved_revision());
+        let created = relations.planned();
+        let suggested_sql = format!(
+            "SELECT * FROM spql.mcap.episodes({}) LIMIT 100",
+            SpiralSql::string_literal(&relations.dataset)
+        );
+        let source =
+            HuggingFaceResolvedSource::new(inspection.dataset_id(), inspection.repository())
+                .with_resolved_revision(inspection.resolved_revision());
         let outcome = HuggingFaceImportOutcome::new(
             inspection.files().len() as u64,
             inspection.total_bytes(),
@@ -606,10 +416,10 @@ trait HuggingFaceDatasetSourceValidation {
 
 impl HuggingFaceDatasetSourceValidation for HuggingFaceDatasetSource {
     fn validate_for_discovery(&self) -> Result<(), String> {
-        if !crate::db::StorageSchema::is_dataset_id(self.dataset_id()) {
-            return Err(
-                "dataset ID must contain 1–96 letters, numbers, '.', '_' or '-'".to_owned(),
-            );
+        if !crate::db::StorageSchema::is_dataset_id(self.dataset_id())
+            || self.dataset_id().contains('.')
+        {
+            return Err("dataset name must contain 1–96 letters, numbers, '_' or '-'".to_owned());
         }
         let revision = self.revision().trim();
         if revision.is_empty()
@@ -634,211 +444,74 @@ impl HuggingFaceDatasetSourceValidation for HuggingFaceDatasetSource {
 struct HuggingFaceFileSelection;
 
 impl HuggingFaceFileSelection {
-    fn select(
-        format: HuggingFaceDatasetFormat,
-        entries: Vec<TreeEntry>,
-    ) -> Result<Vec<HuggingFaceDatasetFile>, String> {
+    fn select(entries: Vec<TreeEntry>) -> Result<Vec<HuggingFaceDatasetFile>, String> {
         let mut selected = entries
             .into_iter()
-            .filter(|entry| entry.kind == "file")
-            .filter(|entry| match format {
-                HuggingFaceDatasetFormat::LeRobot => {
-                    LeRobotFile::is_data(&entry.path)
-                        || LeRobotFile::is_episode_metadata(&entry.path)
-                        || entry.path == "meta/tasks.parquet"
-                        || LeRobotFile::is_video(&entry.path)
-                }
-                HuggingFaceDatasetFormat::Mcap => {
-                    entry.path.to_ascii_lowercase().ends_with(".mcap")
-                }
+            .filter(|entry| {
+                entry.kind == "file" && entry.path.to_ascii_lowercase().ends_with(".mcap")
             })
             .map(|entry| HuggingFaceDatasetFile::new(entry.path, entry.size))
             .collect::<Vec<_>>();
         selected.sort_by(|left, right| left.path().cmp(right.path()));
         selected.dedup_by(|left, right| left.path() == right.path());
-        let valid = match format {
-            HuggingFaceDatasetFormat::LeRobot => selected
-                .iter()
-                .any(|file| LeRobotFile::is_data(file.path())),
-            HuggingFaceDatasetFormat::Mcap => !selected.is_empty(),
-        };
-        if !valid {
-            return Err(match format {
-                HuggingFaceDatasetFormat::LeRobot => {
-                    "no LeRobot data/**/*.parquet files were found at that revision".to_owned()
-                }
-                HuggingFaceDatasetFormat::Mcap => {
-                    "no .mcap files were found at that revision".to_owned()
-                }
-            });
+        if selected.is_empty() {
+            return Err("No .mcap files were found at that revision. Dataset imports require MCAP recordings.".to_owned());
         }
         Ok(selected)
     }
 }
 
-struct LeRobotFile;
-
-impl LeRobotFile {
-    fn is_data(path: &str) -> bool {
-        path.starts_with("data/") && path.to_ascii_lowercase().ends_with(".parquet")
-    }
-
-    fn is_episode_metadata(path: &str) -> bool {
-        path.starts_with("meta/episodes/") && path.to_ascii_lowercase().ends_with(".parquet")
-    }
-
-    fn is_video(path: &str) -> bool {
-        path.starts_with("videos/") && path.to_ascii_lowercase().ends_with(".mp4")
-    }
-}
-
-#[allow(async_fn_in_trait)]
 trait HuggingFaceInspectionStorage {
     async fn materialize(
         &self,
         connection: &mut ProjectConnection,
         relations: &ImportRelations,
     ) -> Result<(), String>;
-    fn catalog_batch(&self) -> Result<RecordBatch, String>;
-    async fn materialize_lerobot(
-        &self,
-        connection: &mut ProjectConnection,
-        relations: &ImportRelations,
-    ) -> Result<(), String>;
-    async fn materialize_mcap(
-        &self,
-        connection: &mut ProjectConnection,
-        relations: &ImportRelations,
-    ) -> Result<(), String>;
 }
-
 impl HuggingFaceInspectionStorage for HuggingFaceDatasetInspection {
     async fn materialize(
         &self,
         connection: &mut ProjectConnection,
         relations: &ImportRelations,
     ) -> Result<(), String> {
-        match self.format() {
-            HuggingFaceDatasetFormat::LeRobot => {
-                self.materialize_lerobot(connection, relations).await
-            }
-            HuggingFaceDatasetFormat::Mcap => self.materialize_mcap(connection, relations).await,
-        }
-    }
-
-    fn catalog_batch(&self) -> Result<RecordBatch, String> {
-        let description = format!(
-            "Hugging Face {} · {}@{}",
-            self.format().label(),
-            self.repository(),
-            self.resolved_revision()
-        );
-        RecordBatch::try_new(
-            EpisodeRelations::dataset_schema(),
-            vec![
-                Arc::new(StringArray::from(vec![self.dataset_id()])) as ArrayRef,
-                Arc::new(StringArray::from(vec![self.dataset_id()])) as ArrayRef,
-                Arc::new(arrow_array::Int64Array::from(vec![
-                    IngestionClock::unix_millis(),
-                ])) as ArrayRef,
-                Arc::new(StringArray::from(vec![Some(description.as_str())])) as ArrayRef,
-            ],
-        )
-        .map_err(|error| format!("building imported dataset catalog row: {error}"))
-    }
-    async fn materialize_lerobot(
-        &self,
-        connection: &mut ProjectConnection,
-        relations: &ImportRelations,
-    ) -> Result<(), String> {
-        let base_uri = format!(
-            "hf://datasets/{}@{}",
-            self.repository(),
-            self.resolved_revision()
-        );
-        connection
-            .materialize_parquet_relation(
-                &relations.primary,
-                &format!("{base_uri}/data/**/*.parquet"),
-            )
-            .await?;
-        if let Some(relation) = &relations.episodes {
-            connection
-                .materialize_parquet_relation(
-                    relation,
-                    &format!("{base_uri}/meta/episodes/**/*.parquet"),
-                )
-                .await?;
-        }
-        if let Some(relation) = &relations.tasks {
-            connection
-                .materialize_parquet_relation(relation, &format!("{base_uri}/meta/tasks.parquet"))
-                .await?;
-        }
-        if let (Some(source), Some(dataset)) = (&relations.video_source, &relations.video_dataset) {
-            let videos = self
-                .files()
-                .iter()
-                .filter(|file| LeRobotFile::is_video(file.path()))
-                .collect::<Vec<_>>();
-            connection
-                .ingest_batch(
-                    source,
-                    HuggingFaceSourceBatch::build(
-                        self.repository(),
-                        self.resolved_revision(),
-                        &videos,
-                    )?,
-                )
-                .await?;
-            connection.execute_update_sql(&format!(
-                "CREATE DATASET {dataset} USING spql.mp4.dataset FROM {source} WITH (blob = 'source', index_tier = 'dependency')"
-            ),
-        )
-        .await
-        .map_err(|error| format!("indexing LeRobot MP4 assets with Spiral: {error}"))?;
-        }
-        Ok(())
-    }
-
-    async fn materialize_mcap(
-        &self,
-        connection: &mut ProjectConnection,
-        relations: &ImportRelations,
-    ) -> Result<(), String> {
-        let source = relations
-            .source
-            .as_deref()
-            .ok_or_else(|| "MCAP import plan has no source relation".to_owned())?;
         let files = self.files().iter().collect::<Vec<_>>();
         connection
             .ingest_batch(
-                source,
+                &relations.source,
                 HuggingFaceSourceBatch::build(self.repository(), self.resolved_revision(), &files)?,
             )
             .await?;
-        connection.execute_update_sql(&format!(
-            "CREATE DATASET {} USING spiral.mcap FROM {source} WITH (key = 'recording', blob = 'source')",
-            relations.primary
-        ),
-    )
-    .await
-    .map_err(|error| format!("materializing MCAP files with Spiral: {error}"))
-    }
-}
-
-impl ProjectConnection {
-    async fn materialize_parquet_relation(
-        &mut self,
-        relation: &str,
-        uri: &str,
-    ) -> Result<(), String> {
-        self.execute_update_sql(&format!(
-            "CREATE TABLE {relation} ENGINE 'arbor' AS SELECT * FROM spql.parquet.read({})",
-            SpiralSql::string_literal(uri)
-        ))
-        .await
-        .map_err(|error| format!("materializing {relation} with Spiral Parquet: {error}"))
+        connection
+            .execute_update_sql(&relations.create_sql())
+            .await?;
+        connection
+            .execute_update_sql(&format!(
+                "REFRESH DATASET {}",
+                ImportRelations::quoted(&relations.dataset)
+            ))
+            .await?;
+        let counts = connection
+            .query_rows(
+                &format!(
+                    "SELECT COUNT(*) AS episodes FROM spql.mcap.episodes({})",
+                    SpiralSql::string_literal(&relations.dataset)
+                ),
+                1,
+            )
+            .await?;
+        if counts
+            .rows()
+            .first()
+            .and_then(|row| row.get("episodes"))
+            .and_then(|value| value.as_u64())
+            != Some(files.len() as u64)
+        {
+            return Err(
+                "The native dataset episode count does not match the imported MCAP files"
+                    .to_owned(),
+            );
+        }
+        Ok(())
     }
 }
 
@@ -920,15 +593,9 @@ impl ImportBlobStorage {
             Arc::new(UInt64Array::from_iter_values(
                 files.iter().map(|file| file.bytes()),
             )) as ArrayRef,
-            Arc::new(StringViewArray::from_iter_values(files.iter().map(
-                |file| {
-                    if file.path().to_ascii_lowercase().ends_with(".mcap") {
-                        "application/mcap"
-                    } else {
-                        "video/mp4"
-                    }
-                },
-            ))) as ArrayRef,
+            Arc::new(StringViewArray::from_iter_values(
+                files.iter().map(|_| "application/mcap"),
+            )) as ArrayRef,
             null_text(),
             null_text(),
             null_text(),
@@ -943,133 +610,52 @@ impl ImportBlobStorage {
     }
 }
 
-struct IngestionClock;
-
-impl IngestionClock {
-    fn unix_millis() -> i64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-            .try_into()
-            .unwrap_or(i64::MAX)
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use spiral_robotics_common::datasets::{
-        HuggingFaceDatasetFile, HuggingFaceDatasetFormat, HuggingFaceDatasetSource,
-    };
-
-    use super::{
-        HuggingFaceDatasetSourceValidation as _, HuggingFaceFileSelection, HuggingFaceRepository,
-        ImportTarget, TreeEntry,
-    };
-
+    use super::*;
     #[test]
-    fn repository_inputs_normalize_without_accepting_arbitrary_hosts() {
-        assert_eq!(
-            HuggingFaceRepository::try_from("lerobot/pusht")
-                .unwrap()
-                .as_str(),
-            "lerobot/pusht",
-        );
-        assert_eq!(
-            HuggingFaceRepository::try_from(
-                "https://huggingface.co/datasets/lerobot/pusht/tree/main",
-            )
-            .unwrap()
-            .as_str(),
-            "lerobot/pusht",
-        );
-        assert!(HuggingFaceRepository::try_from("https://example.com/datasets/a/b").is_err());
-        assert!(HuggingFaceRepository::try_from("lerobot/pusht/tree/main").is_err());
-    }
-
-    #[test]
-    fn hub_api_paths_do_not_gain_an_empty_segment() {
-        assert_eq!(
-            HuggingFaceRepository::try_from("lerobot/pusht")
-                .unwrap()
-                .api_url("revision", "main")
-                .unwrap()
-                .as_str(),
-            "https://huggingface.co/api/datasets/lerobot/pusht/revision/main"
-        );
-        assert_eq!(
-            HuggingFaceRepository::try_from("lerobot/pusht")
-                .unwrap()
-                .file_uri("abc123", "videos/cam/file 0.mp4")
-                .unwrap(),
-            "hf://datasets/lerobot/pusht@abc123/videos/cam/file%200.mp4"
-        );
-    }
-
-    #[test]
-    fn revision_and_dataset_identity_are_bounded() {
-        assert!(
-            HuggingFaceDatasetSource::new(
-                "bench-v1",
-                "lerobot/pusht",
-                HuggingFaceDatasetFormat::LeRobot,
-            )
-            .with_revision("refs/convert/parquet")
-            .validate_for_discovery()
-            .is_ok()
-        );
-        assert!(
-            HuggingFaceDatasetSource::new(
-                "bad id",
-                "lerobot/pusht",
-                HuggingFaceDatasetFormat::LeRobot,
-            )
-            .with_revision("../main")
-            .validate_for_discovery()
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn format_selection_refuses_false_positive_repositories() {
+    fn imports_only_mcap_files() {
         let entries = vec![TreeEntry {
-            kind: "file".to_owned(),
-            path: "data/chunk-000/file-000.parquet".to_owned(),
+            kind: "file".into(),
+            path: "data/frame.parquet".into(),
             size: 12,
         }];
-        let files =
-            HuggingFaceFileSelection::select(HuggingFaceDatasetFormat::LeRobot, entries).unwrap();
-        assert_eq!(files[0].bytes(), 12);
-        assert!(
-            HuggingFaceFileSelection::select(
-                HuggingFaceDatasetFormat::Mcap,
-                vec![TreeEntry {
-                    kind: "file".to_owned(),
-                    path: "README.md".to_owned(),
-                    size: 1,
-                }]
-            )
-            .is_err()
+        assert!(HuggingFaceFileSelection::select(entries).is_err());
+        let entries = vec![TreeEntry {
+            kind: "file".into(),
+            path: "recording.MCAP".into(),
+            size: 12,
+        }];
+        assert_eq!(
+            HuggingFaceFileSelection::select(entries).unwrap()[0].bytes(),
+            12
         );
     }
-
     #[test]
-    fn relation_names_are_stable_and_scoped_to_the_studio_namespace() {
-        let files = vec![HuggingFaceDatasetFile::new(
-            "data/chunk-000/file-000.parquet",
-            1,
-        )];
-        let target = ImportTarget {
-            namespace: "spiral_robotics",
-            dataset_id: "Pick.Place-v1",
-        };
-        let first = target.relations(HuggingFaceDatasetFormat::LeRobot, &files);
-        let second = target.relations(HuggingFaceDatasetFormat::LeRobot, &files);
-        assert_eq!(first.base, second.base);
+    fn import_uses_native_producer_and_quoted_names() {
+        let target = ImportRelations::new("studio", "pick-place");
         assert!(
-            first
-                .primary
-                .starts_with("spiral_robotics.hf_pick_place_v1_")
+            target
+                .create_sql()
+                .contains("CREATE DATASET \"studio\".\"pick-place\" USING spql.mcap.dataset")
+        );
+        assert_eq!(
+            target.planned(),
+            ["studio.pick-place", "studio.pick-place_sources"]
+        );
+    }
+    #[test]
+    fn old_format_requests_are_rejected() {
+        assert!(serde_json::from_value::<HuggingFaceDatasetSource>(serde_json::json!({"dataset_id":"test", "repository":"org/data", "format":"lerobot"})).is_err());
+    }
+    #[test]
+    fn repository_and_revision_are_validated() {
+        assert!(HuggingFaceRepository::try_from("https://example.com/data").is_err());
+        assert!(
+            HuggingFaceDatasetSource::new("recordings", "org/data")
+                .with_revision("../main")
+                .validate_for_discovery()
+                .is_err()
         );
     }
 }

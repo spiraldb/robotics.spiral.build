@@ -19,7 +19,7 @@ stop fighting.
 
 That engineer arrives in one of two postures, and both are first-class:
 
-- **With existing data.** They already have episodes — LeRobot datasets on
+- **With existing data.** They already have episodes — MCAP datasets on
   Hugging Face, buckets of MCAP files in object storage, exports from other
   rigs — and no place to actually look at, query, or reshape them. They judge
   the Studio on how quickly a pile of files becomes a browsable, queryable,
@@ -48,8 +48,8 @@ The durable shape of the product is a **data core with producers and
 consumers**:
 
 - **Producers** put episodes into the project. Recording with connected arms
-  is the built-in producer. Ingestion from external sources — LeRobot
-  datasets and object stores full of MCAP files — is a peer producer and, for
+  is the built-in producer. Ingestion from external sources — MCAP
+  datasets and object stores full of recordings — is a peer producer and, for
   many users, the primary one.
 - **The data core** is where the user spends their time: the episode catalog,
   the Timeline as one synchronized clock over every stream, SQL query, and
@@ -194,8 +194,10 @@ never becomes the motor-control runtime.
 - A fullstack Dioxus Studio with five primary operating activities:
   - **Live** owns recording, arm selection, Hold / Release / Teleop, joint
     control, health, and camera status.
-  - **Data** owns the SpiralDB episode catalog, replay/delete actions, external
-    dataset ingestion, and guarded read-only Spiral SQL.
+  - **Data** owns a directory of actual Spiral tables, views, datasets, and
+    native dataset outputs. Objects open in independent tabs, each with
+    Inspect, guarded read-only SQL, and Results. Load and Import sit beside
+    the object tabs; dataset inspection distinguishes Episodes from Topics.
   - **Workflow** owns relation discovery and a persisted, revision-safe
     Table → Query → optional Model/backfill → final Query → Result editor over existing qualified
     Spiral relations. The backend runs bounded read-only SQL and one executable
@@ -252,9 +254,9 @@ never becomes the motor-control runtime.
   tabbed tiles, horizontal and vertical splits, drag docking with five-zone
   previews, split resizing, keyboard equivalents, session-state panel
   reconciliation, and compact shared chrome. Live, Data, Workflow, Training, and Rollout keep independent session
-  layouts. The default desktop composition is a one-third workbench beside a
-  two-thirds visualization, with Scene/Query, camera panels, and Timeline as
-  movable panels rather than fixed slots.
+  layouts. Live defaults to a one-third workbench beside a two-thirds
+  visualization with movable Scene, camera, and Timeline panels. Data defaults
+  to a quarter-width Tables directory beside its object workspace.
 - Four backend motion modes: **Idle**, **Manual**, **Teleoperation**, and
   **Replay**. The Studio presents their operator-facing form as **Hold**
   (torque engaged and joints writable), **Release** (torque off and telemetry
@@ -266,7 +268,7 @@ never becomes the motor-control runtime.
   time gaps. Assigned cameras can be encoded by the backend into browser-
   playable MP4 segments with episode-clock offsets. Paused checkpoints and
   completed recordings commit directly to the configured SpiralDB project.
-- One canonical **Timeline** in both Live and Data. During capture it follows
+- One canonical **Timeline** in Live. During capture it follows
   new joint and camera data. A paused or completed episode can be scrubbed to
   synchronize recorded camera frames, recorded 3D pose, signals, and the
   playhead. Physical time-seeking is separate, explicit, server-gated, and
@@ -291,6 +293,12 @@ never becomes the motor-control runtime.
   without materializing encoded video frames.
   The Studio exposes row-limited, read-only query preview and video retrieval
   through the backend.
+- **Native MCAP ingestion.** Data imports MCAP recordings from a public
+  Hugging Face repository into one native Spiral Dataset. Source inspection
+  resolves a revision and previews files, size, destination, and warnings
+  before import. The backend uses `spql.mcap.dataset` and `REFRESH`; there is
+  no channel-to-table conversion or parallel Studio dataset row.
+  LeRobot/Parquet/MP4 dataset import is removed.
 - Product simulation is intentionally absent until it can be introduced as a
   separate, principled system rather than another storage or runtime mode.
 
@@ -305,13 +313,8 @@ meet the observation safety window is rejected before a new action is sent.
 These are the accepted next moves of the data-core pivot. None of them ship
 today, and nothing below may be presented as existing behavior:
 
-- **Ingestion as a peer producer.** Backend-owned ingestion jobs bring
-  external episodes into the active project: LeRobot datasets (Hugging Face
-  or compatible layouts) first because they map nearly 1:1 onto the episode
-  schema, then MCAP files from object stores or local upload with an explicit
-  channel-to-stream mapping step. The long-term goal is that any well-formed
-  MCAP file ingests without manual schema work. See
-  `spec/data/ingestion.md`.
+- **More ingestion sources.** Local-file uploads and object-storage import
+  interfaces extend the shipped native MCAP ingestion path.
 - **Data as the home activity.** The activity rail leads with Data and the
   Studio opens there; Live remains the collection surface.
 - **Curation as a consumer.** Materializing a query or a curated selection as

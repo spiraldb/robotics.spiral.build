@@ -108,10 +108,6 @@ impl ManagedRelationSchema for EpisodeRelations {
 }
 
 impl EpisodeRelations {
-    pub(crate) fn dataset_schema() -> arrow_schema::SchemaRef {
-        EpisodeSchema::datasets()
-    }
-
     pub(crate) fn normalize_video_asset(
         batch: arrow_array::RecordBatch,
     ) -> Result<arrow_array::RecordBatch, String> {

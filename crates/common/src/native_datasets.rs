@@ -155,3 +155,48 @@ mod tests {
         assert!(NativeDatasetSelection::new(vec!["\n".into()]).is_err());
     }
 }
+
+/// A real resource at its catalog path; parentage comes from Spiral's namespace.
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProjectResource {
+    selection: NativeDatasetSelection,
+    kind: String,
+    identity: (String, String),
+}
+impl ProjectResource {
+    pub fn new(
+        selection: NativeDatasetSelection,
+        kind: String,
+        identity: (String, String),
+    ) -> Self {
+        Self {
+            selection,
+            kind,
+            identity,
+        }
+    }
+    pub fn selection(&self) -> &NativeDatasetSelection {
+        &self.selection
+    }
+    pub fn kind(&self) -> &str {
+        &self.kind
+    }
+    pub fn resource_id(&self) -> &str {
+        &self.identity.0
+    }
+    pub fn dataset(&self) -> Option<NativeDatasetSummary> {
+        (self.kind == "dataset")
+            .then(|| NativeDatasetSummary::new(self.selection.clone(), self.identity.clone()))
+    }
+    pub fn table_sql(&self) -> String {
+        let name = self
+            .selection
+            .path()
+            .iter()
+            .map(|part| format!("\"{}\"", part.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(".");
+        format!("SELECT * FROM {name} LIMIT 100")
+    }
+}

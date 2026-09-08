@@ -8,151 +8,33 @@ use crate::shell::project::ProjectSessionSignals;
 use dioxus::prelude::*;
 use spiral_robotics_common::native_datasets::{NativeDatasetInspection, NativeDatasetSelection};
 
-#[derive(Clone, Copy, PartialEq)]
-pub(crate) struct DatasetBrowserSelection {
-    selected: Signal<Option<NativeDatasetSelection>>,
-    revision: Signal<u64>,
-    requested_panel: Signal<Option<dioxus_workbench::PanelId>>,
-    navigation: DatasetNavigation,
-    search: Signal<String>,
-}
-impl DatasetBrowserSelection {
-    pub(crate) fn use_selection() -> Self {
-        use_hook(|| Self {
-            selected: Signal::new(None),
-            revision: Signal::new(0),
-            requested_panel: Signal::new(None),
-            navigation: DatasetNavigation::new(),
-            search: Signal::new(String::new()),
-        })
-    }
-    pub(crate) fn requested_panel(self) -> Option<dioxus_workbench::PanelId> {
-        (self.requested_panel)()
-    }
-    pub(crate) fn clear_request(mut self) {
-        self.requested_panel.set(None);
-    }
-    fn select(mut self, selection: NativeDatasetSelection) {
-        if self.selected.peek().as_ref() != Some(&selection) {
-            self.navigation.reset();
-        }
-        self.selected.set(Some(selection));
-        self.requested_panel.set(Some("dataset-inspector".into()));
-    }
-}
-
 #[component]
-pub(crate) fn NativeDatasetsPanel(mut browser: DatasetBrowserSelection) -> Element {
-    let sessions = ProjectSessionSignals::current();
-    let mut search = browser.search;
-    let available = use_memo(move || sessions.storage_available());
-    let mut catalog =
-        crate::client::queries::QueryPolicy::on_demand(crate::client::queries::QueryDomain::Data)
-            .use_when(
-                move || *available.read(),
-                || DatasetClient::current().native_datasets(),
-            );
-    let catalog_response = catalog.read();
-    let pending = *catalog.state().read() == UseResourceState::Pending;
-    rsx! {
-        section { class: "data-catalog", "aria-label": "Spiral datasets",
-            header { class: "data-catalog-toolbar",
-                input { class: "field min-w-0 flex-1", r#type: "search", placeholder: "Find a dataset…", "aria-label": "Find a dataset", value: search(), oninput: move |event| search.set(event.value()) }
-                Action { purpose: ActionPurpose::Refresh, variant: ActionVariant::Outline, disabled: pending || !sessions.storage_available(), onclick: move |_| { catalog.restart(); browser.revision += 1; }, "Refresh" }
-            }
-            div { class: "min-h-0 flex-1 overflow-auto",
-                if !sessions.storage_available() {
-                    p { class: "data-empty-copy", "Connect to SpiralDB in Settings to browse datasets." }
-                } else if pending {
-                    p { class: "data-empty-copy", role: "status", "Loading datasets…" }
-                } else {
-                    match &*catalog_response {
-                        Some(Err(error)) => rsx! { p { class: "data-empty-copy text-danger", role: "alert", "{error} Use Refresh to retry." } },
-                        Some(Ok(datasets)) => {
-                            let filter = search().to_lowercase();
-                            let matches = datasets.iter().filter(|dataset| dataset.selection().label().to_lowercase().contains(&filter)).collect::<Vec<_>>();
-                            rsx! {
-                                if datasets.is_empty() { p { class: "data-empty-copy", "No datasets in this project yet." } }
-                                else if matches.is_empty() { p { class: "data-empty-copy", "No datasets match your search." } }
-                                ul { "aria-label": "Available datasets",
-                                    for dataset in matches {
-                                        {
-                                            let selection = dataset.selection().clone();
-                                            let label = selection.label();
-                                            let active = browser.selected.read().as_ref() == Some(&selection);
-                                            let name = selection.path().last().cloned().unwrap_or_default();
-                                            let namespace = selection.path()[..selection.path().len()-1].join(".");
-                                            rsx! {
-                                                li { key: "{dataset.resource_id()}",
-                                                    button { class: "data-dataset-row", "aria-pressed": active, title: "{label}", onclick: move |_| browser.select(selection.clone()),
-                                                        span { class: "min-w-0 flex-1",
-                                                            span { class: "block break-words font-medium", "{name}" }
-                                                            if !namespace.is_empty() { span { class: "mt-1 block text-[11px] text-ink-soft", "{namespace}" } }
-                                                        }
-                                                        svg { class: "ui-icon shrink-0", view_box: "0 0 16 16", "aria-hidden": "true", path { d: "m6 4 4 4-4 4" } }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        },
-                        None => rsx! {},
-                    }
-                }
-            }
-        }
-    }
-}
-
-#[component]
-pub(crate) fn NativeDatasetInspector(browser: DatasetBrowserSelection) -> Element {
-    let available = use_memo(move || {
-        crate::shell::project::ProjectSessionSignals::current().storage_available()
-    });
-    let mut inspection =
-        crate::client::queries::QueryPolicy::on_demand(crate::client::queries::QueryDomain::Data)
-            .use_when(
-                move || *available.read(),
-                move || {
-                    let selection = (browser.selected)();
-                    let _revision = (browser.revision)();
-                    async move {
-                        match selection {
-                            Some(selection) => DatasetClient::current()
-                                .inspect_native_dataset(selection)
-                                .await
-                                .map(Some),
-                            None => Ok(None),
-                        }
-                    }
-                },
-            );
-    let inspection_response = inspection.read();
+pub(crate) fn NativeDatasetInspector(
+    selection: NativeDatasetSelection,
+    topic: Option<String>,
+) -> Element {
+    let navigation = use_hook(|| DatasetNavigation::new(topic));
+    let available = use_memo(move || ProjectSessionSignals::current().storage_available());
+    let mut inspection = crate::client::queries::QueryPolicy::on_demand(
+        crate::client::queries::QueryDomain::Catalog,
+    )
+    .use_when(
+        move || *available.read(),
+        move || DatasetClient::current().inspect_native_dataset(selection.clone()),
+    );
+    let response = inspection.read();
     let pending = *inspection.state().read() == UseResourceState::Pending;
     rsx! {
         section { class: "data-inspector", "aria-label": "Dataset inspector",
-            if browser.selected.read().is_none() {
-                div { class: "data-inspector-welcome",
-                    h2 { "Explore your recordings" }
-                    p { "Choose a dataset on the left to browse its episodes and preview topic messages." }
-                    p { class: "text-[11px]", "A dataset groups recordings. Each episode is one recording; topics group the messages inside them." }
-                }
-            } else if pending {
-                p { class: "data-empty-copy", role: "status", "Loading dataset…" }
-            } else {
-                match &*inspection_response {
-                    Some(Ok(Some(detail))) => rsx! { DatasetContents { navigation: browser.navigation, key: "{detail.dataset().resource_id()}-{detail.dataset().version_id()}", inspection: detail.clone() } },
-                    Some(Err(error)) => rsx! {
-                        div { class: "data-empty-copy", role: "alert",
-                            p { class: "mb-3 text-danger", "{error}" }
-                            Action { purpose: ActionPurpose::Retry, variant: ActionVariant::Outline, onclick: move |_| inspection.restart(), "Retry dataset" }
-                        }
-                    },
-                    _ => rsx! {},
-                }
-            }
+            if pending { p { class: "data-empty-copy", role: "status", "Loading dataset…" } }
+            else { match &*response {
+                Some(Ok(detail)) => rsx! { DatasetContents { navigation, inspection: detail.clone() } },
+                Some(Err(error)) => rsx! { div { class: "data-empty-copy", role: "alert",
+                    p { "{error}" }
+                    Action { purpose: ActionPurpose::Retry, variant: ActionVariant::Outline, onclick: move |_| inspection.restart(), "Retry dataset" }
+                } },
+                None => rsx! { p { class: "data-empty-copy", "Connect to SpiralDB to inspect this dataset." } },
+            } }
         }
     }
 }
@@ -171,19 +53,17 @@ struct DatasetNavigation {
     message: Signal<usize>,
 }
 impl DatasetNavigation {
-    fn new() -> Self {
+    fn new(topic: Option<String>) -> Self {
         Self {
-            section: Signal::new(DatasetSection::Episodes),
+            section: Signal::new(if topic.is_some() {
+                DatasetSection::Topics
+            } else {
+                DatasetSection::Episodes
+            }),
             episodes: super::native_episodes::EpisodeNavigation::new(),
-            topic: Signal::new(None),
+            topic: Signal::new(topic),
             message: Signal::new(0),
         }
-    }
-    fn reset(mut self) {
-        self.section.set(DatasetSection::Episodes);
-        self.episodes.reset();
-        self.topic.set(None);
-        self.message.set(0);
     }
 }
 
@@ -296,45 +176,5 @@ fn TopicMessages(
             if pending { p { class: "data-empty-copy", role: "status", "Loading messages…" } }
             else if let Some(model) = &*response { super::native_messages::TopicMessagePreview { model: model.clone(), selected: selected_message } }
         }
-    }
-}
-
-#[cfg(test)]
-mod navigation_tests {
-    use super::*;
-    use std::{cell::RefCell, rc::Rc};
-
-    #[derive(Clone, Default)]
-    struct NavigationHarness(Rc<RefCell<Option<DatasetBrowserSelection>>>);
-    impl NavigationHarness {
-        fn render(self) -> Element {
-            *self.0.borrow_mut() = Some(DatasetBrowserSelection::use_selection());
-            rsx! {}
-        }
-    }
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn revisiting_a_dataset_preserves_location_but_switching_datasets_resets_it() {
-        let harness = NavigationHarness::default();
-        let mut dom = VirtualDom::new_with_props(NavigationHarness::render, harness.clone());
-        dom.rebuild_in_place();
-        let browser = harness.0.borrow().unwrap();
-        dom.in_runtime(|| {
-            let dataset = NativeDatasetSelection::new(vec!["recordings".into()]).unwrap();
-            browser.select(dataset.clone());
-            let mut navigation = browser.navigation;
-            navigation.section.set(DatasetSection::Topics);
-            navigation.topic.set(Some("/joints".into()));
-            navigation.message.set(7);
-            browser.clear_request();
-            browser.select(dataset);
-            assert!(matches!((navigation.section)(), DatasetSection::Topics));
-            assert_eq!((navigation.topic)().as_deref(), Some("/joints"));
-            assert_eq!((navigation.message)(), 7);
-            browser.select(NativeDatasetSelection::new(vec!["other".into()]).unwrap());
-            assert!(matches!((navigation.section)(), DatasetSection::Episodes));
-            assert!((navigation.topic)().is_none());
-            assert_eq!((navigation.message)(), 0);
-        });
     }
 }

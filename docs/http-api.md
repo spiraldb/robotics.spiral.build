@@ -204,10 +204,21 @@ schemas served by `/api/openapi.json`. `—` means no request body.
 
 | Method | Path | Body or query | Response |
 | --- | --- | --- | --- |
+| GET | `/data-catalog` | — | ProjectResource[] (actual namespace paths and resource kinds) |
+| GET | `/native-datasets` | — | NativeDatasetSummary[] |
+| POST | `/native-datasets/inspect` | NativeDatasetSelection | NativeDatasetInspection |
 | GET | `/relations` | — | RelationCatalog |
 | POST | `/queries` | QueryRequest | SpiralQuerySnapshot |
 | POST | `/datasets/hugging-face/inspect` | HuggingFaceDatasetSource | HuggingFaceDatasetInspection |
 | POST | `/datasets/hugging-face/import` | HuggingFaceDatasetSource | HuggingFaceDatasetImportSummary |
+
+Dataset import accepts public Hugging Face repositories containing MCAP files. The
+request has `dataset_id`, `repository`, and optional `revision` (default `main`);
+there is no format selector or LeRobot import. Inspection pins a revision and
+lists the native dataset and source relation to create. Import uses Spiral's
+`spql.mcap.dataset` producer, refreshes its population, and checks episode count
+before committing. Existing targets are refused. It does not publish rows into a
+separate Studio dataset registry. Project snapshot restore is a separate operation.
 
 ### Workflow
 

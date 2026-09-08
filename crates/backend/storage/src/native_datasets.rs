@@ -5,6 +5,7 @@ use serde::Deserialize;
 use serde_json::json;
 use spiral_robotics_common::native_datasets::{
     NativeDatasetInspection, NativeDatasetSelection, NativeDatasetSummary, NativeDatasetTopic,
+    ProjectResource,
 };
 use std::collections::{BTreeSet, VecDeque};
 use std::time::Duration;
@@ -86,7 +87,7 @@ impl DatasetCatalogClient {
             .map_err(|error| format!("Decoding Spiral dataset metadata: {error}"))
     }
 
-    async fn datasets(&self) -> Result<Vec<NativeDatasetSummary>, String> {
+    async fn resources(&self) -> Result<Vec<ProjectResource>, String> {
         let prefix = format!("{}/projects/{}/journal", self.endpoint, self.project);
         let branch: JournalBranch = self
             .request(self.client.get(format!("{prefix}/branches/main")))
@@ -98,10 +99,19 @@ impl DatasetCatalogClient {
             namespace.extend(page.namespace);
             token = page.next_page_token;
             if token.is_none() {
-                return DatasetNamespace::new(namespace).datasets();
+                return DatasetNamespace::new(namespace).resources();
             }
         }
         Err("Spiral project catalog exceeds the inspection limit".to_owned())
+    }
+
+    async fn datasets(&self) -> Result<Vec<NativeDatasetSummary>, String> {
+        Ok(self
+            .resources()
+            .await?
+            .iter()
+            .filter_map(ProjectResource::dataset)
+            .collect())
     }
 
     async fn inspect(
@@ -193,7 +203,7 @@ impl DatasetNamespace {
     fn new(entries: Vec<NamespaceEntry>) -> Self {
         Self { entries }
     }
-    fn datasets(self) -> Result<Vec<NativeDatasetSummary>, String> {
+    fn resources(self) -> Result<Vec<ProjectResource>, String> {
         let mut queue = VecDeque::from([(None::<String>, Vec::<String>::new())]);
         let mut visited = BTreeSet::new();
         let mut datasets = Vec::new();
@@ -214,15 +224,14 @@ impl DatasetNamespace {
                     return Err("Dataset namespace exceeds the nesting limit".to_owned());
                 }
                 let resource = &entry.resource;
-                if resource.descriptor.kind == "dataset" {
-                    datasets.push(NativeDatasetSummary::new(
-                        NativeDatasetSelection::new(path.clone())?,
-                        (
-                            resource.descriptor.resource_id.clone(),
-                            resource.version_id.clone(),
-                        ),
-                    ));
-                }
+                datasets.push(ProjectResource::new(
+                    NativeDatasetSelection::new(path.clone())?,
+                    resource.descriptor.kind.clone(),
+                    (
+                        resource.descriptor.resource_id.clone(),
+                        resource.version_id.clone(),
+                    ),
+                ));
                 if visited.insert(resource.descriptor.resource_id.clone()) {
                     queue.push_back((Some(resource.descriptor.resource_id.clone()), path));
                 }
@@ -310,6 +319,12 @@ struct McapTopicLocator {
 }
 
 impl StorageManager {
+    pub async fn project_resources(&self) -> Result<Vec<ProjectResource>, String> {
+        DatasetCatalogClient::connect(self.connection_settings())
+            .await?
+            .resources()
+            .await
+    }
     pub async fn native_datasets(&self) -> Result<Vec<NativeDatasetSummary>, String> {
         DatasetCatalogClient::connect(self.connection_settings())
             .await?
@@ -338,7 +353,12 @@ mod tests {
             {"parent":{"kind":"resource","resourceId":"parent"},"name":"default","resource":{"descriptor":{"resourceId":"data","kind":"dataset"},"versionId":"v2"}},
             {"parent":{"kind":"projectRoot"},"name":"pretend.dataset","resource":{"descriptor":{"resourceId":"ordinary-table","kind":"table"},"versionId":"v3"}}
         ])).unwrap();
-        let datasets = DatasetNamespace::new(entries).datasets().unwrap();
+        let resources = DatasetNamespace::new(entries).resources().unwrap();
+        assert_eq!(resources.len(), 3);
+        let datasets = resources
+            .iter()
+            .filter_map(ProjectResource::dataset)
+            .collect::<Vec<_>>();
         assert_eq!(datasets.len(), 1);
         assert_eq!(datasets[0].selection().path(), &["recordings", "default"]);
         assert_eq!(datasets[0].resource_id(), "data");

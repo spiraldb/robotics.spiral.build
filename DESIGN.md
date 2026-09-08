@@ -211,7 +211,7 @@ alone keep a dark mat for honest letterboxing; application chrome never changes
 visual worlds when the operator changes tasks.
 
 The Studio has five primary activities: **Live** for operating hardware and
-recording, **Data** for episodes and query, **Workflow** for deriving and
+recording, **Data** for catalog inspection, import, and query, **Workflow** for deriving and
 querying Spiral relations, **Training** for configuring and observing policy
 runs, and **Rollout** for staging a trained checkpoint against the configured
 follower. Everything else is a panel. A
@@ -221,7 +221,7 @@ learned spatial grammar without importing its visual weight: the layout is
 powerful, but the chrome remains Notion-like, compact, and quiet.
 
 The **Timeline is the shared clock**, not a footer or a dataset rail. It is
-registered in both Live and Data and synchronizes recording, replay, camera
+registered in Live and synchronizes recording, replay, camera
 video, recorded 3D pose, signals, query selection, and optionally a
 safety-gated physical seek. Signals belongs to the episode on that clock. Full
 camera images belong in camera panels; robot ownership remains explicit through
@@ -231,7 +231,7 @@ rather than being duplicated in the Live workbench.
 Density is the point, not a side effect. The base face is 12px, ordinary
 controls are 24px tall, and most gaps come from a 2/4/6/8px rhythm. Record is
 the one 28px control because it may be reached with a hand still on the arm.
-The 16px elapsed readout is the largest type in the app. Colour is spent on
+The 16px elapsed readout emphasizes capture time. Colour is spent on
 selection, safety, connection, identity, and the one primary action in a local
 region; structure comes from alignment and one-pixel rules.
 
@@ -249,10 +249,13 @@ put reads as a bench tool.
   content registers as panels instead of growing one-off shell regions.
 - A session-owned tab-and-tile workspace supports docking, tabbing, splitting,
   resizing, keyboard operation, and hot-plugged panel reconciliation.
-- The default Live/Data desktop composition is one-third workbench and
+- The default Live desktop composition is one-third workbench and
   two-thirds visualization, with Timeline in the lower 42% and each camera
   visible in its own row of the named camera column. Rollout narrows the
   workbench to 27% and replaces the Timeline slot with one low Inference lane.
+- Data defaults to a 25% Tables directory beside a 75% object workspace.
+  Each object tab owns Inspect, SQL, and Results; Load and Import stay to the
+  right of the object tab strip.
 - Workflow uses a 30% Assistant/Node tab lane beside a right column with a
   dominant lineage canvas above Results; the initial 66/34 vertical split
   favors the graph until evidence exists. It has its own layout scope.
@@ -416,11 +419,11 @@ layout scope. Switching activity therefore changes both the operating
 content and its visualization without moving Live camera tabs into Data, or
 vice versa.
 
-The canonical first-open desktop layout is:
+The canonical first-open Live desktop layout is:
 
 ```text
 ┌──────────── one third ────────────┬────────────── two thirds ──────────────┐
-│ Live or Data workbench            │ Scene + Query tab  │ Camera tabs       │
+│ Live workbench                    │ Scene + Query tab  │ Camera tabs       │
 │                                   │                    │                   │
 │                                   ├────────────────────┴───────────────────┤
 │                                   │ Timeline — lower 42%                   │
@@ -443,23 +446,23 @@ keyboard behavior, previews, and chrome belong to the external
 [`dioxus-workbench`](https://github.com/XiangpengHao/dioxus-workbench) crate; the Studio owns
 panel titles, content, safety, and domain state.
 
-The Timeline is always registered in both activities, including empty state.
-Its default lower position gives the system a consistent clock, but the user may
-move it like any other panel. A paused recording remains inspectable in Live;
-stopping returns Live to current hardware and confirms that the episode moved to
-Data. Data owns completed-episode selection and query results.
+The Timeline is registered in Live, including empty state. Its default lower
+position gives capture a consistent clock, but the user may move it like any
+other panel. A paused recording remains inspectable in Live; completed native
+datasets and their episode outputs are browsable in Data.
 
 Live begins with Control; recording identity, status, and capture transport stay
 in the Timeline and global status bar. Robot identity appears once in a compact
 switcher. There is no selected-arm toolbar beneath it. Setup is global Settings
 → Robots rather than a collapsible section in Live.
 
-Data states `Dataset → Episodes` explicitly. Episodes owns select, replay,
-delete, and external dataset ingestion scoped to the selected dataset. Query
-is a peer tool within Data; its result joins the selected
-episode's Scene as a sibling tab and never unregisters that Scene. The Timeline
-keeps the same layout contract. Recorded camera panels come from the selected
-episode’s media streams, not the currently connected camera assignments.
+Data uses a dockable Tables directory beside Workspace. The directory follows
+Spiral's actual namespace and expands native dataset outputs. Workspace holds
+independent object tabs, each with Inspect, SQL, and Results. The native Load
+selector and Import action remain beside the horizontally scrolling object tab
+strip. Dataset Inspect states `Dataset → Episodes / Topics` explicitly; opening
+a topic output reuses its dataset tab. See the [Data surface brief](.impeccable/surfaces/data-inspector.md)
+for the shipped composition, interaction states, and review scope.
 
 Training is curve-first: its first-open composition gives the learning curve
 the dominant visualization area, keeps the literal data path beside it, and
@@ -1171,24 +1174,21 @@ ambient browser selection—decides whether execution may begin.
 
 ### Data, Episodes, and Query
 
-- **Hierarchy:** Dataset owns Episodes. The Episodes header adds external data
-  to the selected dataset; episode-level actions are Select, Replay, and
-  Delete. Whole-project transfer belongs to Settings → SpiralDB.
-- **One storage layer:** Episodes remain one newest-first SpiralDB ledger. No
-  location grouping, publication badge, Push action, retry queue, or local
-  fallback appears because there is no second durable store to reconcile.
-- **Catalog refresh:** The session owns one fetched dataset catalog and one
-  fetched episode catalog for the selected dataset. They refresh every five
-  seconds, on Retry/Refresh, and after recording, deletion, and import commands.
-  Command responses never insert or remove catalog rows. Each episode entry
-  caches its immutable full data; a changed frame count invalidates that cache.
-  Query failures retain the last successful rows and the user's selection.
-- **Form decision:** This is an incumbent-surface extension, exempt from a
-  concept roll because the operator explicitly retained the existing ordered
-  episode list and rejected location grouping or a new ingestion composition.
-- **Query:** A guarded read-only SQL editor with presets and a row limit in the
-  Data workbench. Results render as the active sibling tab beside the preserved
-  Scene and may synchronize the selected episode/playhead.
+- **Directory:** A compact, searchable hierarchy of real Spiral objects uses
+  explicit expansion controls, kind labels, and blue selection. Dataset
+  outputs load on expansion; loading, failure, empty, and no-match states stay
+  inside the directory.
+- **Object tabs:** Each open object retains its own SQL draft, row limit, and
+  result while inactive. Active object tabs and Inspect / SQL / Results use
+  blue underlines. Arrow keys, Home, and End navigate the object tabs; close
+  controls and focus rings remain visible. Running SQL activates Results.
+- **Inspection:** Dataset Episodes and Topics remain distinct. Table schemas
+  use a disclosure above the bounded shared result table. Counts and source
+  metadata reflect returned data, without inferred filenames or zeroes.
+- **Import:** A restrained form in Workspace leads from source fields to
+  inspection, a resolved-revision review, import, and a success receipt.
+  Existing object sessions remain mounted. Inline status, disabled busy
+  controls, and explicit recovery keep state legible.
 - **Destination state:** Settings selects the Spiral API endpoint, SpFS
   endpoint, and project; first launch opens this section when no project is
   selected. The backend remembers only those bootstrap pointers in its private
@@ -1262,9 +1262,9 @@ another component only to rename it or copy shared mechanics.
   one light neutral world; reserve the dark mat for camera imagery.
 - **Do** register independent surfaces as panels and give them durable IDs and
   meaningful home tiles.
-- **Do** preserve the one-third/two-thirds Live/Data default and Rollout's 27%
-  workbench default while treating persisted user layout as the active
-  composition.
+- **Do** preserve Live's one-third/two-thirds default, Data's 25% Tables / 75%
+  Workspace default, and Rollout's 27% workbench default while treating
+  persisted user layout as the active composition.
 - **Do** give every drag, dock, split, resize, and tab action a keyboard path,
   visible focus, and reduced-motion behavior.
 - **Do** derive Live camera panels from robot assignments and Data camera panels

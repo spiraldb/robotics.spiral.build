@@ -13,6 +13,8 @@ pub(crate) mod state;
 pub(crate) mod workbench;
 
 mod client;
+mod import_dataset;
+mod resource_tree;
 pub(crate) use client::DatasetClient;
 
 pub(crate) mod episode_cache;

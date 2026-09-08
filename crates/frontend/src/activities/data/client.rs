@@ -3,7 +3,7 @@ use crate::client::http::UrlComponent;
 use crate::client::project::ProjectClient;
 use crate::client::transport::{CommandError, HttpRequest};
 use spiral_robotics_common::native_datasets::{
-    NativeDatasetInspection, NativeDatasetSelection, NativeDatasetSummary,
+    NativeDatasetInspection, NativeDatasetSelection, ProjectResource,
 };
 use spiral_robotics_common::recording::{DatasetSummary, EpisodeInspectionSnapshot};
 use spiral_robotics_common::relations::{QueryRequest, RelationCatalog, SpiralQuerySnapshot};
@@ -13,11 +13,36 @@ pub(crate) struct DatasetClient {
     project: ProjectClient,
 }
 impl DatasetClient {
-    pub(crate) fn native_datasets(
+    pub(crate) fn inspect_import(
         &self,
-    ) -> impl Future<Output = Result<Vec<NativeDatasetSummary>, CommandError>> + use<> {
+        source: spiral_robotics_common::datasets::HuggingFaceDatasetSource,
+    ) -> impl Future<
+        Output = Result<
+            spiral_robotics_common::datasets::HuggingFaceDatasetInspection,
+            CommandError,
+        >,
+    > + use<> {
         self.project
-            .request(HttpRequest::new("GET", "/api/native-datasets"))
+            .request(HttpRequest::new("POST", "/api/datasets/hugging-face/inspect").json(&source))
+    }
+    pub(crate) fn import_dataset(
+        &self,
+        source: spiral_robotics_common::datasets::HuggingFaceDatasetSource,
+    ) -> impl Future<
+        Output = Result<
+            spiral_robotics_common::datasets::HuggingFaceDatasetImportSummary,
+            CommandError,
+        >,
+    > + use<> {
+        self.project
+            .request(HttpRequest::new("POST", "/api/datasets/hugging-face/import").json(&source))
+    }
+
+    pub(crate) fn project_resources(
+        &self,
+    ) -> impl Future<Output = Result<Vec<ProjectResource>, CommandError>> + use<> {
+        self.project
+            .request(HttpRequest::new("GET", "/api/data-catalog"))
     }
     pub(crate) fn inspect_native_dataset(
         &self,

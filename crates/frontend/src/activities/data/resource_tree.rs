@@ -1,0 +1,118 @@
+//! Expand the real Spiral namespace and native dataset outputs.
+use super::{DatasetClient, screen::ResourceTabs};
+use dioxus::prelude::*;
+use spiral_robotics_common::native_datasets::ProjectResource;
+
+type ResourceCatalog = ReadSignal<Option<Result<Vec<ProjectResource>, String>>>;
+#[component]
+pub(super) fn ResourceTree(resources: ResourceCatalog, tabs: ResourceTabs) -> Element {
+    let mut search = use_signal(String::new);
+    let result = resources.read();
+    rsx! { section { class: "data-resource-tree", "aria-label": "SpiralDB catalog",
+        div { class: "data-catalog-toolbar",
+            input { class: "field", r#type: "search", placeholder: "Find tables or datasets…", "aria-label": "Find tables or datasets", value: search(), oninput: move |event| search.set(event.value()) }
+            button { class: "data-tree-refresh", "aria-label": "Refresh catalog", title: "Refresh catalog", onclick: move |_| super::relations::RelationCatalogState::refresh(),
+                crate::components::interaction::RefreshIcon {}
+            }
+        }
+        div { class: "data-tree-scroll",
+            match &*result {
+                None => rsx! { p { class: "data-empty-copy", role: "status", "Reading SpiralDB catalog…" } },
+                Some(Err(error)) => rsx! { p { class: "data-empty-copy", role: "alert", "{error} Refresh to retry." } },
+                Some(Ok(entries)) if entries.is_empty() => rsx! { p { class: "data-empty-copy", "This project has no tables or datasets yet. Use Import to add MCAP recordings." } },
+                Some(Ok(entries)) => {
+                    let filter = search().to_lowercase();
+                    let roots = entries.iter().filter(|resource| if filter.is_empty() { resource.selection().path().len() == 1 } else { resource.selection().label().to_lowercase().contains(&filter) }).cloned().collect::<Vec<_>>();
+                    rsx! {
+                        if roots.is_empty() { p { class: "data-empty-copy", "No matching tables or datasets." } }
+                        ul { class: "data-tree-list", for resource in roots { ResourceBranch { key: "{resource.resource_id()}", resource, resources, tabs } } }
+                    }
+                },
+            }
+        }
+    } }
+}
+
+#[component]
+fn ResourceBranch(
+    resource: ProjectResource,
+    resources: ResourceCatalog,
+    tabs: ResourceTabs,
+) -> Element {
+    let mut expanded = use_signal(|| false);
+    let path = resource.selection().path();
+    let children = resources
+        .read()
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .into_iter()
+        .flatten()
+        .filter(|child| {
+            child.selection().path().len() == path.len() + 1
+                && child.selection().path().starts_with(path)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let dataset = resource.kind() == "dataset";
+    let expandable = dataset || !children.is_empty();
+    let selectable = matches!(resource.kind(), "table" | "view" | "dataset");
+    let selected = tabs.active_id().as_deref() == Some(resource.resource_id());
+    let open = resource.clone();
+    rsx! { li { class: "data-tree-branch",
+        div { class: "data-tree-row", "data-selected": selected,
+            if expandable { button { class: "data-tree-toggle", aria_expanded: expanded(), "aria-label": "Expand {resource.selection().label()}", onclick: move |_| expanded.toggle(),
+                svg { view_box: "0 0 16 16", "aria-hidden": "true", style: if expanded() { "transform: rotate(90deg)" } else { "" }, path { d: "m6 4 4 4-4 4" } }
+            } } else { span { class: "data-tree-indent" } }
+            button { class: "data-tree-name", aria_pressed: selected, title: "{resource.selection().label()} · {resource.kind()}", onclick: move |_| { if selectable { tabs.open(open.clone(), None); } else { expanded.toggle(); } },
+                ResourceIcon { dataset }
+                span { "{path.last().unwrap()}" }
+                small { "{resource.kind()}" }
+            }
+        }
+        if expanded() {
+            ul { class: "data-tree-list data-tree-children",
+                for child in children { ResourceBranch { key: "{child.resource_id()}", resource: child, resources, tabs } }
+                if dataset { DatasetOutputs { resource: resource.clone(), tabs } }
+            }
+        }
+    } }
+}
+
+#[component]
+fn ResourceIcon(dataset: bool) -> Element {
+    rsx! { svg { class: "data-resource-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+        if dataset { ellipse { cx: "8", cy: "4", rx: "5", ry: "2" } path { d: "M3 4v8c0 2.7 10 2.7 10 0V4M3 8c0 2.7 10 2.7 10 0" } }
+        else { rect { x: "2.5", y: "2.5", width: "11", height: "11", rx: "1" } path { d: "M2.5 6h11M6 6v7.5" } }
+    } }
+}
+
+#[component]
+fn DatasetOutputs(resource: ProjectResource, tabs: ResourceTabs) -> Element {
+    let selection = resource.selection().clone();
+    let available = use_memo(move || {
+        crate::shell::project::ProjectSessionSignals::current().catalog_available()
+    });
+    let mut inspection = crate::client::queries::QueryPolicy::on_demand(
+        crate::client::queries::QueryDomain::Catalog,
+    )
+    .use_when(
+        move || *available.read(),
+        move || DatasetClient::current().inspect_native_dataset(selection.clone()),
+    );
+    let result = inspection.read();
+    rsx! {
+        match &*result {
+            None => rsx! { li { class: "data-tree-status", role: "status", "Loading outputs…" } },
+            Some(Err(error)) => rsx! { li { class: "data-tree-status", role: "alert", p { "{error}" } button { class: "data-text-action", onclick: move |_| inspection.restart(), "Retry outputs" } } },
+            Some(Ok(detail)) => rsx! {
+                if detail.members().is_some() { li { button { class: "data-output-row", onclick: { let resource = resource.clone(); move |_| tabs.open(resource.clone(), None) }, "Episodes", small { "output" } } } }
+                for topic in detail.topics() {
+                    { let name = topic.name().to_owned(); let resource = resource.clone(); rsx! {
+                        li { button { class: "data-output-row", title: "{name}", onclick: move |_| tabs.open(resource.clone(), Some(name.clone())), span { "{topic.name()}" } small { "topic" } } }
+                    } }
+                }
+                if detail.members().is_none() && detail.topics().is_empty() { li { class: "data-tree-status", "No episode or topic outputs." } }
+            },
+        }
+    }
+}

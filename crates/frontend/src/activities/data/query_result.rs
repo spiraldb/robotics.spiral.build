@@ -87,6 +87,7 @@ pub(crate) enum QueryState {
 
 #[component]
 pub(crate) fn QueryResultView(controller: super::state::QueryController) -> Element {
+    let prefix = use_hook(|| format!("query-{}", dioxus::dioxus_core::current_scope_id().0));
     let tabs = controller.query_tabs();
     let active_id = controller.active_query();
     let active = active_id
@@ -103,20 +104,21 @@ pub(crate) fn QueryResultView(controller: super::state::QueryController) -> Elem
                         div {
                             class: if active_id == Some(tab.id) { "query-result-tab-item query-result-tab-item-active ui-hover-action-host" } else { "query-result-tab-item ui-hover-action-host" },
                             Action {
-                                id: "query-tab-{tab.id}",
+                                id: "{prefix}-tab-{tab.id}",
                                 purpose: ActionPurpose::Select,
                                 variant: ActionVariant::Tab,
                                 class: if active_id == Some(tab.id) { "query-result-tab query-result-tab-active" } else { "query-result-tab" },
                                 role: "tab",
                                 tabindex: if active_id == Some(tab.id) { "0" } else { "-1" },
                                 aria_selected: active_id == Some(tab.id),
-                                aria_controls: "query-panel-{tab.id}",
+                                aria_controls: "{prefix}-panel-{tab.id}",
                                 onclick: {
                                     let id = tab.id;
                                     move |_| controller.select_query(id)
                                 },
                                 auxiliary_handlers: ActionAuxiliaryHandlers::keydown({
                                     let ids = tab_ids.clone();
+                                    let prefix = prefix.clone();
                                     let id = tab.id;
                                     move |event: KeyboardEvent| {
                                         let target = match event.key() {
@@ -134,7 +136,7 @@ pub(crate) fn QueryResultView(controller: super::state::QueryController) -> Elem
                                         event.prevent_default();
                                         if let Some(target) = target {
                                             controller.select_query(target);
-                                            target.focus_after_render();
+                                            target.focus_after_render(&prefix);
                                         }
                                     }
                                 }),
@@ -149,13 +151,14 @@ pub(crate) fn QueryResultView(controller: super::state::QueryController) -> Elem
                                 title: "Close {tab.title}",
                                 onclick: {
                                     let ids = tab_ids.clone();
+                                    let prefix = prefix.clone();
                                     let id = tab.id;
                                     move |_| {
                                         let target = ids.neighbor_after_close(id);
                                         controller.close_query(id);
                                         if let Some(target) = target {
                                             controller.select_query(target);
-                                            target.focus_after_render();
+                                            target.focus_after_render(&prefix);
                                         }
                                     }
                                 },
@@ -167,11 +170,11 @@ pub(crate) fn QueryResultView(controller: super::state::QueryController) -> Elem
             }
             if let Some(tab) = active {
                 div {
-                    id: "query-panel-{tab.id}",
+                    id: "{prefix}-panel-{tab.id}",
                     class: "query-result-panel",
                     role: "tabpanel",
                     tabindex: "0",
-                    "aria-labelledby": "query-tab-{tab.id}",
+                    "aria-labelledby": "{prefix}-tab-{tab.id}",
                     header { class: "query-result-meta",
                         if let QueryState::Ready(result) = tab.presentation().state() {
                             span { class: "query-result-count", role: "status",
@@ -229,12 +232,12 @@ impl QueryTabNavigation for [u64] {
 }
 
 trait QueryTabPresentation {
-    fn focus_after_render(self);
+    fn focus_after_render(self, prefix: &str);
 }
 
 impl QueryTabPresentation for u64 {
-    fn focus_after_render(self) {
-        BrowserFocus::after_render(format!("query-tab-{self}"));
+    fn focus_after_render(self, prefix: &str) {
+        BrowserFocus::after_render(format!("{prefix}-tab-{self}"));
     }
 }
 

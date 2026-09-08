@@ -5,7 +5,6 @@ use crate::activities::data::query_result::{
 };
 use crate::shell::{notifications::MessageSource, state::StudioProjectState};
 use dioxus::prelude::*;
-use spiral_robotics_common::native_datasets::NativeDatasetSelection;
 pub(crate) const MAX_QUERY_TABS: usize = 8;
 struct ActiveQuery {
     id: u64,
@@ -30,10 +29,7 @@ struct QueryExecutionSignals {
 }
 
 impl QueryController {
-    pub(crate) fn use_controller() -> Self {
-        let initial_sql = NativeDatasetSelection::new(vec!["default".into()])
-            .unwrap()
-            .episodes_sql();
+    pub(crate) fn use_controller(initial_sql: String) -> Self {
         use_hook(|| Self {
             draft: QueryDraftSignals {
                 sql: Signal::new(initial_sql),
@@ -314,7 +310,7 @@ mod ownership_tests {
     }
     #[component]
     fn QueryOwner() -> Element {
-        let controller = QueryController::use_controller();
+        let controller = QueryController::use_controller("SELECT 1".into());
         let harness = use_context::<OwnershipHarness>();
         use_hook(move || harness.0.borrow_mut().controllers.push(controller));
         rsx! { span { "{controller.sql()}" } }

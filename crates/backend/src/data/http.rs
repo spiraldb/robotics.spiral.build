@@ -8,7 +8,7 @@ use spiral_robotics_common::datasets::{
     HuggingFaceDatasetImportSummary, HuggingFaceDatasetInspection, HuggingFaceDatasetSource,
 };
 use spiral_robotics_common::native_datasets::{
-    NativeDatasetInspection, NativeDatasetSelection, NativeDatasetSummary,
+    NativeDatasetInspection, NativeDatasetSelection, NativeDatasetSummary, ProjectResource,
 };
 use spiral_robotics_common::relations::{QueryRequest, RelationCatalog, SpiralQuerySnapshot};
 
@@ -17,6 +17,7 @@ pub(crate) struct DatasetQueryEndpoints;
 impl DatasetQueryEndpoints {
     pub(crate) fn register(routes: &mut ApiRoutes) {
         routes.get("/native-datasets", Self::native_datasets);
+        routes.get("/data-catalog", Self::project_resources);
         routes.post("/native-datasets/inspect", Self::inspect_native_dataset);
         routes.get("/relations", Self::relation_catalog);
         routes.post("/queries", Self::run_spiral_query);
@@ -28,6 +29,11 @@ impl DatasetQueryEndpoints {
             "/datasets/hugging-face/import",
             Self::import_hugging_face_dataset,
         );
+    }
+    async fn project_resources(
+        ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,
+    ) -> Result<Json<Vec<ProjectResource>>, HttpFailure> {
+        Ok(Json(commands.project_resources().await?))
     }
     async fn native_datasets(
         ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,

@@ -59,21 +59,6 @@ enum ProjectOperationLease {
     Exclusive { _lease: OwnedRwLockWriteGuard<()> },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct CatalogRelation {
-    name: String,
-}
-
-impl CatalogRelation {
-    fn new(name: String) -> Self {
-        Self { name }
-    }
-
-    pub(crate) fn into_name(self) -> String {
-        self.name
-    }
-}
-
 impl ProjectConnection {
     async fn open(
         database: Arc<dyn Database>,
@@ -137,25 +122,6 @@ impl ProjectConnection {
         .buffered(8)
         .collect()
         .await)
-    }
-
-    /// Enumerate the durable relations advertised by the active Spiral
-    /// project. Temporary query-session relations are intentionally absent
-    /// from the native project's catalog.
-    pub(crate) async fn list_catalog_relations(&mut self) -> Result<Vec<CatalogRelation>, String> {
-        let mut relations = self
-            .relations()
-            .await
-            .map_err(|error| error.to_string())?
-            .into_iter()
-            .map(|metadata| {
-                let (name, _kind) = metadata.into_parts();
-                CatalogRelation::new(name.into_string())
-            })
-            .collect::<Vec<_>>();
-        relations.sort_by(|left, right| left.name.cmp(&right.name));
-        relations.dedup_by(|left, right| left.name == right.name);
-        Ok(relations)
     }
 
     pub async fn begin_transaction(&mut self) -> Result<(), String> {
@@ -223,12 +189,16 @@ impl ProjectConnection {
     /// List durable relation names without exposing the driver's catalog
     /// representation across the storage boundary.
     pub async fn catalog_relation_names(&mut self) -> Result<Vec<String>, String> {
-        self.list_catalog_relations().await.map(|relations| {
-            relations
-                .into_iter()
-                .map(|relation| relation.name)
-                .collect()
-        })
+        let mut names = self
+            .relations()
+            .await
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(|entry| entry.into_parts().0.into_string())
+            .collect::<Vec<_>>();
+        names.sort();
+        names.dedup();
+        Ok(names)
     }
 }
 

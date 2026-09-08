@@ -33,35 +33,15 @@ impl ProjectImportSummary {
     }
 }
 
-/// Dataset layouts that Studio can materialize from a Hugging Face dataset
-/// repository using Spiral's native readers and Dataset producers.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HuggingFaceDatasetFormat {
-    #[serde(rename = "lerobot")]
-    LeRobot,
-    Mcap,
-}
-
-impl HuggingFaceDatasetFormat {
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::LeRobot => "LeRobot",
-            Self::Mcap => "MCAP",
-        }
-    }
-}
-
 /// Source and destination shared by inspection and the eventual import.
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct HuggingFaceDatasetSource {
     dataset_id: String,
     repository: String,
     #[serde(default = "HuggingFaceDatasetSource::default_revision")]
     revision: String,
-    format: HuggingFaceDatasetFormat,
 }
 
 impl HuggingFaceDatasetSource {
@@ -69,16 +49,11 @@ impl HuggingFaceDatasetSource {
         "main".to_owned()
     }
 
-    pub fn new(
-        dataset_id: impl Into<String>,
-        repository: impl Into<String>,
-        format: HuggingFaceDatasetFormat,
-    ) -> Self {
+    pub fn new(dataset_id: impl Into<String>, repository: impl Into<String>) -> Self {
         Self {
             dataset_id: dataset_id.into(),
             repository: repository.into(),
             revision: Self::default_revision(),
-            format,
         }
     }
     pub fn with_revision(mut self, revision: impl Into<String>) -> Self {
@@ -93,9 +68,6 @@ impl HuggingFaceDatasetSource {
     }
     pub fn revision(&self) -> &str {
         &self.revision
-    }
-    pub const fn format(&self) -> HuggingFaceDatasetFormat {
-        self.format
     }
 }
 
@@ -142,7 +114,6 @@ pub struct HuggingFaceInspectionSource {
     repository: String,
     requested_revision: String,
     resolved_revision: String,
-    format: HuggingFaceDatasetFormat,
 }
 
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
@@ -171,7 +142,6 @@ pub struct HuggingFaceResolvedSource {
     dataset_id: String,
     repository: String,
     resolved_revision: String,
-    format: HuggingFaceDatasetFormat,
 }
 
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
@@ -184,17 +154,12 @@ pub struct HuggingFaceImportOutcome {
 }
 
 impl HuggingFaceInspectionSource {
-    pub fn new(
-        dataset_id: impl Into<String>,
-        repository: impl Into<String>,
-        format: HuggingFaceDatasetFormat,
-    ) -> Self {
+    pub fn new(dataset_id: impl Into<String>, repository: impl Into<String>) -> Self {
         Self {
             dataset_id: dataset_id.into(),
             repository: repository.into(),
             requested_revision: String::new(),
             resolved_revision: String::new(),
-            format,
         }
     }
     pub fn with_revisions(
@@ -246,9 +211,6 @@ impl HuggingFaceDatasetInspection {
     pub fn resolved_revision(&self) -> &str {
         &self.source.resolved_revision
     }
-    pub const fn format(&self) -> HuggingFaceDatasetFormat {
-        self.source.format
-    }
     pub fn files(&self) -> &[HuggingFaceDatasetFile] {
         &self.contents.files
     }
@@ -264,16 +226,11 @@ impl HuggingFaceDatasetInspection {
 }
 
 impl HuggingFaceResolvedSource {
-    pub fn new(
-        dataset_id: impl Into<String>,
-        repository: impl Into<String>,
-        format: HuggingFaceDatasetFormat,
-    ) -> Self {
+    pub fn new(dataset_id: impl Into<String>, repository: impl Into<String>) -> Self {
         Self {
             dataset_id: dataset_id.into(),
             repository: repository.into(),
             resolved_revision: String::new(),
-            format,
         }
     }
     pub fn with_resolved_revision(mut self, resolved_revision: impl Into<String>) -> Self {
@@ -309,14 +266,14 @@ impl HuggingFaceDatasetImportSummary {
         self.warnings = warnings;
         self
     }
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
     pub fn repository(&self) -> &str {
         &self.source.repository
     }
     pub fn resolved_revision(&self) -> &str {
         &self.source.resolved_revision
-    }
-    pub const fn format(&self) -> HuggingFaceDatasetFormat {
-        self.source.format
     }
     pub const fn files(&self) -> u64 {
         self.outcome.files
