@@ -47,10 +47,10 @@ enum AssistantInline {
 }
 
 #[component]
-fn WorkflowPanels() -> Element {
+fn WorkflowPanels(is_active: ReadSignal<bool>) -> Element {
     let studio = studio();
     let controller = studio.use_workflow_controller();
-    controller.use_polling(studio);
+    controller.use_polling(studio, is_active);
     use_effect(move || {
         let status = controller
             .accepted_state()
@@ -1928,9 +1928,13 @@ mod tests {
 }
 
 #[component]
-pub(crate) fn WorkflowWorkspace() -> Element {
+pub(crate) fn WorkflowWorkspace(is_active: ReadSignal<bool>) -> Element {
+    crate::shell::activity::WorkspaceActivity::provide(
+        crate::shell::activity::Activity::Workflow,
+        is_active,
+    );
     let studio =
         crate::shell::state::Studio::use_studio(crate::shell::activity::Activity::Workflow);
-    studio.use_relation_catalog();
-    rsx! { crate::shell::frame::WorkspaceFrame { WorkflowPanels {} } }
+    studio.use_relation_catalog(is_active);
+    rsx! { crate::shell::frame::WorkspaceFrame { WorkflowPanels { is_active } } }
 }

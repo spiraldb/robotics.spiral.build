@@ -37,7 +37,7 @@ const EMPTY_RUN_PANEL_ID: &str = "training-run-empty";
 const TRAINING_CHART_POINT_BUDGET: usize = 1_200;
 
 #[component]
-fn TrainingPanels() -> Element {
+fn TrainingPanels(is_active: ReadSignal<bool>) -> Element {
     let studio = studio();
     let dataset_id = studio.selected_dataset().read().to_owned();
     let controller = super::state::TrainingController::use_controller(
@@ -46,7 +46,7 @@ fn TrainingPanels() -> Element {
     );
     let controller = use_context_provider(|| controller);
     let training_history =
-        super::history::TrainingHistory::use_history(move || controller.selected_run());
+        super::history::TrainingHistory::use_history(is_active, move || controller.selected_run());
     let snapshot = training_history.snapshot().read().to_owned();
     let run_names = snapshot
         .runs()
@@ -1521,10 +1521,14 @@ mod tests {
 }
 
 #[component]
-pub(crate) fn TrainingWorkspace() -> Element {
+pub(crate) fn TrainingWorkspace(is_active: ReadSignal<bool>) -> Element {
+    crate::shell::activity::WorkspaceActivity::provide(
+        crate::shell::activity::Activity::Training,
+        is_active,
+    );
     let studio =
         crate::shell::state::Studio::use_studio(crate::shell::activity::Activity::Training);
-    studio.use_relation_catalog();
-    studio.data_controller().use_polling(studio);
-    rsx! { crate::shell::frame::WorkspaceFrame { TrainingPanels {} } }
+    studio.use_relation_catalog(is_active);
+    studio.data_controller().use_polling(studio, is_active);
+    rsx! { crate::shell::frame::WorkspaceFrame { TrainingPanels { is_active } } }
 }

@@ -1080,7 +1080,7 @@ impl WorkflowController {
         }
     }
 
-    pub(crate) fn use_polling(mut self, studio: Studio) {
+    pub(crate) fn use_polling(mut self, studio: Studio, is_active: ReadSignal<bool>) {
         let sessions = crate::shell::project::ProjectSessionSignals::current();
         let workflow_active = use_memo(move || {
             !self.loaded() || self.snapshot().phase().active() || self.command().is_some()
@@ -1088,7 +1088,7 @@ impl WorkflowController {
         let workflow = QueryPolicy::new(QueryDomain::Workflow, 500)
             .with_activity(workflow_active.into())
             .use_when(
-                move || sessions.catalog_available(),
+                move || is_active() && sessions.catalog_available(),
                 || WorkflowClient::current().workflow_snapshot(),
             );
         use_effect(move || {
@@ -1114,7 +1114,7 @@ impl WorkflowController {
         let agent = QueryPolicy::new(QueryDomain::Assistant, 500)
             .with_activity(assistant_active.into())
             .use_when(
-                move || sessions.catalog_available(),
+                move || is_active() && sessions.catalog_available(),
                 || WorkflowClient::current().workflow_agent_snapshot(),
             );
         use_effect(move || {

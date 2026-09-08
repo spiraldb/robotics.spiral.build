@@ -6068,9 +6068,15 @@ li:has(.data-episode-select[aria-pressed="true"]) .data-episode-row {
   grid-column: 2;
   grid-row: 1;
 }
-.studio-route-layout > .studio-status-bar {
+.studio-workspace > .studio-status-bar {
   grid-column: 1 / -1;
   grid-row: 2;
+}
+.studio-workspace {
+  display: contents;
+}
+.studio-workspace[hidden] {
+  display: none;
 }
 @property --tw-translate-x {
   syntax: "*";

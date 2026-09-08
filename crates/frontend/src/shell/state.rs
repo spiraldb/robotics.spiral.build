@@ -413,7 +413,7 @@ impl Studio {
         self.workspace.controllers.timeline
     }
 
-    /// Each routed view retrieves its retained values and owns its mounted resources.
+    /// Each workspace retrieves its retained values and owns its mounted resources.
     pub(crate) fn use_studio(activity: Activity) -> Self {
         ViewState::use_provider(activity);
         let project = consume_context::<StudioProjectState>();
@@ -457,11 +457,11 @@ impl Studio {
         studio
     }
 
-    pub(crate) fn use_relation_catalog(self) {
+    pub(crate) fn use_relation_catalog(self, is_active: ReadSignal<bool>) {
         let mut relation_catalog = self.workspace.relation_catalog;
         let sessions = ProjectSessionSignals::current();
         let catalog_request = QueryPolicy::new(QueryDomain::Catalog, 10_000).use_when(
-            move || sessions.catalog_available(),
+            move || is_active() && sessions.catalog_available(),
             || async {
                 DatasetClient::current()
                     .relation_catalog()
@@ -482,14 +482,20 @@ impl Studio {
 
     /// Each fetched value has one writer. UI components receive read-only
     /// handles; commands invalidate these resources through ProjectClient.
-    pub(crate) fn use_hardware_polling(mut self) {
-        // A newly mounted view must receive a sample before enabling controls.
-        use_hook(move || self.workspace.backend.last_telemetry_ms.set(0.0));
+    pub(crate) fn use_hardware_polling(mut self, is_active: ReadSignal<bool>) {
+        // Reactivation must receive a fresh sample before enabling controls.
+        use_effect(move || {
+            if !is_active() {
+                self.workspace.backend.last_telemetry_ms.set(0.0);
+            }
+        });
         use_drop(move || {
             self.workspace.backend.last_telemetry_ms.set(0.0);
         });
-        let telemetry = QueryPolicy::new(QueryDomain::Telemetry, 50)
-            .use_resource(|| StudioClient::current().telemetry_snapshot());
+        let telemetry = QueryPolicy::new(QueryDomain::Telemetry, 50).use_when(
+            move || *is_active.read(),
+            || StudioClient::current().telemetry_snapshot(),
+        );
         use_effect(move || {
             let result = telemetry.read();
             if telemetry.finished()
@@ -502,10 +508,10 @@ impl Studio {
         });
     }
 
-    pub(crate) fn use_recording_polling(mut self) {
+    pub(crate) fn use_recording_polling(mut self, is_active: ReadSignal<bool>) {
         let recording_present = use_memo(move || self.recording().is_some());
         let recording = QueryPolicy::new(QueryDomain::Recording, 200).use_when(
-            move || *recording_present.read(),
+            move || is_active() && *recording_present.read(),
             move || {
                 let cursor = self.workspace.data.recording_signals.peek().cursor();
                 RecordingClient::current().recording_window(cursor)
@@ -526,12 +532,15 @@ impl Studio {
         });
     }
 
-    pub(crate) fn use_rollout_polling(mut self) {
+    pub(crate) fn use_rollout_polling(mut self, is_active: ReadSignal<bool>) {
         let rollout_active =
             use_memo(move || self.workspace.backend.rollout.read().phase().active());
         let rollout = QueryPolicy::new(QueryDomain::Rollout, 500)
             .with_activity(rollout_active.into())
-            .use_resource(|| RolloutClient::current().rollout_snapshot());
+            .use_when(
+                move || *is_active.read(),
+                || RolloutClient::current().rollout_snapshot(),
+            );
         use_effect(move || {
             let result = rollout.read();
             if rollout.finished()

@@ -32,9 +32,13 @@ impl DataLayout {
 }
 
 #[component]
-pub(crate) fn DataWorkspace() -> Element {
+pub(crate) fn DataWorkspace(is_active: ReadSignal<bool>) -> Element {
+    crate::shell::activity::WorkspaceActivity::provide(
+        crate::shell::activity::Activity::Data,
+        is_active,
+    );
     let studio = Studio::use_studio(Activity::Data);
-    studio.use_relation_catalog();
+    studio.use_relation_catalog(is_active);
     rsx! { WorkspaceFrame { DataPanels {} } }
 }
 

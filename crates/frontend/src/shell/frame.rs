@@ -77,14 +77,16 @@ pub(crate) fn ActivityRail(activity: Activity, on_activity: EventHandler<Activit
     }
 }
 
-/// Shared chrome around the real routed component. This frame and its children
-/// unmount on navigation; retained feature values live in ProjectViewStates.
+/// Workspace content stays mounted; only the active workspace supplies shell chrome.
 #[component]
 pub(crate) fn WorkspaceFrame(children: Element) -> Element {
-    let route = use_route::<crate::shell::routes::StudioRoute>();
+    let workspace = crate::shell::activity::WorkspaceActivity::current();
+    let route = crate::shell::routes::StudioRoute::for_activity(workspace.activity());
     rsx! {
         div { class: "studio-route-content", {children} }
-        StatusBar { route }
+        if workspace.is_active() {
+            StatusBar { route }
+        }
     }
 }
 

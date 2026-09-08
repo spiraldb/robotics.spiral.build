@@ -1966,7 +1966,7 @@ dependencies = [
 [[package]]
 name = "dioxus-workbench"
 version = "0.1.0"
-source = "git+https://github.com/XiangpengHao/dioxus-workbench?rev=a6d65f06d272ac3efa6cc9f1f22e60bb733855b7#a6d65f06d272ac3efa6cc9f1f22e60bb733855b7"
+source = "git+https://github.com/XiangpengHao/dioxus-workbench?rev=a7d98269a211b6ca11f11001899ce6aa9538765c#a7d98269a211b6ca11f11001899ce6aa9538765c"
 dependencies = [
  "dioxus",
  "futures-timer",

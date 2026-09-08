@@ -33,9 +33,6 @@ use crate::activities::data::episode_cache::{EpisodePreview, TimelineArmSample, 
 use crate::panels::recorded_source::{LoadState, RecordedSource};
 use crate::shell::state::{Selection, studio};
 
-/// The canvas the viewport draws into. There is exactly one on the page.
-const CANVAS_ID: &str = "robot-viewport";
-
 /// The colours arms are told apart by, as WebGL values and as CSS.
 ///
 /// The description paints its own accent, but a scene with two identical arms
@@ -140,6 +137,8 @@ pub(crate) fn Viewport(
         resize_revision,
     } = presentation;
     let studio = studio();
+    let workspace = crate::shell::activity::WorkspaceActivity::current();
+    let canvas_dom = use_hook(ViewportDom::new);
     let bench = use_hook(|| Rc::new(RefCell::new(Option::<Bench>::None)));
     let mut view_revision = use_signal(|| 0_u64);
     let mut dragging = use_signal(|| false);
@@ -167,6 +166,9 @@ pub(crate) fn Viewport(
     use_effect(use_reactive(
         (&resize_revision, &source, &visible_robot),
         move |(_resize_revision, draw_source, visible_robot)| {
+            if !workspace.is_active() {
+                return;
+            }
             // A workbench divider changes this canvas without changing the
             // browser window. Its host increments the revision while dragging
             // so WebGL redraws against the canvas's new CSS bounds instead of
@@ -199,7 +201,7 @@ pub(crate) fn Viewport(
                 }
             };
 
-            let Some(canvas) = ViewportDom::canvas() else {
+            let Some(canvas) = canvas_dom.canvas() else {
                 return;
             };
             let mut slot = draw_bench.borrow_mut();
@@ -251,7 +253,7 @@ pub(crate) fn Viewport(
     rsx! {
         div { class: "relative h-full w-full overflow-hidden bg-viewport",
             canvas {
-                id: CANVAS_ID,
+                id: canvas_dom.id(),
                 class: "h-full w-full select-none",
                 class: if dragging() {
                     "cursor-grabbing"
@@ -297,7 +299,7 @@ pub(crate) fn Viewport(
                         }
                         // Only while nothing is being dragged: an orbit is not
                         // a tour of everything the pointer sweeps past.
-                        hover.set(HoverRequest { bench: &bench, at: position }.pick());
+                        hover.set(HoverRequest { bench: &bench, at: position, canvas: canvas_dom }.pick());
                     }
                 },
                 onpointerup: {
@@ -732,6 +734,7 @@ impl BenchMarks for Bench {
 }
 
 struct HoverRequest<'a> {
+    canvas: ViewportDom,
     bench: &'a Rc<RefCell<Option<Bench>>>,
     at: (f64, f64),
 }
@@ -741,7 +744,7 @@ impl HoverRequest<'_> {
         let slot = self.bench.try_borrow().ok()?;
         let bench = slot.as_ref()?;
         let target = bench.pick(self.at)?;
-        let rect = ViewportDom::canvas()?.get_bounding_client_rect();
+        let rect = self.canvas.canvas()?.get_bounding_client_rect();
         Some(Hover {
             entity: target,
             at: (self.at.0 - rect.left(), self.at.1 - rect.top()),
@@ -922,9 +925,22 @@ impl PointerPosition for Event<PointerData> {
     }
 }
 
-struct ViewportDom;
+#[derive(Clone, Copy)]
+struct ViewportDom {
+    scope: ScopeId,
+}
 
 impl ViewportDom {
+    fn new() -> Self {
+        Self {
+            scope: dioxus::dioxus_core::current_scope_id(),
+        }
+    }
+
+    fn id(self) -> String {
+        format!("robot-viewport-{}", self.scope.0)
+    }
+
     /// Keep receiving moves after the pointer leaves the canvas, so a drag that
     /// runs off the edge of a panel keeps turning the robot.
     fn capture_pointer(event: &Event<PointerData>) {
@@ -939,10 +955,10 @@ impl ViewportDom {
         }
     }
 
-    fn canvas() -> Option<HtmlCanvasElement> {
+    fn canvas(self) -> Option<HtmlCanvasElement> {
         web_sys::window()?
             .document()?
-            .get_element_by_id(CANVAS_ID)?
+            .get_element_by_id(&self.id())?
             .dyn_into()
             .ok()
     }

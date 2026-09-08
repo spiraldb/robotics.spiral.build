@@ -47,7 +47,11 @@ pub(crate) fn NativeDatasetsPanel() -> Element {
     let mut browser = use_context::<DatasetBrowserSelection>();
     let sessions = ProjectSessionSignals::current();
     let mut search = browser.search;
+    let workspace = crate::shell::activity::WorkspaceActivity::current();
     let mut catalog = use_resource(move || async move {
+        if !workspace.is_active() {
+            return std::future::pending().await;
+        }
         if !sessions.storage_available() {
             return Ok(Vec::new());
         }

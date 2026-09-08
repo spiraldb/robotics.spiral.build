@@ -1,5 +1,5 @@
 //! Training retains history across route changes and polls only while active.
-//! Rollout requests its own run/checkpoint choices while its activity is mounted.
+//! Rollout requests its own run/checkpoint choices while its activity is visible.
 use crate::activities::training::TrainingClient;
 use crate::client::queries::{QueryDomain, QueryPolicy};
 use crate::shell::frame::TrainingStatus;
@@ -15,10 +15,13 @@ pub(crate) struct TrainingHistory {
 }
 
 impl TrainingHistory {
-    pub(crate) fn use_history(selected: impl Fn() -> Option<String> + 'static) -> Self {
+    pub(crate) fn use_history(
+        is_active: ReadSignal<bool>,
+        selected: impl Fn() -> Option<String> + 'static,
+    ) -> Self {
         let sessions = ProjectSessionSignals::current();
         let request = QueryPolicy::new(QueryDomain::Training, 1_000).use_when(
-            move || sessions.catalog_available(),
+            move || is_active() && sessions.catalog_available(),
             move || TrainingClient::current().training_snapshot(selected()),
         );
         let history = Self::use_response(request);

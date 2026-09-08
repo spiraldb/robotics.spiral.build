@@ -254,11 +254,11 @@ impl DataController {
 
     /// The active Live or Training view fetches its dataset/episode choices.
     /// Data uses the native dataset browser and does not load these catalogs.
-    pub(crate) fn use_polling(mut self, studio: Studio) {
+    pub(crate) fn use_polling(mut self, studio: Studio, is_active: ReadSignal<bool>) {
         let sessions = crate::shell::project::ProjectSessionSignals::current();
         let activity = crate::shell::view_state::ViewState::activity();
         let datasets = QueryPolicy::new(QueryDomain::Data, 5_000).use_when(
-            move || activity.uses_episode_catalog() && sessions.storage_available(),
+            move || is_active() && activity.uses_episode_catalog() && sessions.storage_available(),
             || DatasetClient::current().list_datasets(),
         );
         use_effect(move || {
@@ -270,7 +270,7 @@ impl DataController {
                 self.dataset_catalog.write().accept(result.clone());
             }
         });
-        let episodes = QueryPolicy::new(QueryDomain::Data, 5_000).use_when(move || activity.uses_episode_catalog() && sessions.storage_available(), move || {
+        let episodes = QueryPolicy::new(QueryDomain::Data, 5_000).use_when(move || is_active() && activity.uses_episode_catalog() && sessions.storage_available(), move || {
             let dataset = studio.selected_dataset().read().to_owned();
             async move {
                 let dataset = DatasetId::try_from(dataset.as_str()).map(String::from)

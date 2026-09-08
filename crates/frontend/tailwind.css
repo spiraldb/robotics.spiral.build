@@ -4297,4 +4297,8 @@ li:has(.data-episode-select[aria-pressed="true"]) .data-episode-row {
   grid-column: 2;
   grid-row: 1;
 }
-.studio-route-layout > .studio-status-bar { grid-column: 1 / -1; grid-row: 2; }
+.studio-workspace > .studio-status-bar { grid-column: 1 / -1; grid-row: 2; }
+
+/* Retained workspaces contribute to the shell grid only while selected. */
+.studio-workspace { display: contents; }
+.studio-workspace[hidden] { display: none; }

@@ -446,6 +446,7 @@ fn JointControls(
         on_point,
     } = behavior;
     let studio = studio();
+    let workspace = crate::shell::activity::WorkspaceActivity::current();
     // While a slider is being dragged the arm is still catching up, so the
     // commanded value is shown until the measurement agrees with it. That echo
     // is only meaningful for as long as this arm is actually being driven, so
@@ -459,7 +460,8 @@ fn JointControls(
     // in-flight request completes.
     let pending = use_hook(|| Rc::new(RefCell::new(PendingGoals::default())));
     let command_robot = robot.id().to_owned();
-    use_future({
+    let _ = workspace.is_active();
+    let mut sender = use_future({
         let pending = pending.clone();
         move || {
             let pending = pending.clone();
@@ -467,7 +469,8 @@ fn JointControls(
             async move {
                 loop {
                     gloo_timers::future::TimeoutFuture::new(32).await;
-                    let may_drive = studio.controls_available()
+                    let may_drive = workspace.is_active()
+                        && studio.controls_available()
                         && studio.is_manual_target(&command_robot)
                         && studio
                             .robot_telemetry(&command_robot)
@@ -491,15 +494,25 @@ fn JointControls(
             }
         }
     });
+    let inactive_pending = pending.clone();
+    use_hook_did_run(move |did_run| {
+        if did_run && workspace.is_active() {
+            sender.resume();
+        } else {
+            inactive_pending.borrow_mut().clear();
+            sender.pause();
+        }
+    });
     let watched = robot.id().to_owned();
     let clear_pending = pending.clone();
     use_effect(move || {
-        let driving = studio
-            .telemetry()
-            .read()
-            .robots()
-            .iter()
-            .any(|robot| robot.id() == watched && robot.torque())
+        let driving = workspace.is_active()
+            && studio
+                .telemetry()
+                .read()
+                .robots()
+                .iter()
+                .any(|robot| robot.id() == watched && robot.torque())
             && studio.is_manual_target(&watched);
         // `peek` deliberately: an effect that subscribes to the signal it
         // writes retriggers itself, and this one only needs to observe

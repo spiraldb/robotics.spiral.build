@@ -84,11 +84,15 @@ impl RolloutCameras {
 }
 
 #[component]
-pub(crate) fn RolloutWorkspace() -> Element {
+pub(crate) fn RolloutWorkspace(is_active: ReadSignal<bool>) -> Element {
+    crate::shell::activity::WorkspaceActivity::provide(
+        crate::shell::activity::Activity::Rollout,
+        is_active,
+    );
     let studio = Studio::use_studio(Activity::Rollout);
-    studio.use_hardware_polling();
-    studio.use_rollout_polling();
-    crate::activities::training::history::TrainingHistory::use_history(|| None);
+    studio.use_hardware_polling(is_active);
+    studio.use_rollout_polling(is_active);
+    crate::activities::training::history::TrainingHistory::use_history(is_active, || None);
     rsx! { WorkspaceFrame { RolloutPanels {} } }
 }
 

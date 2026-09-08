@@ -23,17 +23,17 @@ const FAVICON: &str = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/s
 pub(crate) enum StudioRoute {
     #[layout(StudioShell)]
     #[redirect("/", || StudioRoute::Live {})]
-    #[route("/live", LiveWorkspace)]
+    #[route("/live", SelectedActivityRoute)]
     Live {},
-    #[route("/data", DataWorkspace)]
+    #[route("/data", SelectedActivityRoute)]
     Data {},
-    #[route("/workflow", WorkflowWorkspace)]
+    #[route("/workflow", SelectedActivityRoute)]
     Workflow {},
-    #[route("/training", TrainingWorkspace)]
+    #[route("/training", SelectedActivityRoute)]
     Training {},
-    #[route("/rollout", RolloutWorkspace)]
+    #[route("/rollout", SelectedActivityRoute)]
     Rollout {},
-    #[route("/settings", SettingsWorkspace)]
+    #[route("/settings", SelectedActivityRoute)]
     Settings {},
 }
 
@@ -90,12 +90,13 @@ fn StudioShell() -> Element {
     let session = sessions.mounted_session();
     rsx! {
         document::Stylesheet { href: TAILWIND }
-        if let Some(session) = session {
-            ProjectStudioShell { key: "{session.id()}", session }
-        } else {
+        if session.is_none() {
             div { class: "studio-shell studio-shell-v2",
                 div { class: "editor-empty", role: "status", "Connecting to Studio…" }
             }
+        }
+        for session in session {
+            ProjectStudioShell { key: "{session.id()}", session }
         }
     }
 }
@@ -110,6 +111,7 @@ fn ProjectStudioShell(session: ProjectSessionInfo) -> Element {
     let project = StudioProjectState::use_provider();
     project.use_polling();
     let route = use_route::<StudioRoute>();
+    let selected_view = use_memo(use_reactive((&route,), |(route,)| route.activity()));
     let navigator = use_navigator();
     let mut project_setup_prompted = use_signal(|| false);
     use_effect(move || {
@@ -139,6 +141,9 @@ fn ProjectStudioShell(session: ProjectSessionInfo) -> Element {
                             navigator.push(StudioRoute::for_activity(next));
                         },
                     }
+                    for activity in Activity::all() {
+                        ActivityWorkspace { key: "{activity.label()}", activity, selected_view }
+                    }
                     Outlet::<StudioRoute> {}
                 }
             }
@@ -146,21 +151,47 @@ fn ProjectStudioShell(session: ProjectSessionInfo) -> Element {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// URL leaves select an activity. The shared layout owns its persistent instance.
+#[component]
+fn SelectedActivityRoute() -> Element {
+    rsx! {}
+}
 
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn every_primary_screen_has_a_stable_route() {
-        assert_eq!(StudioRoute::Live {}.to_string(), "/live");
-        assert_eq!(StudioRoute::Data {}.to_string(), "/data");
-        assert_eq!(StudioRoute::Workflow {}.to_string(), "/workflow");
-        assert_eq!(StudioRoute::Training {}.to_string(), "/training");
-        assert_eq!(StudioRoute::Rollout {}.to_string(), "/rollout");
-        assert_eq!(StudioRoute::Settings {}.to_string(), "/settings");
-        for route in StudioRoute::all() {
-            assert_eq!(StudioRoute::for_activity(route.activity()), route);
+#[component]
+fn ActivityWorkspace(activity: Activity, selected_view: ReadSignal<Activity>) -> Element {
+    let is_active = use_memo(move || selected_view() == activity);
+    rsx! {
+        PersistentWorkspace { is_active,
+            match activity {
+                Activity::Live => rsx! { LiveWorkspace { is_active } },
+                Activity::Data => rsx! { DataWorkspace { is_active } },
+                Activity::Workflow => rsx! { WorkflowWorkspace { is_active } },
+                Activity::Training => rsx! { TrainingWorkspace { is_active } },
+                Activity::Rollout => rsx! { RolloutWorkspace { is_active } },
+                Activity::Settings => rsx! { SettingsWorkspace { is_active } },
+            }
         }
-        assert_eq!(StudioRoute::Settings {}.activity(), Activity::Settings);
     }
 }
+
+/// Visit once, then preserve the component tree until its project is disposed.
+#[component]
+fn PersistentWorkspace(is_active: ReadSignal<bool>, children: Element) -> Element {
+    let active = is_active();
+    let mut visited = use_signal(move || active);
+    use_effect(move || {
+        if is_active() && !*visited.peek() {
+            visited.set(true);
+        }
+    });
+    rsx! {
+        div { class: "studio-workspace", hidden: !is_active(),
+            if visited() || is_active() {
+                {children}
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;

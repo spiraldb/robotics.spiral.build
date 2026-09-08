@@ -136,7 +136,12 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState) -> Element {
         data.invalidate_episode_catalog();
     };
 
-    use_effect(|| BrowserFocus::after_render("data-settings-panel".to_owned()));
+    let workspace = crate::shell::activity::WorkspaceActivity::current();
+    use_effect(move || {
+        if workspace.is_active() {
+            BrowserFocus::after_render("data-settings-panel".to_owned());
+        }
+    });
 
     use_effect(use_reactive((&initial,), move |(initial,)| {
         let acknowledged = saved();
@@ -582,10 +587,14 @@ fn SettingsField(label: &'static str, value: String, behavior: SettingsInputBeha
 }
 
 #[component]
-pub(crate) fn SettingsWorkspace() -> Element {
+pub(crate) fn SettingsWorkspace(is_active: ReadSignal<bool>) -> Element {
+    crate::shell::activity::WorkspaceActivity::provide(
+        crate::shell::activity::Activity::Settings,
+        is_active,
+    );
     let studio =
         crate::shell::state::Studio::use_studio(crate::shell::activity::Activity::Settings);
-    studio.use_hardware_polling();
+    studio.use_hardware_polling(is_active);
     rsx! {
         crate::shell::frame::WorkspaceFrame {
             SettingsPanel { state: SettingsLoadState::new(

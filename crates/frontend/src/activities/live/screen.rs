@@ -45,11 +45,20 @@ impl LiveLayout {
 }
 
 #[component]
-pub(crate) fn LiveWorkspace() -> Element {
+pub(crate) fn LiveWorkspace(is_active: ReadSignal<bool>) -> Element {
+    crate::shell::activity::WorkspaceActivity::provide(
+        crate::shell::activity::Activity::Live,
+        is_active,
+    );
     let studio = Studio::use_studio(Activity::Live);
-    studio.use_hardware_polling();
-    studio.use_recording_polling();
-    studio.data_controller().use_polling(studio);
+    studio.use_hardware_polling(is_active);
+    studio.use_recording_polling(is_active);
+    use_effect(move || {
+        if !is_active() {
+            studio.timeline_controller().stop_preview();
+        }
+    });
+    studio.data_controller().use_polling(studio, is_active);
     rsx! { WorkspaceFrame { LivePanels {} } }
 }
 
