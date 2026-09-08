@@ -16,27 +16,27 @@ use crate::activities::data::sql_draft::GeneratedSqlDraft;
 use crate::shell::notifications::MessageSource;
 use crate::shell::state::StudioProjectState;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub(crate) struct TrainingController {
     draft: TrainingDraftSignals,
     history: TrainingHistorySignals,
     commands: TrainingCommandSignals,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 struct TrainingDraftSignals {
     config: Signal<TrainingConfig>,
     generated_sql: Signal<String>,
     automatic_run_name: Signal<bool>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 struct TrainingHistorySignals {
     selected_run: Signal<Option<String>>,
     opened_runs: Signal<Vec<String>>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 struct TrainingCommandSignals {
     starting: Signal<bool>,
     stopping: Signal<Option<String>>,
@@ -60,9 +60,6 @@ impl TrainingRunIdentity {
 }
 
 impl TrainingController {
-    pub(crate) fn current() -> Self {
-        consume_context()
-    }
     pub(crate) fn use_controller(namespace: &str, dataset_id: &str) -> Self {
         let initial_sql =
             spiral::ManagedTable::Datasets.training_sql_for_dataset(namespace, dataset_id);
@@ -182,7 +179,11 @@ impl TrainingController {
         }
     }
 
-    pub(crate) fn start(mut self, studio: StudioProjectState) {
+    pub(crate) fn start(
+        mut self,
+        studio: StudioProjectState,
+        history: super::history::TrainingHistory,
+    ) {
         if self.commands.starting.peek().to_owned() {
             return;
         }
@@ -193,7 +194,7 @@ impl TrainingController {
         let mut opened_runs = self.history.opened_runs;
         let mut config_signal = self.draft.config;
         let mut automatic_run_name = self.draft.automatic_run_name;
-        let training = crate::activities::training::history::TrainingHistory::current().snapshot();
+        let training = history.snapshot();
         dioxus::dioxus_core::Runtime::current().spawn(
             self.draft.config.origin_scope(),
             async move {

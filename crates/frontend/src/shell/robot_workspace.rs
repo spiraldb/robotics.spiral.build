@@ -89,12 +89,9 @@ impl std::ops::Deref for RobotWorkspace {
     }
 }
 impl RobotWorkspace {
-    pub(crate) fn current() -> Self {
-        consume_context()
-    }
-    pub(crate) fn use_provider(is_active: ReadSignal<bool>) -> Self {
+    pub(crate) fn use_workspace(is_active: ReadSignal<bool>) -> Self {
         let project = StudioProjectState::current();
-        let workspace = use_context_provider(|| Self {
+        let workspace = use_hook(|| Self {
             project,
             telemetry: Signal::new(TelemetryFrame::default()),
             last_telemetry_ms: Signal::new(0.0),
@@ -115,6 +112,12 @@ impl RobotWorkspace {
         });
         workspace.use_hardware_polling(is_active);
         workspace
+    }
+    pub(crate) fn is_active(self) -> bool {
+        (self.is_active)()
+    }
+    pub(crate) fn is_active_signal(self) -> ReadSignal<bool> {
+        self.is_active
     }
     pub(crate) fn telemetry(self) -> MappedSignal<TelemetryFrame, Signal<TelemetryFrame>> {
         self.telemetry.map(|value| value)

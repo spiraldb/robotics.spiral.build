@@ -47,17 +47,16 @@ impl LiveLayout {
 
 #[component]
 pub(crate) fn LiveWorkspace(is_active: ReadSignal<bool>) -> Element {
-    crate::shell::activity::WorkspaceActivity::provide(
+    let workspace = crate::shell::activity::WorkspaceActivity::provide(
         crate::shell::activity::Activity::Live,
         is_active,
     );
-    let session = LiveSession::use_provider(is_active);
-    rsx! { WorkspaceFrame { status: crate::shell::frame::WorkspaceStatus::Hardware(session.robot()), LivePanels {} } }
+    let session = LiveSession::use_session(is_active);
+    rsx! { WorkspaceFrame { workspace, status: crate::shell::frame::WorkspaceStatus::Hardware(session.robot()), LivePanels { studio: session } } }
 }
 
 #[component]
-fn LivePanels() -> Element {
-    let studio = crate::activities::live::session::LiveSession::current();
+fn LivePanels(studio: LiveSession) -> Element {
     let timeline = LiveTimeline::use_timeline(studio);
     let actions = timeline.actions();
     let mut resize_revision = use_signal(|| 0_u64);
@@ -74,10 +73,10 @@ fn LivePanels() -> Element {
         .unwrap_or_default();
     let mut panels = vec![
         Panel::new("workbench", "Live", "workbench", rsx! {
-            aside { class: "studio-v2-workbench", LiveWorkbench { on_action: move |action| studio.dispatch_live_action(action) } }
+            aside { class: "studio-v2-workbench", LiveWorkbench { studio, on_action: move |action| studio.dispatch_live_action(action) } }
         }).with_class("workbench-editor"),
         Panel::new("scene", "Scene", "primary", rsx! {
-            Viewport { source: timeline.scene_source(), presentation: ViewportPresentation::new(None, resize_revision()), on_select: move |next| selection.set(next) }
+            Viewport { studio: studio.robot(), source: timeline.scene_source(), presentation: ViewportPresentation::new(None, resize_revision()) }
         }).with_class("scene-editor"),
     ];
     for camera in &cameras {

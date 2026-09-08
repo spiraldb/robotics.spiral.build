@@ -17,24 +17,25 @@ use crate::shell::robot_workspace::Selection;
 
 /// The complete left-hand workbench for operating a connected pair.
 #[component]
-pub(crate) fn LiveWorkbench(on_action: EventHandler<LiveAction>) -> Element {
-    let studio = LiveSession::current();
+pub(crate) fn LiveWorkbench(studio: LiveSession, on_action: EventHandler<LiveAction>) -> Element {
     let robots = studio.snapshot().read().robots().to_owned();
 
     rsx! {
         div { class: "studio-workbench-scroll live-workbench",
-            ControlSection { on_action }
-            CaptureSection {}
+            ControlSection { studio, on_action }
+            CaptureSection { studio }
 
             section { class: "workbench-section live-properties",
                 header { class: "workbench-section-heading",
                     h3 { "Motors" }
                 }
                 RobotRoster {
+                    studio,
                     robots,
                     on_select: move |selection| on_action.call(LiveAction::Select(selection)),
                 }
                 JointPanel {
+                    studio: studio.robot(),
                     on_select: move |selection| on_action.call(LiveAction::Select(selection)),
                     on_point: move |selection| on_action.call(LiveAction::Point(selection)),
                 }
@@ -44,9 +45,8 @@ pub(crate) fn LiveWorkbench(on_action: EventHandler<LiveAction>) -> Element {
 }
 
 #[component]
-fn CaptureSection() -> Element {
-    let studio = LiveSession::current();
-    let data = crate::activities::data::dataset_catalog::DatasetChoices::current();
+fn CaptureSection(studio: LiveSession) -> Element {
+    let data = studio.datasets();
     let mut selected_dataset = studio.selected_dataset();
     let recording = studio.recording();
     let dataset_ids = data
@@ -80,7 +80,7 @@ fn CaptureSection() -> Element {
             datalist { id: "live-dataset-options",
                 for id in dataset_ids { option { value: "{id}" } }
             }
-            DatasetCatalogFeedback {}
+            DatasetCatalogFeedback { data }
             p {
                 if recording.is_some() {
                     "Dataset assignment is locked until this episode finishes."
@@ -94,10 +94,10 @@ fn CaptureSection() -> Element {
 
 #[component]
 fn RobotRoster(
+    studio: LiveSession,
     robots: Vec<spiral_robotics_common::robots::RobotSummary>,
     on_select: EventHandler<Option<Selection>>,
 ) -> Element {
-    let studio = LiveSession::current();
     let focused = studio.focused().map(|robot| robot.id().to_owned());
     let empty = robots.is_empty();
 
@@ -164,8 +164,7 @@ fn RobotRoster(
 }
 
 #[component]
-fn ControlSection(on_action: EventHandler<LiveAction>) -> Element {
-    let studio = LiveSession::current();
+fn ControlSection(studio: LiveSession, on_action: EventHandler<LiveAction>) -> Element {
     let focused = studio.focused();
     let telemetry = focused
         .as_ref()

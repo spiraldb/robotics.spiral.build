@@ -13,11 +13,11 @@ use crate::tasks::SingleFlight;
 
 #[component]
 pub(super) fn CalibrationSection(
+    studio: RobotWorkspace,
     robot: RobotSummary,
-    connected: bool,
     progress: Option<CalibrationProgress>,
 ) -> Element {
-    let studio = RobotWorkspace::current();
+    let connected = robot.connection().connected();
     let mut confirming_reapply = use_signal(|| false);
     let reapplying = use_signal(|| false);
     let mut command = use_signal(|| None::<&'static str>);

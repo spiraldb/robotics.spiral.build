@@ -69,17 +69,15 @@ impl RobotFleet for [RobotSummary] {
 }
 
 #[component]
-pub(crate) fn RolloutWorkbench() -> Element {
-    let studio = RobotWorkspace::current();
-    let controller = crate::activities::rollout::state::RolloutController::current();
+pub(crate) fn RolloutWorkbench(
+    studio: RobotWorkspace,
+    controller: super::state::RolloutController,
+    training_history: crate::activities::training::history::TrainingHistory,
+) -> Element {
     let mut pending_action = use_signal(|| None::<PendingRolloutAction>);
     let snapshot = studio.snapshot().read().to_owned();
-    let training_history = crate::activities::training::history::TrainingHistory::current();
     let training = training_history.snapshot().read().to_owned();
-    let rollout = super::state::RolloutController::current()
-        .snapshot()
-        .read()
-        .to_owned();
+    let rollout = controller.snapshot().read().to_owned();
     let checkpoints = training.checkpoint_choices();
     let selected_key = controller
         .checkpoint()
@@ -416,11 +414,8 @@ impl RolloutCameraSummary {
 }
 
 #[component]
-pub(crate) fn InferencePanel() -> Element {
-    let rollout = super::state::RolloutController::current()
-        .snapshot()
-        .read()
-        .to_owned();
+pub(crate) fn InferencePanel(controller: super::state::RolloutController) -> Element {
+    let rollout = controller.snapshot().read().to_owned();
     let metrics = &rollout.metrics();
     let latency = metrics.last_latency_ms().rollout_metric();
     let model = metrics.last_model_ms().rollout_metric();

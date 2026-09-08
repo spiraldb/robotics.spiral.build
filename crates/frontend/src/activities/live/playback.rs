@@ -34,10 +34,9 @@ impl LivePreview {
             interactive: use_signal(|| None),
         };
         let on_sample = use_callback(move |(episode, seconds)| session.sample(episode, seconds));
-        let workspace = crate::shell::activity::WorkspaceActivity::current();
         studio
             .timeline_controller()
-            .use_clock(workspace.is_active_signal(), on_sample);
+            .use_clock(studio.is_active_signal(), on_sample);
         session.use_recording_clock();
         session
     }

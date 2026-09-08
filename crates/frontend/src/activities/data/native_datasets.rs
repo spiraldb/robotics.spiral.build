@@ -8,7 +8,7 @@ use crate::shell::project::ProjectSessionSignals;
 use dioxus::prelude::*;
 use spiral_robotics_common::native_datasets::{NativeDatasetInspection, NativeDatasetSelection};
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub(crate) struct DatasetBrowserSelection {
     selected: Signal<Option<NativeDatasetSelection>>,
     revision: Signal<u64>,
@@ -17,15 +17,14 @@ pub(crate) struct DatasetBrowserSelection {
     search: Signal<String>,
 }
 impl DatasetBrowserSelection {
-    pub(crate) fn provide() -> Self {
-        let browser = use_hook(|| Self {
+    pub(crate) fn use_selection() -> Self {
+        use_hook(|| Self {
             selected: Signal::new(None),
             revision: Signal::new(0),
             requested_panel: Signal::new(None),
             navigation: DatasetNavigation::new(),
             search: Signal::new(String::new()),
-        });
-        use_context_provider(|| browser)
+        })
     }
     pub(crate) fn requested_panel(self) -> Option<dioxus_workbench::PanelId> {
         (self.requested_panel)()
@@ -43,8 +42,7 @@ impl DatasetBrowserSelection {
 }
 
 #[component]
-pub(crate) fn NativeDatasetsPanel() -> Element {
-    let mut browser = use_context::<DatasetBrowserSelection>();
+pub(crate) fn NativeDatasetsPanel(mut browser: DatasetBrowserSelection) -> Element {
     let sessions = ProjectSessionSignals::current();
     let mut search = browser.search;
     let available = use_memo(move || sessions.storage_available());
@@ -109,8 +107,7 @@ pub(crate) fn NativeDatasetsPanel() -> Element {
 }
 
 #[component]
-pub(crate) fn NativeDatasetInspector() -> Element {
-    let browser = use_context::<DatasetBrowserSelection>();
+pub(crate) fn NativeDatasetInspector(browser: DatasetBrowserSelection) -> Element {
     let available = use_memo(move || {
         crate::shell::project::ProjectSessionSignals::current().storage_available()
     });
@@ -146,7 +143,7 @@ pub(crate) fn NativeDatasetInspector() -> Element {
                 p { class: "data-empty-copy", role: "status", "Loading dataset…" }
             } else {
                 match &*inspection_response {
-                    Some(Ok(Some(detail))) => rsx! { DatasetContents { key: "{detail.dataset().resource_id()}-{detail.dataset().version_id()}", inspection: detail.clone() } },
+                    Some(Ok(Some(detail))) => rsx! { DatasetContents { navigation: browser.navigation, key: "{detail.dataset().resource_id()}-{detail.dataset().version_id()}", inspection: detail.clone() } },
                     Some(Err(error)) => rsx! {
                         div { class: "data-empty-copy", role: "alert",
                             p { class: "mb-3 text-danger", "{error}" }
@@ -166,7 +163,7 @@ enum DatasetSection {
     Topics,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 struct DatasetNavigation {
     section: Signal<DatasetSection>,
     episodes: super::native_episodes::EpisodeNavigation,
@@ -191,8 +188,7 @@ impl DatasetNavigation {
 }
 
 #[component]
-fn DatasetContents(inspection: NativeDatasetInspection) -> Element {
-    let navigation = use_context::<DatasetBrowserSelection>().navigation;
+fn DatasetContents(inspection: NativeDatasetInspection, navigation: DatasetNavigation) -> Element {
     let mut section = navigation.section;
     let selection = inspection.dataset().selection();
     rsx! {
@@ -216,14 +212,16 @@ fn DatasetContents(inspection: NativeDatasetInspection) -> Element {
                 p { class: "data-empty-copy", "This dataset has no episode list. Open Topics to explore its contents." }
             }
         } else {
-            DatasetTopics { inspection: inspection.clone() }
+            DatasetTopics { navigation, inspection: inspection.clone() }
         }
     }
 }
 
 #[component]
-fn DatasetTopics(inspection: NativeDatasetInspection) -> Element {
-    let mut navigation = use_context::<DatasetBrowserSelection>().navigation;
+fn DatasetTopics(
+    inspection: NativeDatasetInspection,
+    mut navigation: DatasetNavigation,
+) -> Element {
     let mut selected = navigation.topic;
     rsx! {
         if let Some(topic) = selected() {
@@ -231,7 +229,7 @@ fn DatasetTopics(inspection: NativeDatasetInspection) -> Element {
                 key: "{topic}",
                 dataset: inspection.dataset().selection().clone(),
                 topic,
-                on_back: move |_| selected.set(None),
+                navigation,
             }
         } else {
             p { class: "px-5 py-4 text-xs text-ink-soft", "Choose a topic to preview messages across this dataset." }
@@ -263,8 +261,12 @@ fn DatasetTopics(inspection: NativeDatasetInspection) -> Element {
 }
 
 #[component]
-fn TopicMessages(dataset: NativeDatasetSelection, topic: String, on_back: EventHandler) -> Element {
-    let selected_message = use_context::<DatasetBrowserSelection>().navigation.message;
+fn TopicMessages(
+    dataset: NativeDatasetSelection,
+    topic: String,
+    mut navigation: DatasetNavigation,
+) -> Element {
+    let selected_message = navigation.message;
     let mut preview = use_resource(use_reactive(
         (&dataset, &topic),
         move |(dataset, topic)| async move {
@@ -283,7 +285,7 @@ fn TopicMessages(dataset: NativeDatasetSelection, topic: String, on_back: EventH
     let pending = *preview.state().read() == UseResourceState::Pending;
     rsx! {
         header { class: "data-content-toolbar",
-            button { class: "data-text-action", onclick: move |_| on_back.call(()), "Back to topics" }
+            button { class: "data-text-action", onclick: move |_| navigation.topic.set(None), "Back to topics" }
             button { class: "data-text-action", disabled: pending, onclick: move |_| preview.restart(), "Refresh preview" }
         }
         div { class: "px-5 pb-4",
@@ -306,7 +308,7 @@ mod navigation_tests {
     struct NavigationHarness(Rc<RefCell<Option<DatasetBrowserSelection>>>);
     impl NavigationHarness {
         fn render(self) -> Element {
-            *self.0.borrow_mut() = Some(DatasetBrowserSelection::provide());
+            *self.0.borrow_mut() = Some(DatasetBrowserSelection::use_selection());
             rsx! {}
         }
     }

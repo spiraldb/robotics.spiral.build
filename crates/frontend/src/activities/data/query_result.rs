@@ -86,8 +86,7 @@ pub(crate) enum QueryState {
 }
 
 #[component]
-pub(crate) fn QueryResultView() -> Element {
-    let controller = crate::activities::data::state::QueryController::current();
+pub(crate) fn QueryResultView(controller: super::state::QueryController) -> Element {
     let tabs = controller.query_tabs();
     let active_id = controller.active_query();
     let active = active_id

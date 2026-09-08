@@ -8,13 +8,18 @@ use spiral_robotics_common::relations::RelationCatalog;
 const QUERY_ROW_OPTIONS: [usize; 5] = [25, 100, 250, 500, 1_000];
 
 #[component]
-pub(crate) fn QueryPanel(namespace: String, dataset_id: String, query_available: bool) -> Element {
-    let studio = StudioProjectState::current();
-    let controller = crate::activities::data::state::QueryController::current();
+pub(crate) fn QueryPanel(
+    studio: StudioProjectState,
+    controller: super::state::QueryController,
+    catalog: super::relations::RelationCatalogState,
+) -> Element {
+    let configuration = studio.configuration();
+    let namespace = configuration.dataset();
+    let dataset_id = "default";
+    let query_available = configuration.spiral_query_available();
     let catalog_available =
         crate::shell::project::ProjectSessionSignals::current().catalog_available();
-    let relation_result =
-        super::relations::RelationCatalogState::current().relation_catalog_result();
+    let relation_result = catalog.relation_catalog_result();
     let relation_error = relation_result
         .as_ref()
         .and_then(|result| result.as_ref().err())
@@ -23,8 +28,8 @@ pub(crate) fn QueryPanel(namespace: String, dataset_id: String, query_available:
         .as_ref()
         .and_then(|result| result.as_ref().ok());
     let schema_relations = SchemaRelationSummary::for_dataset(
-        &namespace,
-        &dataset_id,
+        namespace,
+        dataset_id,
         query_available.then_some(relation_response).flatten(),
     );
     let can_query = query_available;

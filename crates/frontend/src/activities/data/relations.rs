@@ -178,14 +178,20 @@ impl ProjectRelationScope<'_> {
 }
 
 #[component]
-pub(crate) fn RelationsPanel(namespace: String, query_available: bool) -> Element {
-    let controller = crate::activities::data::state::QueryController::current();
+pub(crate) fn RelationsPanel(
+    studio: crate::shell::state::StudioProjectState,
+    controller: super::state::QueryController,
+    catalog: RelationCatalogState,
+) -> Element {
+    let configuration = studio.configuration();
+    let namespace = configuration.dataset().to_owned();
+    let query_available = configuration.spiral_query_available();
     let mut selected = use_signal(|| None::<String>);
     let count_namespace = namespace.clone();
     let sessions = crate::shell::project::ProjectSessionSignals::current();
     let mut counts = use_resource(move || {
         let available = sessions.catalog_available();
-        let catalog = RelationCatalogState::current().relation_catalog();
+        let catalog = catalog.relation_catalog();
         let namespace = count_namespace.clone();
         async move {
             if !available {
@@ -205,7 +211,7 @@ pub(crate) fn RelationsPanel(namespace: String, query_available: bool) -> Elemen
                 .map(Some)
         }
     });
-    let catalog_result = RelationCatalogState::current().relation_catalog_result();
+    let catalog_result = catalog.relation_catalog_result();
     let catalog_response = catalog_result
         .as_ref()
         .and_then(|result| result.as_ref().ok())
@@ -652,10 +658,7 @@ pub(crate) struct RelationCatalogState {
     result: ReadSignal<Option<Result<spiral_robotics_common::relations::RelationCatalog, String>>>,
 }
 impl RelationCatalogState {
-    pub(crate) fn current() -> Self {
-        consume_context()
-    }
-    pub(crate) fn use_provider() -> Self {
+    pub(crate) fn use_catalog() -> Self {
         let sessions = crate::shell::project::ProjectSessionSignals::current();
         let available = use_memo(move || sessions.catalog_available());
         let request = crate::client::queries::QueryPolicy::on_demand(
@@ -670,7 +673,7 @@ impl RelationCatalogState {
                     .map_err(|error| error.to_string())
             },
         );
-        use_context_provider(|| Self {
+        use_hook(|| Self {
             result: request.value(),
         })
     }

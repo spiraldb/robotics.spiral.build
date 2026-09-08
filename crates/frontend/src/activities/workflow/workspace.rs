@@ -47,35 +47,34 @@ enum AssistantInline {
 }
 
 #[component]
-fn WorkflowPanels() -> Element {
-    let controller = crate::activities::workflow::state::WorkflowController::current();
+fn WorkflowPanels(controller: super::state::WorkflowController) -> Element {
     let panels = vec![
         Panel::new(
             ASSISTANT_PANEL_ID,
             "Assistant",
             "workflow-left",
-            rsx! { WorkflowAssistant {} },
+            rsx! { WorkflowAssistant { controller } },
         )
         .with_class("workflow-assistant-editor"),
         Panel::new(
             NODE_PANEL_ID,
             "Node",
             "workflow-left",
-            rsx! { WorkflowNodeInspector {} },
+            rsx! { WorkflowNodeInspector { controller } },
         )
         .with_class("workflow-node-editor"),
         Panel::new(
             CANVAS_PANEL_ID,
             "Workflow",
             "workflow-canvas",
-            rsx! { WorkflowCanvas {} },
+            rsx! { WorkflowCanvas { controller } },
         )
         .with_class("workflow-canvas-editor"),
         Panel::new(
             RESULTS_PANEL_ID,
             "Results",
             "workflow-results",
-            rsx! { WorkflowResults {} },
+            rsx! { WorkflowResults { controller } },
         )
         .with_class("workflow-results-editor"),
     ];
@@ -115,9 +114,8 @@ impl WorkflowWorkspaceLayout {
 }
 
 #[component]
-fn WorkflowAssistant() -> Element {
+fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
     let studio = StudioProjectState::current();
-    let controller = crate::activities::workflow::state::WorkflowController::current();
     let state = controller.agent_state();
     let mut follow_latest = use_signal(|| true);
     let mut show_latest_action = use_signal(|| false);
@@ -762,8 +760,7 @@ impl AssistantMarkdownLine for str {
 }
 
 #[component]
-fn WorkflowNodeInspector() -> Element {
-    let controller = crate::activities::workflow::state::WorkflowController::current();
+fn WorkflowNodeInspector(controller: super::state::WorkflowController) -> Element {
     let selected = controller.selected_node_data();
     let relations = controller.relations();
     let snapshot_active = controller.snapshot().phase().active();
@@ -1068,7 +1065,7 @@ fn WorkflowNodeInspector() -> Element {
                         }
                     }
                 }
-                {node_validation_issues(&node_id)}
+                {node_validation_issues(controller, &node_id)}
             } else {
                 div { class: "workflow-panel-empty",
                     strong { "No node selected" }
@@ -1080,8 +1077,8 @@ fn WorkflowNodeInspector() -> Element {
     }
 }
 
-fn node_validation_issues(node_id: &str) -> Element {
-    let validation = crate::activities::workflow::state::WorkflowController::current().validation();
+fn node_validation_issues(controller: super::state::WorkflowController, node_id: &str) -> Element {
+    let validation = controller.validation();
     let issues = validation
         .errors()
         .iter()
@@ -1102,9 +1099,8 @@ fn node_validation_issues(node_id: &str) -> Element {
 }
 
 #[component]
-fn WorkflowCanvas() -> Element {
+fn WorkflowCanvas(controller: super::state::WorkflowController) -> Element {
     let studio = StudioProjectState::current();
-    let controller = crate::activities::workflow::state::WorkflowController::current();
     let nodes = controller.nodes();
     let edges = controller.edges();
     let flow = use_flow_handle::<WorkflowNodeData>();
@@ -1484,9 +1480,8 @@ fn node_kind_icon(kind: WorkflowNodeKind) -> Element {
 }
 
 #[component]
-fn WorkflowResults() -> Element {
+fn WorkflowResults(controller: super::state::WorkflowController) -> Element {
     let studio = StudioProjectState::current();
-    let controller = crate::activities::workflow::state::WorkflowController::current();
     let snapshot = controller.snapshot();
     let run_reason = controller.run_disabled_reason();
     let can_run_again = matches!(
@@ -1918,13 +1913,12 @@ mod tests {
 
 #[component]
 pub(crate) fn WorkflowWorkspace(is_active: ReadSignal<bool>) -> Element {
-    crate::shell::activity::WorkspaceActivity::provide(
+    let workspace = crate::shell::activity::WorkspaceActivity::provide(
         crate::shell::activity::Activity::Workflow,
         is_active,
     );
-    let catalog = crate::activities::data::relations::RelationCatalogState::use_provider();
+    let catalog = crate::activities::data::relations::RelationCatalogState::use_catalog();
     let controller = super::state::WorkflowController::use_controller(catalog.signal());
-    use_context_provider(|| controller);
     controller.use_polling(is_active);
-    rsx! { crate::shell::frame::WorkspaceFrame { status: crate::shell::frame::WorkspaceStatus::Workflow(controller), WorkflowPanels {} } }
+    rsx! { crate::shell::frame::WorkspaceFrame { workspace, status: crate::shell::frame::WorkspaceStatus::Workflow(controller), WorkflowPanels { controller } } }
 }

@@ -67,17 +67,14 @@ impl DatasetCatalogState {
 }
 
 /// Each mounted workspace owns its own choice and completed catalog request.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub(crate) struct DatasetChoices {
     selected: Signal<String>,
     catalog: Signal<DatasetCatalogState>,
 }
 impl DatasetChoices {
-    pub(crate) fn current() -> Self {
-        consume_context()
-    }
-    pub(crate) fn use_provider() -> Self {
-        let choices = use_context_provider(|| Self {
+    pub(crate) fn use_choices() -> Self {
+        let choices = use_hook(|| Self {
             selected: Signal::new("default".to_owned()),
             catalog: Signal::new(DatasetCatalogState::default()),
         });
@@ -118,8 +115,7 @@ impl DatasetChoices {
 /// Background failures stay beside the selector. Retrying is also kept inline,
 /// so one catalog failure never creates a notification on every render.
 #[component]
-pub(crate) fn DatasetCatalogFeedback() -> Element {
-    let data = DatasetChoices::current();
+pub(crate) fn DatasetCatalogFeedback(data: DatasetChoices) -> Element {
     let available = ProjectSessionSignals::current().storage_available();
     let error = data.dataset_catalog_error();
     let loading = data.datasets_loading();

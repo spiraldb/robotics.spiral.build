@@ -10,18 +10,18 @@ pub(crate) const MAX_QUERY_TABS: usize = 8;
 struct ActiveQuery {
     id: u64,
 }
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub(crate) struct QueryController {
     draft: QueryDraftSignals,
     execution: QueryExecutionSignals,
 }
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 struct QueryDraftSignals {
     sql: Signal<String>,
     max_rows: Signal<usize>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 struct QueryExecutionSignals {
     query_tabs: Signal<Vec<QueryTab>>,
     active_query: Signal<Option<u64>>,
@@ -30,14 +30,11 @@ struct QueryExecutionSignals {
 }
 
 impl QueryController {
-    pub(crate) fn current() -> Self {
-        consume_context()
-    }
-    pub(crate) fn use_provider() -> Self {
+    pub(crate) fn use_controller() -> Self {
         let initial_sql = NativeDatasetSelection::new(vec!["default".into()])
             .unwrap()
             .episodes_sql();
-        use_context_provider(|| Self {
+        use_hook(|| Self {
             draft: QueryDraftSignals {
                 sql: Signal::new(initial_sql),
                 max_rows: Signal::new(DEFAULT_QUERY_ROWS),
@@ -317,7 +314,7 @@ mod ownership_tests {
     }
     #[component]
     fn QueryOwner() -> Element {
-        let controller = QueryController::use_provider();
+        let controller = QueryController::use_controller();
         let harness = use_context::<OwnershipHarness>();
         use_hook(move || harness.0.borrow_mut().controllers.push(controller));
         rsx! { span { "{controller.sql()}" } }

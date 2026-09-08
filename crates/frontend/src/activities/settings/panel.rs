@@ -93,7 +93,7 @@ impl SettingsPanelState {
 }
 
 #[component]
-pub(crate) fn SettingsPanel(state: SettingsLoadState) -> Element {
+pub(crate) fn SettingsPanel(studio: RobotWorkspace, state: SettingsLoadState) -> Element {
     let SettingsLoadState {
         initial,
         load_error,
@@ -128,14 +128,12 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState) -> Element {
                     },
             },
     } = SettingsPanelState::use_state(initial_value, initial_section);
-    let studio = RobotWorkspace::current();
     let on_saved = move || {
         studio.refresh_settings();
     };
 
-    let workspace = crate::shell::activity::WorkspaceActivity::current();
     use_effect(move || {
-        if workspace.is_active() {
+        if studio.is_active() {
             BrowserFocus::after_render("data-settings-panel".to_owned());
         }
     });
@@ -268,7 +266,7 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState) -> Element {
                 div { class: "settings-content",
                     if section() == SettingsSection::Robots {
                         ProviderHeading { title: "Robot setup", description: "Configure ports, camera assignments, and calibration for each arm." }
-                        div { class: "robot-settings-panel", RobotPanel {} }
+                        div { class: "robot-settings-panel", RobotPanel { studio } }
                     } else if let Some(error) = load_error.as_ref() {
                         div { class: "settings-loading data-error", "{error}" }
                     } else if !settings_loaded {
@@ -583,14 +581,14 @@ fn SettingsField(label: &'static str, value: String, behavior: SettingsInputBeha
 
 #[component]
 pub(crate) fn SettingsWorkspace(is_active: ReadSignal<bool>) -> Element {
-    crate::shell::activity::WorkspaceActivity::provide(
+    let workspace = crate::shell::activity::WorkspaceActivity::provide(
         crate::shell::activity::Activity::Settings,
         is_active,
     );
-    let studio = crate::shell::robot_workspace::RobotWorkspace::use_provider(is_active);
+    let studio = crate::shell::robot_workspace::RobotWorkspace::use_workspace(is_active);
     rsx! {
-        crate::shell::frame::WorkspaceFrame { status: crate::shell::frame::WorkspaceStatus::Hardware(studio),
-            SettingsPanel { state: SettingsLoadState::new(
+        crate::shell::frame::WorkspaceFrame { workspace, status: crate::shell::frame::WorkspaceStatus::Hardware(studio),
+            SettingsPanel { studio, state: SettingsLoadState::new(
                 studio.loaded_settings(),
                 studio.settings_result().and_then(Result::err),
             ) }

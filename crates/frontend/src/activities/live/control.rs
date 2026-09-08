@@ -14,7 +14,7 @@ use spiral_robotics_common::robots::{
 };
 use spiral_robotics_viewport::{self as arm, ArmPose};
 
-use crate::activities::live::session::LiveSession;
+use crate::shell::robot_workspace::RobotWorkspace;
 use crate::shell::robot_workspace::Selection;
 
 #[derive(Default)]
@@ -36,10 +36,10 @@ impl PendingGoals {
 
 #[component]
 pub(crate) fn JointPanel(
+    studio: RobotWorkspace,
     on_select: EventHandler<Option<Selection>>,
     on_point: EventHandler<Option<Selection>>,
 ) -> Element {
-    let studio = LiveSession::current();
     let Some(robot) = studio.focused() else {
         return rsx! {
             p { class: "px-2 py-1 text-[11px] text-ink-faint", "Add an arm to see its joints." }
@@ -69,12 +69,13 @@ pub(crate) fn JointPanel(
             }
 
             JointControls {
+                studio,
                 robot: robot.clone(),
-                telemetry: telemetry.clone(),
                 behavior: JointControlBehavior::new(drivable, on_select, on_point),
             }
 
             MotorDetail {
+                selection: studio.selection(),
                 robot: robot.clone(),
                 telemetry: telemetry.clone(),
             }
@@ -260,9 +261,12 @@ fn ConditionReadout(robot: RobotSummary, telemetry: Option<RobotTelemetry>) -> E
 /// deliberate act rather than a live value, so opening this does not put the
 /// layout at the mercy of the telemetry stream.
 #[component]
-fn MotorDetail(robot: RobotSummary, telemetry: Option<RobotTelemetry>) -> Element {
-    let studio = LiveSession::current();
-    let selected = studio.selection().read().to_owned();
+fn MotorDetail(
+    selection: Signal<Option<Selection>>,
+    robot: RobotSummary,
+    telemetry: Option<RobotTelemetry>,
+) -> Element {
+    let selected = selection.read().to_owned();
     let Some(name) = selected.and_then(|selection| match selection {
         Selection::Joint {
             robot: selected,
@@ -437,17 +441,16 @@ impl MeasuredJointTelemetry for [JointTelemetry] {
 
 #[component]
 fn JointControls(
+    studio: RobotWorkspace,
     robot: RobotSummary,
-    telemetry: Option<RobotTelemetry>,
     behavior: JointControlBehavior,
 ) -> Element {
+    let telemetry = studio.robot_telemetry(robot.id());
     let JointControlBehavior {
         drivable,
         on_select,
         on_point,
     } = behavior;
-    let studio = LiveSession::current();
-    let workspace = crate::shell::activity::WorkspaceActivity::current();
     // While a slider is being dragged the arm is still catching up, so the
     // commanded value is shown until the measurement agrees with it. That echo
     // is only meaningful for as long as this arm is actually being driven, so
@@ -461,7 +464,7 @@ fn JointControls(
     // in-flight request completes.
     let pending = use_hook(|| Rc::new(RefCell::new(PendingGoals::default())));
     let command_robot = robot.id().to_owned();
-    let _ = workspace.is_active();
+    let _ = studio.is_active();
     let mut sender = use_future({
         let pending = pending.clone();
         move || {
@@ -470,7 +473,7 @@ fn JointControls(
             async move {
                 loop {
                     gloo_timers::future::TimeoutFuture::new(32).await;
-                    let may_drive = workspace.is_active()
+                    let may_drive = studio.is_active()
                         && studio.controls_available()
                         && studio.is_manual_target(&command_robot)
                         && studio
@@ -497,7 +500,7 @@ fn JointControls(
     });
     let inactive_pending = pending.clone();
     use_hook_did_run(move |did_run| {
-        if did_run && workspace.is_active() {
+        if did_run && studio.is_active() {
             sender.resume();
         } else {
             inactive_pending.borrow_mut().clear();
@@ -507,7 +510,7 @@ fn JointControls(
     let watched = robot.id().to_owned();
     let clear_pending = pending.clone();
     use_effect(move || {
-        let driving = workspace.is_active()
+        let driving = studio.is_active()
             && studio
                 .telemetry()
                 .read()

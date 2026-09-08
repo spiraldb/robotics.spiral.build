@@ -324,9 +324,6 @@ struct WorkflowAssistantSignals {
 }
 
 impl WorkflowController {
-    pub(crate) fn current() -> Self {
-        consume_context()
-    }
     pub(crate) fn use_controller(
         relation_catalog: ReadSignal<Option<Result<RelationCatalog, String>>>,
     ) -> Self {

@@ -91,9 +91,9 @@ pub(crate) enum WorkspaceStatus {
 #[component]
 pub(crate) fn WorkspaceFrame(
     children: Element,
+    workspace: crate::shell::activity::WorkspaceActivity,
     #[props(default)] status: WorkspaceStatus,
 ) -> Element {
-    let workspace = crate::shell::activity::WorkspaceActivity::current();
     let route = crate::shell::routes::StudioRoute::for_activity(workspace.activity());
     rsx! {
         div { class: "studio-route-content", {children} }

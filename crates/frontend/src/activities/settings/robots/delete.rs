@@ -11,8 +11,7 @@ use crate::tasks::SingleFlight;
 
 /// Deleting an arm destroys its calibration, so it takes a specific second click.
 #[component]
-pub(super) fn DeleteRobotAction(robot: RobotSummary) -> Element {
-    let studio = RobotWorkspace::current();
+pub(super) fn DeleteRobotAction(studio: RobotWorkspace, robot: RobotSummary) -> Element {
     let mut confirming = use_signal(|| false);
     let deleting = use_signal(|| false);
     let id = robot.id().to_owned();

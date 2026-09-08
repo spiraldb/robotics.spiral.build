@@ -37,13 +37,11 @@ const EMPTY_RUN_PANEL_ID: &str = "training-run-empty";
 const TRAINING_CHART_POINT_BUDGET: usize = 1_200;
 
 #[component]
-fn TrainingPanels() -> Element {
-    let dataset_id = crate::activities::data::dataset_catalog::DatasetChoices::current()
-        .selected()
-        .read()
-        .to_owned();
-    let controller = super::state::TrainingController::current();
-    let training_history = super::history::TrainingHistory::current();
+fn TrainingPanels(
+    data: crate::activities::data::dataset_catalog::DatasetChoices,
+    controller: super::state::TrainingController,
+    training_history: super::history::TrainingHistory,
+) -> Element {
     let snapshot = training_history.snapshot().read().to_owned();
     let run_names = snapshot
         .runs()
@@ -67,9 +65,7 @@ fn TrainingPanels() -> Element {
         "training-control",
         rsx! {
             TrainingRunControl {
-                dataset_id: dataset_id.clone(),
-                readiness: snapshot.readiness().to_owned(),
-                active_run: active_run.clone(),
+                data, controller, training_history,
             }
         },
     )
@@ -78,7 +74,7 @@ fn TrainingPanels() -> Element {
         "training-history",
         "Runs",
         "training-history",
-        rsx! { TrainingHistory { history: snapshot.runs().to_owned() } },
+        rsx! { TrainingHistory { controller, history: snapshot.runs().to_owned() } },
     )
     .with_class("training-history-editor");
 
@@ -189,15 +185,16 @@ fn TrainingPanels() -> Element {
 
 #[component]
 fn TrainingRunControl(
-    dataset_id: String,
-    readiness: TrainingReadiness,
-    active_run: Option<TrainingRun>,
+    data: crate::activities::data::dataset_catalog::DatasetChoices,
+    controller: super::state::TrainingController,
+    training_history: super::history::TrainingHistory,
 ) -> Element {
     let studio = StudioProjectState::current();
-    let data = crate::activities::data::dataset_catalog::DatasetChoices::current();
-    let mut selected_dataset =
-        crate::activities::data::dataset_catalog::DatasetChoices::current().selected();
-    let controller = crate::activities::training::state::TrainingController::current();
+    let dataset_id = data.selected().read().to_owned();
+    let snapshot = training_history.snapshot().read().to_owned();
+    let readiness = snapshot.readiness().to_owned();
+    let active_run = snapshot.active_run().cloned();
+    let mut selected_dataset = data.selected();
     let config = controller.config();
     let dataset_ids = data
         .datasets()
@@ -327,7 +324,7 @@ fn TrainingRunControl(
                         }
                     }
                 }
-                DatasetCatalogFeedback {}
+                DatasetCatalogFeedback { data }
                 dl { class: "training-source-meta",
                     div { dt { "Cameras" } dd { "{camera_summary}" } }
                 }
@@ -548,7 +545,7 @@ fn TrainingRunControl(
                 aria_busy: starting,
                 title: if active_run.is_some() { "Stop the active run first".to_owned() } else if !dataset_valid { "Choose a valid dataset ID first".to_owned() } else if !readiness.ready() { readiness_recovery.clone() } else { "Start training".to_owned() },
                 onclick: move |_| {
-                    controller.start(studio);
+                    controller.start(studio, training_history);
                 },
                 if starting { "Starting…" } else { "Run training" }
             }
@@ -557,9 +554,10 @@ fn TrainingRunControl(
 }
 
 #[component]
-fn TrainingHistory(history: Vec<TrainingRun>) -> Element {
-    let controller = crate::activities::training::state::TrainingController::current();
-    let selected_run = controller.selected_run();
+fn TrainingHistory(
+    controller: super::state::TrainingController,
+    history: Vec<TrainingRun>,
+) -> Element {
     let confirming_delete = use_signal(|| None::<String>);
     rsx! {
         section { class: "training-history-panel studio-workbench-scroll",
@@ -571,7 +569,7 @@ fn TrainingHistory(history: Vec<TrainingRun>) -> Element {
             }
             for run in history {
                 TrainingHistoryRow {
-                    selected: selected_run.as_deref() == Some(run.id()),
+                    controller,
                     confirming_delete,
                     run,
                 }
@@ -583,11 +581,11 @@ fn TrainingHistory(history: Vec<TrainingRun>) -> Element {
 #[component]
 fn TrainingHistoryRow(
     run: TrainingRun,
-    selected: bool,
+    controller: super::state::TrainingController,
     mut confirming_delete: Signal<Option<String>>,
 ) -> Element {
     let studio = StudioProjectState::current();
-    let controller = crate::activities::training::state::TrainingController::current();
+    let selected = controller.selected_run().as_deref() == Some(run.id());
     let deleting_run = controller.deleting();
     let deleting = deleting_run.as_deref() == Some(run.id());
     let delete_disabled = run.phase().active() || deleting_run.is_some();
@@ -1520,18 +1518,17 @@ mod tests {
 
 #[component]
 pub(crate) fn TrainingWorkspace(is_active: ReadSignal<bool>) -> Element {
-    crate::shell::activity::WorkspaceActivity::provide(
+    let workspace = crate::shell::activity::WorkspaceActivity::provide(
         crate::shell::activity::Activity::Training,
         is_active,
     );
     let studio = crate::shell::state::StudioProjectState::current();
-    let choices = crate::activities::data::dataset_catalog::DatasetChoices::use_provider();
+    let choices = crate::activities::data::dataset_catalog::DatasetChoices::use_choices();
     let controller = super::state::TrainingController::use_controller(
         studio.configuration().dataset(),
         &choices.selected().read(),
     );
-    use_context_provider(|| controller);
     let history =
         super::history::TrainingHistory::use_history(is_active, move || controller.selected_run());
-    rsx! { crate::shell::frame::WorkspaceFrame { status: crate::shell::frame::WorkspaceStatus::Training(history), TrainingPanels {} } }
+    rsx! { crate::shell::frame::WorkspaceFrame { workspace, status: crate::shell::frame::WorkspaceStatus::Training(history), TrainingPanels { data: choices, controller, training_history: history } } }
 }

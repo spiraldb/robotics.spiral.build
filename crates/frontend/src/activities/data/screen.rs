@@ -33,56 +33,52 @@ impl DataLayout {
 
 #[component]
 pub(crate) fn DataWorkspace(is_active: ReadSignal<bool>) -> Element {
-    crate::shell::activity::WorkspaceActivity::provide(
+    let workspace = crate::shell::activity::WorkspaceActivity::provide(
         crate::shell::activity::Activity::Data,
         is_active,
     );
-    rsx! { WorkspaceFrame { DataPanels {} } }
+    rsx! { WorkspaceFrame { workspace, DataPanels {} } }
 }
 
 #[component]
 fn DataPanels() -> Element {
     let studio = crate::shell::state::StudioProjectState::current();
-    let controller = super::state::QueryController::use_provider();
-    super::relations::RelationCatalogState::use_provider();
-    let browser = DatasetBrowserSelection::provide();
-    let configuration = studio.configuration();
-    let namespace = configuration.dataset();
-    let dataset_id = "default";
-    let query_available = configuration.spiral_query_available();
+    let controller = super::state::QueryController::use_controller();
+    let catalog = super::relations::RelationCatalogState::use_catalog();
+    let browser = DatasetBrowserSelection::use_selection();
     let panels = vec![
         Panel::new(
             "dataset-inspector",
             "Inspect",
             "dataset-inspector",
-            rsx! { NativeDatasetInspector {} },
+            rsx! { NativeDatasetInspector { browser } },
         ),
         Panel::new(
             "episodes",
             "Datasets",
             "episodes",
-            rsx! { NativeDatasetsPanel {} },
+            rsx! { NativeDatasetsPanel { browser } },
         )
         .with_class("episodes-workbench-editor"),
         Panel::new(
             "query",
             "SQL",
             "query",
-            rsx! { QueryPanel { namespace, dataset_id, query_available } },
+            rsx! { QueryPanel { studio, controller, catalog } },
         )
         .with_class("query-workbench-editor"),
         Panel::new(
             "query-result",
             "Results",
             "query-result",
-            rsx! { QueryResultView {} },
+            rsx! { QueryResultView { controller } },
         )
         .with_class("query-editor"),
         Panel::new(
             "relations",
             "Tables",
             "primary",
-            rsx! { RelationsPanel { namespace, query_available } },
+            rsx! { RelationsPanel { studio, controller, catalog } },
         )
         .with_class("relations-editor"),
     ];

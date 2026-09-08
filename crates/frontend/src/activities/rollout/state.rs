@@ -9,7 +9,7 @@ use spiral_robotics_common::rollout::{
     DEFAULT_ROLLOUT_DURATION_SECONDS, MAX_ROLLOUT_DURATION_SECONDS,
 };
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub(crate) struct RolloutController {
     snapshot: Signal<spiral_robotics_common::rollout::RolloutSnapshot>,
     checkpoint: Signal<Option<String>>,
@@ -17,10 +17,7 @@ pub(crate) struct RolloutController {
 }
 
 impl RolloutController {
-    pub(crate) fn current() -> Self {
-        consume_context()
-    }
-    pub(crate) fn use_provider(is_active: ReadSignal<bool>) -> Self {
+    pub(crate) fn use_controller(is_active: ReadSignal<bool>) -> Self {
         let controller = Self::use_state();
         let active = use_memo(move || controller.snapshot.read().phase().active());
         let request = crate::client::queries::QueryPolicy::new(
@@ -36,7 +33,7 @@ impl RolloutController {
         controller
     }
     fn use_state() -> Self {
-        use_context_provider(|| Self {
+        use_hook(|| Self {
             snapshot: Signal::new(Default::default()),
             checkpoint: Signal::new(None),
             duration_draft: Signal::new(DEFAULT_ROLLOUT_DURATION_SECONDS.to_string()),
@@ -112,7 +109,7 @@ mod tests {
 
     #[derive(Clone, Default)]
     struct ResponseHarness(Rc<RefCell<Option<ResponseObservation>>>);
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, PartialEq)]
     struct ResponseObservation {
         phase: Signal<u8>,
         controller: RolloutController,

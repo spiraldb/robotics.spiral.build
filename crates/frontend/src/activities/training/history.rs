@@ -23,8 +23,7 @@ impl TrainingHistory {
             move || is_active() && sessions.catalog_available(),
             move || TrainingClient::current().training_snapshot(selected()),
         );
-        let history = Self::use_response(request);
-        use_context_provider(|| history)
+        Self::use_response(request)
     }
 
     fn use_response(
@@ -55,9 +54,6 @@ impl TrainingHistory {
         history
     }
 
-    pub(crate) fn current() -> Self {
-        consume_context()
-    }
     pub(crate) fn snapshot(self) -> MappedSignal<TrainingSnapshot, Signal<TrainingSnapshot>> {
         self.snapshot.map(|value| value)
     }

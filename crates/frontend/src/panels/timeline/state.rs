@@ -30,7 +30,7 @@ impl PreviewTransport {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub(crate) struct TimelineController {
     playhead: Signal<f64>,
     preview: Signal<PreviewTransport>,

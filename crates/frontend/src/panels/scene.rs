@@ -129,16 +129,16 @@ impl ViewportPresentation {
 
 #[component]
 pub(crate) fn Viewport(
+    studio: RobotWorkspace,
     source: SceneSource,
     presentation: ViewportPresentation,
-    on_select: EventHandler<Option<Selection>>,
 ) -> Element {
     let ViewportPresentation {
         visible_robot,
         resize_revision,
     } = presentation;
-    let studio = RobotWorkspace::current();
-    let workspace = crate::shell::activity::WorkspaceActivity::current();
+    let mut selection = studio.selection();
+    let on_select = use_callback(move |next| selection.set(next));
     let canvas_dom = use_hook(ViewportDom::new);
     let bench = use_hook(|| Rc::new(RefCell::new(Option::<Bench>::None)));
     let mut view_revision = use_signal(|| 0_u64);
@@ -167,7 +167,7 @@ pub(crate) fn Viewport(
     use_effect(use_reactive(
         (&resize_revision, &source, &visible_robot),
         move |(_resize_revision, draw_source, visible_robot)| {
-            if !workspace.is_active() {
+            if !studio.is_active() {
                 return;
             }
             // A workbench divider changes this canvas without changing the
@@ -423,9 +423,9 @@ pub(crate) fn Viewport(
                     }
                 }
                 if let Some(hovered) = hover() {
-                    HoverNote { hover: hovered, episode_preview: recorded_active }
+                    HoverNote { studio, hover: hovered, episode_preview: recorded_active }
                 }
-                Legend { arms, on_select }
+                Legend { selection, arms, on_select }
                 if let Some(sample) = source.sample() {
                     div {
                         class: "pointer-events-none absolute left-1/2 top-2 z-20 -translate-x-1/2 rounded-sm border border-line bg-surface px-2 py-1 font-mono text-[10px] tabular-nums text-ink-soft",
@@ -503,8 +503,7 @@ pub(crate) fn Viewport(
 /// the operator is going next anyway — and which stays reachable without a
 /// pointer at all.
 #[component]
-fn HoverNote(hover: Hover, episode_preview: bool) -> Element {
-    let studio = RobotWorkspace::current();
+fn HoverNote(studio: RobotWorkspace, hover: Hover, episode_preview: bool) -> Element {
     let (title, detail) = hover.entity.describe(&studio, episode_preview);
     rsx! {
         div {
@@ -818,8 +817,11 @@ impl CameraBindingPresentation for spiral_robotics_common::robots::CameraBinding
 
 /// Which arm is which colour in the scene.
 #[component]
-fn Legend(arms: Vec<RobotSummary>, on_select: EventHandler<Option<Selection>>) -> Element {
-    let studio = RobotWorkspace::current();
+fn Legend(
+    selection: Signal<Option<Selection>>,
+    arms: Vec<RobotSummary>,
+    on_select: EventHandler<Option<Selection>>,
+) -> Element {
     if arms.is_empty() {
         return rsx! {
             div { class: "pointer-events-none absolute inset-0 flex items-center justify-center",
@@ -836,7 +838,7 @@ fn Legend(arms: Vec<RobotSummary>, on_select: EventHandler<Option<Selection>>) -
                         purpose: ActionPurpose::Select,
                         variant: ActionVariant::Row,
                         class: "viewport-legend-row",
-                        aria_pressed: studio.selection().read().as_ref().is_some_and(|selection| selection.matches_robot(arm.id())),
+                        aria_pressed: selection.read().as_ref().is_some_and(|selection| selection.matches_robot(arm.id())),
                         title: "Select {arm.id()}; press F to frame it",
                         onclick: {
                             let id = arm.id().to_owned();

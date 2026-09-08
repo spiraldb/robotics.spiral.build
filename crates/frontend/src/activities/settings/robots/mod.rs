@@ -32,8 +32,7 @@ const ROBOT_TYPES: [(&str, &str); 2] = [
 ];
 
 #[component]
-pub(super) fn RobotPanel() -> Element {
-    let studio = RobotWorkspace::current();
+pub(super) fn RobotPanel(studio: RobotWorkspace) -> Element {
     let robots = studio.snapshot().read().robots().to_owned();
     let focused = studio.focused();
     let sessions = ProjectSessionSignals::current();
@@ -56,7 +55,7 @@ pub(super) fn RobotPanel() -> Element {
         div { class: "flex flex-col",
             ul { class: "flex flex-col",
                 for (index, robot) in robots.iter().cloned().enumerate() {
-                    RobotEntry {
+                    RobotEntry { studio,
                         key: "{robot.id()}",
                         state: RobotEntryState::new(
                             focused.as_ref().is_some_and(|chosen| chosen.id() == robot.id()),
@@ -69,8 +68,8 @@ pub(super) fn RobotPanel() -> Element {
             }
 
             div { class: "device-list-actions",
-                NewRobotForm {}
-                ImportRobotConfiguration {}
+                NewRobotForm { studio }
+                ImportRobotConfiguration { studio }
             }
         }
     }
@@ -82,13 +81,12 @@ pub(super) fn RobotPanel() -> Element {
 /// so a two-arm bench can have both open at once — which is exactly when it is
 /// needed, since setting up the second arm means comparing it to the first.
 #[component]
-fn RobotEntry(robot: RobotSummary, state: RobotEntryState) -> Element {
+fn RobotEntry(studio: RobotWorkspace, robot: RobotSummary, state: RobotEntryState) -> Element {
     let RobotEntryState {
         focused,
         accent,
         port_catalog,
     } = state;
-    let studio = RobotWorkspace::current();
     let mut chosen = studio.selection();
     // Open on whatever still needs attention. An arm that is wired up and
     // calibrated has nothing to do here, so it starts folded; anything else
@@ -152,7 +150,7 @@ fn RobotEntry(robot: RobotSummary, state: RobotEntryState) -> Element {
                 }
             }
             if open() {
-                RobotSetup { robot: robot.clone(), port_catalog }
+                RobotSetup { studio, robot: robot.clone(), port_catalog }
             }
         }
     }
@@ -177,8 +175,7 @@ impl RobotEntryState {
 
 /// Adding an arm, kept folded away so the list stays a list.
 #[component]
-fn NewRobotForm() -> Element {
-    let studio = RobotWorkspace::current();
+fn NewRobotForm(studio: RobotWorkspace) -> Element {
     let mut chosen = studio.selection();
     let mut open = use_signal(|| false);
     let mut id = use_signal(String::new);
@@ -283,8 +280,7 @@ fn NewRobotForm() -> Element {
 
 /// Import a complete robot JSON document as a new instance.
 #[component]
-fn ImportRobotConfiguration() -> Element {
-    let studio = RobotWorkspace::current();
+fn ImportRobotConfiguration(studio: RobotWorkspace) -> Element {
     let importing = use_signal(|| false);
     let mut chosen = studio.selection();
 
@@ -329,11 +325,13 @@ fn ImportRobotConfiguration() -> Element {
 
 /// Everything about one arm stored in its SpiralDB configuration row.
 #[component]
-fn RobotSetup(robot: RobotSummary, port_catalog: PortCatalogState) -> Element {
-    let studio = RobotWorkspace::current();
+fn RobotSetup(
+    studio: RobotWorkspace,
+    robot: RobotSummary,
+    port_catalog: PortCatalogState,
+) -> Element {
     let telemetry = studio.robot_telemetry(robot.id());
     let progress = telemetry.and_then(|robot| robot.calibration().cloned());
-    let connected = robot.connection().connected();
     rsx! {
         div { class: "device-setup",
             // The connection used to get a row of its own reading "Motor bus
@@ -367,7 +365,7 @@ fn RobotSetup(robot: RobotSummary, port_catalog: PortCatalogState) -> Element {
             }
 
             div { class: "device-setup-section",
-                PortSection {
+                PortSection { studio,
                     robot: robot.clone(),
                     state: PortSectionState::new(
                         port_catalog.scan.clone(),
@@ -377,14 +375,14 @@ fn RobotSetup(robot: RobotSummary, port_catalog: PortCatalogState) -> Element {
                 }
             }
             div { class: "device-setup-section",
-                CameraSection { robot: robot.clone() }
+                CameraSection { studio, robot: robot.clone() }
             }
             div { class: "device-setup-section",
-                CalibrationSection { robot: robot.clone(), connected, progress }
+                CalibrationSection { studio, robot: robot.clone(), progress }
             }
             div { class: "device-file-row",
                 span { class: "min-w-0 flex-1 truncate text-[10px] text-ink-faint", "Stored in SpiralDB" }
-                DeleteRobotAction { robot: robot.clone() }
+                DeleteRobotAction { studio, robot: robot.clone() }
             }
         }
     }
@@ -442,11 +440,10 @@ impl PortCatalogState {
 }
 
 #[component]
-fn ConnectionAction(robot: RobotSummary, sweeping: bool) -> Element {
-    let studio = RobotWorkspace::current();
+fn ConnectionAction(studio: RobotWorkspace, robot: RobotSummary, sweeping: bool) -> Element {
+    let connected = robot.connection().connected();
     let pending = use_signal(|| false);
     let id = robot.id().to_owned();
-    let connected = robot.connection().connected();
     // Disconnecting mid-sweep throws the sweep away, so make the operator
     // finish or cancel deliberately rather than lose it to one click.
     let blocked = robot.port().is_none() || robot.problem().is_some() || (connected && sweeping);
@@ -508,13 +505,12 @@ impl PortSectionState {
 }
 
 #[component]
-fn PortSection(robot: RobotSummary, state: PortSectionState) -> Element {
+fn PortSection(studio: RobotWorkspace, robot: RobotSummary, state: PortSectionState) -> Element {
     let PortSectionState {
         scan,
         sweeping,
         on_rescan,
     } = state;
-    let studio = RobotWorkspace::current();
     let mut identify_step = use_signal(|| IdentifyStep::Idle);
     let starting_identify = use_signal(|| false);
     let current = robot
@@ -627,13 +623,13 @@ fn PortSection(robot: RobotSummary, state: PortSectionState) -> Element {
                         option { disabled: true, "Scanning…" }
                     }
                 }
-                ConnectionAction { robot: robot.clone(), sweeping }
+                ConnectionAction { studio, robot: robot.clone(), sweeping }
             }
             if let Some(Err(error)) = &scan {
                 p { class: "mt-0.5 text-[11px] text-danger", "{error}" }
             }
 
-            IdentifyPort {
+            IdentifyPort { studio,
                 robot,
                 step: identify_step,
                 on_found: {
@@ -711,11 +707,11 @@ enum IdentifyStep {
 
 #[component]
 fn IdentifyPort(
+    studio: RobotWorkspace,
     robot: RobotSummary,
     step: Signal<IdentifyStep>,
     on_found: EventHandler<String>,
 ) -> Element {
-    let studio = RobotWorkspace::current();
     let mut step = step;
     let checking = use_signal(|| false);
 
@@ -791,8 +787,7 @@ fn IdentifyPort(
 }
 
 #[component]
-fn CameraSection(robot: RobotSummary) -> Element {
-    let studio = RobotWorkspace::current();
+fn CameraSection(studio: RobotWorkspace, robot: RobotSummary) -> Element {
     let available = studio.snapshot().read().cameras().to_owned();
     let mut role = use_signal(|| "wrist".to_owned());
     let mut device = use_signal(String::new);

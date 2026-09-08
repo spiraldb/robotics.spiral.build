@@ -6,7 +6,7 @@ use crate::panels::timeline::{signals::SignalStore, state::TimelineController};
 use crate::shell::robot_workspace::RobotWorkspace;
 use dioxus::prelude::*;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub(crate) struct LiveSession {
     robot: RobotWorkspace,
     datasets: DatasetChoices,
@@ -20,15 +20,12 @@ impl std::ops::Deref for LiveSession {
     }
 }
 impl LiveSession {
-    pub(crate) fn current() -> Self {
-        consume_context()
-    }
-    pub(crate) fn use_provider(is_active: ReadSignal<bool>) -> Self {
-        let robot = RobotWorkspace::use_provider(is_active);
-        let datasets = DatasetChoices::use_provider();
+    pub(crate) fn use_session(is_active: ReadSignal<bool>) -> Self {
+        let robot = RobotWorkspace::use_workspace(is_active);
+        let datasets = DatasetChoices::use_choices();
         let timeline = TimelineController::use_controller();
         let recording_signals = use_signal(SignalStore::default);
-        let session = use_context_provider(|| Self {
+        let session = use_hook(|| Self {
             robot,
             datasets,
             timeline,
@@ -58,6 +55,9 @@ impl LiveSession {
     }
     pub(crate) fn robot(self) -> RobotWorkspace {
         self.robot
+    }
+    pub(crate) fn datasets(self) -> DatasetChoices {
+        self.datasets
     }
     pub(crate) fn selected_dataset(self) -> Signal<String> {
         self.datasets.selected()

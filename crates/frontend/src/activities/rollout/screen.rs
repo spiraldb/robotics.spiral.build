@@ -46,13 +46,16 @@ impl RolloutLayout {
 
 struct RolloutCameras;
 impl RolloutCameras {
-    fn assigned(studio: RobotWorkspace) -> Vec<AssignedCamera> {
+    fn assigned(
+        studio: RobotWorkspace,
+        controller: super::state::RolloutController,
+        training_history: crate::activities::training::history::TrainingHistory,
+    ) -> Vec<AssignedCamera> {
         let Some(follower) = studio.snapshot().read().robots().follower() else {
             return Vec::new();
         };
-        let checkpoint =
-            crate::activities::rollout::state::RolloutController::current().checkpoint();
-        let roles = crate::activities::training::history::TrainingHistory::current()
+        let checkpoint = controller.checkpoint();
+        let roles = training_history
             .snapshot()
             .read()
             .selected_checkpoint_camera_roles(checkpoint.as_deref());
@@ -86,19 +89,23 @@ impl RolloutCameras {
 
 #[component]
 pub(crate) fn RolloutWorkspace(is_active: ReadSignal<bool>) -> Element {
-    crate::shell::activity::WorkspaceActivity::provide(
+    let workspace = crate::shell::activity::WorkspaceActivity::provide(
         crate::shell::activity::Activity::Rollout,
         is_active,
     );
-    let robot = RobotWorkspace::use_provider(is_active);
-    super::state::RolloutController::use_provider(is_active);
-    crate::activities::training::history::TrainingHistory::use_history(is_active, || None);
-    rsx! { WorkspaceFrame { status: crate::shell::frame::WorkspaceStatus::Hardware(robot), RolloutPanels {} } }
+    let robot = RobotWorkspace::use_workspace(is_active);
+    let controller = super::state::RolloutController::use_controller(is_active);
+    let training_history =
+        crate::activities::training::history::TrainingHistory::use_history(is_active, || None);
+    rsx! { WorkspaceFrame { workspace, status: crate::shell::frame::WorkspaceStatus::Hardware(robot), RolloutPanels { studio: robot, controller, training_history } } }
 }
 
 #[component]
-fn RolloutPanels() -> Element {
-    let studio = crate::shell::robot_workspace::RobotWorkspace::current();
+fn RolloutPanels(
+    studio: RobotWorkspace,
+    controller: super::state::RolloutController,
+    training_history: crate::activities::training::history::TrainingHistory,
+) -> Element {
     let mut resize_revision = use_signal(|| 0_u64);
     let mut selection = studio.selection();
     let follower = studio
@@ -107,11 +114,11 @@ fn RolloutPanels() -> Element {
         .robots()
         .follower()
         .map(|robot| robot.id().to_owned());
-    let cameras = RolloutCameras::assigned(studio);
+    let cameras = RolloutCameras::assigned(studio, controller, training_history);
     let mut panels = vec![
-        Panel::new("workbench", "Rollout", "workbench", rsx! { aside { class: "studio-v2-workbench", RolloutWorkbench {} } }).with_class("workbench-editor"),
+        Panel::new("workbench", "Rollout", "workbench", rsx! { aside { class: "studio-v2-workbench", RolloutWorkbench { studio, controller, training_history } } }).with_class("workbench-editor"),
         Panel::new("scene", "Scene", "primary", rsx! {
-            Viewport { source: SceneSource::Live, presentation: ViewportPresentation::new(follower, resize_revision()), on_select: move |next| selection.set(next) }
+            Viewport { studio, source: SceneSource::Live, presentation: ViewportPresentation::new(follower, resize_revision()) }
         }).with_class("scene-editor"),
     ];
     for camera in &cameras {
@@ -125,7 +132,7 @@ fn RolloutPanels() -> Element {
             "rollout-inference",
             "Inference",
             "timeline",
-            rsx! { InferencePanel {} },
+            rsx! { InferencePanel { controller } },
         )
         .with_class("rollout-inference-editor"),
     );
