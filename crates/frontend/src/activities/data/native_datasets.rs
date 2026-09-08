@@ -92,21 +92,19 @@ pub(crate) fn NativeDatasetsPanel() -> Element {
                                         }
                                     }
                                     if !inspection.topics().is_empty() {
-                                        h3 { class: "px-3 pt-3 pb-1 text-xs font-medium", "Topics" }
-                                        p { class: "px-3 pb-2 text-[11px] text-ink-soft", "Select a topic to preview its decoded messages in Results." }
-                                        ul { class: "divide-y divide-line", "aria-label": "Dataset topics",
-                                            for topic in inspection.topics() {
-                                                {
-                                                    let sql = selection.topic_sql(topic.name());
-                                                    let schemas = topic.schemas().join(", ");
-                                                    rsx! {
-                                                        li { key: "{topic.name()}",
-                                                            button { class: "w-full px-3 py-2 text-left hover:bg-hover focus-visible:outline-2 focus-visible:outline-accent disabled:opacity-50", disabled: !can_preview,
-                                                                onclick: move |_| { let controller = studio.data_controller(); controller.set_sql(sql.clone()); controller.run_query(studio, query_available); },
-                                                                span { class: "block break-all text-xs font-medium", "{topic.name()}" }
-                                                                span { class: "mt-1 block break-all text-[11px] text-ink-soft", "{schemas}" }
-                                                                if let Some(samples) = topic.samples() {
-                                                                    span { class: "mt-1 block text-[11px] tabular-nums text-ink-faint", "{samples} messages · {topic.members()} episodes" }
+                                        details { class: "border-b border-line text-xs",
+                                            summary { class: "cursor-pointer px-3 py-2 font-medium", "All dataset topics" }
+                                            p { class: "px-3 pb-2 text-[11px] text-ink-soft", "Previews include all episodes in this dataset." }
+                                            ul { class: "divide-y divide-line", "aria-label": "All dataset topics",
+                                                for topic in inspection.topics() {
+                                                    {
+                                                        let sql = selection.topic_sql(topic.name());
+                                                        rsx! {
+                                                            li { key: "{topic.name()}",
+                                                                button { class: "w-full px-3 py-2 text-left hover:bg-hover focus-visible:outline-2 focus-visible:outline-accent disabled:opacity-50", disabled: !can_preview,
+                                                                    onclick: move |_| { let controller = studio.data_controller(); controller.set_sql(sql.clone()); controller.run_query(studio, query_available); },
+                                                                    span { class: "block break-all font-medium", "{topic.name()}" }
+                                                                    span { class: "mt-1 block text-[11px] text-ink-soft", {topic.schemas().join(", ")} }
                                                                 }
                                                             }
                                                         }
@@ -115,6 +113,10 @@ pub(crate) fn NativeDatasetsPanel() -> Element {
                                             }
                                         }
                                     }
+                                    if inspection.members().is_some() && can_preview {
+                                        super::native_episodes::NativeEpisodeBrowser { key: "{inspection.dataset().resource_id()}-{inspection.dataset().version_id()}", inspection: inspection.clone() }
+                                    }
+
                                 }
                             },
                             _ => rsx! { p { class: "p-3 text-xs text-ink-soft", "Choose a dataset to inspect its episodes and topics." } },
