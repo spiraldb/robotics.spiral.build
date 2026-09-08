@@ -98,8 +98,8 @@ fn episode_catalog_and_full_data_belong_to_the_data_controller() {
         .expect("Studio state source should be readable");
     let episodes = fs::read_to_string(frontend.join("src/activities/data/workbench.rs"))
         .expect("Episodes panel source should be readable");
-    let workspace = fs::read_to_string(frontend.join("src/shell/workspace.rs"))
-        .expect("Episode workspace source should be readable");
+    let workspace = fs::read_to_string(frontend.join("src/activities/data/screen.rs"))
+        .expect("Data screen source should be readable");
     let preview = fs::read_to_string(frontend.join("src/activities/data/episode_cache.rs"))
         .expect("Episode preview source should be readable");
 
@@ -108,7 +108,6 @@ fn episode_catalog_and_full_data_belong_to_the_data_controller() {
         "episode_loader: Resource<Option<EpisodeLoadResult>>",
         "summary: EpisodeListItem",
         "full_data: Option<Arc<EpisodeData>>",
-        "Ready(Arc<EpisodeData>)",
     ] {
         assert!(
             data.contains(ownership),
@@ -130,8 +129,9 @@ fn episode_catalog_and_full_data_belong_to_the_data_controller() {
     assert!(data.contains("fn use_polling"));
     assert!(data.contains("QueryDomain::Data"));
     assert!(
-        workspace.contains("match data.selected_episode_data()"),
-        "Data renderers must derive directly from the selected resource",
+        workspace.contains("NativeDatasetInspector {}")
+            && !workspace.contains("EpisodePreviewSignals"),
+        "Data must compose its native inspector without mounting an unused episode preview",
     );
     assert!(
         !preview.contains("data: Option<DataController>") && !preview.contains("with_data"),

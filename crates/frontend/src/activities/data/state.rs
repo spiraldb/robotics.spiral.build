@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use dioxus::prelude::*;
 use spiral_robotics_common::identity::DatasetId;
-use spiral_robotics_common::recording::{DatasetSummary, EpisodeInfo, EpisodeListItem};
+use spiral_robotics_common::recording::{DatasetSummary, EpisodeListItem};
 
 use crate::activities::data::dataset_catalog::DatasetCatalogState;
 use crate::activities::data::episode_cache::EpisodeData;
@@ -74,27 +74,6 @@ struct EpisodeCatalogState {
 struct EpisodeEntry {
     summary: EpisodeListItem,
     full_data: Option<Arc<EpisodeData>>,
-}
-
-/// The selected resource projected into the state consumed by recorded views.
-/// Catalog entries cache only successful data, never this transient state.
-#[derive(Clone, Debug)]
-pub(crate) enum EpisodeDataState {
-    Unloaded,
-    Loading,
-    Ready(Arc<EpisodeData>),
-    Failed(String),
-}
-
-impl PartialEq for EpisodeDataState {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Unloaded, Self::Unloaded) | (Self::Loading, Self::Loading) => true,
-            (Self::Ready(left), Self::Ready(right)) => Arc::ptr_eq(left, right),
-            (Self::Failed(left), Self::Failed(right)) => left == right,
-            _ => false,
-        }
-    }
 }
 
 impl EpisodeEntry {
@@ -230,10 +209,6 @@ impl DataController {
         controller
     }
 
-    pub(crate) fn selected_episode_peek(&self) -> Option<String> {
-        self.selected_episode.peek().to_owned()
-    }
-
     pub(crate) fn set_selected_episode(mut self, episode: Option<String>) {
         if self.selected_episode.peek().as_ref() != episode.as_ref() {
             self.selected_episode.set(episode);
@@ -263,62 +238,6 @@ impl DataController {
             return;
         }
         entry.full_data = Some(Arc::clone(data));
-    }
-
-    pub(crate) fn selected_episode_info(&self) -> Option<EpisodeInfo> {
-        let selected = self.selected_episode.read();
-        self.episode_catalog
-            .read()
-            .episodes
-            .iter()
-            .find(|entry| Some(entry.summary.id()) == selected.as_deref())
-            .and_then(|entry| entry.full_data.as_ref())
-            .map(|data| data.info().clone())
-    }
-
-    pub(crate) fn selected_episode_data(&self) -> Option<EpisodeDataState> {
-        let selected = self.selected_episode.read();
-        let catalog = self.episode_catalog.read();
-        let entry = catalog
-            .episodes
-            .iter()
-            .find(|entry| Some(entry.summary.id()) == selected.as_deref())?;
-        if let Some(data) = &entry.full_data {
-            return Some(EpisodeDataState::Ready(Arc::clone(data)));
-        }
-        let expected_frames = entry.summary.frames();
-        drop(catalog);
-
-        if self.episode_loader.state().cloned() == UseResourceState::Pending {
-            return Some(EpisodeDataState::Loading);
-        }
-        let loaded = self.episode_loader.read();
-        let Some(loaded) = loaded.as_ref().and_then(Option::as_ref) else {
-            return Some(EpisodeDataState::Unloaded);
-        };
-        if loaded.episode != selected.as_deref()? || loaded.expected_frames != expected_frames {
-            return Some(EpisodeDataState::Unloaded);
-        }
-        Some(match &loaded.result {
-            Ok(data) => EpisodeDataState::Ready(Arc::clone(data)),
-            Err(error) => EpisodeDataState::Failed(error.clone()),
-        })
-    }
-
-    pub(crate) fn reload_selected_episode_data(mut self, episode: &str) {
-        if self.selected_episode.peek().as_deref() != Some(episode) {
-            return;
-        }
-        if let Some(entry) = self
-            .episode_catalog
-            .write()
-            .episodes
-            .iter_mut()
-            .find(|entry| entry.summary.id() == episode)
-        {
-            entry.full_data = None;
-        }
-        self.episode_loader.restart();
     }
 
     pub(crate) fn datasets(&self) -> Vec<DatasetSummary> {

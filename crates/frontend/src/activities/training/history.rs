@@ -1,5 +1,5 @@
 //! Training retains history across route changes and polls only while active.
-//! Rollout requests its own run/checkpoint choices while its workbench is mounted.
+//! Rollout requests its own run/checkpoint choices while its activity is mounted.
 use crate::activities::training::TrainingClient;
 use crate::client::queries::{QueryDomain, QueryPolicy};
 use crate::shell::frame::TrainingStatus;

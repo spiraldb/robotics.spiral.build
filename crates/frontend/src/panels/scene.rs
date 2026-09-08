@@ -31,8 +31,8 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::Closure;
 use web_sys::HtmlCanvasElement;
 
-use crate::activities::data::episode_cache::{TimelineArmSample, TimelineSample};
-use crate::shell::activity::RecordedSource;
+use crate::activities::data::episode_cache::{EpisodePreview, TimelineArmSample, TimelineSample};
+use crate::panels::recorded_source::{LoadState, RecordedSource};
 use crate::shell::state::{Selection, studio};
 
 /// The canvas the viewport draws into. There is exactly one on the page.
@@ -85,6 +85,18 @@ pub(crate) enum SceneSource {
 }
 
 impl SceneSource {
+    /// Missing or mismatched recorded data stays loading; it never becomes live telemetry.
+    pub(crate) fn recorded(episode: &str, source: Option<&RecordedSource<EpisodePreview>>) -> Self {
+        let source = source
+            .filter(|source| source.episode() == episode)
+            .cloned()
+            .map(|source| source.map(EpisodePreview::into_sample))
+            .unwrap_or_else(|| {
+                RecordedSource::new(episode, 0.0, LoadState::Loading { previous: None })
+            });
+        Self::Recorded(source)
+    }
+
     fn is_live(&self) -> bool {
         matches!(self, Self::Live)
     }
@@ -1004,5 +1016,16 @@ mod tests {
             BTreeMap::from([("shoulder_pan".to_owned(), None)]),
         );
         assert!(sample.recorded_angles().is_none());
+    }
+}
+
+#[cfg(test)]
+mod source_tests {
+    use super::*;
+    #[test]
+    fn a_missing_recorded_scene_source_never_falls_back_to_live() {
+        assert!(
+            matches!(SceneSource::recorded("take-1", None), SceneSource::Recorded(source) if matches!(source.state(), LoadState::Loading { previous: None }))
+        );
     }
 }

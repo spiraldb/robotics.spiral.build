@@ -1,131 +1,132 @@
-//! Route-owned Data panel registry and first-open composition.
+//! Dataset navigation, inspection, and SQL panel composition owned by Data.
 
+use super::native_datasets::{
+    DatasetBrowserSelection, NativeDatasetInspector, NativeDatasetsPanel,
+};
+use super::query_result::QueryResultView;
+use super::relations::RelationsPanel;
+use super::workbench::QueryPanel;
+use crate::shell::{
+    activity::Activity,
+    frame::WorkspaceFrame,
+    state::{Studio, StudioProjectState},
+};
 use dioxus::prelude::*;
-use dioxus_workbench::{LayoutNode, Panel, PanelLayout, SplitAxis};
+use dioxus_workbench::{LayoutNode, Panel, PanelId, PanelLayout, PanelWorkspace, SplitAxis};
 
-use crate::shell::activity::PanelRole;
-use crate::shell::workspace::ScreenWorkspaceDefinition;
-
-pub(crate) struct DataWorkbenchPanels {
-    episodes: Panel,
-    query: Panel,
-}
-
-impl DataWorkbenchPanels {
-    pub(crate) fn new(episodes: Panel, query: Panel) -> Self {
-        Self { episodes, query }
-    }
-}
-
-pub(crate) struct DataEvidencePanels {
-    inspector: Panel,
-    query_result: Panel,
-    relations: Panel,
-}
-
-impl DataEvidencePanels {
-    pub(crate) fn new(inspector: Panel, query_result: Panel, relations: Panel) -> Self {
-        Self {
-            inspector,
-            query_result,
-            relations,
-        }
-    }
-}
-
-/// Dataset navigation leads to the inspector. SQL, query results, and project
-/// tables remain available as secondary tabs, with native docking preserved.
-impl ScreenWorkspaceDefinition {
-    pub(crate) fn for_data(workbench: DataWorkbenchPanels, evidence: DataEvidencePanels) -> Self {
-        let DataWorkbenchPanels { episodes, query } = workbench;
-        let DataEvidencePanels {
-            inspector,
-            query_result,
-            relations,
-        } = evidence;
-        let panels = vec![
-            (inspector, PanelRole::PrimaryVisualization),
-            (episodes, PanelRole::Workbench),
-            (query, PanelRole::Workbench),
-            (query_result, PanelRole::PrimaryVisualization),
-            (relations, PanelRole::PrimaryVisualization),
-        ];
-        let tools = LayoutNode::tile("episodes", ["episodes".to_owned()]);
-        let evidence = LayoutNode::tile(
-            "dataset-inspector",
-            [
-                "dataset-inspector".to_owned(),
-                "query".to_owned(),
-                "query-result".to_owned(),
-                "relations".to_owned(),
-            ],
-        );
-        let layout = PanelLayout::new(LayoutNode::split(
+struct DataLayout;
+impl DataLayout {
+    fn initial() -> PanelLayout {
+        PanelLayout::new(LayoutNode::split(
             "data-columns",
             SplitAxis::Horizontal,
             0.24,
-            tools,
-            evidence,
-        ));
+            LayoutNode::tile("episodes", ["episodes".to_owned()]),
+            LayoutNode::tile(
+                "dataset-inspector",
+                [
+                    "dataset-inspector".to_owned(),
+                    "query".to_owned(),
+                    "query-result".to_owned(),
+                    "relations".to_owned(),
+                ],
+            ),
+        ))
+    }
+}
 
-        Self::new(panels, layout, "spiral_robotics.panel-layout.v8.data")
+#[component]
+pub(crate) fn DataWorkspace() -> Element {
+    let studio = Studio::use_studio(Activity::Data);
+    studio.use_relation_catalog();
+    let project = consume_context::<StudioProjectState>();
+    use_effect(move || {
+        if let Some(episode) = project.take_requested_episode() {
+            studio.data_controller().set_selected_episode(Some(episode));
+        }
+    });
+    rsx! { WorkspaceFrame { DataPanels {} } }
+}
+
+#[component]
+fn DataPanels() -> Element {
+    let studio = crate::shell::state::studio();
+    let browser = DatasetBrowserSelection::provide();
+    let configuration = studio.configuration();
+    let namespace = configuration.dataset();
+    let dataset_id = studio.selected_dataset().read().to_owned();
+    let query_available = configuration.spiral_query_available();
+    let panels = vec![
+        Panel::new(
+            "dataset-inspector",
+            "Inspect",
+            "dataset-inspector",
+            rsx! { NativeDatasetInspector {} },
+        ),
+        Panel::new(
+            "episodes",
+            "Datasets",
+            "episodes",
+            rsx! { NativeDatasetsPanel {} },
+        )
+        .with_class("episodes-workbench-editor"),
+        Panel::new(
+            "query",
+            "SQL",
+            "query",
+            rsx! { QueryPanel { namespace, dataset_id, query_available } },
+        )
+        .with_class("query-workbench-editor"),
+        Panel::new(
+            "query-result",
+            "Results",
+            "query-result",
+            rsx! { QueryResultView {} },
+        )
+        .with_class("query-editor"),
+        Panel::new(
+            "relations",
+            "Tables",
+            "primary",
+            rsx! { RelationsPanel { namespace, query_available } },
+        )
+        .with_class("relations-editor"),
+    ];
+    let active_panel = if studio.data_controller().query_running() {
+        Some(PanelId::from("query-result"))
+    } else {
+        browser.requested_panel()
+    };
+    rsx! {
+        div { class: "min-h-0 min-w-0 overflow-hidden", tabindex: "-1",
+            PanelWorkspace {
+                panels, initial_layout: DataLayout::initial(),
+                layout_scope: Some("spiral_robotics.panel-layout.v8.data".to_owned()),
+                active_panel,
+                on_panel_activate: move |_| browser.clear_request(),
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dioxus_workbench::PanelId;
-
     #[test]
     fn dataset_inspection_leads_and_sql_tools_remain_available() {
-        let definition = ScreenWorkspaceDefinition::for_data(
-            DataWorkbenchPanels::new(
-                Panel::new("episodes", "Episodes", "episodes", rsx! { div {} }),
-                Panel::new("query", "Query", "query", rsx! { div {} }),
-            ),
-            DataEvidencePanels::new(
-                Panel::new(
-                    "dataset-inspector",
-                    "Inspect",
-                    "dataset-inspector",
-                    rsx! { div {} },
-                ),
-                Panel::new("query-result", "Results", "query-result", rsx! { div {} }),
-                Panel::new("relations", "Relations", "primary", rsx! { div {} }),
-            ),
-        );
-
-        let tile = |id| {
-            definition
-                .initial_layout()
-                .tile_for_panel(&PanelId::from(id))
-                .map(|tile| tile.as_str().to_owned())
-        };
-        assert_eq!(tile("episodes").as_deref(), Some("episodes"));
+        let layout = DataLayout::initial();
+        for id in ["dataset-inspector", "query", "query-result", "relations"] {
+            assert_eq!(
+                layout.tile_for_panel(&PanelId::from(id)).unwrap().as_str(),
+                "dataset-inspector"
+            );
+        }
         assert_eq!(
-            tile("dataset-inspector").as_deref(),
-            Some("dataset-inspector")
+            layout
+                .tile_for_panel(&PanelId::from("episodes"))
+                .unwrap()
+                .as_str(),
+            "episodes"
         );
-        assert_eq!(tile("query").as_deref(), Some("dataset-inspector"));
-        assert_eq!(tile("query-result").as_deref(), Some("dataset-inspector"));
-        assert_eq!(tile("relations").as_deref(), Some("dataset-inspector"));
-    }
-}
-
-#[component]
-pub(crate) fn DataWorkspace() -> Element {
-    let studio = crate::shell::state::Studio::use_studio(crate::shell::activity::Activity::Data);
-    studio.use_relation_catalog();
-    let project = consume_context::<crate::shell::state::StudioProjectState>();
-    use_effect(move || {
-        if let Some(episode) = project.take_requested_episode() {
-            studio.data_controller().set_selected_episode(Some(episode));
-        }
-    });
-    rsx! {
-        crate::shell::frame::WorkspaceFrame {
-            crate::shell::workspace::EpisodeWorkspace { activity: crate::shell::activity::Activity::Data }
-        }
     }
 }

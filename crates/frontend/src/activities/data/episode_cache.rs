@@ -17,11 +17,11 @@ use spiral_robotics_common::recording::{
 };
 use spiral_robotics_viewport::SO101_JOINTS;
 
+use crate::panels::recorded_source::{LoadState, RecordedSource};
 use crate::panels::timeline::panel::{
     TimelineSignalLane, TimelineSignalPoint, TimelineSignalSeries,
 };
 use crate::panels::timeline::signals::SignalNamePresentation;
-use crate::shell::activity::{LoadState, RecordedSource};
 use crate::shell::state::Studio;
 
 const EPISODE_RENDER_HZ: f64 = 30.0;

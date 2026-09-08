@@ -1,4 +1,4 @@
-//! Dockable Timeline panel shared by the Live and Data screens.
+//! Controlled timeline rendering with explicit content, capabilities, and action callbacks.
 //!
 //! This component owns presentation and interaction intent only. Recording,
 //! playback, seeking, and motor motion remain server-owned operations. In
@@ -27,7 +27,7 @@ use crate::activities::data::workbench::EpisodeIdPresentation;
 use crate::components::charts::{CharmingChart, ChartPoints, StudioTooltip};
 use crate::format::ClockPresentation;
 use crate::panels::timeline::signals::{SignalNamePresentation, SignalStore};
-use crate::shell::activity::{Activity, TimelineSubject, TimelineTarget};
+use crate::panels::timeline::subject::{TimelineSubject, TimelineTarget};
 
 const TIMELINE_CHART_ID: &str = "studio-timeline-signal-chart";
 const TRACE_POINT_BUDGET: usize = 512;
@@ -49,6 +49,7 @@ pub(crate) enum TimelinePlayback {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct StudioTimelineState {
     subject: TimelineSubject,
+    label: String,
     playhead_seconds: f64,
     playback: TimelinePlayback,
     follow_live: bool,
@@ -63,11 +64,21 @@ impl StudioTimelineState {
     ) -> Self {
         Self {
             subject,
+            label: "Timeline".to_owned(),
             playhead_seconds,
             playback,
             follow_live: false,
             sync_robot: false,
         }
+    }
+
+    pub(crate) const fn playhead_seconds(&self) -> f64 {
+        self.playhead_seconds
+    }
+
+    pub(crate) fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = label.into();
+        self
     }
 
     pub(crate) const fn with_controls(mut self, follow_live: bool, sync_robot: bool) -> Self {
@@ -479,7 +490,7 @@ impl TimelinePlayback {
     }
 }
 
-/// The canonical timeline visualization shared by Live and Data.
+/// Reusable timeline visualization configured by its owning activity.
 ///
 /// The component is controlled: the activity controller owns the projection and
 /// feeds requested actions back through [`StudioTimelineState`]. Scrubbing is
@@ -570,7 +581,7 @@ pub(crate) fn StudioTimeline(
     let playhead_percent = shown_playhead.percent_of(duration);
     let sync_robot = capabilities.robot_sync.allowed && state.sync_robot;
     let subject_label = match &state.subject {
-        TimelineSubject::Empty { activity, .. } => activity.label(),
+        TimelineSubject::Empty { label, .. } => label.as_str(),
         TimelineSubject::Recording(_) => "Recording",
         TimelineSubject::Episode { .. } => "Episode",
     };
@@ -645,14 +656,7 @@ pub(crate) fn StudioTimeline(
         .as_ref()
         .map(|progress| progress.episode().to_owned());
     let capture_paused = recording.as_ref().is_some_and(|progress| progress.paused());
-    let timeline_label = match state.subject.activity() {
-        Activity::Live => "Live Timeline",
-        Activity::Data => "Data Timeline",
-        Activity::Workflow => "Workflow relation timeline",
-        Activity::Training => "Training step timeline",
-        Activity::Rollout => "Rollout live timeline",
-        Activity::Settings => "Timeline",
-    };
+    let timeline_label = &state.label;
     let signal_chart = signal_lanes.chart(duration);
     let signal_chart_label = format!("Six robot joint signals over {}", duration.clock_label());
 
