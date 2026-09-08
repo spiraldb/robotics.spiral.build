@@ -5,7 +5,7 @@ use dioxus::prelude::WritableExt;
 use spiral_robotics_common::robots::ModeSelection;
 
 use crate::activities::live::session::LiveSession;
-use crate::shell::robot_workspace::Selection;
+use crate::robots::Selection;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum LiveAction {
@@ -19,8 +19,8 @@ pub(crate) enum LiveAction {
 impl LiveSession {
     pub(crate) fn dispatch_live_action(self, action: LiveAction) {
         match action {
-            LiveAction::Select(selection) => self.selection().set(selection),
-            LiveAction::Point(selection) => self.pointed_selection().set(selection),
+            LiveAction::Select(selection) => self.selection().selected().set(selection),
+            LiveAction::Point(selection) => self.selection().pointed().set(selection),
             LiveAction::Hold(robot) => self.hold_robot(robot),
             LiveAction::Release(robot) => self.release_robot(robot),
             LiveAction::Teleoperate { leader, follower } => {
@@ -30,7 +30,7 @@ impl LiveSession {
     }
 
     fn hold_robot(self, id: String) {
-        self.run("", async move {
+        self.commands().run("", async move {
             RobotClient::current()
                 .hold_robot(id)
                 .await
@@ -39,7 +39,7 @@ impl LiveSession {
     }
 
     fn release_robot(self, id: String) {
-        self.run_safety("Motors released.", async move {
+        self.project().run_safety("Motors released.", async move {
             RobotClient::current()
                 .release_robot(id)
                 .await
@@ -56,12 +56,12 @@ impl LiveSession {
                 .map_err(|error| error.to_string())
         };
         if stops_motion {
-            self.run_safety(
+            self.project().run_safety(
                 "Motion commands stopped. Motors may still be holding position.",
                 future,
             );
         } else {
-            self.run("", future);
+            self.commands().run("", future);
         }
     }
 }

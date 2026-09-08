@@ -4,7 +4,6 @@ pub(crate) mod activity;
 pub(crate) mod frame;
 pub(crate) mod notifications;
 pub(crate) mod project;
-pub(crate) mod robot_workspace;
 pub(crate) mod routes;
 pub(crate) mod state;
 

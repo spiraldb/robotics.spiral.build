@@ -31,8 +31,9 @@ use web_sys::HtmlCanvasElement;
 
 use crate::activities::data::episode_cache::{EpisodePreview, TimelineArmSample, TimelineSample};
 use crate::panels::recorded_source::{LoadState, RecordedSource};
-use crate::shell::robot_workspace::RobotWorkspace;
-use crate::shell::robot_workspace::Selection;
+use crate::robots::Selection;
+use crate::robots::{HardwareTelemetry, RobotSelection};
+use crate::shell::state::StudioProjectState;
 
 /// The colours arms are told apart by, as WebGL values and as CSS.
 ///
@@ -58,6 +59,19 @@ const ACCENTS: [([f32; 4], &str); 4] = [
 pub(crate) struct ScenePalette;
 
 impl ScenePalette {
+    pub(crate) fn robot_index(robot: &RobotSummary) -> usize {
+        match robot.robot_type() {
+            Some(kind) if kind.contains("follower") => 0,
+            Some(kind) if kind.contains("leader") => 1,
+            _ => {
+                let hash = robot.id().bytes().fold(0usize, |hash, byte| {
+                    hash.wrapping_mul(31).wrapping_add(usize::from(byte))
+                });
+                2 + hash % 2
+            }
+        }
+    }
+
     /// The accent for the arm at `index` in the workspace.
     pub(crate) fn accent_css(index: usize) -> &'static str {
         ACCENTS[index % ACCENTS.len()].1
@@ -129,7 +143,9 @@ impl ViewportPresentation {
 
 #[component]
 pub(crate) fn Viewport(
-    studio: RobotWorkspace,
+    project: StudioProjectState,
+    telemetry: HardwareTelemetry,
+    robot_selection: RobotSelection,
     source: SceneSource,
     presentation: ViewportPresentation,
 ) -> Element {
@@ -137,7 +153,7 @@ pub(crate) fn Viewport(
         visible_robot,
         resize_revision,
     } = presentation;
-    let mut selection = studio.selection();
+    let mut selection = robot_selection.selected();
     let on_select = use_callback(move |next| selection.set(next));
     let canvas_dom = use_hook(ViewportDom::new);
     let bench = use_hook(|| Rc::new(RefCell::new(Option::<Bench>::None)));
@@ -167,7 +183,7 @@ pub(crate) fn Viewport(
     use_effect(use_reactive(
         (&resize_revision, &source, &visible_robot),
         move |(_resize_revision, draw_source, visible_robot)| {
-            if !studio.is_active() {
+            if !telemetry.is_active() {
                 return;
             }
             // A workbench divider changes this canvas without changing the
@@ -180,12 +196,13 @@ pub(crate) fn Viewport(
             let grid = show_grid();
             let hovered = hover();
             let conditions = if draw_source.is_live() {
-                studio.motor_conditions()
+                telemetry.motor_conditions()
             } else {
                 BTreeMap::new()
             };
             let frame = match (SceneBuildRequest {
-                studio: &studio,
+                robots: &SceneRobot::capture(project, telemetry),
+                selection: robot_selection,
                 grid,
                 source: &draw_source,
                 hovered: hovered.as_ref().map(|it| &it.entity),
@@ -231,7 +248,7 @@ pub(crate) fn Viewport(
         },
     ));
 
-    let arms = studio
+    let arms = project
         .snapshot()
         .read()
         .robots()
@@ -382,7 +399,7 @@ pub(crate) fn Viewport(
                         }
                         Key::Character(value) if value == "0" => Some(Command::Home),
                         Key::Character(value) if value.eq_ignore_ascii_case("f") => {
-                            let robot = studio.framed_robot(visible_robot.as_deref());
+                            let robot = robot_selection.framed_robot(visible_robot.as_deref(), project.snapshot().read().robots());
                             if let Ok(mut slot) = bench.try_borrow_mut()
                                 && let Some(bench) = slot.as_mut()
                                 && bench.frame_robot(robot.as_deref())
@@ -423,7 +440,7 @@ pub(crate) fn Viewport(
                     }
                 }
                 if let Some(hovered) = hover() {
-                    HoverNote { studio, hover: hovered, episode_preview: recorded_active }
+                    HoverNote { telemetry, hover: hovered, episode_preview: recorded_active }
                 }
                 Legend { selection, arms, on_select }
                 if let Some(sample) = source.sample() {
@@ -503,8 +520,8 @@ pub(crate) fn Viewport(
 /// the operator is going next anyway — and which stays reachable without a
 /// pointer at all.
 #[component]
-fn HoverNote(studio: RobotWorkspace, hover: Hover, episode_preview: bool) -> Element {
-    let (title, detail) = hover.entity.describe(&studio, episode_preview);
+fn HoverNote(telemetry: HardwareTelemetry, hover: Hover, episode_preview: bool) -> Element {
+    let (title, detail) = hover.entity.describe(telemetry, episode_preview);
     rsx! {
         div {
             class: "bench-note",
@@ -522,7 +539,7 @@ fn HoverNote(studio: RobotWorkspace, hover: Hover, episode_preview: bool) -> Ele
 trait TargetPresentation {
     fn describe(
         &self,
-        studio: &crate::shell::robot_workspace::RobotWorkspace,
+        telemetry: HardwareTelemetry,
         episode_preview: bool,
     ) -> (String, Option<String>);
 }
@@ -530,7 +547,7 @@ trait TargetPresentation {
 impl TargetPresentation for Target {
     fn describe(
         &self,
-        studio: &crate::shell::robot_workspace::RobotWorkspace,
+        telemetry: HardwareTelemetry,
         episode_preview: bool,
     ) -> (String, Option<String>) {
         match self {
@@ -539,7 +556,7 @@ impl TargetPresentation for Target {
             Target::Joint { robot, joint } => {
                 let label = Joint::named(joint)
                     .map_or_else(|| joint.clone(), |joint| joint.label().to_owned());
-                let telemetry = studio.robot_telemetry(robot);
+                let telemetry = telemetry.robot_telemetry(robot);
                 let detail = (!episode_preview)
                     .then(|| {
                         telemetry.as_ref().and_then(|telemetry| {
@@ -575,12 +592,35 @@ impl From<&Target> for Selection {
     }
 }
 
+/// Scene construction receives a sampled model, without project or command access.
+struct SceneRobot {
+    configuration: RobotSummary,
+    telemetry: Option<spiral_robotics_common::robots::RobotTelemetry>,
+    accent: usize,
+}
+impl SceneRobot {
+    fn capture(project: StudioProjectState, telemetry: HardwareTelemetry) -> Vec<Self> {
+        project
+            .snapshot()
+            .read()
+            .robots()
+            .iter()
+            .map(|robot| Self {
+                configuration: robot.clone(),
+                telemetry: telemetry.robot_telemetry(robot.id()),
+                accent: ScenePalette::robot_index(robot),
+            })
+            .collect()
+    }
+}
+
 /// Build the bench from what the studio currently knows.
 ///
 /// Selection, hover, and hardware verdicts remain application policy; the
 /// viewport only receives their presentation states for semantic targets.
 struct SceneBuildRequest<'a> {
-    studio: &'a crate::shell::robot_workspace::RobotWorkspace,
+    robots: &'a [SceneRobot],
+    selection: RobotSelection,
     grid: bool,
     source: &'a SceneSource,
     hovered: Option<&'a Target>,
@@ -590,10 +630,10 @@ struct SceneBuildRequest<'a> {
 
 impl SceneBuildRequest<'_> {
     fn build(&self) -> Result<BenchFrame, FrameError> {
-        let selected = self.studio.selection().read().to_owned();
+        let selected = self.selection.selected().read().to_owned();
         // Hovering a joint row in the inspector lights the motor on the bench, the
         // same way hovering the motor lights the row: one object, seen twice.
-        let pointed = self.studio.pointed_selection().read().to_owned();
+        let pointed = self.selection.pointed().read().to_owned();
         let mut frame = BenchFrame::new(self.grid);
         self.add_arms(&mut frame)?;
 
@@ -619,16 +659,11 @@ impl SceneBuildRequest<'_> {
     }
 
     fn add_arms(&self, frame: &mut BenchFrame) -> Result<(), FrameError> {
-        let arms = self
-            .studio
-            .snapshot()
-            .read()
-            .robots()
-            .iter()
-            .filter(|arm| self.visible_robot.is_none_or(|visible| arm.id() == visible))
-            .cloned()
-            .collect::<Vec<_>>();
-        for arm in &arms {
+        for robot in self.robots.iter().filter(|robot| {
+            self.visible_robot
+                .is_none_or(|visible| robot.configuration.id() == visible)
+        }) {
+            let arm = &robot.configuration;
             let recorded_angles = self
                 .source
                 .sample()
@@ -637,11 +672,7 @@ impl SceneBuildRequest<'_> {
             let telemetry = self
                 .source
                 .is_live()
-                .then(|| {
-                    self.studio
-                        .robot_telemetry(arm.id())
-                        .filter(|_| arm.calibrated())
-                })
+                .then(|| robot.telemetry.clone().filter(|_| arm.calibrated()))
                 .flatten();
             let angles = recorded_angles.or_else(|| {
                 telemetry.as_ref().map(|robot| {
@@ -652,7 +683,7 @@ impl SceneBuildRequest<'_> {
             frame.add_arm(
                 arm.id().to_owned(),
                 spiral_robotics_viewport::ArmPresentation::new(
-                    ACCENTS[self.studio.position_of(arm.id()) % ACCENTS.len()].0,
+                    ACCENTS[robot.accent % ACCENTS.len()].0,
                     angles,
                 ),
             )?;
@@ -683,9 +714,9 @@ impl From<&Selection> for Target {
 }
 
 /// Every hardware-owned motor verdict in the current frame.
-impl crate::shell::robot_workspace::RobotWorkspace {
+impl HardwareTelemetry {
     fn motor_conditions(self) -> BTreeMap<(String, String), Condition> {
-        let telemetry_signal = self.telemetry();
+        let telemetry_signal = self.frame();
         let telemetry = telemetry_signal.read();
         let mut conditions = BTreeMap::new();
         for robot in telemetry.robots() {
@@ -894,14 +925,14 @@ fn ViewCube(on_command: EventHandler<Command>) -> Element {
     }
 }
 
-impl crate::shell::robot_workspace::RobotWorkspace {
-    fn framed_robot(&self, visible_robot: Option<&str>) -> Option<String> {
+impl RobotSelection {
+    fn framed_robot(self, visible_robot: Option<&str>, robots: &[RobotSummary]) -> Option<String> {
         visible_robot.map(str::to_owned).or_else(|| {
-            self.selection()
+            self.selected()
                 .read()
                 .as_ref()
                 .map(|selection| selection.robot_id().to_owned())
-                .or_else(|| self.focused().map(|robot| robot.id().to_owned()))
+                .or_else(|| self.focused(robots).map(|robot| robot.id().to_owned()))
         })
     }
 }

@@ -15,29 +15,28 @@ use spiral_robotics_common::robots::ModeSelection;
 
 #[derive(Clone, Copy)]
 pub(super) struct LiveTimelineActions {
-    studio: LiveSession,
+    session: LiveSession,
     preview: EpisodePreviewSignals,
     interactive: Signal<Option<(String, u64)>>,
 }
 
 impl LiveTimelineActions {
     pub(super) fn new(
-        studio: LiveSession,
+        session: LiveSession,
         preview: EpisodePreviewSignals,
         interactive: Signal<Option<(String, u64)>>,
     ) -> Self {
         Self {
-            studio,
+            session,
             preview,
             interactive,
         }
     }
 
     pub(super) fn dispatch(self, subject: TimelineSubject, action: TimelineAction) {
-        let studio = self.studio;
-        let controller = studio.timeline_controller();
+        let controller = self.session.timeline_controller();
         let review_episode = subject.recorded_episode().map(str::to_owned);
-        let seek_context = studio.timeline_seek_context(&subject);
+        let seek_context = self.session.timeline_seek_context(&subject);
         let (mut episode_preview_state, mut episode_preview_revision, mut episode_data_cache) =
             self.preview.into_signals();
         let mut interactive_preview_target = self.interactive;
@@ -47,12 +46,12 @@ impl LiveTimelineActions {
         match action {
             TimelineAction::Capture { episode, action } => match action {
                 TimelineCaptureAction::Start => {
-                    studio.start_recording();
+                    self.session.start_recording();
                 }
                 TimelineCaptureAction::Pause | TimelineCaptureAction::Resume => {
                     if let Some(episode) = episode {
                         let paused = action == TimelineCaptureAction::Pause;
-                        studio.set_recording_paused(&episode, paused);
+                        self.session.set_recording_paused(&episode, paused);
                         follow_live.set(!paused);
                         if !paused {
                             episode_data_cache.write().invalidate(&episode);
@@ -64,7 +63,7 @@ impl LiveTimelineActions {
                     if let Some(episode) = episode {
                         let keep = action == TimelineCaptureAction::Stop;
                         let finished_episode = episode.clone();
-                        studio.stop_recording(
+                        self.session.stop_recording(
                             &episode,
                             RecordingCompletion::new(
                                 keep,
@@ -100,11 +99,15 @@ impl LiveTimelineActions {
                         controller.stop_preview();
                         follow_live.set(false);
                         if let Some(summary) = subject.episode() {
-                            studio.start_replay(summary, playhead());
+                            self.session.start_replay(summary, playhead());
                         }
                     }
-                    TimelineRobotSyncAction::Pause => studio.set_replay_paused(&episode, true),
-                    TimelineRobotSyncAction::Resume => studio.set_replay_paused(&episode, false),
+                    TimelineRobotSyncAction::Pause => {
+                        self.session.set_replay_paused(&episode, true)
+                    }
+                    TimelineRobotSyncAction::Resume => {
+                        self.session.set_replay_paused(&episode, false)
+                    }
                 }
             }
             TimelineAction::Seek(request)
@@ -134,7 +137,7 @@ impl LiveTimelineActions {
                     && request.moves_robot()
                     && let Some((episode, robot, source_arm)) = seek_context
                 {
-                    studio.physical_seek(
+                    self.session.physical_seek(
                         episode,
                         TimelineSeekBody::new(robot, source_arm, request.seconds()),
                     );
@@ -144,7 +147,7 @@ impl LiveTimelineActions {
                 follow_live.set(next);
                 if next {
                     controller.stop_preview();
-                    if let Some(recording) = studio.recording() {
+                    if let Some(recording) = self.session.telemetry().recording() {
                         playhead.set(recording.elapsed_seconds());
                     }
                 }
@@ -157,10 +160,10 @@ impl LiveTimelineActions {
                     robot_sync_target.set(Some(target));
                 } else {
                     robot_sync_target.set(None);
-                    if let Some(replay) = studio.replay()
+                    if let Some(replay) = self.session.telemetry().replay()
                         && subject.episode_id() == Some(replay.episode())
                     {
-                        studio.stop_replay(replay.episode());
+                        self.session.stop_replay(replay.episode());
                     }
                 }
             }
@@ -182,7 +185,10 @@ impl LiveTimelineActions {
                     ));
                 }
             }
-            _ => studio.report("The Timeline subject changed before the action was applied."),
+            _ => self
+                .session
+                .project()
+                .report("The Timeline subject changed before the action was applied."),
         }
     }
 }
@@ -192,11 +198,11 @@ impl LiveTimelineActions {
         if event.modifiers().ctrl()
             || event.modifiers().meta()
             || event.modifiers().alt()
-            || !self.studio.shortcuts_enabled()
+            || !self.session.shortcuts_enabled()
         {
             return;
         }
-        let recording = self.studio.recording();
+        let recording = self.session.telemetry().recording();
         let subject = recording
             .clone()
             .map(TimelineSubject::Recording)
@@ -214,7 +220,7 @@ impl LiveTimelineActions {
                     Some(crate::panels::timeline::panel::TimelineCaptureAction::Discard)
                 } else {
                     event.prevent_default();
-                    self.studio.report_info_from(
+                    self.session.project().report_info_from(
                         crate::shell::notifications::MessageSource::Live,
                         "Press Shift+X to discard this take.",
                     );
@@ -240,8 +246,7 @@ impl LiveSession {
         self,
         subject: &TimelineSubject,
     ) -> TimelineCapabilities {
-        let studio = self;
-        let record = if let Some(reason) = studio.recording_blocker() {
+        let record = if let Some(reason) = self.recording_blocker() {
             TimelineGate::blocked(reason)
         } else {
             TimelineGate::allowed()
@@ -261,7 +266,7 @@ impl LiveSession {
         };
         let seek = preview.clone();
         let synced_playback = match subject.episode() {
-            Some(episode) => studio
+            Some(episode) => self
                 .replay_blocker(episode)
                 .map(TimelineGate::blocked)
                 .unwrap_or_else(TimelineGate::allowed),
@@ -271,11 +276,13 @@ impl LiveSession {
             TimelineGate::blocked(
                 "Pause or select a completed episode before synchronizing a robot.",
             )
-        } else if !studio.controls_available() {
+        } else if !self.telemetry().controls_available() {
             TimelineGate::blocked("Reconnect telemetry before synchronizing a robot.")
-        } else if studio.mode_active() && !matches!(studio.mode(), ModeSelection::Replay { .. }) {
+        } else if self.project().mode_active()
+            && !matches!(self.project().mode(), ModeSelection::Replay { .. })
+        {
             TimelineGate::blocked("Stop the active control mode before synchronizing a robot.")
-        } else if studio.timeline_seek_context(subject).is_none() {
+        } else if self.timeline_seek_context(subject).is_none() {
             TimelineGate::blocked("Connect and calibrate a compatible follower to synchronize it.")
         } else {
             TimelineGate::allowed()
@@ -288,13 +295,16 @@ impl LiveSession {
         self,
         subject: &TimelineSubject,
     ) -> Option<(String, String, Option<String>)> {
-        let studio = self;
-        let follower = studio.connected_robots().into_iter().find(|robot| {
-            robot.calibrated()
-                && robot
-                    .robot_type()
-                    .is_some_and(|kind| kind.to_ascii_lowercase().contains("follower"))
-        })?;
+        let follower = self
+            .project()
+            .connected_robots()
+            .into_iter()
+            .find(|robot| {
+                robot.calibrated()
+                    && robot
+                        .robot_type()
+                        .is_some_and(|kind| kind.to_ascii_lowercase().contains("follower"))
+            })?;
         let (episode, arms) = match subject {
             TimelineSubject::Recording(recording) if recording.paused() => {
                 (recording.episode().to_owned(), recording.arms().to_owned())

@@ -130,29 +130,6 @@ impl StudioProjectState {
     pub(crate) fn refresh_settings(self) {
         QueryRefresh::current().invalidate(&[QueryDomain::Settings]);
     }
-    pub(crate) fn position_of(&self, id: &str) -> usize {
-        let snapshot = self.backend.snapshot.read();
-        let kind = snapshot
-            .robots()
-            .iter()
-            .find(|robot| robot.id() == id)
-            .and_then(|robot| robot.robot_type().map(str::to_owned));
-        // Blue for the follower and violet for the leader, which is what the
-        // alphabetical accident used to produce on a two-arm bench; the arms
-        // keep the colours their operator already knows.
-        match kind.as_deref() {
-            Some(kind) if kind.contains("follower") => 0,
-            Some(kind) if kind.contains("leader") => 1,
-            // Everything that is not one end of the usual pair takes a stable
-            // slot from its own name, out of the two the pair does not claim.
-            _ => {
-                let hash = id.bytes().fold(0usize, |hash, byte| {
-                    hash.wrapping_mul(31).wrapping_add(usize::from(byte))
-                });
-                2 + hash % 2
-            }
-        }
-    }
     pub(crate) fn connected_robots(&self) -> Vec<RobotSummary> {
         self.backend
             .snapshot
@@ -184,18 +161,17 @@ impl StudioProjectState {
     {
         self.run_inner(success, future);
     }
-    fn run_inner<F>(&self, success: impl Into<String>, future: F)
+    fn run_inner<F>(self, success: impl Into<String>, future: F)
     where
         F: Future<Output = Result<(), String>> + 'static,
     {
-        let studio = *self;
         let success = success.into();
         // Accepted commands belong to the project and report through its notifications.
         crate::client::project::ProjectClient::current().spawn(async move {
             match future.await {
                 Ok(()) if success.is_empty() => {}
-                Ok(()) => studio.report_success(success),
-                Err(error) => studio.report(error),
+                Ok(()) => self.report_success(success),
+                Err(error) => self.report(error),
             }
         });
     }

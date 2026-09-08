@@ -9,8 +9,9 @@ use dioxus::prelude::*;
 use spiral_robotics_common::settings::{DataSettings, SpiralConnectionUpdate};
 
 use crate::activities::settings::robots::RobotPanel;
+use crate::robots::{HardwareTelemetry, RobotSelection};
 use crate::shell::notifications::MessageSource;
-use crate::shell::robot_workspace::RobotWorkspace;
+use crate::shell::{project::ProjectSessionSignals, state::StudioProjectState};
 use crate::tasks::SingleFlight;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19,21 +20,6 @@ enum SettingsSection {
     Spiral,
     Training,
     Video,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct SettingsLoadState {
-    initial: Option<DataSettings>,
-    load_error: Option<String>,
-}
-
-impl SettingsLoadState {
-    pub(crate) const fn new(initial: Option<DataSettings>, load_error: Option<String>) -> Self {
-        Self {
-            initial,
-            load_error,
-        }
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -93,11 +79,13 @@ impl SettingsPanelState {
 }
 
 #[component]
-pub(crate) fn SettingsPanel(studio: RobotWorkspace, state: SettingsLoadState) -> Element {
-    let SettingsLoadState {
-        initial,
-        load_error,
-    } = state;
+pub(crate) fn SettingsPanel(
+    project: StudioProjectState,
+    telemetry: HardwareTelemetry,
+    selection: RobotSelection,
+) -> Element {
+    let initial = project.loaded_settings();
+    let load_error = project.settings_result().and_then(Result::err);
     let initial_value = initial.clone().unwrap_or_default();
     let settings_loaded = initial.is_some();
     let initial_section = if initial_value.spiral().project_id().trim().is_empty() {
@@ -129,11 +117,11 @@ pub(crate) fn SettingsPanel(studio: RobotWorkspace, state: SettingsLoadState) ->
             },
     } = SettingsPanelState::use_state(initial_value, initial_section);
     let on_saved = move || {
-        studio.refresh_settings();
+        project.refresh_settings();
     };
 
     use_effect(move || {
-        if studio.is_active() {
+        if telemetry.is_active() {
             BrowserFocus::after_render("data-settings-panel".to_owned());
         }
     });
@@ -219,7 +207,7 @@ pub(crate) fn SettingsPanel(studio: RobotWorkspace, state: SettingsLoadState) ->
                         }
                         testing.set(false);
                     } else {
-                        studio.report_success_from(
+                        project.report_success_from(
                             MessageSource::Settings,
                             "Settings saved and applied.",
                         );
@@ -266,7 +254,7 @@ pub(crate) fn SettingsPanel(studio: RobotWorkspace, state: SettingsLoadState) ->
                 div { class: "settings-content",
                     if section() == SettingsSection::Robots {
                         ProviderHeading { title: "Robot setup", description: "Configure ports, camera assignments, and calibration for each arm." }
-                        div { class: "robot-settings-panel", RobotPanel { studio } }
+                        div { class: "robot-settings-panel", RobotPanel { project, telemetry, selection } }
                     } else if let Some(error) = load_error.as_ref() {
                         div { class: "settings-loading data-error", "{error}" }
                     } else if !settings_loaded {
@@ -476,7 +464,7 @@ pub(crate) fn SettingsPanel(studio: RobotWorkspace, state: SettingsLoadState) ->
                                 on_saved();
                                 pending_project_file.set(None);
                                 project_transfer_error.set(None);
-                                studio.report_success_from(
+                                project.report_success_from(
                                     MessageSource::Settings,
                                     format!(
                                         "Project restored from {} relations ({} rows).{}",
@@ -489,7 +477,7 @@ pub(crate) fn SettingsPanel(studio: RobotWorkspace, state: SettingsLoadState) ->
                             Err(error) => {
                                 pending_project_file.set(None);
                                 project_transfer_error.set(Some(error.clone()));
-                                studio.report_from(MessageSource::Settings, error);
+                                project.report_from(MessageSource::Settings, error);
                                 BrowserFocus::after_render("project-import-input".to_owned());
                             }
                         }
@@ -585,13 +573,13 @@ pub(crate) fn SettingsWorkspace(is_active: ReadSignal<bool>) -> Element {
         crate::shell::activity::Activity::Settings,
         is_active,
     );
-    let studio = crate::shell::robot_workspace::RobotWorkspace::use_workspace(is_active);
+    let project = StudioProjectState::current();
+    let telemetry =
+        HardwareTelemetry::use_telemetry(project, is_active, ProjectSessionSignals::current());
+    let selection = RobotSelection::use_selection(project.snapshot());
     rsx! {
-        crate::shell::frame::WorkspaceFrame { workspace, status: crate::shell::frame::WorkspaceStatus::Hardware(studio),
-            SettingsPanel { studio, state: SettingsLoadState::new(
-                studio.loaded_settings(),
-                studio.settings_result().and_then(Result::err),
-            ) }
+        crate::shell::frame::WorkspaceFrame { workspace, status: crate::shell::frame::WorkspaceStatus::Hardware(telemetry),
+            SettingsPanel { project, telemetry, selection }
         }
     }
 }

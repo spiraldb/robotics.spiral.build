@@ -1920,5 +1920,6 @@ pub(crate) fn WorkflowWorkspace(is_active: ReadSignal<bool>) -> Element {
     let catalog = crate::activities::data::relations::RelationCatalogState::use_catalog();
     let controller = super::state::WorkflowController::use_controller(catalog.signal());
     controller.use_polling(is_active);
-    rsx! { crate::shell::frame::WorkspaceFrame { workspace, status: crate::shell::frame::WorkspaceStatus::Workflow(controller), WorkflowPanels { controller } } }
+    let status = use_memo(move || controller.accepted_state());
+    rsx! { crate::shell::frame::WorkspaceFrame { workspace, status: crate::shell::frame::WorkspaceStatus::Workflow(status), WorkflowPanels { controller } } }
 }

@@ -82,9 +82,9 @@ pub(crate) fn ActivityRail(activity: Activity, on_activity: EventHandler<Activit
 pub(crate) enum WorkspaceStatus {
     #[default]
     General,
-    Hardware(crate::shell::robot_workspace::RobotWorkspace),
+    Hardware(crate::robots::HardwareTelemetry),
     Training(crate::activities::training::history::TrainingHistory),
-    Workflow(crate::activities::workflow::state::WorkflowController),
+    Workflow(Memo<Option<WorkflowSnapshot>>),
 }
 
 /// Workspace content stays mounted; only the active workspace supplies shell chrome.
@@ -110,7 +110,7 @@ fn StatusBar(route: crate::shell::routes::StudioRoute, status: WorkspaceStatus) 
     let snapshot = studio.snapshot().read().to_owned();
     let (telemetry, connected) = match status {
         WorkspaceStatus::Hardware(robot) => {
-            (robot.telemetry().read().clone(), robot.controls_available())
+            (robot.frame().read().clone(), robot.controls_available())
         }
         _ => (Default::default(), false),
     };
@@ -119,10 +119,9 @@ fn StatusBar(route: crate::shell::routes::StudioRoute, status: WorkspaceStatus) 
         _ => TrainingStatus::default(),
     };
     let workflow = match status {
-        WorkspaceStatus::Workflow(controller) => controller
-            .accepted_state()
-            .as_ref()
-            .map(WorkflowStatusProjection::from),
+        WorkspaceStatus::Workflow(snapshot) => {
+            snapshot.read().as_ref().map(WorkflowStatusProjection::from)
+        }
         _ => None,
     };
     let backend_connected = (studio.live())();

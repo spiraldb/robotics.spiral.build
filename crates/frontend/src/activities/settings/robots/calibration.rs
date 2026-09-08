@@ -4,19 +4,23 @@ use crate::components::interaction::{
     ConfirmationDismissal, ConfirmationResponse,
 };
 use dioxus::prelude::*;
-use spiral_robotics_common::robots::{CalibrationJointProgress, CalibrationProgress, RobotSummary};
+use spiral_robotics_common::robots::{CalibrationJointProgress, RobotSummary};
 use spiral_robotics_viewport as arm;
 
+use crate::robots::{HardwareCommands, HardwareTelemetry};
 use crate::shell::notifications::MessageSource;
-use crate::shell::robot_workspace::RobotWorkspace;
+use crate::shell::state::StudioProjectState;
 use crate::tasks::SingleFlight;
 
 #[component]
 pub(super) fn CalibrationSection(
-    studio: RobotWorkspace,
+    project: StudioProjectState,
+    telemetry: HardwareTelemetry,
     robot: RobotSummary,
-    progress: Option<CalibrationProgress>,
 ) -> Element {
+    let progress = telemetry
+        .robot_telemetry(robot.id())
+        .and_then(|robot| robot.calibration().cloned());
     let connected = robot.connection().connected();
     let mut confirming_reapply = use_signal(|| false);
     let reapplying = use_signal(|| false);
@@ -65,7 +69,7 @@ pub(super) fn CalibrationSection(
                             }
                             let id = recalibrate_id.clone();
                             command.set(Some("start"));
-                            studio.run("", async move {
+                            HardwareCommands::new(project, telemetry).run("", async move {
                                 let result = RobotClient::current().start_calibration(id)
                                     .await
                                     .map_err(|error| error.to_string());
@@ -95,7 +99,7 @@ pub(super) fn CalibrationSection(
                                     return;
                                 }
                                 let id = id.clone();
-                                studio.run_utility("", async move {
+                                project.run_utility("", async move {
                                     let Some(result) = SingleFlight::run(
                                         reapplying,
                                         async move {
@@ -113,9 +117,9 @@ pub(super) fn CalibrationSection(
                                     }
                                     match result {
                                         Ok(result) => {
-                                            studio.report_success(result.reapply_success());
+                                            project.report_success(result.reapply_success());
                                             if !result.warnings().is_empty() {
-                                                studio.report_warning_from(
+                                                project.report_warning_from(
                                                     MessageSource::Studio,
                                                     result.warnings().join(" "),
                                                 );
@@ -165,7 +169,7 @@ pub(super) fn CalibrationSection(
                             }
                             let id = id.clone();
                             command.set(Some("finish"));
-                            studio.run("Calibration saved.", async move {
+                            HardwareCommands::new(project, telemetry).run("Calibration saved.", async move {
                                 let result = RobotClient::current().finish_calibration(id)
                                     .await
                                     .map_err(|error| error.to_string())
@@ -189,7 +193,7 @@ pub(super) fn CalibrationSection(
                             }
                             let id = id.clone();
                             command.set(Some("cancel"));
-                            studio.run("", async move {
+                            HardwareCommands::new(project, telemetry).run("", async move {
                                 let result = RobotClient::current().cancel_calibration(id)
                                     .await
                                     .map_err(|error| error.to_string());

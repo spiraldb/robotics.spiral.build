@@ -1,10 +1,7 @@
-//! Hardware readings and robot selection owned by each hardware workspace.
-use crate::client::queries::{QueryDomain, QueryPolicy};
-use crate::shell::{StudioClient, project::ProjectSessionSignals, state::StudioProjectState};
+//! Selection belongs to a mounted view; it does not own hardware or project state.
 use dioxus::prelude::*;
-use spiral_robotics_common::recording::{RecordingProgress, ReplayProgress};
-use spiral_robotics_common::robots::{RobotSummary, RobotTelemetry, TelemetryFrame};
-use std::future::Future;
+use spiral_robotics_common::robots::RobotSummary;
+use spiral_robotics_common::status::StudioSnapshot;
 /// The one selection shared by the hierarchy, viewport, cameras, and inspector.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Selection {
@@ -41,11 +38,11 @@ impl Selection {
 /// a valid object on an available arm. Camera selection remains intentional;
 /// selecting an arm itself, arriving with no selection, or losing a stale
 /// motor selection opens that arm's first motor in the inspector.
-trait RobotSelection {
+trait DefaultRobotSelection {
     fn default_joint_selection(&self, selected: Option<&Selection>) -> Option<Selection>;
 }
 
-impl RobotSelection for [RobotSummary] {
+impl DefaultRobotSelection for [RobotSummary] {
     fn default_joint_selection(&self, selected: Option<&Selection>) -> Option<Selection> {
         let robot = selected
             .and_then(|selection| self.iter().find(|robot| robot.id() == selection.robot_id()))
@@ -74,34 +71,20 @@ impl RobotSelection for [RobotSummary] {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-pub(crate) struct RobotWorkspace {
-    project: StudioProjectState,
-    telemetry: Signal<TelemetryFrame>,
-    last_telemetry_ms: Signal<f64>,
+pub(crate) struct RobotSelection {
     selected: Signal<Option<Selection>>,
     pointed: Signal<Option<Selection>>,
-    is_active: ReadSignal<bool>,
 }
-impl std::ops::Deref for RobotWorkspace {
-    type Target = StudioProjectState;
-    fn deref(&self) -> &Self::Target {
-        &self.project
-    }
-}
-impl RobotWorkspace {
-    pub(crate) fn use_workspace(is_active: ReadSignal<bool>) -> Self {
-        let project = StudioProjectState::current();
-        let workspace = use_hook(|| Self {
-            project,
-            telemetry: Signal::new(TelemetryFrame::default()),
-            last_telemetry_ms: Signal::new(0.0),
+impl RobotSelection {
+    pub(crate) fn use_selection(
+        snapshot: MappedSignal<StudioSnapshot, Signal<StudioSnapshot>>,
+    ) -> Self {
+        let selection = use_hook(|| Self {
             selected: Signal::new(None),
             pointed: Signal::new(None),
-            is_active,
         });
-        let mut selected = workspace.selected;
+        let mut selected = selection.selected;
         use_effect(move || {
-            let snapshot = project.snapshot();
             let next = snapshot
                 .read()
                 .robots()
@@ -110,105 +93,25 @@ impl RobotWorkspace {
                 selected.set(Some(next));
             }
         });
-        workspace.use_hardware_polling(is_active);
-        workspace
+        selection
     }
-    pub(crate) fn is_active(self) -> bool {
-        (self.is_active)()
-    }
-    pub(crate) fn is_active_signal(self) -> ReadSignal<bool> {
-        self.is_active
-    }
-    pub(crate) fn telemetry(self) -> MappedSignal<TelemetryFrame, Signal<TelemetryFrame>> {
-        self.telemetry.map(|value| value)
-    }
-    pub(crate) const fn selection(self) -> Signal<Option<Selection>> {
+    pub(crate) fn selected(self) -> Signal<Option<Selection>> {
         self.selected
     }
-    pub(crate) const fn pointed_selection(self) -> Signal<Option<Selection>> {
+    pub(crate) fn pointed(self) -> Signal<Option<Selection>> {
         self.pointed
     }
-    fn use_hardware_polling(mut self, is_active: ReadSignal<bool>) {
-        // Reactivation must receive a fresh sample before enabling controls.
-        use_effect(move || {
-            if !is_active() {
-                self.last_telemetry_ms.set(0.0);
-            }
-        });
-        use_drop(move || {
-            self.last_telemetry_ms.set(0.0);
-        });
-        let telemetry = QueryPolicy::new(QueryDomain::Telemetry, 50).use_when(
-            move || *is_active.read(),
-            || StudioClient::current().telemetry_snapshot(),
-        );
-        use_effect(move || {
-            let result = telemetry.read();
-            if telemetry.finished()
-                && let Some(Ok(frame)) = result.as_ref()
-                && self.telemetry.peek().sequence() != frame.sequence()
-            {
-                self.last_telemetry_ms.set(StudioProjectState::now_ms());
-                self.telemetry.set(frame.clone());
-            }
-        });
-    }
-    pub(crate) fn robot_telemetry(&self, id: &str) -> Option<RobotTelemetry> {
-        if !self.controls_available() {
-            return None;
-        }
-        self.telemetry
+    pub(crate) fn focused(self, robots: &[RobotSummary]) -> Option<RobotSummary> {
+        self.selected
             .read()
-            .robots()
-            .iter()
-            .find(|robot| robot.id() == id)
-            .cloned()
-    }
-    pub(crate) fn controls_available(&self) -> bool {
-        let age = self.telemetry_age_seconds();
-        (self.is_active)()
-            && (self.project.live())()
-            && ProjectSessionSignals::current().catalog_available()
-            && age.is_finite()
-            && age < 2.5
-    }
-    pub(crate) fn telemetry_age_seconds(&self) -> f64 {
-        let last = (self.last_telemetry_ms)();
-        if last <= 0.0 {
-            return f64::INFINITY;
-        }
-        (((self.project.clock_ms())() - last) / 1000.0).max(0.0)
-    }
-    pub(crate) fn focused(&self) -> Option<RobotSummary> {
-        let snapshot = self.project.snapshot();
-        let robots = snapshot.read();
-        let chosen = self.selected.read();
-        chosen
             .as_ref()
             .and_then(|selection| {
                 robots
-                    .robots()
                     .iter()
                     .find(|robot| robot.id() == selection.robot_id())
             })
-            .or_else(|| robots.robots().first())
+            .or_else(|| robots.first())
             .cloned()
-    }
-    pub(crate) fn recording(&self) -> Option<RecordingProgress> {
-        self.telemetry.read().recording().cloned()
-    }
-    pub(crate) fn replay(&self) -> Option<ReplayProgress> {
-        self.telemetry.read().replay().cloned()
-    }
-    pub(crate) fn run<F>(&self, success: impl Into<String>, future: F)
-    where
-        F: Future<Output = Result<(), String>> + 'static,
-    {
-        if !self.controls_available() {
-            self.report("Controls are paused because telemetry is unavailable or delayed. No command was sent.");
-            return;
-        }
-        self.project.run_utility(success, future);
     }
 }
 #[cfg(test)]
@@ -217,7 +120,7 @@ mod tests {
         ConnectionStatus, MotorSummary, RobotAvailability, RobotSummary,
     };
 
-    use super::{RobotSelection, Selection};
+    use super::{DefaultRobotSelection, Selection};
 
     fn robot(id: &str, motors: &[&str]) -> RobotSummary {
         RobotSummary::new(
@@ -288,5 +191,86 @@ mod tests {
 
         assert_eq!(robots.default_joint_selection(Some(&camera)), None);
         assert_eq!(robots.default_joint_selection(Some(&joint)), None);
+    }
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+    use std::{cell::RefCell, rc::Rc};
+
+    #[derive(Clone, Default)]
+    struct SelectionHarness(Rc<RefCell<SelectionOwners>>);
+    #[derive(Default)]
+    struct SelectionOwners {
+        mounted: Option<Signal<bool>>,
+        selections: Vec<RobotSelection>,
+    }
+    impl SelectionHarness {
+        fn render(self) -> Element {
+            let mounted = use_signal(|| true);
+            let snapshot = use_signal(StudioSnapshot::default);
+            self.0.borrow_mut().mounted = Some(mounted);
+            rsx! {
+                if mounted() {
+                    for name in ["live", "settings"] {
+                        SelectionOwner {
+                            key: "{name}",
+                            snapshot,
+                            on_created: { let owners = self.0.clone(); move |selection| owners.borrow_mut().selections.push(selection) },
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[component]
+    fn SelectionOwner(
+        snapshot: Signal<StudioSnapshot>,
+        on_created: EventHandler<RobotSelection>,
+    ) -> Element {
+        let selection = RobotSelection::use_selection(snapshot.map(|value| value));
+        use_hook(move || on_created.call(selection));
+        rsx! {}
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn views_have_independent_selections_that_are_disposed_with_their_owner() {
+        let harness = SelectionHarness::default();
+        let mut dom = VirtualDom::new_with_props(SelectionHarness::render, harness.clone());
+        dom.rebuild_in_place();
+        let (live, settings, mut mounted) = {
+            let owners = harness.0.borrow();
+            (
+                owners.selections[0],
+                owners.selections[1],
+                owners.mounted.unwrap(),
+            )
+        };
+        dom.in_runtime(|| {
+            live.selected()
+                .set(Some(Selection::Robot("follower".into())));
+            settings
+                .selected()
+                .set(Some(Selection::Robot("leader".into())));
+            live.pointed().set(Some(Selection::Joint {
+                robot: "follower".into(),
+                joint: "elbow".into(),
+            }));
+        });
+        dom.render_immediate_to_vec();
+        assert_eq!(
+            *live.selected().peek(),
+            Some(Selection::Robot("follower".into()))
+        );
+        assert_eq!(
+            *settings.selected().peek(),
+            Some(Selection::Robot("leader".into()))
+        );
+        assert!(settings.pointed().peek().is_none());
+        dom.in_runtime(|| mounted.set(false));
+        dom.render_immediate_to_vec();
+        assert!(live.selected().try_read().is_err());
+        assert!(settings.selected().try_read().is_err());
     }
 }

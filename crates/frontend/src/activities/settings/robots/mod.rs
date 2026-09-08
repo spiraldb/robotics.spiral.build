@@ -16,8 +16,9 @@ use spiral_robotics_common::robots::{
 };
 
 use crate::panels::scene::ScenePalette;
+use crate::robots::{HardwareCommands, HardwareTelemetry, RobotSelection, Selection};
 use crate::shell::project::ProjectSessionSignals;
-use crate::shell::robot_workspace::{RobotWorkspace, Selection};
+use crate::shell::state::StudioProjectState;
 use crate::tasks::SingleFlight;
 
 mod calibration;
@@ -32,9 +33,13 @@ const ROBOT_TYPES: [(&str, &str); 2] = [
 ];
 
 #[component]
-pub(super) fn RobotPanel(studio: RobotWorkspace) -> Element {
-    let robots = studio.snapshot().read().robots().to_owned();
-    let focused = studio.focused();
+pub(super) fn RobotPanel(
+    project: StudioProjectState,
+    telemetry: HardwareTelemetry,
+    selection: RobotSelection,
+) -> Element {
+    let robots = project.snapshot().read().robots().to_owned();
+    let focused = selection.focused(&robots);
     let sessions = ProjectSessionSignals::current();
     let mut ports = use_resource(move || {
         let available = sessions.catalog_available();
@@ -55,7 +60,7 @@ pub(super) fn RobotPanel(studio: RobotWorkspace) -> Element {
         div { class: "flex flex-col",
             ul { class: "flex flex-col",
                 for (index, robot) in robots.iter().cloned().enumerate() {
-                    RobotEntry { studio,
+                    RobotEntry { project, telemetry, selection,
                         key: "{robot.id()}",
                         state: RobotEntryState::new(
                             focused.as_ref().is_some_and(|chosen| chosen.id() == robot.id()),
@@ -68,8 +73,8 @@ pub(super) fn RobotPanel(studio: RobotWorkspace) -> Element {
             }
 
             div { class: "device-list-actions",
-                NewRobotForm { studio }
-                ImportRobotConfiguration { studio }
+                NewRobotForm { selection, project }
+                ImportRobotConfiguration { selection, project }
             }
         }
     }
@@ -81,13 +86,19 @@ pub(super) fn RobotPanel(studio: RobotWorkspace) -> Element {
 /// so a two-arm bench can have both open at once — which is exactly when it is
 /// needed, since setting up the second arm means comparing it to the first.
 #[component]
-fn RobotEntry(studio: RobotWorkspace, robot: RobotSummary, state: RobotEntryState) -> Element {
+fn RobotEntry(
+    project: StudioProjectState,
+    telemetry: HardwareTelemetry,
+    selection: RobotSelection,
+    robot: RobotSummary,
+    state: RobotEntryState,
+) -> Element {
     let RobotEntryState {
         focused,
         accent,
         port_catalog,
     } = state;
-    let mut chosen = studio.selection();
+    let mut chosen = selection.selected();
     // Open on whatever still needs attention. An arm that is wired up and
     // calibrated has nothing to do here, so it starts folded; anything else
     // opens on the work. Only the initial state is derived — an arm becoming
@@ -150,7 +161,7 @@ fn RobotEntry(studio: RobotWorkspace, robot: RobotSummary, state: RobotEntryStat
                 }
             }
             if open() {
-                RobotSetup { studio, robot: robot.clone(), port_catalog }
+                RobotSetup { project, telemetry, robot: robot.clone(), port_catalog }
             }
         }
     }
@@ -175,8 +186,8 @@ impl RobotEntryState {
 
 /// Adding an arm, kept folded away so the list stays a list.
 #[component]
-fn NewRobotForm(studio: RobotWorkspace) -> Element {
-    let mut chosen = studio.selection();
+fn NewRobotForm(project: StudioProjectState, selection: RobotSelection) -> Element {
+    let mut chosen = selection.selected();
     let mut open = use_signal(|| false);
     let mut id = use_signal(String::new);
     let mut robot_type = use_signal(|| ROBOT_TYPES[0].0.to_owned());
@@ -188,12 +199,12 @@ fn NewRobotForm(studio: RobotWorkspace) -> Element {
         }
         let name = id.read().trim().to_owned();
         if name.is_empty() {
-            studio.report("Give the arm a name first.");
+            project.report("Give the arm a name first.");
             return;
         }
         let request = NewRobot::new(name.clone(), Some(robot_type()));
         let selected_name = name.clone();
-        studio.run_utility(format!("Created {name}."), async move {
+        project.run_utility(format!("Created {name}."), async move {
             let Some(result) = SingleFlight::run(creating, async move {
                 RobotClient::current()
                     .create_robot(request)
@@ -280,9 +291,9 @@ fn NewRobotForm(studio: RobotWorkspace) -> Element {
 
 /// Import a complete robot JSON document as a new instance.
 #[component]
-fn ImportRobotConfiguration(studio: RobotWorkspace) -> Element {
+fn ImportRobotConfiguration(project: StudioProjectState, selection: RobotSelection) -> Element {
     let importing = use_signal(|| false);
-    let mut chosen = studio.selection();
+    let mut chosen = selection.selected();
 
     rsx! {
         FileAction {
@@ -294,7 +305,7 @@ fn ImportRobotConfiguration(studio: RobotWorkspace) -> Element {
             aria_busy: importing(),
             input: FileInput::new(".json,application/json", move |event: Event<FormData>| {
                 let Some(file) = event.files().first().cloned() else { return };
-                studio.run_utility("", async move {
+                project.run_utility("", async move {
                     let Some(result) = SingleFlight::run(importing, async {
                             let bytes = file
                                 .read_bytes()
@@ -311,7 +322,7 @@ fn ImportRobotConfiguration(studio: RobotWorkspace) -> Element {
                     match result {
                         Ok(robot) => {
                             chosen.set(Some(Selection::Robot(robot.id().to_owned())));
-                            studio.report_success(format!("Imported {}.", robot.id()));
+                            project.report_success(format!("Imported {}.", robot.id()));
                             Ok(())
                         }
                         Err(error) => Err(error),
@@ -326,12 +337,14 @@ fn ImportRobotConfiguration(studio: RobotWorkspace) -> Element {
 /// Everything about one arm stored in its SpiralDB configuration row.
 #[component]
 fn RobotSetup(
-    studio: RobotWorkspace,
+    project: StudioProjectState,
+    telemetry: HardwareTelemetry,
     robot: RobotSummary,
     port_catalog: PortCatalogState,
 ) -> Element {
-    let telemetry = studio.robot_telemetry(robot.id());
-    let progress = telemetry.and_then(|robot| robot.calibration().cloned());
+    let progress = telemetry
+        .robot_telemetry(robot.id())
+        .and_then(|robot| robot.calibration().cloned());
     rsx! {
         div { class: "device-setup",
             // The connection used to get a row of its own reading "Motor bus
@@ -365,7 +378,7 @@ fn RobotSetup(
             }
 
             div { class: "device-setup-section",
-                PortSection { studio,
+                PortSection { project, telemetry,
                     robot: robot.clone(),
                     state: PortSectionState::new(
                         port_catalog.scan.clone(),
@@ -375,14 +388,14 @@ fn RobotSetup(
                 }
             }
             div { class: "device-setup-section",
-                CameraSection { studio, robot: robot.clone() }
+                CameraSection { project, telemetry, robot: robot.clone() }
             }
             div { class: "device-setup-section",
-                CalibrationSection { studio, robot: robot.clone(), progress }
+                CalibrationSection { project, telemetry, robot: robot.clone() }
             }
             div { class: "device-file-row",
                 span { class: "min-w-0 flex-1 truncate text-[10px] text-ink-faint", "Stored in SpiralDB" }
-                DeleteRobotAction { studio, robot: robot.clone() }
+                DeleteRobotAction { project, telemetry, robot: robot.clone() }
             }
         }
     }
@@ -440,7 +453,12 @@ impl PortCatalogState {
 }
 
 #[component]
-fn ConnectionAction(studio: RobotWorkspace, robot: RobotSummary, sweeping: bool) -> Element {
+fn ConnectionAction(
+    project: StudioProjectState,
+    telemetry: HardwareTelemetry,
+    robot: RobotSummary,
+    sweeping: bool,
+) -> Element {
     let connected = robot.connection().connected();
     let pending = use_signal(|| false);
     let id = robot.id().to_owned();
@@ -469,7 +487,7 @@ fn ConnectionAction(studio: RobotWorkspace, robot: RobotSummary, sweeping: bool)
                     return;
                 }
                 let id = id.clone();
-                studio.run("", async move {
+                HardwareCommands::new(project, telemetry).run("", async move {
                     SingleFlight::run(pending, async move {
                         let result = if connected {
                             RobotClient::current().disconnect_robot(id).await
@@ -505,7 +523,12 @@ impl PortSectionState {
 }
 
 #[component]
-fn PortSection(studio: RobotWorkspace, robot: RobotSummary, state: PortSectionState) -> Element {
+fn PortSection(
+    project: StudioProjectState,
+    telemetry: HardwareTelemetry,
+    robot: RobotSummary,
+    state: PortSectionState,
+) -> Element {
     let PortSectionState {
         scan,
         sweeping,
@@ -558,8 +581,8 @@ fn PortSection(studio: RobotWorkspace, robot: RobotSummary, state: PortSectionSt
                     title: if locked { "Disconnect this arm before identifying its port" } else { "Find the port by unplugging the cable" },
                     onclick: move |_| {
                         identify_step.set(IdentifyStep::Idle);
-                        if !studio.controls_available() {
-                            studio.report("Controls are paused because telemetry is unavailable or delayed.");
+                        if !telemetry.controls_available() {
+                            project.report("Controls are paused because telemetry is unavailable or delayed.");
                             return;
                         }
                         spawn(async move {
@@ -579,7 +602,7 @@ fn PortSection(studio: RobotWorkspace, robot: RobotSummary, state: PortSectionSt
                                 Ok(list) => identify_step.set(IdentifyStep::AwaitingUnplug(
                                     list.into_iter().map(|port| port.path().to_owned()).collect(),
                                 )),
-                                Err(error) => studio.report(error),
+                                Err(error) => project.report(error),
                             }
                         });
                     },
@@ -600,7 +623,7 @@ fn PortSection(studio: RobotWorkspace, robot: RobotSummary, state: PortSectionSt
                         move |event: Event<FormData>| {
                             let value = event.value();
                             if !value.is_empty() {
-                                studio.assign_port(PortAssignment::new(id.clone(), value, baud));
+                                HardwareCommands::new(project, telemetry).assign_port(PortAssignment::new(id.clone(), value, baud));
                             }
                         }
                     },
@@ -623,19 +646,19 @@ fn PortSection(studio: RobotWorkspace, robot: RobotSummary, state: PortSectionSt
                         option { disabled: true, "Scanning…" }
                     }
                 }
-                ConnectionAction { studio, robot: robot.clone(), sweeping }
+                ConnectionAction { project, telemetry, robot: robot.clone(), sweeping }
             }
             if let Some(Err(error)) = &scan {
                 p { class: "mt-0.5 text-[11px] text-danger", "{error}" }
             }
 
-            IdentifyPort { studio,
+            IdentifyPort { project, telemetry,
                 robot,
                 step: identify_step,
                 on_found: {
                     let id = id.clone();
                     move |path: String| {
-                        studio.assign_port(PortAssignment::new(id.clone(), path, baud))
+                        HardwareCommands::new(project, telemetry).assign_port(PortAssignment::new(id.clone(), path, baud))
                     }
                 },
             }
@@ -665,7 +688,7 @@ fn PortOption(port: SerialPortSummary, owner: String, selected: bool) -> Element
 }
 
 /// Record a serial port on a robot, keeping its existing baud rate.
-impl RobotWorkspace {
+impl HardwareCommands {
     fn assign_port(self, assignment: PortAssignment) {
         let request = RobotUpdate::with_port(
             assignment.robot_id,
@@ -707,7 +730,8 @@ enum IdentifyStep {
 
 #[component]
 fn IdentifyPort(
-    studio: RobotWorkspace,
+    project: StudioProjectState,
+    telemetry: HardwareTelemetry,
     robot: RobotSummary,
     step: Signal<IdentifyStep>,
     on_found: EventHandler<String>,
@@ -731,8 +755,8 @@ fn IdentifyPort(
                         disabled: checking(),
                         aria_busy: checking(),
                         onclick: move |_| {
-                            if !studio.controls_available() {
-                                studio.report("Controls are paused because telemetry is unavailable or delayed.");
+                            if !telemetry.controls_available() {
+                                project.report("Controls are paused because telemetry is unavailable or delayed.");
                                 return;
                             }
                             let before = before.clone();
@@ -755,9 +779,9 @@ fn IdentifyPort(
                                             on_found.call(port.to_owned());
                                             step.set(IdentifyStep::Finished(identification.message().to_owned()));
                                         }
-                                        None => studio.report(identification.message()),
+                                        None => project.report(identification.message()),
                                     },
-                                    Err(error) => studio.report(error),
+                                    Err(error) => project.report(error),
                                 }
                             });
                         },
@@ -787,8 +811,12 @@ fn IdentifyPort(
 }
 
 #[component]
-fn CameraSection(studio: RobotWorkspace, robot: RobotSummary) -> Element {
-    let available = studio.snapshot().read().cameras().to_owned();
+fn CameraSection(
+    project: StudioProjectState,
+    telemetry: HardwareTelemetry,
+    robot: RobotSummary,
+) -> Element {
+    let available = project.snapshot().read().cameras().to_owned();
     let mut role = use_signal(|| "wrist".to_owned());
     let mut device = use_signal(String::new);
     let saving_cameras = use_signal(|| false);
@@ -823,8 +851,8 @@ fn CameraSection(studio: RobotWorkspace, robot: RobotSummary) -> Element {
                     aria_busy: scanning(),
                     title: "Look for cameras that have been plugged in or moved",
                     onclick: move |_| {
-                        if !studio.controls_available() {
-                            studio.report("Controls are paused because telemetry is unavailable or delayed.");
+                        if !telemetry.controls_available() {
+                            project.report("Controls are paused because telemetry is unavailable or delayed.");
                             return;
                         }
                         spawn(async move {
@@ -839,7 +867,7 @@ fn CameraSection(studio: RobotWorkspace, robot: RobotSummary) -> Element {
                             )
                             .await
                             {
-                                studio.report(error)
+                                project.report(error)
                             }
                         });
                     },
@@ -871,7 +899,7 @@ fn CameraSection(studio: RobotWorkspace, robot: RobotSummary) -> Element {
                                     .cloned()
                                     .collect::<Vec<_>>();
                                 move |_| {
-                                    studio.save_cameras(CameraAssignments::new(
+                                    HardwareCommands::new(project, telemetry).save_cameras(CameraAssignments::new(
                                         id.clone(),
                                         remaining.clone(),
                                         saving_cameras,
@@ -944,7 +972,7 @@ fn CameraSection(studio: RobotWorkspace, robot: RobotSummary) -> Element {
                                 move |_| {
                                     let (name, device_id) = (role.read().trim().to_owned(), device());
                                     if name.is_empty() {
-                                        studio.report("Give the camera a role name.");
+                                        project.report("Give the camera a role name.");
                                         return;
                                     }
                                     let mut bindings = existing.iter()
@@ -952,7 +980,7 @@ fn CameraSection(studio: RobotWorkspace, robot: RobotSummary) -> Element {
                                         .cloned()
                                         .collect::<Vec<_>>();
                                     bindings.push(CameraBinding::new(name, device_id, None));
-                                    studio.save_cameras(CameraAssignments::new(
+                                    HardwareCommands::new(project, telemetry).save_cameras(CameraAssignments::new(
                                         id.clone(),
                                         bindings,
                                         saving_cameras,
@@ -969,7 +997,7 @@ fn CameraSection(studio: RobotWorkspace, robot: RobotSummary) -> Element {
 }
 
 /// Replace a robot's camera assignments.
-impl RobotWorkspace {
+impl HardwareCommands {
     fn save_cameras(self, assignments: CameraAssignments) {
         if assignments.saving.peek().to_owned() {
             return;

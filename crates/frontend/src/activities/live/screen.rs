@@ -5,7 +5,9 @@ use super::session::LiveSession;
 use super::workbench::LiveWorkbench;
 use crate::panels::camera_panel::{AssignedCamera, CameraPanelRows};
 use crate::panels::scene::{Viewport, ViewportPresentation};
+use crate::robots::{HardwareTelemetry, RobotSelection};
 use crate::shell::frame::WorkspaceFrame;
+use crate::shell::{project::ProjectSessionSignals, state::StudioProjectState};
 use dioxus::prelude::*;
 use dioxus_workbench::{LayoutNode, Panel, PanelId, PanelLayout, PanelWorkspace, SplitAxis};
 
@@ -51,18 +53,23 @@ pub(crate) fn LiveWorkspace(is_active: ReadSignal<bool>) -> Element {
         crate::shell::activity::Activity::Live,
         is_active,
     );
-    let session = LiveSession::use_session(is_active);
-    rsx! { WorkspaceFrame { workspace, status: crate::shell::frame::WorkspaceStatus::Hardware(session.robot()), LivePanels { studio: session } } }
+    let project = StudioProjectState::current();
+    let telemetry =
+        HardwareTelemetry::use_telemetry(project, is_active, ProjectSessionSignals::current());
+    let selection = RobotSelection::use_selection(project.snapshot());
+    let session = LiveSession::use_session(project, telemetry, selection);
+    rsx! { WorkspaceFrame { workspace, status: crate::shell::frame::WorkspaceStatus::Hardware(session.telemetry()), LivePanels { session } } }
 }
 
 #[component]
-fn LivePanels(studio: LiveSession) -> Element {
-    let timeline = LiveTimeline::use_timeline(studio);
+fn LivePanels(session: LiveSession) -> Element {
+    let timeline = LiveTimeline::use_timeline(session);
     let actions = timeline.actions();
     let mut resize_revision = use_signal(|| 0_u64);
-    let mut selection = studio.selection();
-    let cameras = studio
-        .focused()
+    let mut selection = session.selection().selected();
+    let cameras = session
+        .selection()
+        .focused(session.project().snapshot().read().robots())
         .map(|robot| {
             robot
                 .cameras()
@@ -73,10 +80,10 @@ fn LivePanels(studio: LiveSession) -> Element {
         .unwrap_or_default();
     let mut panels = vec![
         Panel::new("workbench", "Live", "workbench", rsx! {
-            aside { class: "studio-v2-workbench", LiveWorkbench { studio, on_action: move |action| studio.dispatch_live_action(action) } }
+            aside { class: "studio-v2-workbench", LiveWorkbench { project: session.project(), hardware: session.telemetry(), selection: session.selection(), datasets: session.datasets(), on_action: move |action| session.dispatch_live_action(action) } }
         }).with_class("workbench-editor"),
         Panel::new("scene", "Scene", "primary", rsx! {
-            Viewport { studio: studio.robot(), source: timeline.scene_source(), presentation: ViewportPresentation::new(None, resize_revision()) }
+            Viewport { project: session.project(), telemetry: session.telemetry(), robot_selection: session.selection(), source: timeline.scene_source(), presentation: ViewportPresentation::new(None, resize_revision()) }
         }).with_class("scene-editor"),
     ];
     for camera in &cameras {

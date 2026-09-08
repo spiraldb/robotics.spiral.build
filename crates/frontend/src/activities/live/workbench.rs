@@ -10,32 +10,41 @@ use crate::components::interaction::{
 use dioxus::prelude::*;
 use spiral_robotics_common::robots::ModeSelection;
 
+use crate::activities::data::dataset_catalog::DatasetChoices;
 use crate::activities::live::actions::LiveAction;
 use crate::activities::live::control::JointPanel;
-use crate::activities::live::session::LiveSession;
-use crate::shell::robot_workspace::Selection;
+use crate::robots::Selection;
+use crate::robots::{HardwareTelemetry, RobotSelection};
+use crate::shell::state::StudioProjectState;
+use spiral_robotics_common::recording::RecordingProgress;
 
 /// The complete left-hand workbench for operating a connected pair.
 #[component]
-pub(crate) fn LiveWorkbench(studio: LiveSession, on_action: EventHandler<LiveAction>) -> Element {
-    let robots = studio.snapshot().read().robots().to_owned();
+pub(crate) fn LiveWorkbench(
+    project: StudioProjectState,
+    hardware: HardwareTelemetry,
+    selection: RobotSelection,
+    datasets: DatasetChoices,
+    on_action: EventHandler<LiveAction>,
+) -> Element {
+    let robots = project.snapshot().read().robots().to_owned();
 
     rsx! {
         div { class: "studio-workbench-scroll live-workbench",
-            ControlSection { studio, on_action }
-            CaptureSection { studio }
+            ControlSection { project, hardware, selection, on_action }
+            CaptureSection { datasets, recording: hardware.recording() }
 
             section { class: "workbench-section live-properties",
                 header { class: "workbench-section-heading",
                     h3 { "Motors" }
                 }
                 RobotRoster {
-                    studio,
+                    selection,
                     robots,
                     on_select: move |selection| on_action.call(LiveAction::Select(selection)),
                 }
                 JointPanel {
-                    studio: studio.robot(),
+                    project, hardware, robot_selection: selection,
                     on_select: move |selection| on_action.call(LiveAction::Select(selection)),
                     on_point: move |selection| on_action.call(LiveAction::Point(selection)),
                 }
@@ -45,11 +54,9 @@ pub(crate) fn LiveWorkbench(studio: LiveSession, on_action: EventHandler<LiveAct
 }
 
 #[component]
-fn CaptureSection(studio: LiveSession) -> Element {
-    let data = studio.datasets();
-    let mut selected_dataset = studio.selected_dataset();
-    let recording = studio.recording();
-    let dataset_ids = data
+fn CaptureSection(datasets: DatasetChoices, recording: Option<RecordingProgress>) -> Element {
+    let mut selected_dataset = datasets.selected();
+    let dataset_ids = datasets
         .datasets()
         .into_iter()
         .map(|dataset| dataset.id().to_owned())
@@ -80,7 +87,7 @@ fn CaptureSection(studio: LiveSession) -> Element {
             datalist { id: "live-dataset-options",
                 for id in dataset_ids { option { value: "{id}" } }
             }
-            DatasetCatalogFeedback { data }
+            DatasetCatalogFeedback { data: datasets }
             p {
                 if recording.is_some() {
                     "Dataset assignment is locked until this episode finishes."
@@ -94,11 +101,13 @@ fn CaptureSection(studio: LiveSession) -> Element {
 
 #[component]
 fn RobotRoster(
-    studio: LiveSession,
+    selection: RobotSelection,
     robots: Vec<spiral_robotics_common::robots::RobotSummary>,
     on_select: EventHandler<Option<Selection>>,
 ) -> Element {
-    let focused = studio.focused().map(|robot| robot.id().to_owned());
+    let focused = selection
+        .focused(&robots)
+        .map(|robot| robot.id().to_owned());
     let empty = robots.is_empty();
 
     rsx! {
@@ -126,7 +135,7 @@ fn RobotRoster(
                     };
                     let accent =
                         crate::panels::scene::ScenePalette::accent_css(
-                            studio.position_of(robot.id()),
+                            crate::panels::scene::ScenePalette::robot_index(&robot),
                         );
                     rsx! {
                         Action {
@@ -164,14 +173,20 @@ fn RobotRoster(
 }
 
 #[component]
-fn ControlSection(studio: LiveSession, on_action: EventHandler<LiveAction>) -> Element {
-    let focused = studio.focused();
+fn ControlSection(
+    project: StudioProjectState,
+    hardware: HardwareTelemetry,
+    selection: RobotSelection,
+    on_action: EventHandler<LiveAction>,
+) -> Element {
+    let focused = selection.focused(project.snapshot().read().robots());
     let telemetry = focused
         .as_ref()
-        .and_then(|robot| studio.robot_telemetry(robot.id()));
+        .and_then(|robot| hardware.robot_telemetry(robot.id()));
     let holding = telemetry.as_ref().is_some_and(|robot| robot.torque());
-    let teleop = matches!(studio.mode(), ModeSelection::Teleoperate { .. }) && studio.mode_active();
-    let pair = studio.snapshot().read().default_teleoperation_pair();
+    let teleop =
+        matches!(project.mode(), ModeSelection::Teleoperate { .. }) && project.mode_active();
+    let pair = project.snapshot().read().default_teleoperation_pair();
     let mut confirm_release = use_signal(|| false);
 
     rsx! {
@@ -210,7 +225,7 @@ fn ControlSection(studio: LiveSession, on_action: EventHandler<LiveAction>) -> E
                     purpose: ActionPurpose::Teleoperate,
                     checked: teleop,
                     class: "control-segment",
-                    disabled: pair.is_none() || !studio.controls_available(),
+                    disabled: pair.is_none() || !hardware.controls_available(),
                     onclick: move |_| {
                         if !teleop && let Some((leader, follower)) = pair.clone() {
                             on_action.call(LiveAction::Teleoperate { leader, follower });

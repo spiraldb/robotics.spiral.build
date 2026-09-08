@@ -495,48 +495,47 @@ trait EpisodeSnapshot {
 
 impl EpisodeSnapshot for EpisodeInspectionSnapshot {
     fn validate(&self) -> Result<(), String> {
-        let snapshot = self;
         let frames = self.sample_times_seconds().len();
         if frames == 0 {
             return Err(format!(
                 "Episode {:?} has no visual samples.",
-                snapshot.episode().id()
+                self.episode().id()
             ));
         }
-        if snapshot.episode().frames() != frames as u64 {
+        if self.episode().frames() != frames as u64 {
             return Err(format!(
                 "Episode {:?} declares {} frames but delivered {frames} visual samples.",
-                snapshot.episode().id(),
-                snapshot.episode().frames()
+                self.episode().id(),
+                self.episode().frames()
             ));
         }
-        if snapshot.follow_error_degrees().len() != frames {
+        if self.follow_error_degrees().len() != frames {
             return Err(format!(
                 "Episode {:?} delivered an inconsistent follow-error track.",
-                snapshot.episode().id()
+                self.episode().id()
             ));
         }
         let mut previous = None;
-        for seconds in snapshot.sample_times_seconds() {
+        for seconds in self.sample_times_seconds() {
             if !seconds.is_finite()
                 || *seconds < 0.0
                 || previous.is_some_and(|last| *seconds < last)
             {
                 return Err(format!(
                     "Episode {:?} delivered an invalid visual sample clock.",
-                    snapshot.episode().id()
+                    self.episode().id()
                 ));
             }
             previous = Some(*seconds);
         }
-        if snapshot.arms().len() != snapshot.episode().arms().len() {
+        if self.arms().len() != self.episode().arms().len() {
             return Err(format!(
                 "Episode {:?} delivered an inconsistent arm layout.",
-                snapshot.episode().id()
+                self.episode().id()
             ));
         }
-        for arm in snapshot.arms() {
-            let Some(expected) = snapshot
+        for arm in self.arms() {
+            let Some(expected) = self
                 .episode()
                 .arms()
                 .iter()
@@ -544,14 +543,14 @@ impl EpisodeSnapshot for EpisodeInspectionSnapshot {
             else {
                 return Err(format!(
                     "Episode {:?} delivered an unknown arm {:?}.",
-                    snapshot.episode().id(),
+                    self.episode().id(),
                     arm.arm()
                 ));
             };
             if arm.joints() != expected.joints() {
                 return Err(format!(
                     "Episode {:?} delivered a different joint layout for {:?}.",
-                    snapshot.episode().id(),
+                    self.episode().id(),
                     arm.arm()
                 ));
             }
@@ -564,12 +563,12 @@ impl EpisodeSnapshot for EpisodeInspectionSnapshot {
             {
                 return Err(format!(
                     "Episode {:?} delivered an incomplete state track for {:?}.",
-                    snapshot.episode().id(),
+                    self.episode().id(),
                     arm.arm()
                 ));
             }
             let matrices = OptionalMatrixValidation {
-                snapshot,
+                snapshot: self,
                 arm,
                 frames,
                 values,
@@ -676,7 +675,6 @@ trait RecordedArm {
 
 impl RecordedArm for EpisodeInspectionArm {
     fn sample_at(&self, frame: usize) -> Result<TimelineArmSample, String> {
-        let arm = self;
         let joint_count = self.joints().len();
         let start = frame
             .checked_mul(joint_count)
@@ -684,7 +682,7 @@ impl RecordedArm for EpisodeInspectionArm {
         let end = start + joint_count;
         let optional = |matrix: &EpisodeOptionalFrameMatrix| {
             matrix.present()[frame].then(|| {
-                arm.joints()
+                self.joints()
                     .iter()
                     .cloned()
                     .zip(matrix.values()[start..end].iter().copied())
@@ -692,22 +690,22 @@ impl RecordedArm for EpisodeInspectionArm {
             })
         };
         Ok(TimelineArmSample::new(
-            arm.arm(),
-            arm.joints()
+            self.arm(),
+            self.joints()
                 .iter()
                 .cloned()
-                .zip(arm.normalized()[start..end].iter().copied())
+                .zip(self.normalized()[start..end].iter().copied())
                 .collect(),
-            arm.joints()
+            self.joints()
                 .iter()
                 .cloned()
-                .zip(arm.degrees()[start..end].iter().copied())
+                .zip(self.degrees()[start..end].iter().copied())
                 .collect(),
         )
         .with_optional_channels(TimelineOptionalArmChannels::new(
-            optional(arm.velocity()),
-            optional(arm.effort()),
-            optional(arm.action()),
+            optional(self.velocity()),
+            optional(self.effort()),
+            optional(self.action()),
         )))
     }
 }

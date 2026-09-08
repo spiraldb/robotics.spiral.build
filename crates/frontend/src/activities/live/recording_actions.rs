@@ -15,21 +15,21 @@ use crate::shell::notifications::MessageSource;
 
 impl LiveSession {
     pub(crate) fn recording_blocker(self) -> Option<String> {
-        let studio = self;
         if !spiral_robotics_common::identity::DatasetId::is_canonical(
-            studio.selected_dataset().read().trim(),
+            self.datasets().selected().read().trim(),
         ) {
             Some("Choose a dataset ID using letters, numbers, '.', '_' or '-'.".to_owned())
-        } else if matches!(studio.mode(), ModeSelection::Replay { .. }) {
+        } else if matches!(self.project().mode(), ModeSelection::Replay { .. }) {
             Some("Stop replay before recording.".to_owned())
-        } else if studio
+        } else if self
+            .project()
             .snapshot()
             .read()
             .default_teleoperation_pair()
             .is_none()
         {
             Some("Connect and calibrate a compatible leader and follower first.".to_owned())
-        } else if !studio.controls_available() {
+        } else if !self.telemetry().controls_available() {
             Some("Recording is paused while telemetry reconnects.".to_owned())
         } else {
             None
@@ -37,13 +37,12 @@ impl LiveSession {
     }
 
     pub(crate) fn start_recording(self) {
-        let studio = self;
-        if let Some(reason) = studio.recording_blocker() {
-            studio.report(reason);
+        if let Some(reason) = self.recording_blocker() {
+            self.project().report(reason);
             return;
         }
-        let dataset_id = studio.selected_dataset().read().trim().to_owned();
-        studio.run("", async move {
+        let dataset_id = self.datasets().selected().read().trim().to_owned();
+        self.commands().run("", async move {
             RecordingClient::current()
                 .start_recording(dataset_id)
                 .await
@@ -53,14 +52,15 @@ impl LiveSession {
     }
 
     pub(crate) fn set_recording_paused(self, episode: &str, paused: bool) {
-        let studio = self;
-        if studio
+        if self
+            .telemetry()
             .recording()
             .as_ref()
             .map(|progress| progress.episode())
             != Some(episode)
         {
-            studio.report("The recording changed before the Timeline action was applied.");
+            self.project()
+                .report("The recording changed before the Timeline action was applied.");
             return;
         }
         let future = async move {
@@ -70,35 +70,38 @@ impl LiveSession {
                 .map_err(|error| error.to_string())
         };
         if paused {
-            studio.run_safety("Recording paused. The episode remains open.", future);
+            self.project()
+                .run_safety("Recording paused. The episode remains open.", future);
         } else {
-            studio.run("Recording resumed in the same episode.", future);
+            self.commands()
+                .run("Recording resumed in the same episode.", future);
         }
     }
 
     pub(crate) fn stop_recording(self, episode: &str, completion: RecordingCompletion) {
-        let studio = self;
-        if studio
+        if self
+            .telemetry()
             .recording()
             .as_ref()
             .map(|progress| progress.episode())
             != Some(episode)
         {
-            studio.report("The recording changed before the Timeline action was applied.");
+            self.project()
+                .report("The recording changed before the Timeline action was applied.");
             return;
         }
-        studio.run_safety("", async move {
+        self.project().run_safety("", async move {
             let summary = RecordingClient::current()
                 .stop_recording(completion.keep)
                 .await
                 .map_err(|error| error.to_string())?;
             if completion.keep {
-                studio.report_info_from(
+                self.project().report_info_from(
                     MessageSource::Live,
                     format!("Saving episode to dataset ‘{}’.", summary.dataset_id()),
                 );
             } else {
-                studio.report_success_from(
+                self.project().report_success_from(
                     MessageSource::Live,
                     "Recording discarded. Teleoperation stopped.",
                 );
@@ -109,8 +112,8 @@ impl LiveSession {
     }
 
     pub(crate) fn replay_target(self, episode: &EpisodeInfo) -> Option<(String, Option<String>)> {
-        let studio = self;
-        let ready = studio
+        let ready = self
+            .project()
             .connected_robots()
             .into_iter()
             .filter(|robot| robot.calibrated())
@@ -143,18 +146,18 @@ impl LiveSession {
     }
 
     pub(crate) fn replay_blocker(self, episode: &EpisodeInfo) -> Option<String> {
-        let studio = self;
         if !episode.usable() {
             Some("This episode did not finish and cannot be replayed.".to_owned())
-        } else if studio.mode_active()
-            && !studio
+        } else if self.project().mode_active()
+            && !self
+                .telemetry()
                 .replay()
                 .is_some_and(|progress| progress.episode() == episode.id())
         {
             Some("Stop the current robot mode before replaying this episode.".to_owned())
-        } else if !studio.controls_available() {
+        } else if !self.telemetry().controls_available() {
             Some("Replay is unavailable while telemetry reconnects.".to_owned())
-        } else if studio.replay_target(episode).is_none() {
+        } else if self.replay_target(episode).is_none() {
             Some("Connect and calibrate a compatible replay target first.".to_owned())
         } else {
             None
@@ -162,16 +165,15 @@ impl LiveSession {
     }
 
     pub(crate) fn start_replay(self, episode: &EpisodeInfo, start_seconds: f64) {
-        let studio = self;
-        if let Some(reason) = studio.replay_blocker(episode) {
-            studio.report(reason);
+        if let Some(reason) = self.replay_blocker(episode) {
+            self.project().report(reason);
             return;
         }
-        let Some((robot, source_arm)) = studio.replay_target(episode) else {
+        let Some((robot, source_arm)) = self.replay_target(episode) else {
             return;
         };
         let episode = episode.id().to_owned();
-        studio.run("", async move {
+        self.commands().run("", async move {
             RecordingClient::current()
                 .start_replay(
                     spiral_robotics_common::recording::ReplayStart::new(
@@ -187,9 +189,15 @@ impl LiveSession {
     }
 
     pub(crate) fn set_replay_paused(self, episode: &str, paused: bool) {
-        let studio = self;
-        if studio.replay().as_ref().map(|progress| progress.episode()) != Some(episode) {
-            studio.report("The robot replay changed before the Timeline action was applied.");
+        if self
+            .telemetry()
+            .replay()
+            .as_ref()
+            .map(|progress| progress.episode())
+            != Some(episode)
+        {
+            self.project()
+                .report("The robot replay changed before the Timeline action was applied.");
             return;
         }
         let future = async move {
@@ -199,19 +207,26 @@ impl LiveSession {
                 .map_err(|error| error.to_string())
         };
         if paused {
-            studio.run_safety("Robot replay paused at the current frame.", future);
+            self.project()
+                .run_safety("Robot replay paused at the current frame.", future);
         } else {
-            studio.run("Robot replay resumed.", future);
+            self.commands().run("Robot replay resumed.", future);
         }
     }
 
     pub(crate) fn stop_replay(self, episode: &str) {
-        let studio = self;
-        if studio.replay().as_ref().map(|progress| progress.episode()) != Some(episode) {
-            studio.report("The robot replay changed before the Timeline action was applied.");
+        if self
+            .telemetry()
+            .replay()
+            .as_ref()
+            .map(|progress| progress.episode())
+            != Some(episode)
+        {
+            self.project()
+                .report("The robot replay changed before the Timeline action was applied.");
             return;
         }
-        studio.run_safety(
+        self.project().run_safety(
             "Robot replay stopped. Motors may still be holding position.",
             async move {
                 RobotClient::current()
@@ -255,8 +270,7 @@ impl TimelineSeekBody {
 
 impl LiveSession {
     pub(crate) fn physical_seek(self, episode: String, request: TimelineSeekBody) {
-        let studio = self;
-        studio.run("", async move {
+        self.commands().run("", async move {
             RecordingClient::current()
                 .seek_episode(
                     episode,

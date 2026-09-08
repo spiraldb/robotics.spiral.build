@@ -10,8 +10,9 @@ use spiral_robotics_common::rollout::{
 use spiral_robotics_common::training::{TrainingCheckpoint, TrainingRun, TrainingSnapshot};
 
 use crate::format::LossPresentation;
+use crate::robots::HardwareTelemetry;
 use crate::shell::notifications::MessageSource;
-use crate::shell::robot_workspace::RobotWorkspace;
+use crate::shell::state::StudioProjectState;
 
 const MAX_ROLLOUT_ACTION_STEPS: usize = 20;
 
@@ -70,12 +71,13 @@ impl RobotFleet for [RobotSummary] {
 
 #[component]
 pub(crate) fn RolloutWorkbench(
-    studio: RobotWorkspace,
+    project: StudioProjectState,
+    telemetry: HardwareTelemetry,
     controller: super::state::RolloutController,
     training_history: crate::activities::training::history::TrainingHistory,
 ) -> Element {
     let mut pending_action = use_signal(|| None::<PendingRolloutAction>);
-    let snapshot = studio.snapshot().read().to_owned();
+    let snapshot = project.snapshot().read().to_owned();
     let training = training_history.snapshot().read().to_owned();
     let rollout = controller.snapshot().read().to_owned();
     let checkpoints = training.checkpoint_choices();
@@ -119,7 +121,7 @@ pub(crate) fn RolloutWorkbench(
         checkpoint: selected,
         follower: follower.as_ref(),
         cameras_ready: camera_summary.ready,
-        controls_available: studio.controls_available(),
+        controls_available: telemetry.controls_available(),
     }
     .blocker();
     let active = rollout.phase().active();
@@ -200,7 +202,7 @@ pub(crate) fn RolloutWorkbench(
                     div { class: "rollout-target-row",
                         span {
                             class: "live-robot-accent",
-                            style: "background: {crate::panels::scene::ScenePalette::accent_css(studio.position_of(&robot.id()))}",
+                            style: "background: {crate::panels::scene::ScenePalette::accent_css(crate::panels::scene::ScenePalette::robot_index(robot))}",
                         }
                         div {
                             strong { "{robot.id()}" }
@@ -303,7 +305,7 @@ pub(crate) fn RolloutWorkbench(
                                         .await
                                         .map_err(|error| error.to_string());
                                     if let Err(error) = result {
-                                        studio.report_from(MessageSource::Rollout, error);
+                                        project.report_from(MessageSource::Rollout, error);
                                     }
                                     pending_action.set(None);
                                 });
@@ -335,7 +337,7 @@ pub(crate) fn RolloutWorkbench(
                                     .await
                                     .map_err(|error| error.to_string())
                                 {
-                                    studio.report_from(MessageSource::Rollout, error);
+                                    project.report_from(MessageSource::Rollout, error);
                                 }
                                 pending_action.set(None);
                             });

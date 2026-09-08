@@ -1469,37 +1469,29 @@ impl WorkflowDraft for WorkflowSpec {
     }
 
     fn insert_siglip_model(&mut self) -> Option<String> {
-        let workflow = self;
-        let result_edge_index = workflow.edges().iter().position(|edge| {
-            let source = workflow
-                .nodes()
-                .iter()
-                .find(|node| node.id() == edge.source());
-            let target = workflow
-                .nodes()
-                .iter()
-                .find(|node| node.id() == edge.target());
+        let result_edge_index = self.edges().iter().position(|edge| {
+            let source = self.nodes().iter().find(|node| node.id() == edge.source());
+            let target = self.nodes().iter().find(|node| node.id() == edge.target());
             source.is_some_and(|node| {
                 WorkflowNodeKind::from(node.config()) == WorkflowNodeKind::Query
             }) && target.is_some_and(|node| {
                 WorkflowNodeKind::from(node.config()) == WorkflowNodeKind::Result
             })
         })?;
-        let result_edge = workflow.edges()[result_edge_index].clone();
+        let result_edge = self.edges()[result_edge_index].clone();
         let candidate_id = result_edge.source().to_owned();
-        let source_id = workflow
+        let source_id = self
             .edges()
             .iter()
             .find(|edge| edge.target() == candidate_id)
             .and_then(|edge| {
-                workflow
-                    .nodes()
+                self.nodes()
                     .iter()
                     .find(|node| node.id() == edge.source())
                     .filter(|node| WorkflowNodeKind::from(node.config()) == WorkflowNodeKind::Table)
                     .map(|_| edge.source().to_owned())
             })?;
-        let source_relation = workflow
+        let source_relation = self
             .nodes()
             .iter()
             .find(|node| node.id() == source_id)
@@ -1507,7 +1499,7 @@ impl WorkflowDraft for WorkflowSpec {
                 WorkflowNodeConfig::Table { relation } => Some(relation.clone()),
                 _ => None,
             })?;
-        workflow.edges_mut().remove(result_edge_index);
+        self.edges_mut().remove(result_edge_index);
         let mut suffix = 1_u32;
         let node_id = loop {
             let candidate = if suffix == 1 {
@@ -1515,7 +1507,7 @@ impl WorkflowDraft for WorkflowSpec {
             } else {
                 format!("siglip_{suffix}")
             };
-            if !workflow.nodes().iter().any(|node| node.id() == candidate) {
+            if !self.nodes().iter().any(|node| node.id() == candidate) {
                 break candidate;
             }
             suffix += 1;
@@ -1527,17 +1519,17 @@ impl WorkflowDraft for WorkflowSpec {
             } else {
                 format!("feature_query_{query_suffix}")
             };
-            if !workflow.nodes().iter().any(|node| node.id() == candidate) {
+            if !self.nodes().iter().any(|node| node.id() == candidate) {
                 break candidate;
             }
             query_suffix += 1;
         };
-        let insert_at = workflow
+        let insert_at = self
             .nodes()
             .iter()
             .position(|node| node.id() == result_edge.target())
-            .unwrap_or(workflow.nodes().len());
-        workflow.nodes_mut().insert(
+            .unwrap_or(self.nodes().len());
+        self.nodes_mut().insert(
             insert_at,
             spiral_robotics_common::workflow::WorkflowNodeSpec::new(
                 node_id.clone(),
@@ -1551,7 +1543,7 @@ impl WorkflowDraft for WorkflowSpec {
                 },
             ),
         );
-        workflow.nodes_mut().insert(
+        self.nodes_mut().insert(
             insert_at + 1,
             spiral_robotics_common::workflow::WorkflowNodeSpec::new(
                 final_query_id.clone(),
@@ -1562,7 +1554,7 @@ impl WorkflowDraft for WorkflowSpec {
                 },
             ),
         );
-        workflow.edges_mut().extend([
+        self.edges_mut().extend([
             WorkflowEdgeSpec::new(candidate_id.clone(), node_id.clone()),
             WorkflowEdgeSpec::new(candidate_id.clone(), final_query_id.clone()),
             WorkflowEdgeSpec::new(node_id.clone(), final_query_id.clone()),
@@ -1572,30 +1564,29 @@ impl WorkflowDraft for WorkflowSpec {
     }
 
     fn remove_siglip_model(&mut self, node_id: &str) -> Option<String> {
-        let workflow = self;
-        let model_index = workflow.nodes().iter().position(|node| {
+        let model_index = self.nodes().iter().position(|node| {
             node.id() == node_id && WorkflowNodeKind::from(node.config()) == WorkflowNodeKind::Model
         })?;
-        let candidate_id = workflow
+        let candidate_id = self
             .edges()
             .iter()
             .find(|edge| edge.target() == node_id)
             .map(|edge| edge.source().to_owned())?;
-        let final_query_id = workflow
+        let final_query_id = self
             .edges()
             .iter()
             .find(|edge| edge.source() == node_id)
             .map(|edge| edge.target().to_owned())?;
-        let result_id = workflow
+        let result_id = self
             .edges()
             .iter()
             .find(|edge| edge.source() == final_query_id)
             .map(|edge| edge.target().to_owned())?;
-        let query_is_upstream = workflow.nodes().iter().any(|node| {
+        let query_is_upstream = self.nodes().iter().any(|node| {
             node.id() == candidate_id
                 && WorkflowNodeKind::from(node.config()) == WorkflowNodeKind::Query
         });
-        let query_is_downstream = workflow.nodes().iter().any(|node| {
+        let query_is_downstream = self.nodes().iter().any(|node| {
             node.id() == final_query_id
                 && WorkflowNodeKind::from(node.config()) == WorkflowNodeKind::Query
         });
@@ -1603,18 +1594,15 @@ impl WorkflowDraft for WorkflowSpec {
             return None;
         }
 
-        workflow.nodes_mut().remove(model_index);
-        workflow
-            .nodes_mut()
-            .retain(|node| node.id() != final_query_id);
-        workflow.edges_mut().retain(|edge| {
+        self.nodes_mut().remove(model_index);
+        self.nodes_mut().retain(|node| node.id() != final_query_id);
+        self.edges_mut().retain(|edge| {
             edge.source() != node_id
                 && edge.target() != node_id
                 && edge.source() != final_query_id
                 && edge.target() != final_query_id
         });
-        workflow
-            .edges_mut()
+        self.edges_mut()
             .push(WorkflowEdgeSpec::new(candidate_id.clone(), result_id));
         Some(candidate_id)
     }
@@ -1635,8 +1623,7 @@ impl WorkflowDraft for WorkflowSpec {
         model_id: &str,
         features: &[WorkflowFeatureDefinition],
     ) {
-        let workflow = self;
-        let Some(candidate_id) = workflow
+        let Some(candidate_id) = self
             .edges()
             .iter()
             .find(|edge| edge.target() == model_id)
@@ -1644,7 +1631,7 @@ impl WorkflowDraft for WorkflowSpec {
         else {
             return;
         };
-        let Some(final_query_id) = workflow
+        let Some(final_query_id) = self
             .edges()
             .iter()
             .find(|edge| edge.source() == model_id)
@@ -1652,7 +1639,7 @@ impl WorkflowDraft for WorkflowSpec {
         else {
             return;
         };
-        if let Some(query) = workflow
+        if let Some(query) = self
             .nodes_mut()
             .iter_mut()
             .find(|node| node.id() == final_query_id)

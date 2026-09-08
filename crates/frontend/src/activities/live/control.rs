@@ -14,8 +14,9 @@ use spiral_robotics_common::robots::{
 };
 use spiral_robotics_viewport::{self as arm, ArmPose};
 
-use crate::shell::robot_workspace::RobotWorkspace;
-use crate::shell::robot_workspace::Selection;
+use crate::robots::Selection;
+use crate::robots::{HardwareTelemetry, RobotSelection};
+use crate::shell::state::StudioProjectState;
 
 #[derive(Default)]
 struct PendingGoals(BTreeMap<String, f64>);
@@ -36,19 +37,19 @@ impl PendingGoals {
 
 #[component]
 pub(crate) fn JointPanel(
-    studio: RobotWorkspace,
+    robot_selection: RobotSelection,
+    project: StudioProjectState,
+    hardware: HardwareTelemetry,
     on_select: EventHandler<Option<Selection>>,
     on_point: EventHandler<Option<Selection>>,
 ) -> Element {
-    let Some(robot) = studio.focused() else {
+    let Some(robot) = robot_selection.focused(project.snapshot().read().robots()) else {
         return rsx! {
             p { class: "px-2 py-1 text-[11px] text-ink-faint", "Add an arm to see its joints." }
         };
     };
 
-    let telemetry = studio.robot_telemetry(robot.id());
-    let torque = telemetry.as_ref().is_some_and(|robot| robot.torque());
-    let drivable = studio.is_manual_target(robot.id()) && torque && robot.calibrated();
+    let telemetry = hardware.robot_telemetry(robot.id());
 
     rsx! {
         div { class: "live-joint-panel flex flex-col",
@@ -69,13 +70,13 @@ pub(crate) fn JointPanel(
             }
 
             JointControls {
-                studio,
+                project, hardware,
                 robot: robot.clone(),
-                behavior: JointControlBehavior::new(drivable, on_select, on_point),
+                behavior: JointInteraction::new(robot_selection.selected(), on_select, on_point),
             }
 
             MotorDetail {
-                selection: studio.selection(),
+                selection: robot_selection.selected(),
                 robot: robot.clone(),
                 telemetry: telemetry.clone(),
             }
@@ -441,16 +442,19 @@ impl MeasuredJointTelemetry for [JointTelemetry] {
 
 #[component]
 fn JointControls(
-    studio: RobotWorkspace,
+    project: StudioProjectState,
+    hardware: HardwareTelemetry,
     robot: RobotSummary,
-    behavior: JointControlBehavior,
+    behavior: JointInteraction,
 ) -> Element {
-    let telemetry = studio.robot_telemetry(robot.id());
-    let JointControlBehavior {
-        drivable,
+    let telemetry = hardware.robot_telemetry(robot.id());
+    let JointInteraction {
+        selection,
         on_select,
         on_point,
     } = behavior;
+    let torque = telemetry.as_ref().is_some_and(|robot| robot.torque());
+    let drivable = project.is_manual_target(robot.id()) && torque && robot.calibrated();
     // While a slider is being dragged the arm is still catching up, so the
     // commanded value is shown until the measurement agrees with it. That echo
     // is only meaningful for as long as this arm is actually being driven, so
@@ -464,7 +468,7 @@ fn JointControls(
     // in-flight request completes.
     let pending = use_hook(|| Rc::new(RefCell::new(PendingGoals::default())));
     let command_robot = robot.id().to_owned();
-    let _ = studio.is_active();
+    let _ = hardware.is_active();
     let mut sender = use_future({
         let pending = pending.clone();
         move || {
@@ -473,10 +477,10 @@ fn JointControls(
             async move {
                 loop {
                     gloo_timers::future::TimeoutFuture::new(32).await;
-                    let may_drive = studio.is_active()
-                        && studio.controls_available()
-                        && studio.is_manual_target(&command_robot)
-                        && studio
+                    let may_drive = hardware.is_active()
+                        && hardware.controls_available()
+                        && project.is_manual_target(&command_robot)
+                        && hardware
                             .robot_telemetry(&command_robot)
                             .is_some_and(|robot| robot.torque());
                     if !may_drive {
@@ -492,7 +496,7 @@ fn JointControls(
                         .await
                         .map_err(|error| error.to_string())
                     {
-                        studio.report(error);
+                        project.report(error);
                     }
                 }
             }
@@ -500,7 +504,7 @@ fn JointControls(
     });
     let inactive_pending = pending.clone();
     use_hook_did_run(move |did_run| {
-        if did_run && studio.is_active() {
+        if did_run && hardware.is_active() {
             sender.resume();
         } else {
             inactive_pending.borrow_mut().clear();
@@ -510,14 +514,14 @@ fn JointControls(
     let watched = robot.id().to_owned();
     let clear_pending = pending.clone();
     use_effect(move || {
-        let driving = studio.is_active()
-            && studio
-                .telemetry()
+        let driving = hardware.is_active()
+            && hardware
+                .frame()
                 .read()
                 .robots()
                 .iter()
                 .any(|robot| robot.id() == watched && robot.torque())
-            && studio.is_manual_target(&watched);
+            && project.is_manual_target(&watched);
         // `peek` deliberately: an effect that subscribes to the signal it
         // writes retriggers itself, and this one only needs to observe
         // telemetry.
@@ -555,8 +559,7 @@ fn JointControls(
                     joint: joint.clone(),
                     state: JointRowState {
                         drivable,
-                        selected: studio
-                            .selection()
+                        selected: selection
                             .read()
                             .as_ref()
                             .is_some_and(|selection| selection.matches_joint(robot.id(), joint.name())),
@@ -595,20 +598,20 @@ fn JointControls(
 }
 
 #[derive(Clone, Copy, PartialEq)]
-struct JointControlBehavior {
-    drivable: bool,
+struct JointInteraction {
+    selection: Signal<Option<Selection>>,
     on_select: EventHandler<Option<Selection>>,
     on_point: EventHandler<Option<Selection>>,
 }
 
-impl JointControlBehavior {
+impl JointInteraction {
     const fn new(
-        drivable: bool,
+        selection: Signal<Option<Selection>>,
         on_select: EventHandler<Option<Selection>>,
         on_point: EventHandler<Option<Selection>>,
     ) -> Self {
         Self {
-            drivable,
+            selection,
             on_select,
             on_point,
         }

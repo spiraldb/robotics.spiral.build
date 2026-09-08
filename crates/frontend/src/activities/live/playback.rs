@@ -17,33 +17,34 @@ use std::sync::Arc;
 
 #[derive(Clone, Copy)]
 struct LivePreview {
-    studio: LiveSession,
+    session: LiveSession,
     preview: EpisodePreviewSignals,
     sampled: Signal<Option<(String, u64)>>,
     interactive: Signal<Option<(String, u64)>>,
 }
 
 impl LivePreview {
-    fn use_preview(studio: LiveSession) -> Self {
+    fn use_preview(session: LiveSession) -> Self {
         let preview = EpisodePreviewSignals::use_signals();
         // Throttling is local to the mounted screen; remounting must sample again.
-        let session = Self {
-            studio,
+        let playback = Self {
+            session,
             preview,
             sampled: use_signal(|| None),
             interactive: use_signal(|| None),
         };
-        let on_sample = use_callback(move |(episode, seconds)| session.sample(episode, seconds));
-        studio
-            .timeline_controller()
-            .use_clock(studio.is_active_signal(), on_sample);
-        session.use_recording_clock();
+        let on_sample = use_callback(move |(episode, seconds)| playback.sample(episode, seconds));
         session
+            .timeline_controller()
+            .use_clock(session.telemetry().is_active_signal(), on_sample);
+        playback.use_recording_clock();
+        playback
     }
 
     fn sample(mut self, episode: String, seconds: f64) {
         let Some(recording) = self
-            .studio
+            .session
+            .telemetry()
             .recording()
             .filter(|recording| recording.paused() && recording.episode() == episode)
         else {
@@ -62,12 +63,11 @@ impl LivePreview {
     }
 
     fn use_recording_clock(self) {
-        let studio = self.studio;
-        let timeline = studio.timeline_controller();
+        let timeline = self.session.timeline_controller();
         let mut playhead = timeline.playhead_signal();
         let follow_live = timeline.follow_live_signal();
         use_effect(move || {
-            let recording = studio.recording();
+            let recording = self.session.telemetry().recording();
             if let Some(recording) = recording.as_ref().filter(|recording| !recording.paused()) {
                 if follow_live() {
                     playhead.set(recording.elapsed_seconds());
@@ -79,7 +79,7 @@ impl LivePreview {
                 timeline.stop_preview();
                 return;
             }
-            if let Some(replay) = studio.replay().filter(|replay| {
+            if let Some(replay) = self.session.telemetry().replay().filter(|replay| {
                 replay.owns_timeline_transport()
                     && replay.matches_timeline_subject(
                         recording.as_ref().map(|recording| recording.episode()),
@@ -112,7 +112,7 @@ impl LivePreview {
             self.sampled.set(None);
             self.interactive.set(None);
             if let Some((episode, frames, seconds)) = identity {
-                let mut playhead = self.studio.timeline_controller().playhead_signal();
+                let mut playhead = self.session.timeline_controller().playhead_signal();
                 playhead.set(seconds);
                 self.preview
                     .request(EpisodePreviewRequest::new(episode, Some(frames), seconds));
@@ -130,7 +130,7 @@ impl LivePreview {
     }
 
     fn actions(self) -> LiveTimelineActions {
-        LiveTimelineActions::new(self.studio, self.preview, self.interactive)
+        LiveTimelineActions::new(self.session, self.preview, self.interactive)
     }
 }
 
@@ -144,13 +144,14 @@ pub(super) struct LiveTimeline {
 }
 
 impl LiveTimeline {
-    pub(super) fn use_timeline(studio: LiveSession) -> Self {
-        let timeline = studio.timeline_controller();
+    pub(super) fn use_timeline(session: LiveSession) -> Self {
+        let timeline = session.timeline_controller();
         let playhead = timeline.playhead_signal();
         let follow_live = timeline.follow_live_signal();
         let mut robot_sync_target = timeline.robot_sync_target_signal();
-        let preview_session = LivePreview::use_preview(studio);
-        let subject = studio
+        let preview_session = LivePreview::use_preview(session);
+        let subject = session
+            .telemetry()
             .recording()
             .map(TimelineSubject::Recording)
             .unwrap_or_else(|| {
@@ -158,7 +159,7 @@ impl LiveTimeline {
             });
         preview_session.use_source_identity(&subject);
         let live_signal_lanes = Arc::new({
-            let recording_signals = studio.recording_signals();
+            let recording_signals = session.recording_signals();
             let store = recording_signals.read();
             store.timeline_lanes()
         });
@@ -196,15 +197,15 @@ impl LiveTimeline {
         // Two `None`s compare equal, so with no episode on the clock this read as
         // "armed" and the physical-motion toggle rendered checked at rest. Nothing
         // is armed until there is a target to arm it against.
-        let requested_robot_sync = timeline_target.is_some()
+        let robot_sync = timeline_target.is_some()
             && robot_sync_target.read().as_ref() == timeline_target.as_ref();
-        let capabilities = studio.live_timeline_capabilities(&subject);
-        let replay = studio
+        let capabilities = session.live_timeline_capabilities(&subject);
+        let replay = session
+            .telemetry()
             .replay()
             .filter(|replay| subject.episode_id() == Some(replay.episode()));
         let playback = timeline.playback(replay.as_ref());
-        let robot_sync = requested_robot_sync;
-        let disarm_robot_sync = requested_robot_sync && !capabilities.robot_sync().is_allowed();
+        let disarm_robot_sync = robot_sync && !capabilities.robot_sync().is_allowed();
         use_effect(use_reactive(
             (&timeline_target, &disarm_robot_sync),
             move |(current_target, must_disarm)| {
@@ -215,10 +216,10 @@ impl LiveTimeline {
                 }
                 robot_sync_target.set(None);
                 let armed_episode = armed.as_ref().map(TimelineTarget::episode);
-                if let Some(replay) = studio.replay()
+                if let Some(replay) = session.telemetry().replay()
                     && armed_episode == Some(replay.episode())
                 {
-                    studio.stop_replay(replay.episode());
+                    session.stop_replay(replay.episode());
                 }
             },
         ));

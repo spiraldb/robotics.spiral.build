@@ -4,7 +4,10 @@ use super::workspace::{InferencePanel, RobotFleet, RolloutWorkbench, TrainingSna
 use crate::panels::camera_panel::{AssignedCamera, CameraPanelRows};
 use crate::panels::scene::SceneSource;
 use crate::panels::scene::{Viewport, ViewportPresentation};
-use crate::shell::{frame::WorkspaceFrame, robot_workspace::RobotWorkspace};
+use crate::robots::{HardwareTelemetry, RobotSelection};
+use crate::shell::{
+    frame::WorkspaceFrame, project::ProjectSessionSignals, state::StudioProjectState,
+};
 use dioxus::prelude::*;
 use dioxus_workbench::{LayoutNode, Panel, PanelId, PanelLayout, PanelWorkspace, SplitAxis};
 
@@ -47,11 +50,11 @@ impl RolloutLayout {
 struct RolloutCameras;
 impl RolloutCameras {
     fn assigned(
-        studio: RobotWorkspace,
+        project: StudioProjectState,
         controller: super::state::RolloutController,
         training_history: crate::activities::training::history::TrainingHistory,
     ) -> Vec<AssignedCamera> {
-        let Some(follower) = studio.snapshot().read().robots().follower() else {
+        let Some(follower) = project.snapshot().read().robots().follower() else {
             return Vec::new();
         };
         let checkpoint = controller.checkpoint();
@@ -93,32 +96,37 @@ pub(crate) fn RolloutWorkspace(is_active: ReadSignal<bool>) -> Element {
         crate::shell::activity::Activity::Rollout,
         is_active,
     );
-    let robot = RobotWorkspace::use_workspace(is_active);
+    let project = StudioProjectState::current();
+    let telemetry =
+        HardwareTelemetry::use_telemetry(project, is_active, ProjectSessionSignals::current());
+    let robot_selection = RobotSelection::use_selection(project.snapshot());
     let controller = super::state::RolloutController::use_controller(is_active);
     let training_history =
         crate::activities::training::history::TrainingHistory::use_history(is_active, || None);
-    rsx! { WorkspaceFrame { workspace, status: crate::shell::frame::WorkspaceStatus::Hardware(robot), RolloutPanels { studio: robot, controller, training_history } } }
+    rsx! { WorkspaceFrame { workspace, status: crate::shell::frame::WorkspaceStatus::Hardware(telemetry), RolloutPanels { project, telemetry, robot_selection, controller, training_history } } }
 }
 
 #[component]
 fn RolloutPanels(
-    studio: RobotWorkspace,
+    project: StudioProjectState,
+    telemetry: HardwareTelemetry,
+    robot_selection: RobotSelection,
     controller: super::state::RolloutController,
     training_history: crate::activities::training::history::TrainingHistory,
 ) -> Element {
     let mut resize_revision = use_signal(|| 0_u64);
-    let mut selection = studio.selection();
-    let follower = studio
+    let mut selection = robot_selection.selected();
+    let follower = project
         .snapshot()
         .read()
         .robots()
         .follower()
         .map(|robot| robot.id().to_owned());
-    let cameras = RolloutCameras::assigned(studio, controller, training_history);
+    let cameras = RolloutCameras::assigned(project, controller, training_history);
     let mut panels = vec![
-        Panel::new("workbench", "Rollout", "workbench", rsx! { aside { class: "studio-v2-workbench", RolloutWorkbench { studio, controller, training_history } } }).with_class("workbench-editor"),
+        Panel::new("workbench", "Rollout", "workbench", rsx! { aside { class: "studio-v2-workbench", RolloutWorkbench { project, telemetry, controller, training_history } } }).with_class("workbench-editor"),
         Panel::new("scene", "Scene", "primary", rsx! {
-            Viewport { studio, source: SceneSource::Live, presentation: ViewportPresentation::new(follower, resize_revision()) }
+            Viewport { project, telemetry, robot_selection, source: SceneSource::Live, presentation: ViewportPresentation::new(follower, resize_revision()) }
         }).with_class("scene-editor"),
     ];
     for camera in &cameras {
@@ -183,7 +191,7 @@ mod tests {
         );
         assert_eq!(
             cameras[0].selection(),
-            crate::shell::robot_workspace::Selection::Camera {
+            crate::robots::Selection::Camera {
                 robot: "follower".to_owned(),
                 role: "top".to_owned()
             }

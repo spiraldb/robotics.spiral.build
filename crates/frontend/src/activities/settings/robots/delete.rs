@@ -6,12 +6,17 @@ use crate::components::interaction::{
 use dioxus::prelude::*;
 use spiral_robotics_common::robots::RobotSummary;
 
-use crate::shell::robot_workspace::RobotWorkspace;
+use crate::robots::{HardwareCommands, HardwareTelemetry};
+use crate::shell::state::StudioProjectState;
 use crate::tasks::SingleFlight;
 
 /// Deleting an arm destroys its calibration, so it takes a specific second click.
 #[component]
-pub(super) fn DeleteRobotAction(studio: RobotWorkspace, robot: RobotSummary) -> Element {
+pub(super) fn DeleteRobotAction(
+    project: StudioProjectState,
+    telemetry: HardwareTelemetry,
+    robot: RobotSummary,
+) -> Element {
     let mut confirming = use_signal(|| false);
     let deleting = use_signal(|| false);
     let id = robot.id().to_owned();
@@ -51,7 +56,7 @@ pub(super) fn DeleteRobotAction(studio: RobotWorkspace, robot: RobotSummary) -> 
                         return;
                     }
                     let id = id.clone();
-                    studio.run(format!("Deleted {id}."), async move {
+                    HardwareCommands::new(project, telemetry).run(format!("Deleted {id}."), async move {
                         let Some(result) = SingleFlight::run(
                             deleting,
                             async move {
