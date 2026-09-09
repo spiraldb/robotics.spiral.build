@@ -42,10 +42,6 @@ recording or live camera as a substitute.
 
 ## Verification
 
-`python3 scripts/check-mcap-playback.py` checks two real episodes through the
-HTTP API, including timestamp bounds, H.264 keyframe contents, and an unknown
-recording that must return no video. It performs no writes.
-
 Rust browser tests verify clock bounds and restart, epoch precision, and
 backward/forward keyframe selection. A native WebCodecs test compares decoded
 pixels after a keyframe seek with continuous decoding of the same synthetic

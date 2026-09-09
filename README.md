@@ -60,8 +60,6 @@ cargo test -p spiral-robotics-frontend --lib --target wasm32-unknown-unknown --l
 The shell supplies the matching test runner, Firefox, and GeckoDriver on Linux
 and macOS. Tests run in headless Firefox locally and in CI. For interactive
 debugging, set `NO_HEADLESS=1` and open the URL printed by the runner in Firefox.
-Filesystem-based source checks remain native:
-`cargo test -p spiral-robotics-frontend --tests --locked`.
 
 The frontend also supports native type-checking so rust-analyzer can analyze it
 alongside the backend without changing the workspace target. It uses the same

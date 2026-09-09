@@ -598,12 +598,6 @@ impl RecordingProgress {
     pub const fn elapsed_seconds(&self) -> f64 {
         self.clock.elapsed_seconds
     }
-    pub const fn wall_elapsed_seconds(&self) -> f64 {
-        self.clock.wall_elapsed_seconds
-    }
-    pub const fn paused_seconds(&self) -> f64 {
-        self.clock.paused_seconds
-    }
     pub const fn paused(&self) -> bool {
         self.state.paused
     }

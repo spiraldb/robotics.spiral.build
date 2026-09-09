@@ -1,7 +1,7 @@
 //! Episode-owned capture, relational encoding, queries, and video values.
 
+mod capture;
 mod episode_schema;
-mod episodes;
 mod mcap_recording;
 mod mcap_schema;
 mod recording_file;
@@ -12,7 +12,7 @@ pub(crate) use mcap_recording::McapRecording;
 mod identity;
 pub(crate) mod video;
 
-pub use episodes::*;
+pub use capture::*;
 pub use identity::EpisodeId;
 
 #[cfg(test)]

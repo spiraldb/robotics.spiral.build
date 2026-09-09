@@ -181,6 +181,12 @@
   .pointer-events-none {
     pointer-events: none;
   }
+  .collapse {
+    visibility: collapse;
+  }
+  .invisible {
+    visibility: hidden;
+  }
   .visible {
     visibility: visible;
   }
@@ -217,8 +223,29 @@
   .left-1\/2 {
     left: calc(1 / 2 * 100%);
   }
+  .isolate {
+    isolation: isolate;
+  }
   .z-20 {
     z-index: 20;
+  }
+  .container {
+    width: 100%;
+    @media (width >= 40rem) {
+      max-width: 40rem;
+    }
+    @media (width >= 48rem) {
+      max-width: 48rem;
+    }
+    @media (width >= 64rem) {
+      max-width: 64rem;
+    }
+    @media (width >= 80rem) {
+      max-width: 80rem;
+    }
+    @media (width >= 96rem) {
+      max-width: 96rem;
+    }
   }
   .m-0 {
     margin: 0px;
@@ -383,6 +410,9 @@
   }
   .cursor-pointer {
     cursor: pointer;
+  }
+  .resize {
+    resize: both;
   }
   .resize-none {
     resize: none;
@@ -627,6 +657,9 @@
   .text-ink-soft {
     color: var(--tone-ink-soft);
   }
+  .uppercase {
+    text-transform: uppercase;
+  }
   .ordinal {
     --tw-ordinal: ordinal;
     font-variant-numeric: var(--tw-ordinal,) var(--tw-slashed-zero,) var(--tw-numeric-figure,) var(--tw-numeric-spacing,) var(--tw-numeric-fraction,);
@@ -635,11 +668,31 @@
     --tw-numeric-spacing: tabular-nums;
     font-variant-numeric: var(--tw-ordinal,) var(--tw-slashed-zero,) var(--tw-numeric-figure,) var(--tw-numeric-spacing,) var(--tw-numeric-fraction,);
   }
+  .accent-ink {
+    accent-color: var(--tone-ink);
+  }
   .opacity-0 {
     opacity: 0%;
   }
+  .ring {
+    --tw-ring-shadow: var(--tw-ring-inset,) 0 0 0 calc(1px + var(--tw-ring-offset-width)) var(--tw-ring-color, currentcolor);
+    box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
+  }
+  .outline {
+    outline-style: var(--tw-outline-style);
+    outline-width: 1px;
+  }
+  .invert {
+    --tw-invert: invert(100%);
+    filter: var(--tw-blur,) var(--tw-brightness,) var(--tw-contrast,) var(--tw-grayscale,) var(--tw-hue-rotate,) var(--tw-invert,) var(--tw-saturate,) var(--tw-sepia,) var(--tw-drop-shadow,);
+  }
   .filter {
     filter: var(--tw-blur,) var(--tw-brightness,) var(--tw-contrast,) var(--tw-grayscale,) var(--tw-hue-rotate,) var(--tw-invert,) var(--tw-saturate,) var(--tw-sepia,) var(--tw-drop-shadow,);
+  }
+  .transition {
+    transition-property: color, background-color, border-color, outline-color, text-decoration-color, fill, stroke, --tw-gradient-from, --tw-gradient-via, --tw-gradient-to, opacity, box-shadow, transform, translate, scale, rotate, filter, -webkit-backdrop-filter, backdrop-filter, display, content-visibility, overlay, pointer-events;
+    transition-timing-function: var(--tw-ease, var(--default-transition-timing-function));
+    transition-duration: var(--tw-duration, var(--default-transition-duration));
   }
   .select-none {
     -webkit-user-select: none;
@@ -3052,80 +3105,6 @@
     height: 1px;
     width: 100%;
   }
-  .workflow-example-prompt, .workflow-assistant-plan {
-    border-bottom-style: var(--tw-border-style);
-    border-bottom-width: 1px;
-    border-color: var(--tone-line);
-    padding-inline: calc(var(--spacing) * 4);
-    padding-block: calc(var(--spacing) * 4);
-  }
-  .workflow-example-prompt h3, .workflow-assistant-plan h3, .workflow-inspector-sql h3 {
-    margin-bottom: calc(var(--spacing) * 2);
-    font-size: 11px;
-    --tw-font-weight: var(--font-weight-semibold);
-    font-weight: var(--font-weight-semibold);
-    color: var(--tone-ink);
-  }
-  .workflow-example-prompt p {
-    border-radius: 0.25rem;
-    border-style: var(--tw-border-style);
-    border-width: 1px;
-    border-color: var(--tone-line);
-    background-color: var(--tone-sunken);
-    padding-inline: calc(var(--spacing) * 3);
-    padding-block: calc(var(--spacing) * 2.5);
-    font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
-    font-size: 11px;
-    --tw-leading: 1.55;
-    line-height: 1.55;
-    color: var(--tone-ink);
-  }
-  .workflow-assistant-plan ol {
-    display: grid;
-    gap: calc(var(--spacing) * 3);
-  }
-  .workflow-assistant-plan li {
-    display: grid;
-    grid-template-columns: 1.25rem minmax(0,1fr);
-    align-items: flex-start;
-    gap: calc(var(--spacing) * 2);
-  }
-  .workflow-assistant-plan li > span {
-    display: grid;
-    width: calc(var(--spacing) * 5);
-    height: calc(var(--spacing) * 5);
-    place-items: center;
-    border-radius: 0.25rem;
-    border-style: var(--tw-border-style);
-    border-width: 1px;
-    border-color: var(--tone-line);
-    font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
-    font-size: 10px;
-    color: var(--tone-ink-soft);
-  }
-  .workflow-assistant-plan strong {
-    font-size: 11px;
-    --tw-font-weight: var(--font-weight-medium);
-    font-weight: var(--font-weight-medium);
-  }
-  .workflow-assistant-plan p {
-    margin-top: calc(var(--spacing) * 0.5);
-    font-size: 10px;
-    --tw-leading: calc(var(--spacing) * 4);
-    line-height: calc(var(--spacing) * 4);
-    color: var(--tone-ink-faint);
-  }
-  .workflow-assistant-footer {
-    flex-shrink: 0;
-    border-top-style: var(--tw-border-style);
-    border-top-width: 1px;
-    border-color: var(--tone-line);
-    background-color: var(--tone-sunken);
-    padding-inline: calc(var(--spacing) * 4);
-    padding-block: calc(var(--spacing) * 2);
-    font-size: 10px;
-    color: var(--tone-ink-faint);
-  }
   .workflow-inspector {
     overflow-y: auto;
   }
@@ -3223,38 +3202,16 @@
     color: var(--tone-ink-soft);
     overflow-wrap: anywhere;
   }
-  .workflow-inspector-facts code, .workflow-inspector-sql code {
+  .workflow-inspector-facts code {
     font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
     font-size: 10px;
     color: var(--tone-ink);
   }
-  .workflow-inspector-relations, .workflow-inspector-fields {
+  .workflow-inspector-fields {
     display: flex;
     flex-wrap: wrap;
     column-gap: calc(var(--spacing) * 2);
     row-gap: var(--spacing);
-  }
-  .workflow-inspector-relations code {
-    display: block;
-    width: 100%;
-  }
-  .workflow-inspector-sql {
-    border-top-style: var(--tw-border-style);
-    border-top-width: 1px;
-    border-color: var(--tone-line);
-    padding-inline: calc(var(--spacing) * 4);
-    padding-block: calc(var(--spacing) * 3);
-  }
-  .workflow-inspector-sql pre {
-    overflow: auto;
-    border-radius: 0.25rem;
-    background-color: var(--tone-sunken);
-    padding-inline: calc(var(--spacing) * 2.5);
-    padding-block: calc(var(--spacing) * 2);
-    font-size: 10px;
-    --tw-leading: calc(var(--spacing) * 4);
-    line-height: calc(var(--spacing) * 4);
-    white-space: pre-wrap;
   }
   .workflow-inspector-boundary {
     border-top-style: var(--tw-border-style);
@@ -3357,10 +3314,6 @@
   .workflow-inspector-help code {
     font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
     color: var(--tone-ink-soft);
-  }
-  .workflow-inspector-unavailable {
-    color: var(--tone-caution);
-    background: var(--tone-caution-soft);
   }
   .workflow-panel-empty {
     display: flex;
@@ -3872,20 +3825,6 @@
     flex-direction: column;
     overflow: hidden;
   }
-  .workflow-results-column-preview {
-    display: grid;
-    min-height: calc(var(--spacing) * 8);
-    flex-shrink: 0;
-    grid-template-columns: minmax(7rem,1.6fr) minmax(6rem,1fr) minmax(5rem,0.8fr) minmax(4rem,0.6fr);
-    align-items: center;
-    border-bottom-style: var(--tw-border-style);
-    border-bottom-width: 1px;
-    border-color: var(--tone-line);
-    background-color: var(--tone-sunken);
-    padding-inline: calc(var(--spacing) * 3);
-    font-size: 10px;
-    color: var(--tone-ink-faint);
-  }
   .workflow-results > .workflow-panel-empty, .workflow-result-body > .workflow-panel-empty {
     min-height: 0px;
     flex: 1;
@@ -4383,28 +4322,6 @@
   font-size: 0.6875rem;
   overflow-wrap: anywhere;
 }
-.data-episode-select {
-  flex-direction: column;
-  align-items: stretch;
-  justify-content: center;
-  gap: 0;
-  white-space: normal;
-}
-.data-episode-row:hover {
-  background-color: var(--tone-hover);
-}
-li:has(.data-episode-select[aria-pressed="true"]) .data-episode-row {
-  background-color: var(--tone-selected);
-}
-.data-episode-actions {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 0.125rem;
-}
-.data-delete-confirmation {
-  padding-inline: 0.25rem;
-}
 .query-table {
   width: max-content;
   min-width: 100%;
@@ -4465,9 +4382,6 @@ li:has(.data-episode-select[aria-pressed="true"]) .data-episode-row {
   flex: 1 1 auto;
   overflow: auto;
 }
-.query-table .query-media-heading {
-  min-width: 8.5rem;
-}
 .query-table .query-media-cell {
   width: 8.5rem;
   max-width: 8.5rem;
@@ -4476,7 +4390,7 @@ li:has(.data-episode-select[aria-pressed="true"]) .data-episode-row {
   background: var(--tone-surface);
   text-align: center;
 }
-.query-image-preview, .query-video-preview, .query-image-unavailable {
+.query-image-preview, .query-image-unavailable {
   display: block;
   width: 8rem;
   height: 4.75rem;
@@ -4502,10 +4416,6 @@ li:has(.data-episode-select[aria-pressed="true"]) .data-episode-row {
 }
 .query-value-boolean {
   color: var(--tone-ink-soft);
-}
-.query-media-unavailable {
-  color: var(--tone-ink-faint);
-  font-family: var(--font-sans);
 }
 .settings-field-row {
   display: grid;
@@ -4587,10 +4497,6 @@ li:has(.data-episode-select[aria-pressed="true"]) .data-episode-row {
 }
 .connection-test-ok {
   color: var(--tone-good);
-}
-.connection-test-pending {
-  color: var(--tone-caution);
-  background: var(--tone-caution-soft);
 }
 .connection-test-failed {
   color: var(--tone-danger);
@@ -5505,68 +5411,6 @@ li:has(.data-episode-select[aria-pressed="true"]) .data-episode-row {
   syntax: "*";
   inherits: false;
 }
-@property --tw-blur {
-  syntax: "*";
-  inherits: false;
-}
-@property --tw-brightness {
-  syntax: "*";
-  inherits: false;
-}
-@property --tw-contrast {
-  syntax: "*";
-  inherits: false;
-}
-@property --tw-grayscale {
-  syntax: "*";
-  inherits: false;
-}
-@property --tw-hue-rotate {
-  syntax: "*";
-  inherits: false;
-}
-@property --tw-invert {
-  syntax: "*";
-  inherits: false;
-}
-@property --tw-opacity {
-  syntax: "*";
-  inherits: false;
-}
-@property --tw-saturate {
-  syntax: "*";
-  inherits: false;
-}
-@property --tw-sepia {
-  syntax: "*";
-  inherits: false;
-}
-@property --tw-drop-shadow {
-  syntax: "*";
-  inherits: false;
-}
-@property --tw-drop-shadow-color {
-  syntax: "*";
-  inherits: false;
-}
-@property --tw-drop-shadow-alpha {
-  syntax: "<percentage>";
-  inherits: false;
-  initial-value: 100%;
-}
-@property --tw-drop-shadow-size {
-  syntax: "*";
-  inherits: false;
-}
-@property --tw-tracking {
-  syntax: "*";
-  inherits: false;
-}
-@property --tw-divide-x-reverse {
-  syntax: "*";
-  inherits: false;
-  initial-value: 0;
-}
 @property --tw-shadow {
   syntax: "*";
   inherits: false;
@@ -5631,6 +5475,73 @@ li:has(.data-episode-select[aria-pressed="true"]) .data-episode-row {
   syntax: "*";
   inherits: false;
   initial-value: 0 0 #0000;
+}
+@property --tw-outline-style {
+  syntax: "*";
+  inherits: false;
+  initial-value: solid;
+}
+@property --tw-blur {
+  syntax: "*";
+  inherits: false;
+}
+@property --tw-brightness {
+  syntax: "*";
+  inherits: false;
+}
+@property --tw-contrast {
+  syntax: "*";
+  inherits: false;
+}
+@property --tw-grayscale {
+  syntax: "*";
+  inherits: false;
+}
+@property --tw-hue-rotate {
+  syntax: "*";
+  inherits: false;
+}
+@property --tw-invert {
+  syntax: "*";
+  inherits: false;
+}
+@property --tw-opacity {
+  syntax: "*";
+  inherits: false;
+}
+@property --tw-saturate {
+  syntax: "*";
+  inherits: false;
+}
+@property --tw-sepia {
+  syntax: "*";
+  inherits: false;
+}
+@property --tw-drop-shadow {
+  syntax: "*";
+  inherits: false;
+}
+@property --tw-drop-shadow-color {
+  syntax: "*";
+  inherits: false;
+}
+@property --tw-drop-shadow-alpha {
+  syntax: "<percentage>";
+  inherits: false;
+  initial-value: 100%;
+}
+@property --tw-drop-shadow-size {
+  syntax: "*";
+  inherits: false;
+}
+@property --tw-tracking {
+  syntax: "*";
+  inherits: false;
+}
+@property --tw-divide-x-reverse {
+  syntax: "*";
+  inherits: false;
+  initial-value: 0;
 }
 @property --tw-space-y-reverse {
   syntax: "*";
@@ -5697,6 +5608,21 @@ li:has(.data-episode-select[aria-pressed="true"]) .data-episode-row {
       --tw-numeric-figure: initial;
       --tw-numeric-spacing: initial;
       --tw-numeric-fraction: initial;
+      --tw-shadow: 0 0 #0000;
+      --tw-shadow-color: initial;
+      --tw-shadow-alpha: 100%;
+      --tw-inset-shadow: 0 0 #0000;
+      --tw-inset-shadow-color: initial;
+      --tw-inset-shadow-alpha: 100%;
+      --tw-ring-color: initial;
+      --tw-ring-shadow: 0 0 #0000;
+      --tw-inset-ring-color: initial;
+      --tw-inset-ring-shadow: 0 0 #0000;
+      --tw-ring-inset: initial;
+      --tw-ring-offset-width: 0px;
+      --tw-ring-offset-color: #fff;
+      --tw-ring-offset-shadow: 0 0 #0000;
+      --tw-outline-style: solid;
       --tw-blur: initial;
       --tw-brightness: initial;
       --tw-contrast: initial;
@@ -5712,20 +5638,6 @@ li:has(.data-episode-select[aria-pressed="true"]) .data-episode-row {
       --tw-drop-shadow-size: initial;
       --tw-tracking: initial;
       --tw-divide-x-reverse: 0;
-      --tw-shadow: 0 0 #0000;
-      --tw-shadow-color: initial;
-      --tw-shadow-alpha: 100%;
-      --tw-inset-shadow: 0 0 #0000;
-      --tw-inset-shadow-color: initial;
-      --tw-inset-shadow-alpha: 100%;
-      --tw-ring-color: initial;
-      --tw-ring-shadow: 0 0 #0000;
-      --tw-inset-ring-color: initial;
-      --tw-inset-ring-shadow: 0 0 #0000;
-      --tw-ring-inset: initial;
-      --tw-ring-offset-width: 0px;
-      --tw-ring-offset-color: #fff;
-      --tw-ring-offset-shadow: 0 0 #0000;
       --tw-space-y-reverse: 0;
       --tw-divide-y-reverse: 0;
       --tw-backdrop-blur: initial;

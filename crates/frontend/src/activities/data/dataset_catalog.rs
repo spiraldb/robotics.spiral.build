@@ -79,7 +79,7 @@ impl DatasetChoices {
             catalog: Signal::new(DatasetCatalogState::default()),
         });
         let sessions = ProjectSessionSignals::current();
-        let available = use_memo(move || sessions.storage_available());
+        let available = use_memo(move || sessions.catalog_available());
         let request = QueryPolicy::on_demand(QueryDomain::Data).use_when(
             move || *available.read(),
             || DatasetClient::current().list_datasets(),
@@ -116,7 +116,7 @@ impl DatasetChoices {
 /// so one catalog failure never creates a notification on every render.
 #[component]
 pub(crate) fn DatasetCatalogFeedback(data: DatasetChoices) -> Element {
-    let available = ProjectSessionSignals::current().storage_available();
+    let available = ProjectSessionSignals::current().catalog_available();
     let error = data.dataset_catalog_error();
     let loading = data.datasets_loading();
     rsx! {

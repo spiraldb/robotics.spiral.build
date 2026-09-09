@@ -1,7 +1,7 @@
 //! Read control/review samples from the original MCAP Blob; no recording tables.
 use super::{
+    capture::{EpisodeError, FullEpisode},
     episode_schema::{EpisodeSchema, EpisodeStreamCatalog, EpisodeStreamRow, StoredEpisodeRow},
-    episodes::{EpisodeError, FullEpisode},
     mcap_schema::McapSchema,
 };
 use crate::{ProjectStore, db::SpiralSql};

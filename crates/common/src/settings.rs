@@ -97,8 +97,6 @@ pub struct SpiralSettings {
     #[serde(default)]
     client_secret_configured: bool,
     table_prefix: String,
-    #[serde(default)]
-    endpoint_restart_required: bool,
 }
 
 impl Default for SpiralSettings {
@@ -110,7 +108,6 @@ impl Default for SpiralSettings {
             client_id: String::new(),
             client_secret_configured: false,
             table_prefix: "studio".to_owned(),
-            endpoint_restart_required: false,
         }
     }
 }
@@ -139,10 +136,6 @@ impl SpiralSettings {
     }
     pub fn with_table_prefix(mut self, table_prefix: impl Into<String>) -> Self {
         self.table_prefix = table_prefix.into();
-        self
-    }
-    pub const fn with_endpoint_restart_required(mut self, required: bool) -> Self {
-        self.endpoint_restart_required = required;
         self
     }
     pub fn endpoint(&self) -> &str {

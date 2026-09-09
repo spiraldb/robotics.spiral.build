@@ -52,9 +52,6 @@ pub(crate) enum MessageSource {
     Studio,
     Live,
     Data,
-    // Stage 1 has no Workflow command transport yet, but reserving the source
-    // now keeps its shell registration complete without fabricating messages.
-    #[allow(dead_code)]
     Workflow,
     Training,
     Rollout,

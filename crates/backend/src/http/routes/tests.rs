@@ -16,11 +16,10 @@ fn bootstrap_lifecycle_controls_catalog_admission() {
         BackendReadinessState::Bootstrapping
     );
     assert!(state.catalog_unavailable().is_some());
-    assert!(state.storage_unavailable().is_some());
 
     state.ready();
     assert_eq!(state.current().state(), BackendReadinessState::Ready);
-    assert!(state.current().storage_available());
+    assert!(state.current().catalog_available());
     assert!(state.catalog_unavailable().is_none());
 
     state.degraded(false, "authentication expired");
@@ -143,13 +142,9 @@ fn readiness_preserves_compatibility_failures_for_all_project_reads() {
         readiness.catalog_unavailable().unwrap().code(),
         CommandFailureCode::IncompatibleWorkflow
     );
-    assert_eq!(
-        readiness.storage_unavailable().unwrap().code(),
-        CommandFailureCode::IncompatibleWorkflow
-    );
     readiness.failed(false, &OperationError::External("Connection lost".into()));
     assert_eq!(
-        readiness.storage_unavailable().unwrap().code(),
+        readiness.catalog_unavailable().unwrap().code(),
         CommandFailureCode::ProjectUnavailable
     );
 }

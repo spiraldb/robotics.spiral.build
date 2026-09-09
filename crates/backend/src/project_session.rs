@@ -98,11 +98,6 @@ impl ProjectReadiness {
         (!current.catalog_available()).then(|| Self::unavailable_error(&current))
     }
 
-    pub(crate) fn storage_unavailable(&self) -> Option<OperationError> {
-        let current = self.current();
-        (!current.storage_available()).then(|| Self::unavailable_error(&current))
-    }
-
     fn unavailable_error(current: &BackendReadiness) -> OperationError {
         use spiral_robotics_common::command_failure::CommandFailureCode;
         let detail = current.detail().to_owned();
@@ -875,7 +870,7 @@ pub(crate) mod tests {
         assert_eq!(loading.state(), BackendReadinessState::Bootstrapping);
         assert_eq!(loading.detail(), "Loading another project");
         assert!(!loading.catalog_available());
-        assert!(!loading.storage_available());
+        assert!(!loading.catalog_available());
         assert!(fixture.projects.admit(original.info().id()).is_err());
 
         change.abort();

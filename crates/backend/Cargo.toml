@@ -30,11 +30,9 @@ tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.7", features = ["set-header", "trace", "fs"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-async-stream = "0.3"
 arrow-array = "58.4.0"
 arrow-schema = "58.4.0"
 arrow-ipc = { version = "58.4.0", features = ["zstd"] }
-arrow-json = "58.4.0"
 arrow-select = "58.4.0"
 base64.workspace = true
 candle-core.workspace = true
@@ -45,7 +43,6 @@ sha2 = "0.10"
 image.workspace = true
 hf-hub.workspace = true
 spiral-robotics-inference.workspace = true
-dirs = "6"
 tokenizers.workspace = true
 tempfile.workspace = true
 url = "2"

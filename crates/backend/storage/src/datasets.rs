@@ -397,71 +397,6 @@ impl StorageManager {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn episode_preview_binds_uuid_bytes_and_rejects_invalid_ids() {
-        let dataset = DatasetSelection::new(vec!["dataset_default".into()]).unwrap();
-        let id = uuid::Uuid::parse_str("01900000-0000-7000-8000-000000000001").unwrap();
-        let request =
-            EpisodeTopicRequest::new(dataset.clone(), "/camera' --".into(), id.to_string());
-        let statement = EpisodeTopicQuery::try_from(request).unwrap().statement;
-        assert!(statement.as_str().contains("'/camera'' --'"));
-        assert!(statement.as_str().contains("WHERE id = $1"));
-        assert!(!statement.as_str().contains(&id.to_string()));
-        let parameters = statement.parameters().unwrap();
-        assert_eq!(
-            parameters
-                .schema()
-                .field(0)
-                .metadata()
-                .get("ARROW:extension:name")
-                .unwrap(),
-            "arrow.uuid"
-        );
-        let values = parameters
-            .column(0)
-            .as_any()
-            .downcast_ref::<arrow_array::FixedSizeBinaryArray>()
-            .unwrap();
-        assert_eq!(values.value(0), id.as_bytes());
-        let invalid = EpisodeTopicRequest::new(dataset, "/topic".into(), "' OR true --".into());
-        assert!(EpisodeTopicQuery::try_from(invalid).is_err());
-    }
-
-    #[test]
-    fn discovery_uses_typed_resources_and_namespace_ownership() {
-        let entries: Vec<NamespaceEntry> = serde_json::from_value(json!([
-            {"parent":{"kind":"projectRoot"},"name":"recordings","resource":{"descriptor":{"resourceId":"parent","kind":"table"},"versionId":"v1"}},
-            {"parent":{"kind":"resource","resourceId":"parent"},"name":"default","resource":{"descriptor":{"resourceId":"data","kind":"dataset"},"versionId":"v2"}},
-            {"parent":{"kind":"projectRoot"},"name":"pretend.dataset","resource":{"descriptor":{"resourceId":"ordinary-table","kind":"table"},"versionId":"v3"}}
-        ])).unwrap();
-        let resources = DatasetNamespace::new(entries).resources().unwrap();
-        assert_eq!(resources.len(), 3);
-        let datasets = resources
-            .iter()
-            .filter_map(ProjectResource::dataset)
-            .collect::<Vec<_>>();
-        assert_eq!(datasets.len(), 1);
-        assert_eq!(datasets[0].selection().path(), &["recordings", "default"]);
-        assert_eq!(datasets[0].resource_id(), "data");
-        assert_eq!(datasets[0].version_id(), "v2");
-    }
-    #[test]
-    fn mcap_topic_labels_come_from_the_versioned_native_locator() {
-        let observation: DatasetObservation = serde_json::from_value(json!({
-            "name":"mcap.opaque", "variants":[{"nativeSchemaName":"foxglove.CompressedVideo"}],
-            "coverage":{"memberCount":52,"sampleCount":10937},
-            "scanLocator":{"codec":"spiral.mcap.topic-scan","codecVersion":1,"payload":"{\"topic\":\"/camera/top/video\"}"}
-        })).unwrap();
-        let topic = observation.topic().unwrap();
-        assert_eq!(topic.name(), "/camera/top/video");
-        assert_eq!(topic.samples(), Some(10937));
-        assert_eq!(topic.members(), 52);
-    }
-}
-
 impl crate::ProjectStore {
     pub(crate) async fn validate_recording_destination(&self, name: &str) -> Result<bool, String> {
         if !crate::db::StorageSchema::is_dataset_id(name) || name.contains('.') {
@@ -536,5 +471,70 @@ impl crate::ProjectStore {
         }
         names.sort();
         Ok(names)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn episode_preview_binds_uuid_bytes_and_rejects_invalid_ids() {
+        let dataset = DatasetSelection::new(vec!["dataset_default".into()]).unwrap();
+        let id = uuid::Uuid::parse_str("01900000-0000-7000-8000-000000000001").unwrap();
+        let request =
+            EpisodeTopicRequest::new(dataset.clone(), "/camera' --".into(), id.to_string());
+        let statement = EpisodeTopicQuery::try_from(request).unwrap().statement;
+        assert!(statement.as_str().contains("'/camera'' --'"));
+        assert!(statement.as_str().contains("WHERE id = $1"));
+        assert!(!statement.as_str().contains(&id.to_string()));
+        let parameters = statement.parameters().unwrap();
+        assert_eq!(
+            parameters
+                .schema()
+                .field(0)
+                .metadata()
+                .get("ARROW:extension:name")
+                .unwrap(),
+            "arrow.uuid"
+        );
+        let values = parameters
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow_array::FixedSizeBinaryArray>()
+            .unwrap();
+        assert_eq!(values.value(0), id.as_bytes());
+        let invalid = EpisodeTopicRequest::new(dataset, "/topic".into(), "' OR true --".into());
+        assert!(EpisodeTopicQuery::try_from(invalid).is_err());
+    }
+
+    #[test]
+    fn discovery_uses_typed_resources_and_namespace_ownership() {
+        let entries: Vec<NamespaceEntry> = serde_json::from_value(json!([
+            {"parent":{"kind":"projectRoot"},"name":"recordings","resource":{"descriptor":{"resourceId":"parent","kind":"table"},"versionId":"v1"}},
+            {"parent":{"kind":"resource","resourceId":"parent"},"name":"default","resource":{"descriptor":{"resourceId":"data","kind":"dataset"},"versionId":"v2"}},
+            {"parent":{"kind":"projectRoot"},"name":"pretend.dataset","resource":{"descriptor":{"resourceId":"ordinary-table","kind":"table"},"versionId":"v3"}}
+        ])).unwrap();
+        let resources = DatasetNamespace::new(entries).resources().unwrap();
+        assert_eq!(resources.len(), 3);
+        let datasets = resources
+            .iter()
+            .filter_map(ProjectResource::dataset)
+            .collect::<Vec<_>>();
+        assert_eq!(datasets.len(), 1);
+        assert_eq!(datasets[0].selection().path(), &["recordings", "default"]);
+        assert_eq!(datasets[0].resource_id(), "data");
+        assert_eq!(datasets[0].version_id(), "v2");
+    }
+    #[test]
+    fn mcap_topic_labels_come_from_the_versioned_native_locator() {
+        let observation: DatasetObservation = serde_json::from_value(json!({
+            "name":"mcap.opaque", "variants":[{"nativeSchemaName":"foxglove.CompressedVideo"}],
+            "coverage":{"memberCount":52,"sampleCount":10937},
+            "scanLocator":{"codec":"spiral.mcap.topic-scan","codecVersion":1,"payload":"{\"topic\":\"/camera/top/video\"}"}
+        })).unwrap();
+        let topic = observation.topic().unwrap();
+        assert_eq!(topic.name(), "/camera/top/video");
+        assert_eq!(topic.samples(), Some(10937));
+        assert_eq!(topic.members(), 52);
     }
 }

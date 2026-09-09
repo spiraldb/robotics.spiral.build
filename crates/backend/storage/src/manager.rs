@@ -63,12 +63,6 @@ impl StorageManager {
         self.project_store.is_configured()
     }
 
-    pub async fn prewarm(&self) -> Result<(), String> {
-        ProjectDatabasePersistence::new(&self.project_store)
-            .prewarm()
-            .await
-    }
-
     pub fn table_prefix(&self) -> &str {
         self.project_store.table_prefix()
     }
@@ -160,16 +154,6 @@ impl StorageManager {
     ) -> Result<(), String> {
         WorkflowDocumentPersistence::new(&self.project_store)
             .save_assistant(document)
-            .await
-    }
-
-    pub async fn reset_workflow_agent_document(
-        &self,
-        expected_payload: &str,
-        document: &StoredWorkflowDocument,
-    ) -> Result<(), String> {
-        WorkflowDocumentPersistence::new(&self.project_store)
-            .reset_assistant(expected_payload, document)
             .await
     }
 

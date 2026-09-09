@@ -170,37 +170,6 @@ impl CheckpointStore for StorageManager {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{CheckpointArtifact, MAX_CHECKPOINT_ARTIFACT_BYTES, MAX_CHECKPOINT_CONFIG_BYTES};
-
-    #[test]
-    fn checkpoint_size_limits_are_inclusive_and_fail_closed() {
-        assert!(
-            CheckpointArtifact::validate_size(
-                MAX_CHECKPOINT_CONFIG_BYTES,
-                MAX_CHECKPOINT_ARTIFACT_BYTES
-            )
-            .is_ok()
-        );
-        assert!(
-            CheckpointArtifact::validate_size(
-                MAX_CHECKPOINT_CONFIG_BYTES + 1,
-                MAX_CHECKPOINT_ARTIFACT_BYTES
-            )
-            .is_err()
-        );
-        assert!(
-            CheckpointArtifact::validate_size(
-                MAX_CHECKPOINT_CONFIG_BYTES,
-                MAX_CHECKPOINT_ARTIFACT_BYTES + 1
-            )
-            .is_err()
-        );
-        assert!(CheckpointArtifact::validate_size(usize::MAX, usize::MAX).is_err());
-    }
-}
-
 impl CheckpointArtifact {
     fn from_batch_row(batch: &RecordBatch, row: usize) -> Result<Self, String> {
         let config = batch.column_by_name(db::CONFIG_JSON).ok_or_else(|| {
@@ -242,5 +211,36 @@ impl CheckpointArtifact {
         };
         Self::validate_size(config_json.len(), payload.len())?;
         Self::from_bytes(config_json, payload)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CheckpointArtifact, MAX_CHECKPOINT_ARTIFACT_BYTES, MAX_CHECKPOINT_CONFIG_BYTES};
+
+    #[test]
+    fn checkpoint_size_limits_are_inclusive_and_fail_closed() {
+        assert!(
+            CheckpointArtifact::validate_size(
+                MAX_CHECKPOINT_CONFIG_BYTES,
+                MAX_CHECKPOINT_ARTIFACT_BYTES
+            )
+            .is_ok()
+        );
+        assert!(
+            CheckpointArtifact::validate_size(
+                MAX_CHECKPOINT_CONFIG_BYTES + 1,
+                MAX_CHECKPOINT_ARTIFACT_BYTES
+            )
+            .is_err()
+        );
+        assert!(
+            CheckpointArtifact::validate_size(
+                MAX_CHECKPOINT_CONFIG_BYTES,
+                MAX_CHECKPOINT_ARTIFACT_BYTES + 1
+            )
+            .is_err()
+        );
+        assert!(CheckpointArtifact::validate_size(usize::MAX, usize::MAX).is_err());
     }
 }

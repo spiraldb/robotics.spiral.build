@@ -130,7 +130,7 @@ impl SqlStatement {
         &self.text
     }
 
-    pub fn with_parameters(mut self, parameters: RecordBatch) -> DatabaseResult<Self> {
+    pub(crate) fn with_parameters(mut self, parameters: RecordBatch) -> DatabaseResult<Self> {
         if parameters.num_rows() != 1 {
             return Err(DatabaseError::invalid_input(
                 "SQL parameters require exactly one row",

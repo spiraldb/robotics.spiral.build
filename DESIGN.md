@@ -966,8 +966,8 @@ This is the signature component system.
   raw tool payloads, media/tensors, and provider credentials never appear
   there. Only one
   turn is active, and manual Apply or
-  Run waits until it finishes. A long Workflow run moves the turn into an
-  explicit waiting state and resumes it from a synthetic backend completion.
+  Run waits until it finishes. A long Workflow run keeps its tool call pending until durable completion,
+  then continues the same Assistant turn.
   Restarted active turns become Interrupted rather than appearing to resume;
   an incomplete trailing provider tool exchange is removed before Retry.
 - **Manual inspector:** The only advertised Model is pinned SigLIP; its
@@ -1013,10 +1013,8 @@ This is the signature component system.
   and tool summaries as one server-owned schema-v2 envelope in the active Spiral
   project; only the selected conversation is provider context, while
   create/select leaves graph/run truth unchanged. Valid current schema-v2
-  history is preserved. This prototype atomically resets missing-schema,
-  incompatible, future, or unreadable history from its exact stored snapshot to
-  one fresh conversation; if that reset fails, history remains unavailable and
-  conversation mutation stays blocked.
+  history is preserved. Unsupported or unreadable history remains preserved and unavailable;
+  conversation mutation stays blocked until the project can be read.
   Switching or restoring a project replaces the visible collection under a new
   server scope instead of merging histories. Unsent Assistant drafts are keyed
   by both server scope and conversation identity, so a cloned/imported

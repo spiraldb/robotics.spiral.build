@@ -791,8 +791,7 @@ impl EpisodeStore {
         self.seek_gate.lock().await
     }
 
-    /// Read every episode without modifying persisted data.
-
+    /// Read a completed capture before its MCAP publication finishes.
     pub fn completed_episode(&self, id: &str) -> Result<FullEpisode, EpisodeError> {
         self.completed
             .lock_unpoisoned()
@@ -1310,12 +1309,7 @@ impl SampleLocation<'_> {
     }
 }
 
-/// One read of the persisted episode relations.
-///
-/// Episodes and their stream declarations are read together because an
-/// episode's arms live in the stream relation: neither half is a complete
-/// record on its own.
-
+/// Typed field access for decoded MCAP joint messages.
 trait EpisodeJsonRow {
     fn string(&self, name: &str) -> Result<&str, String>;
     fn u64(&self, name: &str) -> Result<u64, String>;

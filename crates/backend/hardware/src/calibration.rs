@@ -677,7 +677,7 @@ impl MotorCalibration {
         self.reading
     }
 
-    pub fn normalize_raw(&self, raw: i64) -> Result<f64, CalibrationError> {
+    pub(crate) fn normalize_raw(&self, raw: i64) -> Result<f64, CalibrationError> {
         let calibration = self;
         let bounded = raw.clamp(calibration.reading.range_min, calibration.reading.range_max);
         let (numerator, denominator) = if bounded < calibration.reading.center {
@@ -700,7 +700,7 @@ impl MotorCalibration {
 
     /// Convert a raw reading to degrees from this motor's calibrated center,
     /// preserving its configured joint direction.
-    pub fn degrees_from_center(&self, raw: i64) -> f64 {
+    pub(crate) fn degrees_from_center(&self, raw: i64) -> f64 {
         let degrees =
             MotorSpec::degrees_from_encoder_counts(raw.saturating_sub(self.reading.center));
         match self.direction {

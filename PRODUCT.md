@@ -221,11 +221,9 @@ never becomes the motor-control runtime.
     Up to 20 project-scoped conversations retain 80 public messages each
     without silently erasing older chats; only the selected conversation enters
     provider context. The server persists them in one versioned schema-v2
-    envelope and preserves valid current-format history. Because this is a
-    prototype, missing-schema, incompatible, future, or unreadable active-project
-    history is atomically reset from its exact stored snapshot to one fresh
-    conversation; a failed reset leaves history unavailable rather than
-    presenting an in-memory fiction. Its durable selected thread safely renders compact structured text
+    envelope and preserves valid current-format history. Unsupported or unreadable
+    history is preserved and reported as unavailable; conversation mutations
+    remain blocked. Its durable selected thread safely renders compact structured text
     and exposes bounded graph/run/result receipts as explicit navigation,
     while the canvas, authoritative run snapshot, and Results remain the source
     of truth; the canvas continues to own the manual Run/Cancel controls.

@@ -13,7 +13,6 @@ use std::sync::Arc;
 
 use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray, UInt32Array};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
-use sha2::{Digest as _, Sha256};
 
 use crate::db::ArrowColumns;
 use crate::db::column as db;
@@ -55,11 +54,7 @@ impl<'a> WorkflowDocumentPersistence<'a> {
     }
 
     pub(crate) async fn save_graph(&self, document: &StoredWorkflowDocument) -> Result<(), String> {
-        self.save(WorkflowDocumentWrite::new(
-            WorkflowDocumentKey::Graph,
-            document,
-        ))
-        .await
+        self.save(WorkflowDocumentKey::Graph, document).await
     }
 
     pub(crate) async fn load_assistant(&self) -> Result<Option<StoredWorkflowDocument>, String> {
@@ -70,25 +65,7 @@ impl<'a> WorkflowDocumentPersistence<'a> {
         &self,
         document: &StoredWorkflowDocument,
     ) -> Result<(), String> {
-        self.save(WorkflowDocumentWrite::new(
-            WorkflowDocumentKey::Assistant,
-            document,
-        ))
-        .await
-    }
-
-    /// Replace an unreadable Assistant document only when its durable payload
-    /// is still the one the caller inspected.
-    pub(crate) async fn reset_assistant(
-        &self,
-        expected_payload: &str,
-        document: &StoredWorkflowDocument,
-    ) -> Result<(), String> {
-        self.save(
-            WorkflowDocumentWrite::new(WorkflowDocumentKey::Assistant, document)
-                .replacing(expected_payload),
-        )
-        .await
+        self.save(WorkflowDocumentKey::Assistant, document).await
     }
 
     async fn load(
@@ -110,7 +87,11 @@ impl<'a> WorkflowDocumentPersistence<'a> {
 
     /// Rewrite the document relation with one key replaced, preserving the
     /// other document in the same transaction.
-    async fn save(&self, write: WorkflowDocumentWrite<'_>) -> Result<(), String> {
+    async fn save(
+        &self,
+        key: WorkflowDocumentKey,
+        document: &StoredWorkflowDocument,
+    ) -> Result<(), String> {
         let relation = Table::WorkflowRuns.qualified_name(self.project_store.table_prefix());
         let mut connection = self.project_store.connect_exclusive().await?;
         connection.begin_transaction().await?;
@@ -120,21 +101,9 @@ impl<'a> WorkflowDocumentPersistence<'a> {
                     .relation_rows(&relation, WorkflowDocumentSchema::decode)
                     .await?,
             );
-            if let Some(expected) = write.expected_payload {
-                let matches = existing.current(write.key).is_some_and(|current| {
-                    Sha256::digest(current.payload().as_bytes()).as_slice()
-                        == Sha256::digest(expected.as_bytes()).as_slice()
-                });
-                if !matches {
-                    return Err(
-                        "Assistant history changed before reset. Reload the current project."
-                            .to_owned(),
-                    );
-                }
-            }
             let rows = existing.replaced(WorkflowDocumentRow::new(
-                write.key.persisted().to_owned(),
-                write.document.clone(),
+                key.persisted().to_owned(),
+                document.clone(),
                 StorageClock::unix_millis(),
             ));
             connection
@@ -145,29 +114,6 @@ impl<'a> WorkflowDocumentPersistence<'a> {
         connection
             .finish_transaction(mutation, "Workflow history")
             .await
-    }
-}
-
-/// One Workflow document write, optionally guarded by the payload the caller
-/// expects to still be durable.
-struct WorkflowDocumentWrite<'a> {
-    key: WorkflowDocumentKey,
-    document: &'a StoredWorkflowDocument,
-    expected_payload: Option<&'a str>,
-}
-
-impl<'a> WorkflowDocumentWrite<'a> {
-    const fn new(key: WorkflowDocumentKey, document: &'a StoredWorkflowDocument) -> Self {
-        Self {
-            key,
-            document,
-            expected_payload: None,
-        }
-    }
-
-    const fn replacing(mut self, expected_payload: &'a str) -> Self {
-        self.expected_payload = Some(expected_payload);
-        self
     }
 }
 
@@ -233,6 +179,7 @@ impl WorkflowDocumentRow {
         self.key == key.persisted()
     }
 
+    #[cfg(test)]
     const fn document(&self) -> &StoredWorkflowDocument {
         &self.document
     }
@@ -302,6 +249,7 @@ impl WorkflowDocumentReplacement {
         Self { rows }
     }
 
+    #[cfg(test)]
     fn current(&self, key: WorkflowDocumentKey) -> Option<&StoredWorkflowDocument> {
         self.rows
             .iter()

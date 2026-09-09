@@ -76,8 +76,8 @@ Source starting points:
 
 - [Current catalog layout](dataset-namespaces.md), [MCAP migration/import](mcap-import-design.md),
   [episode-filter investigation](mcap-episode-filter.md), [database boundary](database-boundary.md).
-- [Native dataset storage](../crates/backend/storage/src/native_datasets.rs),
-  [episode browser](../crates/frontend/src/activities/data/native_episodes.rs).
+- [Native dataset storage](../crates/backend/storage/src/datasets.rs),
+  [episode browser](../crates/frontend/src/activities/data/episode_browser.rs).
 - [Workflow model execution](../crates/backend/src/workflow/model.rs),
   [feature persistence](../crates/backend/storage/src/workflow_features.rs).
 - [Training contracts](../crates/common/src/training.rs),

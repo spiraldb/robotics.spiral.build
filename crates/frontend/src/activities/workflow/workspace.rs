@@ -641,11 +641,6 @@ impl AssistantDocument {
             }
         }
     }
-
-    #[allow(dead_code)]
-    fn into_blocks(self) -> Vec<AssistantBlock> {
-        self.0
-    }
 }
 
 impl AssistantBlock {
@@ -1759,7 +1754,7 @@ mod tests {
             AssistantDocument::parse(
                 "Saved **Holding evidence** with `score_cube`.\n\n- Camera frames\n* Joint state\n\n```sql\nSELECT * FROM scores\n```"
             )
-            .into_blocks(),
+            .0,
             vec![
                 AssistantBlock::Paragraph(vec![
                     AssistantInline::Text("Saved ".to_owned()),
@@ -1779,13 +1774,13 @@ mod tests {
             ]
         );
         assert_eq!(
-            AssistantDocument::parse("Streaming **unfinished").into_blocks(),
+            AssistantDocument::parse("Streaming **unfinished").0,
             vec![AssistantBlock::Paragraph(vec![AssistantInline::Text(
                 "Streaming **unfinished".to_owned()
             )])]
         );
         assert_eq!(
-            AssistantDocument::parse("```sql\nSELECT 1").into_blocks(),
+            AssistantDocument::parse("```sql\nSELECT 1").0,
             vec![AssistantBlock::Code {
                 language: Some("sql".to_owned()),
                 text: "SELECT 1".to_owned(),

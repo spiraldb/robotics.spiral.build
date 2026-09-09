@@ -202,18 +202,6 @@ impl Sample {
     pub fn action(&self) -> &[Option<Vec<Option<f64>>>] {
         &self.action
     }
-
-    pub fn replace_normalized_arm(
-        &mut self,
-        arm_index: usize,
-        values: Vec<Option<f64>>,
-    ) -> Result<(), Vec<Option<f64>>> {
-        let Some(arm) = self.normalized.get_mut(arm_index) else {
-            return Err(values);
-        };
-        *arm = values;
-        Ok(())
-    }
 }
 
 pub type EpisodeCheckpoint = oneshot::Receiver<Result<(), String>>;

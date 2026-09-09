@@ -15,7 +15,7 @@ use arrow_array::{
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use spiral_robotics_common::recording::{EpisodeArm, RecordingGap};
 
-use super::episodes::{
+use super::capture::{
     ArmCondition, ArmConditionEffortExtremes, ArmConditionSummary, ArmConditionThermalExtremes,
     EpisodeCompletion, EpisodeError, EpisodeStart, JointMotorLimits, JointVoltageRange, Sample,
 };
@@ -44,8 +44,7 @@ const CONDITION_COLUMNS: [&str; 10] = [
 pub(super) struct EpisodeSchema;
 
 impl EpisodeSchema {
-    /// Schema for the managed `datasets` relation.
-
+    /// Arrow shape of the episode header encoded into each MCAP recording.
     pub(super) fn episodes() -> SchemaRef {
         Arc::new(Schema::new(vec![
             Field::new(db::EPISODE_ID, DataType::Utf8, false),
@@ -121,8 +120,6 @@ impl EpisodeSchema {
 
 /// Build the owning dataset row. Dataset IDs double as their initial display
 /// name until richer dataset metadata is edited in a future workflow.
-impl EpisodeStart {}
-
 /// One joint message row encoded into the recording’s Protobuf schema.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct JointSampleRow {
@@ -399,8 +396,6 @@ impl StoredEpisodeRow {
 }
 
 /// Build the single row that makes an episode visible to readers.
-impl EpisodeCompletion {}
-
 /// The two parallel gap lists an episode row carries.
 struct RecordingGapColumns {
     after_ns: Vec<u64>,

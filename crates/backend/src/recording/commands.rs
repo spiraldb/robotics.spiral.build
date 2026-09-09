@@ -724,7 +724,7 @@ impl RecordingCommands {
     }
 
     fn require_storage_ready(&self) -> Result<(), BackendCommandError> {
-        match self.state.bootstrap().storage_unavailable() {
+        match self.state.bootstrap().catalog_unavailable() {
             Some(error) => Err(error.into()),
             None => Ok(()),
         }

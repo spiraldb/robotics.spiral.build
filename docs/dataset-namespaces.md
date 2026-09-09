@@ -22,7 +22,7 @@ The source table does not declare a primary key. `recording` is the native
 producer's member key within each dataset's filtered input.
 
 `spiral_robotics` and `spiral_dataset` were marker tables used as containers.
-They are removed by this migration. Source views are at the root because the
+They are no longer part of the catalog. Source views are at the root because the
 current Spiral child-view path requires keyed parent metadata that Arbor does
 not expose. Dataset-owned resources retain their native parent relationship.
 
@@ -30,36 +30,13 @@ The server's `--studio-table-prefix` defaults to `studio`; it is a naming prefix
 not a namespace. Storage schema 11 and training protocol 7 use this layout.
 Rebuild/restart Studio and its training workers together after migration.
 
-## Existing-project migration
+## Existing projects
 
-`migrations/root_source_views.py` copies legacy source rows into the shared table
-using native SQL, comparing all values including SHA-256 hashes of embedded Blob
-bytes. Studio tables move through the project journal with their exact IDs and
-versions. Dataset definitions receive immutable successors that use the root
-views while retaining their logical member contents and private storage layout.
-Publication moves the names, selects the Dataset successors, and removes legacy
-source and container bindings in one compare-and-swap journal commit. Historical
-commits retain the previous catalog and immutable resources.
+Studio rejects unsupported storage layouts instead of recreating the retired
+recording tables. One-off migration scripts have been retired; historical audit
+receipts remain with their backups. Current project transfer uses the supported
+`.spiral-project` format through Settings.
 
-Run Python 3.14+ with `pyarrow` and `adbc_driver_manager` and the current native
-driver. Credentials default to Studio's local bootstrap file and never enter
-the audit. Use a new audit directory for preparation:
-
-```sh
-python migrations/root_source_views.py prepare --audit /absolute/path/to/audit
-python migrations/root_source_views.py publish --audit /absolute/path/to/audit
-python migrations/root_source_views.py verify --audit /absolute/path/to/audit
-```
-
-The script refuses a changed catalog or a second publication attempt. After an
-uncertain network result, inspect the saved request and journal before taking
-further action. The `verify` phase compares Studio table contents, full episode
-rows, source contents, resource identities, and the selected Dataset versions.
-
-The September 8, 2026 audit is stored locally in
-`exports/flat-catalog-root-views-2026-09-08/`. The earlier namespace migration
-and obsolete HF demo removal are retained in their corresponding audit folders.
-The saved default Workflow still refers to that previously removed HF demo;
-this migration preserves that document unchanged.
-
-Live recording and project backup details are in [MCAP recording and playback](recording-mcap.md). There is no separate recording registry.
+Live recording and project backup details are in
+[MCAP recording and playback](recording-mcap.md). There is no separate recording
+registry.

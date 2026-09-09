@@ -11,7 +11,7 @@ use spiral_robotics_common::datasets::{DatasetInspection, DatasetSelection, Epis
 #[component]
 pub(crate) fn DatasetInspector(selection: DatasetSelection, topic: Option<String>) -> Element {
     let navigation = use_hook(|| DatasetNavigation::new(topic));
-    let available = use_memo(move || ProjectSessionSignals::current().storage_available());
+    let available = use_memo(move || ProjectSessionSignals::current().catalog_available());
     let mut inspection = crate::client::queries::QueryPolicy::on_demand(
         crate::client::queries::QueryDomain::Catalog,
     )

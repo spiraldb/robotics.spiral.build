@@ -6,11 +6,6 @@ pub struct EpisodeId(String);
 
 impl EpisodeId {
     pub const MAX_BYTES: usize = 64;
-
-    /// Parse the sequence number from Studio's generated `episode_NNNNNN` IDs.
-    pub fn sequence_number(&self) -> Option<u64> {
-        self.0.strip_prefix("episode_")?.parse().ok()
-    }
 }
 
 impl TryFrom<&str> for EpisodeId {

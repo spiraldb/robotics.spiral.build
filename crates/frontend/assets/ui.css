@@ -220,34 +220,6 @@
   font-weight: 500;
 }
 
-/*
-  `--bare` is for an action that fills a row which already owns a surface: a
-  list item that lights on hover and tints when it is the selected one. Without
-  it the row and the label inside it light separately, so a hovered episode had
-  a grey label sitting on white paper next to its own Delete action — half the
-  row responding to a pointer that was over all of it.
-
-  The selectors carry the same weight as the general rules above and come after
-  them, which is the whole mechanism: opting out has to be able to win.
-*/
-.ui-action--bare,
-.ui-action--bare:hover:not(:disabled):not([aria-disabled="true"]),
-.ui-action--bare:active:not(:disabled):not([aria-disabled="true"]),
-.ui-action--bare:is(
-  [aria-pressed="true"],
-  [aria-selected="true"],
-  [aria-checked="true"],
-  [aria-current="page"]
-),
-.ui-action--bare:is(
-  [aria-pressed="true"],
-  [aria-selected="true"],
-  [aria-checked="true"],
-  [aria-current="page"]
-):hover:not(:disabled):not([aria-disabled="true"]) {
-  background: transparent;
-}
-
 .ui-action--tab:is([aria-selected="true"], [aria-current="page"]):hover:not(:disabled) {
   background: transparent;
 }
@@ -512,10 +484,12 @@
   color: var(--ui-ink);
 }
 .data-catalog-toolbar { display: flex; gap: 6px; padding: 12px; border-bottom: 1px solid var(--ui-line); }
-.data-dataset-row { display: flex; align-items: center; gap: 8px; width: 100%; padding: 14px 12px; text-align: left; font-size: 12px; border-bottom: 1px solid var(--ui-line); }
-.data-dataset-row:hover, .data-ledger tbody tr:hover { background: var(--ui-hover); }
-.data-dataset-row[aria-pressed="true"] { background: var(--ui-selected); color: var(--ui-accent); }
-.data-dataset-row:focus-visible, .data-text-action:focus-visible, .data-topic-action:focus-visible, .data-section-switcher button:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: -2px; }
+
+.data-ledger tbody tr:hover { background: var(--ui-hover); }
+
+.data-text-action:focus-visible,
+.data-topic-action:focus-visible,
+.data-section-switcher button:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: -2px; }
 .data-inspector-heading { flex-shrink: 0; padding: 22px 20px 16px; }
 .data-inspector-heading h2 { overflow-wrap: anywhere; font-size: 20px; font-weight: 600; line-height: 1.3; }
 .data-inspector-heading p { margin-top: 6px; font-size: 12px; color: var(--ui-ink-soft); }

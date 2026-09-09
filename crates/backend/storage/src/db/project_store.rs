@@ -264,7 +264,7 @@ impl ProjectConnection {
             .await
     }
 
-    pub async fn create_or_append_batches(
+    pub(crate) async fn create_or_append_batches(
         &mut self,
         target: &str,
         batches: Vec<RecordBatch>,
@@ -432,12 +432,6 @@ pub struct ProjectStore {
 }
 
 impl ProjectStore {
-    /// Identify the stable operator-facing form so delivery adapters can use
-    /// an availability status instead of misclassifying the failure as input.
-    pub fn is_unavailable_error(message: &str) -> bool {
-        message.starts_with(SPIRAL_UNAVAILABLE_PREFIX)
-    }
-
     fn present_error(endpoint: &str, error: DatabaseError) -> String {
         if error.kind() != DatabaseErrorKind::Unavailable {
             return error.to_string();
@@ -489,20 +483,6 @@ impl ProjectStore {
 
     pub(crate) fn is_configured(&self) -> bool {
         self.connection_settings.project_id().is_some()
-    }
-
-    /// Initialize the configured database adapter and force one authenticated
-    /// project-catalog lookup without mutating project data.
-    pub(crate) async fn prewarm(&self) -> Result<(), String> {
-        let relation =
-            RelationName::parse(Table::StudioSettings.qualified_name(&self.table_prefix))
-                .map_err(|error| error.to_string())?;
-        let mut connection = self.connect().await?;
-        let _ = connection
-            .table_schema(relation)
-            .await
-            .map_err(|error| error.to_string())?;
-        Ok(())
     }
 
     pub fn table_prefix(&self) -> &str {
@@ -597,7 +577,7 @@ mod tests {
             unavailable,
             "SpiralDB is unavailable at http://127.0.0.1:4279. Start the service or update Settings → SpiralDB, then try again."
         );
-        assert!(ProjectStore::is_unavailable_error(&unavailable));
+        assert!(unavailable.starts_with(SPIRAL_UNAVAILABLE_PREFIX));
 
         let invalid = "episode bundle has the wrong format".to_owned();
         assert_eq!(
@@ -618,14 +598,6 @@ pub(crate) struct ProjectDatabasePersistence<'a> {
 impl<'a> ProjectDatabasePersistence<'a> {
     pub(crate) const fn new(project_store: &'a ProjectStore) -> Self {
         Self { project_store }
-    }
-
-    pub(crate) async fn prewarm(&self) -> Result<(), String> {
-        self.project_store.prewarm().await?;
-        let mut connection = self.project_store.connect_exclusive().await?;
-        ManagedRelationProvisioner::new(&mut connection, self.project_store.table_prefix())
-            .verify()
-            .await
     }
 
     pub(crate) async fn test(&self) -> (bool, String) {
@@ -709,22 +681,6 @@ impl<'a> ManagedRelationProvisioner<'a> {
                 .await?;
         }
         Ok(ManagedRelationProvisioning { created_relations })
-    }
-
-    async fn verify(mut self) -> Result<(), String> {
-        let missing = self.relation_readiness().await?;
-        if missing.is_empty() {
-            return Ok(());
-        }
-        let relations = missing
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(", ");
-        Err(format!(
-            "Studio table prefix {} is missing managed relations: {relations}. Run Settings → SpiralDB → Test connection to provision them.",
-            self.table_prefix
-        ))
     }
 
     async fn relation_readiness(&mut self) -> Result<Vec<Table>, String> {
@@ -818,35 +774,6 @@ mod managed_relation_tests {
             created.describe(),
             "created 2 missing relations: robots, studio_settings"
         );
-    }
-
-    /// The two relations whose native column types differ from the portable
-    /// shape a bundle carries still have to satisfy readiness validation and
-    /// agree on their column names.
-    #[test]
-    fn readiness_accepts_the_declared_native_schema_variances() {
-        for (table, schema) in [(
-            Table::TrainingCheckpoints,
-            Arc::new(ManagedRelationCatalog::schema(Table::TrainingCheckpoints)),
-        )] {
-            let native = schema
-                .fields()
-                .iter()
-                .map(|field| field.name().clone())
-                .collect::<Vec<_>>();
-            let managed = ManagedRelationCatalog::schema(table)
-                .fields()
-                .iter()
-                .map(|field| field.name().clone())
-                .collect::<Vec<_>>();
-            assert_eq!(native, managed, "{table}");
-            ManagedRelationProvisioner::validate_existing_relation(
-                table,
-                &table.qualified_name("spiral_robotics"),
-                schema.as_ref(),
-            )
-            .unwrap_or_else(|error| panic!("{table}: {error}"));
-        }
     }
 
     #[test]

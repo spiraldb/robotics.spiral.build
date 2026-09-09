@@ -29,9 +29,6 @@ impl ProjectSessionState {
     pub(crate) fn connected(&self) -> bool {
         matches!(self, Self::Ready(_))
     }
-    pub(crate) fn storage_available(&self) -> bool {
-        matches!(self, Self::Ready(status) if status.readiness().storage_available())
-    }
     pub(crate) fn catalog_available(&self) -> bool {
         matches!(self, Self::Ready(status) if status.readiness().catalog_available())
     }

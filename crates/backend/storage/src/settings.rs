@@ -217,7 +217,7 @@ impl ServiceEndpoint {
         Self::parse(endpoint, "Spiral SpFS endpoint")
     }
 
-    pub fn training_runtime(endpoint: &str) -> Result<Self, String> {
+    fn training_runtime(endpoint: &str) -> Result<Self, String> {
         Self::parse(endpoint, "Training runtime endpoint")
     }
 

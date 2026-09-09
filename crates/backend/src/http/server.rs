@@ -22,8 +22,7 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>
 /// gets a short deadline instead of being allowed to hold process exit open.
 const SERVER_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(750);
 /// Motor and camera cleanup normally completes within one control/frame cycle;
-/// a final MP4 may need a few more seconds to flush its index and fast-start
-/// metadata without corrupting the last recorded episode.
+/// the final encoder segment and MCAP publication need time to finish.
 const RESOURCE_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
 
 /// Set up, calibrate, and drive SO-ARM101 arms from a browser.
@@ -65,7 +64,7 @@ struct VideoArguments {
     #[arg(long, default_value = "ffmpeg", value_name = "PATH")]
     ffmpeg: String,
 
-    /// FFmpeg video codec used for browser-playable episode MP4s.
+    /// FFmpeg video codec used for camera access units in MCAP recordings.
     #[arg(long, default_value = "libx264", value_name = "CODEC")]
     video_codec: String,
 }

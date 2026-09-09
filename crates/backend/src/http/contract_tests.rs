@@ -147,13 +147,11 @@ async fn snapshots_are_plain_gets_and_old_sessions_cannot_read_the_replacement()
 fn dataset_catalogs_and_episode_playback_keep_distinct_wire_contracts() {
     let contract = StudioApi::routes().into_document();
     let paths = &contract["paths"];
-    for (path, item_schema) in [("/datasets", "DatasetSummary")] {
-        assert_eq!(
-            paths[path]["get"]["responses"]["200"]["content"]["application/json"]["schema"]["items"]
-                ["$ref"],
-            format!("#/components/schemas/{item_schema}")
-        );
-    }
+    assert_eq!(
+        paths["/datasets"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]["items"]
+            ["$ref"],
+        "#/components/schemas/DatasetSummary"
+    );
     let playback = &paths["/datasets/episode-video"]["post"];
     assert_eq!(
         playback["requestBody"]["content"]["application/json"]["schema"]["$ref"],

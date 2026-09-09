@@ -28,9 +28,6 @@ impl ProjectSessionSignals {
     pub(crate) fn connected(self) -> bool {
         self.state.read().connected()
     }
-    pub(crate) fn storage_available(self) -> bool {
-        self.state.read().storage_available()
-    }
     pub(crate) fn catalog_available(self) -> bool {
         self.state.read().catalog_available()
     }

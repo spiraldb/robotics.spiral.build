@@ -58,10 +58,3 @@ Validation covers MCAP joint/null/action round trips, camera timestamps,
 immutable file publication, pause timing, real FFmpeg keyframe packaging, and
 native Spiral import/retry/playback/delete. Hardware capture still needs a real
 robot/camera smoke test; automated validation does not move hardware.
-
-The migration suites pass: 264 backend, 110 storage, 105 hardware, 60 common,
-5 training-protocol, 115 browser/WASM, and 14 Python tests, plus the native
-Spiral import/retry/playback/delete and FFmpeg keyframe tests. Seven separate
-frontend source-architecture assertions still fail in `activity_composition`
-and `interaction_language`; the same seven failures were reproduced from an
-unchanged `HEAD` snapshot. They are not counted as passing migration checks.

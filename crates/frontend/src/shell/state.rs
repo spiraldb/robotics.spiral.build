@@ -32,17 +32,9 @@ struct StudioProjectResources {
     configuration: Memo<StudioConfiguration>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct StudioConfiguration {
     spiral_query_available: bool,
-}
-
-impl Default for StudioConfiguration {
-    fn default() -> Self {
-        Self {
-            spiral_query_available: false,
-        }
-    }
 }
 
 impl StudioConfiguration {

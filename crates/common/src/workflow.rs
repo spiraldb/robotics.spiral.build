@@ -183,11 +183,6 @@ impl WorkflowFeatureApplicability {
         )
     }
 
-    /// Derive this applicability's server-owned feature cache name component.
-    fn cache_name(&self) -> String {
-        Self::derived_cache_name(&self.source_relation)
-    }
-
     pub fn new(source_relation: impl Into<String>, media_field: impl Into<String>) -> Self {
         Self {
             source_relation: source_relation.into(),
@@ -246,13 +241,16 @@ impl WorkflowNodeConfig {
 
     /// The writable name component is a pure server-owned derivation, never
     /// graph input. Storage adds the configured namespace before execution.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn model_output_name(&self) -> Option<String> {
         let Self::Model { features } = self else {
             return None;
         };
-        features
-            .first()
-            .map(|feature| feature.applicability().cache_name())
+        features.first().map(|feature| {
+            WorkflowFeatureApplicability::derived_cache_name(
+                feature.applicability().source_relation(),
+            )
+        })
     }
 }
 
@@ -1012,6 +1010,7 @@ impl WorkflowAgentMessage {
         self
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn with_run_id(mut self, run_id: Option<String>) -> Self {
         self.content.run_id = run_id;
         self

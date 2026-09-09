@@ -10,24 +10,6 @@ pub(crate) struct RecordingFile {
     path: PathBuf,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn publication_never_changes_an_existing_file() {
-        let directory = tempfile::tempdir().unwrap();
-        let recording = RecordingFile {
-            path: directory.path().join("take.mcap"),
-        };
-        recording.save(b"original recording").unwrap();
-        recording.save(b"original recording").unwrap();
-        assert!(recording.save(b"recalibrated recording").is_err());
-        assert_eq!(fs::read(recording.path()).unwrap(), b"original recording");
-        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
-    }
-}
-
 impl RecordingFile {
     pub(crate) fn new(
         store: &crate::ProjectStore,
@@ -92,5 +74,23 @@ impl RecordingFile {
         result.map_err(|error: std::io::Error| {
             format!("Saving recording {}: {error}", self.path.display())
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn publication_never_changes_an_existing_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let recording = RecordingFile {
+            path: directory.path().join("take.mcap"),
+        };
+        recording.save(b"original recording").unwrap();
+        recording.save(b"original recording").unwrap();
+        assert!(recording.save(b"recalibrated recording").is_err());
+        assert_eq!(fs::read(recording.path()).unwrap(), b"original recording");
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
     }
 }

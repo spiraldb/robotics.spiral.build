@@ -209,158 +209,6 @@ impl StorageManager {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn backup_restores_every_file_in_a_multirow_batch() {
-        use crate::db::ManagedRelationSchema as _;
-        let batch = RecordBatch::try_new(
-            Arc::new(
-                McapSources
-                    .managed_relation_schema(crate::db::Table::RecordingSources)
-                    .unwrap(),
-            ),
-            vec![
-                Arc::new(StringArray::from(vec!["first", "second"])),
-                Arc::new(StringArray::from(vec!["one.mcap", "two.mcap"])),
-                Arc::new(arrow_array::BinaryArray::from(vec![
-                    b"first file".as_slice(),
-                    b"second file".as_slice(),
-                ])),
-            ],
-        )
-        .unwrap();
-        let restored = McapSources::restore(batch).unwrap();
-        assert_eq!(restored.len(), 2);
-        for (batch, expected) in restored
-            .iter()
-            .zip([b"first file".as_slice(), b"second file".as_slice()])
-        {
-            let source = batch
-                .column_by_name("source")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<StructArray>()
-                .unwrap();
-            assert_eq!(
-                McapSources::bytes(source.column_by_name("bytes").unwrap().as_ref(), 0).unwrap(),
-                expected
-            );
-        }
-    }
-
-    #[tokio::test]
-    #[ignore = "requires SPIRAL_MCAP_TEST_CONFIG and Spiral access; creates and removes a uniquely named dataset"]
-    async fn native_recording_import_retry_playback_and_delete() {
-        use crate::episodes::{CameraRecording, EpisodeFixture, McapRecording};
-        use crate::settings::{BackendStateStore, SpiralConnectionSettings};
-        let config = BackendStateStore::open_for_test(
-            std::env::var_os("SPIRAL_MCAP_TEST_CONFIG")
-                .expect("explicit test config")
-                .into(),
-        )
-        .unwrap();
-        let settings = SpiralConnectionSettings::new(
-            config.spiral_endpoint().unwrap(),
-            config.spiral_spfs_endpoint().unwrap(),
-        )
-        .unwrap()
-        .with_project(&config.project_id().unwrap())
-        .unwrap()
-        .with_credentials(config.credentials());
-        let store = Arc::new(
-            crate::ProjectStore::new(
-                settings.clone(),
-                "mcap_probe".into(),
-                Arc::new(crate::AdbcDatabase::new(settings)),
-            )
-            .unwrap(),
-        );
-        let storage = StorageManager::new(store.clone());
-        let name = format!("recording_probe_{}", uuid::Uuid::new_v4().simple());
-        let camera = CameraRecording::from_annex_b(
-            "wrist".into(),
-            (32, 32, 30),
-            (
-                include_bytes!("../../../../frontend/src/activities/data/fixtures/seek.h264")
-                    .to_vec(),
-                (0..8).map(|index| index * 33_333_333).collect(),
-            ),
-        )
-        .unwrap();
-        let source_existed = store
-            .connect()
-            .await
-            .unwrap()
-            .table_exists("dataset_source")
-            .await
-            .unwrap();
-        let outcome: Result<(), String> = async {
-            for id in ["first", "second"] {
-                let id = format!("{name}_{id}");
-                let episode = EpisodeFixture::new(&id, &name)
-                    .with_arms(vec![spiral_robotics_common::recording::EpisodeArm::new(
-                        "arm",
-                        None,
-                        vec!["joint".into()],
-                    )])
-                    .with_timing(1_700_000_000_000, 30.0)
-                    .with_duration_seconds(0.3)
-                    .into_episode();
-                let bytes = McapRecording::encode(&episode, std::slice::from_ref(&camera))?;
-                let key = format!("{id}.mcap");
-                storage
-                    .import_recording(RecordingImport::new(&name, &key, &bytes))
-                    .await?;
-                storage
-                    .import_recording(RecordingImport::new(&name, &key, &bytes))
-                    .await?;
-                let video = storage.recorded_camera(&id, "wrist").await?;
-                assert_eq!(video.packets().len(), 8);
-                assert_eq!(video.packets()[0].timestamp_ns(), "0");
-                assert!(video.packets()[0].keyframe());
-            }
-            storage.delete_recording(&format!("{name}_first")).await?;
-            let mut connection = store.connect().await?;
-            let rows = connection
-                .query_rows(
-                    &format!("SELECT id FROM spql.mcap.episodes('dataset_{name}')"),
-                    10,
-                )
-                .await?;
-            assert_eq!(rows.rows().len(), 1);
-            Ok(())
-        }
-        .await;
-        let mut connection = store.connect_exclusive().await.unwrap();
-        connection
-            .execute_update_sql(&format!("DROP DATASET IF EXISTS dataset_{name}"))
-            .await
-            .unwrap();
-        connection
-            .execute_update_sql(&format!("DROP VIEW IF EXISTS dataset_source_{name}"))
-            .await
-            .unwrap();
-        if connection.table_exists("dataset_source").await.unwrap() {
-            connection
-                .execute_update_sql(&format!(
-                    "DELETE FROM dataset_source WHERE dataset_name = '{name}'"
-                ))
-                .await
-                .unwrap();
-            if !source_existed {
-                connection
-                    .execute_update_sql("DROP TABLE dataset_source")
-                    .await
-                    .unwrap();
-            }
-        }
-        outcome.expect("native MCAP recording pipeline");
-    }
-}
-
 /// Portable source files are feature data, provisioned by import rather than startup.
 pub(crate) struct McapSources;
 impl crate::db::ManagedRelationSchema for McapSources {
@@ -551,5 +399,157 @@ impl StorageManager {
         connection
             .finish_transaction(mutation, "recording deletion")
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backup_restores_every_file_in_a_multirow_batch() {
+        use crate::db::ManagedRelationSchema as _;
+        let batch = RecordBatch::try_new(
+            Arc::new(
+                McapSources
+                    .managed_relation_schema(crate::db::Table::RecordingSources)
+                    .unwrap(),
+            ),
+            vec![
+                Arc::new(StringArray::from(vec!["first", "second"])),
+                Arc::new(StringArray::from(vec!["one.mcap", "two.mcap"])),
+                Arc::new(arrow_array::BinaryArray::from(vec![
+                    b"first file".as_slice(),
+                    b"second file".as_slice(),
+                ])),
+            ],
+        )
+        .unwrap();
+        let restored = McapSources::restore(batch).unwrap();
+        assert_eq!(restored.len(), 2);
+        for (batch, expected) in restored
+            .iter()
+            .zip([b"first file".as_slice(), b"second file".as_slice()])
+        {
+            let source = batch
+                .column_by_name("source")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StructArray>()
+                .unwrap();
+            assert_eq!(
+                McapSources::bytes(source.column_by_name("bytes").unwrap().as_ref(), 0).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires SPIRAL_MCAP_TEST_CONFIG and Spiral access; creates and removes a uniquely named dataset"]
+    async fn native_recording_import_retry_playback_and_delete() {
+        use crate::episodes::{CameraRecording, EpisodeFixture, McapRecording};
+        use crate::settings::{BackendStateStore, SpiralConnectionSettings};
+        let config = BackendStateStore::open_for_test(
+            std::env::var_os("SPIRAL_MCAP_TEST_CONFIG")
+                .expect("explicit test config")
+                .into(),
+        )
+        .unwrap();
+        let settings = SpiralConnectionSettings::new(
+            config.spiral_endpoint().unwrap(),
+            config.spiral_spfs_endpoint().unwrap(),
+        )
+        .unwrap()
+        .with_project(&config.project_id().unwrap())
+        .unwrap()
+        .with_credentials(config.credentials());
+        let store = Arc::new(
+            crate::ProjectStore::new(
+                settings.clone(),
+                "mcap_probe".into(),
+                Arc::new(crate::AdbcDatabase::new(settings)),
+            )
+            .unwrap(),
+        );
+        let storage = StorageManager::new(store.clone());
+        let name = format!("recording_probe_{}", uuid::Uuid::new_v4().simple());
+        let camera = CameraRecording::from_annex_b(
+            "wrist".into(),
+            (32, 32, 30),
+            (
+                include_bytes!("../../../../frontend/src/activities/data/fixtures/seek.h264")
+                    .to_vec(),
+                (0..8).map(|index| index * 33_333_333).collect(),
+            ),
+        )
+        .unwrap();
+        let source_existed = store
+            .connect()
+            .await
+            .unwrap()
+            .table_exists("dataset_source")
+            .await
+            .unwrap();
+        let outcome: Result<(), String> = async {
+            for id in ["first", "second"] {
+                let id = format!("{name}_{id}");
+                let episode = EpisodeFixture::new(&id, &name)
+                    .with_arms(vec![spiral_robotics_common::recording::EpisodeArm::new(
+                        "arm",
+                        None,
+                        vec!["joint".into()],
+                    )])
+                    .with_timing(1_700_000_000_000, 30.0)
+                    .with_duration_seconds(0.3)
+                    .into_episode();
+                let bytes = McapRecording::encode(&episode, std::slice::from_ref(&camera))?;
+                let key = format!("{id}.mcap");
+                storage
+                    .import_recording(RecordingImport::new(&name, &key, &bytes))
+                    .await?;
+                storage
+                    .import_recording(RecordingImport::new(&name, &key, &bytes))
+                    .await?;
+                let video = storage.recorded_camera(&id, "wrist").await?;
+                assert_eq!(video.packets().len(), 8);
+                assert_eq!(video.packets()[0].timestamp_ns(), "0");
+                assert!(video.packets()[0].keyframe());
+            }
+            storage.delete_recording(&format!("{name}_first")).await?;
+            let mut connection = store.connect().await?;
+            let rows = connection
+                .query_rows(
+                    &format!("SELECT id FROM spql.mcap.episodes('dataset_{name}')"),
+                    10,
+                )
+                .await?;
+            assert_eq!(rows.rows().len(), 1);
+            Ok(())
+        }
+        .await;
+        let mut connection = store.connect_exclusive().await.unwrap();
+        connection
+            .execute_update_sql(&format!("DROP DATASET IF EXISTS dataset_{name}"))
+            .await
+            .unwrap();
+        connection
+            .execute_update_sql(&format!("DROP VIEW IF EXISTS dataset_source_{name}"))
+            .await
+            .unwrap();
+        if connection.table_exists("dataset_source").await.unwrap() {
+            connection
+                .execute_update_sql(&format!(
+                    "DELETE FROM dataset_source WHERE dataset_name = '{name}'"
+                ))
+                .await
+                .unwrap();
+            if !source_existed {
+                connection
+                    .execute_update_sql("DROP TABLE dataset_source")
+                    .await
+                    .unwrap();
+            }
+        }
+        outcome.expect("native MCAP recording pipeline");
     }
 }

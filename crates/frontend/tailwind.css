@@ -1575,45 +1575,6 @@
     @apply h-px w-full;
   }
 
-  .workflow-example-prompt,
-  .workflow-assistant-plan {
-    @apply border-b border-line px-4 py-4;
-  }
-
-  .workflow-example-prompt h3,
-  .workflow-assistant-plan h3,
-  .workflow-inspector-sql h3 {
-    @apply mb-2 text-[11px] font-semibold text-ink;
-  }
-
-  .workflow-example-prompt p {
-    @apply rounded border border-line bg-sunken px-3 py-2.5 font-mono text-[11px] leading-[1.55] text-ink;
-  }
-
-  .workflow-assistant-plan ol {
-    @apply grid gap-3;
-  }
-
-  .workflow-assistant-plan li {
-    @apply grid grid-cols-[1.25rem_minmax(0,1fr)] items-start gap-2;
-  }
-
-  .workflow-assistant-plan li > span {
-    @apply grid size-5 place-items-center rounded border border-line font-mono text-[10px] text-ink-soft;
-  }
-
-  .workflow-assistant-plan strong {
-    @apply text-[11px] font-medium;
-  }
-
-  .workflow-assistant-plan p {
-    @apply mt-0.5 text-[10px] leading-4 text-ink-faint;
-  }
-
-  .workflow-assistant-footer {
-    @apply shrink-0 border-t border-line bg-sunken px-4 py-2 text-[10px] text-ink-faint;
-  }
-
   .workflow-inspector {
     @apply overflow-y-auto;
   }
@@ -1675,27 +1636,12 @@
     overflow-wrap: anywhere;
   }
 
-  .workflow-inspector-facts code,
-  .workflow-inspector-sql code {
+  .workflow-inspector-facts code {
     @apply font-mono text-[10px] text-ink;
   }
 
-  .workflow-inspector-relations,
   .workflow-inspector-fields {
     @apply flex flex-wrap gap-x-2 gap-y-1;
-  }
-
-  .workflow-inspector-relations code {
-    @apply block w-full;
-  }
-
-  .workflow-inspector-sql {
-    @apply border-t border-line px-4 py-3;
-  }
-
-  .workflow-inspector-sql pre {
-    @apply overflow-auto rounded bg-sunken px-2.5 py-2 text-[10px] leading-4;
-    white-space: pre-wrap;
   }
 
   .workflow-inspector-boundary {
@@ -1759,11 +1705,6 @@
 
   .workflow-inspector-help code {
     @apply font-mono text-ink-soft;
-  }
-
-  .workflow-inspector-unavailable {
-    color: var(--tone-caution);
-    background: var(--tone-caution-soft);
   }
 
   .workflow-panel-empty {
@@ -2153,10 +2094,6 @@
 
   .workflow-result-body {
     @apply flex min-h-0 flex-1 flex-col overflow-hidden;
-  }
-
-  .workflow-results-column-preview {
-    @apply grid min-h-8 shrink-0 grid-cols-[minmax(7rem,1.6fr)_minmax(6rem,1fr)_minmax(5rem,0.8fr)_minmax(4rem,0.6fr)] items-center border-b border-line bg-sunken px-3 text-[10px] text-ink-faint;
   }
 
   .workflow-results > .workflow-panel-empty,
@@ -2572,44 +2509,6 @@
   overflow-wrap: anywhere;
 }
 
-/*
-  Unlayered, because it argues with `.ui-action`, which is unlayered too.
-
-  An episode is two lines: what it is and how long it ran, then how it was
-  captured and how much of it there is. The shared action is `inline-flex` with
-  `align-items: center`, so wrapping the row in it laid those two lines side by
-  side instead of stacking them — and the second line, asking for 164px in the
-  85px that were left, rendered "Teleoperation — leader → follower" as "T…".
-  Fifty-two rows of a single letter and an ellipsis.
-*/
-.data-episode-select {
-  flex-direction: column;
-  align-items: stretch;
-  justify-content: center;
-  gap: 0;
-  white-space: normal;
-}
-
-/* The row is the target, so the row is what responds. */
-.data-episode-row:hover {
-  background-color: var(--tone-hover);
-}
-
-li:has(.data-episode-select[aria-pressed="true"]) .data-episode-row {
-  background-color: var(--tone-selected);
-}
-
-.data-episode-actions {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 0.125rem;
-}
-
-.data-delete-confirmation {
-  padding-inline: 0.25rem;
-}
-
 .query-table {
   width: max-content;
   min-width: 100%;
@@ -2681,10 +2580,6 @@ li:has(.data-episode-select[aria-pressed="true"]) .data-episode-row {
   overflow: auto;
 }
 
-.query-table .query-media-heading {
-  min-width: 8.5rem;
-}
-
 .query-table .query-media-cell {
   width: 8.5rem;
   max-width: 8.5rem;
@@ -2695,7 +2590,6 @@ li:has(.data-episode-select[aria-pressed="true"]) .data-episode-row {
 }
 
 .query-image-preview,
-.query-video-preview,
 .query-image-unavailable {
   display: block;
   width: 8rem;
@@ -2726,11 +2620,6 @@ li:has(.data-episode-select[aria-pressed="true"]) .data-episode-row {
 
 .query-value-boolean {
   color: var(--tone-ink-soft);
-}
-
-.query-media-unavailable {
-  color: var(--tone-ink-faint);
-  font-family: var(--font-sans);
 }
 
 .settings-field-row {
@@ -2827,7 +2716,7 @@ li:has(.data-episode-select[aria-pressed="true"]) .data-episode-row {
 }
 
 .connection-test-ok { color: var(--tone-good); }
-.connection-test-pending { color: var(--tone-caution); background: var(--tone-caution-soft); }
+
 .connection-test-failed { color: var(--tone-danger); background: var(--tone-danger-soft); }
 
 .settings-save-error {
