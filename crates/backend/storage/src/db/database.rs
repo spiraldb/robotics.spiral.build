@@ -109,19 +109,39 @@ pub trait DatabaseTransaction: DatabaseSession {
     fn rollback(self: Box<Self>) -> DatabaseFuture<'static, ()>;
 }
 
-/// Owned SQL text passed through the async database boundary.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SqlStatement(String);
+/// Owned SQL and optional single-row Arrow parameters passed through the database boundary.
+#[derive(Clone, Debug)]
+pub struct SqlStatement {
+    text: String,
+    parameters: Option<RecordBatch>,
+}
 
 impl<T: Into<String>> From<T> for SqlStatement {
     fn from(sql: T) -> Self {
-        Self(sql.into())
+        Self {
+            text: sql.into(),
+            parameters: None,
+        }
     }
 }
 
 impl SqlStatement {
     pub fn as_str(&self) -> &str {
-        &self.0
+        &self.text
+    }
+
+    pub fn with_parameters(mut self, parameters: RecordBatch) -> DatabaseResult<Self> {
+        if parameters.num_rows() != 1 {
+            return Err(DatabaseError::invalid_input(
+                "SQL parameters require exactly one row",
+            ));
+        }
+        self.parameters = Some(parameters);
+        Ok(self)
+    }
+
+    pub(crate) fn parameters(&self) -> Option<&RecordBatch> {
+        self.parameters.as_ref()
     }
 }
 

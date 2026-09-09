@@ -6,7 +6,9 @@ use super::{
 use crate::components::interaction::{Action, ActionPurpose, ActionVariant};
 use crate::shell::project::ProjectSessionSignals;
 use dioxus::prelude::*;
-use spiral_robotics_common::native_datasets::{NativeDatasetInspection, NativeDatasetSelection};
+use spiral_robotics_common::native_datasets::{
+    NativeDatasetInspection, NativeDatasetSelection, NativeEpisodeTopicRequest,
+};
 
 #[component]
 pub(crate) fn NativeDatasetInspector(
@@ -51,6 +53,7 @@ struct DatasetNavigation {
     episodes: super::native_episodes::EpisodeNavigation,
     topic: Signal<Option<String>>,
     message: Signal<usize>,
+    episode_scope: Signal<Option<(usize, String)>>,
 }
 impl DatasetNavigation {
     fn new(topic: Option<String>) -> Self {
@@ -63,12 +66,16 @@ impl DatasetNavigation {
             episodes: super::native_episodes::EpisodeNavigation::new(),
             topic: Signal::new(topic),
             message: Signal::new(0),
+            episode_scope: Signal::new(None),
         }
     }
 }
 
 #[component]
-fn DatasetContents(inspection: NativeDatasetInspection, navigation: DatasetNavigation) -> Element {
+fn DatasetContents(
+    inspection: NativeDatasetInspection,
+    mut navigation: DatasetNavigation,
+) -> Element {
     let mut section = navigation.section;
     let selection = inspection.dataset().selection();
     rsx! {
@@ -81,13 +88,13 @@ fn DatasetContents(inspection: NativeDatasetInspection, navigation: DatasetNavig
         }
         nav { class: "data-section-switcher", "aria-label": "Dataset contents",
             button { "aria-pressed": section() == DatasetSection::Episodes, onclick: move |_| section.set(DatasetSection::Episodes), "Episodes" }
-            button { "aria-pressed": section() == DatasetSection::Topics, onclick: move |_| section.set(DatasetSection::Topics), "Topics" }
+            button { "aria-pressed": section() == DatasetSection::Topics, onclick: move |_| { navigation.episode_scope.set(None); navigation.message.set(0); section.set(DatasetSection::Topics); }, "Topics" }
         }
         if !selection.can_preview() {
             p { class: "data-empty-copy", "Preview is unavailable for this dataset name." }
         } else if section() == DatasetSection::Episodes {
             if inspection.members().is_some() {
-                super::native_episodes::NativeEpisodeBrowser { inspection: inspection.clone(), navigation: navigation.episodes, on_topics: move |_| section.set(DatasetSection::Topics) }
+                super::native_episodes::NativeEpisodeBrowser { inspection: inspection.clone(), navigation: navigation.episodes, on_topics: move |episode| { navigation.episode_scope.set(Some(episode)); navigation.topic.set(None); navigation.message.set(0); section.set(DatasetSection::Topics); } }
             } else {
                 p { class: "data-empty-copy", "This dataset has no episode list. Open Topics to explore its contents." }
             }
@@ -103,20 +110,32 @@ fn DatasetTopics(
     mut navigation: DatasetNavigation,
 ) -> Element {
     let mut selected = navigation.topic;
+    let episode = (navigation.episode_scope)();
     rsx! {
+        if let Some((ordinal, _)) = &episode {
+            header { class: "data-content-toolbar",
+                button { class: "data-text-action", onclick: move |_| navigation.section.set(DatasetSection::Episodes), "Back to episode" }
+                span { class: "text-xs font-medium", "Episode {ordinal}" }
+                button { class: "data-text-action", onclick: move |_| { navigation.episode_scope.set(None); navigation.message.set(0); }, "Show all episodes" }
+            }
+        }
         if let Some(topic) = selected() {
             TopicMessages {
-                key: "{topic}",
+                key: "{topic}-{episode:?}",
                 dataset: inspection.dataset().selection().clone(),
                 topic,
+                episode: episode.clone(),
                 navigation,
             }
         } else {
-            p { class: "px-5 py-4 text-xs text-ink-soft", "Choose a topic to preview messages across this dataset." }
+            p { class: "px-5 py-4 text-xs text-ink-soft",
+                if episode.is_some() { "Choose a dataset topic to preview messages from this episode." }
+                else { "Choose a topic to preview messages across this dataset." }
+            }
             div { class: "min-h-0 flex-1 overflow-auto",
                 if inspection.topics().is_empty() { p { class: "data-empty-copy", "No topics in this dataset." } }
                 table { class: "data-ledger", "aria-label": "Dataset topics",
-                    thead { tr { th { "Topic / schema" } th { class: "text-right", "Episodes" } th { class: "text-right", "Messages" } } }
+                    thead { tr { th { "Topic / schema" } if episode.is_none() { th { class: "text-right", "Episodes" } th { class: "text-right", "Messages" } } } }
                     tbody {
                         for topic in inspection.topics() {
                             {
@@ -127,8 +146,10 @@ fn DatasetTopics(
                                             span { class: "block break-all font-medium text-accent", "{topic.name()}" }
                                             span { class: "mt-1 block break-all text-[11px] text-ink-soft", {topic.schemas().join(", ")} }
                                         } }
-                                        td { class: "text-right tabular-nums", "{topic.members()}" }
-                                        td { class: "text-right tabular-nums", {topic.samples().map(|count| count.to_string()).unwrap_or_else(|| "—".into())} }
+                                        if episode.is_none() {
+                                            td { class: "text-right tabular-nums", "{topic.members()}" }
+                                            td { class: "text-right tabular-nums", {topic.samples().map(|count| count.to_string()).unwrap_or_else(|| "—".into())} }
+                                        }
                                     }
                                 }
                             }
@@ -144,17 +165,29 @@ fn DatasetTopics(
 fn TopicMessages(
     dataset: NativeDatasetSelection,
     topic: String,
+    episode: Option<(usize, String)>,
     mut navigation: DatasetNavigation,
 ) -> Element {
     let selected_message = navigation.message;
     let mut preview = use_resource(use_reactive(
-        (&dataset, &topic),
-        move |(dataset, topic)| async move {
-            let sql = dataset.topic_sql(&topic);
-            let state = match DatasetClient::current()
-                .run_spiral_query(sql.clone(), 100)
-                .await
-            {
+        (&dataset, &topic, &episode),
+        move |(dataset, topic, episode)| async move {
+            let (sql, response) = if let Some((_, id)) = episode {
+                let request = NativeEpisodeTopicRequest::new(dataset, topic, id);
+                (
+                    request.sql(),
+                    DatasetClient::current()
+                        .preview_episode_topic(request)
+                        .await,
+                )
+            } else {
+                let sql = dataset.topic_sql(&topic);
+                let response = DatasetClient::current()
+                    .run_spiral_query(sql.clone(), 100)
+                    .await;
+                (sql, response)
+            };
+            let state = match response {
                 Ok(result) => QueryState::Ready(result),
                 Err(error) => QueryState::Failed(error.to_string()),
             };
@@ -170,7 +203,15 @@ fn TopicMessages(
         }
         div { class: "px-5 pb-4",
             h3 { class: "break-all text-sm font-medium", "{topic}" }
-            p { class: "mt-1 text-xs text-ink-soft", "Message preview · up to 100 rows across all episodes" }
+            p { class: "mt-1 text-xs text-ink-soft",
+                if let Some((ordinal, _)) = &episode { "Message preview · up to 100 rows from Episode {ordinal}" }
+                else { "Message preview · up to 100 rows across all episodes" }
+            }
+            details { class: "mt-2 text-xs text-ink-soft",
+                summary { class: "cursor-pointer", "Preview query" }
+                if let Some((_, id)) = &episode { p { class: "mt-2 break-all font-mono", "$1 · UUID · {id}" } }
+                if let Some(model) = &*response { pre { class: "mt-2 whitespace-pre-wrap break-all", "{model.sql()}" } }
+            }
         }
         div { class: "flex min-h-0 flex-1 flex-col overflow-hidden",
             if pending { p { class: "data-empty-copy", role: "status", "Loading messages…" } }

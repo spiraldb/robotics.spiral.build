@@ -19,6 +19,10 @@ impl DatasetQueryEndpoints {
         routes.get("/native-datasets", Self::native_datasets);
         routes.get("/data-catalog", Self::project_resources);
         routes.post("/native-datasets/inspect", Self::inspect_native_dataset);
+        routes.post(
+            "/native-datasets/episode-topic",
+            Self::preview_episode_topic,
+        );
         routes.get("/relations", Self::relation_catalog);
         routes.post("/queries", Self::run_spiral_query);
         routes.post(
@@ -45,6 +49,14 @@ impl DatasetQueryEndpoints {
         ApiJson(selection): ApiJson<NativeDatasetSelection>,
     ) -> Result<Json<NativeDatasetInspection>, HttpFailure> {
         Ok(Json(commands.inspect_native_dataset(selection).await?))
+    }
+    async fn preview_episode_topic(
+        ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,
+        ApiJson(request): ApiJson<
+            spiral_robotics_common::native_datasets::NativeEpisodeTopicRequest,
+        >,
+    ) -> Result<Json<SpiralQuerySnapshot>, HttpFailure> {
+        Ok(Json(commands.preview_episode_topic(request).await?))
     }
     async fn relation_catalog(
         ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,

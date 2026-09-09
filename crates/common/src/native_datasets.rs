@@ -45,6 +45,38 @@ impl NativeDatasetSelection {
     }
 }
 
+/// A bounded topic preview scoped to one native recording ID.
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeEpisodeTopicRequest {
+    dataset: NativeDatasetSelection,
+    topic: String,
+    episode_id: String,
+}
+impl NativeEpisodeTopicRequest {
+    pub fn new(dataset: NativeDatasetSelection, topic: String, episode_id: String) -> Self {
+        Self {
+            dataset,
+            topic,
+            episode_id,
+        }
+    }
+    pub fn dataset(&self) -> &NativeDatasetSelection {
+        &self.dataset
+    }
+    pub fn episode_id(&self) -> &str {
+        &self.episode_id
+    }
+    pub fn sql(&self) -> String {
+        format!(
+            "SELECT * FROM spql.mcap.read_topic('{}', '{}') WHERE id = $1 ORDER BY log_time, sequence LIMIT 101",
+            self.dataset.sql_name().replace('\'', "''"),
+            self.topic.replace('\'', "''")
+        )
+    }
+}
+
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct NativeDatasetSummary {

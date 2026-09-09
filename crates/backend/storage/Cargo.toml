@@ -19,7 +19,7 @@ arrow-data = "58.4.0"
 spiral-robotics-common.workspace = true
 spiral-robotics-hardware.workspace = true
 arrow-array = "58.4.0"
-arrow-schema = "58.4.0"
+arrow-schema = { version = "58.4.0", features = ["canonical_extension_types"] }
 arrow-ipc = { version = "58.4.0", features = ["zstd"] }
 arrow-json = "58.4.0"
 base64.workspace = true

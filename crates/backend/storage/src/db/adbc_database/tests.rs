@@ -15,6 +15,53 @@ impl AdbcDatabase {
 }
 
 #[tokio::test]
+async fn bound_parameters_preserve_arrow_types_and_connection_reuse() {
+    let database = AdbcDatabase::memory();
+    let mut connection = database.connect().await.unwrap();
+    let schema = Arc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+        "id",
+        arrow_schema::DataType::Int64,
+        true,
+    )]));
+    for expected in [Some(42), Some(73), None] {
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int64Array::from(vec![expected]))],
+        )
+        .unwrap();
+        let statement = SqlStatement::from("SELECT $1 AS id")
+            .with_parameters(batch)
+            .unwrap();
+        let records = connection
+            .query(statement)
+            .await
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        let values = records[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(values.iter().collect::<Vec<_>>(), vec![expected]);
+    }
+    for rows in [0, 2] {
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int64Array::from(vec![Some(1); rows]))],
+        )
+        .unwrap();
+        assert!(
+            SqlStatement::from("SELECT $1")
+                .with_parameters(batch)
+                .is_err()
+        );
+    }
+}
+
+#[tokio::test]
 async fn adbc_query_stream_contract() {
     DatabaseContract::new(Arc::new(AdbcDatabase::memory()))
         .query_streams()

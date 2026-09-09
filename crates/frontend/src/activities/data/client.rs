@@ -80,6 +80,14 @@ impl DatasetClient {
             .request(HttpRequest::new("GET", "/api/relations"))
     }
 
+    pub(crate) fn preview_episode_topic(
+        &self,
+        request: spiral_robotics_common::native_datasets::NativeEpisodeTopicRequest,
+    ) -> impl Future<Output = Result<SpiralQuerySnapshot, CommandError>> + use<> {
+        self.project
+            .request(HttpRequest::new("POST", "/api/native-datasets/episode-topic").json(&request))
+    }
+
     pub(crate) fn run_spiral_query(
         &self,
         statement: String,

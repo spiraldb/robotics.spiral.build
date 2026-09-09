@@ -89,6 +89,10 @@ impl ConnectionWorker {
             let state = state.as_mut().expect("live connection");
             let mut statement = state.connection.new_statement()?;
             statement.set_sql_query(sql.as_str())?;
+            if let Some(parameters) = sql.parameters() {
+                statement.prepare()?;
+                statement.bind(parameters.clone())?;
+            }
             let mut reader = statement.execute()?;
             if schema_sender.send(reader.schema()).is_err() {
                 return Ok(());

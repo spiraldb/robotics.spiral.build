@@ -272,6 +272,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "21ca356ad6425cecb6eb7b28e4f659f1ee7880fbb1a16127de7dd62901efee9e"
 dependencies = [
  "bitflags 2.13.1",
+ "serde_core",
+ "serde_json",
 ]
 
 [[package]]

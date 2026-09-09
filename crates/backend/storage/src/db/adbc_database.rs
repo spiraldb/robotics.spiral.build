@@ -100,6 +100,10 @@ impl DatabaseSession for AdbcConnection {
                     let _permit = permit;
                     let mut statement = state.connection().new_statement()?;
                     statement.set_sql_query(sql.as_str())?;
+                    if let Some(parameters) = sql.parameters() {
+                        statement.prepare()?;
+                        statement.bind(parameters.clone())?;
+                    }
                     statement.execute_update()?;
                     Ok(ExecutionSummary)
                 })

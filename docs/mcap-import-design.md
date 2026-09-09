@@ -73,7 +73,7 @@ The HTTP-based implementation described below has not yet been replaced.
 
 The Data workbench starts with a list of actual Spiral Dataset resources.
 Selecting a dataset shows its episode population and available native topics.
-Episode filtering is a next inspector step, using Spiral member ID; original Studio IDs
+Episode-scoped topic previews filter by the exact Spiral member ID; original Studio IDs
 remain in the `/studio/episode` and joint message payloads. Dataset-native UUIDs
 and the original `episode_000001` identifiers are distinct identities.
 

@@ -92,7 +92,7 @@ async fn every_documented_scoped_endpoint_is_registered_and_rejects_missing_or_s
             }
         }
     }
-    assert_eq!(count, 55);
+    assert_eq!(count, 56);
     fixture.shutdown().await;
 }
 

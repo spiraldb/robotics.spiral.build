@@ -210,6 +210,7 @@ schemas served by `/api/openapi.json`. `—` means no request body.
 | GET | `/data-catalog` | — | ProjectResource[] (actual namespace paths and resource kinds) |
 | GET | `/native-datasets` | — | NativeDatasetSummary[] |
 | POST | `/native-datasets/inspect` | NativeDatasetSelection | NativeDatasetInspection |
+| POST | `/native-datasets/episode-topic` | NativeEpisodeTopicRequest (dataset, topic, episode_id) | SpiralQuerySnapshot (up to 100 messages from the exact recording ID) |
 | GET | `/relations` | — | RelationCatalog |
 | POST | `/queries` | QueryRequest | SpiralQuerySnapshot |
 | POST | `/datasets/hugging-face/inspect` | HuggingFaceDatasetSource | HuggingFaceDatasetInspection |

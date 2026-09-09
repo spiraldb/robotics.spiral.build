@@ -53,7 +53,7 @@ impl EpisodePage {
     }
     fn sql(dataset: &NativeDatasetSelection, offset: usize) -> String {
         format!(
-            "SELECT id, source.uri AS source_uri, message_count, message_start_time, message_end_time, duration_ns FROM spql.mcap.episodes('{}') ORDER BY message_start_time, source.uri LIMIT 51 OFFSET {offset}",
+            "SELECT id, source.uri AS source_uri, message_count, message_start_time, message_end_time, duration_ns FROM spql.mcap.episodes('{}') ORDER BY message_start_time, source_uri LIMIT 51 OFFSET {offset}",
             dataset.sql_name().replace('\'', "''")
         )
     }
@@ -77,7 +77,7 @@ impl EpisodeNavigation {
 pub(super) fn NativeEpisodeBrowser(
     inspection: NativeDatasetInspection,
     navigation: EpisodeNavigation,
-    on_topics: EventHandler,
+    on_topics: EventHandler<(usize, String)>,
 ) -> Element {
     let mut offset = navigation.offset;
     let mut selected = navigation.selected;
@@ -109,9 +109,8 @@ pub(super) fn NativeEpisodeBrowser(
                     dt { "End (UTC)" } dd { "{NativeEpisode::time(episode.message_end_time)}" }
                 }
                 div { class: "my-6 border-y border-line py-4 text-xs",
-                    p { class: "font-medium", "Message previews for individual episodes are unavailable." }
-                    button { class: "data-text-action mt-2", onclick: move |_| on_topics.call(()), "Browse dataset topics" }
-                    p { class: "mt-1 text-ink-soft", "Topic previews include messages from all episodes." }
+                    button { class: "data-text-action", onclick: { let id = episode.id.clone(); move |_| on_topics.call((ordinal, id.clone())) }, "Browse episode topics" }
+                    p { class: "mt-1 text-ink-soft", "Preview messages from this recording." }
                 }
                 details { class: "text-xs",
                     summary { class: "cursor-pointer text-ink-soft", "Recording source" }

@@ -5,7 +5,7 @@ use serde::Deserialize;
 use serde_json::json;
 use spiral_robotics_common::native_datasets::{
     NativeDatasetInspection, NativeDatasetSelection, NativeDatasetSummary, NativeDatasetTopic,
-    ProjectResource,
+    NativeEpisodeTopicRequest, ProjectResource,
 };
 use std::collections::{BTreeSet, VecDeque};
 use std::time::Duration;
@@ -318,7 +318,47 @@ struct McapTopicLocator {
     topic: String,
 }
 
+struct EpisodeTopicQuery {
+    statement: crate::db::SqlStatement,
+}
+
+impl TryFrom<NativeEpisodeTopicRequest> for EpisodeTopicQuery {
+    type Error = String;
+
+    fn try_from(request: NativeEpisodeTopicRequest) -> Result<Self, Self::Error> {
+        let selection = NativeDatasetSelection::new(request.dataset().path().to_vec())?;
+        if !selection.can_preview() {
+            return Err("Preview is unavailable for this dataset name".to_owned());
+        }
+        let id = uuid::Uuid::parse_str(request.episode_id())
+            .map_err(|_| "Invalid recording UUID".to_owned())?;
+        let values = arrow_array::FixedSizeBinaryArray::try_from_iter([id.as_bytes()].into_iter())
+            .map_err(|error| error.to_string())?;
+        let field =
+            arrow_schema::Field::new("id", arrow_schema::DataType::FixedSizeBinary(16), false)
+                .with_extension_type(arrow_schema::extension::Uuid);
+        let parameters = arrow_array::RecordBatch::try_new(
+            std::sync::Arc::new(arrow_schema::Schema::new(vec![field])),
+            vec![std::sync::Arc::new(values)],
+        )
+        .map_err(|error| error.to_string())?;
+        crate::db::SqlStatement::from(request.sql())
+            .with_parameters(parameters)
+            .map(|statement| Self { statement })
+            .map_err(|error| error.to_string())
+    }
+}
+
 impl StorageManager {
+    pub async fn preview_episode_topic(
+        &self,
+        request: NativeEpisodeTopicRequest,
+    ) -> Result<spiral_robotics_common::relations::SpiralQuerySnapshot, String> {
+        crate::db::ProjectQueries::new(self.project_store())
+            .query_with_parameters(EpisodeTopicQuery::try_from(request)?.statement, 100)
+            .await
+    }
+
     pub async fn project_resources(&self) -> Result<Vec<ProjectResource>, String> {
         DatasetCatalogClient::connect(self.connection_settings())
             .await?
@@ -346,6 +386,37 @@ impl StorageManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn episode_preview_binds_uuid_bytes_and_rejects_invalid_ids() {
+        let dataset = NativeDatasetSelection::new(vec!["dataset_default".into()]).unwrap();
+        let id = uuid::Uuid::parse_str("01900000-0000-7000-8000-000000000001").unwrap();
+        let request =
+            NativeEpisodeTopicRequest::new(dataset.clone(), "/camera' --".into(), id.to_string());
+        let statement = EpisodeTopicQuery::try_from(request).unwrap().statement;
+        assert!(statement.as_str().contains("'/camera'' --'"));
+        assert!(statement.as_str().contains("WHERE id = $1"));
+        assert!(!statement.as_str().contains(&id.to_string()));
+        let parameters = statement.parameters().unwrap();
+        assert_eq!(
+            parameters
+                .schema()
+                .field(0)
+                .metadata()
+                .get("ARROW:extension:name")
+                .unwrap(),
+            "arrow.uuid"
+        );
+        let values = parameters
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow_array::FixedSizeBinaryArray>()
+            .unwrap();
+        assert_eq!(values.value(0), id.as_bytes());
+        let invalid =
+            NativeEpisodeTopicRequest::new(dataset, "/topic".into(), "' OR true --".into());
+        assert!(EpisodeTopicQuery::try_from(invalid).is_err());
+    }
+
     #[test]
     fn discovery_uses_typed_resources_and_namespace_ownership() {
         let entries: Vec<NamespaceEntry> = serde_json::from_value(json!([
