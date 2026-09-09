@@ -59,28 +59,16 @@ impl EpisodePage {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
-pub(super) struct EpisodeNavigation {
-    offset: Signal<usize>,
-    selected: Signal<Option<(usize, DatasetEpisode)>>,
-}
-impl EpisodeNavigation {
-    pub(super) fn new() -> Self {
-        Self {
-            offset: Signal::new(0),
-            selected: Signal::new(None),
-        }
-    }
-}
-
 #[component]
-pub(super) fn EpisodeBrowser(
-    inspection: DatasetInspection,
-    navigation: EpisodeNavigation,
-    on_topics: EventHandler<(usize, String)>,
-) -> Element {
-    let mut offset = navigation.offset;
-    let mut selected = navigation.selected;
+pub(super) fn EpisodeBrowser(inspection: DatasetInspection) -> Element {
+    let mut offset = use_signal(|| 0_usize);
+    let mut selected = use_signal(|| None::<(usize, DatasetEpisode)>);
+    let heading_id = use_hook(|| {
+        format!(
+            "dataset-heading-{}",
+            dioxus::dioxus_core::current_scope_id().0
+        )
+    });
     let dataset = inspection.dataset().selection().clone();
     let mut page = use_resource(use_reactive((&dataset,), move |(dataset,)| {
         let offset = offset();
@@ -97,41 +85,19 @@ pub(super) fn EpisodeBrowser(
     let selection = selected.read().clone();
     rsx! {
         if let Some((ordinal, episode)) = selection {
-            header { class: "data-content-toolbar",
-                button { class: "data-text-action", onclick: move |_| selected.set(None), "Back to episodes" }
-            }
-            div { class: "min-h-0 flex-1 overflow-auto px-5 pb-5",
-                h3 { class: "mb-5 text-base font-medium", "Episode {ordinal}" }
-                if let (Some(start), Some(end), Some(camera)) = (episode.message_start_time, episode.message_end_time, inspection.topics().iter().find(|topic| topic.schemas().iter().any(|schema| schema == "foxglove.CompressedVideo"))) {
-                    super::episode_playback::EpisodePlayback {
-                        key: "{episode.id}",
-                        request: spiral_robotics_common::datasets::EpisodeTopicRequest::new(dataset.clone(), camera.name().to_owned(), episode.id.clone()),
-                        timeline: super::episode_playback::EpisodeTimeRange::new(start, end),
-                    }
-                } else {
-                    p { class: "mb-5 text-xs text-ink-soft", "No camera video with episode timing is available." }
-                }
-                dl { class: "data-recording-facts",
-                    dt { "Duration" } dd { "{episode.duration()}" }
-                    dt { "Messages" } dd { {episode.message_count.map(|count| count.to_string()).unwrap_or_else(|| "Unavailable".into())} }
-                    dt { "Start (UTC)" } dd { "{DatasetEpisode::time(episode.message_start_time)}" }
-                    dt { "End (UTC)" } dd { "{DatasetEpisode::time(episode.message_end_time)}" }
-                }
-                div { class: "my-6 border-y border-line py-4 text-xs",
-                    button { class: "data-text-action", onclick: { let id = episode.id.clone(); move |_| on_topics.call((ordinal, id.clone())) }, "Browse episode topics" }
-                    p { class: "mt-1 text-ink-soft", "Preview messages from this recording." }
-                }
-                details { class: "text-xs",
-                    summary { class: "cursor-pointer text-ink-soft", "Recording source" }
-                    dl { class: "data-recording-facts mt-4",
-                        dt { "Recording ID" } dd { class: "break-all font-mono select-text", "{episode.id}" }
-                        dt { "Source" } dd { class: "break-all select-text", "{episode.source_uri.as_deref().unwrap_or(\"Source unavailable\")}" }
-                    }
-                }
+            super::episode_topics::EpisodeInspector {
+                key: "{episode.id}",
+                episode: EpisodeContext::new(dataset.clone(), (ordinal, episode)),
+                on_back: { let heading_id = heading_id.clone(); move |_| { selected.set(None); crate::components::interaction::BrowserFocus::after_render(heading_id.clone()); } },
             }
         } else {
+            header { class: "data-inspector-heading",
+                h2 { id: "{heading_id}", tabindex: "-1", "{dataset.label()}" }
+                p { "{inspection.members().unwrap_or_default()} episodes" }
+            }
             header { class: "data-content-toolbar",
-                p { class: "text-xs text-ink-soft", "Recordings in chronological order · UTC" }
+
+                p { class: "text-xs text-ink-soft", "Episodes · chronological order · UTC" }
                 button { class: "data-text-action", disabled: pending, onclick: move |_| page.restart(), "Refresh" }
             }
             if pending {
@@ -175,6 +141,57 @@ pub(super) fn EpisodeBrowser(
                 }
             }
         }
+    }
+}
+
+#[derive(Clone, PartialEq)]
+pub(super) struct EpisodeContext {
+    dataset: DatasetSelection,
+    ordinal: usize,
+    recording: DatasetEpisode,
+}
+impl EpisodeContext {
+    fn new(dataset: DatasetSelection, selected: (usize, DatasetEpisode)) -> Self {
+        Self {
+            dataset,
+            ordinal: selected.0,
+            recording: selected.1,
+        }
+    }
+    pub(super) fn dataset(&self) -> &DatasetSelection {
+        &self.dataset
+    }
+    pub(super) fn title(&self) -> String {
+        format!("Episode {}", self.ordinal)
+    }
+    pub(super) fn selection(&self) -> spiral_robotics_common::datasets::EpisodeSelection {
+        spiral_robotics_common::datasets::EpisodeSelection::new(
+            self.dataset.clone(),
+            self.recording.id.clone(),
+        )
+    }
+    pub(super) fn timeline(&self) -> Option<super::episode_playback::EpisodeTimeRange> {
+        Some(super::episode_playback::EpisodeTimeRange::new(
+            self.recording.message_start_time?,
+            self.recording.message_end_time?,
+        ))
+    }
+    pub(super) fn render_summary(&self) -> Element {
+        rsx! { dl { class: "data-episode-summary",
+            div { dt { "Duration" } dd { "{self.recording.duration()}" } }
+            div { dt { "Messages" } dd { {self.recording.message_count.map(|count| count.to_string()).unwrap_or_else(|| "Unavailable".into())} } }
+            div { dt { "Recorded (UTC)" } dd { "{DatasetEpisode::time(self.recording.message_start_time)}" } }
+        } }
+    }
+    pub(super) fn render_details(&self) -> Element {
+        rsx! { details { class: "data-episode-details",
+            summary { "Recording details" }
+            dl { class: "data-recording-facts",
+                dt { "Recording ID" } dd { "{self.recording.id}" }
+                dt { "Source" } dd { {self.recording.source_uri.as_deref().unwrap_or("Source unavailable")} }
+                dt { "End (UTC)" } dd { "{DatasetEpisode::time(self.recording.message_end_time)}" }
+            }
+        } }
     }
 }
 

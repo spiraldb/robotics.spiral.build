@@ -2,8 +2,8 @@
 
 mod catalog;
 pub use catalog::{
-    DatasetInspection, DatasetSelection, DatasetSummary, DatasetTopic, EpisodeTopicRequest,
-    EpisodeVideo, ProjectResource, RecordedCameraRequest, VideoPacket,
+    DatasetInspection, DatasetSelection, DatasetSummary, DatasetTopic, EpisodeSelection,
+    EpisodeTopicRequest, EpisodeVideo, ProjectResource, RecordedCameraRequest, VideoPacket,
 };
 
 use serde::{Deserialize, Serialize};

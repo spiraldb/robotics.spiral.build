@@ -13,7 +13,6 @@ use spiral_robotics_common::datasets::ProjectResource;
 #[derive(Clone, PartialEq)]
 pub(super) struct OpenResource {
     resource: ProjectResource,
-    topic: Option<String>,
     revision: u64,
 }
 #[derive(Clone, Copy, PartialEq)]
@@ -33,7 +32,7 @@ impl ResourceTabs {
             importing,
         }
     }
-    pub(super) fn open(mut self, resource: ProjectResource, topic: Option<String>) {
+    pub(super) fn open(mut self, resource: ProjectResource) {
         let id = resource.resource_id().to_owned();
         let mut opened = self.opened.write();
         if let Some(tab) = opened
@@ -41,12 +40,10 @@ impl ResourceTabs {
             .find(|tab| tab.resource.resource_id() == id)
         {
             tab.resource = resource;
-            tab.topic = topic;
             tab.revision = tab.revision.wrapping_add(1);
         } else {
             opened.push(OpenResource {
                 resource,
-                topic,
                 revision: 0,
             });
         }
@@ -116,12 +113,12 @@ fn DataPanels() -> Element {
         if let Some(resource) = resource {
             imported_dataset.set(None);
             tabs.close("data-import");
-            tabs.open(resource, None);
+            tabs.open(resource);
         }
     });
     let mut panels = vec![Panel::new(
         "tables",
-        "Tables",
+        "Catalog",
         "tables",
         rsx! { super::resource_tree::ResourceTree { resources, tabs } },
     )];
@@ -191,7 +188,7 @@ fn ObjectActions(
     rsx! { div { class: "data-panel-actions", role: "group", "aria-label": "Load or import data",
             label { class: "data-load", span { "Load" }
                 select { "aria-label": "Load a table or dataset", value: active.clone().unwrap_or_default(), onchange: move |event| {
-                    if let Some(resource) = choices.iter().find(|resource| resource.resource_id() == event.value()) { tabs.open(resource.clone(), None); }
+                    if let Some(resource) = choices.iter().find(|resource| resource.resource_id() == event.value()) { tabs.open(resource.clone()); }
                 }, option { value: "", selected: active.is_none(), "Choose…" }
                     for resource in resources.read().as_ref().and_then(|result| result.as_ref().ok()).into_iter().flatten() {
                         if matches!(resource.kind(), "table" | "view" | "dataset") { option { value: resource.resource_id(), selected: active.as_deref() == Some(resource.resource_id()), "{resource.selection().label()}" } }
@@ -236,7 +233,7 @@ fn ObjectSession(tab: OpenResource) -> Element {
             span { title: tab.resource.selection().label(), "{tab.resource.selection().label()}" }
         }
         div { class: "data-session-content", hidden: section() != ObjectSection::Inspect,
-            if dataset { DatasetInspector { key: "{tab.revision}", selection: tab.resource.selection().clone(), topic: tab.topic } }
+            if dataset { DatasetInspector { key: "{tab.revision}", selection: tab.resource.selection().clone() } }
             else { TableInspector { resource: tab.resource.clone() } }
         }
         div { class: "data-session-content", hidden: section() != ObjectSection::Sql, QueryPanel { studio, controller } }
@@ -291,19 +288,19 @@ mod tests {
         }
     }
     #[test]
-    fn opening_outputs_reuses_dataset_tabs_without_sharing_sql_drafts() {
+    fn opening_datasets_reuses_tabs_without_sharing_sql_drafts() {
         let harness = SessionHarness(Rc::new(RefCell::new(None)));
         let mut dom = VirtualDom::new_with_props(SessionHarness::render, harness.clone());
         dom.rebuild_in_place();
         let (mut tabs, first, second) = harness.0.borrow().unwrap();
         dom.in_runtime(|| {
-            tabs.open(SessionHarness::resource("first"), None);
+            tabs.open(SessionHarness::resource("first"));
             first.set_sql("SELECT 7".into());
-            tabs.open(SessionHarness::resource("second"), None);
+            tabs.open(SessionHarness::resource("second"));
             second.set_max_rows(25);
-            tabs.open(SessionHarness::resource("first"), Some("/camera".into()));
+            tabs.open(SessionHarness::resource("first"));
             assert_eq!(tabs.opened.peek().len(), 2);
-            assert_eq!(tabs.opened.peek()[0].topic.as_deref(), Some("/camera"));
+            assert_eq!(tabs.opened.peek()[0].revision, 1);
             assert_eq!(first.sql(), "SELECT 7");
             assert_eq!(second.sql(), "SELECT 2");
             assert_eq!(first.max_rows(), 100);

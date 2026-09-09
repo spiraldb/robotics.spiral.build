@@ -1,5 +1,5 @@
-//! Expand the real Spiral namespace and dataset outputs.
-use super::{DatasetClient, screen::ResourceTabs};
+//! Project resources; dataset browsing begins with its episode population.
+use super::screen::ResourceTabs;
 use dioxus::prelude::*;
 use spiral_robotics_common::datasets::ProjectResource;
 
@@ -54,7 +54,7 @@ fn ResourceBranch(
         .cloned()
         .collect::<Vec<_>>();
     let dataset = resource.kind() == "dataset";
-    let expandable = dataset || !children.is_empty();
+    let expandable = !children.is_empty();
     let selectable = matches!(resource.kind(), "table" | "view" | "dataset");
     let selected = tabs.active_id().as_deref() == Some(resource.resource_id());
     let open = resource.clone();
@@ -63,7 +63,7 @@ fn ResourceBranch(
             if expandable { button { class: "data-tree-toggle", aria_expanded: expanded(), "aria-label": "Expand {resource.selection().label()}", onclick: move |_| expanded.toggle(),
                 svg { view_box: "0 0 16 16", "aria-hidden": "true", style: if expanded() { "transform: rotate(90deg)" } else { "" }, path { d: "m6 4 4 4-4 4" } }
             } } else { span { class: "data-tree-indent" } }
-            button { class: "data-tree-name", aria_pressed: selected, title: "{resource.selection().label()} · {resource.kind()}", onclick: move |_| { if selectable { tabs.open(open.clone(), None); } else { expanded.toggle(); } },
+            button { class: "data-tree-name", aria_pressed: selected, title: "{resource.selection().label()} · {resource.kind()}", onclick: move |_| { if selectable { tabs.open(open.clone()); } else { expanded.toggle(); } },
                 ResourceIcon { dataset }
                 span { "{path.last().unwrap()}" }
                 small { "{resource.kind()}" }
@@ -72,7 +72,6 @@ fn ResourceBranch(
         if expanded() {
             ul { class: "data-tree-list data-tree-children",
                 for child in children { ResourceBranch { key: "{child.resource_id()}", resource: child, resources, tabs } }
-                if dataset { DatasetOutputs { resource: resource.clone(), tabs } }
             }
         }
     } }
@@ -84,35 +83,4 @@ fn ResourceIcon(dataset: bool) -> Element {
         if dataset { ellipse { cx: "8", cy: "4", rx: "5", ry: "2" } path { d: "M3 4v8c0 2.7 10 2.7 10 0V4M3 8c0 2.7 10 2.7 10 0" } }
         else { rect { x: "2.5", y: "2.5", width: "11", height: "11", rx: "1" } path { d: "M2.5 6h11M6 6v7.5" } }
     } }
-}
-
-#[component]
-fn DatasetOutputs(resource: ProjectResource, tabs: ResourceTabs) -> Element {
-    let selection = resource.selection().clone();
-    let available = use_memo(move || {
-        crate::shell::project::ProjectSessionSignals::current().catalog_available()
-    });
-    let mut inspection = crate::client::queries::QueryPolicy::on_demand(
-        crate::client::queries::QueryDomain::Catalog,
-    )
-    .use_when(
-        move || *available.read(),
-        move || DatasetClient::current().inspect_dataset(selection.clone()),
-    );
-    let result = inspection.read();
-    rsx! {
-        match &*result {
-            None => rsx! { li { class: "data-tree-status", role: "status", "Loading outputs…" } },
-            Some(Err(error)) => rsx! { li { class: "data-tree-status", role: "alert", p { "{error}" } button { class: "data-text-action", onclick: move |_| inspection.restart(), "Retry outputs" } } },
-            Some(Ok(detail)) => rsx! {
-                if detail.members().is_some() { li { button { class: "data-output-row", onclick: { let resource = resource.clone(); move |_| tabs.open(resource.clone(), None) }, "Episodes", small { "output" } } } }
-                for topic in detail.topics() {
-                    { let name = topic.name().to_owned(); let resource = resource.clone(); rsx! {
-                        li { button { class: "data-output-row", title: "{name}", onclick: move |_| tabs.open(resource.clone(), Some(name.clone())), span { "{topic.name()}" } small { "topic" } } }
-                    } }
-                }
-                if detail.members().is_none() && detail.topics().is_empty() { li { class: "data-tree-status", "No episode or topic outputs." } }
-            },
-        }
-    }
 }

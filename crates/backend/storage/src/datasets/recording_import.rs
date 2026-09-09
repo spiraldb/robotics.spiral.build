@@ -473,16 +473,23 @@ mod tests {
         );
         let storage = StorageManager::new(store.clone());
         let name = format!("recording_probe_{}", uuid::Uuid::new_v4().simple());
-        let camera = CameraRecording::from_annex_b(
-            "wrist".into(),
-            (32, 32, 30),
-            (
-                include_bytes!("../../../../frontend/src/activities/data/fixtures/seek.h264")
-                    .to_vec(),
-                (0..8).map(|index| index * 33_333_333).collect(),
-            ),
-        )
-        .unwrap();
+        let cameras = ["wrist", "overhead"]
+            .into_iter()
+            .map(|stream| {
+                CameraRecording::from_annex_b(
+                    stream.into(),
+                    (32, 32, 30),
+                    (
+                        include_bytes!(
+                            "../../../../frontend/src/activities/data/fixtures/seek.h264"
+                        )
+                        .to_vec(),
+                        (0..8).map(|index| index * 33_333_333).collect(),
+                    ),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
         let source_existed = store
             .connect()
             .await
@@ -491,7 +498,7 @@ mod tests {
             .await
             .unwrap();
         let outcome: Result<(), String> = async {
-            for id in ["first", "second"] {
+            for (id, camera_count) in [("first", 2), ("second", 1), ("third", 0)] {
                 let id = format!("{name}_{id}");
                 let episode = EpisodeFixture::new(&id, &name)
                     .with_arms(vec![spiral_robotics_common::recording::EpisodeArm::new(
@@ -502,7 +509,7 @@ mod tests {
                     .with_timing(1_700_000_000_000, 30.0)
                     .with_duration_seconds(0.3)
                     .into_episode();
-                let bytes = McapRecording::encode(&episode, std::slice::from_ref(&camera))?;
+                let bytes = McapRecording::encode(&episode, &cameras[..camera_count])?;
                 let key = format!("{id}.mcap");
                 storage
                     .import_recording(RecordingImport::new(&name, &key, &bytes))
@@ -510,11 +517,42 @@ mod tests {
                 storage
                     .import_recording(RecordingImport::new(&name, &key, &bytes))
                     .await?;
+                if camera_count == 0 { continue; }
                 let video = storage.recorded_camera(&id, "wrist").await?;
                 assert_eq!(video.packets().len(), 8);
                 assert_eq!(video.packets()[0].timestamp_ns(), "0");
                 assert!(video.packets()[0].keyframe());
             }
+            // All topics exist in the dataset now; availability must still be exact per episode.
+            let dataset = spiral_robotics_common::datasets::DatasetSelection::new(vec![format!("dataset_{name}")])?;
+            let headers = store.connect().await?.query_rows(
+                &format!("SELECT id, value.episode_id AS recording FROM spql.mcap.read_topic('dataset_{name}', '/studio/episode')"), 10,
+            ).await?;
+            assert_eq!(headers.rows().len(), 3);
+            for row in headers.rows() {
+                let member = row["id"].as_str().unwrap().to_owned();
+                let recording = row["recording"].as_str().unwrap();
+                let available = storage.episode_topics(
+                    spiral_robotics_common::datasets::EpisodeSelection::new(dataset.clone(), member.clone())
+                ).await?;
+                let expected = if recording.ends_with("_first") {
+                    vec!["/camera/overhead/video", "/camera/wrist/video"]
+                } else if recording.ends_with("_second") {
+                    vec!["/camera/wrist/video"]
+                } else { vec![] };
+                assert_eq!(available.iter().filter(|topic| topic.schemas().iter().any(|schema| schema == "foxglove.CompressedVideo")).map(|topic| topic.name()).collect::<Vec<_>>(), expected, "{recording}");
+                assert!(available.iter().any(|topic| topic.name() == "/studio/episode"));
+                assert!(available.iter().all(|topic| topic.members() == 1));
+                for topic in available.into_iter().filter(|topic| topic.schemas().iter().any(|schema| schema == "foxglove.CompressedVideo")) {
+                    let video = storage.episode_video(spiral_robotics_common::datasets::EpisodeTopicRequest::new(
+                        dataset.clone(), topic.name().to_owned(), member.clone()
+                    )).await?;
+                    assert_eq!(video.packets().len(), 8);
+                }
+            }
+            assert!(storage.episode_topics(
+                spiral_robotics_common::datasets::EpisodeSelection::new(dataset, uuid::Uuid::new_v4().to_string())
+            ).await.unwrap_err().contains("no longer in the dataset"));
             storage.delete_recording(&format!("{name}_first")).await?;
             let mut connection = store.connect().await?;
             let rows = connection
@@ -523,7 +561,7 @@ mod tests {
                     10,
                 )
                 .await?;
-            assert_eq!(rows.rows().len(), 1);
+            assert_eq!(rows.rows().len(), 2);
             Ok(())
         }
         .await;

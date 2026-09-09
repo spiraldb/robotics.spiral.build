@@ -21,6 +21,7 @@ impl DatasetQueryEndpoints {
         routes.post("/datasets/inspect", Self::inspect_dataset);
         routes.post("/datasets/episode-topic", Self::preview_episode_topic);
         routes.post("/datasets/episode-video", Self::episode_video);
+        routes.post("/datasets/episode-topics", Self::episode_topics);
         routes.get("/relations", Self::relation_catalog);
         routes.post("/queries", Self::run_spiral_query);
         routes.post(
@@ -53,6 +54,12 @@ impl DatasetQueryEndpoints {
         ApiJson(request): ApiJson<spiral_robotics_common::datasets::EpisodeTopicRequest>,
     ) -> Result<Json<SpiralQuerySnapshot>, HttpFailure> {
         Ok(Json(commands.preview_episode_topic(request).await?))
+    }
+    async fn episode_topics(
+        ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,
+        ApiJson(request): ApiJson<spiral_robotics_common::datasets::EpisodeSelection>,
+    ) -> Result<Json<Vec<spiral_robotics_common::datasets::DatasetTopic>>, HttpFailure> {
+        Ok(Json(commands.episode_topics(request).await?))
     }
     async fn episode_video(
         ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,

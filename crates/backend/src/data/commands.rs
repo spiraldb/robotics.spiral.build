@@ -115,6 +115,26 @@ impl DataCommands {
             .await?
     }
 
+    pub(crate) async fn episode_topics(
+        &self,
+        request: spiral_robotics_common::datasets::EpisodeSelection,
+    ) -> Result<Vec<spiral_robotics_common::datasets::DatasetTopic>, BackendCommandError> {
+        let commands = self.clone();
+        self.state
+            .tasks()
+            .execute(async move {
+                let _activity = commands.state.admit()?;
+                commands.require_catalog_ready()?;
+                commands
+                    .state
+                    .storage()
+                    .episode_topics(request)
+                    .await
+                    .map_err(Into::into)
+            })
+            .await?
+    }
+
     pub(crate) async fn episode_video(
         &self,
         request: spiral_robotics_common::datasets::EpisodeTopicRequest,

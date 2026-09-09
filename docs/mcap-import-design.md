@@ -24,15 +24,17 @@ a parallel recording registry or infer ownership from dotted names.
 
 ## Inspection
 
-The Data resource tree selects a native Dataset, its episodes, and its topics.
+The Data catalog opens a native Dataset, then an episode, then one of that
+episode’s topics. Breadcrumbs preserve that hierarchy. Video topics open the
+player; other topics open a table.
 `spql.mcap.episodes('dataset_default')` reads the population;
 `spql.mcap.read_topic('dataset_default', '/studio/joints/leader')` reads a topic.
 Previews are bounded and derive their columns from the returned Arrow schema.
 
 Episode-scoped reads bind the exact native member UUID as an Arrow parameter.
 That identity differs from the original Studio episode ID in message payloads.
-Topic inspection exposes the SQL and bound recording ID; **Show all episodes**
-explicitly clears the scope. An absent topic returns an empty preview.
+Table inspection exposes the SQL and bound recording ID. Cross-episode reads
+remain available through SQL. An absent topic returns an empty preview.
 Camera decoding and playback follow [the playback contract](episode-playback.md).
 
 ## Driver requirement

@@ -34,7 +34,7 @@ pub(super) fn EpisodePlayback(request: EpisodeTopicRequest, timeline: EpisodeTim
     rsx! {
         section { class: "episode-playback", "aria-label": "Episode video playback",
             div { class: "episode-playback-heading",
-                span { class: "text-xs text-ink-soft break-all", "{request.topic()}" }
+                span { class: "text-xs text-ink-soft break-all", "H.264 video" }
                 button { class: "data-text-action", disabled: pending, onclick: move |_| { revision += 1; video.restart(); }, "Retry video" }
             }
             if pending { div { class: "episode-playback-placeholder", role: "status", "Loading episode video…" } }

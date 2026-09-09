@@ -45,6 +45,29 @@ impl DatasetSelection {
     }
 }
 
+/// One native recording within a dataset.
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EpisodeSelection {
+    dataset: DatasetSelection,
+    episode_id: String,
+}
+impl EpisodeSelection {
+    pub fn new(dataset: DatasetSelection, episode_id: String) -> Self {
+        Self {
+            dataset,
+            episode_id,
+        }
+    }
+    pub fn dataset(&self) -> &DatasetSelection {
+        &self.dataset
+    }
+    pub fn episode_id(&self) -> &str {
+        &self.episode_id
+    }
+}
+
 /// A bounded topic preview scoped to one native recording ID.
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -1,5 +1,6 @@
 //! Native Dataset discovery through the same project journal used by the ADBC driver.
 mod playback;
+mod topics;
 pub(crate) use playback::CameraPackets;
 mod recording_import;
 pub(crate) use recording_import::{McapSources, RecordingImport};
@@ -334,12 +335,20 @@ impl TryFrom<EpisodeTopicRequest> for EpisodeTopicQuery {
 
 impl EpisodeTopicQuery {
     fn for_sql(request: &EpisodeTopicRequest, sql: String) -> Result<Self, String> {
-        let selection = DatasetSelection::new(request.dataset().path().to_vec())?;
+        Self::for_episode(request.dataset(), request.episode_id(), sql)
+    }
+
+    fn for_episode(
+        dataset: &DatasetSelection,
+        episode_id: &str,
+        sql: String,
+    ) -> Result<Self, String> {
+        let selection = DatasetSelection::new(dataset.path().to_vec())?;
         if !selection.can_preview() {
             return Err("Preview is unavailable for this dataset name".to_owned());
         }
-        let id = uuid::Uuid::parse_str(request.episode_id())
-            .map_err(|_| "Invalid recording UUID".to_owned())?;
+        let id =
+            uuid::Uuid::parse_str(episode_id).map_err(|_| "Invalid recording UUID".to_owned())?;
         let values = arrow_array::FixedSizeBinaryArray::try_from_iter([id.as_bytes()].into_iter())
             .map_err(|error| error.to_string())?;
         let field =

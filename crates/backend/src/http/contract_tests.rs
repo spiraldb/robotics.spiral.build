@@ -153,6 +153,15 @@ fn dataset_catalogs_and_episode_playback_keep_distinct_wire_contracts() {
         "#/components/schemas/DatasetSummary"
     );
     let playback = &paths["/datasets/episode-video"]["post"];
+    let topics = &paths["/datasets/episode-topics"]["post"];
+    assert_eq!(
+        topics["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+        "#/components/schemas/EpisodeSelection"
+    );
+    assert_eq!(
+        topics["responses"]["200"]["content"]["application/json"]["schema"]["items"]["$ref"],
+        "#/components/schemas/DatasetTopic"
+    );
     assert_eq!(
         playback["requestBody"]["content"]["application/json"]["schema"]["$ref"],
         "#/components/schemas/EpisodeTopicRequest"

@@ -40,15 +40,19 @@ Start the studio with:
 
 ```console
 cd crates/studio
-dx serve --fullstack --release
+dx serve --fullstack --release --debug-symbols false
 ```
 
 Studio renders entirely in the browser. The native server serves the built HTML,
 JavaScript, WASM, and assets alongside `/api`; it does not compile or render the
 frontend. `--fullstack` tells DX to build and watch both processes, without enabling
 Dioxus SSR or hydration. Build a distributable server and browser bundle with
-`dx bundle --fullstack --release` from `crates/studio`; keep its `public` directory
+`dx bundle --fullstack --release --debug-symbols false` from `crates/studio`; keep its `public` directory
 beside the server binary.
+
+Keep `--debug-symbols false` on browser builds: DX enables WASM debug symbols by
+default, and the bundled Binaryen currently fails when processing that DWARF.
+The Cargo profile's `debug = 0` does not disable DX's separate bundling option.
 
 Frontend unit tests run as WASM in a browser using `wasm-bindgen-test`, including
 the real browser timers and DOM APIs. In the Nix shell, run:
