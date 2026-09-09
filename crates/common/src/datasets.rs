@@ -3,7 +3,7 @@
 mod catalog;
 pub use catalog::{
     DatasetInspection, DatasetSelection, DatasetSummary, DatasetTopic, EpisodeTopicRequest,
-    EpisodeVideo, ProjectResource, VideoPacket,
+    EpisodeVideo, ProjectResource, RecordedCameraRequest, VideoPacket,
 };
 
 use serde::{Deserialize, Serialize};

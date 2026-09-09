@@ -1054,24 +1054,24 @@ by joint name, and crosshair/focus changes emphasis without changing layout.
 ### Training
 
 Training is a curve-first run desk, not a collection of dashboard cards. A
-30% left rail separates **Training control** above **Training history**. The
+30% left rail separates **Setup** above **Runs**. The
 remaining workspace is one tab group: every opened run owns one tab containing
 its overview, dominant learning curve, data path, throughput, events, and logs.
 Opening history never replaces or rewrites the new-run draft.
 
-- **Control and ledger:** Training control selects an available dataset,
-  policy, device, optimizer settings, and the collapsed data/tensor query. Its
-  single filled **Run training** action stays visible beneath the independently
-  scrolling form. An active run adds progress and **Stop after current step**
-  in the same control panel. Training history is a separate newest-first ledger
-  whose rows state run, dataset, phase, and step progress.
+- **Control and ledger:** Setup retains dataset, device, run settings, and a
+  collapsed **Advanced settings** disclosure. Its single filled **Run training**
+  action stays visible beneath the independently scrolling form, disabled
+  beside **MCAP training is not available yet** and the native Spiral decoding
+  blocker. Recording and Data playback remain available. Runs is a separate
+  newest-first history ledger; existing run details and checkpoint downloads
+  remain accessible. An active run retains progress and **Stop training**.
 - **Run tabs:** Selecting a history row appends or activates that immutable run
   in the right tab group; already opened runs remain available as sibling tabs.
   Each run tab can be closed without stopping or deleting the backend run.
   Closing the selected tab activates the run to its right, then the one to its
-  left; closing the last run restores the empty **Run workspace**.
-  Starting a run opens its tab automatically, including when backend state
-  arrives after the start response.
+  left; closing the last run restores the empty **Run** panel.
+  Current MCAP camera datasets cannot start new training runs.
 
 - **Shared step axis:** Learning traces, throughput lanes, checkpoints,
   validation, and loader events use optimizer step as one common horizontal
@@ -1090,22 +1090,21 @@ Opening history never replaces or rewrites the new-run draft.
   run starts but before its first metric, they say they are waiting for the
   first optimizer step. They never draw synthetic telemetry. Unavailable or
   locked actions remain visible and disabled beside the blocker or active-run
-  context, while Stop remains reachable for the run in progress. Readiness is
-  the backend's combined remote-compute-and-hosted-Spiral probe, not an
-  inference made from settings in the browser. A failed run keeps its terminal
-  reason and the latest training log lines visible in its run tab.
-- **Owned data path:** The stages shown are the actual boundaries: Rust Spiral
-  ADBC query, Arrow image/action buffers, HTTP/Arrow IPC transport, remote
-  PyTorch tensor/model compute, and Rust checkpoint ingest. Tensor and
-  optimizer throughput are measured values; the Rust loader validates native
-  Arrow tensor structs and streams fixed-shape float32 buffers to the selected
-  compute runtime.
-- **Terse operating copy:** Panel tabs name Training control, Training history,
-  and each run; run content uses only the short evidence headers **Loss**,
-  **Data path**, and **Throughput**. Configuration uses field labels, run state
-  uses measured facts, and SQL plus tensor mapping stays under one collapsed
-  **Data query & tensors** disclosure. Data-path stages pair short noun labels
-  with live values instead of architecture prose.
+  context, while Stop remains reachable for the run in progress. The MCAP
+  capability blocker takes precedence over compute readiness; connecting a
+  runtime does not enable training before native Spiral decoding is supported.
+  A failed run keeps its terminal reason and the latest training log lines visible in its run tab.
+- **Owned data path:** Run tabs preserve recorded data-path stages and measured
+  tensor/optimizer throughput as historical evidence. The legacy registry/MP4
+  training loader is removed; no MCAP decoder fallback supplies training
+  images. Runtime connection and retained history must not imply that new
+  dataset training is available.
+- **Terse operating copy:** Panel tabs name Setup, Runs, and each run; run
+  content uses the short evidence headers **Loss**, **Data path**, and
+  **Throughput**. Configuration uses field labels, run state uses measured
+  facts, and secondary configuration stays under **Advanced settings**.
+  Data-path stages pair short noun labels with recorded values instead of
+  architecture prose.
 - **Desktop composition:** The split tree keeps control, history, and opened run
   panels simultaneously available; container queries may adapt evidence within
   a user-resized panel without creating a viewport-specific application mode.
@@ -1143,6 +1142,8 @@ follower camera, and inference evidence remain the visual authority.
   robot type in one SafeTensors artifact. Rollout state and metrics come only
   from the backend-owned native session. Loading and warm-up precede policy
   mode; a failed contract or safety check never becomes physical motion.
+  Checkpoint schema versions must match exactly: schema-10 checkpoints remain
+  available for inspection/download, but cannot run after the schema-11 migration.
 - **Inference evidence:** The low lane exposes Latency, Model, and Misses as
   tabular metrics. Values remain em dashes and the lane says “No measurements
   yet” until backend measurements arrive; never draw synthetic timing traces.
@@ -1167,8 +1168,14 @@ ambient browser selection—decides whether execution may begin.
   Do not repeat “role · Live” in an internal metadata row. Unavailable streams
   keep their actionable error inside the frame.
 - **Lifecycle:** One stable MJPEG image element per assigned Live camera. Moving
-  or tabbing a panel must not fabricate a second connection. Recorded video
-  seeks to the playhead and exposes approximate synchronization as caution.
+  or tabbing a panel must not fabricate a second connection. Recorded H.264
+  frames use native WebCodecs through Rust/WASM and seek from the preceding
+  keyframe to the episode playhead.
+- **Recorded state:** Source fetching, decoding, and missing coverage are
+  explicit inside the camera mat. During a keyframe interval load show
+  “Decoding recorded camera…”; before the first frame show “No camera frame at
+  this time.” Decode and fetch failures remain legible instead of presenting
+  an unexplained blank image or substituting live pixels.
 - **Failure:** Actionable unavailable/permission text appears in the frame; a
   green dot never masks a blank image.
 
@@ -1183,7 +1190,12 @@ ambient browser selection—decides whether execution may begin.
   closing, docking, splitting, and keyboard operation. Inspect / SQL / Results
   use blue underlines; running SQL activates Results. Closing removes the panel
   and its session; reopening starts a fresh session.
-- **Inspection:** Dataset Episodes and Topics remain distinct. Table schemas
+- **Inspection:** Dataset Episodes and Topics remain distinct. Each episode is
+  one immutable MCAP recording. Selected-camera playback keeps native
+  play/pause and keyboard-accessible range controls in the existing inspector;
+  Live recorded cameras and joint plots share the episode playhead. Deleting
+  an episode removes Dataset membership, while retaining its local MCAP file.
+  Table schemas
   use a disclosure above the bounded shared result table. Counts and source
   metadata reflect returned data, without inferred filenames or zeroes.
 - **Import:** A peer native tab contains a restrained form leading from source
@@ -1215,6 +1227,9 @@ dialog, requires explicit confirmation, and replaces all Studio-managed
 relations, including the Workflow feature registry and every cache relation
 whose source-derived identity that registry validates. Save failures, test results, and configuration blockers remain
 visible beside the responsible section and its retry and exit actions.
+Calibration applies to future recordings; there is no action to rewrite saved
+MCAP episodes. Project transfer uses format 2 and restores original MCAP bytes
+and Dataset names with Studio state; format-1 backups require the old application.
 
 ### Inputs / Fields
 

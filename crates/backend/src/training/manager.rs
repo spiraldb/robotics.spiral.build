@@ -968,10 +968,12 @@ impl TrainingManager {
                 .with_devices(info.devices().to_vec())
         });
         let spiral_ready = connection.0;
-        let ready = spiral_ready && backend.is_ok();
+        let blocker = spiral_robotics_common::training::TrainingPolicy::Act.mcap_training_blocker();
+        let ready = spiral_ready && backend.is_ok() && blocker.is_none();
         let summary = match (connection, backend) {
             ((false, message), _) => format!("Spiral is not ready for training: {message}"),
             (_, Err(error)) => format!("Training runtime is not ready: {error}"),
+            (_, Ok(_)) if blocker.is_some() => blocker.unwrap().to_owned(),
             (_, Ok(backend)) => format!(
                 "Runtime ready · {probe} · Spiral project {} · namespace {} · query checked at run start",
                 self.inner.storage.project_id(),

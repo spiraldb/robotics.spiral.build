@@ -1,6 +1,5 @@
 use crate::OperationError;
 use crate::project_session::ProjectReadiness;
-use crate::recording::video_http::ByteRange;
 use crate::robotics::cameras::Frame;
 use crate::robots::commands::CameraConfigurationObject;
 use crate::robots::service::CameraAssignment;
@@ -126,31 +125,6 @@ fn multipart_parts_carry_an_accurate_length() {
     assert!(text.contains("Content-Length: 5\r\n\r\n"));
     assert!(part.ends_with(b"\r\n"));
     assert_eq!(part.len(), 5 + part.len() - 5);
-}
-
-#[test]
-fn spiral_video_ranges_cover_browser_seek_forms() {
-    assert_eq!(
-        ByteRange::parse("bytes=10-19", 100),
-        Some(ByteRange::new(10, 19))
-    );
-    assert_eq!(
-        ByteRange::parse("bytes=90-", 100),
-        Some(ByteRange::new(90, 99))
-    );
-    assert_eq!(
-        ByteRange::parse("bytes=-10", 100),
-        Some(ByteRange::new(90, 99))
-    );
-    assert_eq!(
-        ByteRange::parse("bytes=90-200", 100),
-        Some(ByteRange::new(90, 99))
-    );
-    assert_eq!(ByteRange::parse("bytes=100-", 100), None);
-    assert_eq!(ByteRange::parse("bytes=20-10", 100), None);
-    assert_eq!(ByteRange::parse("bytes=0-1,4-5", 100), None);
-    assert_eq!(ByteRange::parse("items=0-1", 100), None);
-    assert_eq!(ByteRange::parse("bytes=0-1", 0), None);
 }
 
 #[test]

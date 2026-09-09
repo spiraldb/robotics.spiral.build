@@ -1,6 +1,5 @@
 //! Query execution snapshots and the shared result viewer.
 
-use crate::client::http::EpisodeApiPath;
 use crate::components::interaction::{
     Action, ActionAuxiliaryHandlers, ActionPurpose, ActionVariant, BrowserFocus, CloseIcon,
 };
@@ -266,19 +265,13 @@ fn QueryResultContent(model: QueryExecutionPresentation) -> Element {
                 }
             },
             QueryState::Ready(result) => {
-                let has_video_previews = result.needs_video_preview_column();
                 let result_row_count = result.rows().len();
                 rsx! {
                     div { class: "query-result-ready",
                         div { class: "query-result-table-scroll",
                             table { class: "query-table", "aria-label": "Query results",
                                 thead { tr {
-                                    if has_video_previews {
-                                        th { class: "query-media-heading", scope: "col",
-                                            span { class: "query-column-name", "Preview" }
-                                            span { class: "query-column-type", "Video" }
-                                        }
-                                    }
+
                                     for column in &result.columns() {
                                         th { key: "{column.name()}", scope: "col",
                                             title: column.presentation_title(),
@@ -290,9 +283,7 @@ fn QueryResultContent(model: QueryExecutionPresentation) -> Element {
                                 tbody {
                                     for (index, row) in result.rows().iter().enumerate() {
                                         tr { key: "{index}",
-                                            if has_video_previews {
-                                                {row.render_video_cell(index)}
-                                            }
+
                                             for column in &result.columns() {
                                                 {QueryCellContext::new(column, row, QueryRowPosition::new(index, result_row_count)).render()}
                                             }
@@ -471,9 +462,7 @@ impl<'a> QueryCellContext<'a> {
                 }
             };
         }
-        if column.semantic_type() == Some(ENCODED_MEDIA_EXTENSION_NAME) {
-            return self.row.render_video_cell(self.row_index);
-        }
+
         let rendered = value.cell_text();
         let display = if value.is_none_or(serde_json::Value::is_null) {
             "—"
@@ -504,32 +493,6 @@ impl QueryJsonValue for serde_json::Value {
     }
 }
 
-trait QueryResultPresentation {
-    fn needs_video_preview_column(&self) -> bool;
-}
-
-impl QueryResultPresentation for SpiralQuerySnapshot {
-    fn needs_video_preview_column(&self) -> bool {
-        if self
-            .columns()
-            .iter()
-            .any(|column| column.semantic_type() == Some(ENCODED_MEDIA_EXTENSION_NAME))
-        {
-            return false;
-        }
-        let has = |name: &str| self.columns().iter().any(|column| column.name() == name);
-        has("episode_id")
-            && has("stream_id")
-            && has("segment_index")
-            && (has("camera_id")
-                || has("byte_size")
-                || self
-                    .columns()
-                    .iter()
-                    .any(|column| column.semantic_type() == Some(ENCODED_MEDIA_EXTENSION_NAME)))
-    }
-}
-
 trait OptionalQueryValue {
     fn presentation_class(self) -> &'static str;
     fn cell_text(self) -> String;
@@ -557,47 +520,6 @@ impl OptionalQueryValue for Option<&serde_json::Value> {
         } else {
             rendered
         }
-    }
-}
-
-trait QueryRowPresentation {
-    fn video_preview(&self) -> Option<(String, String)>;
-    fn render_video_cell(&self, row_index: usize) -> Element;
-}
-
-impl QueryRowPresentation for serde_json::Map<String, serde_json::Value> {
-    fn render_video_cell(&self, row_index: usize) -> Element {
-        let Some((url, label)) = self.video_preview() else {
-            return rsx! {
-                td { class: "query-media-cell query-media-unavailable", title: "This row does not identify one exact video segment", "—" }
-            };
-        };
-        rsx! {
-            td { class: "query-media-cell",
-                video {
-                    class: "query-video-preview",
-                    src: crate::client::project::ProjectClient::current().scoped_url(&url),
-                    preload: "none",
-                    controls: true,
-                    playsinline: true,
-                    "aria-label": "Query video {label}, row {row_index + 1}",
-                    "Your browser cannot preview this MP4 segment."
-                }
-            }
-        }
-    }
-
-    fn video_preview(&self) -> Option<(String, String)> {
-        let episode = self.get("episode_id")?.as_str()?;
-        let stream = self.get("stream_id")?.as_str()?;
-        let segment = self.get("segment_index")?.as_u64()?.try_into().ok()?;
-        let label = self
-            .get("camera_id")
-            .and_then(serde_json::Value::as_str)
-            .filter(|label| !label.is_empty())
-            .unwrap_or(stream)
-            .to_owned();
-        Some((episode.video_url(stream, segment), label))
     }
 }
 
@@ -671,44 +593,6 @@ mod tests {
             Some(&serde_json::json!(true)).presentation_class(),
             "query-value-boolean"
         );
-    }
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn video_rows_map_to_the_exact_range_streaming_endpoint() {
-        let columns = vec![
-            query_column("episode_id", None),
-            query_column("stream_id", None),
-            query_column("segment_index", None),
-            query_column("camera_id", None),
-        ];
-        let row = serde_json::Map::from_iter([
-            ("episode_id".to_owned(), serde_json::json!("take 1")),
-            ("stream_id".to_owned(), serde_json::json!("follower/camera")),
-            ("segment_index".to_owned(), serde_json::json!(2)),
-            ("camera_id".to_owned(), serde_json::json!("wrist")),
-        ]);
-        let result = SpiralQuerySnapshot::new(columns, vec![row.clone()], false).with_elapsed_ms(1);
-        assert!(result.needs_video_preview_column());
-        assert_eq!(
-            row.video_preview(),
-            Some((
-                "/api/episodes/take%201/videos/follower%2Fcamera?segment=2".to_owned(),
-                "wrist".to_owned(),
-            ))
-        );
-
-        let encoded = SpiralQuerySnapshot::new(
-            vec![
-                query_column("episode_id", None),
-                query_column("stream_id", None),
-                query_column("segment_index", None),
-                query_column("media", Some(ENCODED_MEDIA_EXTENSION_NAME)),
-            ],
-            vec![row],
-            false,
-        )
-        .with_elapsed_ms(result.elapsed_ms());
-        assert!(!encoded.needs_video_preview_column());
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]

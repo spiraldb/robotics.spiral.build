@@ -11,21 +11,6 @@ impl CameraApiPath for str {
     }
 }
 
-pub(crate) trait EpisodeApiPath {
-    /// Browser-native MP4 endpoint for one segment of this episode's camera stream.
-    fn video_url(&self, stream: &str, segment: u32) -> String;
-}
-
-impl EpisodeApiPath for str {
-    fn video_url(&self, stream: &str, segment: u32) -> String {
-        format!(
-            "/api/episodes/{}/videos/{}?segment={segment}",
-            self.url_component(),
-            stream.url_component()
-        )
-    }
-}
-
 /// Percent-encode a value for use in a query string.
 ///
 /// Camera identifiers are device paths on Linux, so at minimum the separators
@@ -63,9 +48,5 @@ mod tests {
         // macOS reports opaque identifiers that may contain anything at all.
         assert_eq!("cam 1&x=2".url_component(), "cam%201%26x%3D2");
         assert_eq!("plain-id_1.0~".url_component(), "plain-id_1.0~");
-        assert_eq!(
-            "episode 1".video_url("arm/camera", 2),
-            "/api/episodes/episode%201/videos/arm%2Fcamera?segment=2"
-        );
     }
 }

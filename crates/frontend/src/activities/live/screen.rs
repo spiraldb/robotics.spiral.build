@@ -86,7 +86,7 @@ fn LivePanels(session: LiveSession) -> Element {
         }).with_class("scene-editor"),
     ];
     for camera in &cameras {
-        panels.push(camera.panel(timeline.camera_source(camera), timeline.media_playing()));
+        panels.push(camera.panel(timeline.camera_source(camera)));
     }
     if cameras.is_empty() {
         panels.push(AssignedCamera::unassigned_panel());

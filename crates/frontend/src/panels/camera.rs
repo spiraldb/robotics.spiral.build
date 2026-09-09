@@ -3,12 +3,12 @@
 use dioxus::prelude::*;
 
 use crate::activities::data::episode_cache::EpisodePreview;
-use crate::client::http::{CameraApiPath, EpisodeApiPath};
+use crate::client::http::CameraApiPath;
 use crate::client::project::ProjectClient;
 use crate::format::ClockPresentation;
 use crate::panels::recorded_source::{LoadState, RecordedSource};
 
-use wasm_bindgen::{JsCast as _, JsValue};
+use wasm_bindgen::JsCast as _;
 
 /// Camera panels render exactly one declared source. A recorded camera never
 /// falls back to the live device when its clip is missing or still loading.
@@ -27,27 +27,7 @@ pub(crate) enum CameraEditorSource {
 }
 
 #[component]
-pub(crate) fn CameraEditor(
-    element_id: String,
-    source: CameraEditorSource,
-    playing: bool,
-) -> Element {
-    let workspace = crate::shell::activity::WorkspaceActivity::current();
-    let panel = dioxus_workbench::PanelContext::current();
-    let playing = playing && workspace.is_active() && panel.geometry().visible();
-    // DOM media synchronization belongs to the media element that owns the
-    // node. A prop change now seeks/plays only this camera instead of making
-    // the application root scan every recorded element after each frame.
-    use_effect(use_reactive(
-        (&element_id, &source, &playing),
-        move |(element_id, source, playing)| {
-            if let CameraEditorSource::Recorded(source) = source
-                && let Some(recorded) = source.renderable()
-            {
-                recorded.sync_element(&element_id, playing);
-            }
-        },
-    ));
+pub(crate) fn CameraEditor(element_id: String, source: CameraEditorSource) -> Element {
     let content = match source {
         CameraEditorSource::Live {
             robot,
@@ -60,34 +40,19 @@ pub(crate) fn CameraEditor(
             if let Some(recorded) = source.renderable().cloned() {
                 let updating = source.state().is_loading();
                 let warning = source.state().reason().map(str::to_owned);
-                let sync_camera = recorded.clone();
-                let scoped_url = ProjectClient::current().scoped_url(&recorded.url);
                 rsx! {
                     div { class: "camera-editor-meta",
                         span {
-                            if recorded.approximate { "Approximate timeline sync" }
-                            else if updating { "Updating from episode…" }
+                            if updating { "Updating from episode…" }
                             else { "Synced to episode timeline" }
                         }
                         span {
                             class: "status-dot",
-                            style: if recorded.approximate || warning.is_some() { "background: var(--tone-caution)" } else { "background: var(--tone-good)" },
+                            style: if warning.is_some() { "background: var(--tone-caution)" } else { "background: var(--tone-good)" },
                         }
                     }
                     div { class: "camera-editor-frame",
-                        video {
-                            key: "{recorded.url}",
-                            id: "{element_id}",
-                            class: "h-full w-full object-contain",
-                            src: scoped_url,
-                            preload: "auto",
-                            autoplay: playing,
-                            muted: true,
-                            playsinline: true,
-                            onloadedmetadata: move |_| sync_camera.sync_element(&element_id, playing),
-                            "aria-label": "Recorded {recorded.label} camera at {recorded.episode_seconds.clock_label()}",
-                            "Your browser cannot preview this recorded camera stream."
-                        }
+                        RecordedCameraFrame { key: "{recorded.episode}:{recorded.stream}", recorded, element_id }
                         if let Some(ref warning) = warning {
                             div { class: "camera-live-error", role: "alert", span { "{warning}" } }
                         }
@@ -105,7 +70,7 @@ pub(crate) fn CameraEditor(
                     }
                     LoadState::Ready(_) => (
                         "No recorded camera",
-                        "This episode has no local video for this camera.".to_owned(),
+                        "This episode has no recorded video for this camera.".to_owned(),
                     ),
                 };
                 rsx! {
@@ -197,71 +162,10 @@ fn LiveCameraFrame(robot: String, role: String, device: String) -> Element {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct RecordedCamera {
+    episode: String,
+    stream: String,
     label: String,
-    url: String,
-    video_seconds: f64,
     episode_seconds: f64,
-    approximate: bool,
-}
-
-impl RecordedCamera {
-    #[cfg(test)]
-    pub(crate) fn url(&self) -> &str {
-        &self.url
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn video_seconds(&self) -> f64 {
-        self.video_seconds
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn episode_seconds(&self) -> f64 {
-        self.episode_seconds
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn approximate(&self) -> bool {
-        self.approximate
-    }
-
-    fn sync_element(&self, element_id: &str, should_play: bool) {
-        let Some(element) = web_sys::window()
-            .and_then(|window| window.document())
-            .and_then(|document| document.get_element_by_id(element_id))
-        else {
-            return;
-        };
-        let target = self.video_seconds.max(0.0);
-        let current = js_sys::Reflect::get(element.as_ref(), &JsValue::from_str("currentTime"))
-            .ok()
-            .and_then(|value| value.as_f64())
-            .unwrap_or(0.0);
-        let seek_threshold = if should_play { 0.25 } else { 0.005 };
-        if (current - target).abs() > seek_threshold {
-            let _ = js_sys::Reflect::set(
-                element.as_ref(),
-                &JsValue::from_str("currentTime"),
-                &JsValue::from_f64(target),
-            );
-        }
-
-        let paused = js_sys::Reflect::get(element.as_ref(), &JsValue::from_str("paused"))
-            .ok()
-            .and_then(|value| value.as_bool())
-            .unwrap_or(!should_play);
-        let method = match (should_play, paused) {
-            (true, true) => Some("play"),
-            (false, false) => Some("pause"),
-            _ => None,
-        };
-        if let Some(method) = method
-            && let Ok(function) = js_sys::Reflect::get(element.as_ref(), &JsValue::from_str(method))
-                .and_then(|value| value.dyn_into::<js_sys::Function>())
-        {
-            let _ = function.call0(element.as_ref());
-        }
-    }
 }
 
 pub(crate) struct RecordedCameraSourceRequest<'a> {
@@ -313,7 +217,7 @@ impl<'a> RecordedCameraSourceRequest<'a> {
             },
             LoadState::Ready(preview) => select(preview).map_or_else(
                 || LoadState::Unavailable {
-                    reason: "This episode has no local video for this camera.".to_owned(),
+                    reason: "This episode has no recorded video for this camera.".to_owned(),
                 },
                 LoadState::Ready,
             ),
@@ -329,49 +233,11 @@ impl<'a> RecordedCameraSourceRequest<'a> {
     }
 }
 
-impl EpisodePreview {
-    #[cfg(test)]
-    pub(crate) fn recorded_camera(
-        &self,
-        selected: Option<&(String, String, String)>,
-    ) -> Option<RecordedCamera> {
-        self.recorded_camera_at(selected, self.sample().seconds())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn recorded_camera_at(
-        &self,
-        selected: Option<&(String, String, String)>,
-        at: f64,
-    ) -> Option<RecordedCamera> {
-        let expected = selected.map(|(robot, role, _)| format!("{robot}.camera.{role}"));
-        let stream_id = if let Some(expected) = expected.as_deref() {
-            self.timeline()
-                .videos()
-                .iter()
-                .find(|asset| asset.stream_id() == expected)
-                .map(|asset| asset.stream_id())?
-        } else {
-            self.timeline()
-                .videos()
-                .first()
-                .map(|asset| asset.stream_id())?
-        };
-        let label = selected
-            .filter(|(robot, role, _)| stream_id == format!("{robot}.camera.{role}"))
-            .map(|(_, role, _)| role.clone())
-            .or_else(|| stream_id.rsplit('.').next().map(str::to_owned))
-            .unwrap_or_else(|| "recorded".to_owned());
-        RecordedCameraStream::new(self, stream_id, &label).at(at)
-    }
-}
-
 struct RecordedCameraStream<'a> {
     preview: &'a EpisodePreview,
     stream_id: &'a str,
     label: &'a str,
 }
-
 impl<'a> RecordedCameraStream<'a> {
     const fn new(preview: &'a EpisodePreview, stream_id: &'a str, label: &'a str) -> Self {
         Self {
@@ -380,192 +246,104 @@ impl<'a> RecordedCameraStream<'a> {
             label,
         }
     }
-
-    fn at(self, at: f64) -> Option<RecordedCamera> {
-        let assets = self
-            .preview
-            .timeline()
-            .videos()
-            .iter()
-            .filter(|asset| asset.stream_id() == self.stream_id)
-            .collect::<Vec<_>>();
-        let mut exact_assets = assets
-            .iter()
-            .copied()
-            .filter(|asset| asset.timeline_offset_seconds().is_some())
-            .collect::<Vec<_>>();
-        exact_assets.sort_by(|left, right| {
-            left.timeline_offset_seconds()
-                .unwrap_or_default()
-                .total_cmp(&right.timeline_offset_seconds().unwrap_or_default())
-        });
-        let at = at.max(0.0);
-        let asset = if exact_assets.is_empty() {
-            assets
-                .iter()
-                .copied()
-                .min_by_key(|asset| asset.segment_index())?
-        } else {
-            exact_assets
-                .iter()
-                .copied()
-                .filter(|asset| {
-                    let start = asset.timeline_offset_seconds().unwrap_or_default();
-                    let end = start + asset.duration_seconds().max(0.0);
-                    start <= at && at < end
-                })
-                .max_by(|left, right| {
-                    left.timeline_offset_seconds()
-                        .unwrap_or_default()
-                        .total_cmp(&right.timeline_offset_seconds().unwrap_or_default())
-                })
-                .or_else(|| {
-                    exact_assets.iter().copied().min_by(|left, right| {
-                        left.distance_from(at).total_cmp(&right.distance_from(at))
-                    })
-                })?
-        };
-        let label = self.label.to_owned();
-        let episode_duration = self
-            .preview
-            .timeline()
-            .episode()
-            .duration_seconds()
-            .max(0.0);
-        let (video_seconds, approximate) = if let Some(offset) = asset.timeline_offset_seconds() {
-            (
-                (at - offset).clamp(0.0, asset.duration_seconds().max(0.0)),
-                false,
-            )
-        } else {
-            let ratio = if episode_duration > 0.0 {
-                (at / episode_duration).clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
-            (ratio * asset.duration_seconds().max(0.0), true)
-        };
-        let url = self
-            .preview
-            .episode()
-            .video_url(asset.stream_id(), asset.segment_index());
+    fn at(self, seconds: f64) -> Option<RecordedCamera> {
         Some(RecordedCamera {
-            label,
-            url,
-            video_seconds,
-            episode_seconds: at,
-            approximate,
+            episode: self.preview.episode().to_owned(),
+            stream: self.stream_id.into(),
+            label: self.label.into(),
+            episode_seconds: seconds.max(0.0),
         })
     }
 }
 
-trait VideoSegmentTimeline {
-    fn distance_from(&self, at: f64) -> f64;
-}
-
-impl VideoSegmentTimeline for crate::activities::data::episode_cache::VideoAssetMetadata {
-    fn distance_from(&self, at: f64) -> f64 {
-        let start = self.timeline_offset_seconds().unwrap_or_default();
-        let end = start + self.duration_seconds().max(0.0);
-        if at < start {
-            start - at
-        } else if at > end {
-            at - end
-        } else {
-            0.0
+#[component]
+fn RecordedCameraFrame(recorded: RecordedCamera, element_id: String) -> Element {
+    let episode = recorded.episode.clone();
+    let stream = recorded.stream.clone();
+    let source = use_resource(move || {
+        let episode = episode.clone();
+        let stream = stream.clone();
+        async move {
+            crate::activities::data::DatasetClient::current()
+                .recorded_camera(episode, stream)
+                .await
+                .map(std::rc::Rc::new)
         }
+    });
+    match &*source.read() {
+        Some(Ok(video)) => {
+            rsx! { CameraFrameCanvas { source: video.clone(), seconds: recorded.episode_seconds, label: recorded.label, element_id } }
+        }
+        Some(Err(error)) => rsx! { div { class: "camera-live-error", role: "alert", "{error}" } },
+        None => rsx! { div { class: "editor-empty", role: "status", "Loading recorded camera…" } },
     }
 }
 
-#[cfg(test)]
-mod source_tests {
-    use super::*;
-    use crate::activities::data::episode_cache::{
-        EpisodeTimeline, TimelineSample, VideoAssetMetadata,
-    };
-    use crate::panels::timeline::panel::RecordedTimelineTraces;
-    use spiral_robotics_common::recording::{
-        EpisodeInfo, EpisodeVideoFormat, EpisodeVideoIdentity, EpisodeVideoTimeline,
-    };
-    use std::sync::Arc;
-    fn episode_summary() -> EpisodeInfo {
-        EpisodeInfo::new("take-1", "default")
-            .with_source("Teleoperation")
-            .with_timeline(600, 10.0)
-            .with_sample_hz(60.0)
-    }
-    fn preview(at: f64, videos: Vec<VideoAssetMetadata>) -> EpisodePreview {
-        EpisodePreview::fixture(
-            "take-1".to_owned(),
-            Arc::new(EpisodeTimeline::new(episode_summary(), videos)),
-            (
-                TimelineSample::new(0, at),
-                Arc::new(RecordedTimelineTraces::default().signal_lanes()),
-            ),
-        )
-    }
-    fn video(segment_index: u32, offset: Option<f64>, duration_seconds: f64) -> VideoAssetMetadata {
-        VideoAssetMetadata::new(
-            EpisodeVideoIdentity::new("follower.camera.wrist", "camera-1", segment_index),
-            EpisodeVideoFormat::new(640, 480, 30),
-            EpisodeVideoTimeline::new((duration_seconds * 30.0) as u64, duration_seconds, offset),
-        )
-    }
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn recorded_camera_selects_the_exact_pause_segment() {
-        let preview = preview(
-            4.25,
-            vec![video(0, Some(0.0), 2.0), video(1, Some(4.0), 3.0)],
-        );
-
-        let camera = preview.recorded_camera(None).expect("recorded camera");
-
-        assert!(!camera.approximate());
-        assert_eq!(camera.video_seconds(), 0.25);
-        assert_eq!(
-            camera.url(),
-            "/api/episodes/take-1/videos/follower.camera.wrist?segment=1"
-        );
-    }
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn recorded_camera_keeps_legacy_sync_explicitly_approximate() {
-        let preview = preview(5.0, vec![video(0, None, 8.0)]);
-
-        let camera = preview.recorded_camera(None).expect("recorded camera");
-
-        assert!(camera.approximate());
-        assert_eq!(camera.video_seconds(), 4.0);
-        assert_eq!(
-            camera.url(),
-            "/api/episodes/take-1/videos/follower.camera.wrist?segment=0"
-        );
-    }
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn recorded_video_sync_uses_the_controller_clock_not_a_late_sample_response() {
-        let preview = preview(1.0, vec![video(0, Some(0.0), 8.0)]);
-
-        let camera = preview
-            .recorded_camera_at(None, 5.0)
-            .expect("recorded camera");
-
-        assert_eq!(camera.video_seconds(), 5.0);
-        assert_eq!(camera.episode_seconds(), 5.0);
-    }
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn a_missing_recorded_camera_source_never_falls_back_to_the_live_device() {
-        let assigned = (
-            "follower".to_owned(),
-            "wrist".to_owned(),
-            "camera-1".to_owned(),
-        );
-
-        let source =
-            RecordedCameraSourceRequest::new("take-1", None, 0.0).for_live_assignment(&assigned);
-
-        assert!(matches!(
-            source,
-            CameraEditorSource::Recorded(source)
-                if matches!(source.state(), LoadState::Loading { previous: None })
-        ));
+#[component]
+fn CameraFrameCanvas(
+    source: std::rc::Rc<spiral_robotics_common::datasets::EpisodeVideo>,
+    seconds: f64,
+    label: String,
+    element_id: String,
+) -> Element {
+    use crate::activities::data::episode_decoder::{DecodedGroup, EncodedCamera};
+    use std::rc::Rc;
+    let encoded = use_hook(|| Rc::new(EncodedCamera::new(&source, 0)));
+    let mut canvas = use_signal(|| None::<web_sys::HtmlCanvasElement>);
+    let mut drawing_error = use_signal(|| None::<String>);
+    let camera = encoded.clone();
+    let group = use_memo(use_reactive((&seconds,), move |(seconds,)| {
+        camera
+            .as_ref()
+            .as_ref()
+            .ok()
+            .and_then(|camera| camera.group_at(seconds))
+    }));
+    let frames = use_resource(move || {
+        let range = group();
+        let encoded = encoded.clone();
+        async move {
+            let camera = encoded.as_ref().as_ref().map_err(Clone::clone)?;
+            match range {
+                Some(range) => DecodedGroup::decode(camera, range).await.map(Some),
+                None => Ok(None),
+            }
+        }
+    });
+    use_effect(use_reactive((&seconds,), move |(seconds,)| {
+        let Some(canvas) = canvas() else {
+            return;
+        };
+        let pending = *frames.state().read() == UseResourceState::Pending;
+        let result = match &*frames.read() {
+            Some(Ok(Some(decoded))) if !pending => decoded.draw(&canvas, seconds),
+            _ => DecodedGroup::clear(&canvas),
+        };
+        if let Err(error) = result {
+            drawing_error.set(Some(error));
+        }
+    }));
+    let decoding = *frames.state().read() == UseResourceState::Pending;
+    let no_frame = matches!(&*frames.read(), Some(Ok(None)));
+    let error = drawing_error().or_else(|| {
+        frames
+            .read()
+            .as_ref()
+            .and_then(|result| result.as_ref().err().cloned())
+    });
+    rsx! {
+        canvas { id: element_id, class: "h-full w-full object-contain", width: 640, height: 360, role: "img",
+            "aria-label": "Recorded {label} camera at {seconds.clock_label()}",
+            onmounted: move |event| {
+                if let Some(element) = event.data().downcast::<web_sys::Element>() { canvas.set(Some(element.clone().unchecked_into())); }
+            }
+        }
+        if let Some(error) = error {
+            div { class: "camera-live-error", role: "alert", "{error}" }
+        } else if decoding {
+            div { class: "camera-live-error", role: "status", "Decoding recorded camera…" }
+        } else if no_frame {
+            div { class: "camera-live-error", role: "status", "No camera frame at this time." }
+        }
     }
 }

@@ -92,7 +92,7 @@ async fn every_documented_scoped_endpoint_is_registered_and_rejects_missing_or_s
             }
         }
     }
-    assert_eq!(count, 57);
+    assert_eq!(count, 55);
     fixture.shutdown().await;
 }
 
@@ -147,10 +147,7 @@ async fn snapshots_are_plain_gets_and_old_sessions_cannot_read_the_replacement()
 fn dataset_catalogs_and_episode_playback_keep_distinct_wire_contracts() {
     let contract = StudioApi::routes().into_document();
     let paths = &contract["paths"];
-    for (path, item_schema) in [
-        ("/datasets", "DatasetSummary"),
-        ("/recording-datasets", "RecordingDatasetSummary"),
-    ] {
+    for (path, item_schema) in [("/datasets", "DatasetSummary")] {
         assert_eq!(
             paths[path]["get"]["responses"]["200"]["content"]["application/json"]["schema"]["items"]
                 ["$ref"],

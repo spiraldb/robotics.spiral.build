@@ -4,7 +4,7 @@
   "major": 7,
   "minor": 0,
   "storage_schema": {
-    "minimum": 10,
-    "maximum": 10
+    "minimum": 11,
+    "maximum": 11
   }
 }

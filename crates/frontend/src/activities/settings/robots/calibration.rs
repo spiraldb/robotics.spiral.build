@@ -1,16 +1,11 @@
 use crate::activities::settings::robots::RobotClient;
-use crate::components::interaction::{
-    Action, ActionPurpose, ActionVariant, BlockingConfirmation, ConfirmationCopy,
-    ConfirmationDismissal, ConfirmationResponse,
-};
+use crate::components::interaction::{Action, ActionPurpose, ActionVariant};
 use dioxus::prelude::*;
 use spiral_robotics_common::robots::{CalibrationJointProgress, RobotSummary};
 use spiral_robotics_viewport as arm;
 
 use crate::robots::{HardwareCommands, HardwareTelemetry};
-use crate::shell::notifications::MessageSource;
 use crate::shell::state::StudioProjectState;
-use crate::tasks::SingleFlight;
 
 #[component]
 pub(super) fn CalibrationSection(
@@ -22,13 +17,9 @@ pub(super) fn CalibrationSection(
         .robot_telemetry(robot.id())
         .and_then(|robot| robot.calibration().cloned());
     let connected = robot.connection().connected();
-    let mut confirming_reapply = use_signal(|| false);
-    let reapplying = use_signal(|| false);
     let mut command = use_signal(|| None::<&'static str>);
     let id = robot.id().to_owned();
     let recalibrate_id = id.clone();
-    let reapply_title =
-        "Recalculate recorded joint state from raw encoder positions using this calibration";
     let calibration_title = if !connected {
         "Connect the arm first"
     } else if robot.calibrated() {
@@ -36,31 +27,15 @@ pub(super) fn CalibrationSection(
     } else {
         ""
     };
-    let reapply_confirm_label = if reapplying() {
-        "Applying…".to_owned()
-    } else {
-        "Apply to recorded takes".to_owned()
-    };
-
     let Some(progress) = progress else {
         return rsx! {
             section {
                 div { class: "device-section-head",
                     h3 { class: "label mb-0 flex-1", "Calibration" }
-                    if robot.calibrated() {
-                        Action {
-                            id: "reapply-calibration-{robot.id()}",
-                            purpose: ActionPurpose::Apply,
-                            disabled: reapplying() || command().is_some(),
-                            title: reapply_title,
-                            onclick: move |_| confirming_reapply.set(true),
-                            "Reapply calibration"
-                        }
-                    }
                     Action {
                         purpose: ActionPurpose::Start,
                         variant: ActionVariant::Outline,
-                        disabled: !connected || reapplying() || command().is_some(),
+                        disabled: !connected || command().is_some(),
                         aria_busy: command() == Some("start"),
                         title: calibration_title,
                         onclick: move |_| {
@@ -78,65 +53,6 @@ pub(super) fn CalibrationSection(
                             });
                         },
                         {if command() == Some("start") { "Starting…" } else if robot.calibrated() { "Recalibrate" } else { "Calibrate" }}
-                    }
-                }
-                if confirming_reapply() {
-                    BlockingConfirmation {
-                        id: "reapply-calibration-confirmation-{robot.id()}",
-                        title: format!("Apply {} calibration to recorded takes?", robot.id()),
-                        consequence: "Recorded actions and raw encoder positions are preserved. Measured joint state will be replaced.".to_owned(),
-                        copy: ConfirmationCopy::new(
-                            "Recalculate measured joint state in every recorded take containing this arm using this calibration.",
-                            reapply_confirm_label,
-                            "Keep recorded data",
-                        ),
-                        response: ConfirmationResponse::new(
-                            ActionPurpose::Apply,
-                            {
-                                let id = id.clone();
-                                move |_| {
-                                if reapplying() {
-                                    return;
-                                }
-                                let id = id.clone();
-                                project.run_utility("", async move {
-                                    let Some(result) = SingleFlight::run(
-                                        reapplying,
-                                        async move {
-                                            RobotClient::current().reapply_calibration(id)
-                                                .await
-                                                .map_err(|error| error.to_string())
-                                        },
-                                    )
-                                    .await
-                                    else {
-                                        return Ok(());
-                                    };
-                                    if result.is_ok() {
-                                        confirming_reapply.set(false);
-                                    }
-                                    match result {
-                                        Ok(result) => {
-                                            project.report_success(result.reapply_success());
-                                            if !result.warnings().is_empty() {
-                                                project.report_warning_from(
-                                                    MessageSource::Studio,
-                                                    result.warnings().join(" "),
-                                                );
-                                            }
-                                            Ok(())
-                                        }
-                                        Err(error) => Err(error),
-                                    }
-                                });
-                                }
-                            },
-                            move |_| confirming_reapply.set(false),
-                        ),
-                        dismissal: ConfirmationDismissal::new(format!(
-                            "reapply-calibration-{}",
-                            robot.id(),
-                        )).with_pending(reapplying()),
                     }
                 }
                 // Instructions only where there is still work to do. On a
@@ -224,32 +140,6 @@ pub(super) fn CalibrationSection(
                 }
             }
         }
-    }
-}
-
-trait CalibrationReapplyPresentation {
-    fn reapply_success(&self) -> String;
-}
-
-impl CalibrationReapplyPresentation for spiral_robotics_common::robots::CalibrationApplication {
-    fn reapply_success(&self) -> String {
-        let episodes = self.episodes_updated();
-        let frames = self.frames_updated();
-        let unchanged = self.episodes_unchanged();
-        let skipped = self.episodes_skipped();
-        let noun = if episodes == 1 { "take" } else { "takes" };
-        let mut message = format!(
-            "Reapplied calibration to {episodes} {noun} ({} frames)",
-            frames
-        );
-        if unchanged > 0 {
-            message.push_str(&format!("; {unchanged} already matched"));
-        }
-        if skipped > 0 {
-            message.push_str(&format!("; {skipped} skipped"));
-        }
-        message.push('.');
-        message
     }
 }
 

@@ -6,8 +6,8 @@ use crate::http::delivery::{ApiJson, ApiPath, ApiQuery, HttpFailure, ScopedProje
 
 use axum::Json;
 use spiral_robotics_common::recording::{
-    EpisodeCatalog, EpisodeInfo, EpisodeInspectionSnapshot, EpisodeSeek, PauseUpdate,
-    RecordingDatasetSummary, RecordingFinish, RecordingStart, ReplayStart,
+    EpisodeInfo, EpisodeInspectionSnapshot, EpisodeSeek, PauseUpdate, RecordingFinish,
+    RecordingStart, ReplayStart,
 };
 
 pub(crate) struct EpisodeEndpoints;
@@ -22,33 +22,25 @@ impl EpisodeEndpoints {
     }
     pub(crate) fn register(routes: &mut ApiRoutes) {
         routes.get("/recording/signals", Self::fetch_recording_signals);
-        routes.get("/recording-datasets", Self::list_datasets);
-        routes.get(
-            "/recording-datasets/{dataset_id}/episodes",
-            Self::list_episodes,
-        );
         routes.post("/recording", Self::start_recording);
         routes.patch("/recording", Self::set_recording_paused);
         routes.post("/recording/stop", Self::stop_recording);
         routes.delete("/episodes/{id}", Self::delete_episode);
         routes.get("/episodes/{id}", Self::inspect_episode);
+        routes.post("/episodes/{id}/camera", Self::camera_preview);
         routes.post("/episodes/{id}/seek", Self::seek_episode);
         routes.post("/replay", Self::start_replay);
         routes.patch("/replay", Self::set_replay_paused);
     }
-    async fn list_datasets(
+
+    async fn camera_preview(
         ScopedProject(commands): ScopedProject<crate::recording::commands::RecordingCommands>,
-    ) -> Result<Json<Vec<RecordingDatasetSummary>>, HttpFailure> {
-        let result = commands.datasets().await?;
-        Ok(Json(result))
+        ApiPath(id): ApiPath<String>,
+        ApiJson(request): ApiJson<spiral_robotics_common::datasets::RecordedCameraRequest>,
+    ) -> Result<Json<spiral_robotics_common::datasets::EpisodeVideo>, HttpFailure> {
+        Ok(Json(commands.camera_preview(id, request).await?))
     }
-    async fn list_episodes(
-        ScopedProject(commands): ScopedProject<crate::recording::commands::RecordingCommands>,
-        ApiPath(dataset_id): ApiPath<String>,
-    ) -> Result<Json<EpisodeCatalog>, HttpFailure> {
-        let result = commands.episodes(dataset_id).await?;
-        Ok(Json(result))
-    }
+
     async fn start_recording(
         ScopedProject(commands): ScopedProject<crate::recording::commands::RecordingCommands>,
         ApiJson(request): ApiJson<RecordingStart>,

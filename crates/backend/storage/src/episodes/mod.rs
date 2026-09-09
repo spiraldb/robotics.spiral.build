@@ -2,6 +2,13 @@
 
 mod episode_schema;
 mod episodes;
+mod mcap_recording;
+mod mcap_schema;
+mod recording_file;
+pub(crate) use recording_file::RecordingFile;
+mod mcap_read;
+pub use mcap_recording::CameraRecording;
+pub(crate) use mcap_recording::McapRecording;
 mod identity;
 pub(crate) mod video;
 
@@ -47,77 +54,5 @@ impl EpisodeFixture {
             self.start,
             EpisodeCompletion::new(self.duration_seconds, Vec::new(), Vec::new()),
         )
-    }
-}
-
-use arrow_schema::{DataType, Field, Schema};
-
-use crate::db::{ManagedRelationSchema, Table, column};
-use episode_schema::EpisodeSchema;
-
-/// Episode relation schemas shared by capture, ingestion, and project transfer.
-pub(crate) struct EpisodeRelations;
-
-impl EpisodeRelations {
-    pub(crate) const RELATIONS: [Table; 5] = [
-        Table::Datasets,
-        Table::Episodes,
-        Table::EpisodeStreams,
-        Table::JointSamples,
-        Table::VideoAssets,
-    ];
-    pub(super) const DELETION_RELATIONS: [Table; 4] = [
-        Table::Episodes,
-        Table::JointSamples,
-        Table::EpisodeStreams,
-        Table::VideoAssets,
-    ];
-}
-
-impl ManagedRelationSchema for EpisodeRelations {
-    fn relations(&self) -> &'static [Table] {
-        &Self::RELATIONS
-    }
-
-    fn managed_relation_schema(&self, table: Table) -> Option<Schema> {
-        let text = |name, nullable| Field::new(name, DataType::Utf8, nullable);
-        match table {
-            Table::Datasets => Some(EpisodeSchema::datasets().as_ref().clone()),
-            Table::Episodes => Some(EpisodeSchema::episodes().as_ref().clone()),
-            Table::EpisodeStreams => Some(EpisodeSchema::episode_streams().as_ref().clone()),
-            Table::JointSamples => Some(EpisodeSchema::joint_samples().as_ref().clone()),
-            // Portable files carry MP4 bytes as Arrow Binary. SpiralDB adapts
-            // this field to its native Blob extension at the database edge.
-            Table::VideoAssets => Some(Schema::new(vec![
-                text(column::EPISODE_ID, false),
-                text(column::STREAM_ID, false),
-                Field::new(column::SEGMENT_INDEX, DataType::UInt32, false),
-                Field::new(column::TIMELINE_OFFSET_NS, DataType::UInt64, true),
-                text(column::CAMERA_ID, false),
-                Field::new(column::PAYLOAD, DataType::Binary, true),
-                Field::new(column::BYTE_SIZE, DataType::UInt64, false),
-                Field::new(column::WIDTH, DataType::UInt32, false),
-                Field::new(column::HEIGHT, DataType::UInt32, false),
-                Field::new(column::FPS, DataType::UInt32, false),
-                Field::new(column::FRAMES, DataType::UInt64, false),
-                text(column::MEDIA_RELATION, false),
-            ])),
-            _ => None,
-        }
-    }
-}
-
-impl EpisodeRelations {
-    pub(crate) fn normalize_video_asset(
-        batch: arrow_array::RecordBatch,
-    ) -> Result<arrow_array::RecordBatch, String> {
-        use video::VideoAssetRecordBatch as _;
-
-        batch.normalize_video_asset()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn native_video_schema() -> std::sync::Arc<Schema> {
-        video::VideoAssetStorage::schema()
     }
 }

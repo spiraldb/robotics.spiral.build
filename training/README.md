@@ -13,6 +13,16 @@ The service uses Hugging Face LeRobot's Apache-2.0 ACT implementation directly
 through PyTorch. There is no LibTorch or model implementation in the Rust
 workspace.
 
+## Current recording support
+
+MCAP camera training is unavailable until Spiral supports native MCAP video
+packet decoding for training images. Studio disables starting these jobs and
+the worker rejects the dataset request explicitly. The legacy registry/MP4
+loader and its pinned Spiral Python driver have been removed. Existing training
+history and checkpoint downloads remain accessible. The Arrow-based model
+inference service remains available for checkpoints matching the current
+schema; rollout still rejects older schema versions.
+
 ## Lambda Cloud: clone and run
 
 Choose a Lambda Stack 24.04 image. Lambda Stack already includes the
@@ -66,14 +76,6 @@ uv run ruff format --check .
 uv run spiral-training-runtime --host 127.0.0.1 --port 50051
 ```
 
-## SpiralDB driver
-
-The worker imports the `spiraldb` Python package and opens its ADBC driver with
-per-database `username`, `password`, `spiral.api_url`, and `spiral.spfs_url`
-options. The pinned `spiraldb` wheel includes the scoped-option driver.
-`SPIRALDB_ADBC_DRIVER` remains an explicit development override for testing a
-locally built `libadbc_driver_spiraldb` shared library.
-
 ## Stable protocol
 
 The authoritative training API version and storage-schema compatibility range
@@ -99,10 +101,9 @@ Control plane:
 
 The immutable job request carries the SpiralDB destination, optional client
 credentials, SQL/data contract, selected Spiral schema version, and model/run
-configuration. The runtime opens SpiralDB itself, uses SPQL to load
-training-ready Arrow data, and appends SafeTensors directly to
-`training_checkpoints`. It records the request's schema version in the
-checkpoint manifest rather than maintaining another constant. Job snapshots
+configuration. Dataset-backed job execution is currently unavailable pending
+native MCAP training support. The job protocol still carries the schema version
+for compatibility validation. Job snapshots
 never return credentials. `POST /v1/jobs` is idempotent only when the job ID and
 complete specification match; conflicting reuse returns HTTP 409.
 

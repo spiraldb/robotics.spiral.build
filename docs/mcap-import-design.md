@@ -15,7 +15,7 @@ Import and inspection come first. Existing native recordings have been exported
 as 52 MCAP files with H.264 camera topics, original MP4 attachments, exact native
 row attachments, timestamps, checksums, and verified standalone restoration.
 The import uses those files as the source of one native Dataset named `default`.
-Moving future Live recording to MCAP is a separate producer change.
+Live recording now produces and imports MCAP directly; see [recording and playback](recording-mcap.md). The phase notes below document the earlier importer rollout.
 
 ## Storage and publication
 
@@ -127,7 +127,7 @@ Hugging Face source relations.
 
 Startup now verifies/provisions only the nine application-state relations.
 It does not recreate the five retired recording tables. Data uses the native
-Dataset inspector, and Live refuses new recording before hardware capture
+Dataset inspector. At that earlier phase, Live refused new recording before hardware capture
 when legacy storage is absent. The next producer change is writing MCAP from
 Live. Legacy episode playback, training selection, and Hugging Face import UI
 have not been adapted to native MCAP members.

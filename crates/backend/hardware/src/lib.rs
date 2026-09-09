@@ -15,6 +15,8 @@
 use std::error::Error;
 use std::fmt;
 
+mod capture_clock;
+pub use capture_clock::CaptureClock;
 mod bus;
 mod calibration;
 mod cameras;

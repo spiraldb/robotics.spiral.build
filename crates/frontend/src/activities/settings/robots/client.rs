@@ -4,8 +4,8 @@ use crate::client::project::ProjectClient;
 use crate::client::queries::QueryDomain::*;
 use crate::client::transport::{CommandError, HttpRequest};
 use spiral_robotics_common::robots::{
-    CalibrationApplication, CameraBinding, CameraStatus, ModeSelection, NewRobot, RobotGoal,
-    RobotSummary, RobotUpdate, SerialPortIdentification, SerialPortScan, SerialPortSummary,
+    CameraBinding, CameraStatus, ModeSelection, NewRobot, RobotGoal, RobotSummary, RobotUpdate,
+    SerialPortIdentification, SerialPortScan, SerialPortSummary,
 };
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -195,22 +195,6 @@ impl RobotClient {
                 "POST",
                 format!(
                     "/api/robots/{id}/calibration/cancel",
-                    id = id.url_component()
-                ),
-            ),
-        )
-    }
-
-    pub(crate) fn reapply_calibration(
-        &self,
-        id: String,
-    ) -> impl Future<Output = Result<CalibrationApplication, CommandError>> + use<> {
-        self.project.mutate(
-            &[Telemetry, Setup],
-            HttpRequest::new(
-                "POST",
-                format!(
-                    "/api/robots/{id}/calibration/reapply",
                     id = id.url_component()
                 ),
             ),

@@ -11,9 +11,8 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
 use dioxus::prelude::*;
-pub(crate) use spiral_robotics_common::recording::EpisodeVideoAssetMetadata as VideoAssetMetadata;
 use spiral_robotics_common::recording::{
-    EpisodeInfo, EpisodeInspectionArm, EpisodeInspectionSnapshot, EpisodeOptionalFrameMatrix,
+    EpisodeInspectionArm, EpisodeInspectionSnapshot, EpisodeOptionalFrameMatrix,
 };
 use spiral_robotics_viewport::SO101_JOINTS;
 
@@ -28,27 +27,6 @@ const EPISODE_RENDER_HZ: f64 = 30.0;
 const RECORDED_REQUEST_TIMEOUT_MS: u32 = 15_000;
 const TRACE_BUCKETS: usize = 240;
 const MAX_CACHED_EPISODES: usize = 4;
-
-/// Episode detail used to align timeline samples and recorded media.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct EpisodeTimeline {
-    episode: EpisodeInfo,
-    videos: Vec<VideoAssetMetadata>,
-}
-
-impl EpisodeTimeline {
-    pub(crate) const fn new(episode: EpisodeInfo, videos: Vec<VideoAssetMetadata>) -> Self {
-        Self { episode, videos }
-    }
-
-    pub(crate) const fn episode(&self) -> &EpisodeInfo {
-        &self.episode
-    }
-
-    pub(crate) fn videos(&self) -> &[VideoAssetMetadata] {
-        &self.videos
-    }
-}
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct TimelineArmSample {
@@ -176,7 +154,6 @@ impl EpisodePlaybackTime for f64 {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct EpisodePreview {
     episode: String,
-    timeline: Arc<EpisodeTimeline>,
     sample: TimelineSample,
     signal_lanes: Arc<[TimelineSignalLane; 6]>,
 }
@@ -185,33 +162,13 @@ impl EpisodePreview {
     fn from_inspection(inspection: &EpisodeData, sample: TimelineSample) -> Self {
         Self {
             episode: inspection.snapshot.episode().id().to_owned(),
-            timeline: Arc::clone(&inspection.timeline),
             sample,
             signal_lanes: Arc::clone(&inspection.signal_lanes),
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn fixture(
-        episode: String,
-        timeline: Arc<EpisodeTimeline>,
-        render: (TimelineSample, Arc<[TimelineSignalLane; 6]>),
-    ) -> Self {
-        let (sample, signal_lanes) = render;
-        Self {
-            episode,
-            timeline,
-            sample,
-            signal_lanes,
-        }
-    }
-
     pub(crate) fn episode(&self) -> &str {
         &self.episode
-    }
-
-    pub(crate) fn timeline(&self) -> &EpisodeTimeline {
-        &self.timeline
     }
 
     #[cfg(test)]
@@ -231,21 +188,15 @@ impl EpisodePreview {
 #[derive(Clone, Debug)]
 pub(crate) struct EpisodeData {
     snapshot: EpisodeInspectionSnapshot,
-    timeline: Arc<EpisodeTimeline>,
     signal_lanes: Arc<[TimelineSignalLane; 6]>,
 }
 
 impl EpisodeData {
     pub(crate) fn try_new(snapshot: EpisodeInspectionSnapshot) -> Result<Self, String> {
         snapshot.validate()?;
-        let timeline = Arc::new(EpisodeTimeline::new(
-            snapshot.episode().to_owned(),
-            snapshot.videos().to_owned(),
-        ));
         let signal_lanes = Arc::new(snapshot.signal_lanes(TRACE_BUCKETS));
         Ok(Self {
             snapshot,
-            timeline,
             signal_lanes,
         })
     }

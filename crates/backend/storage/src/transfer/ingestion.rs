@@ -239,38 +239,38 @@ impl HuggingFaceResponse for reqwest::Response {
 
 /// One dataset and the durable source relation it reads.
 #[derive(Clone, Debug)]
-struct ImportRelations {
+pub(crate) struct ImportRelations {
     dataset_name: String,
     dataset: String,
     source: String,
 }
 impl ImportRelations {
-    const SOURCE_TABLE: &str = "dataset_source";
+    pub(crate) const SOURCE_TABLE: &str = "dataset_source";
 
-    fn new(dataset_id: &str) -> Self {
+    pub(crate) fn new(dataset_id: &str) -> Self {
         Self {
             dataset_name: dataset_id.to_owned(),
             dataset: format!("dataset_{dataset_id}"),
             source: format!("dataset_source_{dataset_id}"),
         }
     }
-    fn quoted(name: &str) -> String {
+    pub(crate) fn quoted(name: &str) -> String {
         name.split('.')
             .map(|part| format!("\"{}\"", part.replace('"', "\"\"")))
             .collect::<Vec<_>>()
             .join(".")
     }
-    fn planned(&self) -> Vec<String> {
+    pub(crate) fn planned(&self) -> Vec<String> {
         vec![self.dataset.clone(), self.source.clone()]
     }
-    fn create_sql(&self) -> String {
+    pub(crate) fn create_sql(&self) -> String {
         format!(
             "CREATE DATASET {} USING spql.mcap.dataset FROM {} WITH (key = 'recording', blob = 'source', on_error = 'fail')",
             Self::quoted(&self.dataset),
             Self::quoted(&self.source)
         )
     }
-    fn source_view_sql(&self) -> String {
+    pub(crate) fn source_view_sql(&self) -> String {
         format!(
             "CREATE VIEW {} AS SELECT recording, source FROM {} WHERE dataset_name = {}",
             Self::quoted(&self.source),
@@ -590,10 +590,10 @@ impl HuggingFaceSourceBatch {
     }
 }
 
-struct ImportBlobStorage;
+pub(crate) struct ImportBlobStorage;
 
 impl ImportBlobStorage {
-    fn fields() -> Fields {
+    pub(crate) fn fields() -> Fields {
         vec![
             Field::new("bytes", DataType::BinaryView, true),
             Field::new("uri", DataType::Utf8View, true),
@@ -611,7 +611,7 @@ impl ImportBlobStorage {
         .into()
     }
 
-    fn field(name: &str) -> Field {
+    pub(crate) fn field(name: &str) -> Field {
         Field::new(name, DataType::Struct(Self::fields()), true).with_metadata(
             [(
                 EXTENSION_TYPE_NAME_KEY.to_owned(),

@@ -89,11 +89,11 @@ from it without writing glue code or operating a second data stack.
   candidate image cohorts, and atomically publishes Studio-owned source-scoped
   feature caches plus registry provenance. Its Assistant uses backend-owned,
   OpenAI-compatible tool calling to inspect existing relations and propose,
-  save, run, and iterate the same bounded relation-first graph. Training's
-  dedicated ADBC connection reads
-  Arrow state, action, and Spiral-decoded image tensors, then streams Arrow IPC
-  batches over HTTP to a selected remote ACT/CVAE compute runtime. That runtime
-  owns PyTorch policy sessions for rollout inference. Rust owns lifecycle,
+  save, run, and iterate the same bounded relation-first graph. MCAP camera training
+  is unavailable until Spiral supports native decoding into training images.
+  The legacy registry/MP4 loader is removed. The selected remote ACT/CVAE
+  compute runtime retains Arrow transport and PyTorch policy sessions for
+  rollout inference, subject to exact checkpoint-schema compatibility. Rust owns lifecycle,
   cancellation, validation, remote telemetry, feature-cache persistence,
   and SafeTensors checkpoint persistence without linking the Studio server to
   LibTorch.
@@ -111,18 +111,14 @@ from it without writing glue code or operating a second data stack.
   training compatibility are conditional capabilities an episode has when its
   streams match a configured robot's contract. Ingested episodes without a
   matching robot remain full citizens of the catalog.
-- **SpiralDB is the only persistent data path.** Robots, settings, episodes,
-  relational Arrow samples, MP4 assets, saved workflows and runs, training runs,
-  checkpoints, and rollout state are written and read through one shared ADBC
-  repository. There is no filesystem staging, recovery spool, in-memory
-  database mode, or second connected dataset. The selected API endpoint, SpFS
-  endpoint, and project are backend bootstrap pointers. Settings may change
-  the project across an idle live cutover; a service-endpoint change is saved
-  for the next process because ADBC binds both endpoints when constructing the
-  database. The namespace is fixed when the repository is constructed. Saved
-  runs retain only their selected dataset row. One private local JSON file
-  remembers only bootstrap/auth session state, never project records or cached
-  Spiral rows.
+- **SpiralDB owns the queryable project.** Robots, settings, saved workflows,
+  training history, checkpoints, and rollout state use the shared ADBC
+  repository. Each completed Live episode is first saved and synced as one
+  immutable local MCAP file, then imported as a native Blob into the selected
+  Dataset. A failed import reports the retained file path; restart recovery
+  and a local-file retry UI are not yet available. Backend bootstrap pointers
+  select the API endpoint, SpFS endpoint, and project. One private local JSON
+  file remembers bootstrap/auth session state, never cached Spiral rows.
 - **The robot description is the single source of truth.** Geometry, joint
   limits, and the rendered model come from URDF rather than duplicated drawing
   constants.
@@ -137,7 +133,7 @@ Browser frontend
       ▼
 Spiral Robotics backend
       ├── robot connections and safety
-      ├── recording and MP4 encoding
+      ├── MCAP recording and H.264 encoding
       ├── SpiralDB persistence and read-only queries
       ├── pinned Workflow SigLIP enrichment and source-scoped feature caches
       ├── bounded Workflow Assistant and tool supervision
@@ -179,8 +175,8 @@ during calibration or teleoperation. Releasing torque lets an arm fall under
 its own weight, so controls and consequences must remain reachable and stable.
 
 Studio policy control is backend-owned while tensor execution is remote.
-Training exports the exact native ACT graph and normalization contract as
-SafeTensors; rollout sends that artifact and Arrow IPC observations to the
+Existing training checkpoints preserve the native ACT graph and normalization
+contract as SafeTensors; rollout requires an exact schema match and sends that artifact and Arrow IPC observations to the
 selected compute runtime, then admits returned actions to one session-scoped,
 bounded motor control thread. The backend stops the session on stale inputs,
 motor faults, mode changes, inference failures, or excessive
@@ -240,10 +236,11 @@ never becomes the motor-control runtime.
     ordinary result format.
     Workflow still has no ingestion controls. Hugging Face is used here only to
     resolve the pinned model artifacts.
-  - **Training** owns random anchor and camera/action sampling through the
-    Spiral ADBC/Arrow path, remote HTTP runtime selection, vision ACT
-    configuration, learning/resource telemetry, graceful cancellation, and
-    Spiral checkpoints.
+  - **Training** retains remote HTTP runtime selection, vision ACT
+    configuration, historical learning/resource telemetry, and checkpoint
+    inspection/downloads. Starting MCAP camera training is disabled until
+    Spiral supports native video decoding into training images; the worker
+    also rejects these dataset jobs explicitly.
   - **Rollout** owns checkpoint selection, fixed-follower readiness, simple
     action-chunk and control-rate settings, the live 3D scene, every follower
     camera recorded for the policy, authoritative start/stop lifecycle, and
@@ -264,40 +261,45 @@ never becomes the motor-control runtime.
   read-only), and **Teleop** (leader mapped to follower).
 - A live 3D scene drawn from URDF, live MJPEG camera panels, and one stable
   stream connection per assigned camera.
-- Episode recording during Teleop with server-owned start, pause, resume, stop,
-  and discard. Pause/resume preserves one episode identity and records explicit
-  time gaps. Assigned cameras can be encoded by the backend into browser-
-  playable MP4 segments with episode-clock offsets. Paused checkpoints and
-  completed recordings commit directly to the configured SpiralDB project.
-- One canonical **Timeline** in Live. During capture it follows
-  new joint and camera data. A paused or completed episode can be scrubbed to
-  synchronize recorded camera frames, recorded 3D pose, signals, and the
-  playhead. Physical time-seeking is separate, explicit, server-gated, and
+- Episode recording during Teleop has server-owned start, pause, resume, stop,
+  and discard. Pause/resume preserves one episode identity and elapsed clock,
+  excluding paused time. Pause ends the encoder segment without publishing an
+  incomplete Dataset member. Final stop saves one immutable MCAP file holding
+  joint observations/actions, metadata, and H.264 camera packets, then imports
+  it into the configured Spiral project and target Dataset.
+- One canonical **Timeline** in Live follows capture. Completed episodes can
+  be scrubbed to synchronize recorded camera frames, recorded 3D pose,
+  signals, and the playhead. Browser WebCodecs decoding is owned by Rust/WASM;
+  camera timestamps follow capture time and seeks begin at a preceding
+  keyframe. Physical time-seeking is separate, explicit, server-gated, and
   applied on committed release rather than every pointer move.
-- Dataset semantics are explicit: one dataset contains many episodes. An
-  episode can be selected, deleted, or replayed on a compatible follower.
-  Settings imports and exports the complete active project—including binary
-  MP4, checkpoint data, and Studio-owned Workflow feature registry/cache
-  relations—as one versioned `.spiral-project` file.
+- Dataset semantics are explicit: one native Dataset contains many MCAP
+  episodes. An episode can be selected, deleted, or replayed on a compatible
+  follower. Deletion removes its source row and refreshes the Dataset while
+  retaining the local MCAP file. Calibration changes affect future recordings;
+  existing recordings retain their captured normalized values and are never
+  rewritten. Historical degrees require a calibration snapshot.
+- Settings imports and exports the active project as versioned
+  `.spiral-project` format 2, including original MCAP bytes, Dataset names
+  (including empty datasets), checkpoints, and Studio-owned Workflow caches.
+  Restore rebuilds native Dataset populations with Studio state in one
+  transaction. Format-1 backups require the old application.
 - Replay ramps a compatible calibrated follower to the first pose before
   playback. Pause/resume keeps the current replay frame rather than restarting
   the episode.
-- Direct SpiralDB persistence writes completed episode metadata, stream
-  semantics, fixed-rate joint samples, actions, and MP4 assets as Arrow
-  relations through a trusted ADBC driver without a browser session or local
-  retry spool. Hosted configurations maintain
-  managed per-episode MP4 datasets. Training derives the MP4 frame directly
-  from sample index and the declared stream rates, then submits only finite
-  frame manifests; Spiral performs frame selection, decode, resize,
-  normalization, and Arrow tensor conversion. Rust streams those contiguous
-  buffers over Arrow IPC; the remote runtime borrows them into PyTorch tensors
-  without materializing encoded video frames.
-  The Studio exposes row-limited, read-only query preview and video retrieval
-  through the backend.
-- **Data ownership.** `spiral_robotics` holds Studio application state (robots,
-  settings, workflow, training, and rollout records). `spiral_dataset` holds
-  native datasets and their source tables; their association comes from the
-  dataset definition, not name-prefix matching.
+- Native recording import writes a Blob source row, creates the filtered
+  source view and target Dataset when needed, and refreshes the population in
+  one transaction. An identical recording key and byte payload is an
+  idempotent retry; different bytes at that key are rejected. No separate
+  recording registry, MP4 container, or per-episode video Dataset remains.
+  The backend exposes bounded read-only query preview and H.264 retrieval;
+  camera reads reject more than 18,000 packets or 64 MiB of encoded video.
+- **Data ownership.** Root `studio_*` tables hold application state.
+  `dataset_source` holds recording sources, `dataset_source_<name>` views
+  select each dataset's rows, and `dataset_<name>` native Datasets reference
+  those views through their definitions. Storage schema 11 replaces the old
+  container layout. Schema-10 checkpoints remain inspectable/downloadable;
+  rollout's exact schema check rejects them under schema 11.
 - **Native MCAP ingestion.** Data imports MCAP recordings from a public
   Hugging Face repository into one native Spiral Dataset. Source inspection
   resolves a revision and previews files, size, destination, and warnings
@@ -337,11 +339,11 @@ today, and nothing below may be presented as existing behavior:
   touch-target overrides.
 - **Hardware:** SO-ARM101 only for now, with leader and follower roles. Live
   calibration supports Feetech protocol-0 motors such as the STS3215.
-- **One selected policy compute endpoint.** Training reads samples through a
-  dedicated read-only ADBC connection and sends Arrow IPC tensor batches to the
-  configured HTTP endpoint. The remote runtime holds ACT model, optimizer, and
-  active rollout policy state; Studio remains responsible for queries, run
-  history, checkpoint ingest, and bounded hardware control. Workflow enrichment
+- **One selected policy compute endpoint.** The configured HTTP runtime
+  retains Arrow transport and ACT model inference for schema-compatible
+  checkpoints. MCAP dataset training jobs remain unavailable pending native
+  Spiral image decoding. Studio owns queries, run history, checkpoint ingest,
+  and bounded hardware control. Workflow enrichment
   is separate: its one pinned SigLIP capability runs locally in the trusted Rust
   backend and does not become another configurable policy endpoint.
 - **Backend-scoped Workflow provider.** The trusted backend can obtain
@@ -417,9 +419,15 @@ Real, in-repo:
 - `examples/robot.json`, `examples/calibration-input.json` — real configuration
   and calibration input.
 - `robots/leader.json`, `robots/follower.json` — a working two-arm setup.
-- `crates/backend/storage/src/episodes/episode_schema.rs` — the relational episode schema.
-- `crates/backend/src/robotics/video.rs` — server-owned MP4 capture and
-  timeline-aligned segment manifests.
+- `crates/backend/storage/src/episodes/mcap_recording.rs` and
+  `recording_file.rs` — immutable MCAP packaging and local publication.
+- `crates/backend/storage/src/datasets/recording_import.rs` — native Blob
+  import, Dataset refresh, and idempotent recording retries.
+- `crates/backend/src/robotics/video.rs` — server-owned H.264 capture with
+  capture-time timestamps and parameter-bearing keyframes.
+- `docs/recording-mcap.md` — recording, playback, calibration, backup, and
+  training limits. Native import/retry/playback/delete checks and browser seek
+  pixel tests passed; physical robot/camera capture still needs a smoke test.
 - `crates/backend/src/workflow/model.rs` — the
   pinned SigLIP runner, SQL-candidate contract, source-derived feature cache,
   Studio feature registry, atomic publication, bounded pipeline, quarantine,

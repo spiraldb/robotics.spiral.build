@@ -50,14 +50,14 @@ impl AssignedCamera {
         request.for_live_assignment(&(self.robot.clone(), self.role.clone(), self.device.clone()))
     }
 
-    pub(crate) fn panel(&self, source: CameraEditorSource, playing: bool) -> Panel {
+    pub(crate) fn panel(&self, source: CameraEditorSource) -> Panel {
         let id = self.panel_id();
         Panel::new(
             id.clone(),
             format!("Camera · {}", self.role),
             "cameras",
             rsx! {
-                CameraEditor { element_id: id.as_str().recorded_element_id(), source, playing }
+                CameraEditor { element_id: id.as_str().recorded_element_id(), source }
             },
         )
         .with_home_zone(DockZone::Bottom)
@@ -76,7 +76,6 @@ impl AssignedCamera {
                         title: "No camera assigned".to_owned(),
                         detail: "Assign a camera to this arm in Settings.".to_owned(),
                     },
-                    playing: false,
                 }
             },
         )

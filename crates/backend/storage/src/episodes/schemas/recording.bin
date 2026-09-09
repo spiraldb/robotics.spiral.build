@@ -1,0 +1,139 @@
+
+ª'
+studio_recordings.protostudio.recording"T
+Dataset
+
+dataset_id (	
+name (	
+
+created_ms (
+description (	"œ
+Episode
+
+episode_id (	
+
+dataset_id (	
+schema_version (
+
+started_ms (
+	sample_hz (
+source (	
+note (	
+frames (
+duration_ns	 ( 
+max_follow_error_degrees
+ (
+	discarded (U
+recording_gap_after_ns (25.studio.recording.Episode_recording_gap_after_ns_List[
+recording_gap_duration_ns (28.studio.recording.Episode_recording_gap_duration_ns_List"9
+(Episode_recording_gap_after_ns_List_Item
+value ("q
+#Episode_recording_gap_after_ns_ListJ
+values (2:.studio.recording.Episode_recording_gap_after_ns_List_Item"<
++Episode_recording_gap_duration_ns_List_Item
+value ("w
+&Episode_recording_gap_duration_ns_ListM
+values (2=.studio.recording.Episode_recording_gap_duration_ns_List_Item"™
+Stream
+
+episode_id (	
+	stream_id (	
+ordinal (
+modality (	
+
+robot_type (	>
+joint_names (2).studio.recording.Stream_joint_names_List
+	camera_id (	
+width (
+height	 (
+fps
+ (Z
+start_temperature_celsius (27.studio.recording.Stream_start_temperature_celsius_ListN
+start_voltage_volts (21.studio.recording.Stream_start_voltage_volts_Listb
+limit_max_temperature_celsius (2;.studio.recording.Stream_limit_max_temperature_celsius_ListV
+limit_min_voltage_volts (25.studio.recording.Stream_limit_min_voltage_volts_ListV
+limit_max_voltage_volts (25.studio.recording.Stream_limit_max_voltage_volts_ListD
+limit_max_load (2,.studio.recording.Stream_limit_max_load_ListX
+peak_temperature_celsius (26.studio.recording.Stream_peak_temperature_celsius_ListJ
+min_voltage_volts (2/.studio.recording.Stream_min_voltage_volts_List:
+	peak_load (2'.studio.recording.Stream_peak_load_ListJ
+peak_current_amps (2/.studio.recording.Stream_peak_current_amps_List"-
+Stream_joint_names_List_Item
+value (	"Y
+Stream_joint_names_List>
+values (2..studio.recording.Stream_joint_names_List_Item";
+*Stream_start_temperature_celsius_List_Item
+value ("u
+%Stream_start_temperature_celsius_ListL
+values (2<.studio.recording.Stream_start_temperature_celsius_List_Item"5
+$Stream_start_voltage_volts_List_Item
+value ("i
+Stream_start_voltage_volts_ListF
+values (26.studio.recording.Stream_start_voltage_volts_List_Item"?
+.Stream_limit_max_temperature_celsius_List_Item
+value ("}
+)Stream_limit_max_temperature_celsius_ListP
+values (2@.studio.recording.Stream_limit_max_temperature_celsius_List_Item"9
+(Stream_limit_min_voltage_volts_List_Item
+value ("q
+#Stream_limit_min_voltage_volts_ListJ
+values (2:.studio.recording.Stream_limit_min_voltage_volts_List_Item"9
+(Stream_limit_max_voltage_volts_List_Item
+value ("q
+#Stream_limit_max_voltage_volts_ListJ
+values (2:.studio.recording.Stream_limit_max_voltage_volts_List_Item"0
+Stream_limit_max_load_List_Item
+value ("_
+Stream_limit_max_load_ListA
+values (21.studio.recording.Stream_limit_max_load_List_Item":
+)Stream_peak_temperature_celsius_List_Item
+value ("s
+$Stream_peak_temperature_celsius_ListK
+values (2;.studio.recording.Stream_peak_temperature_celsius_List_Item"3
+"Stream_min_voltage_volts_List_Item
+value ("e
+Stream_min_voltage_volts_ListD
+values (24.studio.recording.Stream_min_voltage_volts_List_Item"+
+Stream_peak_load_List_Item
+value ("U
+Stream_peak_load_List<
+values (2,.studio.recording.Stream_peak_load_List_Item"3
+"Stream_peak_current_amps_List_Item
+value ("e
+Stream_peak_current_amps_ListD
+values (24.studio.recording.Stream_peak_current_amps_List_Item"…
+JointSample
+
+episode_id (	
+	stream_id (	
+sample_index (
+episode_time_ns (
+state_valid (
+action_valid (I
+state_position (21.studio.recording.JointSample_state_position_ListK
+action_position (22.studio.recording.JointSample_action_position_ListE
+raw_position	 (2/.studio.recording.JointSample_raw_position_List=
+velocity
+ (2+.studio.recording.JointSample_velocity_List9
+effort (2).studio.recording.JointSample_effort_List
+follow_error_degrees ("5
+$JointSample_state_position_List_Item
+value ("i
+JointSample_state_position_ListF
+values (26.studio.recording.JointSample_state_position_List_Item"6
+%JointSample_action_position_List_Item
+value ("k
+ JointSample_action_position_ListG
+values (27.studio.recording.JointSample_action_position_List_Item"3
+"JointSample_raw_position_List_Item
+value ("e
+JointSample_raw_position_ListD
+values (24.studio.recording.JointSample_raw_position_List_Item"/
+JointSample_velocity_List_Item
+value ("]
+JointSample_velocity_List@
+values (20.studio.recording.JointSample_velocity_List_Item"-
+JointSample_effort_List_Item
+value ("Y
+JointSample_effort_List>
+values (2..studio.recording.JointSample_effort_List_Itembproto2

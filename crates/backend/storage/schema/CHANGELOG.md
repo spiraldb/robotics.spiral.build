@@ -1,5 +1,11 @@
 # Storage schema changelog
 
+## Spiral schema 11
+
+- Recordings are immutable MCAP source blobs in `dataset_source`, selected by native Dataset source views. Removed the episode/joint/video registry tables and MP4 recording indexes.
+- Project bundle format 2 stores original MCAP bytes and native Dataset names, including empty datasets. Format-1 bundles require the previous application version.
+- Calibration changes affect future recordings only. MCAP camera training is unavailable pending native Spiral video decoding support.
+
 ## Spiral schema 10
 
 - Studio relations and feature caches are root resources named with a `studio_`

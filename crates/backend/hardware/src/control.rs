@@ -279,6 +279,7 @@ impl RecordingCompletion {
 /// Persistence stays in the storage crate; the control runtime only owns the
 /// sampling contract, which keeps edits on either side independently cached.
 pub trait RecordingWriter: Send {
+    fn update_clock(&self, _now: Instant, _elapsed: Option<Duration>) {}
     fn id(&self) -> &str;
     fn dataset_id(&self) -> &str;
     fn push(&self, sample: Sample) -> bool;
@@ -1952,12 +1953,14 @@ impl Controller {
             .map(|arm| ArmConditionSummary::new(arm.id().to_owned(), arm.joints().len()))
             .collect();
 
+        let clock = RecordingClock::started_now();
+        writer.update_clock(clock.started, Some(Duration::ZERO));
         self.published.recording_issue = None;
         self.operations.recording = Some(Recording {
             writer,
             arms,
             resume_mode: self.published.mode.selection().clone(),
-            clock: RecordingClock::started_now(),
+            clock,
             frames: 0,
             tracking: RecordingTrackingSummary::default(),
             condition,
@@ -1972,6 +1975,7 @@ impl Controller {
             .take()
             .ok_or_else(|| "no take is being recorded".to_owned())?;
         let now = Instant::now();
+        recording.writer.update_clock(now, None);
         recording.close_pause(now);
         let duration = recording.active_elapsed(now).as_secs_f64();
         let follow_error = recording.follow_error();
@@ -2001,7 +2005,9 @@ impl Controller {
                     .recording
                     .as_mut()
                     .ok_or_else(|| "no take is being recorded".to_owned())?;
-                recording.clock.pause(Instant::now());
+                let now = Instant::now();
+                recording.clock.pause(now);
+                recording.writer.update_clock(now, None);
                 // FIFO ordering means this barrier is processed after every
                 // sample accepted before the pause. The async caller awaits it
                 // without blocking this fixed-rate controller thread.
@@ -2033,7 +2039,11 @@ impl Controller {
         if let Some(recording) = self.operations.recording.as_mut()
             && recording.clock.is_paused()
         {
-            recording.close_pause(Instant::now());
+            let now = Instant::now();
+            recording.close_pause(now);
+            recording
+                .writer
+                .update_clock(now, Some(recording.active_elapsed(now)));
         }
         Ok((None, elapsed_seconds))
     }

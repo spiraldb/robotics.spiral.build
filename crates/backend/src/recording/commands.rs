@@ -23,11 +23,11 @@ use crate::recording::{
     ReplayTrajectoryRequest, SetRecordingPausedCommand, SetReplayPausedCommand,
     StartRecordingCommand, StartReplayCommand, StopRecordingCommand, TeleoperationPair,
 };
-use crate::robotics::video::{CameraCaptureSpec, VideoAsset, VideoCapture, VideoCaptureRequest};
-use crate::{BackendCommandError, OperationError};
-use spiral_robotics_common::recording::{
-    EpisodeInfo, EpisodeInspectionSnapshot, RecordingDatasetSummary,
+use crate::robotics::video::{
+    CameraCaptureSpec, CameraRecording, VideoCapture, VideoCaptureRequest,
 };
+use crate::{BackendCommandError, OperationError};
+use spiral_robotics_common::recording::{EpisodeInfo, EpisodeInspectionSnapshot};
 use spiral_robotics_hardware::ModeSelection as HardwareModeSelection;
 use spiral_robotics_storage::episodes::{
     ArmCondition, EpisodeArmCollection as _, EpisodeRecordingRequest, EpisodeWriter,
@@ -42,6 +42,7 @@ use spiral_robotics_storage::episodes::{
 /// framework-neutral capability action.
 struct RecordingAdapter<'a> {
     state: &'a ProjectContext,
+    clock: std::sync::Mutex<Option<spiral_robotics_hardware::CaptureClock>>,
     presented_recording: std::sync::Mutex<Option<EpisodeInfo>>,
 }
 
@@ -49,6 +50,7 @@ impl<'a> RecordingAdapter<'a> {
     fn new(state: &'a ProjectContext) -> Self {
         Self {
             state,
+            clock: std::sync::Mutex::new(None),
             presented_recording: std::sync::Mutex::new(None),
         }
     }
@@ -80,7 +82,7 @@ struct RecordingDraft {
 impl RecordingPort for RecordingAdapter<'_> {
     type RecordingDraft = RecordingDraft;
     type MediaCapture = VideoCapture;
-    type MediaOutput = Vec<VideoAsset>;
+    type MediaOutput = Vec<CameraRecording>;
 
     fn reserve_recording_start(&self) -> Result<Option<CatalogLeaseToken>, OperationError> {
         self.state.recording_session().reserve_start(|| {
@@ -255,7 +257,7 @@ impl RecordingPort for RecordingAdapter<'_> {
             .map_err(OperationError::from)?;
         self.state
             .storage()
-            .commit_episode(&full_episode, &media)
+            .commit_recording(&full_episode, &media)
             .await
             .map_err(OperationError::Internal)?;
         self.state.episodes().forget_completed(&episode);
@@ -275,34 +277,13 @@ impl RecordingPort for RecordingAdapter<'_> {
     }
 
     async fn finish_media_pause(&self) -> Result<(), OperationError> {
-        let checkpoint = self.state.recording_session().finish_media_pause().await;
-        let (episode, media) = match checkpoint {
-            Some((episode, media, failures)) => {
-                for failure in failures {
-                    self.state
-                        .cameras()
-                        .note_issue(format!("paused episode video was not saved: {failure}"));
-                }
-                (episode, media)
+        if let Some((_, _, failures)) = self.state.recording_session().finish_media_pause().await {
+            for failure in failures {
+                self.state.cameras().note_issue(failure);
             }
-            None => {
-                let Some(episode) = self.state.recording_session().episode() else {
-                    return Ok(());
-                };
-                (episode, Vec::new())
-            }
-        };
-        let full_episode = self
-            .state
-            .episodes()
-            .completed_episode(&episode)
-            .map_err(OperationError::from)?;
-        self.state
-            .storage()
-            .commit_episode(&full_episode, &media)
-            .await
-            .map_err(OperationError::Internal)?;
-        self.state.episodes().forget_completed(&episode);
+        }
+        // The writer's pause checkpoint remains in this recording session.
+        // Only Stop publishes the finalized MCAP as a Dataset member.
         Ok(())
     }
 
@@ -549,64 +530,6 @@ impl RecordingCommands {
         let _activity = self.state.admit()?;
         Ok(self.state.hardware().recording_signals(cursor))
     }
-    pub(crate) async fn datasets(
-        &self,
-    ) -> Result<Vec<RecordingDatasetSummary>, BackendCommandError> {
-        let commands = self.clone();
-        let activity = commands.state.admit()?;
-        self.state
-            .tasks()
-            .read(async move {
-                let _activity = activity;
-                commands.require_storage_ready()?;
-                commands
-                    .state
-                    .storage()
-                    .recording_datasets()
-                    .await
-                    .map_err(Into::into)
-            })
-            .await?
-    }
-
-    pub(crate) async fn episodes(
-        &self,
-        dataset_id: String,
-    ) -> Result<spiral_robotics_common::recording::EpisodeCatalog, BackendCommandError> {
-        let commands = self.clone();
-        let activity = commands.state.admit()?;
-        self.state
-            .tasks()
-            .read(async move {
-                let _activity = activity;
-                commands.require_storage_ready()?;
-                // A paused take has a readable SpiralDB checkpoint. Hide its catalog row
-                // here because live recording state is delivered through telemetry.
-                if !commands.state.storage().legacy_recording_available().await? {
-                    return Ok(spiral_robotics_common::recording::EpisodeCatalog::new(
-                        Vec::new(), vec!["Legacy recording storage has been retired. Inspect MCAP datasets in Data.".to_owned()],
-                    ));
-                }
-                let recording = commands
-                    .state
-                    .hardware()
-                    .state()
-                    .recording()
-                    .as_ref()
-                    .map(|progress| progress.episode().to_owned());
-                let episodes = EpisodeQueries::new(&commands.state)
-                    .list(dataset_id)
-                    .await?
-                    .into_iter()
-                    .filter(|episode| Some(episode.id()) != recording.as_deref())
-                    .collect();
-                Ok(spiral_robotics_common::recording::EpisodeCatalog::new(
-                    episodes,
-                    commands.state.episodes().issues(),
-                ))
-            })
-            .await?
-    }
 
     /// Begin a take using the configured teleoperation pair.
     pub(crate) async fn start_recording(
@@ -620,9 +543,11 @@ impl RecordingCommands {
             .execute(async move {
                 let _activity = activity;
                 commands.require_catalog_ready()?;
-                if !commands.state.storage().legacy_recording_available().await? {
-                    return Err(BackendCommandError::conflict("Live recording is unavailable after the MCAP migration. Browse imported datasets in Data; the MCAP recording producer is the next migration step."));
-                }
+                commands
+                    .state
+                    .storage()
+                    .validate_recording_destination(&dataset_id)
+                    .await?;
                 let adapter = RecordingAdapter::new(&commands.state);
                 let result = RecordingActions::new(&adapter)
                     .start(StartRecordingCommand::new(dataset_id, Vec::new(), None))
@@ -704,6 +629,32 @@ impl RecordingCommands {
                     .map_err(Into::into)
             })
             .await?
+    }
+
+    pub(crate) async fn camera_preview(
+        &self,
+        id: String,
+        request: spiral_robotics_common::datasets::RecordedCameraRequest,
+    ) -> Result<spiral_robotics_common::datasets::EpisodeVideo, BackendCommandError> {
+        let _activity = self.state.admit()?;
+        self.require_storage_ready()?;
+        spiral_robotics_storage::episodes::EpisodeId::try_from(id.as_str())
+            .map_err(|error| OperationError::InvalidInput(error.to_string()))?;
+        let result = match self
+            .state
+            .recording_session()
+            .camera_preview(&id, request.stream())
+            .await
+        {
+            Some(result) => result,
+            None => {
+                self.state
+                    .storage()
+                    .recorded_camera(&id, request.stream())
+                    .await
+            }
+        };
+        result.map_err(|error| OperationError::InvalidInput(error).into())
     }
 
     /// Move a physical follower to one committed recorded sample.
@@ -898,6 +849,11 @@ impl RecordingAdapter<'_> {
             )
             .await
             .map_err(OperationError::from)?;
+        *self
+            .clock
+            .lock()
+            .map_err(|_| OperationError::Internal("Recording clock lock poisoned".into()))? =
+            Some(writer.clock());
         let id = writer.id().to_owned();
         let started_ms = writer.started_ms();
         let summary = EpisodeInfo::new(id, dataset_id)
@@ -948,9 +904,15 @@ impl RecordingAdapter<'_> {
                     ));
                 }
             }
+            let clock = self
+                .clock
+                .lock()
+                .map_err(|_| OperationError::Internal("Recording clock lock poisoned".into()))?
+                .clone()
+                .ok_or_else(|| OperationError::Internal("Recording clock is missing".into()))?;
             VideoCapture::start(
                 self.state.cameras().clone(),
-                VideoCaptureRequest::new(episode, cameras),
+                VideoCaptureRequest::new(episode, cameras, clock),
                 self.state.video_encoder(),
             )
             .await

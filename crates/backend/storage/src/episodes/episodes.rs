@@ -8,35 +8,25 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::db::{Table, column as db};
-use futures::future;
+use crate::db::column as db;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
-use spiral_robotics_common::recording::{EpisodeArm, EpisodeInfo, EpisodeListItem, RecordingGap};
-use spiral_robotics_common::sql::QualifiedRelation;
+use spiral_robotics_common::recording::{EpisodeArm, EpisodeInfo, RecordingGap};
 
 use super::EpisodeId;
-use spiral_robotics_hardware::Calibration;
 use spiral_robotics_hardware::{
     ArmConditionSummary as HardwareArmConditionSummary, CompletedRecording,
     MotorLimits as HardwareMotorLimits, RecordingCompletion, RecordingWriter,
 };
 pub use spiral_robotics_hardware::{EpisodeCheckpoint, Sample};
 
-use super::episode_schema::{
-    EpisodeStreamCatalog, EpisodeStreamRow, JointSampleRows, SpiralEpisodeEncoder,
-    StoredEpisodeRow, VideoStreamProperties, VideoStreamRow, VideoStreamRows,
-};
-use super::video::{VideoAsset, VideoAssetMetadata, VideoSegment, VideoSize, VideoTiming};
-use crate::db::SpiralSql;
-use crate::db::{ProjectConnection, ProjectStore};
+use super::episode_schema::SpiralEpisodeEncoder;
+use crate::db::ProjectStore;
 
 const SAMPLE_QUEUE_DEPTH: usize = 2_048;
 /// Hard storage limit for a single recorded episode.
 pub const MAX_EPISODE_FRAMES: u64 = 1_000_000;
-const MAX_EPISODE_ROWS: usize = MAX_EPISODE_FRAMES as usize * 16;
 const NO_SAMPLE_TIMESTAMP_BITS: u64 = u64::MAX;
-const JOINT_BATCH_ROWS: usize = 512;
 
 type NormalizedPose = BTreeMap<String, f64>;
 pub type TimelineJointValues = BTreeMap<String, Option<f64>>;
@@ -540,6 +530,17 @@ pub struct FullEpisode {
 }
 
 impl FullEpisode {
+    pub(super) fn from_recording(
+        start: EpisodeStart,
+        samples: Vec<Sample>,
+        completion: EpisodeCompletion,
+    ) -> Self {
+        Self {
+            start,
+            samples,
+            completion,
+        }
+    }
     #[cfg(test)]
     pub(super) fn fixture_without_samples(
         start: EpisodeStart,
@@ -573,53 +574,11 @@ impl FullEpisode {
 pub struct EpisodeInspection {
     episode: FullEpisode,
     summary: EpisodeInfo,
-    videos: Vec<VideoAssetMetadata>,
 }
 
 impl EpisodeInspection {
-    pub fn into_parts(self) -> (FullEpisode, EpisodeInfo, Vec<VideoAssetMetadata>) {
-        (self.episode, self.summary, self.videos)
-    }
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct ReappliedEpisodePositions {
-    updated_episode_ids: Vec<String>,
-    frames_updated: u64,
-    episodes_unchanged: u64,
-    episodes_skipped: u64,
-    warnings: Vec<String>,
-}
-
-impl ReappliedEpisodePositions {
-    pub fn into_parts(self) -> (Vec<String>, u64, u64, u64, Vec<String>) {
-        (
-            self.updated_episode_ids,
-            self.frames_updated,
-            self.episodes_unchanged,
-            self.episodes_skipped,
-            self.warnings,
-        )
-    }
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn new(
-        updated_episode_ids: Vec<String>,
-        frames_updated: u64,
-        episodes_unchanged: u64,
-    ) -> Self {
-        Self {
-            updated_episode_ids,
-            frames_updated,
-            episodes_unchanged,
-            episodes_skipped: 0,
-            warnings: Vec::new(),
-        }
-    }
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn with_skipped(mut self, episodes_skipped: u64, warnings: Vec<String>) -> Self {
-        self.episodes_skipped = episodes_skipped;
-        self.warnings = warnings;
-        self
+    pub fn into_parts(self) -> (FullEpisode, EpisodeInfo) {
+        (self.episode, self.summary)
     }
 }
 
@@ -669,7 +628,6 @@ pub struct EpisodeStore {
     project_store: Arc<ProjectStore>,
     completed: Arc<Mutex<BTreeMap<String, FullEpisode>>>,
     /// What the last catalog read could not do.
-    catalog_issues: Mutex<Vec<String>>,
     seek_sequence: AtomicU64,
     latest_seek: Mutex<BTreeMap<String, u64>>,
     seek_gate: tokio::sync::Mutex<()>,
@@ -680,136 +638,28 @@ impl EpisodeStore {
         Self {
             project_store,
             completed: Arc::new(Mutex::new(BTreeMap::new())),
-            catalog_issues: Mutex::new(Vec::new()),
             seek_sequence: AtomicU64::new(0),
             latest_seek: Mutex::new(BTreeMap::new()),
             seek_gate: tokio::sync::Mutex::new(()),
         }
     }
 
-    pub async fn list(&self) -> Vec<EpisodeInfo> {
-        self.list_selected(EpisodeCatalogSelection::All).await
-    }
-
-    pub async fn list_in_dataset(&self, dataset_id: &str) -> Vec<EpisodeListItem> {
-        match self
-            .read_catalog(EpisodeCatalogSelection::Dataset(dataset_id))
-            .await
-        {
-            Ok(read) => {
-                *self.catalog_issues.lock_unpoisoned() = read.warnings.clone();
-                read.list_items()
-            }
-            Err(error) => {
-                *self.catalog_issues.lock_unpoisoned() = vec![error.to_string()];
-                Vec::new()
-            }
-        }
-    }
-
-    async fn list_selected(&self, selection: EpisodeCatalogSelection<'_>) -> Vec<EpisodeInfo> {
-        match self.read_catalog(selection).await {
-            Ok(read) => {
-                *self.catalog_issues.lock_unpoisoned() = read.warnings.clone();
-                read.summaries()
-            }
-            Err(error) => {
-                *self.catalog_issues.lock_unpoisoned() = vec![error.to_string()];
-                Vec::new()
-            }
-        }
-    }
-    pub fn issues(&self) -> Vec<String> {
-        self.catalog_issues.lock_unpoisoned().clone()
-    }
     pub async fn get(&self, id: &str) -> Result<EpisodeInfo, EpisodeError> {
-        EpisodeId::try_from(id).map_err(|_| EpisodeError::InvalidId(id.to_owned()))?;
-        self.try_list()
-            .await?
-            .into_iter()
-            .find(|episode| episode.id() == id)
-            .ok_or_else(|| EpisodeError::NotFound(id.to_owned()))
+        Ok(self.full_episode(id).await?.summary())
     }
 
     async fn full_episode(&self, id: &str) -> Result<FullEpisode, EpisodeError> {
-        EpisodeId::try_from(id).map_err(|_| EpisodeError::InvalidId(id.to_owned()))?;
-        self.load_episode(id, EpisodeCatalogSelection::Episode(id))
-            .await
-    }
-
-    async fn load_episode(
-        &self,
-        id: &str,
-        selection: EpisodeCatalogSelection<'_>,
-    ) -> Result<FullEpisode, EpisodeError> {
-        let (read, rows) =
-            future::try_join(self.read_catalog(selection), self.read_sample_rows(id)).await?;
-        let (start, completion, _) = read
-            .episodes
-            .into_iter()
-            .next()
-            .ok_or_else(|| EpisodeError::NotFound(id.to_owned()))?
-            .into_parts();
-        let decoded = start.decode_samples(rows).map_err(EpisodeError::Invalid)?;
-        Ok(FullEpisode {
-            start,
-            samples: decoded,
-            completion,
-        })
-    }
-
-    async fn read_sample_rows(
-        &self,
-        id: &str,
-    ) -> Result<Vec<JsonMap<String, JsonValue>>, EpisodeError> {
-        let sample_query = SpiralSql::episode_samples(self.project_store.table_prefix(), id);
-        let mut connection = self
-            .project_store
-            .connect()
-            .await
-            .map_err(EpisodeError::Invalid)?;
-        let result = connection
-            .query_rows(&sample_query, MAX_EPISODE_ROWS)
-            .await
-            .map_err(EpisodeError::Invalid)?;
-        if result.truncated() {
-            return Err(EpisodeError::Invalid(format!(
-                "episode {id:?} exceeds the supported row limit"
-            )));
+        if let Ok(episode) = self.completed_episode(id) {
+            return Ok(episode);
         }
-        Ok(result.into_rows())
+        EpisodeId::try_from(id).map_err(|_| EpisodeError::InvalidId(id.into()))?;
+        super::mcap_read::McapRead::load(&self.project_store, id).await
     }
 
     pub async fn inspection(&self, id: &str) -> Result<EpisodeInspection, EpisodeError> {
-        EpisodeId::try_from(id).map_err(|_| EpisodeError::InvalidId(id.to_owned()))?;
-        let (episode, videos) = future::try_join(
-            self.load_episode(id, EpisodeCatalogSelection::Inspection(id)),
-            self.video_metadata_for_existing(id),
-        )
-        .await?;
-        let summary = episode
-            .start
-            .summary(&episode.completion, episode.samples.len() as u64);
-        Ok(EpisodeInspection {
-            episode,
-            summary,
-            videos,
-        })
-    }
-
-    async fn next_id(&self) -> Result<String, EpisodeError> {
-        let highest = self
-            .try_list()
-            .await?
-            .iter()
-            .filter_map(|episode| {
-                EpisodeId::try_from(episode.id())
-                    .ok()
-                    .and_then(|id| id.sequence_number())
-            })
-            .max()
-            .unwrap_or(0);
-        Ok(format!("episode_{:06}", highest + 1))
+        let episode = self.full_episode(id).await?;
+        let summary = episode.summary();
+        Ok(EpisodeInspection { episode, summary })
     }
 
     pub async fn begin_in_dataset(
@@ -821,7 +671,7 @@ impl EpisodeStore {
                 "a take needs at least one connected arm to sample".to_owned(),
             ));
         }
-        let start = EpisodeStart::new(self.next_id().await?, request.dataset_id)
+        let start = EpisodeStart::new(uuid::Uuid::new_v4().to_string(), request.dataset_id)
             .with_current_timing(request.sample_hz)
             .with_source(request.source, request.note)
             .with_arms(request.arms, request.condition);
@@ -830,69 +680,11 @@ impl EpisodeStore {
     }
 
     pub async fn delete(&self, id: &str) -> Result<(), EpisodeError> {
-        self.get(id).await?;
-        let id = id.to_owned();
-        let table_prefix = self.project_store.table_prefix().to_owned();
-        let mut connection = self
-            .project_store
-            .connect_exclusive()
-            .await
-            .map_err(EpisodeError::Invalid)?;
-        connection
-            .clear_episode_rows(&table_prefix, &id)
+        EpisodeId::try_from(id).map_err(|_| EpisodeError::InvalidId(id.into()))?;
+        crate::StorageManager::new(self.project_store.clone())
+            .delete_recording(id)
             .await
             .map_err(EpisodeError::Invalid)
-    }
-
-    pub async fn reapply_calibration(
-        &self,
-        robot: &str,
-        calibration: &Calibration,
-    ) -> Result<ReappliedEpisodePositions, EpisodeError> {
-        let mut result = ReappliedEpisodePositions::default();
-        for summary in self.try_list().await? {
-            let Some(arm_index) = summary.arms().iter().position(|arm| arm.id() == robot) else {
-                continue;
-            };
-            let joints = summary.arms()[arm_index].joints();
-            let missing = joints
-                .iter()
-                .filter(|joint| !calibration.motors().contains_key(*joint))
-                .cloned()
-                .collect::<Vec<_>>();
-            if !missing.is_empty() {
-                result.episodes_skipped += 1;
-                result.warnings.push(format!(
-                    "take {:?} uses joints absent from the current calibration: {}",
-                    summary.id(),
-                    missing.join(", ")
-                ));
-                continue;
-            }
-            let mut episode = self.full_episode(summary.id()).await?;
-            let mut changed = false;
-            for sample in &mut episode.samples {
-                let normalized = joints.iter().enumerate().map(|(joint_index, joint)| {
-                    calibration.motors()[joint].normalize_raw(sample.raw()[arm_index][joint_index]).map(Some).map_err(|error| EpisodeError::Invalid(format!("could not reapply calibration to take {:?} joint {joint:?}: {error}", summary.id())))
-                }).collect::<Result<Vec<_>, _>>()?;
-                if sample.normalized()[arm_index] != normalized {
-                    sample
-                        .replace_normalized_arm(arm_index, normalized)
-                        .map_err(|_| {
-                            EpisodeError::Invalid("calibration arm index disappeared".to_owned())
-                        })?;
-                    changed = true;
-                }
-            }
-            if changed {
-                self.replace_samples(&episode).await?;
-                result.frames_updated = result.frames_updated.saturating_add(summary.frames());
-                result.updated_episode_ids.push(summary.id().to_owned());
-            } else {
-                result.episodes_unchanged += 1;
-            }
-        }
-        Ok(result)
     }
 
     pub async fn trajectory_at(
@@ -999,92 +791,7 @@ impl EpisodeStore {
         self.seek_gate.lock().await
     }
 
-    async fn video_metadata_for_existing(
-        &self,
-        id: &str,
-    ) -> Result<Vec<VideoAssetMetadata>, EpisodeError> {
-        let relation = Table::VideoAssets.qualified_name(self.project_store.table_prefix());
-        let id = SpiralSql::string_literal(id);
-        let mut connection = self
-            .project_store
-            .connect()
-            .await
-            .map_err(EpisodeError::Invalid)?;
-        let result = connection.query_rows(&format!("SELECT {}, {}, {}, {}, {}, {}, {}, {} FROM {relation} WHERE {} = {id} ORDER BY {}, {}", db::STREAM_ID, db::CAMERA_ID, db::WIDTH, db::HEIGHT, db::FPS, db::FRAMES, db::SEGMENT_INDEX, db::TIMELINE_OFFSET_NS, db::EPISODE_ID, db::STREAM_ID, db::SEGMENT_INDEX), 10_000).await.map_err(EpisodeError::Invalid)?;
-        result
-            .into_rows()
-            .into_iter()
-            .map(|row| row.video_metadata().map_err(EpisodeError::Invalid))
-            .collect()
-    }
-
-    async fn try_list(&self) -> Result<Vec<EpisodeInfo>, EpisodeError> {
-        self.read_catalog(EpisodeCatalogSelection::All)
-            .await
-            .map(EpisodeCatalogRead::summaries)
-    }
-
     /// Read every episode without modifying persisted data.
-    async fn read_catalog(
-        &self,
-        selection: EpisodeCatalogSelection<'_>,
-    ) -> Result<EpisodeCatalogRead, EpisodeError> {
-        EpisodeCatalogRead::load(&self.project_store, selection).await
-    }
-
-    async fn replace_samples(&self, episode: &FullEpisode) -> Result<(), EpisodeError> {
-        let episode = episode.clone();
-        let table_prefix = self.project_store.table_prefix().to_owned();
-        let mut connection = self
-            .project_store
-            .connect_exclusive()
-            .await
-            .map_err(EpisodeError::Invalid)?;
-        let sample_relation = Table::JointSamples.qualified_name(&table_prefix);
-        let episode_relation = Table::Episodes.qualified_name(&table_prefix);
-        connection
-            .execute_update_sql(&SpiralSql::delete_episode(
-                &sample_relation,
-                episode.start.id(),
-            ))
-            .await
-            .map_err(EpisodeError::Invalid)?;
-        connection
-            .execute_update_sql(&SpiralSql::delete_episode(
-                &episode_relation,
-                episode.start.id(),
-            ))
-            .await
-            .map_err(EpisodeError::Invalid)?;
-        let mut encoder = SpiralEpisodeEncoder::new(episode.start.clone())?;
-        let mut rows = Vec::new();
-        for sample in &episode.samples {
-            rows.extend(encoder.encode(sample)?);
-            if rows.len() >= 512 {
-                connection
-                    .ingest_batch(&sample_relation, rows.batch()?)
-                    .await
-                    .map_err(EpisodeError::Invalid)?;
-                rows.clear();
-            }
-        }
-        if !rows.is_empty() {
-            connection
-                .ingest_batch(&sample_relation, rows.batch()?)
-                .await
-                .map_err(EpisodeError::Invalid)?;
-        }
-        connection
-            .ingest_batch(
-                &episode_relation,
-                episode
-                    .completion
-                    .episode_batch(&episode.start, encoder.frames())
-                    .map_err(|error| EpisodeError::Invalid(error.to_string()))?,
-            )
-            .await
-            .map_err(EpisodeError::Invalid)
-    }
 
     pub fn completed_episode(&self, id: &str) -> Result<FullEpisode, EpisodeError> {
         self.completed
@@ -1120,13 +827,18 @@ trait EpisodeWriteSession: Send {
 }
 
 pub struct EpisodeWriter {
+    clock: spiral_robotics_hardware::CaptureClock,
     session: Box<dyn EpisodeWriteSession>,
 }
 
 impl EpisodeWriter {
+    pub fn clock(&self) -> spiral_robotics_hardware::CaptureClock {
+        self.clock.clone()
+    }
     fn from_session(session: impl EpisodeWriteSession + 'static) -> Self {
         Self {
             session: Box::new(session),
+            clock: Default::default(),
         }
     }
     fn start(
@@ -1187,6 +899,9 @@ impl EpisodeWriter {
 }
 
 impl RecordingWriter for EpisodeWriter {
+    fn update_clock(&self, now: std::time::Instant, elapsed: Option<std::time::Duration>) {
+        self.clock.update(now, elapsed);
+    }
     fn id(&self) -> &str {
         EpisodeWriter::id(self)
     }
@@ -1409,7 +1124,10 @@ struct SampleBuilder {
 }
 
 impl EpisodeStart {
-    fn decode_samples(&self, rows: Vec<JsonMap<String, JsonValue>>) -> Result<Vec<Sample>, String> {
+    pub(super) fn decode_samples(
+        &self,
+        rows: Vec<JsonMap<String, JsonValue>>,
+    ) -> Result<Vec<Sample>, String> {
         let start = self;
         let mut frames = BTreeMap::<u64, SampleBuilder>::new();
         for row in rows {
@@ -1597,175 +1315,6 @@ impl SampleLocation<'_> {
 /// Episodes and their stream declarations are read together because an
 /// episode's arms live in the stream relation: neither half is a complete
 /// record on its own.
-#[derive(Clone, Copy)]
-enum EpisodeCatalogSelection<'a> {
-    All,
-    Dataset(&'a str),
-    Episode(&'a str),
-    Inspection(&'a str),
-}
-
-impl EpisodeCatalogSelection<'_> {
-    fn episodes_sql(self, table_prefix: &str) -> String {
-        let relation = Table::Episodes.qualified_name(table_prefix);
-        match self {
-            Self::All => format!("SELECT * FROM {relation}"),
-            Self::Dataset(dataset_id) => format!(
-                "SELECT * FROM {relation} WHERE {} = {}",
-                db::DATASET_ID,
-                SpiralSql::string_literal(dataset_id)
-            ),
-            Self::Episode(episode_id) | Self::Inspection(episode_id) => format!(
-                "SELECT * FROM {relation} WHERE {} = {}",
-                db::EPISODE_ID,
-                SpiralSql::string_literal(episode_id)
-            ),
-        }
-    }
-
-    fn streams_sql(self, table_prefix: &str) -> String {
-        let streams = Table::EpisodeStreams.qualified_name(table_prefix);
-        let projection = format!(
-            "s.{0} AS {0}, s.{1} AS {1}, s.{2} AS {2}, s.{3} AS {3}, s.{4} AS {4}, s.{5} AS {5}",
-            db::EPISODE_ID,
-            db::STREAM_ID,
-            db::ORDINAL,
-            db::MODALITY,
-            db::ROBOT_TYPE,
-            db::JOINT_NAMES,
-        );
-        match self {
-            Self::All => format!(
-                "SELECT {projection} FROM {streams} AS s WHERE s.{} = 'joint'",
-                db::MODALITY
-            ),
-            Self::Dataset(_) => unreachable!("dataset listings do not read episode streams"),
-            Self::Episode(episode_id) => format!(
-                "SELECT * FROM {streams} WHERE {} = {}",
-                db::EPISODE_ID,
-                SpiralSql::string_literal(episode_id)
-            ),
-            Self::Inspection(episode_id) => format!(
-                "SELECT {projection} FROM {streams} AS s WHERE s.{} = {} AND s.{} = 'joint'",
-                db::EPISODE_ID,
-                SpiralSql::string_literal(episode_id),
-                db::MODALITY,
-            ),
-        }
-    }
-
-    fn decode_stream(
-        self,
-        batch: &arrow_array::RecordBatch,
-        row: usize,
-    ) -> Result<EpisodeStreamRow, String> {
-        match self {
-            Self::Episode(_) => EpisodeStreamRow::decode(batch, row),
-            Self::All | Self::Dataset(_) | Self::Inspection(_) => {
-                EpisodeStreamRow::decode_catalog(batch, row)
-            }
-        }
-    }
-}
-
-#[derive(Clone, Debug, Default)]
-struct EpisodeCatalogRead {
-    episodes: Vec<StoredEpisodeRow>,
-    warnings: Vec<String>,
-}
-
-impl EpisodeCatalogRead {
-    async fn load(
-        project_store: &ProjectStore,
-        selection: EpisodeCatalogSelection<'_>,
-    ) -> Result<Self, EpisodeError> {
-        let table_prefix = project_store.table_prefix();
-        let streams = async {
-            if matches!(selection, EpisodeCatalogSelection::Dataset(_)) {
-                return Ok(EpisodeStreamCatalog::default());
-            }
-            let mut connection = project_store
-                .connect()
-                .await
-                .map_err(EpisodeError::Invalid)?;
-            Self::load_streams(&mut connection, table_prefix, selection).await
-        };
-        let episode_batches = async {
-            let mut connection = project_store
-                .connect()
-                .await
-                .map_err(EpisodeError::Invalid)?;
-            connection
-                .read_batches(&selection.episodes_sql(table_prefix))
-                .await
-                .map_err(EpisodeError::Invalid)
-        };
-        let (streams, episode_batches) = future::try_join(streams, episode_batches).await?;
-        Self::decode(episode_batches, streams)
-    }
-
-    fn decode(
-        episode_batches: Vec<arrow_array::RecordBatch>,
-        streams: EpisodeStreamCatalog,
-    ) -> Result<Self, EpisodeError> {
-        let mut rows = Vec::new();
-        for batch in episode_batches {
-            for row in 0..batch.num_rows() {
-                rows.push(
-                    StoredEpisodeRow::decode(&batch, row, &streams)
-                        .map_err(EpisodeError::Invalid)?,
-                );
-            }
-        }
-        rows.sort_by(|left, right| {
-            left.start()
-                .started_ms()
-                .cmp(&right.start().started_ms())
-                .then_with(|| left.start().id().cmp(right.start().id()))
-        });
-
-        Ok(Self {
-            episodes: rows,
-            warnings: Vec::new(),
-        })
-    }
-
-    async fn load_streams(
-        connection: &mut ProjectConnection,
-        table_prefix: &str,
-        selection: EpisodeCatalogSelection<'_>,
-    ) -> Result<EpisodeStreamCatalog, EpisodeError> {
-        let mut rows = Vec::new();
-        for batch in connection
-            .read_batches(&selection.streams_sql(table_prefix))
-            .await
-            .map_err(EpisodeError::Invalid)?
-        {
-            for row in 0..batch.num_rows() {
-                rows.push(
-                    selection
-                        .decode_stream(&batch, row)
-                        .map_err(EpisodeError::Invalid)?,
-                );
-            }
-        }
-        Ok(EpisodeStreamCatalog::new(rows))
-    }
-
-    fn summaries(self) -> Vec<EpisodeInfo> {
-        self.episodes
-            .iter()
-            .map(|row| row.start().summary(row.completion(), row.frames()))
-            .collect()
-    }
-
-    fn list_items(self) -> Vec<EpisodeListItem> {
-        self.episodes
-            .iter()
-            .map(|row| EpisodeListItem::from(&row.start().summary(row.completion(), row.frames())))
-            .collect()
-    }
-}
 
 trait EpisodeJsonRow {
     fn string(&self, name: &str) -> Result<&str, String>;
@@ -1773,7 +1322,6 @@ trait EpisodeJsonRow {
     fn i64s(&self, name: &str) -> Result<Vec<i64>, String>;
     fn optional_f64s(&self, name: &str) -> Result<Vec<Option<f64>>, String>;
     fn optional_optional_f64s(&self, name: &str) -> Result<Option<Vec<Option<f64>>>, String>;
-    fn video_metadata(&self) -> Result<VideoAssetMetadata, String>;
 }
 
 impl EpisodeJsonRow for JsonMap<String, JsonValue> {
@@ -1826,28 +1374,6 @@ impl EpisodeJsonRow for JsonMap<String, JsonValue> {
             Some(_) => self.optional_f64s(name).map(Some),
         }
     }
-
-    fn video_metadata(&self) -> Result<VideoAssetMetadata, String> {
-        let fps = self.u64(db::FPS)? as u32;
-        let frames = self.u64(db::FRAMES)?;
-        let timing = VideoTiming::new(fps, frames);
-        Ok(VideoAssetMetadata::new(
-            self.string(db::STREAM_ID)?.to_owned(),
-            self.string(db::CAMERA_ID)?.to_owned(),
-            timing.duration_seconds(),
-        )
-        .with_size(VideoSize::new(
-            self.u64(db::WIDTH)? as u32,
-            self.u64(db::HEIGHT)? as u32,
-        ))
-        .with_timing(timing)
-        .with_segment(VideoSegment::new(
-            self.u64(db::SEGMENT_INDEX)? as u32,
-            self.get(db::TIMELINE_OFFSET_NS)
-                .and_then(JsonValue::as_u64)
-                .map(|value| value as f64 / 1_000_000_000.0),
-        )))
-    }
 }
 
 pub trait EpisodeArmCollection: Sized {
@@ -1880,423 +1406,5 @@ impl<T> UnpoisonedMutex<T> for Mutex<T> {
     fn lock_unpoisoned(&self) -> std::sync::MutexGuard<'_, T> {
         self.lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn inspection_reads_only_the_selected_joint_stream_layout() {
-        let sql =
-            EpisodeCatalogSelection::Inspection("episode_000052").streams_sql("spiral_robotics");
-
-        assert!(sql.contains("episode_id = 'episode_000052'"));
-        assert!(sql.contains("modality = 'joint'"));
-        assert!(sql.contains("joint_names"));
-        assert!(!sql.contains("camera_id"));
-        assert!(!sql.contains("temperature_celsius"));
-    }
-
-    #[test]
-    fn complete_episode_reads_retain_condition_and_video_columns() {
-        let sql = EpisodeCatalogSelection::Episode("episode_000052").streams_sql("spiral_robotics");
-
-        assert!(sql.starts_with("SELECT *"));
-        assert!(sql.contains("episode_id = 'episode_000052'"));
-    }
-}
-
-/// Complete episode replacement operations for one project.
-pub(crate) struct EpisodePersistence<'a> {
-    project_store: &'a ProjectStore,
-}
-
-impl<'a> EpisodePersistence<'a> {
-    pub(crate) const fn new(project_store: &'a ProjectStore) -> Self {
-        Self { project_store }
-    }
-
-    pub(crate) async fn commit(
-        &self,
-        episode: &FullEpisode,
-        videos: &[VideoAsset],
-    ) -> Result<(), String> {
-        let mut connection = self.project_store.connect().await?;
-        EpisodeReplacement::new(self.project_store.table_prefix(), episode, videos)
-            .save(&mut connection)
-            .await
-    }
-}
-
-struct EpisodeReplacement<'a> {
-    table_prefix: &'a str,
-    episode: &'a FullEpisode,
-    videos: &'a [VideoAsset],
-}
-
-impl<'a> EpisodeReplacement<'a> {
-    const fn new(
-        table_prefix: &'a str,
-        episode: &'a FullEpisode,
-        videos: &'a [VideoAsset],
-    ) -> Self {
-        Self {
-            table_prefix,
-            episode,
-            videos,
-        }
-    }
-
-    async fn save(self, connection: &mut ProjectConnection) -> Result<(), String> {
-        let Self {
-            table_prefix,
-            episode,
-            videos,
-        } = self;
-        let had_video = connection
-            .episode_has_video_assets(table_prefix, episode.start().id())
-            .await?;
-        let video_rows_changed = had_video || !videos.is_empty();
-        let dataset_exists = if video_rows_changed {
-            connection.video_dataset_exists(table_prefix).await?
-        } else {
-            false
-        };
-        let previous_video_episodes = if video_rows_changed {
-            connection.stored_video_episode_ids(table_prefix).await?
-        } else {
-            BTreeSet::new()
-        };
-        let has_video_rows = !videos.is_empty()
-            || previous_video_episodes
-                .iter()
-                .any(|episode_id| episode_id != episode.start().id());
-        if !dataset_exists && !previous_video_episodes.is_empty() && has_video_rows {
-            connection
-                .retarget_stored_video_media_relations(table_prefix)
-                .await?;
-        }
-        // Replacement is idempotent. Clear any earlier complete row and partial
-        // children before writing, so a retry after a process or network failure
-        // can finish without duplicating already-landed rows.
-        connection
-            .clear_episode_rows_only(table_prefix, episode.start().id())
-            .await?;
-        let datasets = Table::Datasets.qualified_name(table_prefix);
-        if !connection
-            .table_has_dataset(&datasets, episode.start().dataset_id())
-            .await?
-        {
-            connection
-                .ingest_batch(
-                    &datasets,
-                    episode
-                        .start()
-                        .dataset_batch()
-                        .map_err(|error| error.to_string())?,
-                )
-                .await?;
-        }
-        connection
-            .ingest_batch(
-                &Table::EpisodeStreams.qualified_name(table_prefix),
-                episode
-                    .start()
-                    .streams_batch(episode.completion())
-                    .map_err(|error| error.to_string())?,
-            )
-            .await?;
-        if !videos.is_empty() {
-            let streams = videos
-                .iter()
-                .map(|video| {
-                    (
-                        video.stream_id().to_owned(),
-                        VideoStreamRow::new(
-                            episode.start().id().to_owned(),
-                            video.stream_id().to_owned(),
-                            VideoStreamProperties::new(
-                                video.camera_id().to_owned(),
-                                video.size(),
-                                video.timing().fps(),
-                            ),
-                        ),
-                    )
-                })
-                .collect::<BTreeMap<_, _>>()
-                .into_values()
-                .collect::<Vec<_>>();
-            connection
-                .ingest_batch(
-                    &Table::EpisodeStreams.qualified_name(table_prefix),
-                    streams.batch().map_err(|error| error.to_string())?,
-                )
-                .await?;
-        }
-        let mut encoder = SpiralEpisodeEncoder::new(episode.start().clone())
-            .map_err(|error| error.to_string())?;
-        let mut rows = Vec::new();
-        for sample in episode.samples() {
-            rows.extend(encoder.encode(sample).map_err(|error| error.to_string())?);
-            if rows.len() >= JOINT_BATCH_ROWS {
-                let batch = rows.batch().map_err(|error| error.to_string())?;
-                connection
-                    .ingest_batch(&Table::JointSamples.qualified_name(table_prefix), batch)
-                    .await?;
-                rows.clear();
-            }
-        }
-        if !rows.is_empty() {
-            let batch = rows.batch().map_err(|error| error.to_string())?;
-            connection
-                .ingest_batch(&Table::JointSamples.qualified_name(table_prefix), batch)
-                .await?;
-        }
-        if !videos.is_empty() {
-            let media_relation = SpiralSql::video_dataset_output(table_prefix);
-            let batch = VideoAsset::storage_publication_batch(
-                episode.start().id(),
-                videos,
-                &media_relation,
-            )?;
-            connection
-                .ingest_batch(&Table::VideoAssets.qualified_name(table_prefix), batch)
-                .await?;
-        }
-        if video_rows_changed {
-            if has_video_rows {
-                connection
-                    .rebuild_video_dataset_internal(table_prefix, dataset_exists)
-                    .await?;
-            } else {
-                connection.drop_video_dataset(table_prefix).await?;
-            }
-        }
-        // Inserted last: readers never see an episode whose streams or media only
-        // partially arrived.
-        connection
-            .ingest_batch(
-                &Table::Episodes.qualified_name(table_prefix),
-                episode
-                    .completion()
-                    .episode_batch(episode.start(), encoder.frames())
-                    .map_err(|error| error.to_string())?,
-            )
-            .await?;
-        Ok(())
-    }
-}
-
-/// Rebuild the managed MP4 index for this table prefix from all durable `video_assets` rows.
-///
-/// The output is deliberately refreshed even when the Dataset already exists.
-/// Project import replaces those source rows in place, so merely observing an
-/// existing output does not prove that its video index matches the imported
-/// payloads.
-impl ProjectConnection {
-    pub(crate) async fn rebuild_video_dataset_internal(
-        &mut self,
-        table_prefix: &str,
-        dataset_exists: bool,
-    ) -> Result<(), String> {
-        let connection = self;
-        // One unfiltered view and Dataset cover all Studio recording tables. The
-        // output preserves episode and stream IDs, so consumers select individual
-        // media without multiplying catalog resources by episode count.
-        let sources = SpiralSql::video_sources_relation(table_prefix);
-        let assets = Table::VideoAssets.qualified_name(table_prefix);
-        let dataset = SpiralSql::video_dataset_relation(table_prefix);
-        connection
-            .execute_update_sql(&SpiralSql::create_video_sources(&sources, &assets))
-            .await
-            .map_err(|error| format!("creating Spiral video source view: {error}"))?;
-        if !dataset_exists {
-            connection
-                .execute_update_sql(&SpiralSql::create_video_dataset(&dataset, &sources))
-                .await
-                .map_err(|error| format!("creating Spiral MP4 dataset: {error}"))?;
-        }
-        connection
-            .execute_update_sql(&SpiralSql::refresh_dataset(&dataset))
-            .await
-            .map_err(|error| format!("refreshing Spiral MP4 dataset: {error}"))
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    pub async fn rebuild_video_dataset(
-        &mut self,
-        table_prefix: &str,
-        dataset_exists: bool,
-    ) -> Result<(), String> {
-        self.rebuild_video_dataset_internal(table_prefix, dataset_exists)
-            .await
-    }
-
-    pub(crate) async fn video_dataset_exists(
-        &mut self,
-        table_prefix: &str,
-    ) -> Result<bool, String> {
-        let connection = self;
-        let dataset = SpiralSql::video_dataset_relation(table_prefix);
-        match connection
-            .query_rows(&format!("DESCRIBE {dataset}"), 1)
-            .await
-        {
-            Ok(_) => Ok(true),
-            Err(error)
-                if error.contains("unknown resource")
-                    || error.contains("does not exist")
-                    || error.contains("unknown relation") =>
-            {
-                Ok(false)
-            }
-            Err(error) => Err(format!("checking Spiral MP4 dataset: {error}")),
-        }
-    }
-
-    pub(crate) async fn drop_video_dataset(&mut self, table_prefix: &str) -> Result<(), String> {
-        let connection = self;
-        let dataset = SpiralSql::video_dataset_relation(table_prefix);
-        QualifiedRelation::try_from(dataset.as_str())
-            .map_err(|error| format!("refusing to drop an invalid Spiral MP4 Dataset: {error}"))?;
-        connection
-            .execute_update_sql(&SpiralSql::drop_video_dataset_sql(&dataset))
-            .await
-            .map_err(|error| format!("dropping Spiral MP4 dataset with CASCADE: {error}"))?;
-        connection
-            .execute_update_sql(&SpiralSql::drop_video_sources(
-                &SpiralSql::video_sources_relation(table_prefix),
-            ))
-            .await
-            .map_err(|error| format!("dropping Spiral video source view: {error}"))
-    }
-
-    pub(crate) async fn clear_episode_rows(
-        &mut self,
-        table_prefix: &str,
-        episode_id: &str,
-    ) -> Result<(), String> {
-        let connection = self;
-        let previous_video_episodes = connection.stored_video_episode_ids(table_prefix).await?;
-        let had_video = previous_video_episodes.contains(episode_id);
-        let dataset_exists = if had_video {
-            connection.video_dataset_exists(table_prefix).await?
-        } else {
-            false
-        };
-        if had_video && !dataset_exists && previous_video_episodes.len() > 1 {
-            connection
-                .retarget_stored_video_media_relations(table_prefix)
-                .await?;
-        }
-        connection
-            .clear_episode_rows_only(table_prefix, episode_id)
-            .await?;
-        if !had_video {
-            return Ok(());
-        }
-        if previous_video_episodes.len() == 1 {
-            connection.drop_video_dataset(table_prefix).await?;
-        } else {
-            connection
-                .rebuild_video_dataset_internal(table_prefix, dataset_exists)
-                .await?;
-        }
-        Ok(())
-    }
-
-    async fn clear_episode_rows_only(
-        &mut self,
-        table_prefix: &str,
-        episode_id: &str,
-    ) -> Result<(), String> {
-        let connection = self;
-        for table in super::EpisodeRelations::DELETION_RELATIONS {
-            let target = table.qualified_name(table_prefix);
-            connection
-                .execute_update_sql(&SpiralSql::delete_episode(&target, episode_id))
-                .await
-                .map_err(|error| format!("clearing prior Spiral rows in {target}: {error}"))?;
-        }
-        Ok(())
-    }
-
-    pub(crate) async fn stored_video_episode_ids(
-        &mut self,
-        table_prefix: &str,
-    ) -> Result<BTreeSet<String>, String> {
-        let connection = self;
-        const MAX_VIDEO_EPISODES: usize = 100_000;
-
-        let assets = Table::VideoAssets.qualified_name(table_prefix);
-        let result = connection
-            .query_rows(
-                &format!(
-                    "SELECT DISTINCT {episode_id} FROM {assets}",
-                    episode_id = db::EPISODE_ID
-                ),
-                MAX_VIDEO_EPISODES,
-            )
-            .await?;
-        if result.truncated() {
-            return Err(format!(
-                "project has more than {MAX_VIDEO_EPISODES} video episodes; refusing incomplete video-resource reconciliation"
-            ));
-        }
-        result
-            .into_rows()
-            .into_iter()
-            .map(|row| {
-                row.get(db::EPISODE_ID)
-                    .and_then(JsonValue::as_str)
-                    .map(str::to_owned)
-                    .ok_or_else(|| "stored video asset has no valid episode ID".to_owned())
-            })
-            .collect()
-    }
-
-    async fn episode_has_video_assets(
-        &mut self,
-        table_prefix: &str,
-        episode_id: &str,
-    ) -> Result<bool, String> {
-        let connection = self;
-        let assets = Table::VideoAssets.qualified_name(table_prefix);
-        let result = connection.query_rows(
-        &format!(
-            "SELECT {episode_column} FROM {assets} WHERE {episode_column} = {episode_id} LIMIT 1",
-            episode_column = db::EPISODE_ID,
-            episode_id = SpiralSql::string_literal(episode_id),
-        ),
-        1,
-    ).await?;
-        Ok(!result.rows().is_empty())
-    }
-
-    pub(crate) async fn retarget_stored_video_media_relations(
-        &mut self,
-        table_prefix: &str,
-    ) -> Result<(), String> {
-        let connection = self;
-        let assets = Table::VideoAssets.qualified_name(table_prefix);
-        let output = SpiralSql::video_dataset_output(table_prefix);
-        connection
-            .execute_update_sql(&format!(
-                "UPDATE {assets} SET {media_relation} = {output}",
-                media_relation = db::MEDIA_RELATION,
-                output = SpiralSql::string_literal(&output),
-            ))
-            .await
-            .map_err(|error| format!("retargeting stored video media relations: {error}"))
-    }
-
-    async fn table_has_dataset(&mut self, target: &str, dataset_id: &str) -> Result<bool, String> {
-        let connection = self;
-        let result = connection
-            .query_rows(&SpiralSql::dataset_exists(target, dataset_id), 1)
-            .await?;
-        Ok(!result.rows().is_empty())
     }
 }

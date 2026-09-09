@@ -1,11 +1,11 @@
-//! Server-side camera recording into browser-playable MP4 assets.
+//! Camera capture into timestamped H.264 access units for the recording MCAP.
 
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub(crate) use spiral_robotics_storage::video::VideoAsset;
-use spiral_robotics_storage::video::{VideoSegment, VideoSize, VideoTiming};
+use spiral_robotics_hardware::CaptureClock;
+pub(crate) use spiral_robotics_storage::episodes::CameraRecording;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::watch;
 
@@ -41,6 +41,7 @@ impl CameraCaptureSpec {
 /// persistence layer.
 const MAX_VIDEO_SEGMENT_BYTES: usize = 512 * 1024 * 1024;
 const MAX_VIDEO_TRANSACTION_BYTES: usize = 1024 * 1024 * 1024;
+const H264_PACKET_FILTER: &str = "dump_extra=freq=keyframe,h264_metadata=aud=insert";
 
 pub(crate) struct VideoCapture {
     source: VideoCaptureSource,
@@ -53,24 +54,31 @@ struct VideoCaptureSource {
     specs: Vec<CameraCaptureSpec>,
     ffmpeg: String,
     codec: String,
+    clock: CaptureClock,
 }
 
 struct VideoCaptureProgress {
     next_segment: u32,
     active: Option<VideoCaptureRun>,
-    completed: Vec<VideoAsset>,
+    completed: Vec<CameraRecording>,
 }
 
 pub(crate) struct VideoCaptureRequest {
     episode_id: String,
     cameras: Vec<CameraCaptureSpec>,
+    clock: CaptureClock,
 }
 
 impl VideoCaptureRequest {
-    pub(crate) fn new(episode_id: &str, cameras: Vec<CameraCaptureSpec>) -> Self {
+    pub(crate) fn new(
+        episode_id: &str,
+        cameras: Vec<CameraCaptureSpec>,
+        clock: CaptureClock,
+    ) -> Self {
         Self {
             episode_id: episode_id.to_owned(),
             cameras,
+            clock,
         }
     }
 
@@ -85,7 +93,7 @@ impl VideoCaptureRequest {
 
 struct VideoCaptureRun {
     control: watch::Sender<CaptureState>,
-    tasks: Vec<tokio::task::JoinHandle<Result<VideoAsset, String>>>,
+    tasks: Vec<tokio::task::JoinHandle<Result<CameraRecording, String>>>,
 }
 
 struct PreparedCameraSegment {
@@ -98,7 +106,7 @@ impl PreparedCameraSegment {
     async fn record(
         self,
         mut control: watch::Receiver<CaptureState>,
-    ) -> Result<VideoAsset, String> {
+    ) -> Result<CameraRecording, String> {
         let Self {
             spec,
             mut frames,
@@ -128,10 +136,14 @@ impl PreparedCameraSegment {
                 "yuv420p",
                 "-color_range",
                 "tv",
-                "-movflags",
-                "frag_keyframe+empty_moov+default_base_moof",
+                "-bf",
+                "0",
+                "-g",
+                "30",
+                "-bsf:v",
+                H264_PACKET_FILTER,
                 "-f",
-                "mp4",
+                "h264",
                 "-y",
             ])
             .arg("pipe:1")
@@ -157,7 +169,7 @@ impl PreparedCameraSegment {
                 let read = stdout
                     .read(&mut buffer)
                     .await
-                    .map_err(|error| format!("could not read FFmpeg MP4 output: {error}"))?;
+                    .map_err(|error| format!("could not read FFmpeg H.264 output: {error}"))?;
                 if read == 0 {
                     break;
                 }
@@ -179,7 +191,7 @@ impl PreparedCameraSegment {
             String::from_utf8_lossy(&bytes).trim().to_owned()
         });
 
-        let mut written = 0_u64;
+        let mut timestamps = Vec::new();
         let mut last_sequence = 0_u64;
         loop {
             if *control.borrow() == CaptureState::Finish {
@@ -201,11 +213,13 @@ impl PreparedCameraSegment {
                     if frame.sequence() <= last_sequence {
                         continue;
                     }
+                    let Some(timestamp) = segment.clock.timestamp_ns(frame.captured_at()) else { continue; };
+                    if timestamps.last().is_some_and(|previous| *previous >= timestamp) { continue; }
                     stdin.write_all(frame.bytes()).await.map_err(|error| {
                         format!("camera {} could not write to FFmpeg: {error}", spec.stream_id)
                     })?;
                     last_sequence = frame.sequence();
-                    written += 1;
+                    timestamps.push(timestamp);
                 }
             }
         }
@@ -233,19 +247,18 @@ impl PreparedCameraSegment {
         let payload = output_task
             .await
             .map_err(|error| format!("FFmpeg output task failed: {error}"))??;
-        if written == 0 || payload.is_empty() {
+        if timestamps.is_empty() || payload.is_empty() {
             return Err(format!(
                 "camera {} delivered no video frames",
                 spec.stream_id
             ));
         }
-        Ok(VideoAsset::new(spec.stream_id, spec.camera_id, payload)
-            .with_size(VideoSize::new(spec.width, spec.height))
-            .with_timing(VideoTiming::new(encoder_fps, written))
-            .with_segment(VideoSegment::new(
-                segment.index,
-                Some(segment.timeline_offset_seconds),
-            )))
+        CameraRecording::from_annex_b(
+            spec.stream_id,
+            (spec.width, spec.height, encoder_fps),
+            (payload, timestamps),
+        )
+        .map(|recording| recording.with_camera_id(spec.camera_id))
     }
 }
 
@@ -253,8 +266,7 @@ impl PreparedCameraSegment {
 struct CameraSegment {
     ffmpeg: String,
     codec: String,
-    index: u32,
-    timeline_offset_seconds: f64,
+    clock: CaptureClock,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -297,6 +309,7 @@ impl VideoCapture {
                 specs: request.cameras,
                 ffmpeg: encoder.executable.clone(),
                 codec: encoder.codec.clone(),
+                clock: request.clock,
             },
             progress: VideoCaptureProgress {
                 next_segment: 0,
@@ -312,7 +325,7 @@ impl VideoCapture {
         &self.source.episode_id
     }
 
-    pub(crate) fn completed_assets(&self) -> Vec<VideoAsset> {
+    pub(crate) fn completed_assets(&self) -> Vec<CameraRecording> {
         self.progress.completed.clone()
     }
 
@@ -340,7 +353,6 @@ impl VideoCapture {
         if self.source.codec.trim().is_empty() {
             return Err("video encoder codec cannot be empty".to_owned());
         }
-        let index = self.progress.next_segment;
         let mut pending = Vec::with_capacity(self.source.specs.len());
         for spec in self.source.specs.iter().cloned() {
             if spec.stream_id.trim().is_empty() {
@@ -364,7 +376,7 @@ impl VideoCapture {
         // Subscriptions may fail independently (for example, a camera can be
         // unplugged between discovery and recording). Acquire every receiver
         // before the first encoder task starts so a later camera failure can
-        // never leave an earlier FFmpeg child or partial MP4 behind.
+        // never leave an earlier FFmpeg child or partial H.264 output behind.
         let mut prepared = Vec::with_capacity(pending.len());
         for spec in pending {
             let frames = subscribe(&spec.camera_id)?;
@@ -374,8 +386,7 @@ impl VideoCapture {
                 segment: CameraSegment {
                     ffmpeg: self.source.ffmpeg.clone(),
                     codec: self.source.codec.clone(),
-                    index,
-                    timeline_offset_seconds,
+                    clock: self.source.clock.clone(),
                 },
             });
         }
@@ -390,7 +401,7 @@ impl VideoCapture {
         Ok(())
     }
 
-    /// Stop feeding the current encoders immediately. Their finalized MP4s are
+    /// Stop feeding the current encoders immediately. Their encoded H.264 packets are
     /// collected after the joint-writer pause barrier has completed.
     pub(crate) fn request_pause(&self) {
         if let Some(active) = &self.progress.active {
@@ -426,10 +437,10 @@ impl VideoCapture {
             .progress
             .completed
             .iter()
-            .map(|asset| asset.payload().len())
+            .map(|asset| asset.encoded_bytes())
             .sum::<usize>();
         for asset in assets {
-            let next = total.saturating_add(asset.payload().len());
+            let next = total.saturating_add(asset.encoded_bytes());
             if next > MAX_VIDEO_TRANSACTION_BYTES {
                 failures.push(format!(
                     "episode video exceeded the {} MiB in-memory transaction limit",
@@ -443,7 +454,7 @@ impl VideoCapture {
         failures
     }
 
-    pub(crate) async fn finish(mut self) -> (Vec<VideoAsset>, Vec<String>) {
+    pub(crate) async fn finish(mut self) -> (Vec<CameraRecording>, Vec<String>) {
         let failures = self.finish_active().await;
         (self.progress.completed, failures)
     }
@@ -453,6 +464,63 @@ impl VideoCapture {
 mod tests {
     use super::*;
 
+    #[test]
+    #[ignore = "requires FFmpeg with libx264"]
+    fn each_keyframe_retains_its_own_decoder_parameters() {
+        let output = std::process::Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=red:s=32x32:r=5:d=1",
+                "-an",
+                "-c:v",
+                "libx264",
+                "-flags",
+                "+global_header",
+                "-x264-params",
+                "repeat-headers=0",
+                "-bf",
+                "0",
+                "-g",
+                "2",
+                "-bsf:v",
+                H264_PACKET_FILTER,
+                "-f",
+                "h264",
+                "pipe:1",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let camera = CameraRecording::from_annex_b(
+            "wrist".into(),
+            (32, 32, 5),
+            (
+                output.stdout,
+                (0..5).map(|index| index * 200_000_000).collect(),
+            ),
+        )
+        .unwrap();
+        let preview = CameraRecording::preview(&[camera], "wrist").unwrap();
+        assert_eq!(preview.packets().len(), 5);
+        assert_eq!(
+            preview
+                .packets()
+                .iter()
+                .filter(|packet| packet.keyframe())
+                .count(),
+            3
+        );
+    }
+
     fn capture(specs: Vec<CameraCaptureSpec>) -> VideoCapture {
         VideoCapture {
             source: VideoCaptureSource {
@@ -461,6 +529,7 @@ mod tests {
                 specs,
                 ffmpeg: "ffmpeg".to_owned(),
                 codec: "libx264".to_owned(),
+                clock: CaptureClock::default(),
             },
             progress: VideoCaptureProgress {
                 next_segment: 0,
@@ -472,9 +541,17 @@ mod tests {
 
     #[test]
     fn episode_ids_are_safe_logical_keys() {
-        assert!(VideoCaptureRequest::new("episode_000001", Vec::new()).has_safe_asset_key());
-        assert!(!VideoCaptureRequest::new("../episode", Vec::new()).has_safe_asset_key());
-        assert!(!VideoCaptureRequest::new("", Vec::new()).has_safe_asset_key());
+        assert!(
+            VideoCaptureRequest::new("episode_000001", Vec::new(), CaptureClock::default())
+                .has_safe_asset_key()
+        );
+        assert!(
+            !VideoCaptureRequest::new("../episode", Vec::new(), CaptureClock::default())
+                .has_safe_asset_key()
+        );
+        assert!(
+            !VideoCaptureRequest::new("", Vec::new(), CaptureClock::default()).has_safe_asset_key()
+        );
     }
 
     #[test]
@@ -510,20 +587,5 @@ mod tests {
         assert!(error.contains("second camera disappeared"));
         assert!(capture.progress.active.is_none());
         assert_eq!(capture.progress.next_segment, 0);
-    }
-
-    #[test]
-    fn video_metadata_is_derived_without_a_filesystem_path() {
-        let asset = VideoAsset::new(
-            "follower.camera.wrist".to_owned(),
-            "camera-1".to_owned(),
-            b"mp4".to_vec(),
-        )
-        .with_size(VideoSize::new(640, 480))
-        .with_timing(VideoTiming::new(30, 15))
-        .with_segment(VideoSegment::new(2, Some(4.5)));
-        assert_eq!(asset.metadata().duration_seconds(), 0.5);
-        assert_eq!(asset.metadata().segment().index(), 2);
-        assert_eq!(asset.payload(), b"mp4");
     }
 }

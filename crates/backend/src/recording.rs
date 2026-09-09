@@ -8,7 +8,6 @@
 pub(crate) mod commands;
 pub(crate) mod http;
 pub(crate) mod supervisor;
-pub(crate) mod video_http;
 
 use std::collections::BTreeMap;
 

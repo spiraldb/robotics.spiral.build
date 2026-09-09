@@ -91,36 +91,6 @@ struct EpisodeAssessment {
     problem: Option<String>,
 }
 
-/// One logical dataset known to Studio, including datasets whose native
-/// imported relations do not project into Studio's recorded-episode schema.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct RecordingDatasetSummary {
-    id: String,
-    name: String,
-    created_ms: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    description: Option<String>,
-}
-
-impl RecordingDatasetSummary {
-    pub fn new(id: impl Into<String>, name: impl Into<String>, created_ms: i64) -> Self {
-        Self {
-            id: id.into(),
-            name: name.into(),
-            created_ms,
-            description: None,
-        }
-    }
-    pub fn with_description(mut self, description: Option<String>) -> Self {
-        self.description = description;
-        self
-    }
-    pub fn id(&self) -> &str {
-        &self.id
-    }
-}
-
 impl EpisodeInfo {
     pub fn new(id: impl Into<String>, dataset_id: impl Into<String>) -> Self {
         Self {
@@ -290,7 +260,7 @@ impl EpisodeIdentity {
 ///
 /// The frame clock and arm tracks are columnar: arm and joint identities occur
 /// once, while every visual seek indexes the flat frame-major matrices in
-/// memory. Video bytes remain separate range-addressable resources.
+/// memory. Camera packets are fetched separately from MCAP.
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct EpisodeInspectionSnapshot {
@@ -298,7 +268,6 @@ pub struct EpisodeInspectionSnapshot {
     sample_times_seconds: Vec<f64>,
     follow_error_degrees: Vec<Option<f64>>,
     arms: Vec<EpisodeInspectionArm>,
-    videos: Vec<EpisodeVideoAssetMetadata>,
 }
 
 impl EpisodeInspectionSnapshot {
@@ -312,17 +281,11 @@ impl EpisodeInspectionSnapshot {
             sample_times_seconds,
             follow_error_degrees,
             arms: Vec::new(),
-            videos: Vec::new(),
         }
     }
 
     pub fn with_arms(mut self, arms: Vec<EpisodeInspectionArm>) -> Self {
         self.arms = arms;
-        self
-    }
-
-    pub fn with_videos(mut self, videos: Vec<EpisodeVideoAssetMetadata>) -> Self {
-        self.videos = videos;
         self
     }
 
@@ -337,9 +300,6 @@ impl EpisodeInspectionSnapshot {
     }
     pub fn arms(&self) -> &[EpisodeInspectionArm] {
         &self.arms
-    }
-    pub fn videos(&self) -> &[EpisodeVideoAssetMetadata] {
-        &self.videos
     }
 }
 
@@ -459,105 +419,6 @@ impl EpisodeOptionalFrameMatrix {
     }
     pub fn values(&self) -> &[Option<f64>] {
         &self.values
-    }
-}
-
-/// Filesystem-free metadata needed to align a browser-native video with the
-/// episode clock. The MP4 payload deliberately does not travel in the snapshot.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct EpisodeVideoAssetMetadata {
-    #[serde(flatten)]
-    identity: EpisodeVideoIdentity,
-    #[serde(flatten)]
-    format: EpisodeVideoFormat,
-    #[serde(flatten)]
-    timeline: EpisodeVideoTimeline,
-}
-
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct EpisodeVideoIdentity {
-    stream_id: String,
-    camera_id: String,
-    segment_index: u32,
-}
-
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
-pub struct EpisodeVideoFormat {
-    width: u32,
-    height: u32,
-    fps: u32,
-}
-
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
-pub struct EpisodeVideoTimeline {
-    frames: u64,
-    duration_seconds: f64,
-    timeline_offset_seconds: Option<f64>,
-}
-
-impl EpisodeVideoIdentity {
-    pub fn new(
-        stream_id: impl Into<String>,
-        camera_id: impl Into<String>,
-        segment_index: u32,
-    ) -> Self {
-        Self {
-            stream_id: stream_id.into(),
-            camera_id: camera_id.into(),
-            segment_index,
-        }
-    }
-}
-impl EpisodeVideoFormat {
-    pub const fn new(width: u32, height: u32, fps: u32) -> Self {
-        Self { width, height, fps }
-    }
-}
-impl EpisodeVideoTimeline {
-    pub const fn new(
-        frames: u64,
-        duration_seconds: f64,
-        timeline_offset_seconds: Option<f64>,
-    ) -> Self {
-        Self {
-            frames,
-            duration_seconds,
-            timeline_offset_seconds,
-        }
-    }
-}
-impl EpisodeVideoAssetMetadata {
-    pub const fn new(
-        identity: EpisodeVideoIdentity,
-        format: EpisodeVideoFormat,
-        timeline: EpisodeVideoTimeline,
-    ) -> Self {
-        Self {
-            identity,
-            format,
-            timeline,
-        }
-    }
-    pub fn stream_id(&self) -> &str {
-        &self.identity.stream_id
-    }
-    pub const fn duration_seconds(&self) -> f64 {
-        self.timeline.duration_seconds
-    }
-    pub const fn segment_index(&self) -> u32 {
-        self.identity.segment_index
-    }
-    pub const fn timeline_offset_seconds(&self) -> Option<f64> {
-        self.timeline.timeline_offset_seconds
-    }
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn with_stream_id(mut self, stream_id: impl Into<String>) -> Self {
-        self.identity.stream_id = stream_id.into();
-        self
     }
 }
 

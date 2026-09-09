@@ -11,7 +11,7 @@ from typing import Any
 from .act import TrainingSession, backend_info
 from .config import TrainingConfig
 from .errors import RuntimeRequestError
-from .spiral import SpiralActDataset
+from .mcap import McapTrainingDataset
 
 MAX_ROLLOUT_ACTION_STEPS = 100
 MAX_METRIC_HISTORY = 4_096
@@ -132,7 +132,7 @@ class TrainingJob:
     def _run(self, request: dict[str, Any]) -> None:
         dataset = None
         try:
-            dataset = SpiralActDataset(request)
+            dataset = McapTrainingDataset(request)
             config = TrainingConfig.from_request(_session_request(request, dataset))
             session = TrainingSession(config)
             resolved = {
@@ -228,7 +228,7 @@ class TrainingJob:
 
     def _checkpoint(
         self,
-        dataset: SpiralActDataset,
+        dataset: McapTrainingDataset,
         session: TrainingSession,
         request: dict[str, Any],
         step: int,
@@ -270,7 +270,7 @@ class TrainingJob:
             )
 
 
-def _session_request(request: dict[str, Any], dataset: SpiralActDataset) -> dict[str, Any]:
+def _session_request(request: dict[str, Any], dataset: McapTrainingDataset) -> dict[str, Any]:
     act = request["act"]
     return {
         "model": {
@@ -300,7 +300,7 @@ def _session_request(request: dict[str, Any], dataset: SpiralActDataset) -> dict
 
 def _checkpoint_manifest(
     request: dict[str, Any],
-    dataset: SpiralActDataset,
+    dataset: McapTrainingDataset,
     session: TrainingSession,
     step: int,
 ) -> tuple[dict[str, Any], dict[str, Any]]:

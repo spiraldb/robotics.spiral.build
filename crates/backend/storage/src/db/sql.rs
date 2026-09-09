@@ -21,7 +21,6 @@ use futures::StreamExt as _;
 use image::codecs::jpeg::JpegEncoder;
 use image::{DynamicImage, ImageFormat};
 use serde_json::{Map as JsonMap, Value as JsonValue};
-use spiral_robotics_common::recording::RecordingDatasetSummary;
 use spiral_robotics_common::relations::{
     CatalogRelation as ApiCatalogRelation, QueryColumn, RelationCatalog, SpiralQuerySnapshot,
 };
@@ -30,7 +29,6 @@ use spiral_robotics_common::sql::QualifiedRelation;
 use super::database::{DatabaseSession, RelationKind, SqlStatement};
 use super::project_store::{ProjectConnection, ProjectStore};
 use super::schema::{Table, column};
-use crate::episodes::video::{VideoAssetKey, VideoByteRange};
 use spiral_robotics_common::sql::ReadOnlyQueryMode;
 
 const MAX_QUERY_ROWS: usize = 1_000;
@@ -135,90 +133,11 @@ impl<'a> QueryImage<'a> {
 pub struct SpiralSql;
 
 impl SpiralSql {
-    #[cfg(test)]
-    pub(crate) fn count_rows(relation: &str) -> String {
-        format!("SELECT COUNT(*) AS rows FROM {relation}")
-    }
-
-    pub(crate) fn dataset_exists(relation: &str, dataset_id: &str) -> String {
-        format!(
-            "SELECT {dataset_id_column} FROM {relation} WHERE {dataset_id_column} = {dataset_id} LIMIT 1",
-            dataset_id_column = column::DATASET_ID,
-            dataset_id = Self::string_literal(dataset_id),
-        )
-    }
-
-    pub(crate) fn delete_episode(relation: &str, episode_id: &str) -> String {
-        format!(
-            "DELETE FROM {relation} WHERE {} = {}",
-            column::EPISODE_ID,
-            Self::string_literal(episode_id)
-        )
-    }
-
     pub(crate) fn delete_training_run(relation: &str, run_id: &str) -> String {
         format!(
             "DELETE FROM {relation} WHERE {} = {}",
             column::RUN_ID,
             Self::string_literal(run_id)
-        )
-    }
-
-    pub(crate) fn episode_samples(dataset: &str, episode_id: &str) -> String {
-        format!(
-            "SELECT * FROM {} WHERE {} = {} ORDER BY {}, {}",
-            Table::JointSamples.qualified_name(dataset),
-            column::EPISODE_ID,
-            Self::string_literal(episode_id),
-            column::SAMPLE_INDEX,
-            column::STREAM_ID,
-        )
-    }
-
-    pub(crate) fn video_asset_size(dataset: &str, asset: &VideoAssetKey) -> String {
-        let assets = Table::VideoAssets.qualified_name(dataset);
-        let segment_filter = asset
-            .segment_index()
-            .map(|segment| format!(" AND {} = {segment}", column::SEGMENT_INDEX))
-            .unwrap_or_default();
-        format!(
-            "SELECT {byte_size} FROM {assets} WHERE {episode_id_column} = {episode_id} \
-         AND {stream_id_column} = {stream_id}{segment_filter} \
-         ORDER BY {segment_index} LIMIT 1",
-            byte_size = column::BYTE_SIZE,
-            episode_id_column = column::EPISODE_ID,
-            episode_id = Self::string_literal(asset.episode_id()),
-            stream_id_column = column::STREAM_ID,
-            stream_id = Self::string_literal(asset.stream_id()),
-            segment_index = column::SEGMENT_INDEX,
-        )
-    }
-
-    pub(crate) fn video_asset_range(
-        dataset: &str,
-        asset: &VideoAssetKey,
-        range: VideoByteRange,
-    ) -> String {
-        let assets = Self::video_dataset_output(dataset);
-        let segment_filter = asset
-            .segment_index()
-            .map(|segment| format!(" AND {} = {segment}", column::SEGMENT_INDEX))
-            .unwrap_or_default();
-        format!(
-            "SELECT spql.io.read_bytes({source}, CAST({offset} AS UINT64), \
-         CAST({size} AS UINT64)) AS {payload} \
-         FROM {assets} WHERE {episode_id_column} = {episode_id} \
-         AND {stream_id_column} = {stream_id}{segment_filter} \
-         ORDER BY {segment_index} LIMIT 1",
-            source = column::SOURCE,
-            payload = column::PAYLOAD,
-            episode_id_column = column::EPISODE_ID,
-            episode_id = Self::string_literal(asset.episode_id()),
-            stream_id_column = column::STREAM_ID,
-            stream_id = Self::string_literal(asset.stream_id()),
-            offset = range.offset(),
-            size = range.size(),
-            segment_index = column::SEGMENT_INDEX,
         )
     }
 
@@ -237,58 +156,6 @@ impl SpiralSql {
         )
     }
 
-    pub(crate) fn video_sources_relation(dataset: &str) -> String {
-        format!("{dataset}_video_sources")
-    }
-
-    pub(crate) fn video_dataset_relation(dataset: &str) -> String {
-        format!("{dataset}_video")
-    }
-
-    pub(crate) fn video_dataset_output(dataset: &str) -> String {
-        format!("{}.assets", Self::video_dataset_relation(dataset))
-    }
-
-    pub(crate) fn create_video_sources(sources: &str, assets: &str) -> String {
-        format!(
-            "CREATE OR REPLACE VIEW {sources} AS SELECT assets.{episode_id}, assets.{stream_id}, \
-         assets.{segment_index}, assets.{timeline_offset}, \
-         assets.{payload} AS {source} \
-         FROM {assets} AS assets",
-            episode_id = column::EPISODE_ID,
-            stream_id = column::STREAM_ID,
-            segment_index = column::SEGMENT_INDEX,
-            timeline_offset = column::TIMELINE_OFFSET_NS,
-            payload = column::PAYLOAD,
-            source = column::SOURCE,
-        )
-    }
-
-    pub(crate) fn create_video_dataset(dataset: &str, sources: &str) -> String {
-        format!(
-            "CREATE DATASET {dataset} USING spql.mp4.dataset FROM {sources} \
-         WITH (blob = '{}', index_tier = 'dependency')",
-            column::SOURCE
-        )
-    }
-
-    pub(crate) fn refresh_dataset(dataset: &str) -> String {
-        format!("REFRESH DATASET {dataset}")
-    }
-
-    pub(crate) fn drop_video_dataset_sql(dataset: &str) -> String {
-        format!("DROP DATASET IF EXISTS {dataset} CASCADE")
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn drop_video_dataset(dataset: &str) -> String {
-        Self::drop_video_dataset_sql(dataset)
-    }
-
-    pub(crate) fn drop_video_sources(sources: &str) -> String {
-        format!("DROP VIEW IF EXISTS {sources}")
-    }
-
     pub(crate) fn ensure_read_only(sql: &str, mode: ReadOnlyQueryMode) -> Result<(), String> {
         spiral_robotics_common::sql::ReadOnlyQuery::new(sql, mode)
             .authorize()
@@ -300,30 +167,6 @@ impl SpiralSql {
     /// generated statements isolate this compatibility fallback in one function.
     pub fn string_literal(value: &str) -> String {
         format!("'{}'", value.replace('\'', "''"))
-    }
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn trajectory(dataset: &str, episode_id: &str, stream_id: &str) -> String {
-        let episodes = Table::Episodes.qualified_name(dataset);
-        let streams = Table::EpisodeStreams.qualified_name(dataset);
-        let samples = Table::JointSamples.qualified_name(dataset);
-        format!(
-            "SELECT e.{sample_hz}, s.{joint_names}, \
-         COALESCE(j.{action}, j.{state}) AS {replay} \
-         FROM {episodes} e JOIN {streams} s ON e.{episode_id} = s.{episode_id} \
-         JOIN {samples} j ON j.{episode_id} = s.{episode_id} AND j.{stream_id} = s.{stream_id} \
-         WHERE e.{episode_id} = {episode_value} AND s.{stream_id} = {stream_value} \
-         ORDER BY j.{sample_index}",
-            sample_hz = column::SAMPLE_HZ,
-            joint_names = column::JOINT_NAMES,
-            action = column::ACTION_POSITION,
-            state = column::STATE_POSITION,
-            replay = column::REPLAY_POSITION,
-            episode_id = column::EPISODE_ID,
-            stream_id = column::STREAM_ID,
-            sample_index = column::SAMPLE_INDEX,
-            episode_value = Self::string_literal(episode_id),
-            stream_value = Self::string_literal(stream_id),
-        )
     }
 }
 
@@ -365,54 +208,6 @@ impl<'a> ProjectQueries<'a> {
         );
         execution.parameters = statement.parameters().cloned();
         execution.run_async(&mut connection).await
-    }
-
-    pub(crate) async fn datasets(&self) -> Result<Vec<RecordingDatasetSummary>, String> {
-        let relation = Table::Datasets.qualified_name(self.project_store.table_prefix());
-        let mut connection = self.project_store.connect().await?;
-        if !connection.table_exists(&relation).await? {
-            return Ok(Vec::new());
-        }
-        let sql = format!(
-            "SELECT {id}, {name}, {created}, {description} FROM {relation} ORDER BY {created}, {id}",
-            id = column::DATASET_ID,
-            name = column::NAME,
-            created = column::CREATED_MS,
-            description = column::DESCRIPTION,
-        );
-        let result = QueryExecution::new(
-            &sql,
-            QueryLimits::new(100_000, MAX_INTERNAL_QUERY_RESPONSE_BYTES),
-        )
-        .run_async(&mut connection)
-        .await?;
-        if result.truncated() {
-            return Err("Spiral dataset catalog exceeds 100,000 rows".to_owned());
-        }
-        result
-            .into_rows()
-            .into_iter()
-            .enumerate()
-            .map(|(index, row)| {
-                let text = |column| {
-                    row.get(column)
-                        .and_then(JsonValue::as_str)
-                        .map(str::to_owned)
-                };
-                Ok(RecordingDatasetSummary::new(
-                    text(column::DATASET_ID)
-                        .ok_or_else(|| format!("dataset catalog row {index} has no dataset ID"))?,
-                    text(column::NAME)
-                        .ok_or_else(|| format!("dataset catalog row {index} has no name"))?,
-                    row.get(column::CREATED_MS)
-                        .and_then(JsonValue::as_i64)
-                        .ok_or_else(|| {
-                            format!("dataset catalog row {index} has no creation time")
-                        })?,
-                )
-                .with_description(text(column::DESCRIPTION)))
-            })
-            .collect()
     }
 
     pub(crate) async fn relation_catalog(&self) -> Result<RelationCatalog, String> {
@@ -519,20 +314,8 @@ mod tests {
 
         let cases = [
             (
-                SpiralSql::dataset_exists("robot_datasets", "dataset-'one"),
-                "dataset-'one",
-            ),
-            (
-                SpiralSql::delete_episode("robot_episodes", "take-'one"),
-                "take-'one",
-            ),
-            (
                 SpiralSql::delete_training_run("robot_training_checkpoints", "run-'one"),
                 "run-'one",
-            ),
-            (
-                SpiralSql::episode_samples("robot", "episode-'one"),
-                "episode-'one",
             ),
             (
                 SpiralSql::training_checkpoint("robot", "run-'two", 42),
@@ -542,70 +325,6 @@ mod tests {
         for (sql, value) in cases {
             assert_single_literal(&sql, value);
         }
-
-        let trajectory = SpiralSql::trajectory("robot", "episode-'three", "stream-'three");
-        assert_single_literal(&trajectory, "episode-'three");
-        assert_single_literal(&trajectory, "stream-'three");
-
-        let video = SpiralSql::video_asset_size(
-            "robot",
-            &VideoAssetKey::new(
-                "episode-'four".to_owned(),
-                "stream-'four".to_owned(),
-                Some(0),
-            ),
-        );
-        assert_single_literal(&video, "episode-'four");
-        assert_single_literal(&video, "stream-'four");
-    }
-
-    #[test]
-    fn video_resources_are_shared_by_the_namespace() {
-        assert_eq!(
-            SpiralSql::video_sources_relation("robot"),
-            "robot_video_sources"
-        );
-        assert_eq!(SpiralSql::video_dataset_relation("robot"), "robot_video");
-        assert_eq!(
-            SpiralSql::video_dataset_output("robot"),
-            "robot_video.assets"
-        );
-        assert_eq!(
-            SpiralSql::drop_video_dataset("robot_video"),
-            "DROP DATASET IF EXISTS robot_video CASCADE"
-        );
-        assert_eq!(
-            SpiralSql::create_video_sources("robot_video_sources", "robot_video_assets"),
-            "CREATE OR REPLACE VIEW robot_video_sources AS SELECT assets.episode_id, assets.stream_id, assets.segment_index, assets.timeline_offset_ns, assets.payload AS source FROM robot_video_assets AS assets"
-        );
-        assert_eq!(
-            SpiralSql::video_asset_range(
-                "robot",
-                &VideoAssetKey::new("episode".to_owned(), "camera.main".to_owned(), Some(2),),
-                VideoByteRange::new(512, 1024),
-            ),
-            "SELECT spql.io.read_bytes(source, CAST(512 AS UINT64), CAST(1024 AS UINT64)) AS payload FROM robot_video.assets WHERE episode_id = 'episode' AND stream_id = 'camera.main' AND segment_index = 2 ORDER BY segment_index LIMIT 1"
-        );
-    }
-
-    #[test]
-    fn generated_training_relations_follow_the_shared_contract() {
-        let sql = SpiralSql::trajectory("robotics", "episode-1", "leader");
-        for table in [Table::Episodes, Table::EpisodeStreams, Table::JointSamples] {
-            assert!(sql.contains(&table.qualified_name("robotics")));
-        }
-    }
-
-    #[test]
-    fn episode_sample_id_is_encoded_as_exactly_one_string_literal() {
-        assert_eq!(
-            SpiralSql::episode_samples("robotics", "episode_000051"),
-            "SELECT * FROM robotics_joint_samples WHERE episode_id = 'episode_000051' ORDER BY sample_index, stream_id"
-        );
-        assert_eq!(
-            SpiralSql::episode_samples("robotics", "episode_'quoted"),
-            "SELECT * FROM robotics_joint_samples WHERE episode_id = 'episode_''quoted' ORDER BY sample_index, stream_id"
-        );
     }
 
     #[test]

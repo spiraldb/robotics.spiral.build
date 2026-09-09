@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::OperationError;
 use crate::data::catalog_lease::{CatalogLeaseOwner, CatalogLeaseToken, CatalogMutationLease};
-use crate::robotics::video::{VideoAsset, VideoCapture};
+use crate::robotics::video::{CameraRecording, VideoCapture};
 use crate::sync::MutexRecovery;
 
 #[derive(Clone, Debug)]
@@ -145,6 +145,21 @@ impl RecordingSessionManager {
         self.media.lock().await.take()
     }
 
+    pub(crate) async fn camera_preview(
+        &self,
+        episode: &str,
+        stream: &str,
+    ) -> Option<Result<spiral_robotics_common::datasets::EpisodeVideo, String>> {
+        let media = self.media.lock().await;
+        let capture = media
+            .as_ref()
+            .filter(|capture| capture.episode_id() == episode)?;
+        Some(CameraRecording::preview(
+            &capture.completed_assets(),
+            stream,
+        ))
+    }
+
     pub(crate) async fn request_media_pause(&self) {
         if let Some(capture) = self.media.lock().await.as_ref() {
             capture.request_pause();
@@ -153,7 +168,7 @@ impl RecordingSessionManager {
 
     pub(crate) async fn finish_media_pause(
         &self,
-    ) -> Option<(String, Vec<VideoAsset>, Vec<String>)> {
+    ) -> Option<(String, Vec<CameraRecording>, Vec<String>)> {
         let mut media = self.media.lock().await;
         let capture = media.as_mut()?;
         let failures = capture.finish_pause().await;

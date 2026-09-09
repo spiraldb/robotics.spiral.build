@@ -38,7 +38,7 @@ impl StorageManager {
 }
 
 #[derive(Default)]
-struct CameraPackets {
+pub(crate) struct CameraPackets {
     packets: Vec<VideoPacket>,
     codec: Option<String>,
     previous_time: Option<u64>,
@@ -51,47 +51,49 @@ impl CameraPackets {
             .column_by_name("data")
             .ok_or("Camera has no encoded data")?;
         for row in 0..batch.num_rows() {
-            if self.packets.len() >= MAX_PACKETS {
-                return Err("Camera exceeds the 18,000-packet playback limit".into());
-            }
             if columns.text("format", row)? != "h264" {
                 return Err("Camera playback currently requires H.264 video".into());
             }
             let timestamp = columns.unsigned("log_time", row)?;
-            if self
-                .previous_time
-                .is_some_and(|previous| timestamp <= previous)
-            {
-                return Err("Camera timestamps must increase strictly for playback".into());
-            }
-            let bytes = Self::bytes(data.as_ref(), row)?;
-            self.encoded_bytes = self.encoded_bytes.saturating_add(bytes.len());
-            if self.encoded_bytes > MAX_ENCODED_BYTES {
-                return Err("Camera exceeds the 64 MiB encoded playback limit".into());
-            }
-            let access = H264AccessUnit::parse(bytes)?;
-            if self.packets.is_empty() && !access.keyframe {
-                return Err("Camera does not begin with a decodable H.264 keyframe".into());
-            }
-            if let Some(codec) = access.codec {
-                if self
-                    .codec
-                    .as_ref()
-                    .is_some_and(|previous| previous != &codec)
-                {
-                    return Err(
-                        "Camera changes H.264 codec configuration during this episode".into(),
-                    );
-                }
-                self.codec = Some(codec);
-            }
-            self.packets.push(VideoPacket::new(
-                timestamp,
-                base64::engine::general_purpose::STANDARD.encode(bytes),
-                access.keyframe,
-            ));
-            self.previous_time = Some(timestamp);
+            self.push(timestamp, Self::bytes(data.as_ref(), row)?)?;
         }
+        Ok(())
+    }
+
+    pub(crate) fn push(&mut self, timestamp: u64, bytes: &[u8]) -> Result<(), String> {
+        if self.packets.len() >= MAX_PACKETS {
+            return Err("Camera exceeds the 18,000-packet playback limit".into());
+        }
+        if self
+            .previous_time
+            .is_some_and(|previous| timestamp <= previous)
+        {
+            return Err("Camera timestamps must increase strictly for playback".into());
+        }
+        self.encoded_bytes = self.encoded_bytes.saturating_add(bytes.len());
+        if self.encoded_bytes > MAX_ENCODED_BYTES {
+            return Err("Camera exceeds the 64 MiB encoded playback limit".into());
+        }
+        let access = H264AccessUnit::parse(bytes)?;
+        if self.packets.is_empty() && !access.keyframe {
+            return Err("Camera does not begin with a decodable H.264 keyframe".into());
+        }
+        if let Some(codec) = access.codec {
+            if self
+                .codec
+                .as_ref()
+                .is_some_and(|previous| previous != &codec)
+            {
+                return Err("Camera changes H.264 codec configuration during this episode".into());
+            }
+            self.codec = Some(codec);
+        }
+        self.packets.push(VideoPacket::new(
+            timestamp,
+            base64::engine::general_purpose::STANDARD.encode(bytes),
+            access.keyframe,
+        ));
+        self.previous_time = Some(timestamp);
         Ok(())
     }
 
@@ -111,7 +113,7 @@ impl CameraPackets {
         Err("Camera packet data is not binary".into())
     }
 
-    fn finish(self) -> Result<EpisodeVideo, String> {
+    pub(crate) fn finish(self) -> Result<EpisodeVideo, String> {
         if self.packets.is_empty() {
             return Err("This camera has no video in the selected episode".into());
         }

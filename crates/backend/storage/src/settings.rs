@@ -284,7 +284,7 @@ impl BackendStateStore {
     }
 
     /// Isolated bootstrap state for integration tests, without process-global environment changes.
-    #[cfg(feature = "test-support")]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn open_for_test(path: PathBuf) -> Result<Self, String> {
         Self::open(path)
     }

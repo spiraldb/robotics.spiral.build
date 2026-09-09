@@ -129,7 +129,7 @@ fn RolloutPanels(
         }).with_class("scene-editor"),
     ];
     for camera in &cameras {
-        panels.push(camera.panel(camera.live_source(), false));
+        panels.push(camera.panel(camera.live_source()));
     }
     if cameras.is_empty() {
         panels.push(AssignedCamera::unassigned_panel());

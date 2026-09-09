@@ -18,7 +18,6 @@ impl StudioApi {
         crate::data::http::DatasetQueryEndpoints::register(&mut routes);
         crate::data::project_download::ProjectDownload::register(&mut routes);
         crate::robots::camera_preview::CameraPreview::register(&mut routes);
-        crate::recording::video_http::EpisodeVideo::register(&mut routes);
         crate::rollout::http::RolloutEndpoints::register(&mut routes);
         routes
     }

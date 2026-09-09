@@ -3,10 +3,8 @@
 use std::collections::BTreeMap;
 
 use spiral_robotics_hardware::{Calibration, CalibrationInput, MotorSpec};
-use spiral_robotics_storage::episodes::ReappliedEpisodePositions;
 
 use crate::OperationError;
-use crate::data::catalog_lease::CatalogLeaseToken;
 
 pub(crate) struct CalibrationUpdate<'a> {
     motors: &'a BTreeMap<String, MotorSpec>,
@@ -58,54 +56,6 @@ pub(crate) trait CalibrationControlPort {
         robot: &str,
         calibration: Calibration,
     ) -> Result<(), OperationError>;
-}
-
-/// Work that would make rewriting completed episode state inconsistent.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct CalibrationHistoryActivity {
-    recording: Option<String>,
-    replaying: Option<String>,
-    training_active: bool,
-}
-
-impl CalibrationHistoryActivity {
-    pub(crate) fn new(
-        recording: Option<String>,
-        replaying: Option<String>,
-        training_active: bool,
-    ) -> Self {
-        Self {
-            recording,
-            replaying,
-            training_active,
-        }
-    }
-}
-
-/// Recorded episode boundary for applying a robot's current calibration.
-pub(crate) trait CalibrationHistoryPort {
-    fn reserve_catalog_mutation(&self) -> Result<Option<CatalogLeaseToken>, OperationError>;
-    fn release_catalog_mutation(&self, token: CatalogLeaseToken);
-    fn activity(&self) -> CalibrationHistoryActivity;
-    async fn current_calibration(&self, robot: &str)
-    -> Result<Option<Calibration>, OperationError>;
-
-    async fn reapply_positions(
-        &self,
-        robot: String,
-        calibration: Calibration,
-    ) -> Result<ReappliedEpisodePositions, OperationError>;
-}
-
-struct CalibrationHistoryReservation<'a, P: CalibrationHistoryPort + ?Sized> {
-    port: &'a P,
-    token: CatalogLeaseToken,
-}
-
-impl<P: CalibrationHistoryPort + ?Sized> Drop for CalibrationHistoryReservation<'_, P> {
-    fn drop(&mut self) {
-        self.port.release_catalog_mutation(self.token);
-    }
 }
 
 pub(crate) struct CalibrationControlActions<'a, C: CalibrationControlPort + ?Sized> {
@@ -203,92 +153,6 @@ where
     }
 }
 
-pub(crate) struct CalibrationHistoryActions<'a, P: CalibrationHistoryPort + ?Sized> {
-    port: &'a P,
-}
-
-#[derive(Debug)]
-pub(crate) struct CalibrationReapplyOutcome {
-    episodes_updated: u64,
-    frames_updated: u64,
-    episodes_unchanged: u64,
-    episodes_skipped: u64,
-    warnings: Vec<String>,
-}
-
-impl CalibrationReapplyOutcome {
-    pub(crate) fn into_parts(self) -> (u64, u64, u64, u64, Vec<String>) {
-        (
-            self.episodes_updated,
-            self.frames_updated,
-            self.episodes_unchanged,
-            self.episodes_skipped,
-            self.warnings,
-        )
-    }
-}
-
-impl<'a, P: CalibrationHistoryPort + ?Sized> CalibrationHistoryActions<'a, P> {
-    pub(crate) const fn new(port: &'a P) -> Self {
-        Self { port }
-    }
-
-    /// Reinterpret every matching completed take from raw encoder counts.
-    ///
-    /// The current calibration is read once after catalog admission, local files
-    /// are replaced atomically, and only then are changed takes queued for remote
-    /// synchronization. Actions remain untouched because old takes do not retain
-    /// the raw commanded goal needed to transform them faithfully.
-    pub(crate) async fn reapply(
-        &self,
-        robot: &str,
-    ) -> Result<CalibrationReapplyOutcome, OperationError> {
-        let Some(token) = self.port.reserve_catalog_mutation()? else {
-            return Err(OperationError::Conflict(
-                "another recording or dataset mutation is active; wait for it to finish".to_owned(),
-            ));
-        };
-        let _reservation = CalibrationHistoryReservation {
-            port: self.port,
-            token,
-        };
-        let activity = self.port.activity();
-        if let Some(episode) = activity.recording {
-            return Err(OperationError::Conflict(format!(
-                "take {episode:?} is still recording; stop it before reapplying calibration"
-            )));
-        }
-        if let Some(episode) = activity.replaying {
-            return Err(OperationError::Conflict(format!(
-                "take {episode:?} is driving an arm; stop replay before reapplying calibration"
-            )));
-        }
-        if activity.training_active {
-            return Err(OperationError::Conflict(
-                "training is reading the episode dataset; stop it before reapplying calibration"
-                    .to_owned(),
-            ));
-        }
-        let calibration = self.port.current_calibration(robot).await?.ok_or_else(|| {
-            OperationError::InvalidInput(format!(
-                "robot {robot:?} must have a saved calibration before positions can be reapplied"
-            ))
-        })?;
-        let (updated_episode_ids, frames_updated, episodes_unchanged, episodes_skipped, warnings) =
-            self.port
-                .reapply_positions(robot.to_owned(), calibration)
-                .await?
-                .into_parts();
-        Ok(CalibrationReapplyOutcome {
-            episodes_updated: updated_episode_ids.len() as u64,
-            frames_updated,
-            episodes_unchanged,
-            episodes_skipped,
-            warnings,
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
@@ -296,7 +160,6 @@ mod tests {
     use spiral_robotics_hardware::{CalibrationError, MotorDirection, MotorReading};
 
     use super::*;
-    use crate::data::catalog_lease::{CatalogLeaseOwner, CatalogMutationLease};
 
     fn motors() -> BTreeMap<String, MotorSpec> {
         BTreeMap::from([(
@@ -481,102 +344,5 @@ mod tests {
         .build(&motors())
         .unwrap_err();
         assert!(matches!(error, CalibrationError::KeyMismatch { .. }));
-    }
-
-    struct History {
-        lease: CatalogMutationLease,
-        activity: CalibrationHistoryActivity,
-        calibration: Option<Calibration>,
-        updated: ReappliedEpisodePositions,
-    }
-
-    impl CalibrationHistoryPort for History {
-        fn reserve_catalog_mutation(&self) -> Result<Option<CatalogLeaseToken>, OperationError> {
-            Ok(self
-                .lease
-                .try_acquire(CatalogLeaseOwner::CalibrationReapply))
-        }
-
-        fn release_catalog_mutation(&self, token: CatalogLeaseToken) {
-            assert!(self.lease.release(token));
-        }
-
-        fn activity(&self) -> CalibrationHistoryActivity {
-            self.activity.clone()
-        }
-
-        async fn current_calibration(
-            &self,
-            _robot: &str,
-        ) -> Result<Option<Calibration>, OperationError> {
-            Ok(self.calibration.clone())
-        }
-
-        async fn reapply_positions(
-            &self,
-            _robot: String,
-            _calibration: Calibration,
-        ) -> Result<ReappliedEpisodePositions, OperationError> {
-            Ok(self.updated.clone())
-        }
-    }
-
-    fn history() -> History {
-        let calibration = input().build(&motors()).unwrap();
-        History {
-            lease: CatalogMutationLease::default(),
-            activity: CalibrationHistoryActivity::default(),
-            calibration: Some(calibration),
-            updated: ReappliedEpisodePositions::new(
-                vec!["episode_000001".to_owned(), "episode_000002".to_owned()],
-                120,
-                3,
-            )
-            .with_skipped(1, vec!["one old take was incomplete".to_owned()]),
-        }
-    }
-
-    #[tokio::test]
-    async fn recorded_state_is_rewritten_directly_in_spiral() {
-        let history = history();
-        let output = CalibrationHistoryActions::new(&history)
-            .reapply("arm")
-            .await
-            .unwrap();
-
-        let (updated, frames, unchanged, skipped, warnings) = output.into_parts();
-        assert_eq!(updated, 2);
-        assert_eq!(frames, 120);
-        assert_eq!(unchanged, 3);
-        assert_eq!(skipped, 1);
-        assert_eq!(warnings, ["one old take was incomplete"]);
-        assert!(!history.lease.is_held());
-    }
-
-    #[tokio::test]
-    async fn active_episode_consumers_block_recorded_recalibration() {
-        for activity in [
-            CalibrationHistoryActivity {
-                recording: Some("episode_000003".to_owned()),
-                ..CalibrationHistoryActivity::default()
-            },
-            CalibrationHistoryActivity {
-                replaying: Some("episode_000003".to_owned()),
-                ..CalibrationHistoryActivity::default()
-            },
-            CalibrationHistoryActivity {
-                training_active: true,
-                ..CalibrationHistoryActivity::default()
-            },
-        ] {
-            let mut history = history();
-            history.activity = activity;
-            let error = CalibrationHistoryActions::new(&history)
-                .reapply("arm")
-                .await
-                .unwrap_err();
-            assert!(matches!(error, OperationError::Conflict(_)));
-            assert!(!history.lease.is_held());
-        }
     }
 }

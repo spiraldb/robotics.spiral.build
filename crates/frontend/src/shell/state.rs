@@ -34,24 +34,18 @@ struct StudioProjectResources {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct StudioConfiguration {
-    dataset: String,
     spiral_query_available: bool,
 }
 
 impl Default for StudioConfiguration {
     fn default() -> Self {
         Self {
-            dataset: "spiral_robotics".to_owned(),
             spiral_query_available: false,
         }
     }
 }
 
 impl StudioConfiguration {
-    pub(crate) fn dataset(&self) -> &str {
-        &self.dataset
-    }
-
     pub(crate) const fn spiral_query_available(&self) -> bool {
         self.spiral_query_available
     }
@@ -77,11 +71,6 @@ impl StudioProjectResources {
         let loaded_configuration = loaded_settings.read().to_owned();
         let configuration = use_memo(use_reactive((&loaded_configuration,), move |(settings,)| {
             StudioConfiguration {
-                dataset: settings
-                    .as_ref()
-                    .map(|settings| settings.spiral().table_prefix().to_owned())
-                    .filter(|dataset| !dataset.trim().is_empty())
-                    .unwrap_or_else(|| "spiral_robotics".to_owned()),
                 spiral_query_available: settings
                     .as_ref()
                     .is_some_and(|settings| !settings.spiral().project_id().trim().is_empty()),

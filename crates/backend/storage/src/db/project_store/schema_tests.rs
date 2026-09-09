@@ -1,4 +1,5 @@
 use super::*;
+use arrow_schema::{DataType, Field};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::{Semaphore, mpsc};
 

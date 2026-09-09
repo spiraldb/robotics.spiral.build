@@ -7,7 +7,7 @@ use crate::activities::data::episode_cache::{
 use crate::activities::live::session::LiveSession;
 use crate::panels::recorded_source::RecordedSource;
 use crate::panels::timeline::panel::{
-    RecordedTimelineTraces, RecordingTimeline, SignalSource, StudioTimelineState, TimelinePlayback,
+    RecordedTimelineTraces, RecordingTimeline, SignalSource, StudioTimelineState,
     TimelineVisualization,
 };
 use crate::panels::timeline::playback::TimelineReplay;
@@ -137,7 +137,6 @@ impl LivePreview {
 pub(super) struct LiveTimeline {
     subject: TimelineSubject,
     source: Option<RecordedSource<EpisodePreview>>,
-    playback: TimelinePlayback,
     state: StudioTimelineState,
     visualization: TimelineVisualization,
     actions: LiveTimelineActions,
@@ -227,7 +226,6 @@ impl LiveTimeline {
         Self {
             subject,
             source: episode_preview_source,
-            playback,
             state: StudioTimelineState::new(subject_for_state, playhead(), playback)
                 .with_controls(follow_live(), robot_sync)
                 .with_label("Live Timeline"),
@@ -259,13 +257,6 @@ impl LiveTimeline {
             }
             None => camera.live_source(),
         }
-    }
-
-    pub(super) fn media_playing(&self) -> bool {
-        matches!(
-            self.playback,
-            TimelinePlayback::PreviewPlaying | TimelinePlayback::RobotSyncPlaying
-        )
     }
 
     pub(super) fn render(&self) -> Element {

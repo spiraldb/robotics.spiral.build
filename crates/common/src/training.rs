@@ -12,6 +12,14 @@ pub enum TrainingPolicy {
 }
 
 impl TrainingPolicy {
+    pub const fn mcap_training_blocker(self) -> Option<&'static str> {
+        match self {
+            Self::Act => Some(
+                "MCAP camera training is unavailable until Spiral supports decoding MCAP video into training images.",
+            ),
+        }
+    }
+
     pub const fn label(self) -> &'static str {
         match self {
             Self::Act => "ACT · vision",

@@ -1,6 +1,6 @@
 //! Exclusive, owner-scoped admission for episode-catalog mutation.
 //!
-//! Recording and calibration can mutate the same catalog.
+//! Recording and dataset import can mutate the same catalog.
 //! A boolean cannot express who owns that exclusion, so an unrelated stop can
 //! accidentally release somebody else's mutation. This lease uses an opaque
 //! generation token: only the exact acquisition may release its slot.
@@ -12,7 +12,6 @@ use crate::sync::MutexRecovery;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CatalogLeaseOwner {
     Recording,
-    CalibrationReapply,
     DatasetImport,
     WorkflowStart,
     StudioCatalogRead,
@@ -89,13 +88,13 @@ mod tests {
             .expect("recording acquires the empty catalog");
         assert!(
             lease
-                .try_acquire(CatalogLeaseOwner::CalibrationReapply)
+                .try_acquire(CatalogLeaseOwner::DatasetImport)
                 .is_none()
         );
         assert!(lease.release(recording));
 
         let dataset = lease
-            .try_acquire(CatalogLeaseOwner::CalibrationReapply)
+            .try_acquire(CatalogLeaseOwner::DatasetImport)
             .expect("dataset acquires after recording releases");
         assert!(
             !lease.release(recording),
@@ -149,7 +148,7 @@ mod tests {
         );
         assert!(
             lease
-                .try_acquire(CatalogLeaseOwner::CalibrationReapply)
+                .try_acquire(CatalogLeaseOwner::DatasetImport)
                 .is_none()
         );
         assert!(lease.release(agent));
@@ -175,7 +174,7 @@ mod tests {
         );
         assert!(
             lease
-                .try_acquire(CatalogLeaseOwner::CalibrationReapply)
+                .try_acquire(CatalogLeaseOwner::DatasetImport)
                 .is_none(),
             "destination cutover cannot replace history during conversation persistence"
         );

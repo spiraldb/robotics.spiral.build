@@ -31,6 +31,7 @@ from spiral_training_runtime.jobs import (
     TrainingJob,
     _checkpoint_manifest,
 )
+from spiral_training_runtime.mcap import McapTrainingDataset
 from spiral_training_runtime.models import (
     TrainingBackendInfoModel,
     TrainingJobRequestModel,
@@ -41,13 +42,6 @@ from spiral_training_runtime.service import (
     ARROW_STREAM_CONTENT_TYPE,
     POLICY_ARTIFACT_CONTENT_TYPE,
     create_app,
-)
-from spiral_training_runtime.spiral import (
-    Anchor,
-    Sample,
-    SpiralActDataset,
-    VideoSegment,
-    connect_spiral,
 )
 
 CANONICAL_FIXTURES = (
@@ -94,7 +88,7 @@ def job_request() -> dict:
             "client_id": "client-id",
             "client_secret": "client-secret",
         },
-        "sql": "SELECT * FROM spiral_robotics.joint_samples",
+        "sql": "SELECT * FROM fixture",
         "state_column": "state",
         "action_column": "action",
         "spiral_schema_version": VERSIONS.storage_schema,
@@ -155,356 +149,9 @@ def test_canonical_fixture_versions_follow_the_boundary_descriptor() -> None:
     assert request["spiral_schema_version"] == VERSIONS.storage_schema
 
 
-def test_spiral_connection_uses_scoped_adbc_options(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    captured: dict = {}
-
-    class Native:
-        def close(self) -> None:
-            pass
-
-    class Connection:
-        def close(self) -> None:
-            pass
-
-    monkeypatch.delenv("SPIRALDB_ADBC_DRIVER", raising=False)
-    monkeypatch.setattr("spiral_training_runtime.spiral.driver_path", lambda: "/driver.dylib")
-    monkeypatch.setattr(
-        "spiral_training_runtime.spiral.adbc_driver_manager.AdbcDatabase",
-        lambda **options: captured.update(options) or Native(),
-    )
-    monkeypatch.setattr(
-        "spiral_training_runtime.spiral.adbc_driver_manager.AdbcConnection", lambda _db: Native()
-    )
-    monkeypatch.setattr(
-        "spiral_training_runtime.spiral.dbapi.Connection", lambda *_args, **_kwargs: Connection()
-    )
-
-    connection = connect_spiral(job_request()["spiral"])
-    connection.close()
-
-    assert captured == {
-        "driver": "/driver.dylib",
-        "uri": "spiraldb://?project=project-test",
-        "spiral.api_url": "https://api.spiraldb.dev",
-        "spiral.spfs_url": "https://spfs.spiraldb.dev",
-        "username": "client-id",
-        "password": "client-secret",
-    }
-
-
-def test_training_anchors_follow_camera_frames_instead_of_joint_rows() -> None:
-    dataset = object.__new__(SpiralActDataset)
-    dataset.camera_streams = ("observation.images.wrist",)
-    dataset.sample_hz = 30.0
-    dataset.joint_sample_hz = 60.0
-    samples = {
-        index: Sample(
-            episode_id="episode",
-            stream_id="follower",
-            sample_index=index,
-            episode_time_ns=round(index * 1_000_000_000 / 60),
-            sample_hz=60.0,
-            state=np.array([index], dtype=np.float32),
-            action=np.array([index], dtype=np.float32),
-            robot_type="so101_follower",
-            joint_names=("joint",),
-        )
-        for index in range(6)
-    }
-    dataset.by_stream = {("episode", "follower"): samples}
-    dataset.segments = [
-        VideoSegment(
-            episode_id="episode",
-            stream_id="observation.images.wrist",
-            segment_index=0,
-            timeline_offset_ns=0,
-            fps=30,
-            frames=3,
-            width=32,
-            height=32,
-            media_relation="spiral_robotics.video_media",
-        )
-    ]
-
-    anchors = dataset._build_anchors()
-
-    assert [anchor.frame_index for anchor in anchors] == [0, 1, 2]
-    assert [anchor.sample.sample_index for anchor in anchors] == [0, 2, 4]
-
-
-def test_missing_managed_video_relation_is_an_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    dataset = object.__new__(SpiralActDataset)
-    dataset.camera_streams = ("observation.images.wrist",)
-    dataset.image_width = 2
-    dataset.image_height = 1
-    dataset.resize_images = False
-    dataset.video_decoder = "auto"
-    sample = Sample(
-        episode_id="episode",
-        stream_id="follower",
-        sample_index=0,
-        episode_time_ns=0,
-        sample_hz=30.0,
-        state=np.array([0], dtype=np.float32),
-        action=np.array([0], dtype=np.float32),
-        robot_type="so101_follower",
-        joint_names=("joint",),
-    )
-    segment = VideoSegment(
-        episode_id="episode",
-        stream_id="observation.images.wrist",
-        segment_index=0,
-        timeline_offset_ns=0,
-        fps=30,
-        frames=1,
-        width=2,
-        height=1,
-        media_relation="spiral_robotics.video_episode.assets",
-    )
-    dataset.segments = [segment]
-    queries: list[str] = []
-
-    def query(sql: str) -> pa.Table:
-        queries.append(sql)
-        raise RuntimeRequestError(
-            "Spiral training query failed: unknown table `spiral_robotics.video_episode.assets`",
-            422,
-        )
-
-    monkeypatch.setattr(dataset, "_query", query)
-
-    with pytest.raises(RuntimeRequestError, match="unknown table"):
-        dataset._fetch_images([Anchor(sample, 0, 0)])
-
-    assert len(queries) == 1
-    assert "video_episode.assets" in queries[0]
-
-
-def test_spiral_image_query_casts_request_index_to_arrow_integer(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    dataset = object.__new__(SpiralActDataset)
-    dataset.camera_streams = ("observation.images.wrist",)
-    dataset.image_width = 2
-    dataset.image_height = 1
-    dataset.resize_images = False
-    dataset.video_decoder = "auto"
-    sample = Sample(
-        episode_id="episode",
-        stream_id="follower",
-        sample_index=0,
-        episode_time_ns=0,
-        sample_hz=30.0,
-        state=np.array([0], dtype=np.float32),
-        action=np.array([0], dtype=np.float32),
-        robot_type="so101_follower",
-        joint_names=("joint",),
-    )
-    dataset.segments = [
-        VideoSegment(
-            episode_id="episode",
-            stream_id="observation.images.wrist",
-            segment_index=0,
-            timeline_offset_ns=0,
-            fps=30,
-            frames=1,
-            width=2,
-            height=1,
-            media_relation="spiral_robotics.video_episode.assets",
-        )
-    ]
-    queries: list[str] = []
-
-    def query(sql: str) -> pa.Table:
-        queries.append(sql)
-        return pa.table(
-            {
-                "group_index": pa.array([0], type=pa.int64()),
-                "request_index": pa.array([0], type=pa.int64()),
-                "image": [
-                    {
-                        "data": [1, 2, 3, 4, 5, 6],
-                        "shape": [1, 2, 3],
-                    }
-                ],
-            }
-        )
-
-    monkeypatch.setattr(dataset, "_query", query)
-
-    images = dataset._fetch_images([Anchor(sample, 0, 0)])
-
-    assert images.tolist() == [[[[[1, 2, 3], [4, 5, 6]]]]]
-    assert "CAST(f.request_index AS BIGINT) AS request_index" in queries[0]
-
-
-def test_spiral_batches_all_video_segments_into_one_query(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    dataset = object.__new__(SpiralActDataset)
-    dataset.camera_streams = ("observation.images.wrist",)
-    dataset.image_width = 1
-    dataset.image_height = 1
-    dataset.resize_images = False
-    dataset.video_decoder = "auto"
-    samples = [
-        Sample(
-            episode_id=episode,
-            stream_id="follower",
-            sample_index=0,
-            episode_time_ns=0,
-            sample_hz=30.0,
-            state=np.array([0], dtype=np.float32),
-            action=np.array([0], dtype=np.float32),
-            robot_type="so101_follower",
-            joint_names=("joint",),
-        )
-        for episode in ("episode-a", "episode-b")
-    ]
-    dataset.segments = [
-        VideoSegment(
-            episode_id=sample.episode_id,
-            stream_id="observation.images.wrist",
-            segment_index=0,
-            timeline_offset_ns=0,
-            fps=30,
-            frames=1,
-            width=1,
-            height=1,
-            media_relation="spiral_robotics.video_episode.assets",
-        )
-        for sample in samples
-    ]
-    queries: list[str] = []
-
-    def query(sql: str) -> pa.Table:
-        queries.append(sql)
-        return pa.table(
-            {
-                "group_index": pa.array([0, 1], type=pa.int64()),
-                "request_index": pa.array([0, 0], type=pa.int64()),
-                "image": [
-                    {"data": [1, 2, 3], "shape": [1, 1, 3]},
-                    {"data": [4, 5, 6], "shape": [1, 1, 3]},
-                ],
-            }
-        )
-
-    monkeypatch.setattr(dataset, "_query", query)
-
-    images = dataset._fetch_images([Anchor(sample, 0, 0) for sample in samples])
-
-    assert len(queries) == 1
-    assert " UNION ALL " in queries[0]
-    assert "0 AS group_index" in queries[0]
-    assert "1 AS group_index" in queries[0]
-    assert images.tolist() == [
-        [[[[1, 2, 3]]]],
-        [[[[4, 5, 6]]]],
-    ]
-
-
-def test_training_batch_stays_within_one_weighted_episode() -> None:
-    dataset = object.__new__(SpiralActDataset)
-    dataset.batch_size = 16
-    population = [
-        Anchor(
-            Sample(
-                episode_id=episode,
-                stream_id="follower",
-                sample_index=index,
-                episode_time_ns=index,
-                sample_hz=30.0,
-                state=np.array([index], dtype=np.float32),
-                action=np.array([index], dtype=np.float32),
-                robot_type="so101_follower",
-                joint_names=("joint",),
-            ),
-            frame_index=index,
-            episode_time_ns=index,
-        )
-        for episode, count in (("short", 2), ("long", 8))
-        for index in range(count)
-    ]
-    rng = np.random.default_rng(42)
-
-    batches = [dataset._select_episode_batch(population, rng) for _ in range(200)]
-
-    assert all(len({anchor.sample.episode_id for anchor in batch}) == 1 for batch in batches)
-    long_batches = sum(batch[0].sample.episode_id == "long" for batch in batches)
-    assert 140 <= long_batches <= 180
-
-
-def test_checkpoint_ingest_uses_flat_table_prefix() -> None:
-    calls: list[tuple[str, pa.Table, dict[str, object]]] = []
-
-    class Cursor:
-        def __enter__(self) -> Cursor:
-            return self
-
-        def __exit__(self, *_args: object) -> None:
-            pass
-
-        def adbc_ingest(self, table_name: str, table: pa.Table, **options: object) -> None:
-            calls.append((table_name, table, options))
-
-    class Connection:
-        def cursor(self) -> Cursor:
-            return Cursor()
-
-    dataset = object.__new__(SpiralActDataset)
-    dataset.table_prefix = "spiral_robotics"
-    dataset.connection = Connection()
-
-    dataset.write_checkpoint(
-        "run-id",
-        "run-name",
-        1,
-        123,
-        0.25,
-        "{}",
-        b"checkpoint",
-    )
-
-    assert len(calls) == 1
-    table_name, table, options = calls[0]
-    assert table_name == "spiral_robotics_training_checkpoints"
-    assert table.num_rows == 1
-    assert options == {"mode": "append"}
-
-
-def test_checkpoint_ingest_reports_an_unprovisioned_relation() -> None:
-    class Cursor:
-        def __enter__(self) -> Cursor:
-            return self
-
-        def __exit__(self, *_args: object) -> None:
-            pass
-
-        def adbc_ingest(
-            self, _table_name: str, _table: pa.Table, **_options: object
-        ) -> None:
-            raise RuntimeError("unknown table spiral_robotics_training_checkpoints")
-
-    class Connection:
-        def cursor(self) -> Cursor:
-            return Cursor()
-
-    dataset = object.__new__(SpiralActDataset)
-    dataset.table_prefix = "spiral_robotics"
-    dataset.connection = Connection()
-
-    with pytest.raises(RuntimeRequestError) as failure:
-        dataset.write_checkpoint("run-id", "run-name", 1, 123, None, "{}", b"checkpoint")
-
-    assert failure.value.status_code == 422
-    assert "unknown table spiral_robotics_training_checkpoints" in str(failure.value)
-    assert "Settings → SpiralDB → Test connection" in str(failure.value)
-    assert isinstance(failure.value.__cause__, RuntimeError)
+def test_mcap_training_requires_native_spiral_image_decoding() -> None:
+    with pytest.raises(RuntimeRequestError, match="MCAP camera training is unavailable"):
+        McapTrainingDataset(job_request())
 
 
 def test_job_api_owns_data_training_and_checkpoint_lifecycle(
@@ -566,7 +213,7 @@ def test_job_api_owns_data_training_and_checkpoint_lifecycle(
         def checkpoint(self, _request: dict) -> bytes:
             return b"safe-tensors"
 
-    monkeypatch.setattr("spiral_training_runtime.jobs.SpiralActDataset", Dataset)
+    monkeypatch.setattr("spiral_training_runtime.jobs.McapTrainingDataset", Dataset)
     monkeypatch.setattr("spiral_training_runtime.jobs.TrainingSession", Session)
 
     async def exercise() -> None:

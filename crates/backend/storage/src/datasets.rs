@@ -1,5 +1,8 @@
 //! Native Dataset discovery through the same project journal used by the ADBC driver.
 mod playback;
+pub(crate) use playback::CameraPackets;
+mod recording_import;
+pub(crate) use recording_import::{McapSources, RecordingImport};
 
 use crate::{StorageManager, settings::SpiralConnectionSettings};
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
@@ -370,6 +373,12 @@ impl StorageManager {
             .resources()
             .await
     }
+    pub async fn validate_recording_destination(&self, name: &str) -> Result<bool, String> {
+        self.project_store()
+            .validate_recording_destination(name)
+            .await
+    }
+
     pub async fn datasets(&self) -> Result<Vec<DatasetSummary>, String> {
         DatasetCatalogClient::connect(self.connection_settings())
             .await?
@@ -450,5 +459,82 @@ mod tests {
         assert_eq!(topic.name(), "/camera/top/video");
         assert_eq!(topic.samples(), Some(10937));
         assert_eq!(topic.members(), 52);
+    }
+}
+
+impl crate::ProjectStore {
+    pub(crate) async fn validate_recording_destination(&self, name: &str) -> Result<bool, String> {
+        if !crate::db::StorageSchema::is_dataset_id(name) || name.contains('.') {
+            return Err("Dataset name must contain 1–96 letters, numbers, '_' or '-'".into());
+        }
+        let client = DatasetCatalogClient::connect(self.connection_settings()).await?;
+        let resources = client.resources().await?;
+        let dataset_name = format!("dataset_{name}");
+        let source_name = format!("dataset_source_{name}");
+        let Some(resource) = resources
+            .iter()
+            .find(|r| r.selection().label() == dataset_name)
+        else {
+            if resources
+                .iter()
+                .any(|r| r.selection().label() == source_name)
+            {
+                return Err("The recording source exists without its dataset; repair the catalog before recording".into());
+            }
+            return Ok(false);
+        };
+        let dataset = resource
+            .dataset()
+            .ok_or("Recording destination is not a Spiral dataset")?;
+        let response: serde_json::Value = client
+            .request(client.client.get(format!(
+                "{}/datasets/{}/versions/{}",
+                client.endpoint,
+                dataset.resource_id(),
+                dataset.version_id()
+            )))
+            .await?;
+        let definition = &response["version"]["definition"];
+        let payload: serde_json::Value = serde_json::from_str(
+            definition["canonicalPayload"]
+                .as_str()
+                .ok_or("Dataset has no source definition")?,
+        )
+        .map_err(|e| e.to_string())?;
+        if definition["producerId"] != "spql.mcap.dataset"
+            || payload["sourceRelation"] != json!([source_name])
+            || payload["options"]["key"] != "recording"
+            || payload["options"]["blob"] != "source"
+        {
+            return Err("This dataset does not use Studio's MCAP recording source; choose a recording destination with the shared source view".into());
+        }
+        Ok(true)
+    }
+}
+
+impl crate::ProjectStore {
+    pub(crate) async fn recording_dataset_names(&self) -> Result<Vec<String>, String> {
+        let client = DatasetCatalogClient::connect(self.connection_settings()).await?;
+        let resources = client.resources().await?;
+        let mut names = Vec::new();
+        for resource in &resources {
+            if resource.dataset().is_none() {
+                continue;
+            }
+            let label = resource.selection().label();
+            let Some(name) = label.strip_prefix("dataset_") else {
+                continue;
+            };
+            let source_name = format!("dataset_source_{name}");
+            if resources
+                .iter()
+                .any(|resource| resource.selection().label() == source_name)
+                && self.validate_recording_destination(name).await?
+            {
+                names.push(name.to_owned());
+            }
+        }
+        names.sort();
+        Ok(names)
     }
 }

@@ -1822,10 +1822,7 @@ mod tests {
         WorkflowModelRunMetadata, WorkflowNodeConfig, WorkflowNodeSpec, WorkflowRunPhase,
     };
 
-    use crate::robotics::video::VideoAsset;
     use spiral_robotics_storage::ProjectStore;
-    use spiral_robotics_storage::SpiralSql;
-    use spiral_robotics_storage::video::{VideoSegment, VideoSize, VideoTiming};
     use spiral_robotics_storage::{BackendStateStore, ServiceEndpoint, SpiralConnectionSettings};
 
     /// The stored document declares its own encoding. A newer version is
@@ -2399,7 +2396,6 @@ mod tests {
                 format!("{table_prefix}_workflow_runs"),
             ],
             table_prefix.clone(),
-            false,
         );
         let schema = Arc::new(Schema::new(vec![Field::new(
             "value",
@@ -2495,334 +2491,6 @@ mod tests {
             .expect("the SQL E2E must leave no catalog resources behind");
     }
 
-    /// Live Stage-5 acceptance: a tiny deterministic MP4 is stored as a Spiral
-    /// media relation, decoded by candidate SQL, backfilled into the shared
-    /// feature cache, queried downstream, reused, reloaded, and cancelled.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[ignore = "requires FFmpeg, cached/downloadable SigLIP artifacts, and disposable real Spiral project access"]
-    async fn spiral_siglip_video_workflow_decodes_scores_reuses_and_reloads() {
-        let stored = BackendStateStore::open_default().ok();
-        let project = std::env::var("SPIRAL_PROJECT_ID")
-            .ok()
-            .filter(|project| !project.trim().is_empty())
-            .or_else(|| stored.as_ref().and_then(BackendStateStore::project_id))
-            .expect("SPIRAL_PROJECT_ID or a project saved in Studio Settings is required");
-        let table_prefix = format!(
-            "workflow_siglip_{}_{}",
-            std::process::id(),
-            SystemTime::now().unix_millis()
-        );
-        let connection = SpiralConnectionSettings::new(
-            stored
-                .as_ref()
-                .and_then(BackendStateStore::spiral_endpoint)
-                .unwrap_or_else(|| ServiceEndpoint::environment_spiral().into_string()),
-            stored
-                .as_ref()
-                .and_then(BackendStateStore::spiral_spfs_endpoint)
-                .unwrap_or_else(|| ServiceEndpoint::environment_spiral_spfs().into_string()),
-        )
-        .and_then(|settings| settings.with_project(&project))
-        .expect("the Workflow SigLIP connection must be valid")
-        .with_credentials(stored.as_ref().and_then(BackendStateStore::credentials));
-        let project_store = Arc::new(
-            {
-                let settings = connection;
-                let database =
-                    Arc::new(spiral_robotics_storage::AdbcDatabase::new(settings.clone()));
-                ProjectStore::new(settings, table_prefix.clone(), database)
-            }
-            .expect("the Workflow SigLIP project store must be valid"),
-        );
-        let manifest_relation = format!("{table_prefix}_video_assets");
-        let media_relation = format!("{table_prefix}_video.assets");
-        let empty_relation = format!("{table_prefix}_empty_video_assets");
-        let model_node_id = format!(
-            "model_{}_{}",
-            std::process::id(),
-            SystemTime::now().unix_millis()
-        );
-        let mut workflow = siglip_video_workflow(&manifest_relation, &model_node_id);
-        set_video_candidate_sql(&mut workflow, &media_relation);
-        workflow.normalize_model_sources();
-        let output_relation = workflow
-            .nodes()
-            .iter()
-            .find_map(|node| node.config().qualified_model_output(&table_prefix))
-            .expect("the server derivation must produce a Model output relation");
-        let empty_output_relation =
-            StorageSchema::workflow_feature_cache_relation(&table_prefix, &empty_relation);
-        // Install cleanup before the first catalog mutation so a seeding or
-        // Dataset-build failure cannot strand a test table prefix.
-        let mut cleanup = WorkflowTestTables::new(
-            project_store.clone(),
-            vec![
-                manifest_relation.clone(),
-                empty_relation.clone(),
-                format!("{table_prefix}_workflow_runs"),
-                output_relation.clone(),
-                empty_output_relation,
-                StorageSchema::workflow_feature_registry_relation(&table_prefix),
-            ],
-            table_prefix.clone(),
-            true,
-        );
-        let asset = VideoAsset::new(
-            "camera.main".to_owned(),
-            "camera-e2e".to_owned(),
-            tiny_test_mp4(),
-        )
-        .with_size(VideoSize::new(32, 32))
-        .with_timing(VideoTiming::new(2, 2))
-        .with_segment(VideoSegment::new(0, Some(0.0)));
-        let media_batch = VideoAsset::publication_batch("episode-e2e", &[asset], &media_relation)
-            .expect("the video fixture batch must be valid");
-        let empty_batch = VideoAsset::publication_batch("episode-empty", &[], &empty_relation)
-            .expect("the empty video fixture schema must be valid");
-        let media_target = manifest_relation.clone();
-        let empty_target = empty_relation.clone();
-        let mut connection = project_store
-            .connect_exclusive()
-            .await
-            .expect("the video Workflow project must connect");
-        connection
-            .replace_or_create_batches(&media_target, vec![media_batch])
-            .await
-            .expect("the video manifest must save");
-        connection
-            .replace_or_create_batches(&empty_target, vec![empty_batch])
-            .await
-            .expect("the empty video manifest must save");
-        connection
-            .rebuild_video_dataset(&table_prefix, false)
-            .await
-            .expect("seeding the video manifest relations must succeed");
-        drop(connection);
-
-        let storage = Arc::new(StorageManager::new(project_store.clone()));
-        let manager = WorkflowManager::new(storage.clone());
-        manager
-            .prepare_from_storage()
-            .await
-            .expect("an empty Workflow document must hydrate");
-        let saved = manager
-            .command(WorkflowCommand::apply(manager.scope_id(), 0, workflow))
-            .await
-            .expect("the SigLIP video workflow must save");
-
-        let scope_id = manager.scope_id().to_owned();
-        let revision = saved.workflow().revision();
-        manager
-            .start(&scope_id, revision)
-            .await
-            .expect("the SigLIP video run must start");
-        let completed = wait_for_model_terminal(&manager).await;
-        assert_eq!(
-            completed.phase(),
-            WorkflowRunPhase::Completed,
-            "Workflow failed: {:?}",
-            completed.error()
-        );
-        let result = completed.result().expect("Result must own real rows");
-        assert_eq!(result.rows().len(), 2);
-        for row in result.rows() {
-            for column in ["is_black_square_feature", "is_white_square_feature"] {
-                let score = row
-                    .get(column)
-                    .and_then(serde_json::Value::as_f64)
-                    .expect("SigLIP score columns must be numeric");
-                assert!((0.0..=1.0).contains(&score));
-            }
-        }
-        let metadata = completed
-            .nodes()
-            .iter()
-            .find(|node| node.node_id() == model_node_id)
-            .and_then(WorkflowNodeSnapshot::model)
-            .expect("the Model snapshot must expose measured metadata");
-        assert_eq!(metadata.input_rows(), 2);
-        assert_eq!(metadata.output_rows(), 2);
-        assert!(
-            metadata.decode_ms() > 0,
-            "Spiral decode timing must be measured"
-        );
-        assert!(
-            metadata.inference_ms() > 0,
-            "SigLIP timing must be measured"
-        );
-        eprintln!(
-            "workflow SigLIP real smoke: device={}, rows=2, decode_ms={}, inference_ms={}, decode_fps={:.2}",
-            metadata.device(),
-            metadata.decode_ms(),
-            metadata.inference_ms(),
-            2_000.0 / metadata.decode_ms() as f64,
-        );
-        manager
-            .start(&scope_id, revision)
-            .await
-            .expect("an unchanged run must start for reuse");
-        let reused = wait_for_model_terminal(&manager).await;
-        assert!(
-            reused
-                .nodes()
-                .iter()
-                .find(|node| node.node_id() == model_node_id)
-                .and_then(WorkflowNodeSnapshot::model)
-                .is_some_and(WorkflowModelRunMetadata::reused),
-            "the unchanged fingerprint must reuse the durable relation"
-        );
-
-        let reloaded = WorkflowManager::new(storage);
-        reloaded
-            .prepare_from_storage()
-            .await
-            .expect("the SigLIP workflow and snapshot must reload");
-        assert_eq!(reloaded.state().snapshot().result(), reused.result());
-        assert!(
-            reloaded
-                .state()
-                .snapshot()
-                .nodes()
-                .iter()
-                .find(|node| node.node_id() == model_node_id)
-                .and_then(WorkflowNodeSnapshot::model)
-                .is_some_and(WorkflowModelRunMetadata::reused)
-        );
-
-        let mut empty_workflow = siglip_video_workflow(&empty_relation, &model_node_id);
-        set_video_candidate_sql(&mut empty_workflow, &media_relation);
-        let empty_saved = reloaded
-            .command(WorkflowCommand::apply(
-                reloaded.scope_id(),
-                saved.workflow().revision(),
-                empty_workflow,
-            ))
-            .await
-            .expect("the empty manifest workflow must save");
-        reloaded
-            .start(&reloaded.scope_id(), empty_saved.workflow().revision())
-            .await
-            .expect("the zero-row replacement run must start");
-        let empty = wait_for_model_terminal(&reloaded).await;
-        assert_eq!(empty.phase(), WorkflowRunPhase::Completed);
-        assert_eq!(empty.result().map(|result| result.rows().len()), Some(0));
-        let empty_metadata = empty
-            .nodes()
-            .iter()
-            .find(|node| node.node_id() == model_node_id)
-            .and_then(WorkflowNodeSnapshot::model)
-            .expect("the zero-row run must retain a typed Model snapshot");
-        assert_eq!(empty_metadata.output_rows(), 0);
-        assert_eq!(
-            empty_metadata.device(),
-            "not loaded (empty applicable cohort)"
-        );
-
-        let mut restored_workflow = siglip_video_workflow(&manifest_relation, &model_node_id);
-        set_video_candidate_sql(&mut restored_workflow, &media_relation);
-        let changed_saved = reloaded
-            .command(WorkflowCommand::apply(
-                reloaded.scope_id(),
-                empty_saved.workflow().revision(),
-                restored_workflow,
-            ))
-            .await
-            .expect("restoring the media workflow must save");
-        reloaded
-            .start(&reloaded.scope_id(), changed_saved.workflow().revision())
-            .await
-            .expect("the cancellable model run must start");
-        let cancelling = reloaded
-            .cancel(&reloaded.scope_id())
-            .await
-            .expect("the active Model run must cancel");
-        assert_eq!(cancelling.phase(), WorkflowRunPhase::Cancelling);
-        assert_eq!(
-            wait_for_model_terminal(&reloaded).await.phase(),
-            WorkflowRunPhase::Cancelled
-        );
-
-        // Removing a Model must not delete the source-scoped cache: a later
-        // workflow over the same source owns the same registered features.
-        let mut without_model = reloaded.state().workflow().clone();
-        without_model
-            .nodes_mut()
-            .retain(|node| node.id() != model_node_id);
-        without_model
-            .edges_mut()
-            .retain(|edge| edge.source() != model_node_id && edge.target() != model_node_id);
-        without_model
-            .edges_mut()
-            .insert(0, WorkflowEdgeSpec::new("table", "query"));
-        let WorkflowNodeConfig::Query { sql, .. } = without_model
-            .nodes_mut()
-            .iter_mut()
-            .find(|node| node.id() == "query")
-            .expect("the test workflow retains its Query")
-            .config_mut()
-        else {
-            unreachable!()
-        };
-        *sql = "SELECT * FROM {{node:table}} ORDER BY episode_id".to_owned();
-        let removed = reloaded
-            .command(WorkflowCommand::apply(
-                reloaded.scope_id(),
-                without_model.revision(),
-                without_model,
-            ))
-            .await
-            .expect("removing the Model must save without deleting shared cache state");
-        let manifest_check = manifest_relation.clone();
-        let output_check = output_relation.clone();
-        let mut connection = project_store
-            .connect()
-            .await
-            .expect("the post-Model-removal project must connect");
-        assert!(
-            connection
-                .table_exists(&manifest_check)
-                .await
-                .expect("the input manifest catalog lookup must succeed"),
-            "hostile stored output text dropped the input manifest"
-        );
-        assert!(
-            connection
-                .table_exists(&output_check)
-                .await
-                .expect("the feature cache catalog lookup must succeed"),
-            "removing one Model deleted the shared feature cache"
-        );
-        drop(connection);
-        let mut renamed = removed.workflow().clone();
-        renamed.set_name("Post-cleanup write");
-        let renamed = reloaded
-            .command(WorkflowCommand::apply(
-                reloaded.scope_id(),
-                renamed.revision(),
-                renamed,
-            ))
-            .await
-            .expect("ordinary persistence must work after cleanup restores autocommit");
-        reloaded
-            .prepare_from_storage()
-            .await
-            .expect("the post-cleanup document must remain readable");
-        assert_eq!(
-            reloaded.state().workflow().name(),
-            renamed.workflow().name()
-        );
-        reloaded.shutdown().await;
-        manager.shutdown().await;
-        cleanup
-            .cleanup_now()
-            .await
-            .expect("the SigLIP E2E tables must clean up");
-        cleanup
-            .assert_absent()
-            .await
-            .expect("the SigLIP E2E must leave no catalog resources behind");
-    }
-
     fn siglip_video_workflow(relation: &str, model_node_id: &str) -> WorkflowSpec {
         let mut workflow = WorkflowSpec::new("default", "SigLIP video E2E");
         workflow.nodes_mut().extend([
@@ -2881,21 +2549,6 @@ mod tests {
         workflow
     }
 
-    fn set_video_candidate_sql(workflow: &mut WorkflowSpec, media_relation: &str) {
-        let WorkflowNodeConfig::Query { sql, .. } = workflow
-            .nodes_mut()
-            .iter_mut()
-            .find(|node| node.id() == "candidates")
-            .expect("the test workflow has a candidate Query")
-            .config_mut()
-        else {
-            unreachable!()
-        };
-        *sql = format!(
-            "SELECT m.episode_id, m.stream_id, m.segment_index, CAST(f.request_index AS UINT64) AS frame_index, COALESCE(m.timeline_offset_ns, CAST(0 AS UINT64)) + (CAST(f.request_index AS UINT64) * CAST(1000000000 AS UINT64) / CAST(m.fps AS UINT64)) AS episode_time_ns, spql.video.decode(f.frame, 'auto') AS image FROM {{{{node:table}}}} m JOIN {media_relation} a ON a.episode_id = m.episode_id AND a.stream_id = m.stream_id AND a.segment_index = m.segment_index CROSS JOIN LATERAL spql.video.frames(a.media, spql.video.frame_slice(CAST(0 AS BIGINT), CAST(m.frames AS BIGINT), CAST(1 AS BIGINT))) f"
-        );
-    }
-
     fn feature_definition(
         source_relation: &str,
         name: &str,
@@ -2907,50 +2560,6 @@ mod tests {
             concept,
         )
         .with_applicability(WorkflowFeatureApplicability::new(source_relation, "image"))
-    }
-
-    fn tiny_test_mp4() -> Vec<u8> {
-        let ffmpeg = std::env::var("FFMPEG").unwrap_or_else(|_| "ffmpeg".to_owned());
-        let output = std::process::Command::new(&ffmpeg)
-            .args([
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-f",
-                "lavfi",
-                "-i",
-                "color=c=black:s=32x32:r=2:d=1",
-                "-an",
-                "-c:v",
-                "libx264",
-                "-pix_fmt",
-                "yuv420p",
-                "-movflags",
-                "frag_keyframe+empty_moov+default_base_moof",
-                "-f",
-                "mp4",
-                "pipe:1",
-            ])
-            .output()
-            .unwrap_or_else(|error| panic!("could not run {ffmpeg:?}: {error}"));
-        assert!(
-            output.status.success(),
-            "FFmpeg fixture failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(!output.stdout.is_empty(), "FFmpeg fixture emitted no MP4");
-        output.stdout
-    }
-
-    async fn wait_for_model_terminal(manager: &WorkflowManager) -> WorkflowRunSnapshot {
-        for _ in 0..2_400 {
-            let snapshot = manager.state().snapshot().clone();
-            if snapshot.phase().terminal() {
-                return snapshot;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-        panic!("Workflow Model run did not reach a terminal state within 60 seconds");
     }
 
     async fn wait_for_terminal(manager: &WorkflowManager) -> WorkflowRunSnapshot {
@@ -2968,7 +2577,6 @@ mod tests {
         project_store: Arc<ProjectStore>,
         relations: Vec<String>,
         table_prefix: String,
-        video_dataset: bool,
         cleaned: bool,
     }
 
@@ -2977,13 +2585,11 @@ mod tests {
             project_store: Arc<ProjectStore>,
             relations: Vec<String>,
             table_prefix: String,
-            video_dataset: bool,
         ) -> Self {
             Self {
                 project_store,
                 relations,
                 table_prefix,
-                video_dataset,
                 cleaned: false,
             }
         }
@@ -2992,40 +2598,11 @@ mod tests {
             if self.cleaned {
                 return Ok(());
             }
-            if self.video_dataset {
-                let dataset = format!("{}_video", self.table_prefix);
-                self.execute_cleanup_sql(&SpiralSql::drop_video_dataset(&dataset))
-                    .await?;
-                self.execute_cleanup_sql(&format!(
-                    "DROP VIEW IF EXISTS {}_video_sources",
-                    self.table_prefix
-                ))
-                .await?;
-            }
             for relation in self.relations.clone() {
                 self.drop_cleanup_table(&relation).await?;
             }
             self.cleaned = true;
             Ok(())
-        }
-
-        async fn execute_cleanup_sql(&self, sql: &str) -> Result<(), String> {
-            const MAX_ATTEMPTS: usize = 32;
-            for attempt in 1..=MAX_ATTEMPTS {
-                let mut connection = self.project_store.connect_exclusive().await?;
-                let result = connection.execute_update_sql(sql).await;
-                match result {
-                    Ok(()) => return Ok(()),
-                    Err(error)
-                        if error.contains("project namespace compare-and-swap conflict")
-                            && attempt < MAX_ATTEMPTS =>
-                    {
-                        tokio::time::sleep(Duration::from_millis(25)).await;
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-            unreachable!("the bounded cleanup loop returns on its final attempt")
         }
 
         async fn drop_cleanup_table(&self, relation: &str) -> Result<(), String> {

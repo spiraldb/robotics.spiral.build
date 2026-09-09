@@ -16,11 +16,7 @@ include!(concat!(env!("OUT_DIR"), "/storage_schema_version.rs"));
 /// Stable persisted relations owned by Spiral Robotics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Table {
-    Datasets,
-    Episodes,
-    EpisodeStreams,
-    JointSamples,
-    VideoAssets,
+    RecordingSources,
     TrainingCheckpoints,
     Robots,
     StudioSettings,
@@ -33,29 +29,13 @@ pub(crate) enum Table {
 }
 
 impl Table {
-    /// Legacy recording relations can be read/restored explicitly, but startup
-    /// no longer provisions them now that MCAP owns new dataset imports.
-    pub(crate) const fn is_legacy_recording(self) -> bool {
-        matches!(
-            self,
-            Self::Datasets
-                | Self::Episodes
-                | Self::EpisodeStreams
-                | Self::JointSamples
-                | Self::VideoAssets
-        )
-    }
     /// Relations shown in the Data schema browser.
     ///
     /// Ordered so a parent relation always precedes the child relations that
     /// reference it; bundle import walks this order and deletion walks its
     /// reverse.
-    pub(crate) const ALL: [Self; 14] = [
-        Self::Datasets,
-        Self::Episodes,
-        Self::EpisodeStreams,
-        Self::JointSamples,
-        Self::VideoAssets,
+    pub(crate) const ALL: [Self; 10] = [
+        Self::RecordingSources,
         Self::TrainingCheckpoints,
         Self::Robots,
         Self::StudioSettings,
@@ -69,11 +49,7 @@ impl Table {
 
     pub(crate) const fn name(self) -> &'static str {
         match self {
-            Self::Datasets => "datasets",
-            Self::Episodes => "episodes",
-            Self::EpisodeStreams => "episode_streams",
-            Self::JointSamples => "joint_samples",
-            Self::VideoAssets => "video_assets",
+            Self::RecordingSources => "dataset_source",
             Self::TrainingCheckpoints => "training_checkpoints",
             Self::Robots => "robots",
             Self::StudioSettings => "studio_settings",
@@ -88,6 +64,9 @@ impl Table {
 
     /// Qualify this owned table using the configured Studio table prefix.
     pub(crate) fn qualified_name(self, table_prefix: &str) -> String {
+        if self == Self::RecordingSources {
+            return "dataset_source".into();
+        }
         let suffix = if self == Self::StudioSettings {
             "settings"
         } else {
@@ -166,12 +145,7 @@ impl ManagedRelationDefinition {
     }
 
     fn field_matches(&self, actual: &Field, expected: &Field) -> bool {
-        let portable_video_payload_is_required = self.table == Table::VideoAssets
-            && actual.name() == column::PAYLOAD
-            && expected.name() == column::PAYLOAD
-            && !actual.is_nullable()
-            && expected.is_nullable();
-        (portable_video_payload_is_required || actual.is_nullable() == expected.is_nullable())
+        (actual.is_nullable() == expected.is_nullable())
             && actual.name() == expected.name()
             && actual.metadata() == expected.metadata()
             && actual
@@ -273,7 +247,6 @@ pub(crate) mod column {
     pub(crate) const CURRENT_STEP: &str = "current_step";
     pub(crate) const DATASET_ID: &str = "dataset_id";
     pub(crate) const DECODER_LAYERS: &str = "decoder_layers";
-    pub(crate) const DESCRIPTION: &str = "description";
     pub(crate) const DEVICE: &str = "device";
     pub(crate) const DEVICE_COPY_MS: &str = "device_copy_ms";
     pub(crate) const DISCARDED: &str = "discarded";
@@ -319,17 +292,14 @@ pub(crate) mod column {
     pub(crate) const MEAN_LATENCY_MS: &str = "mean_latency_ms";
     pub(crate) const MEMORY_BYTES: &str = "memory_bytes";
     pub(crate) const MESSAGE: &str = "message";
-    pub(crate) const MEDIA_RELATION: &str = "media_relation";
     /// Lowest supply voltage measured on a motor across the whole take. See
     /// [`LIMIT_MIN_VOLTAGE_VOLTS`] for the motor's own configured floor.
     pub(crate) const MIN_VOLTAGE_VOLTS: &str = "min_voltage_volts";
     pub(crate) const MISSED_DEADLINES: &str = "missed_deadlines";
     pub(crate) const MODALITY: &str = "modality";
     pub(crate) const MODEL_MS: &str = "model_ms";
-    pub(crate) const NAME: &str = "name";
     pub(crate) const NOTE: &str = "note";
     pub(crate) const ORDINAL: &str = "ordinal";
-    pub(crate) const PAYLOAD: &str = "payload";
     pub(crate) const PEAK_CURRENT_AMPS: &str = "peak_current_amps";
     pub(crate) const PEAK_LOAD: &str = "peak_load";
     pub(crate) const PEAK_TEMPERATURE_CELSIUS: &str = "peak_temperature_celsius";
@@ -343,8 +313,6 @@ pub(crate) mod column {
     /// Parallel to [`RECORDING_GAP_DURATION_NS`]; both lists are equal length.
     pub(crate) const RECORDING_GAP_AFTER_NS: &str = "recording_gap_after_ns";
     pub(crate) const RECORDING_GAP_DURATION_NS: &str = "recording_gap_duration_ns";
-    #[cfg(any(test, feature = "test-support"))]
-    pub(crate) const REPLAY_POSITION: &str = "replay_position";
     pub(crate) const ROBOT: &str = "robot";
     pub(crate) const ROBOT_TYPE: &str = "robot_type";
     pub(crate) const ROBOT_ID: &str = "robot_id";
@@ -354,7 +322,6 @@ pub(crate) mod column {
     pub(crate) const SAMPLE_INDEX: &str = "sample_index";
     pub(crate) const SCHEMA_VERSION: &str = "schema_version";
     pub(crate) const SEED: &str = "seed";
-    pub(crate) const SEGMENT_INDEX: &str = "segment_index";
     pub(crate) const SESSION_ID: &str = "session_id";
     pub(crate) const SOURCE: &str = "source";
     /// Dataset a training run actually drew its episodes from, captured when
@@ -372,7 +339,6 @@ pub(crate) mod column {
     pub(crate) const STEP: &str = "step";
     pub(crate) const STEPS: &str = "steps";
     pub(crate) const STREAM_ID: &str = "stream_id";
-    pub(crate) const TIMELINE_OFFSET_NS: &str = "timeline_offset_ns";
     pub(crate) const TRAIN_LOSS: &str = "train_loss";
     pub(crate) const TRANSFER_BYTES_PER_SECOND: &str = "transfer_bytes_per_second";
     pub(crate) const UPLOAD_MS: &str = "upload_ms";
@@ -477,87 +443,10 @@ mod tests {
         columns: &'static [&'static str],
     }
 
-    const PUBLISHED_MANAGED_RELATIONS: [PublishedManagedRelation; 14] = [
+    const PUBLISHED_MANAGED_RELATIONS: [PublishedManagedRelation; 10] = [
         PublishedManagedRelation {
-            name: "datasets",
-            columns: &["dataset_id", "name", "created_ms", "description"],
-        },
-        PublishedManagedRelation {
-            name: "episodes",
-            columns: &[
-                "episode_id",
-                "dataset_id",
-                "schema_version",
-                "started_ms",
-                "sample_hz",
-                "source",
-                "note",
-                "frames",
-                "duration_ns",
-                "max_follow_error_degrees",
-                "discarded",
-                "recording_gap_after_ns",
-                "recording_gap_duration_ns",
-            ],
-        },
-        PublishedManagedRelation {
-            name: "episode_streams",
-            columns: &[
-                "episode_id",
-                "stream_id",
-                "ordinal",
-                "modality",
-                "robot_type",
-                "joint_names",
-                "camera_id",
-                "width",
-                "height",
-                "fps",
-                "start_temperature_celsius",
-                "start_voltage_volts",
-                "limit_max_temperature_celsius",
-                "limit_min_voltage_volts",
-                "limit_max_voltage_volts",
-                "limit_max_load",
-                "peak_temperature_celsius",
-                "min_voltage_volts",
-                "peak_load",
-                "peak_current_amps",
-            ],
-        },
-        PublishedManagedRelation {
-            name: "joint_samples",
-            columns: &[
-                "episode_id",
-                "stream_id",
-                "sample_index",
-                "episode_time_ns",
-                "state_valid",
-                "action_valid",
-                "state_position",
-                "action_position",
-                "raw_position",
-                "velocity",
-                "effort",
-                "follow_error_degrees",
-            ],
-        },
-        PublishedManagedRelation {
-            name: "video_assets",
-            columns: &[
-                "episode_id",
-                "stream_id",
-                "segment_index",
-                "timeline_offset_ns",
-                "camera_id",
-                "payload",
-                "byte_size",
-                "width",
-                "height",
-                "fps",
-                "frames",
-                "media_relation",
-            ],
+            name: "dataset_source",
+            columns: &["dataset_name", "recording", "payload"],
         },
         PublishedManagedRelation {
             name: "training_checkpoints",
@@ -722,32 +611,6 @@ mod tests {
             columns.sort_unstable();
             columns.dedup();
             assert_eq!(columns.len(), declared.len(), "{table}");
-        }
-    }
-
-    #[test]
-    fn episodes_reference_the_dataset_table() {
-        assert_eq!(
-            persisted_columns(Table::Datasets)
-                .first()
-                .map(String::as_str),
-            Some(column::DATASET_ID)
-        );
-        assert_eq!(
-            persisted_columns(Table::Episodes)
-                .get(1)
-                .map(String::as_str),
-            Some(column::DATASET_ID)
-        );
-        for table in Table::ALL {
-            if table != Table::Datasets && table != Table::Episodes {
-                assert!(
-                    !persisted_columns(table)
-                        .iter()
-                        .any(|column| column == column::DATASET_ID),
-                    "{table} must reach datasets through episodes"
-                );
-            }
         }
     }
 

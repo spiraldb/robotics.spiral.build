@@ -17,7 +17,7 @@ inferred from the naming convention.
 
 Studio imports create or append the shared table, create the filtered root view,
 create and refresh the Dataset, and verify its episode count in one transaction.
-Existing target resources or source rows with the same dataset name are refused.
+Hugging Face import refuses existing target resources or source rows with the same dataset name. Live recording appends to a validated matching Dataset; an identical recording key and byte payload is an idempotent retry.
 The source table does not declare a primary key. `recording` is the native
 producer's member key within each dataset's filtered input.
 
@@ -27,7 +27,7 @@ current Spiral child-view path requires keyed parent metadata that Arbor does
 not expose. Dataset-owned resources retain their native parent relationship.
 
 The server's `--studio-table-prefix` defaults to `studio`; it is a naming prefix,
-not a namespace. Storage schema 10 and training protocol 7 use this layout.
+not a namespace. Storage schema 11 and training protocol 7 use this layout.
 Rebuild/restart Studio and its training workers together after migration.
 
 ## Existing-project migration
@@ -61,3 +61,5 @@ The September 8, 2026 audit is stored locally in
 and obsolete HF demo removal are retained in their corresponding audit folders.
 The saved default Workflow still refers to that previously removed HF demo;
 this migration preserves that document unchanged.
+
+Live recording and project backup details are in [MCAP recording and playback](recording-mcap.md). There is no separate recording registry.

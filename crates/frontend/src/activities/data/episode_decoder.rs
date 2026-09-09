@@ -54,12 +54,12 @@ struct CameraPacket {
     keyframe: bool,
 }
 
-pub(super) struct EncodedCamera {
+pub(crate) struct EncodedCamera {
     codec: String,
     packets: Vec<CameraPacket>,
 }
 impl EncodedCamera {
-    pub(super) fn new(source: &EpisodeVideo, start_ns: u64) -> Result<Self, String> {
+    pub(crate) fn new(source: &EpisodeVideo, start_ns: u64) -> Result<Self, String> {
         let packets = source
             .packets()
             .iter()
@@ -85,14 +85,14 @@ impl EncodedCamera {
         })
     }
 
-    pub(super) fn first_frame_seconds(&self) -> f64 {
+    pub(crate) fn first_frame_seconds(&self) -> f64 {
         self.packets
             .first()
             .map(|packet| packet.microseconds.max(0) as f64 / 1e6)
             .unwrap_or_default()
     }
 
-    pub(super) fn group_at(&self, seconds: f64) -> Option<Range<usize>> {
+    pub(crate) fn group_at(&self, seconds: f64) -> Option<Range<usize>> {
         let timestamp = (seconds * 1e6).round() as i64;
         let index = self
             .packets
@@ -117,11 +117,11 @@ impl Drop for DecodedFrame {
     }
 }
 
-pub(super) struct DecodedGroup {
+pub(crate) struct DecodedGroup {
     frames: Vec<DecodedFrame>,
 }
 impl DecodedGroup {
-    pub(super) async fn decode(
+    pub(crate) async fn decode(
         camera: &EncodedCamera,
         range: Range<usize>,
     ) -> Result<Self, String> {
@@ -157,7 +157,7 @@ impl DecodedGroup {
         Ok(Self { frames })
     }
 
-    pub(super) fn draw(
+    pub(crate) fn draw(
         &self,
         canvas: &web_sys::HtmlCanvasElement,
         seconds: f64,
@@ -183,7 +183,7 @@ impl DecodedGroup {
             .map_err(DecoderSession::error)
     }
 
-    pub(super) fn clear(canvas: &web_sys::HtmlCanvasElement) -> Result<(), String> {
+    pub(crate) fn clear(canvas: &web_sys::HtmlCanvasElement) -> Result<(), String> {
         Self::context(canvas)?.clear_rect(0.0, 0.0, canvas.width().into(), canvas.height().into());
         Ok(())
     }

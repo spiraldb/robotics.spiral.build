@@ -1,6 +1,6 @@
 //! Finalize automatically stopped recordings and retain catalog exclusion through media commit.
 use crate::project_session::context::ProjectContext;
-use crate::robotics::video::{VideoAsset, VideoCapture};
+use crate::robotics::video::{CameraRecording, VideoCapture};
 use std::time::Duration;
 const VIDEO_RECORDING_MONITOR_INTERVAL: Duration = Duration::from_millis(200);
 const VIDEO_RECORDING_STOP_TICKS: u8 = 5;
@@ -83,7 +83,7 @@ impl RecordingSupervisor {
                     .episodes()
                     .completed_episode(&episode_id)
                     .map_err(|error| error.to_string())?;
-                state.storage().commit_episode(&episode, &videos).await?;
+                state.storage().commit_recording(&episode, &videos).await?;
                 state.episodes().forget_completed(&episode_id);
                 Ok::<_, String>(())
             }
@@ -100,7 +100,7 @@ impl RecordingSupervisor {
         }
     }
 
-    pub(crate) async fn finish_video_capture(&self, capture: VideoCapture) -> Vec<VideoAsset> {
+    pub(crate) async fn finish_video_capture(&self, capture: VideoCapture) -> Vec<CameraRecording> {
         let state = &self.project;
         let (videos, failures) = capture.finish().await;
         for failure in failures {

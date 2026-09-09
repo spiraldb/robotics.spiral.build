@@ -6,7 +6,6 @@
 
 use std::sync::Arc;
 
-use spiral_robotics_common::recording::RecordingDatasetSummary;
 use spiral_robotics_common::relations::{RelationCatalog, SpiralQuerySnapshot};
 use spiral_robotics_common::rollout::RolloutSnapshot;
 use spiral_robotics_common::training::{TrainingRun, TrainingSnapshot};
@@ -14,9 +13,7 @@ use spiral_robotics_common::training::{TrainingRun, TrainingSnapshot};
 use crate::db::ProjectDatabasePersistence;
 use crate::db::ProjectQueries;
 use crate::db::ProjectStore;
-use crate::episodes::video::VideoAssetPersistence;
-use crate::episodes::video::{VideoAsset, VideoAssetKey, VideoByteRange};
-use crate::episodes::{EpisodePersistence, FullEpisode};
+use crate::episodes::FullEpisode;
 use crate::rollout_runs::RolloutSessionPersistence;
 use crate::settings::{
     SpiralConnectionSettings, StoredStudioPreferences, StudioPreferencePersistence,
@@ -30,18 +27,6 @@ pub struct StorageManager {
 }
 
 impl StorageManager {
-    pub async fn legacy_recording_available(&self) -> Result<bool, String> {
-        let mut connection = self.project_store.connect().await?;
-        for table in crate::episodes::EpisodeRelations::RELATIONS {
-            if !connection
-                .table_exists(&table.qualified_name(self.table_prefix()))
-                .await?
-            {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
     pub fn new(project_store: Arc<ProjectStore>) -> Self {
         Self { project_store }
     }
@@ -88,17 +73,28 @@ impl StorageManager {
         self.project_store.table_prefix()
     }
 
-    /// Persist one complete episode snapshot and its finalized media directly
-    /// to SpiralDB. A later pause or stop replaces the same episode
-    /// idempotently with the newer complete snapshot.
-    pub async fn commit_episode(
+    /// Finalize one recording as MCAP and publish its source Blob and Dataset atomically.
+    pub async fn commit_recording(
         &self,
         episode: &FullEpisode,
-        videos: &[VideoAsset],
+        cameras: &[crate::episodes::CameraRecording],
     ) -> Result<(), String> {
-        EpisodePersistence::new(&self.project_store)
-            .commit(episode, videos)
-            .await
+        let summary = episode.summary();
+        let bytes = crate::episodes::McapRecording::encode(episode, cameras)?;
+        let file = crate::episodes::RecordingFile::new(self.project_store(), episode)?;
+        file.save(&bytes)?;
+        self.import_recording(crate::datasets::RecordingImport::new(
+            summary.dataset_id(),
+            &format!("{}.mcap", summary.id()),
+            &bytes,
+        ))
+        .await
+        .map_err(|error| {
+            format!(
+                "{error}. The complete MCAP is saved at {}",
+                file.path().display()
+            )
+        })
     }
 
     /// Read the durable training history.
@@ -219,35 +215,9 @@ impl StorageManager {
             .await
     }
 
-    pub async fn recording_datasets(&self) -> Result<Vec<RecordingDatasetSummary>, String> {
-        ProjectQueries::new(&self.project_store).datasets().await
-    }
-
     pub async fn relation_catalog(&self) -> Result<RelationCatalog, String> {
         ProjectQueries::new(&self.project_store)
             .relation_catalog()
-            .await
-    }
-
-    /// Read the authoritative MP4 size without materializing its bytes.
-    pub async fn video_asset_size(&self, asset: &VideoAssetKey) -> Result<u64, String> {
-        VideoAssetPersistence::new(&self.project_store)
-            .size(asset)
-            .await
-    }
-
-    /// Fetch exactly one browser-requested range from Spiral's managed Blob.
-    ///
-    /// The managed MP4 output retains the source Blob, including its provider
-    /// URI and object offset. `spql.io.read_bytes` can therefore push the range
-    /// into object storage instead of materializing the complete MP4 in Studio.
-    pub async fn video_asset_range(
-        &self,
-        asset: &VideoAssetKey,
-        range: VideoByteRange,
-    ) -> Result<Vec<u8>, String> {
-        VideoAssetPersistence::new(&self.project_store)
-            .range(asset, range)
             .await
     }
 }

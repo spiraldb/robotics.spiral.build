@@ -8,8 +8,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use arrow_array::RecordBatch;
-use arrow_schema::extension::EXTENSION_TYPE_NAME_KEY;
-use arrow_schema::{DataType, Field, Schema};
+use arrow_schema::Schema;
 use futures::{FutureExt as _, StreamExt as _};
 
 use super::database::{
@@ -25,7 +24,6 @@ use super::schema::{Table, column as db};
 use crate::transfer::ManagedRelationCatalog;
 
 const SPIRAL_UNAVAILABLE_PREFIX: &str = "SpiralDB is unavailable at ";
-const BLOB_EXTENSION_NAME: &str = "spql.io.Blob";
 
 pub(crate) struct StorageClock;
 
@@ -692,7 +690,7 @@ impl<'a> ManagedRelationProvisioner<'a> {
     fn tables() -> Vec<Table> {
         ManagedRelationCatalog::tables()
             .into_iter()
-            .filter(|table| !table.is_legacy_recording())
+            .filter(|table| *table != Table::RecordingSources)
             .collect()
     }
 
@@ -766,8 +764,7 @@ impl<'a> ManagedRelationProvisioner<'a> {
         if Self::is_known_legacy_schema(table, schema) {
             return Err(LEGACY_PROJECT_ERROR.to_owned());
         }
-        let schema = Self::portable_validation_schema(table, schema);
-        ManagedRelationCatalog::validate(table, &schema, "SpiralDB destination")
+        ManagedRelationCatalog::validate(table, schema, "SpiralDB destination")
             .map_err(|error| {
                 format!(
                     "{error}; existing managed relation {relation} was not modified. Choose a fresh table prefix or remove that relation, then run Settings → SpiralDB → Test connection."
@@ -777,7 +774,6 @@ impl<'a> ManagedRelationProvisioner<'a> {
 
     fn is_known_legacy_schema(table: Table, schema: &Schema) -> bool {
         match table {
-            Table::Episodes => schema.field_with_name("metadata_json").is_ok(),
             Table::TrainingRuns => {
                 schema.field_with_name(db::SNAPSHOT_JSON).is_ok()
                     && schema.field_with_name(db::ORDINAL).is_err()
@@ -792,47 +788,12 @@ impl<'a> ManagedRelationProvisioner<'a> {
             _ => false,
         }
     }
-
-    /// A portable project bundle stores video payloads as Arrow Binary, while
-    /// a ready SpiralDB relation exposes the same field as its native Blob
-    /// extension. Normalize only that declared semantic variance before using
-    /// the shared portable-schema validator.
-    fn portable_validation_schema(table: Table, schema: &Schema) -> Schema {
-        if table != Table::VideoAssets {
-            return schema.clone();
-        }
-        let expected = ManagedRelationCatalog::schema(table);
-        let mut fields = schema
-            .fields()
-            .iter()
-            .map(|field| field.as_ref().clone())
-            .collect::<Vec<_>>();
-        for field in &mut fields {
-            let native_blob = field.name() == db::PAYLOAD
-                && matches!(field.data_type(), DataType::Struct(_))
-                && field
-                    .metadata()
-                    .get(EXTENSION_TYPE_NAME_KEY)
-                    .is_some_and(|name| name == BLOB_EXTENSION_NAME);
-            if native_blob {
-                let expected_payload = expected
-                    .field_with_name(db::PAYLOAD)
-                    .expect("the managed video schema declares its payload");
-                *field = Field::new(
-                    expected_payload.name(),
-                    expected_payload.data_type().clone(),
-                    field.is_nullable(),
-                );
-            }
-        }
-        Schema::new_with_metadata(fields, schema.metadata().clone())
-    }
 }
 
 #[cfg(test)]
 mod managed_relation_tests {
     use super::*;
-    use crate::episodes::EpisodeRelations;
+    use arrow_schema::{DataType, Field};
 
     #[test]
     fn startup_provisions_application_state_without_recreating_recordings() {
@@ -840,12 +801,7 @@ mod managed_relation_tests {
         assert_eq!(tables.len(), 9);
         assert!(tables.contains(&Table::Robots));
         assert!(tables.contains(&Table::TrainingRuns));
-        assert!(
-            EpisodeRelations::RELATIONS
-                .iter()
-                .all(|table| !tables.contains(table))
-        );
-        assert!(!tables.contains(&Table::Datasets));
+        assert!(!tables.contains(&Table::RecordingSources));
     }
 
     #[test]
@@ -869,13 +825,10 @@ mod managed_relation_tests {
     /// agree on their column names.
     #[test]
     fn readiness_accepts_the_declared_native_schema_variances() {
-        for (table, schema) in [
-            (
-                Table::TrainingCheckpoints,
-                Arc::new(ManagedRelationCatalog::schema(Table::TrainingCheckpoints)),
-            ),
-            (Table::VideoAssets, EpisodeRelations::native_video_schema()),
-        ] {
+        for (table, schema) in [(
+            Table::TrainingCheckpoints,
+            Arc::new(ManagedRelationCatalog::schema(Table::TrainingCheckpoints)),
+        )] {
             let native = schema
                 .fields()
                 .iter()
@@ -897,17 +850,6 @@ mod managed_relation_tests {
     }
 
     #[test]
-    fn readiness_accepts_legacy_video_binary_before_blob_migration() {
-        let table = Table::VideoAssets;
-        ManagedRelationProvisioner::validate_existing_relation(
-            table,
-            &table.qualified_name("spiral_robotics"),
-            &ManagedRelationCatalog::schema(table),
-        )
-        .expect("portable Binary remains valid input to the readiness migration");
-    }
-
-    #[test]
     fn readiness_refuses_known_legacy_relation_shapes_with_project_guidance() {
         let legacy_document = || {
             Schema::new(vec![
@@ -917,10 +859,6 @@ mod managed_relation_tests {
             ])
         };
         let legacy_relations = [
-            (
-                Table::Episodes,
-                Schema::new(vec![Field::new("metadata_json", DataType::Utf8, false)]),
-            ),
             (Table::TrainingRuns, legacy_document()),
             (Table::RolloutRuns, legacy_document()),
             (Table::WorkflowRuns, legacy_document()),

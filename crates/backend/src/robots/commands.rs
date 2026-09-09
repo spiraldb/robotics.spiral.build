@@ -2,11 +2,9 @@
 
 use std::collections::BTreeMap;
 
-use crate::data::catalog_lease::{CatalogLeaseOwner, CatalogLeaseToken, CatalogMutationLease};
 use crate::project_session::context::ProjectContext;
 use crate::robots::calibration::{
-    CalibrationActions, CalibrationControlActions, CalibrationHistoryActions,
-    CalibrationHistoryActivity, CalibrationHistoryPort, CalibrationUpdate, RobotCalibrationStore,
+    CalibrationActions, CalibrationControlActions, CalibrationUpdate, RobotCalibrationStore,
 };
 use crate::robots::control::{RobotControlActions, RobotControlCommand};
 use crate::robots::discovery::SerialPortDiscovery;
@@ -23,9 +21,7 @@ use spiral_robotics_common::robots::{
     CameraBinding, CameraStatus, ConnectionStatus, ModeSelection, NewRobot, PortSettings,
     RobotSummary, RobotUpdate, SerialPortSummary,
 };
-use spiral_robotics_hardware::ModeSelection as HardwareModeSelection;
-use spiral_robotics_hardware::{Calibration, MotorSpec, RobotSpec};
-use spiral_robotics_storage::episodes::ReappliedEpisodePositions;
+use spiral_robotics_hardware::{MotorSpec, RobotSpec};
 
 /// Adapts cached JSON robot documents and the live control thread to plain
 /// capability commands. JSON preservation, wire summaries, and concrete
@@ -269,85 +265,6 @@ impl RobotCalibrationStore for RobotWorkspace {
     }
 }
 
-struct CalibrationHistoryAdapter<'a> {
-    state: &'a ProjectContext,
-}
-
-impl CalibrationHistoryPort for CalibrationHistoryAdapter<'_> {
-    fn reserve_catalog_mutation(&self) -> Result<Option<CatalogLeaseToken>, OperationError> {
-        self.state.catalog_lease().reserve_calibration_history(
-            self.state.workflow().is_active(),
-            self.state.workflow_agent().is_active(),
-        )
-    }
-
-    fn release_catalog_mutation(&self, token: CatalogLeaseToken) {
-        let released = self.state.catalog_lease().release(token);
-        debug_assert!(
-            released,
-            "calibration history refresh releases its exact catalog lease once"
-        );
-    }
-
-    fn activity(&self) -> CalibrationHistoryActivity {
-        let hardware = self.state.hardware().state();
-        CalibrationHistoryActivity::new(
-            hardware
-                .recording()
-                .as_ref()
-                .map(|recording| recording.episode().to_owned()),
-            match hardware.mode() {
-                HardwareModeSelection::Replay { episode, .. } => Some(episode.clone()),
-                _ => None,
-            },
-            self.state.training().snapshot().runs().iter().any(|run| {
-                matches!(
-                    run.phase(),
-                    spiral_robotics_common::training::TrainingRunPhase::Starting
-                        | spiral_robotics_common::training::TrainingRunPhase::Running
-                        | spiral_robotics_common::training::TrainingRunPhase::Stopping
-                )
-            }),
-        )
-    }
-
-    async fn current_calibration(
-        &self,
-        robot: &str,
-    ) -> Result<Option<Calibration>, OperationError> {
-        let record = self
-            .state
-            .workspace()
-            .get(robot)
-            .await
-            .map_err(OperationError::from)?;
-        let motors = record.motors().map_err(OperationError::from)?;
-        let calibration = record.calibration().map_err(OperationError::from)?;
-        if let Some(calibration) = &calibration {
-            calibration
-                .validate_for_motor_specs(&motors)
-            .map_err(|error| {
-                OperationError::InvalidInput(format!(
-                    "robot {robot:?} has calibration that does not match its configured motors: {error}"
-                ))
-            })?;
-        }
-        Ok(calibration)
-    }
-
-    async fn reapply_positions(
-        &self,
-        robot: String,
-        calibration: Calibration,
-    ) -> Result<ReappliedEpisodePositions, OperationError> {
-        self.state
-            .episodes()
-            .reapply_calibration(&robot, &calibration)
-            .await
-            .map_err(OperationError::from)
-    }
-}
-
 impl DeviceCommands {
     /// Try every usable saved robot once when the studio starts.
     ///
@@ -361,38 +278,6 @@ impl DeviceCommands {
         for outcome in RobotActions::new(&adapter, &adapter).auto_connect().await {
             outcome.log();
         }
-    }
-}
-
-impl CatalogMutationLease {
-    fn reserve_calibration_history(
-        &self,
-        workflow_active: bool,
-        assistant_active: bool,
-    ) -> Result<Option<CatalogLeaseToken>, OperationError> {
-        let Some(token) = self.try_acquire(CatalogLeaseOwner::CalibrationReapply) else {
-            return Ok(None);
-        };
-        let conflict = if workflow_active {
-            Some(
-                "Wait for the active Workflow run to finish before reapplying calibration to episode history.",
-            )
-        } else if assistant_active {
-            Some(
-                "Wait for the active Workflow Assistant turn to finish before reapplying calibration to episode history.",
-            )
-        } else {
-            None
-        };
-        if let Some(message) = conflict {
-            let released = self.release(token);
-            debug_assert!(
-                released,
-                "rejected calibration-history admission releases its exact catalog lease"
-            );
-            return Err(OperationError::Conflict(message.to_owned()));
-        }
-        Ok(Some(token))
     }
 }
 
@@ -733,32 +618,6 @@ impl DeviceCommands {
             .await?
     }
 
-    pub(crate) async fn reapply_calibration(
-        &self,
-        id: String,
-    ) -> Result<spiral_robotics_common::robots::CalibrationApplication, BackendCommandError> {
-        let commands = self.clone();
-        let activity = commands.state.admit()?;
-        self.state
-            .tasks()
-            .execute(async move {
-                let _activity = activity;
-                commands.require_catalog_ready()?;
-                let outcome = CalibrationHistoryActions::new(&CalibrationHistoryAdapter {
-                    state: &commands.state,
-                })
-                .reapply(&id)
-                .await
-                .map_err(BackendCommandError::from)?;
-                Ok(
-                    spiral_robotics_common::robots::CalibrationApplication::from(
-                        outcome.into_parts(),
-                    ),
-                )
-            })
-            .await?
-    }
-
     pub(crate) async fn set_mode(
         &self,
         selection: ModeSelection,
@@ -898,60 +757,5 @@ impl AutoConnectOutcome {
 impl From<crate::project_session::context::ProjectContext> for DeviceCommands {
     fn from(state: crate::project_session::context::ProjectContext) -> Self {
         Self { state }
-    }
-}
-
-#[cfg(test)]
-mod admission_tests {
-    use super::*;
-
-    #[test]
-    fn active_workflow_or_assistant_blocks_history_rewrite_and_releases_admission() {
-        for (activity, expected, next_owner) in [
-            (
-                (true, false),
-                "active Workflow run",
-                CatalogLeaseOwner::WorkflowStart,
-            ),
-            (
-                (false, true),
-                "active Workflow Assistant turn",
-                CatalogLeaseOwner::WorkflowAgentStart,
-            ),
-        ] {
-            let lease = CatalogMutationLease::default();
-            let error = lease
-                .reserve_calibration_history(activity.0, activity.1)
-                .expect_err("published activity must block a later history rewrite");
-            assert!(error.to_string().contains(expected));
-
-            let next = lease
-                .try_acquire(next_owner)
-                .expect("a rejected history rewrite must release its admission lease");
-            assert!(lease.release(next));
-        }
-    }
-
-    #[test]
-    fn admitted_history_rewrite_blocks_later_workflow_and_assistant_admission() {
-        let lease = CatalogMutationLease::default();
-        let calibration = lease
-            .reserve_calibration_history(false, false)
-            .expect("idle activity check")
-            .expect("calibration-history admission");
-
-        assert!(
-            lease
-                .try_acquire(CatalogLeaseOwner::WorkflowStart)
-                .is_none(),
-            "manual Workflow cannot pass an admitted history rewrite"
-        );
-        assert!(
-            lease
-                .try_acquire(CatalogLeaseOwner::WorkflowAgentStart)
-                .is_none(),
-            "Assistant cannot pass an admitted history rewrite"
-        );
-        assert!(lease.release(calibration));
     }
 }

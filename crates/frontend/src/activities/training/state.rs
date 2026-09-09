@@ -10,9 +10,6 @@ use std::collections::BTreeSet;
 use dioxus::prelude::*;
 use spiral_robotics_common::training::TrainingConfig;
 
-use crate::activities::data::catalog as spiral;
-use crate::activities::data::sql_draft::GeneratedSqlDraft;
-
 use crate::shell::notifications::MessageSource;
 use crate::shell::state::StudioProjectState;
 
@@ -26,7 +23,6 @@ pub(crate) struct TrainingController {
 #[derive(Clone, Copy, PartialEq)]
 struct TrainingDraftSignals {
     config: Signal<TrainingConfig>,
-    generated_sql: Signal<String>,
     automatic_run_name: Signal<bool>,
 }
 
@@ -43,11 +39,6 @@ struct TrainingCommandSignals {
     deleting: Signal<Option<String>>,
 }
 
-struct DatasetSync<'a> {
-    namespace: &'a str,
-    dataset_id: &'a str,
-}
-
 pub(crate) struct TrainingRunIdentity {
     id: String,
     name: String,
@@ -60,17 +51,14 @@ impl TrainingRunIdentity {
 }
 
 impl TrainingController {
-    pub(crate) fn use_controller(namespace: &str, dataset_id: &str) -> Self {
-        let initial_sql =
-            spiral::ManagedTable::Datasets.training_sql_for_dataset(namespace, dataset_id);
-        let config_sql = initial_sql.clone();
+    pub(crate) fn use_controller(dataset_id: &str) -> Self {
+        let config_sql = String::new();
         let config_dataset = dataset_id.to_owned();
         let controller = use_hook(|| Self {
             draft: TrainingDraftSignals {
                 config: Signal::new({
                     TrainingConfig::for_dataset("act-run-001", config_dataset, config_sql)
                 }),
-                generated_sql: Signal::new(initial_sql),
                 automatic_run_name: Signal::new(true),
             },
             history: TrainingHistorySignals {
@@ -83,36 +71,12 @@ impl TrainingController {
                 deleting: Signal::new(None),
             },
         });
-        let namespace_dependency = namespace.to_owned();
         let dataset_dependency = dataset_id.to_owned();
-        use_effect(use_reactive(
-            (&namespace_dependency, &dataset_dependency),
-            move |(namespace, dataset_id)| {
-                controller.sync_dataset(DatasetSync {
-                    namespace: &namespace,
-                    dataset_id: &dataset_id,
-                })
-            },
-        ));
+        use_effect(use_reactive((&dataset_dependency,), move |(dataset_id,)| {
+            let mut config = controller.draft.config;
+            config.write().set_dataset_id(dataset_id);
+        }));
         controller
-    }
-
-    fn sync_dataset(mut self, dataset: DatasetSync<'_>) {
-        let previous = self.draft.generated_sql.peek().to_owned();
-        let next = spiral::ManagedTable::Datasets
-            .training_sql_for_dataset(dataset.namespace, dataset.dataset_id);
-        self.draft.config.write().set_dataset_id(dataset.dataset_id);
-        if previous == next {
-            return;
-        }
-        {
-            let mut config = self.draft.config.write();
-            let mut sql = config.sql().to_owned();
-            if sql.rebase_generated(&previous, &next) {
-                config.set_sql(sql);
-            }
-        }
-        self.draft.generated_sql.set(next);
     }
 
     pub(crate) fn config(&self) -> TrainingConfig {

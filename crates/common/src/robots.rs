@@ -1353,4 +1353,4 @@ mod tests {
 }
 
 mod requests;
-pub use requests::{CalibrationApplication, RobotGoal, SerialPortIdentification, SerialPortScan};
+pub use requests::{RobotGoal, SerialPortIdentification, SerialPortScan};

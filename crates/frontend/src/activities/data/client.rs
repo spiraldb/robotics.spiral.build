@@ -3,7 +3,7 @@ use crate::client::http::UrlComponent;
 use crate::client::project::ProjectClient;
 use crate::client::transport::{CommandError, HttpRequest};
 use spiral_robotics_common::datasets::{DatasetInspection, DatasetSelection, ProjectResource};
-use spiral_robotics_common::recording::{EpisodeInspectionSnapshot, RecordingDatasetSummary};
+use spiral_robotics_common::recording::EpisodeInspectionSnapshot;
 use spiral_robotics_common::relations::{QueryRequest, RelationCatalog, SpiralQuerySnapshot};
 use std::future::Future;
 
@@ -11,6 +11,21 @@ pub(crate) struct DatasetClient {
     project: ProjectClient,
 }
 impl DatasetClient {
+    pub(crate) fn recorded_camera(
+        &self,
+        episode: String,
+        stream: String,
+    ) -> impl Future<Output = Result<spiral_robotics_common::datasets::EpisodeVideo, CommandError>> + use<>
+    {
+        self.project.request(
+            HttpRequest::new(
+                "POST",
+                format!("/api/episodes/{}/camera", episode.url_component()),
+            )
+            .json(&spiral_robotics_common::datasets::RecordedCameraRequest::new(stream)),
+        )
+    }
+
     pub(crate) fn inspect_import(
         &self,
         source: spiral_robotics_common::datasets::HuggingFaceDatasetSource,
@@ -54,11 +69,13 @@ impl DatasetClient {
             project: ProjectClient::current(),
         }
     }
-    pub(crate) fn list_recording_datasets(
+    pub(crate) fn list_datasets(
         &self,
-    ) -> impl Future<Output = Result<Vec<RecordingDatasetSummary>, CommandError>> + use<> {
+    ) -> impl Future<
+        Output = Result<Vec<spiral_robotics_common::datasets::DatasetSummary>, CommandError>,
+    > + use<> {
         self.project
-            .request(HttpRequest::new("GET", "/api/recording-datasets"))
+            .request(HttpRequest::new("GET", "/api/datasets"))
     }
 
     pub(crate) fn inspect_episode(

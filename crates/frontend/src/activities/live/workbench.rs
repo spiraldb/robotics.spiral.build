@@ -59,7 +59,13 @@ fn CaptureSection(datasets: DatasetChoices, recording: Option<RecordingProgress>
     let dataset_ids = datasets
         .datasets()
         .into_iter()
-        .map(|dataset| dataset.id().to_owned())
+        .filter_map(|dataset| {
+            dataset
+                .selection()
+                .label()
+                .strip_prefix("dataset_")
+                .map(str::to_owned)
+        })
         .chain(std::iter::once(selected_dataset.read().to_owned()))
         .collect::<BTreeSet<_>>();
 

@@ -22,9 +22,6 @@ use spiral_robotics_common::training::{
     TrainingMetricPoint, TrainingReadiness, TrainingRun, TrainingRunPhase,
 };
 
-#[cfg(test)]
-use crate::activities::data::catalog as spiral;
-
 use crate::components::charts::{
     COLOR_CPU, COLOR_GPU, COLOR_INK_FAINT, COLOR_LINE, COLOR_MEMORY, COLOR_SELECTED, COLOR_SURFACE,
     COLOR_THROUGHPUT, COLOR_TRAIN, COLOR_TRANSFER, COLOR_VALIDATION, CharmingChart, ChartPoints,
@@ -96,7 +93,7 @@ fn TrainingPanels(
                 "training-runs",
                 rsx! {
                     section { class: "training-run-empty",
-                        strong { "Start training or select a run" }
+                        strong { "Select a run to inspect its progress and checkpoints" }
                     }
                 },
             )
@@ -197,13 +194,24 @@ fn TrainingRunControl(
     let dataset_ids = data
         .datasets()
         .into_iter()
-        .map(|dataset| dataset.id().to_owned())
+        .filter_map(|dataset| {
+            dataset
+                .selection()
+                .label()
+                .strip_prefix("dataset_")
+                .map(str::to_owned)
+        })
         .chain(std::iter::once(dataset_id.clone()))
         .collect::<BTreeSet<_>>();
     let starting = controller.starting();
     let stopping = controller.stopping();
     let dataset_valid = DatasetId::is_canonical(dataset_id.trim());
-    let can_start = readiness.ready() && active_run.is_none() && !starting && dataset_valid;
+    let training_blocker = config.policy().mcap_training_blocker();
+    let can_start = training_blocker.is_none()
+        && readiness.ready()
+        && active_run.is_none()
+        && !starting
+        && dataset_valid;
     let active_id = active_run.as_ref().map(|run| run.id().to_owned());
     let progress = active_run.as_ref().map(|run| {
         if run.config().steps() == 0 {
@@ -250,7 +258,15 @@ fn TrainingRunControl(
     rsx! {
         div { class: "training-control",
             div { class: "training-control-scroll",
-            if !readiness.ready() {
+            if let Some(reason) = training_blocker {
+                div { class: "training-inline-state training-inline-state-caution", role: "status",
+                    div { class: "training-inline-copy",
+                        strong { "MCAP training is not available yet" }
+                        span { "{reason}" }
+                        p { "You can record episodes and play them back in Data. Existing training history and checkpoints remain available." }
+                    }
+                }
+            } else if !readiness.ready() {
                 div { class: "training-inline-state training-inline-state-caution",
                     div { class: "training-inline-copy",
                         strong { "Training is not ready" }
@@ -541,7 +557,7 @@ fn TrainingRunControl(
                 class: "training-start-action",
                 disabled: !can_start,
                 aria_busy: starting,
-                title: if active_run.is_some() { "Stop the active run first".to_owned() } else if !dataset_valid { "Choose a valid dataset ID first".to_owned() } else if !readiness.ready() { readiness_recovery.clone() } else { "Start training".to_owned() },
+                title: if active_run.is_some() { "Stop the active run first".to_owned() } else if let Some(reason) = training_blocker { reason.to_owned() } else if !dataset_valid { "Choose a valid dataset ID first".to_owned() } else if !readiness.ready() { readiness_recovery.clone() } else { "Start training".to_owned() },
                 onclick: move |_| {
                     controller.start(studio, training_history);
                 },
@@ -562,7 +578,7 @@ fn TrainingHistory(
             if history.is_empty() {
                 div { class: "training-history-empty",
                     strong { "No runs yet" }
-                    span { "Start training to create one." }
+                    span { "Training history will appear here." }
                 }
             }
             for run in history {
@@ -1426,7 +1442,6 @@ impl RuntimeDevicePresentation for str {
 
 #[cfg(test)]
 mod tests {
-    use crate::activities::data::catalog::ManagedTable as Table;
 
     use super::*;
 
@@ -1451,20 +1466,6 @@ mod tests {
             "CPU".runtime_device_option(),
             ("cpu".to_owned(), "CPU".to_owned())
         );
-    }
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn default_query_selects_complete_kept_follower_samples() {
-        let sql = spiral::ManagedTable::Datasets.training_sql_for_dataset("robotics", "pick-place");
-        assert!(sql.contains(&format!(
-            "FROM {}",
-            Table::JointSamples.qualified_name("robotics")
-        )));
-        assert!(sql.contains(&Table::Episodes.qualified_name("robotics")));
-        assert!(sql.contains(&Table::EpisodeStreams.qualified_name("robotics")));
-        assert!(sql.contains(&format!("j.{}", spiral::column::STATE_VALID)));
-        assert!(sql.contains(&format!("j.{}", spiral::column::ACTION_VALID)));
-        assert!(sql.contains("LIKE '%follower%'"));
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]
@@ -1520,12 +1521,8 @@ pub(crate) fn TrainingWorkspace(is_active: ReadSignal<bool>) -> Element {
         crate::shell::activity::Activity::Training,
         is_active,
     );
-    let studio = crate::shell::state::StudioProjectState::current();
     let choices = crate::activities::data::dataset_catalog::DatasetChoices::use_choices();
-    let controller = super::state::TrainingController::use_controller(
-        studio.configuration().dataset(),
-        &choices.selected().read(),
-    );
+    let controller = super::state::TrainingController::use_controller(&choices.selected().read());
     let history =
         super::history::TrainingHistory::use_history(is_active, move || controller.selected_run());
     rsx! { crate::shell::frame::WorkspaceFrame { workspace, status: crate::shell::frame::WorkspaceStatus::Training(history), TrainingPanels { data: choices, controller, training_history: history } } }

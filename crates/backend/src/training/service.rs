@@ -98,6 +98,9 @@ impl<'a> TrainingActions<'a> {
         &self,
         command: TrainingConfig,
     ) -> Result<TrainingRun, OperationError> {
+        if let Some(reason) = command.policy().mcap_training_blocker() {
+            return Err(OperationError::Conflict(reason.into()));
+        }
         self.training
             .start(command.validated()?)
             .await

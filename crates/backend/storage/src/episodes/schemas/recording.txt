@@ -1,0 +1,168 @@
+// studio_recordings.proto
+syntax = "proto2";
+package studio.recording;
+message Dataset {
+  optional string dataset_id = 1;
+  optional string name = 2;
+  optional int64 created_ms = 3;
+  optional string description = 4;
+}
+message Episode {
+  optional string episode_id = 1;
+  optional string dataset_id = 2;
+  optional uint32 schema_version = 3;
+  optional int64 started_ms = 4;
+  optional double sample_hz = 5;
+  optional string source = 6;
+  optional string note = 7;
+  optional uint64 frames = 8;
+  optional uint64 duration_ns = 9;
+  optional double max_follow_error_degrees = 10;
+  optional bool discarded = 11;
+  optional .studio.recording.Episode_recording_gap_after_ns_List recording_gap_after_ns = 12;
+  optional .studio.recording.Episode_recording_gap_duration_ns_List recording_gap_duration_ns = 13;
+}
+message Episode_recording_gap_after_ns_List_Item {
+  optional uint64 value = 1;
+}
+message Episode_recording_gap_after_ns_List {
+  repeated .studio.recording.Episode_recording_gap_after_ns_List_Item values = 1;
+}
+message Episode_recording_gap_duration_ns_List_Item {
+  optional uint64 value = 1;
+}
+message Episode_recording_gap_duration_ns_List {
+  repeated .studio.recording.Episode_recording_gap_duration_ns_List_Item values = 1;
+}
+message Stream {
+  optional string episode_id = 1;
+  optional string stream_id = 2;
+  optional uint32 ordinal = 3;
+  optional string modality = 4;
+  optional string robot_type = 5;
+  optional .studio.recording.Stream_joint_names_List joint_names = 6;
+  optional string camera_id = 7;
+  optional uint32 width = 8;
+  optional uint32 height = 9;
+  optional uint32 fps = 10;
+  optional .studio.recording.Stream_start_temperature_celsius_List start_temperature_celsius = 11;
+  optional .studio.recording.Stream_start_voltage_volts_List start_voltage_volts = 12;
+  optional .studio.recording.Stream_limit_max_temperature_celsius_List limit_max_temperature_celsius = 13;
+  optional .studio.recording.Stream_limit_min_voltage_volts_List limit_min_voltage_volts = 14;
+  optional .studio.recording.Stream_limit_max_voltage_volts_List limit_max_voltage_volts = 15;
+  optional .studio.recording.Stream_limit_max_load_List limit_max_load = 16;
+  optional .studio.recording.Stream_peak_temperature_celsius_List peak_temperature_celsius = 17;
+  optional .studio.recording.Stream_min_voltage_volts_List min_voltage_volts = 18;
+  optional .studio.recording.Stream_peak_load_List peak_load = 19;
+  optional .studio.recording.Stream_peak_current_amps_List peak_current_amps = 20;
+}
+message Stream_joint_names_List_Item {
+  optional string value = 1;
+}
+message Stream_joint_names_List {
+  repeated .studio.recording.Stream_joint_names_List_Item values = 1;
+}
+message Stream_start_temperature_celsius_List_Item {
+  optional double value = 1;
+}
+message Stream_start_temperature_celsius_List {
+  repeated .studio.recording.Stream_start_temperature_celsius_List_Item values = 1;
+}
+message Stream_start_voltage_volts_List_Item {
+  optional double value = 1;
+}
+message Stream_start_voltage_volts_List {
+  repeated .studio.recording.Stream_start_voltage_volts_List_Item values = 1;
+}
+message Stream_limit_max_temperature_celsius_List_Item {
+  optional double value = 1;
+}
+message Stream_limit_max_temperature_celsius_List {
+  repeated .studio.recording.Stream_limit_max_temperature_celsius_List_Item values = 1;
+}
+message Stream_limit_min_voltage_volts_List_Item {
+  optional double value = 1;
+}
+message Stream_limit_min_voltage_volts_List {
+  repeated .studio.recording.Stream_limit_min_voltage_volts_List_Item values = 1;
+}
+message Stream_limit_max_voltage_volts_List_Item {
+  optional double value = 1;
+}
+message Stream_limit_max_voltage_volts_List {
+  repeated .studio.recording.Stream_limit_max_voltage_volts_List_Item values = 1;
+}
+message Stream_limit_max_load_List_Item {
+  optional double value = 1;
+}
+message Stream_limit_max_load_List {
+  repeated .studio.recording.Stream_limit_max_load_List_Item values = 1;
+}
+message Stream_peak_temperature_celsius_List_Item {
+  optional double value = 1;
+}
+message Stream_peak_temperature_celsius_List {
+  repeated .studio.recording.Stream_peak_temperature_celsius_List_Item values = 1;
+}
+message Stream_min_voltage_volts_List_Item {
+  optional double value = 1;
+}
+message Stream_min_voltage_volts_List {
+  repeated .studio.recording.Stream_min_voltage_volts_List_Item values = 1;
+}
+message Stream_peak_load_List_Item {
+  optional double value = 1;
+}
+message Stream_peak_load_List {
+  repeated .studio.recording.Stream_peak_load_List_Item values = 1;
+}
+message Stream_peak_current_amps_List_Item {
+  optional double value = 1;
+}
+message Stream_peak_current_amps_List {
+  repeated .studio.recording.Stream_peak_current_amps_List_Item values = 1;
+}
+message JointSample {
+  optional string episode_id = 1;
+  optional string stream_id = 2;
+  optional uint64 sample_index = 3;
+  optional uint64 episode_time_ns = 4;
+  optional bool state_valid = 5;
+  optional bool action_valid = 6;
+  optional .studio.recording.JointSample_state_position_List state_position = 7;
+  optional .studio.recording.JointSample_action_position_List action_position = 8;
+  optional .studio.recording.JointSample_raw_position_List raw_position = 9;
+  optional .studio.recording.JointSample_velocity_List velocity = 10;
+  optional .studio.recording.JointSample_effort_List effort = 11;
+  optional double follow_error_degrees = 12;
+}
+message JointSample_state_position_List_Item {
+  optional double value = 1;
+}
+message JointSample_state_position_List {
+  repeated .studio.recording.JointSample_state_position_List_Item values = 1;
+}
+message JointSample_action_position_List_Item {
+  optional double value = 1;
+}
+message JointSample_action_position_List {
+  repeated .studio.recording.JointSample_action_position_List_Item values = 1;
+}
+message JointSample_raw_position_List_Item {
+  optional int64 value = 1;
+}
+message JointSample_raw_position_List {
+  repeated .studio.recording.JointSample_raw_position_List_Item values = 1;
+}
+message JointSample_velocity_List_Item {
+  optional double value = 1;
+}
+message JointSample_velocity_List {
+  repeated .studio.recording.JointSample_velocity_List_Item values = 1;
+}
+message JointSample_effort_List_Item {
+  optional double value = 1;
+}
+message JointSample_effort_List {
+  repeated .studio.recording.JointSample_effort_List_Item values = 1;
+}

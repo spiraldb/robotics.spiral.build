@@ -45,14 +45,6 @@ pub(super) struct EpisodeSchema;
 
 impl EpisodeSchema {
     /// Schema for the managed `datasets` relation.
-    pub(super) fn datasets() -> SchemaRef {
-        Arc::new(Schema::new(vec![
-            Field::new(db::DATASET_ID, DataType::Utf8, false),
-            Field::new(db::NAME, DataType::Utf8, false),
-            Field::new(db::CREATED_MS, DataType::Int64, false),
-            Field::new(db::DESCRIPTION, DataType::Utf8, true),
-        ]))
-    }
 
     pub(super) fn episodes() -> SchemaRef {
         Arc::new(Schema::new(vec![
@@ -129,22 +121,9 @@ impl EpisodeSchema {
 
 /// Build the owning dataset row. Dataset IDs double as their initial display
 /// name until richer dataset metadata is edited in a future workflow.
-impl EpisodeStart {
-    pub(super) fn dataset_batch(&self) -> Result<RecordBatch, EpisodeError> {
-        let start = self;
-        let columns: Vec<ArrayRef> = vec![
-            Arc::new(StringArray::from(vec![start.dataset_id()])),
-            Arc::new(StringArray::from(vec![start.dataset_id()])),
-            Arc::new(Int64Array::from(vec![start.started_ms()])),
-            Arc::new(StringArray::from(vec![None::<&str>])),
-        ];
-        RecordBatch::try_new(EpisodeSchema::datasets(), columns).map_err(|error| {
-            EpisodeError::invalid(format!("building Spiral dataset batch: {error}"))
-        })
-    }
-}
+impl EpisodeStart {}
 
-/// One row destined for the managed `joint_samples` relation.
+/// One joint message row encoded into the recording’s Protobuf schema.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct JointSampleRow {
     key: JointSampleKey,
@@ -242,10 +221,6 @@ impl SpiralEpisodeEncoder {
         })
     }
 
-    pub(super) fn frames(&self) -> u64 {
-        self.next_sample_index
-    }
-
     /// Convert one control frame without performing I/O.
     pub(super) fn encode(&mut self, sample: &Sample) -> Result<Vec<JointSampleRow>, EpisodeError> {
         sample.validate_for(&self.start)?;
@@ -308,6 +283,19 @@ pub(super) struct StoredEpisodeRow {
 }
 
 impl StoredEpisodeRow {
+    #[cfg(test)]
+    fn start(&self) -> &EpisodeStart {
+        &self.start
+    }
+    #[cfg(test)]
+    fn completion(&self) -> &EpisodeCompletion {
+        &self.completion
+    }
+    #[cfg(test)]
+    fn frames(&self) -> u64 {
+        self.frames
+    }
+
     pub(super) const fn new(
         start: EpisodeStart,
         completion: EpisodeCompletion,
@@ -318,18 +306,6 @@ impl StoredEpisodeRow {
             completion,
             frames,
         }
-    }
-
-    pub(super) const fn start(&self) -> &EpisodeStart {
-        &self.start
-    }
-
-    pub(super) const fn completion(&self) -> &EpisodeCompletion {
-        &self.completion
-    }
-
-    pub(super) const fn frames(&self) -> u64 {
-        self.frames
     }
 
     pub(super) fn into_parts(self) -> (EpisodeStart, EpisodeCompletion, u64) {
@@ -423,15 +399,7 @@ impl StoredEpisodeRow {
 }
 
 /// Build the single row that makes an episode visible to readers.
-impl EpisodeCompletion {
-    pub(super) fn episode_batch(
-        &self,
-        start: &EpisodeStart,
-        frames: u64,
-    ) -> Result<RecordBatch, EpisodeError> {
-        StoredEpisodeRow::batch(&[StoredEpisodeRow::new(start.clone(), self.clone(), frames)])
-    }
-}
+impl EpisodeCompletion {}
 
 /// The two parallel gap lists an episode row carries.
 struct RecordingGapColumns {
@@ -673,30 +641,6 @@ impl EpisodeStreamRow {
             start,
             peak,
             video,
-        })
-    }
-
-    /// Decode the columns needed to assemble an episode-list row. Conditions
-    /// and video properties are deliberately absent from the catalog query.
-    pub(super) fn decode_catalog(batch: &RecordBatch, row: usize) -> Result<Self, String> {
-        let columns = ArrowColumns::new(batch, "episode stream catalog");
-        let modality = StreamModality::parse(columns.text(db::MODALITY, row)?)?;
-        Ok(Self {
-            key: EpisodeStreamKey::new(
-                columns.text(db::EPISODE_ID, row)?.to_owned(),
-                columns.text(db::STREAM_ID, row)?.to_owned(),
-                columns.ordinal(db::ORDINAL, row)?,
-            ),
-            modality,
-            robot_type: columns
-                .optional_text(db::ROBOT_TYPE, row)?
-                .map(str::to_owned),
-            joints: matches!(modality, StreamModality::Joint)
-                .then(|| columns.text_list(db::JOINT_NAMES, row))
-                .transpose()?,
-            start: None,
-            peak: None,
-            video: None,
         })
     }
 }
@@ -1185,7 +1129,7 @@ mod tests {
         assert_eq!(second[0].key.sample_index, 1);
         assert_eq!(first[0].action_position, None);
         assert_eq!(first[1].action_position, Some(vec![Some(0.25), Some(0.5)]));
-        assert_eq!(encoder.frames(), 2);
+        assert_eq!(encoder.next_sample_index, 2);
     }
 
     #[test]
@@ -1200,7 +1144,7 @@ mod tests {
 
         let error = encoder.encode(&malformed).unwrap_err().to_string();
         assert!(error.contains("raw position has 1 arm streams, expected 2"));
-        assert_eq!(encoder.frames(), 0);
+        assert_eq!(encoder.next_sample_index, 0);
         assert_eq!(encoder.encode(&sample(0.0)).unwrap()[0].key.sample_index, 0);
     }
 
@@ -1242,11 +1186,12 @@ mod tests {
     }
 
     #[test]
-    fn completion_row_is_the_episode_visibility_marker() {
+    fn recording_header_keeps_duration_and_frame_count() {
         let start = start();
         let completion = EpisodeCompletion::new(2.5, Vec::new(), Vec::new())
             .with_max_follow_error_degrees(Some(1.25));
-        let batch = completion.episode_batch(&start, 150).unwrap();
+        let batch =
+            StoredEpisodeRow::batch(&[StoredEpisodeRow::new(start, completion, 150)]).unwrap();
 
         assert_eq!(batch.num_rows(), 1);
         let dataset = batch
@@ -1273,19 +1218,6 @@ mod tests {
     }
 
     #[test]
-    fn dataset_row_precedes_its_episode_reference() {
-        let batch = start().dataset_batch().unwrap();
-        assert_eq!(batch.num_rows(), 1);
-        let id = batch
-            .column_by_name("dataset_id")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        assert_eq!(id.value(0), "default");
-    }
-
-    #[test]
     fn stream_rows_keep_joint_order() {
         let batch = start()
             .streams_batch(&EpisodeCompletion::new(0.0, Vec::new(), Vec::new()))
@@ -1300,22 +1232,6 @@ mod tests {
         let leader = leader.as_any().downcast_ref::<StringArray>().unwrap();
         assert_eq!(leader.value(0), "shoulder");
         assert_eq!(leader.value(1), "elbow");
-    }
-
-    #[test]
-    fn catalog_streams_decode_without_condition_or_video_columns() {
-        let full_batch = start()
-            .streams_batch(&EpisodeCompletion::new(0.0, Vec::new(), Vec::new()))
-            .unwrap();
-        let catalog_batch = full_batch.project(&[0, 1, 2, 3, 4, 5]).unwrap();
-
-        let stream = EpisodeStreamRow::decode_catalog(&catalog_batch, 0).unwrap();
-
-        assert_eq!(stream.arm().id(), "leader");
-        assert_eq!(stream.arm().joints(), ["shoulder", "elbow"]);
-        assert!(stream.start.is_none());
-        assert!(stream.peak.is_none());
-        assert!(stream.video.is_none());
     }
 
     #[test]

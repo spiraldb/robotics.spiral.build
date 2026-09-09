@@ -2,12 +2,9 @@
 
 use crate::OperationError;
 use crate::project_session::context::ProjectContext;
-use crate::robots::workspace::RobotRecord;
-use spiral_robotics_common::identity::DatasetId;
 use spiral_robotics_common::recording::{
-    EpisodeArmScalarSamples, EpisodeInspectionArm, EpisodeInspectionSnapshot, EpisodeListItem,
-    EpisodeOptionalFrameMatrix, EpisodeVideoAssetMetadata, EpisodeVideoFormat,
-    EpisodeVideoIdentity, EpisodeVideoTimeline,
+    EpisodeArmScalarSamples, EpisodeInspectionArm, EpisodeInspectionSnapshot,
+    EpisodeOptionalFrameMatrix,
 };
 use spiral_robotics_storage::episodes::{EpisodeId, EpisodeInspection};
 
@@ -20,40 +17,17 @@ impl<'a> EpisodeQueries<'a> {
         Self { state }
     }
 
-    pub(crate) async fn authorize_asset(&self, episode: String) -> Result<(), OperationError> {
-        let episode = Self::episode_id(&episode)?;
-        self.state
-            .episodes()
-            .get(episode.as_str())
-            .await
-            .map(|_| ())
-            .map_err(OperationError::from)
-    }
-
-    pub(crate) async fn list(
-        &self,
-        dataset_id: String,
-    ) -> Result<Vec<EpisodeListItem>, OperationError> {
-        let dataset_id = Self::dataset_id(&dataset_id)?;
-        Ok(self
-            .state
-            .episodes()
-            .list_in_dataset(dataset_id.as_str())
-            .await)
-    }
-
     pub(crate) async fn inspection(
         &self,
         episode: String,
     ) -> Result<EpisodeInspectionSnapshot, OperationError> {
         let episode = Self::episode_id(&episode)?;
-        let (inspection, saved_robots) = tokio::join!(
-            self.state.episodes().inspection(episode.as_str()),
-            self.state.workspace().list(),
-        );
-        Ok(inspection
-            .map_err(OperationError::from)?
-            .into_snapshot(&saved_robots))
+        self.state
+            .episodes()
+            .inspection(episode.as_str())
+            .await
+            .map_err(OperationError::from)
+            .map(InspectionProjection::into_snapshot)
     }
 
     fn episode_id(episode: &str) -> Result<String, OperationError> {
@@ -63,16 +37,6 @@ impl<'a> EpisodeQueries<'a> {
             )
         })
     }
-
-    fn dataset_id(dataset_id: &str) -> Result<String, OperationError> {
-        DatasetId::try_from(dataset_id)
-            .map(String::from)
-            .map_err(|_| {
-                OperationError::invalid_input(
-                    "a dataset ID must contain 1–96 letters, numbers, '.', '_' or '-'",
-                )
-            })
-    }
 }
 
 /// Projects a stored inspection into the wire snapshot.
@@ -81,13 +45,13 @@ impl<'a> EpisodeQueries<'a> {
 /// transposition hangs off the stored value as a local extension trait rather
 /// than a `From` impl.
 trait InspectionProjection {
-    fn into_snapshot(self, saved_robots: &[RobotRecord]) -> EpisodeInspectionSnapshot;
+    fn into_snapshot(self) -> EpisodeInspectionSnapshot;
 }
 
 impl InspectionProjection for EpisodeInspection {
-    fn into_snapshot(self, saved_robots: &[RobotRecord]) -> EpisodeInspectionSnapshot {
+    fn into_snapshot(self) -> EpisodeInspectionSnapshot {
         let inspection = self;
-        let (episode, summary, videos) = inspection.into_parts();
+        let (episode, summary) = inspection.into_parts();
         let samples = episode.samples();
         let arms = episode
             .start()
@@ -96,11 +60,6 @@ impl InspectionProjection for EpisodeInspection {
             .enumerate()
             .map(|(arm_index, arm)| {
                 let joint_count = arm.joints().len();
-                let calibration = saved_robots
-                    .iter()
-                    .find(|robot| robot.id() == arm.id())
-                    .cloned()
-                    .and_then(|record| record.calibration().ok().flatten());
                 let normalized = samples
                     .iter()
                     .flat_map(|sample| sample.normalized()[arm_index].iter().copied())
@@ -109,20 +68,9 @@ impl InspectionProjection for EpisodeInspection {
                     .iter()
                     .flat_map(|sample| sample.raw()[arm_index].iter().copied())
                     .collect();
-                let degrees = samples
-                    .iter()
-                    .flat_map(|sample| {
-                        sample.raw()[arm_index]
-                            .iter()
-                            .zip(arm.joints())
-                            .map(|(raw, joint)| {
-                                calibration
-                                    .as_ref()
-                                    .and_then(|calibration| calibration.motors().get(joint))
-                                    .map(|motor| motor.degrees_from_center(*raw))
-                            })
-                    })
-                    .collect();
+                // The MCAP preserves normalized positions and raw encoder readings.
+                // Never reinterpret historical samples with today's calibration.
+                let degrees = vec![None; samples.len() * joint_count];
                 let velocity = OptionalFrameMatrix::new(samples, joint_count, |sample, index| {
                     sample
                         .velocity()
@@ -164,29 +112,6 @@ impl InspectionProjection for EpisodeInspection {
                 .collect(),
         )
         .with_arms(arms)
-        .with_videos(
-            videos
-                .into_iter()
-                .map(|video| {
-                    let size = video.size();
-                    let timing = video.timing();
-                    let segment = video.segment();
-                    EpisodeVideoAssetMetadata::new(
-                        EpisodeVideoIdentity::new(
-                            video.stream_id(),
-                            video.camera_id(),
-                            segment.index(),
-                        ),
-                        EpisodeVideoFormat::new(size.width(), size.height(), timing.fps()),
-                        EpisodeVideoTimeline::new(
-                            timing.frames(),
-                            video.duration_seconds(),
-                            segment.timeline_offset_seconds(),
-                        ),
-                    )
-                })
-                .collect(),
-        )
     }
 }
 
@@ -240,11 +165,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_reads_normalize_datasets_and_require_exact_episode_identities() {
-        assert_eq!(
-            EpisodeQueries::dataset_id(" pick-place ").unwrap().as_str(),
-            "pick-place"
-        );
+    fn inspection_requires_exact_episode_identities() {
         assert_eq!(
             EpisodeQueries::episode_id("episode_000001")
                 .unwrap()
@@ -258,10 +179,6 @@ mod tests {
         for invalid in ["", "../episode", "episode name", "episode/"] {
             assert!(matches!(
                 EpisodeQueries::episode_id(invalid),
-                Err(OperationError::InvalidInput(_))
-            ));
-            assert!(matches!(
-                EpisodeQueries::dataset_id(invalid),
                 Err(OperationError::InvalidInput(_))
             ));
         }

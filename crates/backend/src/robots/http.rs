@@ -5,8 +5,8 @@ use crate::http::delivery::{ApiJson, ApiPath, HttpFailure, ScopedProject};
 
 use axum::Json;
 use spiral_robotics_common::robots::{
-    CalibrationApplication, CameraBinding, CameraStatus, ModeSelection, NewRobot, RobotGoal,
-    RobotSummary, RobotUpdate, SerialPortIdentification, SerialPortScan, SerialPortSummary,
+    CameraBinding, CameraStatus, ModeSelection, NewRobot, RobotGoal, RobotSummary, RobotUpdate,
+    SerialPortIdentification, SerialPortScan, SerialPortSummary,
 };
 
 pub(crate) struct RobotEndpoints;
@@ -30,10 +30,6 @@ impl RobotEndpoints {
         routes.post("/robots/{id}/calibration/start", Self::start_calibration);
         routes.post("/robots/{id}/calibration/finish", Self::finish_calibration);
         routes.post("/robots/{id}/calibration/cancel", Self::cancel_calibration);
-        routes.post(
-            "/robots/{id}/calibration/reapply",
-            Self::reapply_calibration,
-        );
         routes.put("/mode", Self::set_mode);
     }
     async fn list_serial_ports(
@@ -160,13 +156,7 @@ impl RobotEndpoints {
         commands.cancel_calibration(id).await?;
         Ok(Json(()))
     }
-    async fn reapply_calibration(
-        ScopedProject(commands): ScopedProject<crate::robots::commands::DeviceCommands>,
-        ApiPath(id): ApiPath<String>,
-    ) -> Result<Json<CalibrationApplication>, HttpFailure> {
-        let result = commands.reapply_calibration(id).await?;
-        Ok(Json(result))
-    }
+
     async fn set_mode(
         ScopedProject(commands): ScopedProject<crate::robots::commands::DeviceCommands>,
         ApiJson(selection): ApiJson<ModeSelection>,
