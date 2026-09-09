@@ -1,7 +1,7 @@
 //! One dataset request policy and its recovery control across Studio activities.
 
 use dioxus::prelude::*;
-use spiral_robotics_common::recording::DatasetSummary;
+use spiral_robotics_common::recording::RecordingDatasetSummary;
 
 use crate::client::CommandError;
 
@@ -24,7 +24,7 @@ pub(super) enum DatasetCatalogState {
 
 #[derive(Clone, Debug)]
 pub(super) struct LoadedDatasets {
-    datasets: Vec<DatasetSummary>,
+    datasets: Vec<RecordingDatasetSummary>,
 }
 
 impl DatasetCatalogState {
@@ -36,7 +36,7 @@ impl DatasetCatalogState {
         }
     }
 
-    pub(super) fn datasets(&self) -> &[DatasetSummary] {
+    pub(super) fn datasets(&self) -> &[RecordingDatasetSummary] {
         self.snapshot().map_or(&[], |snapshot| &snapshot.datasets)
     }
 
@@ -57,7 +57,7 @@ impl DatasetCatalogState {
         }
     }
 
-    pub(super) fn accept(&mut self, result: Result<Vec<DatasetSummary>, CommandError>) {
+    pub(super) fn accept(&mut self, result: Result<Vec<RecordingDatasetSummary>, CommandError>) {
         let previous = self.snapshot().cloned();
         *self = match result {
             Ok(datasets) => Self::Ready(LoadedDatasets { datasets }),
@@ -82,7 +82,7 @@ impl DatasetChoices {
         let available = use_memo(move || sessions.storage_available());
         let request = QueryPolicy::on_demand(QueryDomain::Data).use_when(
             move || *available.read(),
-            || DatasetClient::current().list_datasets(),
+            || DatasetClient::current().list_recording_datasets(),
         );
         let mut catalog = choices.catalog;
         use_effect(move || {
@@ -98,7 +98,7 @@ impl DatasetChoices {
     pub(crate) fn selected(self) -> Signal<String> {
         self.selected
     }
-    pub(crate) fn datasets(self) -> Vec<DatasetSummary> {
+    pub(crate) fn datasets(self) -> Vec<RecordingDatasetSummary> {
         self.catalog.read().datasets().to_vec()
     }
     fn dataset_catalog_error(self) -> Option<CommandError> {
@@ -153,7 +153,9 @@ mod tests {
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn failed_refresh_preserves_rows_then_recovers() {
         let mut catalog = DatasetCatalogState::default();
-        catalog.accept(Ok(vec![DatasetSummary::new("default", "Default", 0)]));
+        catalog.accept(Ok(vec![RecordingDatasetSummary::new(
+            "default", "Default", 0,
+        )]));
         catalog.pending();
         assert!(catalog.loading());
         assert_eq!(catalog.datasets()[0].id(), "default");

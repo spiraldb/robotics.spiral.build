@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use spiral_robotics_common::recording::DatasetSummary;
+use spiral_robotics_common::recording::RecordingDatasetSummary;
 use spiral_robotics_common::relations::{RelationCatalog, SpiralQuerySnapshot};
 use spiral_robotics_common::rollout::RolloutSnapshot;
 use spiral_robotics_common::training::{TrainingRun, TrainingSnapshot};
@@ -219,7 +219,7 @@ impl StorageManager {
             .await
     }
 
-    pub async fn datasets(&self) -> Result<Vec<DatasetSummary>, String> {
+    pub async fn recording_datasets(&self) -> Result<Vec<RecordingDatasetSummary>, String> {
         ProjectQueries::new(&self.project_store).datasets().await
     }
 

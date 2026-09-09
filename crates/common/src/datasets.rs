@@ -1,5 +1,11 @@
 //! Dataset identity and import contracts.
 
+mod catalog;
+pub use catalog::{
+    DatasetInspection, DatasetSelection, DatasetSummary, DatasetTopic, EpisodeTopicRequest,
+    EpisodeVideo, ProjectResource, VideoPacket,
+};
+
 use serde::{Deserialize, Serialize};
 
 /// What replacing the active SpiralDB project from a portable snapshot imported.

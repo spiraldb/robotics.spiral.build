@@ -5,10 +5,10 @@ use crate::http::delivery::{ApiJson, HttpFailure, ScopedProject};
 
 use axum::Json;
 use spiral_robotics_common::datasets::{
-    HuggingFaceDatasetImportSummary, HuggingFaceDatasetInspection, HuggingFaceDatasetSource,
+    DatasetInspection, DatasetSelection, DatasetSummary, ProjectResource,
 };
-use spiral_robotics_common::native_datasets::{
-    NativeDatasetInspection, NativeDatasetSelection, NativeDatasetSummary, ProjectResource,
+use spiral_robotics_common::datasets::{
+    HuggingFaceDatasetImportSummary, HuggingFaceDatasetInspection, HuggingFaceDatasetSource,
 };
 use spiral_robotics_common::relations::{QueryRequest, RelationCatalog, SpiralQuerySnapshot};
 
@@ -16,13 +16,11 @@ pub(crate) struct DatasetQueryEndpoints;
 
 impl DatasetQueryEndpoints {
     pub(crate) fn register(routes: &mut ApiRoutes) {
-        routes.get("/native-datasets", Self::native_datasets);
+        routes.get("/datasets", Self::datasets);
         routes.get("/data-catalog", Self::project_resources);
-        routes.post("/native-datasets/inspect", Self::inspect_native_dataset);
-        routes.post(
-            "/native-datasets/episode-topic",
-            Self::preview_episode_topic,
-        );
+        routes.post("/datasets/inspect", Self::inspect_dataset);
+        routes.post("/datasets/episode-topic", Self::preview_episode_topic);
+        routes.post("/datasets/episode-video", Self::episode_video);
         routes.get("/relations", Self::relation_catalog);
         routes.post("/queries", Self::run_spiral_query);
         routes.post(
@@ -39,24 +37,28 @@ impl DatasetQueryEndpoints {
     ) -> Result<Json<Vec<ProjectResource>>, HttpFailure> {
         Ok(Json(commands.project_resources().await?))
     }
-    async fn native_datasets(
+    async fn datasets(
         ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,
-    ) -> Result<Json<Vec<NativeDatasetSummary>>, HttpFailure> {
-        Ok(Json(commands.native_datasets().await?))
+    ) -> Result<Json<Vec<DatasetSummary>>, HttpFailure> {
+        Ok(Json(commands.datasets().await?))
     }
-    async fn inspect_native_dataset(
+    async fn inspect_dataset(
         ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,
-        ApiJson(selection): ApiJson<NativeDatasetSelection>,
-    ) -> Result<Json<NativeDatasetInspection>, HttpFailure> {
-        Ok(Json(commands.inspect_native_dataset(selection).await?))
+        ApiJson(selection): ApiJson<DatasetSelection>,
+    ) -> Result<Json<DatasetInspection>, HttpFailure> {
+        Ok(Json(commands.inspect_dataset(selection).await?))
     }
     async fn preview_episode_topic(
         ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,
-        ApiJson(request): ApiJson<
-            spiral_robotics_common::native_datasets::NativeEpisodeTopicRequest,
-        >,
+        ApiJson(request): ApiJson<spiral_robotics_common::datasets::EpisodeTopicRequest>,
     ) -> Result<Json<SpiralQuerySnapshot>, HttpFailure> {
         Ok(Json(commands.preview_episode_topic(request).await?))
+    }
+    async fn episode_video(
+        ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,
+        ApiJson(request): ApiJson<spiral_robotics_common::datasets::EpisodeTopicRequest>,
+    ) -> Result<Json<spiral_robotics_common::datasets::EpisodeVideo>, HttpFailure> {
+        Ok(Json(commands.episode_video(request).await?))
     }
     async fn relation_catalog(
         ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,

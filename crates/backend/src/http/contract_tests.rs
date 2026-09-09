@@ -92,7 +92,7 @@ async fn every_documented_scoped_endpoint_is_registered_and_rejects_missing_or_s
             }
         }
     }
-    assert_eq!(count, 56);
+    assert_eq!(count, 57);
     fixture.shutdown().await;
 }
 
@@ -141,6 +141,36 @@ async fn snapshots_are_plain_gets_and_old_sessions_cannot_read_the_replacement()
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(failure["code"], "stale_project");
     fixture.shutdown().await;
+}
+
+#[test]
+fn dataset_catalogs_and_episode_playback_keep_distinct_wire_contracts() {
+    let contract = StudioApi::routes().into_document();
+    let paths = &contract["paths"];
+    for (path, item_schema) in [
+        ("/datasets", "DatasetSummary"),
+        ("/recording-datasets", "RecordingDatasetSummary"),
+    ] {
+        assert_eq!(
+            paths[path]["get"]["responses"]["200"]["content"]["application/json"]["schema"]["items"]
+                ["$ref"],
+            format!("#/components/schemas/{item_schema}")
+        );
+    }
+    let playback = &paths["/datasets/episode-video"]["post"];
+    assert_eq!(
+        playback["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+        "#/components/schemas/EpisodeTopicRequest"
+    );
+    assert_eq!(
+        playback["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+        "#/components/schemas/EpisodeVideo"
+    );
+    // Nanosecond timestamps must survive the browser's numeric precision limit.
+    assert_eq!(
+        contract["components"]["schemas"]["VideoPacket"]["properties"]["timestamp_ns"]["type"],
+        "string"
+    );
 }
 
 #[tokio::test]

@@ -1,13 +1,13 @@
-//! Recording navigation within one native Spiral dataset.
+//! Recording navigation within one Spiral dataset.
 use super::DatasetClient;
 use crate::format::ClockPresentation;
 use dioxus::prelude::*;
 use serde::Deserialize;
-use spiral_robotics_common::native_datasets::{NativeDatasetInspection, NativeDatasetSelection};
+use spiral_robotics_common::datasets::{DatasetInspection, DatasetSelection};
 use spiral_robotics_common::relations::SpiralQuerySnapshot;
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
-struct NativeEpisode {
+struct DatasetEpisode {
     id: String,
     source_uri: Option<String>,
     message_count: Option<u64>,
@@ -15,7 +15,7 @@ struct NativeEpisode {
     message_end_time: Option<u64>,
     duration_ns: Option<u64>,
 }
-impl NativeEpisode {
+impl DatasetEpisode {
     fn duration(&self) -> String {
         self.duration_ns
             .map(|nanos| (nanos as f64 / 1e9).clock_label())
@@ -34,7 +34,7 @@ impl NativeEpisode {
 }
 
 struct EpisodePage {
-    episodes: Vec<NativeEpisode>,
+    episodes: Vec<DatasetEpisode>,
     has_more: bool,
 }
 impl EpisodePage {
@@ -51,7 +51,7 @@ impl EpisodePage {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self { episodes, has_more })
     }
-    fn sql(dataset: &NativeDatasetSelection, offset: usize) -> String {
+    fn sql(dataset: &DatasetSelection, offset: usize) -> String {
         format!(
             "SELECT id, source.uri AS source_uri, message_count, message_start_time, message_end_time, duration_ns FROM spql.mcap.episodes('{}') ORDER BY message_start_time, source_uri LIMIT 51 OFFSET {offset}",
             dataset.sql_name().replace('\'', "''")
@@ -62,7 +62,7 @@ impl EpisodePage {
 #[derive(Clone, Copy, PartialEq)]
 pub(super) struct EpisodeNavigation {
     offset: Signal<usize>,
-    selected: Signal<Option<(usize, NativeEpisode)>>,
+    selected: Signal<Option<(usize, DatasetEpisode)>>,
 }
 impl EpisodeNavigation {
     pub(super) fn new() -> Self {
@@ -74,8 +74,8 @@ impl EpisodeNavigation {
 }
 
 #[component]
-pub(super) fn NativeEpisodeBrowser(
-    inspection: NativeDatasetInspection,
+pub(super) fn EpisodeBrowser(
+    inspection: DatasetInspection,
     navigation: EpisodeNavigation,
     on_topics: EventHandler<(usize, String)>,
 ) -> Element {
@@ -102,11 +102,20 @@ pub(super) fn NativeEpisodeBrowser(
             }
             div { class: "min-h-0 flex-1 overflow-auto px-5 pb-5",
                 h3 { class: "mb-5 text-base font-medium", "Episode {ordinal}" }
+                if let (Some(start), Some(end), Some(camera)) = (episode.message_start_time, episode.message_end_time, inspection.topics().iter().find(|topic| topic.schemas().iter().any(|schema| schema == "foxglove.CompressedVideo"))) {
+                    super::episode_playback::EpisodePlayback {
+                        key: "{episode.id}",
+                        request: spiral_robotics_common::datasets::EpisodeTopicRequest::new(dataset.clone(), camera.name().to_owned(), episode.id.clone()),
+                        timeline: super::episode_playback::EpisodeTimeRange::new(start, end),
+                    }
+                } else {
+                    p { class: "mb-5 text-xs text-ink-soft", "No camera video with episode timing is available." }
+                }
                 dl { class: "data-recording-facts",
                     dt { "Duration" } dd { "{episode.duration()}" }
                     dt { "Messages" } dd { {episode.message_count.map(|count| count.to_string()).unwrap_or_else(|| "Unavailable".into())} }
-                    dt { "Start (UTC)" } dd { "{NativeEpisode::time(episode.message_start_time)}" }
-                    dt { "End (UTC)" } dd { "{NativeEpisode::time(episode.message_end_time)}" }
+                    dt { "Start (UTC)" } dd { "{DatasetEpisode::time(episode.message_start_time)}" }
+                    dt { "End (UTC)" } dd { "{DatasetEpisode::time(episode.message_end_time)}" }
                 }
                 div { class: "my-6 border-y border-line py-4 text-xs",
                     button { class: "data-text-action", onclick: { let id = episode.id.clone(); move |_| on_topics.call((ordinal, id.clone())) }, "Browse episode topics" }
@@ -143,7 +152,7 @@ pub(super) fn NativeEpisodeBrowser(
                                                 rsx! {
                                                     tr { key: "{episode.id}",
                                                         td { button { class: "data-text-action whitespace-nowrap font-medium", onclick: { let episode = episode.clone(); move |_| selected.set(Some((ordinal, episode.clone()))) }, "Episode {ordinal}" } }
-                                                        td { class: "whitespace-nowrap tabular-nums text-ink-soft", "{NativeEpisode::time(episode.message_start_time)}" }
+                                                        td { class: "whitespace-nowrap tabular-nums text-ink-soft", "{DatasetEpisode::time(episode.message_start_time)}" }
                                                         td { class: "text-right tabular-nums", "{episode.duration()}" }
                                                         td { class: "text-right tabular-nums", {episode.message_count.map(|count| count.to_string()).unwrap_or_else(|| "—".into())} }
                                                     }
@@ -198,7 +207,7 @@ mod tests {
             ))
             .is_err()
         );
-        let dataset = NativeDatasetSelection::new(vec!["owner's recordings".into()]).unwrap();
+        let dataset = DatasetSelection::new(vec!["owner's recordings".into()]).unwrap();
         assert!(EpisodePage::sql(&dataset, 50).contains("'owner''s recordings'"));
         assert!(EpisodePage::sql(&dataset, 50).ends_with("LIMIT 51 OFFSET 50"));
     }

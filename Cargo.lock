@@ -5493,6 +5493,7 @@ dependencies = [
 name = "spiral-robotics-frontend"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "charming",
  "dioxus",
  "dioxus-flow",
@@ -5508,6 +5509,7 @@ dependencies = [
  "spiral-robotics-common",
  "spiral-robotics-viewport",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "wasm-bindgen-test",
  "web-sys",
 ]

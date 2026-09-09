@@ -95,7 +95,7 @@ struct EpisodeAssessment {
 /// imported relations do not project into Studio's recorded-episode schema.
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct DatasetSummary {
+pub struct RecordingDatasetSummary {
     id: String,
     name: String,
     created_ms: i64,
@@ -103,7 +103,7 @@ pub struct DatasetSummary {
     description: Option<String>,
 }
 
-impl DatasetSummary {
+impl RecordingDatasetSummary {
     pub fn new(id: impl Into<String>, name: impl Into<String>, created_ms: i64) -> Self {
         Self {
             id: id.into(),

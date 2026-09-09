@@ -25,7 +25,9 @@ use crate::recording::{
 };
 use crate::robotics::video::{CameraCaptureSpec, VideoAsset, VideoCapture, VideoCaptureRequest};
 use crate::{BackendCommandError, OperationError};
-use spiral_robotics_common::recording::{DatasetSummary, EpisodeInfo, EpisodeInspectionSnapshot};
+use spiral_robotics_common::recording::{
+    EpisodeInfo, EpisodeInspectionSnapshot, RecordingDatasetSummary,
+};
 use spiral_robotics_hardware::ModeSelection as HardwareModeSelection;
 use spiral_robotics_storage::episodes::{
     ArmCondition, EpisodeArmCollection as _, EpisodeRecordingRequest, EpisodeWriter,
@@ -547,7 +549,9 @@ impl RecordingCommands {
         let _activity = self.state.admit()?;
         Ok(self.state.hardware().recording_signals(cursor))
     }
-    pub(crate) async fn datasets(&self) -> Result<Vec<DatasetSummary>, BackendCommandError> {
+    pub(crate) async fn datasets(
+        &self,
+    ) -> Result<Vec<RecordingDatasetSummary>, BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
         self.state
@@ -558,7 +562,7 @@ impl RecordingCommands {
                 commands
                     .state
                     .storage()
-                    .datasets()
+                    .recording_datasets()
                     .await
                     .map_err(Into::into)
             })

@@ -6,15 +6,10 @@ use super::{
 use crate::components::interaction::{Action, ActionPurpose, ActionVariant};
 use crate::shell::project::ProjectSessionSignals;
 use dioxus::prelude::*;
-use spiral_robotics_common::native_datasets::{
-    NativeDatasetInspection, NativeDatasetSelection, NativeEpisodeTopicRequest,
-};
+use spiral_robotics_common::datasets::{DatasetInspection, DatasetSelection, EpisodeTopicRequest};
 
 #[component]
-pub(crate) fn NativeDatasetInspector(
-    selection: NativeDatasetSelection,
-    topic: Option<String>,
-) -> Element {
+pub(crate) fn DatasetInspector(selection: DatasetSelection, topic: Option<String>) -> Element {
     let navigation = use_hook(|| DatasetNavigation::new(topic));
     let available = use_memo(move || ProjectSessionSignals::current().storage_available());
     let mut inspection = crate::client::queries::QueryPolicy::on_demand(
@@ -22,7 +17,7 @@ pub(crate) fn NativeDatasetInspector(
     )
     .use_when(
         move || *available.read(),
-        move || DatasetClient::current().inspect_native_dataset(selection.clone()),
+        move || DatasetClient::current().inspect_dataset(selection.clone()),
     );
     let response = inspection.read();
     let pending = *inspection.state().read() == UseResourceState::Pending;
@@ -50,7 +45,7 @@ enum DatasetSection {
 #[derive(Clone, Copy, PartialEq)]
 struct DatasetNavigation {
     section: Signal<DatasetSection>,
-    episodes: super::native_episodes::EpisodeNavigation,
+    episodes: super::episode_browser::EpisodeNavigation,
     topic: Signal<Option<String>>,
     message: Signal<usize>,
     episode_scope: Signal<Option<(usize, String)>>,
@@ -63,7 +58,7 @@ impl DatasetNavigation {
             } else {
                 DatasetSection::Episodes
             }),
-            episodes: super::native_episodes::EpisodeNavigation::new(),
+            episodes: super::episode_browser::EpisodeNavigation::new(),
             topic: Signal::new(topic),
             message: Signal::new(0),
             episode_scope: Signal::new(None),
@@ -72,10 +67,7 @@ impl DatasetNavigation {
 }
 
 #[component]
-fn DatasetContents(
-    inspection: NativeDatasetInspection,
-    mut navigation: DatasetNavigation,
-) -> Element {
+fn DatasetContents(inspection: DatasetInspection, mut navigation: DatasetNavigation) -> Element {
     let mut section = navigation.section;
     let selection = inspection.dataset().selection();
     rsx! {
@@ -94,7 +86,7 @@ fn DatasetContents(
             p { class: "data-empty-copy", "Preview is unavailable for this dataset name." }
         } else if section() == DatasetSection::Episodes {
             if inspection.members().is_some() {
-                super::native_episodes::NativeEpisodeBrowser { inspection: inspection.clone(), navigation: navigation.episodes, on_topics: move |episode| { navigation.episode_scope.set(Some(episode)); navigation.topic.set(None); navigation.message.set(0); section.set(DatasetSection::Topics); } }
+                super::episode_browser::EpisodeBrowser { inspection: inspection.clone(), navigation: navigation.episodes, on_topics: move |episode| { navigation.episode_scope.set(Some(episode)); navigation.topic.set(None); navigation.message.set(0); section.set(DatasetSection::Topics); } }
             } else {
                 p { class: "data-empty-copy", "This dataset has no episode list. Open Topics to explore its contents." }
             }
@@ -105,10 +97,7 @@ fn DatasetContents(
 }
 
 #[component]
-fn DatasetTopics(
-    inspection: NativeDatasetInspection,
-    mut navigation: DatasetNavigation,
-) -> Element {
+fn DatasetTopics(inspection: DatasetInspection, mut navigation: DatasetNavigation) -> Element {
     let mut selected = navigation.topic;
     let episode = (navigation.episode_scope)();
     rsx! {
@@ -163,7 +152,7 @@ fn DatasetTopics(
 
 #[component]
 fn TopicMessages(
-    dataset: NativeDatasetSelection,
+    dataset: DatasetSelection,
     topic: String,
     episode: Option<(usize, String)>,
     mut navigation: DatasetNavigation,
@@ -173,7 +162,7 @@ fn TopicMessages(
         (&dataset, &topic, &episode),
         move |(dataset, topic, episode)| async move {
             let (sql, response) = if let Some((_, id)) = episode {
-                let request = NativeEpisodeTopicRequest::new(dataset, topic, id);
+                let request = EpisodeTopicRequest::new(dataset, topic, id);
                 (
                     request.sql(),
                     DatasetClient::current()
@@ -215,7 +204,7 @@ fn TopicMessages(
         }
         div { class: "flex min-h-0 flex-1 flex-col overflow-hidden",
             if pending { p { class: "data-empty-copy", role: "status", "Loading messages…" } }
-            else if let Some(model) = &*response { super::native_messages::TopicMessagePreview { model: model.clone(), selected: selected_message } }
+            else if let Some(model) = &*response { super::topic_messages::TopicMessagePreview { model: model.clone(), selected: selected_message } }
         }
     }
 }

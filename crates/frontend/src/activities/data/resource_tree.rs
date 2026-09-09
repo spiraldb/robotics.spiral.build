@@ -1,7 +1,7 @@
-//! Expand the real Spiral namespace and native dataset outputs.
+//! Expand the real Spiral namespace and dataset outputs.
 use super::{DatasetClient, screen::ResourceTabs};
 use dioxus::prelude::*;
-use spiral_robotics_common::native_datasets::ProjectResource;
+use spiral_robotics_common::datasets::ProjectResource;
 
 type ResourceCatalog = ReadSignal<Option<Result<Vec<ProjectResource>, String>>>;
 #[component]
@@ -97,7 +97,7 @@ fn DatasetOutputs(resource: ProjectResource, tabs: ResourceTabs) -> Element {
     )
     .use_when(
         move || *available.read(),
-        move || DatasetClient::current().inspect_native_dataset(selection.clone()),
+        move || DatasetClient::current().inspect_dataset(selection.clone()),
     );
     let result = inspection.read();
     rsx! {

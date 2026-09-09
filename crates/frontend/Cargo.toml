@@ -9,6 +9,8 @@ publish = false
 workspace = true
 
 [dependencies]
+base64.workspace = true
+wasm-bindgen-futures = "0.4"
 charming = { version = "0.6.0", default-features = false, features = ["wasm"] }
 spiral-robotics-common.workspace = true
 spiral-robotics-viewport.workspace = true
@@ -43,6 +45,9 @@ web-sys = { version = "0.3", features = [
     "AbortController",
     "AbortSignal",
     "HtmlCanvasElement",
+    "CanvasRenderingContext2d",
+    "ImageData",
+    "Performance",
     "HtmlElement",
     "Node",
     "NodeList",

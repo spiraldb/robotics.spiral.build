@@ -1,7 +1,7 @@
 //! Data settings, catalog, query, and transfer commands exposed to delivery adapters.
 
-use spiral_robotics_common::native_datasets::{
-    NativeDatasetInspection, NativeDatasetSelection, NativeDatasetSummary, ProjectResource,
+use spiral_robotics_common::datasets::{
+    DatasetInspection, DatasetSelection, DatasetSummary, ProjectResource,
 };
 use std::sync::Arc;
 
@@ -61,9 +61,7 @@ impl DataCommands {
             .await?
     }
 
-    pub(crate) async fn native_datasets(
-        &self,
-    ) -> Result<Vec<NativeDatasetSummary>, BackendCommandError> {
+    pub(crate) async fn datasets(&self) -> Result<Vec<DatasetSummary>, BackendCommandError> {
         let commands = self.clone();
         self.state
             .tasks()
@@ -72,17 +70,17 @@ impl DataCommands {
                 commands
                     .state
                     .storage()
-                    .native_datasets()
+                    .datasets()
                     .await
                     .map_err(Into::into)
             })
             .await?
     }
 
-    pub(crate) async fn inspect_native_dataset(
+    pub(crate) async fn inspect_dataset(
         &self,
-        selection: NativeDatasetSelection,
-    ) -> Result<NativeDatasetInspection, BackendCommandError> {
+        selection: DatasetSelection,
+    ) -> Result<DatasetInspection, BackendCommandError> {
         let commands = self.clone();
         self.state
             .tasks()
@@ -91,7 +89,7 @@ impl DataCommands {
                 commands
                     .state
                     .storage()
-                    .inspect_native_dataset(selection)
+                    .inspect_dataset(selection)
                     .await
                     .map_err(Into::into)
             })
@@ -99,7 +97,7 @@ impl DataCommands {
     }
     pub(crate) async fn preview_episode_topic(
         &self,
-        request: spiral_robotics_common::native_datasets::NativeEpisodeTopicRequest,
+        request: spiral_robotics_common::datasets::EpisodeTopicRequest,
     ) -> Result<SpiralQuerySnapshot, BackendCommandError> {
         let commands = self.clone();
         self.state
@@ -111,6 +109,26 @@ impl DataCommands {
                     .state
                     .storage()
                     .preview_episode_topic(request)
+                    .await
+                    .map_err(Into::into)
+            })
+            .await?
+    }
+
+    pub(crate) async fn episode_video(
+        &self,
+        request: spiral_robotics_common::datasets::EpisodeTopicRequest,
+    ) -> Result<spiral_robotics_common::datasets::EpisodeVideo, BackendCommandError> {
+        let commands = self.clone();
+        self.state
+            .tasks()
+            .execute(async move {
+                let _activity = commands.state.admit()?;
+                commands.require_catalog_ready()?;
+                commands
+                    .state
+                    .storage()
+                    .episode_video(request)
                     .await
                     .map_err(Into::into)
             })

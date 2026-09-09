@@ -1,6 +1,6 @@
 //! Project catalog beside independent object sessions.
 use super::{
-    DatasetClient, native_datasets::NativeDatasetInspector, query_result::QueryResultView,
+    DatasetClient, datasets::DatasetInspector, query_result::QueryResultView,
     state::QueryController, workbench::QueryPanel,
 };
 use crate::shell::frame::WorkspaceFrame;
@@ -8,7 +8,7 @@ use dioxus::prelude::*;
 use dioxus_workbench::{
     GroupContext, LayoutNode, Panel, PanelId, PanelLayout, PanelWorkspace, SplitAxis,
 };
-use spiral_robotics_common::native_datasets::ProjectResource;
+use spiral_robotics_common::datasets::ProjectResource;
 
 #[derive(Clone, PartialEq)]
 pub(super) struct OpenResource {
@@ -148,7 +148,7 @@ fn DataPanels() -> Element {
         panels.push(Panel::new("data-open", "Open data", "datasets", rsx! {
             div { class: "data-inspector-welcome", h2 { "Open your data" }
                 p { "Choose a table or dataset from the catalog, or use Load to open it in a tab." }
-                p { "Import MCAP recordings to create a native Spiral dataset." }
+                p { "Import MCAP recordings to create a Spiral dataset." }
             }
         }).with_class("data-object-panel"));
     }
@@ -236,7 +236,7 @@ fn ObjectSession(tab: OpenResource) -> Element {
             span { title: tab.resource.selection().label(), "{tab.resource.selection().label()}" }
         }
         div { class: "data-session-content", hidden: section() != ObjectSection::Inspect,
-            if dataset { NativeDatasetInspector { key: "{tab.revision}", selection: tab.resource.selection().clone(), topic: tab.topic } }
+            if dataset { DatasetInspector { key: "{tab.revision}", selection: tab.resource.selection().clone(), topic: tab.topic } }
             else { TableInspector { resource: tab.resource.clone() } }
         }
         div { class: "data-session-content", hidden: section() != ObjectSection::Sql, QueryPanel { studio, controller } }
@@ -269,7 +269,7 @@ fn TableInspector(resource: ProjectResource) -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spiral_robotics_common::native_datasets::NativeDatasetSelection;
+    use spiral_robotics_common::datasets::DatasetSelection;
     use std::{cell::RefCell, rc::Rc};
 
     #[derive(Clone)]
@@ -284,7 +284,7 @@ mod tests {
         }
         fn resource(name: &str) -> ProjectResource {
             ProjectResource::new(
-                NativeDatasetSelection::new(vec![name.to_owned()]).unwrap(),
+                DatasetSelection::new(vec![name.to_owned()]).unwrap(),
                 "dataset".into(),
                 (name.into(), "v1".into()),
             )

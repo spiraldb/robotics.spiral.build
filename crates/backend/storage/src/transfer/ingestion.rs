@@ -1,4 +1,4 @@
-//! Hugging Face discovery and Spiral-native dataset materialization.
+//! Hugging Face discovery and Spiral dataset materialization.
 //!
 //! Studio owns only repository inspection and catalog admission. Remote byte
 //! reads and MCAP parsing remain inside
@@ -237,7 +237,7 @@ impl HuggingFaceResponse for reqwest::Response {
     }
 }
 
-/// One native dataset and the durable source relation it reads.
+/// One dataset and the durable source relation it reads.
 #[derive(Clone, Debug)]
 struct ImportRelations {
     dataset_name: String,
@@ -550,8 +550,7 @@ impl HuggingFaceInspectionStorage for HuggingFaceDatasetInspection {
             != Some(files.len() as u64)
         {
             return Err(
-                "The native dataset episode count does not match the imported MCAP files"
-                    .to_owned(),
+                "The dataset episode count does not match the imported MCAP files".to_owned(),
             );
         }
         Ok(())

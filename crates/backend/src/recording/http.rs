@@ -6,8 +6,8 @@ use crate::http::delivery::{ApiJson, ApiPath, ApiQuery, HttpFailure, ScopedProje
 
 use axum::Json;
 use spiral_robotics_common::recording::{
-    DatasetSummary, EpisodeCatalog, EpisodeInfo, EpisodeInspectionSnapshot, EpisodeSeek,
-    PauseUpdate, RecordingFinish, RecordingStart, ReplayStart,
+    EpisodeCatalog, EpisodeInfo, EpisodeInspectionSnapshot, EpisodeSeek, PauseUpdate,
+    RecordingDatasetSummary, RecordingFinish, RecordingStart, ReplayStart,
 };
 
 pub(crate) struct EpisodeEndpoints;
@@ -22,8 +22,11 @@ impl EpisodeEndpoints {
     }
     pub(crate) fn register(routes: &mut ApiRoutes) {
         routes.get("/recording/signals", Self::fetch_recording_signals);
-        routes.get("/datasets", Self::list_datasets);
-        routes.get("/datasets/{dataset_id}/episodes", Self::list_episodes);
+        routes.get("/recording-datasets", Self::list_datasets);
+        routes.get(
+            "/recording-datasets/{dataset_id}/episodes",
+            Self::list_episodes,
+        );
         routes.post("/recording", Self::start_recording);
         routes.patch("/recording", Self::set_recording_paused);
         routes.post("/recording/stop", Self::stop_recording);
@@ -35,7 +38,7 @@ impl EpisodeEndpoints {
     }
     async fn list_datasets(
         ScopedProject(commands): ScopedProject<crate::recording::commands::RecordingCommands>,
-    ) -> Result<Json<Vec<DatasetSummary>>, HttpFailure> {
+    ) -> Result<Json<Vec<RecordingDatasetSummary>>, HttpFailure> {
         let result = commands.datasets().await?;
         Ok(Json(result))
     }

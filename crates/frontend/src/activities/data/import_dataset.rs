@@ -1,4 +1,4 @@
-//! Inspect a pinned MCAP source before publishing a native dataset.
+//! Inspect a pinned MCAP source before publishing a dataset.
 use super::DatasetClient;
 use dioxus::prelude::*;
 use spiral_robotics_common::datasets::{
@@ -47,7 +47,7 @@ pub(super) fn ImportDataset(on_done: EventHandler<String>) -> Element {
     let mut problem = use_signal(|| None::<String>);
     let mut receipt = use_signal(|| None::<ImportReceipt>);
     rsx! { section { class: "data-import-pane", "aria-label": "Import MCAP dataset",
-        header { h2 { "Import MCAP dataset" } p { "Create a native Spiral dataset from MCAP files in a public Hugging Face repository." } }
+        header { h2 { "Import MCAP dataset" } p { "Create a Spiral dataset from MCAP files in a public Hugging Face repository." } }
         if let Some(result) = receipt() {
             p { role: "status", "{result.message}" }
             button { class: "data-import-action", onclick: move |_| { receipt.set(None); inspection.set(None); draft.name.set(String::new()); on_done.call(result.dataset.clone()); }, "Open dataset" }

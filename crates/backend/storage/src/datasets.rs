@@ -1,11 +1,13 @@
 //! Native Dataset discovery through the same project journal used by the ADBC driver.
+mod playback;
+
 use crate::{StorageManager, settings::SpiralConnectionSettings};
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde::Deserialize;
 use serde_json::json;
-use spiral_robotics_common::native_datasets::{
-    NativeDatasetInspection, NativeDatasetSelection, NativeDatasetSummary, NativeDatasetTopic,
-    NativeEpisodeTopicRequest, ProjectResource,
+use spiral_robotics_common::datasets::{
+    DatasetInspection, DatasetSelection, DatasetSummary, DatasetTopic, EpisodeTopicRequest,
+    ProjectResource,
 };
 use std::collections::{BTreeSet, VecDeque};
 use std::time::Duration;
@@ -105,7 +107,7 @@ impl DatasetCatalogClient {
         Err("Spiral project catalog exceeds the inspection limit".to_owned())
     }
 
-    async fn datasets(&self) -> Result<Vec<NativeDatasetSummary>, String> {
+    async fn datasets(&self) -> Result<Vec<DatasetSummary>, String> {
         Ok(self
             .resources()
             .await?
@@ -114,10 +116,7 @@ impl DatasetCatalogClient {
             .collect())
     }
 
-    async fn inspect(
-        &self,
-        selection: NativeDatasetSelection,
-    ) -> Result<NativeDatasetInspection, String> {
+    async fn inspect(&self, selection: DatasetSelection) -> Result<DatasetInspection, String> {
         // Resolve membership in this project again; client-supplied IDs never select another project.
         let dataset = self
             .datasets()
@@ -134,7 +133,7 @@ impl DatasetCatalogClient {
             )))
             .await?;
         let Some(revision) = response.version.data_revision else {
-            return Ok(NativeDatasetInspection::new(dataset, None, vec![]));
+            return Ok(DatasetInspection::new(dataset, None, vec![]));
         };
         let mut topics = revision
             .data
@@ -144,7 +143,7 @@ impl DatasetCatalogClient {
             .map(|observation| observation.topic())
             .collect::<Result<Vec<_>, _>>()?;
         topics.sort_by(|left, right| left.name().cmp(right.name()));
-        Ok(NativeDatasetInspection::new(
+        Ok(DatasetInspection::new(
             dataset,
             Some(revision.data.member_count),
             topics,
@@ -225,7 +224,7 @@ impl DatasetNamespace {
                 }
                 let resource = &entry.resource;
                 datasets.push(ProjectResource::new(
-                    NativeDatasetSelection::new(path.clone())?,
+                    DatasetSelection::new(path.clone())?,
                     resource.descriptor.kind.clone(),
                     (
                         resource.descriptor.resource_id.clone(),
@@ -292,7 +291,7 @@ struct ScanLocator {
     payload: String,
 }
 impl DatasetObservation {
-    fn topic(self) -> Result<NativeDatasetTopic, String> {
+    fn topic(self) -> Result<DatasetTopic, String> {
         let name = if self.scan_locator.codec == "spiral.mcap.topic-scan"
             && self.scan_locator.codec_version == 1
         {
@@ -309,7 +308,7 @@ impl DatasetObservation {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
-        Ok(NativeDatasetTopic::new(name, schemas)
+        Ok(DatasetTopic::new(name, schemas)
             .with_coverage(self.coverage.member_count, self.coverage.sample_count))
     }
 }
@@ -322,11 +321,17 @@ struct EpisodeTopicQuery {
     statement: crate::db::SqlStatement,
 }
 
-impl TryFrom<NativeEpisodeTopicRequest> for EpisodeTopicQuery {
+impl TryFrom<EpisodeTopicRequest> for EpisodeTopicQuery {
     type Error = String;
 
-    fn try_from(request: NativeEpisodeTopicRequest) -> Result<Self, Self::Error> {
-        let selection = NativeDatasetSelection::new(request.dataset().path().to_vec())?;
+    fn try_from(request: EpisodeTopicRequest) -> Result<Self, Self::Error> {
+        Self::for_sql(&request, request.sql())
+    }
+}
+
+impl EpisodeTopicQuery {
+    fn for_sql(request: &EpisodeTopicRequest, sql: String) -> Result<Self, String> {
+        let selection = DatasetSelection::new(request.dataset().path().to_vec())?;
         if !selection.can_preview() {
             return Err("Preview is unavailable for this dataset name".to_owned());
         }
@@ -342,7 +347,7 @@ impl TryFrom<NativeEpisodeTopicRequest> for EpisodeTopicQuery {
             vec![std::sync::Arc::new(values)],
         )
         .map_err(|error| error.to_string())?;
-        crate::db::SqlStatement::from(request.sql())
+        crate::db::SqlStatement::from(sql)
             .with_parameters(parameters)
             .map(|statement| Self { statement })
             .map_err(|error| error.to_string())
@@ -352,7 +357,7 @@ impl TryFrom<NativeEpisodeTopicRequest> for EpisodeTopicQuery {
 impl StorageManager {
     pub async fn preview_episode_topic(
         &self,
-        request: NativeEpisodeTopicRequest,
+        request: EpisodeTopicRequest,
     ) -> Result<spiral_robotics_common::relations::SpiralQuerySnapshot, String> {
         crate::db::ProjectQueries::new(self.project_store())
             .query_with_parameters(EpisodeTopicQuery::try_from(request)?.statement, 100)
@@ -365,17 +370,17 @@ impl StorageManager {
             .resources()
             .await
     }
-    pub async fn native_datasets(&self) -> Result<Vec<NativeDatasetSummary>, String> {
+    pub async fn datasets(&self) -> Result<Vec<DatasetSummary>, String> {
         DatasetCatalogClient::connect(self.connection_settings())
             .await?
             .datasets()
             .await
     }
-    pub async fn inspect_native_dataset(
+    pub async fn inspect_dataset(
         &self,
-        selection: NativeDatasetSelection,
-    ) -> Result<NativeDatasetInspection, String> {
-        let selection = NativeDatasetSelection::new(selection.path().to_vec())?;
+        selection: DatasetSelection,
+    ) -> Result<DatasetInspection, String> {
+        let selection = DatasetSelection::new(selection.path().to_vec())?;
         DatasetCatalogClient::connect(self.connection_settings())
             .await?
             .inspect(selection)
@@ -388,10 +393,10 @@ mod tests {
     use super::*;
     #[test]
     fn episode_preview_binds_uuid_bytes_and_rejects_invalid_ids() {
-        let dataset = NativeDatasetSelection::new(vec!["dataset_default".into()]).unwrap();
+        let dataset = DatasetSelection::new(vec!["dataset_default".into()]).unwrap();
         let id = uuid::Uuid::parse_str("01900000-0000-7000-8000-000000000001").unwrap();
         let request =
-            NativeEpisodeTopicRequest::new(dataset.clone(), "/camera' --".into(), id.to_string());
+            EpisodeTopicRequest::new(dataset.clone(), "/camera' --".into(), id.to_string());
         let statement = EpisodeTopicQuery::try_from(request).unwrap().statement;
         assert!(statement.as_str().contains("'/camera'' --'"));
         assert!(statement.as_str().contains("WHERE id = $1"));
@@ -412,8 +417,7 @@ mod tests {
             .downcast_ref::<arrow_array::FixedSizeBinaryArray>()
             .unwrap();
         assert_eq!(values.value(0), id.as_bytes());
-        let invalid =
-            NativeEpisodeTopicRequest::new(dataset, "/topic".into(), "' OR true --".into());
+        let invalid = EpisodeTopicRequest::new(dataset, "/topic".into(), "' OR true --".into());
         assert!(EpisodeTopicQuery::try_from(invalid).is_err());
     }
 

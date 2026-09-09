@@ -358,7 +358,7 @@ impl StartTrainingAdmission for TrainingConfig {
             ));
         }
         let runtime_image_bytes = if native_images {
-            // The adapter repeats the exact check after resolving native dataset
+            // The adapter repeats the exact check after resolving dataset
             // dimensions. Budget the largest batch it is allowed to admit here.
             MAX_TRAINING_IMAGE_BATCH_BYTES
         } else {

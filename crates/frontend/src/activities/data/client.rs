@@ -2,10 +2,8 @@
 use crate::client::http::UrlComponent;
 use crate::client::project::ProjectClient;
 use crate::client::transport::{CommandError, HttpRequest};
-use spiral_robotics_common::native_datasets::{
-    NativeDatasetInspection, NativeDatasetSelection, ProjectResource,
-};
-use spiral_robotics_common::recording::{DatasetSummary, EpisodeInspectionSnapshot};
+use spiral_robotics_common::datasets::{DatasetInspection, DatasetSelection, ProjectResource};
+use spiral_robotics_common::recording::{EpisodeInspectionSnapshot, RecordingDatasetSummary};
 use spiral_robotics_common::relations::{QueryRequest, RelationCatalog, SpiralQuerySnapshot};
 use std::future::Future;
 
@@ -44,23 +42,23 @@ impl DatasetClient {
         self.project
             .request(HttpRequest::new("GET", "/api/data-catalog"))
     }
-    pub(crate) fn inspect_native_dataset(
+    pub(crate) fn inspect_dataset(
         &self,
-        selection: NativeDatasetSelection,
-    ) -> impl Future<Output = Result<NativeDatasetInspection, CommandError>> + use<> {
+        selection: DatasetSelection,
+    ) -> impl Future<Output = Result<DatasetInspection, CommandError>> + use<> {
         self.project
-            .request(HttpRequest::new("POST", "/api/native-datasets/inspect").json(&selection))
+            .request(HttpRequest::new("POST", "/api/datasets/inspect").json(&selection))
     }
     pub(crate) fn current() -> Self {
         Self {
             project: ProjectClient::current(),
         }
     }
-    pub(crate) fn list_datasets(
+    pub(crate) fn list_recording_datasets(
         &self,
-    ) -> impl Future<Output = Result<Vec<DatasetSummary>, CommandError>> + use<> {
+    ) -> impl Future<Output = Result<Vec<RecordingDatasetSummary>, CommandError>> + use<> {
         self.project
-            .request(HttpRequest::new("GET", "/api/datasets"))
+            .request(HttpRequest::new("GET", "/api/recording-datasets"))
     }
 
     pub(crate) fn inspect_episode(
@@ -82,10 +80,19 @@ impl DatasetClient {
 
     pub(crate) fn preview_episode_topic(
         &self,
-        request: spiral_robotics_common::native_datasets::NativeEpisodeTopicRequest,
+        request: spiral_robotics_common::datasets::EpisodeTopicRequest,
     ) -> impl Future<Output = Result<SpiralQuerySnapshot, CommandError>> + use<> {
         self.project
-            .request(HttpRequest::new("POST", "/api/native-datasets/episode-topic").json(&request))
+            .request(HttpRequest::new("POST", "/api/datasets/episode-topic").json(&request))
+    }
+
+    pub(crate) fn episode_video(
+        &self,
+        request: spiral_robotics_common::datasets::EpisodeTopicRequest,
+    ) -> impl Future<Output = Result<spiral_robotics_common::datasets::EpisodeVideo, CommandError>> + use<>
+    {
+        self.project
+            .request(HttpRequest::new("POST", "/api/datasets/episode-video").json(&request))
     }
 
     pub(crate) fn run_spiral_query(

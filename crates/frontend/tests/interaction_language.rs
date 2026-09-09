@@ -131,8 +131,7 @@ fn episode_catalog_and_full_data_belong_to_the_data_controller() {
     assert!(data.contains("fn use_polling"));
     assert!(data.contains("QueryDomain::Data"));
     assert!(
-        workspace.contains("NativeDatasetInspector {}")
-            && !workspace.contains("EpisodePreviewSignals"),
+        workspace.contains("DatasetInspector {}") && !workspace.contains("EpisodePreviewSignals"),
         "Data must compose its native inspector without mounting an unused episode preview",
     );
     assert!(

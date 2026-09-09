@@ -610,3 +610,13 @@
 .data-import-review code { overflow-wrap: anywhere; }
 .data-import-pane .data-import-error { color: var(--ui-danger); }
 .data-workspace button:focus-visible, .data-workspace select:focus-visible, .data-workspace input:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: -2px; }
+
+/* Native MCAP episode player uses the workbench camera mat and native range input. */
+.episode-playback { margin-bottom: 24px; max-width: 960px; }
+.episode-playback-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 8px; }
+.episode-playback-canvas { display: block; width: 100%; aspect-ratio: 16 / 9; max-height: min(48vh, calc(100vh - 440px)); object-fit: contain; background: var(--tone-camera, #1f1f1f); }
+.episode-playback-placeholder { display: grid; place-items: center; min-height: 200px; padding: 24px; background: var(--ui-sunken); font-size: 12px; }
+.episode-playback-controls { display: flex; align-items: center; gap: 16px; padding: 12px 0; border-bottom: 1px solid var(--ui-line); }
+.episode-playback-toggle { min-width: 40px; }
+.episode-playback-seek { flex: 1; min-width: 80px; accent-color: var(--ui-accent); cursor: pointer; }
+.episode-playback-time { flex-shrink: 0; font-size: 12px; font-variant-numeric: tabular-nums; }

@@ -1,12 +1,12 @@
-//! Native Spiral Dataset discovery and bounded topic inspection.
+//! Spiral dataset discovery and bounded topic inspection.
 use serde::{Deserialize, Serialize};
 
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct NativeDatasetSelection {
+pub struct DatasetSelection {
     path: Vec<String>,
 }
-impl NativeDatasetSelection {
+impl DatasetSelection {
     pub fn new(path: Vec<String>) -> Result<Self, String> {
         if path.is_empty()
             || path.len() > 32
@@ -49,21 +49,24 @@ impl NativeDatasetSelection {
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct NativeEpisodeTopicRequest {
-    dataset: NativeDatasetSelection,
+pub struct EpisodeTopicRequest {
+    dataset: DatasetSelection,
     topic: String,
     episode_id: String,
 }
-impl NativeEpisodeTopicRequest {
-    pub fn new(dataset: NativeDatasetSelection, topic: String, episode_id: String) -> Self {
+impl EpisodeTopicRequest {
+    pub fn new(dataset: DatasetSelection, topic: String, episode_id: String) -> Self {
         Self {
             dataset,
             topic,
             episode_id,
         }
     }
-    pub fn dataset(&self) -> &NativeDatasetSelection {
+    pub fn dataset(&self) -> &DatasetSelection {
         &self.dataset
+    }
+    pub fn topic(&self) -> &str {
+        &self.topic
     }
     pub fn episode_id(&self) -> &str {
         &self.episode_id
@@ -79,20 +82,20 @@ impl NativeEpisodeTopicRequest {
 
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct NativeDatasetSummary {
-    selection: NativeDatasetSelection,
+pub struct DatasetSummary {
+    selection: DatasetSelection,
     resource_id: String,
     version_id: String,
 }
-impl NativeDatasetSummary {
-    pub fn new(selection: NativeDatasetSelection, identity: (String, String)) -> Self {
+impl DatasetSummary {
+    pub fn new(selection: DatasetSelection, identity: (String, String)) -> Self {
         Self {
             selection,
             resource_id: identity.0,
             version_id: identity.1,
         }
     }
-    pub fn selection(&self) -> &NativeDatasetSelection {
+    pub fn selection(&self) -> &DatasetSelection {
         &self.selection
     }
     pub fn resource_id(&self) -> &str {
@@ -105,13 +108,13 @@ impl NativeDatasetSummary {
 
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct NativeDatasetTopic {
+pub struct DatasetTopic {
     name: String,
     schemas: Vec<String>,
     members: u64,
     samples: Option<u64>,
 }
-impl NativeDatasetTopic {
+impl DatasetTopic {
     pub fn new(name: String, schemas: Vec<String>) -> Self {
         Self {
             name,
@@ -141,30 +144,26 @@ impl NativeDatasetTopic {
 
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct NativeDatasetInspection {
-    dataset: NativeDatasetSummary,
+pub struct DatasetInspection {
+    dataset: DatasetSummary,
     members: Option<u64>,
-    topics: Vec<NativeDatasetTopic>,
+    topics: Vec<DatasetTopic>,
 }
-impl NativeDatasetInspection {
-    pub fn new(
-        dataset: NativeDatasetSummary,
-        members: Option<u64>,
-        topics: Vec<NativeDatasetTopic>,
-    ) -> Self {
+impl DatasetInspection {
+    pub fn new(dataset: DatasetSummary, members: Option<u64>, topics: Vec<DatasetTopic>) -> Self {
         Self {
             dataset,
             members,
             topics,
         }
     }
-    pub fn dataset(&self) -> &NativeDatasetSummary {
+    pub fn dataset(&self) -> &DatasetSummary {
         &self.dataset
     }
     pub fn members(&self) -> Option<u64> {
         self.members
     }
-    pub fn topics(&self) -> &[NativeDatasetTopic] {
+    pub fn topics(&self) -> &[DatasetTopic] {
         &self.topics
     }
 }
@@ -175,7 +174,7 @@ mod tests {
     #[test]
     fn dataset_paths_and_topics_cannot_escape_preview_sql() {
         let selection =
-            NativeDatasetSelection::new(vec!["a.b".into(), "owner's \"data\"".into()]).unwrap();
+            DatasetSelection::new(vec!["a.b".into(), "owner's \"data\"".into()]).unwrap();
         assert!(!selection.can_preview());
         assert!(
             selection
@@ -183,8 +182,8 @@ mod tests {
                 .contains("'/camera'' --'")
         );
         assert!(selection.episodes_sql().contains("owner''s"));
-        assert!(NativeDatasetSelection::new(vec![]).is_err());
-        assert!(NativeDatasetSelection::new(vec!["\n".into()]).is_err());
+        assert!(DatasetSelection::new(vec![]).is_err());
+        assert!(DatasetSelection::new(vec!["\n".into()]).is_err());
     }
 }
 
@@ -192,23 +191,19 @@ mod tests {
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProjectResource {
-    selection: NativeDatasetSelection,
+    selection: DatasetSelection,
     kind: String,
     identity: (String, String),
 }
 impl ProjectResource {
-    pub fn new(
-        selection: NativeDatasetSelection,
-        kind: String,
-        identity: (String, String),
-    ) -> Self {
+    pub fn new(selection: DatasetSelection, kind: String, identity: (String, String)) -> Self {
         Self {
             selection,
             kind,
             identity,
         }
     }
-    pub fn selection(&self) -> &NativeDatasetSelection {
+    pub fn selection(&self) -> &DatasetSelection {
         &self.selection
     }
     pub fn kind(&self) -> &str {
@@ -217,9 +212,9 @@ impl ProjectResource {
     pub fn resource_id(&self) -> &str {
         &self.identity.0
     }
-    pub fn dataset(&self) -> Option<NativeDatasetSummary> {
+    pub fn dataset(&self) -> Option<DatasetSummary> {
         (self.kind == "dataset")
-            .then(|| NativeDatasetSummary::new(self.selection.clone(), self.identity.clone()))
+            .then(|| DatasetSummary::new(self.selection.clone(), self.identity.clone()))
     }
     pub fn table_sql(&self) -> String {
         let name = self
@@ -230,5 +225,50 @@ impl ProjectResource {
             .collect::<Vec<_>>()
             .join(".");
         format!("SELECT * FROM {name} LIMIT 100")
+    }
+}
+
+/// Encoded Annex B packets; nanoseconds travel as strings to preserve integer precision in JS.
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct EpisodeVideo {
+    codec: String,
+    packets: Vec<VideoPacket>,
+}
+impl EpisodeVideo {
+    pub fn new(codec: String, packets: Vec<VideoPacket>) -> Self {
+        Self { codec, packets }
+    }
+    pub fn codec(&self) -> &str {
+        &self.codec
+    }
+    pub fn packets(&self) -> &[VideoPacket] {
+        &self.packets
+    }
+}
+
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct VideoPacket {
+    timestamp_ns: String,
+    data: String,
+    keyframe: bool,
+}
+impl VideoPacket {
+    pub fn timestamp_ns(&self) -> &str {
+        &self.timestamp_ns
+    }
+    pub fn data(&self) -> &str {
+        &self.data
+    }
+    pub fn keyframe(&self) -> bool {
+        self.keyframe
+    }
+    pub fn new(timestamp_ns: u64, data: String, keyframe: bool) -> Self {
+        Self {
+            timestamp_ns: timestamp_ns.to_string(),
+            data,
+            keyframe,
+        }
     }
 }

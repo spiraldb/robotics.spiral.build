@@ -159,8 +159,8 @@ schemas served by `/api/openapi.json`. `—` means no request body.
 
 | Method | Path | Body or query | Response |
 | --- | --- | --- | --- |
-| GET | `/datasets` | — | Vec<DatasetSummary> |
-| GET | `/datasets/{dataset_id}/episodes` | — | EpisodeCatalog |
+| GET | `/recording-datasets` | — | Vec<RecordingDatasetSummary> |
+| GET | `/recording-datasets/{dataset_id}/episodes` | — | EpisodeCatalog |
 | POST | `/recording` | RecordingStart | EpisodeInfo |
 | POST | `/recording/stop` | RecordingFinish | EpisodeInfo |
 | PATCH | `/recording` | PauseUpdate | `null` |
@@ -205,12 +205,16 @@ schemas served by `/api/openapi.json`. `—` means no request body.
 
 ### Queries
 
+The recording catalog uses `/recording-datasets`; `/datasets` lists Spiral dataset
+resources. These return distinct `RecordingDatasetSummary` and `DatasetSummary` contracts.
+
 | Method | Path | Body or query | Response |
 | --- | --- | --- | --- |
 | GET | `/data-catalog` | — | ProjectResource[] (actual namespace paths and resource kinds) |
-| GET | `/native-datasets` | — | NativeDatasetSummary[] |
-| POST | `/native-datasets/inspect` | NativeDatasetSelection | NativeDatasetInspection |
-| POST | `/native-datasets/episode-topic` | NativeEpisodeTopicRequest (dataset, topic, episode_id) | SpiralQuerySnapshot (up to 100 messages from the exact recording ID) |
+| GET | `/datasets` | — | DatasetSummary[] |
+| POST | `/datasets/inspect` | DatasetSelection | DatasetInspection |
+| POST | `/datasets/episode-topic` | EpisodeTopicRequest (dataset, topic, episode_id) | SpiralQuerySnapshot (up to 100 messages from the exact recording ID) |
+| POST | `/datasets/episode-video` | EpisodeTopicRequest (dataset, topic, episode_id) | EpisodeVideo (H.264 codec and timestamped Annex B packets; up to 18,000 packets / 64 MiB encoded) |
 | GET | `/relations` | — | RelationCatalog |
 | POST | `/queries` | QueryRequest | SpiralQuerySnapshot |
 | POST | `/datasets/hugging-face/inspect` | HuggingFaceDatasetSource | HuggingFaceDatasetInspection |
@@ -223,7 +227,7 @@ table, create the root filtered view `dataset_source_<dataset_id>`, and derive
 `dataset_<dataset_id>` from that view in one transaction. Studio application state
 uses root `studio_*` tables.
 There is no format selector or LeRobot import. Inspection pins a revision and
-lists the native dataset and source relation to create. Import uses Spiral's
+lists the dataset and source relation to create. Import uses Spiral's
 `spql.mcap.dataset` producer, refreshes its population, and checks episode count
 before committing. Existing targets are refused. It does not publish rows into a
 separate Studio dataset registry. Project snapshot restore is a separate operation.

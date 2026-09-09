@@ -21,7 +21,7 @@ use futures::StreamExt as _;
 use image::codecs::jpeg::JpegEncoder;
 use image::{DynamicImage, ImageFormat};
 use serde_json::{Map as JsonMap, Value as JsonValue};
-use spiral_robotics_common::recording::DatasetSummary;
+use spiral_robotics_common::recording::RecordingDatasetSummary;
 use spiral_robotics_common::relations::{
     CatalogRelation as ApiCatalogRelation, QueryColumn, RelationCatalog, SpiralQuerySnapshot,
 };
@@ -367,7 +367,7 @@ impl<'a> ProjectQueries<'a> {
         execution.run_async(&mut connection).await
     }
 
-    pub(crate) async fn datasets(&self) -> Result<Vec<DatasetSummary>, String> {
+    pub(crate) async fn datasets(&self) -> Result<Vec<RecordingDatasetSummary>, String> {
         let relation = Table::Datasets.qualified_name(self.project_store.table_prefix());
         let mut connection = self.project_store.connect().await?;
         if !connection.table_exists(&relation).await? {
@@ -399,7 +399,7 @@ impl<'a> ProjectQueries<'a> {
                         .and_then(JsonValue::as_str)
                         .map(str::to_owned)
                 };
-                Ok(DatasetSummary::new(
+                Ok(RecordingDatasetSummary::new(
                     text(column::DATASET_ID)
                         .ok_or_else(|| format!("dataset catalog row {index} has no dataset ID"))?,
                     text(column::NAME)

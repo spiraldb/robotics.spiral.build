@@ -1,9 +1,9 @@
 //! Project storage: SpiralDB access, schemas, queries, ingestion, and transfer.
 
+mod datasets;
 mod db;
 pub mod episodes;
 mod manager;
-mod native_datasets;
 mod rollout_runs;
 mod settings;
 mod training;
@@ -27,7 +27,7 @@ pub mod checkpoints {
 }
 
 pub mod ingestion {
-    //! Hugging Face discovery and Spiral-native dataset materialization.
+    //! Hugging Face discovery and Spiral dataset materialization.
 
     pub use crate::transfer::HuggingFaceDatasetDiscovery;
 }
