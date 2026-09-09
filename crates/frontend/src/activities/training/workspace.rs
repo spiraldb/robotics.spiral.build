@@ -160,7 +160,6 @@ fn TrainingPanels(
             initial_layout: layout,
             layout_scope: Some("training".to_owned()),
             active_panel: selected_panel,
-            on_layout_change: move |_layout: PanelLayout| {},
             on_panel_activate: move |panel_id: PanelId| {
                 if let Some((_, run_id)) = registered_runs
                     .iter()
@@ -169,15 +168,14 @@ fn TrainingPanels(
                     controller.select_run(run_id.clone());
                 }
             },
-            on_panel_close: move |panel_id: PanelId| {
+            on_panel_close: move |panel: PanelId| {
                 if let Some((_, run_id)) = closeable_runs
                     .iter()
-                    .find(|(registered, _)| registered == panel_id.as_str())
+                    .find(|(registered, _)| registered == panel.as_str())
                 {
                     controller.close_run(run_id.clone());
                 }
             },
-            on_resize: move |_| {},
         }
         }
     }

@@ -253,9 +253,9 @@ put reads as a bench tool.
   two-thirds visualization, with Timeline in the lower 42% and each camera
   visible in its own row of the named camera column. Rollout narrows the
   workbench to 27% and replaces the Timeline slot with one low Inference lane.
-- Data defaults to a 25% Tables directory beside a 75% object workspace.
-  Each object tab owns Inspect, SQL, and Results; Load and Import stay to the
-  right of the object tab strip.
+- Data defaults to a 25% Tables directory beside 75% native object panels.
+  Each top-level object tab owns Inspect, SQL, and Results; Load and Import
+  sit alongside the native tab header. Import opens as a peer tab.
 - Workflow uses a 30% Assistant/Node tab lane beside a right column with a
   dominant lineage canvas above Results; the initial 66/34 vertical split
   favors the graph until evidence exists. It has its own layout scope.
@@ -456,11 +456,11 @@ in the Timeline and global status bar. Robot identity appears once in a compact
 switcher. There is no selected-arm toolbar beneath it. Setup is global Settings
 → Robots rather than a collapsible section in Live.
 
-Data uses a dockable Tables directory beside Workspace. The directory follows
-Spiral's actual namespace and expands native dataset outputs. Workspace holds
-independent object tabs, each with Inspect, SQL, and Results. The native Load
-selector and Import action remain beside the horizontally scrolling object tab
-strip. Dataset Inspect states `Dataset → Episodes / Topics` explicitly; opening
+Data uses a dockable Tables directory beside native object panels. The
+directory follows Spiral's actual namespace and expands native dataset outputs.
+Each object is a top-level panel tab with Inspect, SQL, and Results, without a
+Workspace wrapper. Load and Import sit alongside the native tab header; Import
+opens as a peer tab. The initial empty panel is Open data. Dataset Inspect states `Dataset → Episodes / Topics` explicitly; opening
 a topic output reuses its dataset tab. See the [Data surface brief](.impeccable/surfaces/data-inspector.md)
 for the shipped composition, interaction states, and review scope.
 
@@ -1179,16 +1179,17 @@ ambient browser selection—decides whether execution may begin.
   outputs load on expansion; loading, failure, empty, and no-match states stay
   inside the directory.
 - **Object tabs:** Each open object retains its own SQL draft, row limit, and
-  result while inactive. Active object tabs and Inspect / SQL / Results use
-  blue underlines. Arrow keys, Home, and End navigate the object tabs; close
-  controls and focus rings remain visible. Running SQL activates Results.
+  result during tab switching, docking, and splitting. Native PanelWorkspace chrome owns
+  closing, docking, splitting, and keyboard operation. Inspect / SQL / Results
+  use blue underlines; running SQL activates Results. Closing removes the panel
+  and its session; reopening starts a fresh session.
 - **Inspection:** Dataset Episodes and Topics remain distinct. Table schemas
   use a disclosure above the bounded shared result table. Counts and source
   metadata reflect returned data, without inferred filenames or zeroes.
-- **Import:** A restrained form in Workspace leads from source fields to
-  inspection, a resolved-revision review, import, and a success receipt.
-  Existing object sessions remain mounted. Inline status, disabled busy
-  controls, and explicit recovery keep state legible.
+- **Import:** A peer native tab contains a restrained form leading from source
+  fields to inspection, a resolved-revision review, import, and a success
+  receipt. Tab switching and docking retain the form. Inline status, disabled
+  busy controls, and explicit recovery keep state legible.
 - **Destination state:** Settings selects the Spiral API endpoint, SpFS
   endpoint, and project; first launch opens this section when no project is
   selected. The backend remembers only those bootstrap pointers in its private
@@ -1263,7 +1264,7 @@ another component only to rename it or copy shared mechanics.
 - **Do** register independent surfaces as panels and give them durable IDs and
   meaningful home tiles.
 - **Do** preserve Live's one-third/two-thirds default, Data's 25% Tables / 75%
-  Workspace default, and Rollout's 27% workbench default while treating
+  native object panels default, and Rollout's 27% workbench default while treating
   persisted user layout as the active composition.
 - **Do** give every drag, dock, split, resize, and tab action a keyboard path,
   visible focus, and reduced-motion behavior.

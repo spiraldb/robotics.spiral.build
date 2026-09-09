@@ -5,7 +5,9 @@ use super::{
 };
 use crate::shell::frame::WorkspaceFrame;
 use dioxus::prelude::*;
-use dioxus_workbench::{LayoutNode, Panel, PanelLayout, PanelWorkspace, SplitAxis};
+use dioxus_workbench::{
+    GroupContext, LayoutNode, Panel, PanelId, PanelLayout, PanelWorkspace, SplitAxis,
+};
 use spiral_robotics_common::native_datasets::ProjectResource;
 
 #[derive(Clone, PartialEq)]
@@ -32,13 +34,13 @@ impl ResourceTabs {
         }
     }
     pub(super) fn open(mut self, resource: ProjectResource, topic: Option<String>) {
-        self.importing.set(false);
         let id = resource.resource_id().to_owned();
         let mut opened = self.opened.write();
         if let Some(tab) = opened
             .iter_mut()
             .find(|tab| tab.resource.resource_id() == id)
         {
+            tab.resource = resource;
             tab.topic = topic;
             tab.revision = tab.revision.wrapping_add(1);
         } else {
@@ -51,46 +53,21 @@ impl ResourceTabs {
         drop(opened);
         self.active.set(Some(id));
     }
+    // Registry removal approves closing; workbench owns selection and focus.
     fn close(mut self, id: &str) {
-        let mut opened = self.opened.write();
-        let Some(index) = opened
-            .iter()
-            .position(|tab| tab.resource.resource_id() == id)
-        else {
-            return;
-        };
-        opened.remove(index);
+        if id == "data-import" {
+            self.importing.set(false);
+        } else {
+            self.opened
+                .write()
+                .retain(|tab| tab.resource.resource_id() != id);
+        }
         if self.active.peek().as_deref() == Some(id) {
-            self.active.set(
-                opened
-                    .get(index)
-                    .or_else(|| opened.last())
-                    .map(|tab| tab.resource.resource_id().to_owned()),
-            );
+            self.active.set(None);
         }
     }
     pub(super) fn active_id(self) -> Option<String> {
         self.active.read().clone()
-    }
-    fn navigate(mut self, key: Key) {
-        let opened = self.opened.read();
-        if opened.is_empty() {
-            return;
-        }
-        let index = opened
-            .iter()
-            .position(|tab| Some(tab.resource.resource_id()) == self.active.peek().as_deref())
-            .unwrap_or(0);
-        let next = match key {
-            Key::ArrowLeft => (index + opened.len() - 1) % opened.len(),
-            Key::ArrowRight => (index + 1) % opened.len(),
-            Key::Home => 0,
-            Key::End => opened.len() - 1,
-            _ => return,
-        };
-        let id = opened[next].resource.resource_id().to_owned();
-        self.active.set(Some(id.clone()));
-        crate::components::interaction::BrowserFocus::after_render(format!("resource-tab-{id}"));
     }
 }
 
@@ -105,7 +82,7 @@ pub(crate) fn DataWorkspace(is_active: ReadSignal<bool>) -> Element {
 
 #[component]
 fn DataPanels() -> Element {
-    let tabs = ResourceTabs::use_tabs();
+    let mut tabs = ResourceTabs::use_tabs();
     let sessions = crate::shell::project::ProjectSessionSignals::current();
     let available = use_memo(move || sessions.catalog_available());
     let catalog = crate::client::queries::QueryPolicy::on_demand(
@@ -121,38 +98,6 @@ fn DataPanels() -> Element {
         },
     );
     let resources = catalog.value();
-    let panels = vec![
-        Panel::new(
-            "tables",
-            "Tables",
-            "tables",
-            rsx! { super::resource_tree::ResourceTree { resources, tabs } },
-        ),
-        Panel::new(
-            "datasets",
-            "Workspace",
-            "datasets",
-            rsx! { ObjectWorkspace { resources, tabs } },
-        ),
-    ];
-    let initial_layout = PanelLayout::new(LayoutNode::split(
-        "data-columns",
-        SplitAxis::Horizontal,
-        0.25,
-        LayoutNode::tile("tables", ["tables".to_owned()]),
-        LayoutNode::tile("datasets", ["datasets".to_owned()]),
-    ));
-    rsx! { div { class: "data-workspace min-h-0 min-w-0 overflow-hidden",
-        PanelWorkspace { panels, initial_layout, layout_scope: Some("spiral_robotics.panel-layout.v9.data".to_owned()) }
-    } }
-}
-
-#[component]
-fn ObjectWorkspace(
-    resources: ReadSignal<Option<Result<Vec<ProjectResource>, String>>>,
-    mut tabs: ResourceTabs,
-) -> Element {
-    let mut importing = tabs.importing;
     let mut imported_dataset = use_signal(|| None::<String>);
     use_effect(move || {
         let Some(name) = imported_dataset() else {
@@ -170,62 +115,90 @@ fn ObjectWorkspace(
             .cloned();
         if let Some(resource) = resource {
             imported_dataset.set(None);
+            tabs.close("data-import");
             tabs.open(resource, None);
         }
     });
-    let opened = tabs.opened.read().clone();
-    let active = tabs.active_id();
+    let mut panels = vec![Panel::new(
+        "tables",
+        "Tables",
+        "tables",
+        rsx! { super::resource_tree::ResourceTree { resources, tabs } },
+    )];
+    for tab in tabs.opened.read().iter() {
+        panels.push(
+            Panel::new(
+                tab.resource.resource_id(),
+                tab.resource.selection().path().last().unwrap().clone(),
+                "datasets",
+                rsx! { ObjectSession { tab: tab.clone() } },
+            )
+            .with_closable(true)
+            .with_class("data-object-panel"),
+        );
+    }
+    if (tabs.importing)() {
+        panels.push(Panel::new("data-import", "Import", "datasets", rsx! {
+            super::import_dataset::ImportDataset {
+                on_done: move |name| { imported_dataset.set(Some(name)); super::relations::RelationCatalogState::refresh(); },
+            }
+        }).with_closable(true).with_class("data-object-panel"));
+    }
+    if tabs.opened.read().is_empty() && !(tabs.importing)() {
+        panels.push(Panel::new("data-open", "Open data", "datasets", rsx! {
+            div { class: "data-inspector-welcome", h2 { "Open your data" }
+                p { "Choose a table or dataset from the catalog, or use Load to open it in a tab." }
+                p { "Import MCAP recordings to create a native Spiral dataset." }
+            }
+        }).with_class("data-object-panel"));
+    }
+    let initial_layout = PanelLayout::new(LayoutNode::split(
+        "data-columns",
+        SplitAxis::Horizontal,
+        0.25,
+        LayoutNode::tile("tables", ["tables".to_owned()]),
+        LayoutNode::empty_tile("datasets"),
+    ));
+    let active_panel = tabs.active_id().map(PanelId::new);
+    rsx! { div { class: "data-workspace min-h-0 min-w-0 overflow-hidden",
+        PanelWorkspace { panels, initial_layout, active_panel,
+            layout_scope: Some("spiral_robotics.panel-layout.v10.data".to_owned()),
+            on_panel_activate: move |id: PanelId| tabs.active.set(Some(id.as_str().to_owned())),
+            on_panel_close: move |panel: PanelId| tabs.close(panel.as_str()),
+            group_toolbar: move |group: GroupContext| {
+                if group.active_panel().is_some_and(|id| id.as_str() != "tables") {
+                    rsx! { ObjectActions { resources, tabs, active: group.active_panel().map(|id| id.as_str().to_owned()) } }
+                } else { VNode::empty() }
+            },
+        }
+    } }
+}
+
+#[component]
+fn ObjectActions(
+    resources: ReadSignal<Option<Result<Vec<ProjectResource>, String>>>,
+    mut tabs: ResourceTabs,
+    active: Option<String>,
+) -> Element {
+    let mut importing = tabs.importing;
     let choices = resources
         .read()
         .as_ref()
         .and_then(|result| result.as_ref().ok())
         .cloned()
         .unwrap_or_default();
-    rsx! { section { class: "data-object-workspace",
-        header { class: "data-object-bar",
-            div { class: "data-object-tabs", role: "tablist", "aria-label": "Open tables and datasets",
-                for tab in opened.iter() {
-                    {
-                        let id = tab.resource.resource_id().to_owned();
-                        let select_id = id.clone();
-                        let close_id = id.clone();
-                        let selected = active.as_deref() == Some(id.as_str()) && !importing();
-                        rsx! { div { class: "data-object-tab", "data-active": selected,
-                            button { id: "resource-tab-{id}", role: "tab", aria_selected: selected, aria_controls: "resource-panel-{id}", tabindex: if selected { "0" } else { "-1" },
-                                title: tab.resource.selection().label(),
-                                onclick: move |_| { tabs.active.set(Some(select_id.clone())); importing.set(false); },
-                                onkeydown: move |event| { if matches!(event.key(), Key::ArrowLeft | Key::ArrowRight | Key::Home | Key::End) { event.prevent_default(); tabs.navigate(event.key()); } },
-                                "{tab.resource.selection().path().last().unwrap()}"
-                            }
-                            button { class: "data-tab-close", "aria-label": "Close {tab.resource.selection().label()}", onclick: move |_| tabs.close(&close_id),
-                                svg { view_box: "0 0 16 16", "aria-hidden": "true", path { d: "m4 4 8 8M12 4l-8 8" } }
-                            }
-                        } }
-                    }
-                }
-            }
+    let active = active.filter(|id| choices.iter().any(|resource| resource.resource_id() == id));
+    rsx! { div { class: "data-panel-actions", role: "group", "aria-label": "Load or import data",
             label { class: "data-load", span { "Load" }
                 select { "aria-label": "Load a table or dataset", value: active.clone().unwrap_or_default(), onchange: move |event| {
-                    if let Some(resource) = choices.iter().find(|resource| resource.resource_id() == event.value()) { tabs.open(resource.clone(), None); importing.set(false); }
+                    if let Some(resource) = choices.iter().find(|resource| resource.resource_id() == event.value()) { tabs.open(resource.clone(), None); }
                 }, option { value: "", selected: active.is_none(), "Choose…" }
                     for resource in resources.read().as_ref().and_then(|result| result.as_ref().ok()).into_iter().flatten() {
                         if matches!(resource.kind(), "table" | "view" | "dataset") { option { value: resource.resource_id(), selected: active.as_deref() == Some(resource.resource_id()), "{resource.selection().label()}" } }
                     }
                 }
             }
-            button { class: "data-import-action", aria_pressed: importing(), onclick: move |_| importing.toggle(), "Import" }
-        }
-        div { class: "data-session-content", hidden: !importing(), super::import_dataset::ImportDataset { on_done: move |name| { imported_dataset.set(Some(name)); importing.set(false); super::relations::RelationCatalogState::refresh(); }, on_close: move |_| importing.set(false) } }
-        if opened.is_empty() && !importing() { div { class: "data-inspector-welcome", h2 { "Open your data" } p { "Choose a table or dataset from the catalog, or use Load to open it in a tab." } p { "Import MCAP recordings to create a native Spiral dataset." } } }
-        for tab in opened {
-            {
-                let id = tab.resource.resource_id().to_owned();
-                let visible = active.as_deref() == Some(id.as_str()) && !importing();
-                rsx! { div { key: "{id}", id: "resource-panel-{id}", role: "tabpanel", "aria-labelledby": "resource-tab-{id}", class: "data-object-body", hidden: !visible,
-                    ObjectSession { tab }
-                } }
-            }
-        }
+            button { class: "data-import-action", onclick: move |_| { importing.set(true); tabs.active.set(Some("data-import".to_owned())); }, "Import" }
     } }
 }
 
@@ -322,7 +295,7 @@ mod tests {
         let harness = SessionHarness(Rc::new(RefCell::new(None)));
         let mut dom = VirtualDom::new_with_props(SessionHarness::render, harness.clone());
         dom.rebuild_in_place();
-        let (tabs, first, second) = harness.0.borrow().unwrap();
+        let (mut tabs, first, second) = harness.0.borrow().unwrap();
         dom.in_runtime(|| {
             tabs.open(SessionHarness::resource("first"), None);
             first.set_sql("SELECT 7".into());
@@ -335,6 +308,10 @@ mod tests {
             assert_eq!(second.sql(), "SELECT 2");
             assert_eq!(first.max_rows(), 100);
             assert_eq!(second.max_rows(), 25);
+            tabs.importing.set(true);
+            tabs.close("data-import");
+            assert_eq!(tabs.active_id().as_deref(), Some("first"));
+            assert!(!*tabs.importing.peek());
             tabs.close("second");
             assert_eq!(tabs.active_id().as_deref(), Some("first"));
             tabs.close("first");

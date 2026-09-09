@@ -33,7 +33,8 @@ pub(crate) fn CameraEditor(
     playing: bool,
 ) -> Element {
     let workspace = crate::shell::activity::WorkspaceActivity::current();
-    let playing = playing && workspace.is_active();
+    let panel = dioxus_workbench::PanelContext::current();
+    let playing = playing && workspace.is_active() && panel.geometry().visible();
     // DOM media synchronization belongs to the media element that owns the
     // node. A prop change now seeks/plays only this camera instead of making
     // the application root scan every recorded element after each frame.
@@ -130,6 +131,7 @@ pub(crate) fn CameraEditor(
 fn LiveCameraFrame(robot: String, role: String, device: String) -> Element {
     let studio = crate::shell::state::StudioProjectState::current();
     let workspace = crate::shell::activity::WorkspaceActivity::current();
+    let panel = dioxus_workbench::PanelContext::current();
     let status = studio
         .snapshot()
         .read()
@@ -173,7 +175,7 @@ fn LiveCameraFrame(robot: String, role: String, device: String) -> Element {
 
     rsx! {
         div { class: "camera-editor-frame camera-live-frame",
-            if workspace.is_active() {
+            if workspace.is_active() && panel.geometry().visible() {
             img {
                 class: "camera-stream-image",
                 src: ProjectClient::current().scoped_url(&device.camera_stream_url()),

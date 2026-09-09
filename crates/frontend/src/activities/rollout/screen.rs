@@ -114,7 +114,6 @@ fn RolloutPanels(
     controller: super::state::RolloutController,
     training_history: crate::activities::training::history::TrainingHistory,
 ) -> Element {
-    let mut resize_revision = use_signal(|| 0_u64);
     let mut selection = robot_selection.selected();
     let follower = project
         .snapshot()
@@ -126,7 +125,7 @@ fn RolloutPanels(
     let mut panels = vec![
         Panel::new("workbench", "Rollout", "workbench", rsx! { aside { class: "studio-v2-workbench", RolloutWorkbench { project, telemetry, controller, training_history } } }).with_class("workbench-editor"),
         Panel::new("scene", "Scene", "primary", rsx! {
-            Viewport { project, telemetry, robot_selection, source: SceneSource::Live, presentation: ViewportPresentation::new(follower, resize_revision()) }
+            Viewport { project, telemetry, robot_selection, source: SceneSource::Live, presentation: ViewportPresentation::new(follower) }
         }).with_class("scene-editor"),
     ];
     for camera in &cameras {
@@ -149,7 +148,6 @@ fn RolloutPanels(
         div { class: "min-h-0 min-w-0 overflow-hidden", tabindex: "-1",
             PanelWorkspace {
                 panels, initial_layout, layout_scope: Some("spiral_robotics.panel-layout.v6.rollout".to_owned()),
-                on_resize: move |_| { let next = resize_revision.peek().wrapping_add(1); resize_revision.set(next); },
                 on_panel_activate: move |id: PanelId| {
                     if let Some(camera) = cameras.iter().find(|camera| camera.panel_id() == id) { selection.set(Some(camera.selection())); }
                 },

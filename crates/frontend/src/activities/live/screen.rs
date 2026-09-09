@@ -65,7 +65,6 @@ pub(crate) fn LiveWorkspace(is_active: ReadSignal<bool>) -> Element {
 fn LivePanels(session: LiveSession) -> Element {
     let timeline = LiveTimeline::use_timeline(session);
     let actions = timeline.actions();
-    let mut resize_revision = use_signal(|| 0_u64);
     let mut selection = session.selection().selected();
     let cameras = session
         .selection()
@@ -83,7 +82,7 @@ fn LivePanels(session: LiveSession) -> Element {
             aside { class: "studio-v2-workbench", LiveWorkbench { project: session.project(), hardware: session.telemetry(), selection: session.selection(), datasets: session.datasets(), on_action: move |action| session.dispatch_live_action(action) } }
         }).with_class("workbench-editor"),
         Panel::new("scene", "Scene", "primary", rsx! {
-            Viewport { project: session.project(), telemetry: session.telemetry(), robot_selection: session.selection(), source: timeline.scene_source(), presentation: ViewportPresentation::new(None, resize_revision()) }
+            Viewport { project: session.project(), telemetry: session.telemetry(), robot_selection: session.selection(), source: timeline.scene_source(), presentation: ViewportPresentation::new(None) }
         }).with_class("scene-editor"),
     ];
     for camera in &cameras {
@@ -101,7 +100,6 @@ fn LivePanels(session: LiveSession) -> Element {
         div { class: "min-h-0 min-w-0 overflow-hidden", tabindex: "-1", onkeydown: move |event| actions.on_key(event),
             PanelWorkspace {
                 panels, initial_layout, layout_scope: Some("spiral_robotics.panel-layout.v7.live".to_owned()),
-                on_resize: move |_| { let next = resize_revision.peek().wrapping_add(1); resize_revision.set(next); },
                 on_panel_activate: move |id: PanelId| {
                     if let Some(camera) = cameras.iter().find(|camera| camera.panel_id() == id) { selection.set(Some(camera.selection())); }
                 },

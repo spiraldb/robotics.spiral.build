@@ -85,9 +85,7 @@ fn WorkflowPanels(controller: super::state::WorkflowController) -> Element {
             initial_layout: WorkflowWorkspaceLayout::initial(),
             layout_scope: Some(WORKFLOW_LAYOUT_SCOPE.to_owned()),
             active_panel: controller.active_panel(),
-            on_layout_change: move |_layout: PanelLayout| {},
             on_panel_activate: move |id: PanelId| controller.activate_panel(id),
-            on_resize: move |_| {},
         }
     }
 }

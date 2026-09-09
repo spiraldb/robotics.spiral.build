@@ -26,7 +26,6 @@ use spiral_robotics_viewport::{
     Viewport as Bench,
 };
 use wasm_bindgen::JsCast;
-use wasm_bindgen::prelude::Closure;
 use web_sys::HtmlCanvasElement;
 
 use crate::activities::data::episode_cache::{EpisodePreview, TimelineArmSample, TimelineSample};
@@ -129,15 +128,11 @@ impl SceneSource {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ViewportPresentation {
     visible_robot: Option<String>,
-    resize_revision: u64,
 }
 
 impl ViewportPresentation {
-    pub(crate) const fn new(visible_robot: Option<String>, resize_revision: u64) -> Self {
-        Self {
-            visible_robot,
-            resize_revision,
-        }
+    pub(crate) const fn new(visible_robot: Option<String>) -> Self {
+        Self { visible_robot }
     }
 }
 
@@ -149,10 +144,7 @@ pub(crate) fn Viewport(
     source: SceneSource,
     presentation: ViewportPresentation,
 ) -> Element {
-    let ViewportPresentation {
-        visible_robot,
-        resize_revision,
-    } = presentation;
+    let ViewportPresentation { visible_robot } = presentation;
     let mut selection = robot_selection.selected();
     let on_select = use_callback(move |next| selection.set(next));
     let canvas_dom = use_hook(ViewportDom::new);
@@ -166,32 +158,16 @@ pub(crate) fn Viewport(
     // how an operator reads reach and clearance off the screen. It stays a
     // control, so a scene that only needs the arms can still shed it.
     let mut show_grid = use_signal(|| true);
-    // Bumped by the window resize listener: the draw below reads it purely so
-    // that a resize redraws even when no telemetry is arriving.
-    let resized = use_signal(|| 0_u32);
-    let mut resized = resized;
-
-    // Held for the life of the component, and dropped — unsubscribing — with it.
-    use_hook(|| {
-        Rc::new(WindowListener::new("resize", move || {
-            let next = resized.peek().wrapping_add(1);
-            resized.set(next);
-        }))
-    });
+    let panel = dioxus_workbench::PanelContext::current();
 
     let draw_bench = bench.clone();
     use_effect(use_reactive(
-        (&resize_revision, &source, &visible_robot),
-        move |(_resize_revision, draw_source, visible_robot)| {
-            if !telemetry.is_active() {
+        (&source, &visible_robot),
+        move |(draw_source, visible_robot)| {
+            let geometry = panel.geometry();
+            if !geometry.visible() || !telemetry.is_active() {
                 return;
             }
-            // A workbench divider changes this canvas without changing the
-            // browser window. Its host increments the revision while dragging
-            // so WebGL redraws against the canvas's new CSS bounds instead of
-            // stretching the previous frame until the next telemetry or camera
-            // interaction.
-            let _ = resized();
             let _ = view_revision();
             let grid = show_grid();
             let hovered = hover();
@@ -995,33 +971,6 @@ impl ViewportDom {
             .get_element_by_id(&self.id())?
             .dyn_into()
             .ok()
-    }
-}
-
-/// A window event subscription that ends when the viewport does.
-struct WindowListener {
-    event: &'static str,
-    callback: Closure<dyn FnMut()>,
-}
-
-impl WindowListener {
-    fn new(event: &'static str, handler: impl FnMut() + 'static) -> Option<Self> {
-        let callback = Closure::wrap(Box::new(handler) as Box<dyn FnMut()>);
-        web_sys::window()?
-            .add_event_listener_with_callback(event, callback.as_ref().unchecked_ref())
-            .ok()?;
-        Some(Self { event, callback })
-    }
-}
-
-impl Drop for WindowListener {
-    fn drop(&mut self) {
-        if let Some(window) = web_sys::window() {
-            let _ = window.remove_event_listener_with_callback(
-                self.event,
-                self.callback.as_ref().unchecked_ref(),
-            );
-        }
     }
 }
 

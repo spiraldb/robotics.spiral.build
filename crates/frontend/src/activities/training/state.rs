@@ -169,13 +169,12 @@ impl TrainingController {
     }
 
     pub(crate) fn close_run(mut self, id: String) {
-        let selected = self.history.selected_run.peek().to_owned();
-        let next_selected = {
-            let mut opened = self.history.opened_runs.write();
-            opened.selection_after_close(selected.as_deref(), &id)
-        };
-        if selected.as_deref() == Some(id.as_str()) {
-            self.history.selected_run.set(next_selected);
+        self.history
+            .opened_runs
+            .write()
+            .retain(|opened| opened != &id);
+        if self.history.selected_run.peek().as_deref() == Some(id.as_str()) {
+            self.history.selected_run.set(None);
         }
     }
 

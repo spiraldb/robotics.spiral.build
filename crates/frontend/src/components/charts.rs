@@ -226,6 +226,7 @@ pub(crate) fn CharmingChart(id: String, chart: Chart, presentation: ChartPresent
     } = presentation;
     let runtime_failed = use_signal(|| false);
     let workspace = crate::shell::activity::WorkspaceActivity::current();
+    let panel = dioxus_workbench::PanelContext::current();
 
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -241,14 +242,14 @@ pub(crate) fn CharmingChart(id: String, chart: Chart, presentation: ChartPresent
     use_effect(use_reactive(
         (&id, &chart, &group),
         move |(id, chart, group)| {
-            if !workspace.is_active() {
+            if !panel.geometry().visible() || !workspace.is_active() {
                 return;
             }
             let instance = Rc::clone(&update_instance);
             let observer = Rc::clone(&update_observer);
             spawn(async move {
                 for _ in 0..100 {
-                    if !workspace.is_active() {
+                    if !panel.geometry().visible() || !workspace.is_active() {
                         return;
                     }
                     if EchartsRuntime::ready() {

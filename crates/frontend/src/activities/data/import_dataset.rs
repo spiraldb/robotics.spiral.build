@@ -35,7 +35,8 @@ impl From<HuggingFaceDatasetImportSummary> for ImportReceipt {
     }
 }
 #[component]
-pub(super) fn ImportDataset(on_done: EventHandler<String>, on_close: EventHandler<()>) -> Element {
+pub(super) fn ImportDataset(on_done: EventHandler<String>) -> Element {
+    let panel = dioxus_workbench::PanelContext::current();
     let mut draft = ImportDraft {
         name: use_signal(String::new),
         repository: use_signal(String::new),
@@ -91,7 +92,7 @@ pub(super) fn ImportDataset(on_done: EventHandler<String>, on_close: EventHandle
                         });
                     }
                 }, if busy() { "Working…" } else if inspection.read().is_some() { "Import dataset" } else { "Inspect source" } }
-                button { class: "data-text-action", disabled: busy(), onclick: move |_| on_close.call(()), "Close" }
+                button { class: "data-text-action", disabled: busy(), onclick: move |_| panel.request_close(), "Close" }
             }
         }
     } }
