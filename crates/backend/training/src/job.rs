@@ -42,7 +42,7 @@ pub struct SpiralJobConnection {
     api_url: String,
     spfs_url: String,
     project_id: String,
-    namespace: String,
+    table_prefix: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     client_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -53,13 +53,13 @@ impl SpiralJobConnection {
     pub fn new(
         endpoints: SpiralServiceEndpoints,
         project_id: impl Into<String>,
-        namespace: impl Into<String>,
+        table_prefix: impl Into<String>,
     ) -> Self {
         let connection = Self {
             api_url: endpoints.api_url,
             spfs_url: endpoints.spfs_url,
             project_id: project_id.into(),
-            namespace: namespace.into(),
+            table_prefix: table_prefix.into(),
             client_id: None,
             client_secret: None,
         };
@@ -68,8 +68,8 @@ impl SpiralJobConnection {
             "Spiral project ID must not be empty"
         );
         assert!(
-            !connection.namespace.trim().is_empty(),
-            "Spiral namespace must not be empty"
+            !connection.table_prefix.trim().is_empty(),
+            "Studio table prefix must not be empty"
         );
         connection
     }
@@ -97,7 +97,7 @@ impl fmt::Debug for SpiralJobConnection {
             .field("api_url", &self.api_url)
             .field("spfs_url", &self.spfs_url)
             .field("project_id", &self.project_id)
-            .field("namespace", &self.namespace)
+            .field("table_prefix", &self.table_prefix)
             .field("client_id", &self.client_id)
             .field(
                 "client_secret",

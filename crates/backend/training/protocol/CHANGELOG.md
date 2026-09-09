@@ -1,5 +1,11 @@
 # Training protocol changelog
 
+## Training API 7.0
+
+- Replaced `spiral.namespace` with `spiral.table_prefix`.
+- Workers query flat `<prefix>_video_assets` and publish checkpoints to
+  `<prefix>_training_checkpoints`; storage schema 10 is required.
+
 ## Training API 6.0
 
 - Added the required `spiral_schema_version` job field.

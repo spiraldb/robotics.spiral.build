@@ -46,7 +46,7 @@ impl<'a> RolloutSessionPersistence<'a> {
         if !self.project_store.is_configured() {
             return Ok(None);
         }
-        let relation = Table::RolloutRuns.qualified_name(self.project_store.namespace());
+        let relation = Table::RolloutRuns.qualified_name(self.project_store.table_prefix());
         let mut connection = self.project_store.connect().await?;
         let sessions = connection
             .relation_rows(&relation, StoredRolloutSession::decode)
@@ -60,7 +60,7 @@ impl<'a> RolloutSessionPersistence<'a> {
         let mut connection = self.project_store.connect().await?;
         connection
             .replace_batches(
-                &Table::RolloutRuns.qualified_name(self.project_store.namespace()),
+                &Table::RolloutRuns.qualified_name(self.project_store.table_prefix()),
                 vec![batch],
             )
             .await

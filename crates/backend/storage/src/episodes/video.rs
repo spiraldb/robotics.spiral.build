@@ -30,7 +30,7 @@ impl<'a> VideoAssetPersistence<'a> {
     }
 
     pub(crate) async fn size(&self, asset: &VideoAssetKey) -> Result<u64, String> {
-        let sql = SpiralSql::video_asset_size(self.project_store.namespace(), asset);
+        let sql = SpiralSql::video_asset_size(self.project_store.table_prefix(), asset);
         self.u64_query(sql, db::BYTE_SIZE).await
     }
 
@@ -39,7 +39,7 @@ impl<'a> VideoAssetPersistence<'a> {
         asset: &VideoAssetKey,
         range: VideoByteRange,
     ) -> Result<Vec<u8>, String> {
-        let sql = SpiralSql::video_asset_range(self.project_store.namespace(), asset, range);
+        let sql = SpiralSql::video_asset_range(self.project_store.table_prefix(), asset, range);
         self.binary_query(sql).await
     }
 

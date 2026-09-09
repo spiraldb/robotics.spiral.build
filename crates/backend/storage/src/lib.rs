@@ -13,7 +13,7 @@ pub mod workflow_documents;
 pub mod workflow_features;
 
 pub mod bundle {
-    //! Portable single-file snapshots of the Studio-owned Spiral namespace.
+    //! Portable single-file snapshots of the Studio-owned Spiral tables.
 
     pub use crate::transfer::ProjectBundle;
 }

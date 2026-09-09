@@ -79,7 +79,7 @@ impl StudioProjectResources {
             StudioConfiguration {
                 dataset: settings
                     .as_ref()
-                    .map(|settings| settings.spiral().namespace().to_owned())
+                    .map(|settings| settings.spiral().table_prefix().to_owned())
                     .filter(|dataset| !dataset.trim().is_empty())
                     .unwrap_or_else(|| "spiral_robotics".to_owned()),
                 spiral_query_available: settings

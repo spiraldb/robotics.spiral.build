@@ -96,7 +96,7 @@ class SpiralActDataset:
 
     def __init__(self, request: dict[str, Any]) -> None:
         self.request = request
-        self.namespace = _identifier(request["spiral"].get("namespace"), "namespace")
+        self.table_prefix = _identifier(request["spiral"].get("table_prefix"), "table_prefix")
         self.state_column = _identifier(request.get("state_column"), "state column")
         self.action_column = _identifier(request.get("action_column"), "action column")
         self.chunk_size = _positive_int(request.get("chunk_size"), "chunk size")
@@ -253,7 +253,7 @@ class SpiralActDataset:
         try:
             with self.connection.cursor() as cursor:
                 cursor.adbc_ingest(
-                    f"{self.namespace}.training_checkpoints", table, mode="append"
+                    f"{self.table_prefix}_training_checkpoints", table, mode="append"
                 )
         except Exception as error:
             raise RuntimeRequestError(
@@ -351,7 +351,7 @@ class SpiralActDataset:
     def _load_segments(self) -> list[VideoSegment]:
         table = self._query(
             "SELECT episode_id, stream_id, segment_index, timeline_offset_ns, fps, frames, "
-            f"width, height, media_relation FROM {self.namespace}.video_assets"
+            f"width, height, media_relation FROM {self.table_prefix}_video_assets"
         )
         episodes = {sample.episode_id for sample in self.samples}
         result = []

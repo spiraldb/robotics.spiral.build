@@ -1,7 +1,7 @@
 //! Physical relational schema owned by the SpiralDB storage adapter.
 //!
 //! User-visible catalog vocabulary lives in `spiral-robotics-common`. This module
-//! owns persisted relation names, namespace qualification, columns, and
+//! owns persisted relation names, table prefix qualification, columns, and
 //! schema-drift checks. Feature modules contribute their concrete Arrow
 //! layouts through [`ManagedRelationSchema`].
 
@@ -12,9 +12,6 @@ use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 
 include!(concat!(env!("OUT_DIR"), "/storage_schema_version.rs"));
-
-/// Marker used to distinguish Spiral Robotics' managed dataset namespace resource.
-pub(super) const DATASET_NAMESPACE_MARKER: &str = "_spiral_robotics_dataset_key_v1";
 
 /// Stable persisted relations owned by Spiral Robotics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -89,9 +86,14 @@ impl Table {
         }
     }
 
-    /// Qualify this owned table inside the configured Studio namespace.
-    pub(crate) fn qualified_name(self, namespace: &str) -> String {
-        format!("{namespace}.{}", self.name())
+    /// Qualify this owned table using the configured Studio table prefix.
+    pub(crate) fn qualified_name(self, table_prefix: &str) -> String {
+        let suffix = if self == Self::StudioSettings {
+            "settings"
+        } else {
+            self.name()
+        };
+        format!("{table_prefix}_{suffix}")
     }
 }
 
@@ -397,20 +399,20 @@ pub const ROBOT_UPDATED_MILLIS_COLUMN: &str = column::UPDATED_MS;
 pub struct StorageSchema;
 
 impl StorageSchema {
-    /// Fully qualify the robot-configuration relation in the active namespace.
-    pub fn robot_configuration_relation(namespace: &str) -> String {
-        Table::Robots.qualified_name(namespace)
+    /// Fully qualify the robot-configuration relation using the active table prefix.
+    pub fn robot_configuration_relation(table_prefix: &str) -> String {
+        Table::Robots.qualified_name(table_prefix)
     }
 
-    /// Fully qualify the Workflow feature registry in the active namespace.
-    pub fn workflow_feature_registry_relation(namespace: &str) -> String {
-        Table::FeatureRegistry.qualified_name(namespace)
+    /// Fully qualify the Workflow feature registry using the active table prefix.
+    pub fn workflow_feature_registry_relation(table_prefix: &str) -> String {
+        Table::FeatureRegistry.qualified_name(table_prefix)
     }
 
-    /// Derive and qualify a Workflow feature cache in the active namespace.
-    pub fn workflow_feature_cache_relation(namespace: &str, source_relation: &str) -> String {
+    /// Derive and qualify a Workflow feature cache using the active table prefix.
+    pub fn workflow_feature_cache_relation(table_prefix: &str, source_relation: &str) -> String {
         format!(
-            "{namespace}.{}",
+            "{table_prefix}_{}",
             spiral_robotics_common::workflow::WorkflowFeatureApplicability::derived_cache_name(
                 source_relation
             )
@@ -423,15 +425,15 @@ impl StorageSchema {
         relation: &str,
         source_relation: &str,
     ) -> bool {
-        let Some((namespace, name)) = relation.split_once('.') else {
-            return false;
-        };
-        !name.contains('.')
-            && Self::is_identifier(namespace)
-            && name
-                == spiral_robotics_common::workflow::WorkflowFeatureApplicability::derived_cache_name(
-                    source_relation,
-                )
+        let suffix = format!(
+            "_{}",
+            spiral_robotics_common::workflow::WorkflowFeatureApplicability::derived_cache_name(
+                source_relation
+            )
+        );
+        relation
+            .strip_suffix(&suffix)
+            .is_some_and(Self::is_identifier)
     }
 
     /// Build one robot-configuration row against the managed relation schema.
@@ -791,10 +793,10 @@ mod tests {
         );
         assert_eq!(
             StorageSchema::workflow_feature_registry_relation("studio"),
-            "studio.feature_registry"
+            "studio_feature_registry"
         );
         let cache = StorageSchema::workflow_feature_cache_relation("studio", "media_frames");
-        assert_eq!(cache, "studio.features_media_frames");
+        assert_eq!(cache, "studio_features_media_frames");
         assert!(StorageSchema::is_workflow_feature_cache_relation(
             &cache,
             "media_frames"

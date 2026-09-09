@@ -38,23 +38,23 @@ impl<'a> TrainingHistoryPersistence<'a> {
         if !self.project_store.is_configured() {
             return Ok(Vec::new());
         }
-        let namespace = self.project_store.namespace();
+        let table_prefix = self.project_store.table_prefix();
         let mut connection = self.project_store.connect().await?;
         let rows = connection
             .relation_rows(
-                &Table::TrainingRuns.qualified_name(namespace),
+                &Table::TrainingRuns.qualified_name(table_prefix),
                 TrainingRunRow::decode,
             )
             .await?;
         let metrics = connection
             .relation_rows(
-                &Table::TrainingRunMetrics.qualified_name(namespace),
+                &Table::TrainingRunMetrics.qualified_name(table_prefix),
                 StoredTrainingMetric::decode,
             )
             .await?;
         let checkpoints = connection
             .relation_rows(
-                &Table::TrainingRunCheckpoints.qualified_name(namespace),
+                &Table::TrainingRunCheckpoints.qualified_name(table_prefix),
                 StoredTrainingCheckpoint::decode,
             )
             .await?;
@@ -65,14 +65,14 @@ impl<'a> TrainingHistoryPersistence<'a> {
 
     /// Replace all three history relations in one transaction.
     pub(crate) async fn save(&self, snapshot: &TrainingSnapshot) -> Result<(), String> {
-        let namespace = self.project_store.namespace();
+        let table_prefix = self.project_store.table_prefix();
         let batches = StoredTrainingHistory::stored(snapshot).batches()?;
         let mut connection = self.project_store.connect().await?;
         connection.begin_transaction().await?;
         let mutation = async {
             for (table, batch) in batches {
                 connection
-                    .replace_batches(&table.qualified_name(namespace), vec![batch])
+                    .replace_batches(&table.qualified_name(table_prefix), vec![batch])
                     .await?;
             }
             Ok(())

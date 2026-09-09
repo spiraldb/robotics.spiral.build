@@ -96,7 +96,7 @@ pub struct SpiralSettings {
     /// The secret is write-only and never crosses back to the browser.
     #[serde(default)]
     client_secret_configured: bool,
-    namespace: String,
+    table_prefix: String,
     #[serde(default)]
     endpoint_restart_required: bool,
 }
@@ -109,7 +109,7 @@ impl Default for SpiralSettings {
             project_id: String::new(),
             client_id: String::new(),
             client_secret_configured: false,
-            namespace: "spiral_robotics".to_owned(),
+            table_prefix: "studio".to_owned(),
             endpoint_restart_required: false,
         }
     }
@@ -137,8 +137,8 @@ impl SpiralSettings {
         self.client_secret_configured = secret_configured;
         self
     }
-    pub fn with_namespace(mut self, namespace: impl Into<String>) -> Self {
-        self.namespace = namespace.into();
+    pub fn with_table_prefix(mut self, table_prefix: impl Into<String>) -> Self {
+        self.table_prefix = table_prefix.into();
         self
     }
     pub const fn with_endpoint_restart_required(mut self, required: bool) -> Self {
@@ -165,8 +165,8 @@ impl SpiralSettings {
         self.client_secret_configured
     }
 
-    pub fn namespace(&self) -> &str {
-        &self.namespace
+    pub fn table_prefix(&self) -> &str {
+        &self.table_prefix
     }
 
     pub fn set_endpoint(&mut self, endpoint: impl Into<String>) {

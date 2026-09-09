@@ -54,13 +54,11 @@ impl<'a> TryFrom<&'a str> for WorkflowNodeId<'a> {
     }
 }
 
-/// A validated unquoted, dotted Spiral relation name.
+/// A validated unquoted Spiral relation path within the selected project.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct QualifiedRelation<'a>(&'a str);
 
-/// Admit an unquoted dotted Spiral relation such as `dataset.camera_frames`.
-/// Requiring at least two segments makes the catalog boundary visible and
-/// prevents later code from silently inheriting a connection-local default.
+/// Admit root resources and dotted resource paths within the selected project.
 impl<'a> TryFrom<&'a str> for QualifiedRelation<'a> {
     type Error = WorkflowSyntaxError;
 
@@ -71,13 +69,12 @@ impl<'a> TryFrom<&'a str> for QualifiedRelation<'a> {
             ));
         }
         let segments = relation.split('.').collect::<Vec<_>>();
-        if segments.len() < 2
-            || segments
-                .iter()
-                .any(|segment| UnquotedSqlIdentifier::try_from(*segment).is_err())
+        if segments
+            .iter()
+            .any(|segment| UnquotedSqlIdentifier::try_from(*segment).is_err())
         {
             return Err(WorkflowSyntaxError::new(
-                "Spiral relations must be qualified dotted identifiers such as dataset.table",
+                "Spiral relations must contain safe identifiers separated by dots",
             ));
         }
         Ok(Self(relation))
@@ -164,6 +161,9 @@ mod tests {
     #[test]
     fn qualified_relations_reject_identifier_injection() {
         for valid in [
+            "studio_robots",
+            "dataset_source",
+            "episodes",
             "spiral_robotics.episodes",
             "pick_place.camera_frames",
             "project.dataset.table_2",
@@ -171,7 +171,7 @@ mod tests {
             assert!(QualifiedRelation::try_from(valid).is_ok(), "{valid}");
         }
         for invalid in [
-            "episodes",
+            "",
             "dataset.",
             ".table",
             "dataset.table;DROP_TABLE_x",

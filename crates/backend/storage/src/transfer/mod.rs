@@ -25,7 +25,7 @@ impl<'a> TransferPersistence<'a> {
     pub(crate) async fn export_project(&self) -> Result<Vec<u8>, String> {
         let mut connection = self.project_store.connect_exclusive().await?;
         ProjectBundle
-            .export(&mut connection, self.project_store.namespace())
+            .export(&mut connection, self.project_store.table_prefix())
             .await
     }
 
@@ -37,7 +37,7 @@ impl<'a> TransferPersistence<'a> {
         ProjectBundle
             .import(
                 &mut connection,
-                ProjectBundleImport::new(self.project_store.namespace(), bytes),
+                ProjectBundleImport::new(self.project_store.table_prefix(), bytes),
             )
             .await
     }

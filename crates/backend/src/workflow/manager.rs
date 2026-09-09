@@ -1082,7 +1082,7 @@ impl WorkflowManager {
                     };
                     let Some(output_relation) = node
                         .config()
-                        .qualified_model_output(self.inner.storage.namespace())
+                        .qualified_model_output(self.inner.storage.table_prefix())
                     else {
                         self.finish_failed(
                             WorkflowFailure::new(
@@ -1597,7 +1597,7 @@ impl WorkflowManager {
             };
             node_snapshot.set_output_relation(
                 node.config()
-                    .qualified_model_output(self.inner.storage.namespace()),
+                    .qualified_model_output(self.inner.storage.table_prefix()),
             );
         }
         response.set_snapshot(snapshot);
@@ -1619,17 +1619,17 @@ impl WorkflowManager {
 }
 
 trait WorkflowNodeConfigStorageExt {
-    fn qualified_model_output(&self, namespace: &str) -> Option<String>;
+    fn qualified_model_output(&self, table_prefix: &str) -> Option<String>;
 }
 
 impl WorkflowNodeConfigStorageExt for WorkflowNodeConfig {
-    fn qualified_model_output(&self, namespace: &str) -> Option<String> {
+    fn qualified_model_output(&self, table_prefix: &str) -> Option<String> {
         let Self::Model { features } = self else {
             return None;
         };
         let source_relation = features.first()?.applicability().source_relation();
         Some(StorageSchema::workflow_feature_cache_relation(
-            namespace,
+            table_prefix,
             source_relation,
         ))
     }
@@ -2029,7 +2029,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wire_snapshot_carries_the_namespace_qualified_model_output() {
+    async fn wire_snapshot_carries_the_prefixed_model_output() {
         let mut workflow = siglip_video_workflow("media.manifest", "model");
         workflow.normalize_model_sources();
         let document =
@@ -2364,7 +2364,7 @@ mod tests {
             .filter(|project| !project.trim().is_empty())
             .or_else(|| stored.as_ref().and_then(BackendStateStore::project_id))
             .expect("SPIRAL_PROJECT_ID or a project saved in Studio Settings is required");
-        let namespace = format!(
+        let table_prefix = format!(
             "workflow_e2e_{}_{}",
             std::process::id(),
             SystemTime::now().unix_millis()
@@ -2387,15 +2387,18 @@ mod tests {
                 let settings = connection;
                 let database =
                     Arc::new(spiral_robotics_storage::AdbcDatabase::new(settings.clone()));
-                ProjectStore::new(settings, namespace.clone(), database)
+                ProjectStore::new(settings, table_prefix.clone(), database)
             }
             .expect("the Workflow E2E project store must be valid"),
         );
-        let seed_relation = format!("{namespace}.seed_values");
-        let mut cleanup = WorkflowTestNamespace::new(
+        let seed_relation = format!("{table_prefix}_seed_values");
+        let mut cleanup = WorkflowTestTables::new(
             project_store.clone(),
-            vec![seed_relation.clone(), format!("{namespace}.workflow_runs")],
-            namespace.clone(),
+            vec![
+                seed_relation.clone(),
+                format!("{table_prefix}_workflow_runs"),
+            ],
+            table_prefix.clone(),
             false,
         );
         let schema = Arc::new(Schema::new(vec![Field::new(
@@ -2409,15 +2412,10 @@ mod tests {
         )
         .expect("the seed batch must match its schema");
         let target = seed_relation.clone();
-        let dataset = namespace.clone();
         let mut connection = project_store
             .connect_exclusive()
             .await
             .expect("the Workflow seed project must connect");
-        connection
-            .ensure_dataset_namespace(&dataset)
-            .await
-            .expect("the Workflow seed namespace must exist");
         connection
             .replace_or_create_batches(&target, vec![batch])
             .await
@@ -2490,7 +2488,7 @@ mod tests {
         cleanup
             .cleanup_now()
             .await
-            .expect("the SQL E2E namespace must clean up");
+            .expect("the SQL E2E tables must clean up");
         cleanup
             .assert_absent()
             .await
@@ -2509,7 +2507,7 @@ mod tests {
             .filter(|project| !project.trim().is_empty())
             .or_else(|| stored.as_ref().and_then(BackendStateStore::project_id))
             .expect("SPIRAL_PROJECT_ID or a project saved in Studio Settings is required");
-        let namespace = format!(
+        let table_prefix = format!(
             "workflow_siglip_{}_{}",
             std::process::id(),
             SystemTime::now().unix_millis()
@@ -2532,13 +2530,13 @@ mod tests {
                 let settings = connection;
                 let database =
                     Arc::new(spiral_robotics_storage::AdbcDatabase::new(settings.clone()));
-                ProjectStore::new(settings, namespace.clone(), database)
+                ProjectStore::new(settings, table_prefix.clone(), database)
             }
             .expect("the Workflow SigLIP project store must be valid"),
         );
-        let manifest_relation = format!("{namespace}.video_assets");
-        let media_relation = format!("{namespace}.video.assets");
-        let empty_relation = format!("{namespace}.empty_video_assets");
+        let manifest_relation = format!("{table_prefix}_video_assets");
+        let media_relation = format!("{table_prefix}_video.assets");
+        let empty_relation = format!("{table_prefix}_empty_video_assets");
         let model_node_id = format!(
             "model_{}_{}",
             std::process::id(),
@@ -2550,23 +2548,23 @@ mod tests {
         let output_relation = workflow
             .nodes()
             .iter()
-            .find_map(|node| node.config().qualified_model_output(&namespace))
+            .find_map(|node| node.config().qualified_model_output(&table_prefix))
             .expect("the server derivation must produce a Model output relation");
         let empty_output_relation =
-            StorageSchema::workflow_feature_cache_relation(&namespace, &empty_relation);
+            StorageSchema::workflow_feature_cache_relation(&table_prefix, &empty_relation);
         // Install cleanup before the first catalog mutation so a seeding or
-        // Dataset-build failure cannot strand a test namespace.
-        let mut cleanup = WorkflowTestNamespace::new(
+        // Dataset-build failure cannot strand a test table prefix.
+        let mut cleanup = WorkflowTestTables::new(
             project_store.clone(),
             vec![
                 manifest_relation.clone(),
                 empty_relation.clone(),
-                format!("{namespace}.workflow_runs"),
+                format!("{table_prefix}_workflow_runs"),
                 output_relation.clone(),
                 empty_output_relation,
-                StorageSchema::workflow_feature_registry_relation(&namespace),
+                StorageSchema::workflow_feature_registry_relation(&table_prefix),
             ],
-            namespace.clone(),
+            table_prefix.clone(),
             true,
         );
         let asset = VideoAsset::new(
@@ -2583,15 +2581,10 @@ mod tests {
             .expect("the empty video fixture schema must be valid");
         let media_target = manifest_relation.clone();
         let empty_target = empty_relation.clone();
-        let dataset = namespace.clone();
         let mut connection = project_store
             .connect_exclusive()
             .await
             .expect("the video Workflow project must connect");
-        connection
-            .ensure_dataset_namespace(&dataset)
-            .await
-            .expect("the video Workflow namespace must exist");
         connection
             .replace_or_create_batches(&media_target, vec![media_batch])
             .await
@@ -2601,7 +2594,7 @@ mod tests {
             .await
             .expect("the empty video manifest must save");
         connection
-            .rebuild_video_dataset(&dataset, false)
+            .rebuild_video_dataset(&table_prefix, false)
             .await
             .expect("seeding the video manifest relations must succeed");
         drop(connection);
@@ -2823,7 +2816,7 @@ mod tests {
         cleanup
             .cleanup_now()
             .await
-            .expect("the SigLIP E2E namespace must clean up");
+            .expect("the SigLIP E2E tables must clean up");
         cleanup
             .assert_absent()
             .await
@@ -2971,25 +2964,25 @@ mod tests {
         panic!("Workflow run did not reach a terminal state within 10 seconds");
     }
 
-    struct WorkflowTestNamespace {
+    struct WorkflowTestTables {
         project_store: Arc<ProjectStore>,
         relations: Vec<String>,
-        namespace: String,
+        table_prefix: String,
         video_dataset: bool,
         cleaned: bool,
     }
 
-    impl WorkflowTestNamespace {
+    impl WorkflowTestTables {
         fn new(
             project_store: Arc<ProjectStore>,
             relations: Vec<String>,
-            namespace: String,
+            table_prefix: String,
             video_dataset: bool,
         ) -> Self {
             Self {
                 project_store,
                 relations,
-                namespace,
+                table_prefix,
                 video_dataset,
                 cleaned: false,
             }
@@ -3000,19 +2993,18 @@ mod tests {
                 return Ok(());
             }
             if self.video_dataset {
-                let dataset = format!("{}.video", self.namespace);
+                let dataset = format!("{}_video", self.table_prefix);
                 self.execute_cleanup_sql(&SpiralSql::drop_video_dataset(&dataset))
                     .await?;
                 self.execute_cleanup_sql(&format!(
                     "DROP VIEW IF EXISTS {}_video_sources",
-                    self.namespace
+                    self.table_prefix
                 ))
                 .await?;
             }
             for relation in self.relations.clone() {
                 self.drop_cleanup_table(&relation).await?;
             }
-            self.drop_cleanup_table(&self.namespace).await?;
             self.cleaned = true;
             Ok(())
         }
@@ -3058,7 +3050,7 @@ mod tests {
         }
 
         async fn assert_absent(&self) -> Result<(), String> {
-            let namespace = self.namespace.clone();
+            let table_prefix = self.table_prefix.clone();
             let relations = self.relations.clone();
             let mut connection = self.project_store.connect_exclusive().await?;
             let leaked = connection
@@ -3066,8 +3058,8 @@ mod tests {
                 .await?
                 .into_iter()
                 .filter(|relation_name| {
-                    relation_name == &namespace
-                        || relation_name.starts_with(&format!("{namespace}."))
+                    relation_name == &table_prefix
+                        || relation_name.starts_with(&format!("{table_prefix}_"))
                         || relations.iter().any(|relation| relation == relation_name)
                 })
                 .collect::<Vec<_>>();

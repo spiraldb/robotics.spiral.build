@@ -54,7 +54,7 @@ impl<'a> StudioPreferencePersistence<'a> {
         if !self.project_store.is_configured() {
             return Ok(StoredStudioPreferences::default());
         }
-        let relation = Table::StudioSettings.qualified_name(self.project_store.namespace());
+        let relation = Table::StudioSettings.qualified_name(self.project_store.table_prefix());
         let mut connection = self.project_store.connect().await?;
         let result = connection
             .query_rows(
@@ -79,7 +79,7 @@ impl<'a> StudioPreferencePersistence<'a> {
     }
 
     pub(crate) async fn save(&self, preferences: &StoredStudioPreferences) -> Result<(), String> {
-        let relation = Table::StudioSettings.qualified_name(self.project_store.namespace());
+        let relation = Table::StudioSettings.qualified_name(self.project_store.table_prefix());
         let json = serde_json::to_string(preferences)
             .map_err(|error| format!("encoding Studio preferences: {error}"))?;
         let mut connection = self.project_store.connect().await?;

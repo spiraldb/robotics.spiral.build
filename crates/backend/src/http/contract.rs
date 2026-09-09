@@ -88,7 +88,7 @@ impl ApiRoutes {
     pub(crate) fn into_document(mut self) -> Value {
         json!({
             "openapi": "3.1.0",
-            "info": { "title": "Spiral Robotics HTTP API", "version": "1.0.0",
+            "info": { "title": "Spiral Robotics HTTP API", "version": "2.0.0",
                 "description": "Backend-owned commands and frontend-initiated snapshots. X-Project-Session is an identity guard, not authentication. Reads are never cached. Commands are never automatically retried. See docs/http-api.md for operation lifetimes and polling." },
             "servers": [{ "url": "/api" }],
             "paths": self.paths,

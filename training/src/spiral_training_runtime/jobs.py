@@ -265,7 +265,8 @@ class TrainingJob:
         with self.lock:
             self._append_checkpoint_locked(checkpoint)
             self._append_log_locked(
-                f"Checkpoint {step} committed directly to {dataset.namespace}.training_checkpoints."
+                f"Checkpoint {step} committed directly to "
+                f"{dataset.table_prefix}_training_checkpoints."
             )
 
 

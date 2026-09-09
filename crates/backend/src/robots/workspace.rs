@@ -467,7 +467,8 @@ impl RobotWorkspace {
 
     pub(crate) async fn delete(&self, id: &str) -> Result<(), WorkspaceError> {
         self.get(id).await?;
-        let relation = StorageSchema::robot_configuration_relation(self.project_store.namespace());
+        let relation =
+            StorageSchema::robot_configuration_relation(self.project_store.table_prefix());
         let id = SpiralSql::string_literal(id);
         let mut connection = self
             .project_store
@@ -484,7 +485,8 @@ impl RobotWorkspace {
     }
 
     pub(crate) async fn try_list(&self) -> Result<Vec<RobotRecord>, WorkspaceError> {
-        let relation = StorageSchema::robot_configuration_relation(self.project_store.namespace());
+        let relation =
+            StorageSchema::robot_configuration_relation(self.project_store.table_prefix());
         let mut connection = self
             .project_store
             .connect()
@@ -527,8 +529,8 @@ impl RobotWorkspace {
     }
 
     async fn persist(&self, id: &str, config: RobotConfig) -> Result<RobotRecord, WorkspaceError> {
-        let namespace = self.project_store.namespace().to_owned();
-        let relation = StorageSchema::robot_configuration_relation(&namespace);
+        let table_prefix = self.project_store.table_prefix().to_owned();
+        let relation = StorageSchema::robot_configuration_relation(&table_prefix);
         let config_json = config.to_pretty_json()?;
         let id_sql = SpiralSql::string_literal(id);
         let mut connection = self

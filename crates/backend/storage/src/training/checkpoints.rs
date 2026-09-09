@@ -113,7 +113,7 @@ impl<'a> TrainingCheckpointPersistence<'a> {
 
     async fn load(&self, key: CheckpointKey) -> Result<CheckpointArtifact, String> {
         let query = SpiralSql::training_checkpoint(
-            self.project_store.namespace(),
+            self.project_store.table_prefix(),
             key.run_id(),
             key.step(),
         );
@@ -132,7 +132,7 @@ impl<'a> TrainingCheckpointPersistence<'a> {
     }
 
     async fn delete(&self, run_id: String) -> Result<(), String> {
-        let target = Table::TrainingCheckpoints.qualified_name(self.project_store.namespace());
+        let target = Table::TrainingCheckpoints.qualified_name(self.project_store.table_prefix());
         let mut connection = self.project_store.connect().await?;
         connection
             .execute_update(SpiralSql::delete_training_run(&target, &run_id).into())

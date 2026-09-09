@@ -1,10 +1,10 @@
 {
   "format_version": 1,
   "id": "spiral.robotics.training",
-  "major": 6,
+  "major": 7,
   "minor": 0,
   "storage_schema": {
-    "minimum": 8,
-    "maximum": 9
+    "minimum": 10,
+    "maximum": 10
   }
 }

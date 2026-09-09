@@ -34,7 +34,7 @@ impl StorageManager {
         let mut connection = self.project_store.connect().await?;
         for table in crate::episodes::EpisodeRelations::RELATIONS {
             if !connection
-                .table_exists(&table.qualified_name(self.namespace()))
+                .table_exists(&table.qualified_name(self.table_prefix()))
                 .await?
             {
                 return Ok(false);
@@ -84,8 +84,8 @@ impl StorageManager {
             .await
     }
 
-    pub fn namespace(&self) -> &str {
-        self.project_store.namespace()
+    pub fn table_prefix(&self) -> &str {
+        self.project_store.table_prefix()
     }
 
     /// Persist one complete episode snapshot and its finalized media directly

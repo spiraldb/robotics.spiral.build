@@ -1301,7 +1301,7 @@ impl WorkflowAgentManager {
                     "workflow": saved.workflow(),
                     "validation": saved.validation(),
                     "resolved_models": saved.workflow().resolved_models_for_agent(
-                        self.inner.services.storage.namespace()
+                        self.inner.services.storage.table_prefix()
                     ),
                 })
                 .to_string())

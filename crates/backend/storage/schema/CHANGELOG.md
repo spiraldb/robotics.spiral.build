@@ -1,5 +1,15 @@
 # Storage schema changelog
 
+## Spiral schema 10
+
+- Studio relations and feature caches are root resources named with a `studio_`
+  prefix. No marker table is provisioned.
+- Native imports share `dataset_source`, partitioned by `dataset_name`, and
+  create root `dataset_source_<name>` views and `dataset_<name>` Datasets.
+- Training requests carry `table_prefix` instead of a relation namespace.
+- Older bundles require the previous application version; schema-10 bundles
+  use flat managed table and feature cache names.
+
 ## Spiral schema 9
 
 - Moved the durable Workflow feature registry into the configured Studio

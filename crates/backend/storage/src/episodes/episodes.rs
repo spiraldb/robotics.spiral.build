@@ -762,7 +762,7 @@ impl EpisodeStore {
         &self,
         id: &str,
     ) -> Result<Vec<JsonMap<String, JsonValue>>, EpisodeError> {
-        let sample_query = SpiralSql::episode_samples(self.project_store.namespace(), id);
+        let sample_query = SpiralSql::episode_samples(self.project_store.table_prefix(), id);
         let mut connection = self
             .project_store
             .connect()
@@ -832,14 +832,14 @@ impl EpisodeStore {
     pub async fn delete(&self, id: &str) -> Result<(), EpisodeError> {
         self.get(id).await?;
         let id = id.to_owned();
-        let namespace = self.project_store.namespace().to_owned();
+        let table_prefix = self.project_store.table_prefix().to_owned();
         let mut connection = self
             .project_store
             .connect_exclusive()
             .await
             .map_err(EpisodeError::Invalid)?;
         connection
-            .clear_episode_rows(&namespace, &id)
+            .clear_episode_rows(&table_prefix, &id)
             .await
             .map_err(EpisodeError::Invalid)
     }
@@ -1003,7 +1003,7 @@ impl EpisodeStore {
         &self,
         id: &str,
     ) -> Result<Vec<VideoAssetMetadata>, EpisodeError> {
-        let relation = Table::VideoAssets.qualified_name(self.project_store.namespace());
+        let relation = Table::VideoAssets.qualified_name(self.project_store.table_prefix());
         let id = SpiralSql::string_literal(id);
         let mut connection = self
             .project_store
@@ -1034,14 +1034,14 @@ impl EpisodeStore {
 
     async fn replace_samples(&self, episode: &FullEpisode) -> Result<(), EpisodeError> {
         let episode = episode.clone();
-        let namespace = self.project_store.namespace().to_owned();
+        let table_prefix = self.project_store.table_prefix().to_owned();
         let mut connection = self
             .project_store
             .connect_exclusive()
             .await
             .map_err(EpisodeError::Invalid)?;
-        let sample_relation = Table::JointSamples.qualified_name(&namespace);
-        let episode_relation = Table::Episodes.qualified_name(&namespace);
+        let sample_relation = Table::JointSamples.qualified_name(&table_prefix);
+        let episode_relation = Table::Episodes.qualified_name(&table_prefix);
         connection
             .execute_update_sql(&SpiralSql::delete_episode(
                 &sample_relation,
@@ -1606,8 +1606,8 @@ enum EpisodeCatalogSelection<'a> {
 }
 
 impl EpisodeCatalogSelection<'_> {
-    fn episodes_sql(self, namespace: &str) -> String {
-        let relation = Table::Episodes.qualified_name(namespace);
+    fn episodes_sql(self, table_prefix: &str) -> String {
+        let relation = Table::Episodes.qualified_name(table_prefix);
         match self {
             Self::All => format!("SELECT * FROM {relation}"),
             Self::Dataset(dataset_id) => format!(
@@ -1623,8 +1623,8 @@ impl EpisodeCatalogSelection<'_> {
         }
     }
 
-    fn streams_sql(self, namespace: &str) -> String {
-        let streams = Table::EpisodeStreams.qualified_name(namespace);
+    fn streams_sql(self, table_prefix: &str) -> String {
+        let streams = Table::EpisodeStreams.qualified_name(table_prefix);
         let projection = format!(
             "s.{0} AS {0}, s.{1} AS {1}, s.{2} AS {2}, s.{3} AS {3}, s.{4} AS {4}, s.{5} AS {5}",
             db::EPISODE_ID,
@@ -1679,7 +1679,7 @@ impl EpisodeCatalogRead {
         project_store: &ProjectStore,
         selection: EpisodeCatalogSelection<'_>,
     ) -> Result<Self, EpisodeError> {
-        let namespace = project_store.namespace();
+        let table_prefix = project_store.table_prefix();
         let streams = async {
             if matches!(selection, EpisodeCatalogSelection::Dataset(_)) {
                 return Ok(EpisodeStreamCatalog::default());
@@ -1688,7 +1688,7 @@ impl EpisodeCatalogRead {
                 .connect()
                 .await
                 .map_err(EpisodeError::Invalid)?;
-            Self::load_streams(&mut connection, namespace, selection).await
+            Self::load_streams(&mut connection, table_prefix, selection).await
         };
         let episode_batches = async {
             let mut connection = project_store
@@ -1696,7 +1696,7 @@ impl EpisodeCatalogRead {
                 .await
                 .map_err(EpisodeError::Invalid)?;
             connection
-                .read_batches(&selection.episodes_sql(namespace))
+                .read_batches(&selection.episodes_sql(table_prefix))
                 .await
                 .map_err(EpisodeError::Invalid)
         };
@@ -1732,12 +1732,12 @@ impl EpisodeCatalogRead {
 
     async fn load_streams(
         connection: &mut ProjectConnection,
-        namespace: &str,
+        table_prefix: &str,
         selection: EpisodeCatalogSelection<'_>,
     ) -> Result<EpisodeStreamCatalog, EpisodeError> {
         let mut rows = Vec::new();
         for batch in connection
-            .read_batches(&selection.streams_sql(namespace))
+            .read_batches(&selection.streams_sql(table_prefix))
             .await
             .map_err(EpisodeError::Invalid)?
         {
@@ -1924,22 +1924,26 @@ impl<'a> EpisodePersistence<'a> {
         videos: &[VideoAsset],
     ) -> Result<(), String> {
         let mut connection = self.project_store.connect().await?;
-        EpisodeReplacement::new(self.project_store.namespace(), episode, videos)
+        EpisodeReplacement::new(self.project_store.table_prefix(), episode, videos)
             .save(&mut connection)
             .await
     }
 }
 
 struct EpisodeReplacement<'a> {
-    namespace: &'a str,
+    table_prefix: &'a str,
     episode: &'a FullEpisode,
     videos: &'a [VideoAsset],
 }
 
 impl<'a> EpisodeReplacement<'a> {
-    const fn new(namespace: &'a str, episode: &'a FullEpisode, videos: &'a [VideoAsset]) -> Self {
+    const fn new(
+        table_prefix: &'a str,
+        episode: &'a FullEpisode,
+        videos: &'a [VideoAsset],
+    ) -> Self {
         Self {
-            namespace,
+            table_prefix,
             episode,
             videos,
         }
@@ -1947,21 +1951,21 @@ impl<'a> EpisodeReplacement<'a> {
 
     async fn save(self, connection: &mut ProjectConnection) -> Result<(), String> {
         let Self {
-            namespace,
+            table_prefix,
             episode,
             videos,
         } = self;
         let had_video = connection
-            .episode_has_video_assets(namespace, episode.start().id())
+            .episode_has_video_assets(table_prefix, episode.start().id())
             .await?;
         let video_rows_changed = had_video || !videos.is_empty();
         let dataset_exists = if video_rows_changed {
-            connection.video_dataset_exists(namespace).await?
+            connection.video_dataset_exists(table_prefix).await?
         } else {
             false
         };
         let previous_video_episodes = if video_rows_changed {
-            connection.stored_video_episode_ids(namespace).await?
+            connection.stored_video_episode_ids(table_prefix).await?
         } else {
             BTreeSet::new()
         };
@@ -1971,16 +1975,16 @@ impl<'a> EpisodeReplacement<'a> {
                 .any(|episode_id| episode_id != episode.start().id());
         if !dataset_exists && !previous_video_episodes.is_empty() && has_video_rows {
             connection
-                .retarget_stored_video_media_relations(namespace)
+                .retarget_stored_video_media_relations(table_prefix)
                 .await?;
         }
         // Replacement is idempotent. Clear any earlier complete row and partial
         // children before writing, so a retry after a process or network failure
         // can finish without duplicating already-landed rows.
         connection
-            .clear_episode_rows_only(namespace, episode.start().id())
+            .clear_episode_rows_only(table_prefix, episode.start().id())
             .await?;
-        let datasets = Table::Datasets.qualified_name(namespace);
+        let datasets = Table::Datasets.qualified_name(table_prefix);
         if !connection
             .table_has_dataset(&datasets, episode.start().dataset_id())
             .await?
@@ -1997,7 +2001,7 @@ impl<'a> EpisodeReplacement<'a> {
         }
         connection
             .ingest_batch(
-                &Table::EpisodeStreams.qualified_name(namespace),
+                &Table::EpisodeStreams.qualified_name(table_prefix),
                 episode
                     .start()
                     .streams_batch(episode.completion())
@@ -2026,7 +2030,7 @@ impl<'a> EpisodeReplacement<'a> {
                 .collect::<Vec<_>>();
             connection
                 .ingest_batch(
-                    &Table::EpisodeStreams.qualified_name(namespace),
+                    &Table::EpisodeStreams.qualified_name(table_prefix),
                     streams.batch().map_err(|error| error.to_string())?,
                 )
                 .await?;
@@ -2039,7 +2043,7 @@ impl<'a> EpisodeReplacement<'a> {
             if rows.len() >= JOINT_BATCH_ROWS {
                 let batch = rows.batch().map_err(|error| error.to_string())?;
                 connection
-                    .ingest_batch(&Table::JointSamples.qualified_name(namespace), batch)
+                    .ingest_batch(&Table::JointSamples.qualified_name(table_prefix), batch)
                     .await?;
                 rows.clear();
             }
@@ -2047,34 +2051,34 @@ impl<'a> EpisodeReplacement<'a> {
         if !rows.is_empty() {
             let batch = rows.batch().map_err(|error| error.to_string())?;
             connection
-                .ingest_batch(&Table::JointSamples.qualified_name(namespace), batch)
+                .ingest_batch(&Table::JointSamples.qualified_name(table_prefix), batch)
                 .await?;
         }
         if !videos.is_empty() {
-            let media_relation = SpiralSql::video_dataset_output(namespace);
+            let media_relation = SpiralSql::video_dataset_output(table_prefix);
             let batch = VideoAsset::storage_publication_batch(
                 episode.start().id(),
                 videos,
                 &media_relation,
             )?;
             connection
-                .ingest_batch(&Table::VideoAssets.qualified_name(namespace), batch)
+                .ingest_batch(&Table::VideoAssets.qualified_name(table_prefix), batch)
                 .await?;
         }
         if video_rows_changed {
             if has_video_rows {
                 connection
-                    .rebuild_video_dataset_internal(namespace, dataset_exists)
+                    .rebuild_video_dataset_internal(table_prefix, dataset_exists)
                     .await?;
             } else {
-                connection.drop_video_dataset(namespace).await?;
+                connection.drop_video_dataset(table_prefix).await?;
             }
         }
         // Inserted last: readers never see an episode whose streams or media only
         // partially arrived.
         connection
             .ingest_batch(
-                &Table::Episodes.qualified_name(namespace),
+                &Table::Episodes.qualified_name(table_prefix),
                 episode
                     .completion()
                     .episode_batch(episode.start(), encoder.frames())
@@ -2085,7 +2089,7 @@ impl<'a> EpisodeReplacement<'a> {
     }
 }
 
-/// Rebuild the namespace's one managed MP4 index from all durable `video_assets` rows.
+/// Rebuild the managed MP4 index for this table prefix from all durable `video_assets` rows.
 ///
 /// The output is deliberately refreshed even when the Dataset already exists.
 /// Project import replaces those source rows in place, so merely observing an
@@ -2094,16 +2098,16 @@ impl<'a> EpisodeReplacement<'a> {
 impl ProjectConnection {
     pub(crate) async fn rebuild_video_dataset_internal(
         &mut self,
-        namespace: &str,
+        table_prefix: &str,
         dataset_exists: bool,
     ) -> Result<(), String> {
         let connection = self;
-        // One unfiltered view and Dataset cover the whole Studio namespace. The
+        // One unfiltered view and Dataset cover all Studio recording tables. The
         // output preserves episode and stream IDs, so consumers select individual
         // media without multiplying catalog resources by episode count.
-        let sources = SpiralSql::video_sources_relation(namespace);
-        let assets = Table::VideoAssets.qualified_name(namespace);
-        let dataset = SpiralSql::video_dataset_relation(namespace);
+        let sources = SpiralSql::video_sources_relation(table_prefix);
+        let assets = Table::VideoAssets.qualified_name(table_prefix);
+        let dataset = SpiralSql::video_dataset_relation(table_prefix);
         connection
             .execute_update_sql(&SpiralSql::create_video_sources(&sources, &assets))
             .await
@@ -2123,16 +2127,19 @@ impl ProjectConnection {
     #[cfg(any(test, feature = "test-support"))]
     pub async fn rebuild_video_dataset(
         &mut self,
-        namespace: &str,
+        table_prefix: &str,
         dataset_exists: bool,
     ) -> Result<(), String> {
-        self.rebuild_video_dataset_internal(namespace, dataset_exists)
+        self.rebuild_video_dataset_internal(table_prefix, dataset_exists)
             .await
     }
 
-    pub(crate) async fn video_dataset_exists(&mut self, namespace: &str) -> Result<bool, String> {
+    pub(crate) async fn video_dataset_exists(
+        &mut self,
+        table_prefix: &str,
+    ) -> Result<bool, String> {
         let connection = self;
-        let dataset = SpiralSql::video_dataset_relation(namespace);
+        let dataset = SpiralSql::video_dataset_relation(table_prefix);
         match connection
             .query_rows(&format!("DESCRIBE {dataset}"), 1)
             .await
@@ -2149,9 +2156,9 @@ impl ProjectConnection {
         }
     }
 
-    pub(crate) async fn drop_video_dataset(&mut self, namespace: &str) -> Result<(), String> {
+    pub(crate) async fn drop_video_dataset(&mut self, table_prefix: &str) -> Result<(), String> {
         let connection = self;
-        let dataset = SpiralSql::video_dataset_relation(namespace);
+        let dataset = SpiralSql::video_dataset_relation(table_prefix);
         QualifiedRelation::try_from(dataset.as_str())
             .map_err(|error| format!("refusing to drop an invalid Spiral MP4 Dataset: {error}"))?;
         connection
@@ -2160,7 +2167,7 @@ impl ProjectConnection {
             .map_err(|error| format!("dropping Spiral MP4 dataset with CASCADE: {error}"))?;
         connection
             .execute_update_sql(&SpiralSql::drop_video_sources(
-                &SpiralSql::video_sources_relation(namespace),
+                &SpiralSql::video_sources_relation(table_prefix),
             ))
             .await
             .map_err(|error| format!("dropping Spiral video source view: {error}"))
@@ -2168,33 +2175,33 @@ impl ProjectConnection {
 
     pub(crate) async fn clear_episode_rows(
         &mut self,
-        namespace: &str,
+        table_prefix: &str,
         episode_id: &str,
     ) -> Result<(), String> {
         let connection = self;
-        let previous_video_episodes = connection.stored_video_episode_ids(namespace).await?;
+        let previous_video_episodes = connection.stored_video_episode_ids(table_prefix).await?;
         let had_video = previous_video_episodes.contains(episode_id);
         let dataset_exists = if had_video {
-            connection.video_dataset_exists(namespace).await?
+            connection.video_dataset_exists(table_prefix).await?
         } else {
             false
         };
         if had_video && !dataset_exists && previous_video_episodes.len() > 1 {
             connection
-                .retarget_stored_video_media_relations(namespace)
+                .retarget_stored_video_media_relations(table_prefix)
                 .await?;
         }
         connection
-            .clear_episode_rows_only(namespace, episode_id)
+            .clear_episode_rows_only(table_prefix, episode_id)
             .await?;
         if !had_video {
             return Ok(());
         }
         if previous_video_episodes.len() == 1 {
-            connection.drop_video_dataset(namespace).await?;
+            connection.drop_video_dataset(table_prefix).await?;
         } else {
             connection
-                .rebuild_video_dataset_internal(namespace, dataset_exists)
+                .rebuild_video_dataset_internal(table_prefix, dataset_exists)
                 .await?;
         }
         Ok(())
@@ -2202,12 +2209,12 @@ impl ProjectConnection {
 
     async fn clear_episode_rows_only(
         &mut self,
-        namespace: &str,
+        table_prefix: &str,
         episode_id: &str,
     ) -> Result<(), String> {
         let connection = self;
         for table in super::EpisodeRelations::DELETION_RELATIONS {
-            let target = table.qualified_name(namespace);
+            let target = table.qualified_name(table_prefix);
             connection
                 .execute_update_sql(&SpiralSql::delete_episode(&target, episode_id))
                 .await
@@ -2218,12 +2225,12 @@ impl ProjectConnection {
 
     pub(crate) async fn stored_video_episode_ids(
         &mut self,
-        namespace: &str,
+        table_prefix: &str,
     ) -> Result<BTreeSet<String>, String> {
         let connection = self;
         const MAX_VIDEO_EPISODES: usize = 100_000;
 
-        let assets = Table::VideoAssets.qualified_name(namespace);
+        let assets = Table::VideoAssets.qualified_name(table_prefix);
         let result = connection
             .query_rows(
                 &format!(
@@ -2252,11 +2259,11 @@ impl ProjectConnection {
 
     async fn episode_has_video_assets(
         &mut self,
-        namespace: &str,
+        table_prefix: &str,
         episode_id: &str,
     ) -> Result<bool, String> {
         let connection = self;
-        let assets = Table::VideoAssets.qualified_name(namespace);
+        let assets = Table::VideoAssets.qualified_name(table_prefix);
         let result = connection.query_rows(
         &format!(
             "SELECT {episode_column} FROM {assets} WHERE {episode_column} = {episode_id} LIMIT 1",
@@ -2270,11 +2277,11 @@ impl ProjectConnection {
 
     pub(crate) async fn retarget_stored_video_media_relations(
         &mut self,
-        namespace: &str,
+        table_prefix: &str,
     ) -> Result<(), String> {
         let connection = self;
-        let assets = Table::VideoAssets.qualified_name(namespace);
-        let output = SpiralSql::video_dataset_output(namespace);
+        let assets = Table::VideoAssets.qualified_name(table_prefix);
+        let output = SpiralSql::video_dataset_output(table_prefix);
         connection
             .execute_update_sql(&format!(
                 "UPDATE {assets} SET {media_relation} = {output}",

@@ -1,4 +1,4 @@
-//! Portable single-file snapshots of the Studio-owned Spiral namespace.
+//! Portable single-file snapshots of the Studio-owned Spiral tables.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Cursor, Read as _};
@@ -60,13 +60,16 @@ impl ProjectBundle {
 }
 
 pub(super) struct ProjectBundleImport<'a> {
-    namespace: &'a str,
+    table_prefix: &'a str,
     bytes: &'a [u8],
 }
 
 impl<'a> ProjectBundleImport<'a> {
-    pub(super) const fn new(namespace: &'a str, bytes: &'a [u8]) -> Self {
-        Self { namespace, bytes }
+    pub(super) const fn new(table_prefix: &'a str, bytes: &'a [u8]) -> Self {
+        Self {
+            table_prefix,
+            bytes,
+        }
     }
 }
 
@@ -99,12 +102,15 @@ impl ProjectRelation {
         }
     }
 
-    fn target(&self, namespace: &str) -> String {
+    fn target(&self, table_prefix: &str) -> String {
         match self {
-            Self::Managed(table) => table.qualified_name(namespace),
+            Self::Managed(table) => table.qualified_name(table_prefix),
             Self::WorkflowFeatureCache {
                 source_relation, ..
-            } => spiral::StorageSchema::workflow_feature_cache_relation(namespace, source_relation),
+            } => spiral::StorageSchema::workflow_feature_cache_relation(
+                table_prefix,
+                source_relation,
+            ),
         }
     }
 }
@@ -161,9 +167,9 @@ impl WorkflowBundleRegistry {
 impl WorkflowBundleRegistry {
     async fn load(
         connection: &mut ProjectConnection,
-        namespace: &str,
+        table_prefix: &str,
     ) -> Result<Option<WorkflowBundleRegistry>, String> {
-        let relation = Table::FeatureRegistry.qualified_name(namespace);
+        let relation = Table::FeatureRegistry.qualified_name(table_prefix);
         if !connection.table_exists(&relation).await? {
             return Ok(None);
         }
@@ -181,7 +187,7 @@ impl WorkflowBundleRegistry {
         if batches.is_empty() {
             batches.push(RecordBatch::new_empty(schema.clone()));
         }
-        Self::validate_for_namespace(&batches, namespace).map(Some)
+        Self::validate_for_namespace(&batches, table_prefix).map(Some)
     }
 }
 
@@ -189,11 +195,11 @@ impl ProjectBundle {
     pub(super) async fn export(
         &self,
         connection: &mut ProjectConnection,
-        namespace: &str,
+        table_prefix: &str,
     ) -> Result<Vec<u8>, String> {
         let mut queries = Vec::new();
         for table in ManagedRelationCatalog::tables() {
-            let relation = table.qualified_name(namespace);
+            let relation = table.qualified_name(table_prefix);
             let query = if table == Table::VideoAssets {
                 ProjectBundle::portable_video_assets_query(&relation)
             } else {
@@ -201,7 +207,7 @@ impl ProjectBundle {
             };
             queries.push((table.name().to_owned(), query));
         }
-        if let Some(registry) = WorkflowBundleRegistry::load(connection, namespace).await? {
+        if let Some(registry) = WorkflowBundleRegistry::load(connection, table_prefix).await? {
             for relation in registry.cache_relations() {
                 if !connection.table_exists(&relation).await? {
                     return Err(format!(
@@ -341,7 +347,10 @@ impl ProjectBundle {
         connection: &mut ProjectConnection,
         source: ProjectBundleImport<'_>,
     ) -> Result<ProjectImportSummary, String> {
-        let ProjectBundleImport { namespace, bytes } = source;
+        let ProjectBundleImport {
+            table_prefix,
+            bytes,
+        } = source;
         let decoded = ProjectBundle::decode_entries(self.parse_raw(bytes)?)?;
         let decoded = ProjectBundle::with_empty_managed_relations(decoded);
         let fixed_relations = decoded
@@ -352,7 +361,7 @@ impl ProjectBundle {
             })
             .collect::<Vec<_>>();
         let imported_video_episodes = ProjectBundle::video_episode_ids(&fixed_relations)?;
-        let current_caches = WorkflowBundleRegistry::load(connection, namespace)
+        let current_caches = WorkflowBundleRegistry::load(connection, table_prefix)
             .await?
             .map(|registry| registry.cache_relations())
             .unwrap_or_default();
@@ -360,7 +369,7 @@ impl ProjectBundle {
             .iter()
             .filter_map(|entry| match &entry.relation {
                 ProjectRelation::WorkflowFeatureCache { .. } => {
-                    Some(entry.relation.target(namespace))
+                    Some(entry.relation.target(table_prefix))
                 }
                 _ => None,
             })
@@ -381,16 +390,16 @@ impl ProjectBundle {
             }
             let mut summary = ProjectImportSummary::default();
             for entry in decoded {
-                let relation = entry.relation.target(namespace);
+                let relation = entry.relation.target(table_prefix);
                 let batches = entry
                     .batches
                     .into_iter()
                     .map(|batch| {
                         if entry.relation == ProjectRelation::Managed(Table::VideoAssets) {
-                            ProjectBundle::prepare_video_asset_import(batch, namespace)
+                            ProjectBundle::prepare_video_asset_import(batch, table_prefix)
                         } else if entry.relation == ProjectRelation::Managed(Table::FeatureRegistry)
                         {
-                            WorkflowBundleRegistry::retarget_batch(batch, namespace)
+                            WorkflowBundleRegistry::retarget_batch(batch, table_prefix)
                         } else {
                             Ok(batch)
                         }
@@ -426,9 +435,12 @@ impl ProjectBundle {
         // until the commit is published. Keep the project_store's exclusive
         // checkout while reconciling derived MP4 resources immediately after
         // the durable rows commit.
-        if let Err(error) =
-            ProjectBundle::reconcile_video_dataset(connection, namespace, &imported_video_episodes)
-                .await
+        if let Err(error) = ProjectBundle::reconcile_video_dataset(
+            connection,
+            table_prefix,
+            &imported_video_episodes,
+        )
+        .await
         {
             summary.push_warning(format!(
                 "project rows committed, but the derived video dataset needs repair: {error}"
@@ -1105,25 +1117,25 @@ impl WorkflowBundleRegistry {
 
     fn validate_for_namespace(
         batches: &[RecordBatch],
-        namespace: &str,
+        table_prefix: &str,
     ) -> Result<WorkflowBundleRegistry, String> {
         let registry = Self::validate(batches)?;
         if let Some(entry) = registry.entries.values().find(|entry| {
             entry.cache_relation
                 != spiral::StorageSchema::workflow_feature_cache_relation(
-                    namespace,
+                    table_prefix,
                     entry.definition.applicability().source_relation(),
                 )
         }) {
             return Err(format!(
-                "Workflow feature registry cache relation {:?} is outside the configured namespace {namespace:?}",
+                "Workflow feature registry cache relation {:?} is outside the configured table prefix {table_prefix:?}",
                 entry.cache_relation
             ));
         }
         Ok(registry)
     }
 
-    fn retarget_batch(batch: RecordBatch, namespace: &str) -> Result<RecordBatch, String> {
+    fn retarget_batch(batch: RecordBatch, table_prefix: &str) -> Result<RecordBatch, String> {
         let source_relations = batch
             .column_by_name("source_relation")
             .ok_or_else(|| "Workflow feature registry lost source_relation".to_owned())?;
@@ -1131,7 +1143,7 @@ impl WorkflowBundleRegistry {
             .map(|row| {
                 WorkflowArrow::string_value(source_relations.as_ref(), row)
                     .map(|source| {
-                        spiral::StorageSchema::workflow_feature_cache_relation(namespace, source)
+                        spiral::StorageSchema::workflow_feature_cache_relation(table_prefix, source)
                     })
                     .ok_or_else(|| {
                         "Workflow feature registry contains an invalid source_relation".to_owned()
@@ -1701,15 +1713,15 @@ impl ProjectBundle {
 
     async fn reconcile_video_dataset(
         connection: &mut ProjectConnection,
-        namespace: &str,
+        table_prefix: &str,
         imported: &BTreeSet<String>,
     ) -> Result<(), String> {
-        let dataset_exists = connection.video_dataset_exists(namespace).await?;
+        let dataset_exists = connection.video_dataset_exists(table_prefix).await?;
         if imported.is_empty() {
-            connection.drop_video_dataset(namespace).await?;
+            connection.drop_video_dataset(table_prefix).await?;
         } else {
             connection
-                .rebuild_video_dataset_internal(namespace, dataset_exists)
+                .rebuild_video_dataset_internal(table_prefix, dataset_exists)
                 .await?;
         }
         Ok(())
@@ -1748,9 +1760,9 @@ impl ProjectBundle {
 
     fn retarget_video_media_relations(
         batch: RecordBatch,
-        namespace: &str,
+        table_prefix: &str,
     ) -> Result<RecordBatch, String> {
-        let media_relation = SpiralSql::video_dataset_output(namespace);
+        let media_relation = SpiralSql::video_dataset_output(table_prefix);
         let index = batch
             .schema()
             .index_of(column::MEDIA_RELATION)
@@ -1789,11 +1801,11 @@ impl ProjectBundle {
 
     fn prepare_video_asset_import(
         batch: RecordBatch,
-        namespace: &str,
+        table_prefix: &str,
     ) -> Result<RecordBatch, String> {
         ProjectBundle::retarget_video_media_relations(
             EpisodeRelations::normalize_video_asset(batch)?,
-            namespace,
+            table_prefix,
         )
     }
 
@@ -2754,7 +2766,7 @@ mod tests {
             WorkflowBundleRegistry::retarget_batch(registry.clone(), target_namespace)
                 .expect("the registry cache column retargets with the imported cache");
         WorkflowBundleRegistry::validate_for_namespace(&[retargeted_registry], target_namespace)
-            .expect("the retargeted registry names the configured import namespace");
+            .expect("the retargeted registry names the configured import table prefix");
 
         let registry_payload = arrow_payload(&registry);
         let missing = envelope(
@@ -3106,7 +3118,7 @@ mod tests {
     #[ignore = "requires a real SpiralDB server, SpFS, and disposable project access"]
     async fn spiral_export_import_round_trip_overwrites_existing_data() {
         let project = required_project();
-        let namespace = format!(
+        let table_prefix = format!(
             "spiral_robotics_transfer_e2e_{}_{}",
             std::process::id(),
             SystemTime::now()
@@ -3114,8 +3126,8 @@ mod tests {
                 .expect("system clock must be after the Unix epoch")
                 .as_nanos()
         );
-        let project_store = configured_project_store(project, namespace);
-        let _cleanup = TestNamespace::new(project_store.clone());
+        let project_store = configured_project_store(project, table_prefix);
+        let _cleanup = TestStudioTables::new(project_store.clone());
         let storage = StorageManager::new(project_store.clone());
         let readiness = storage.test_spiral().await;
         assert!(readiness.0, "{}", readiness.1);
@@ -3127,14 +3139,14 @@ mod tests {
                 .expect("the exported Spiral project must connect");
             connection
                 .ingest_batch(
-                    &Table::StudioSettings.qualified_name(project_store.namespace()),
+                    &Table::StudioSettings.qualified_name(project_store.table_prefix()),
                     settings_batch("exported-setting", r#"{"source":"export"}"#, 10),
                 )
                 .await
                 .expect("the exported setting must save");
             connection
                 .ingest_batch(
-                    &Table::TrainingCheckpoints.qualified_name(project_store.namespace()),
+                    &Table::TrainingCheckpoints.qualified_name(project_store.table_prefix()),
                     checkpoint_batch(),
                 )
                 .await
@@ -3160,7 +3172,7 @@ mod tests {
                 .expect("the replacement Spiral project must connect");
             connection
                 .replace_batches(
-                    &Table::StudioSettings.qualified_name(project_store.namespace()),
+                    &Table::StudioSettings.qualified_name(project_store.table_prefix()),
                     vec![settings_batch(
                         "replacement-setting",
                         r#"{"source":"replacement"}"#,
@@ -3171,7 +3183,7 @@ mod tests {
                 .expect("the replacement setting must save");
             connection
                 .replace_batches(
-                    &Table::RolloutRuns.qualified_name(project_store.namespace()),
+                    &Table::RolloutRuns.qualified_name(project_store.table_prefix()),
                     vec![snapshot_batch("replacement-run")],
                 )
                 .await
@@ -3200,7 +3212,7 @@ mod tests {
             .connect()
             .await
             .expect("the restored Spiral project must connect");
-        let rollout = Table::RolloutRuns.qualified_name(project_store.namespace());
+        let rollout = Table::RolloutRuns.qualified_name(project_store.table_prefix());
         assert!(
             connection
                 .query_rows(&format!("SELECT * FROM {rollout}"), 1)
@@ -3218,7 +3230,7 @@ mod tests {
     #[ignore = "requires a real SpiralDB server, SpFS, disposable project access, and FFmpeg"]
     async fn spiral_project_import_rebuilds_the_shared_managed_video_dataset() {
         let project = required_project();
-        let namespace = format!(
+        let table_prefix = format!(
             "spiral_robotics_video_transfer_e2e_{}_{}",
             std::process::id(),
             SystemTime::now()
@@ -3226,8 +3238,8 @@ mod tests {
                 .expect("system clock must be after the Unix epoch")
                 .as_nanos()
         );
-        let project_store = configured_project_store(project, namespace);
-        let _cleanup = TestNamespace::new(project_store.clone());
+        let project_store = configured_project_store(project, table_prefix);
+        let _cleanup = TestStudioTables::new(project_store.clone());
         let storage = StorageManager::new(project_store.clone());
         let readiness = storage.test_spiral().await;
         assert!(readiness.0, "{}", readiness.1);
@@ -3261,10 +3273,10 @@ mod tests {
             .expect("the video project must connect");
         connection
             .ingest_batch(
-                &Table::VideoAssets.qualified_name(project_store.namespace()),
+                &Table::VideoAssets.qualified_name(project_store.table_prefix()),
                 ProjectBundle::prepare_video_asset_import(
                     video_asset_batch(episode_id, &mp4),
-                    project_store.namespace(),
+                    project_store.table_prefix(),
                 )
                 .expect("the portable video fixture must normalize to Blob"),
             )
@@ -3306,7 +3318,7 @@ mod tests {
             .connect()
             .await
             .expect("the imported video project must connect");
-        let assets = Table::VideoAssets.qualified_name(project_store.namespace());
+        let assets = Table::VideoAssets.qualified_name(project_store.table_prefix());
         let schema = connection
             .relation_schema(&assets)
             .await
@@ -3343,7 +3355,7 @@ mod tests {
         );
         let range = connection
             .run_binary_query(&SpiralSql::video_asset_range(
-                project_store.namespace(),
+                project_store.table_prefix(),
                 &crate::episodes::video::VideoAssetKey::new(
                     episode_id.to_owned(),
                     "camera.main".to_owned(),
@@ -3355,7 +3367,7 @@ mod tests {
             .expect("the video Blob range must load");
         assert_eq!(range, mp4[512..1536]);
 
-        let output = SpiralSql::video_dataset_output(project_store.namespace());
+        let output = SpiralSql::video_dataset_output(project_store.table_prefix());
         let rows = connection
             .query_rows(&SpiralSql::count_rows(&output), 1)
             .await
@@ -3388,7 +3400,7 @@ mod tests {
     }
 
     /// Profile the production project-import algorithm against a real archive
-    /// in an isolated namespace of the configured Spiral project.
+    /// with an isolated table prefix in the configured Spiral project.
     ///
     /// ```text
     /// SPIRAL_PROJECT_BUNDLE=/absolute/path/to/project.spiral-project \
@@ -3411,7 +3423,7 @@ mod tests {
         profile_event("studio.file_read", file_start, (0, bytes.len()));
 
         let project = required_project();
-        let namespace = format!(
+        let table_prefix = format!(
             "spiral_robotics_import_profile_{}_{}",
             std::process::id(),
             SystemTime::now()
@@ -3420,9 +3432,9 @@ mod tests {
                 .as_nanos()
         );
         let repository_start = Instant::now();
-        let project_store = configured_project_store(project, namespace);
+        let project_store = configured_project_store(project, table_prefix);
         profile_event("studio.repository_config", repository_start, (0, 0));
-        let cleanup = TestNamespace::new(project_store.clone());
+        let cleanup = TestStudioTables::new(project_store.clone());
         let storage = StorageManager::new(project_store.clone());
 
         let namespace_start = Instant::now();
@@ -3436,7 +3448,7 @@ mod tests {
 
         let exclusive_start = Instant::now();
         let summary =
-            profile_project_import_into(&mut connection, project_store.namespace(), &bytes)
+            profile_project_import_into(&mut connection, project_store.table_prefix(), &bytes)
                 .await
                 .expect("the profiled project import must succeed");
         drop(connection);
@@ -3514,7 +3526,7 @@ mod tests {
         ManagedRelationCatalog::sort(&mut decoded);
 
         let project = required_project();
-        let namespace = format!(
+        let table_prefix = format!(
             "spiral_robotics_replace_profile_{}_{}",
             std::process::id(),
             SystemTime::now()
@@ -3522,8 +3534,8 @@ mod tests {
                 .expect("system clock must be after the Unix epoch")
                 .as_nanos()
         );
-        let project_store = configured_project_store(project, namespace);
-        let cleanup = TestNamespace::new(project_store.clone());
+        let project_store = configured_project_store(project, table_prefix);
+        let cleanup = TestStudioTables::new(project_store.clone());
         let storage = StorageManager::new(project_store.clone());
         let readiness = storage.test_spiral().await;
         assert!(readiness.0, "{}", readiness.1);
@@ -3553,9 +3565,9 @@ mod tests {
             let rows = batches.iter().map(RecordBatch::num_rows).sum::<usize>();
             let encoded_bytes =
                 profile_encoded_bytes(&batches).expect("the profiling Arrow batches must encode");
-            let target = format!("{}.{label}", project_store.namespace());
-            let ingest_target = format!("{}.{label}_ingest", project_store.namespace());
-            let autocommit_target = format!("{}.{label}_autocommit", project_store.namespace());
+            let target = format!("{}_{label}", project_store.table_prefix());
+            let ingest_target = format!("{}_{label}_ingest", project_store.table_prefix());
+            let autocommit_target = format!("{}_{label}_autocommit", project_store.table_prefix());
 
             ProfileWrite::new(label, "ingest_missing_autocommit", &autocommit_target)
                 .with_batches(&batches, (rows, encoded_bytes))
@@ -3600,7 +3612,7 @@ mod tests {
                     bind_start.elapsed().as_secs_f64()
                 );
             }
-            let missing_target = format!("{}.missing", project_store.namespace());
+            let missing_target = format!("{}_missing", project_store.table_prefix());
             for bind_index in 1..=5 {
                 let bind_start = Instant::now();
                 let exists = connection
@@ -3773,7 +3785,7 @@ mod tests {
 
     async fn profile_project_import_into(
         connection: &mut ProjectConnection,
-        namespace: &str,
+        table_prefix: &str,
         bundle: &[u8],
     ) -> Result<ProjectImportSummary, String> {
         let parse_start = Instant::now();
@@ -3831,7 +3843,7 @@ mod tests {
             let video_chunk_rows = profile_usize("SPIRAL_PROFILE_VIDEO_CHUNK_ROWS");
             let mut summary = ProjectImportSummary::default();
             for (table, batches) in decoded {
-                let relation = table.qualified_name(namespace);
+                let relation = table.qualified_name(table_prefix);
                 let relation_ingest_start = Instant::now();
                 let mut relation_rows = 0usize;
                 let mut relation_bytes = 0usize;
@@ -3839,7 +3851,7 @@ mod tests {
                 for batch in batches {
                     let transform_start = Instant::now();
                     let batch = if table == Table::VideoAssets {
-                        ProjectBundle::prepare_video_asset_import(batch, namespace)?
+                        ProjectBundle::prepare_video_asset_import(batch, table_prefix)?
                     } else {
                         batch
                     };
@@ -3921,9 +3933,9 @@ mod tests {
         if !profile_bool("SPIRAL_PROFILE_SKIP_VIDEO_RECONCILE") {
             let reconcile_total_start = Instant::now();
             if imported_video_episodes.is_empty() {
-                connection.drop_video_dataset(namespace).await?;
+                connection.drop_video_dataset(table_prefix).await?;
             } else {
-                let _ = profile_rebuild_video_dataset(connection, namespace).await?;
+                let _ = profile_rebuild_video_dataset(connection, table_prefix).await?;
             }
             profile_event(
                 "spiral.reconcile_video_total",
@@ -3936,15 +3948,15 @@ mod tests {
 
     async fn profile_rebuild_video_dataset(
         connection: &mut ProjectConnection,
-        namespace: &str,
+        table_prefix: &str,
     ) -> Result<bool, String> {
         let exists_start = Instant::now();
-        let dataset_exists = connection.video_dataset_exists(namespace).await?;
+        let dataset_exists = connection.video_dataset_exists(table_prefix).await?;
         profile_event("spiral.reconcile_video_exists", exists_start, (1, 0));
 
-        let sources = SpiralSql::video_sources_relation(namespace);
-        let assets = Table::VideoAssets.qualified_name(namespace);
-        let dataset = SpiralSql::video_dataset_relation(namespace);
+        let sources = SpiralSql::video_sources_relation(table_prefix);
+        let assets = Table::VideoAssets.qualified_name(table_prefix);
+        let dataset = SpiralSql::video_dataset_relation(table_prefix);
         let view_start = Instant::now();
         connection
             .execute_update_sql(&SpiralSql::create_video_sources(&sources, &assets))
@@ -4034,7 +4046,7 @@ mod tests {
             .unwrap_or_else(|| ServiceEndpoint::environment_spiral_spfs().into_string())
     }
 
-    fn configured_project_store(project: String, namespace: String) -> Arc<ProjectStore> {
+    fn configured_project_store(project: String, table_prefix: String) -> Arc<ProjectStore> {
         let settings = SpiralConnectionSettings::new(
             configured_spiral_endpoint(),
             configured_spiral_spfs_endpoint(),
@@ -4046,7 +4058,7 @@ mod tests {
         Arc::new(
             {
                 let database = Arc::new(crate::AdbcDatabase::new(settings.clone()));
-                ProjectStore::new(settings, namespace, database)
+                ProjectStore::new(settings, table_prefix, database)
             }
             .expect("the Spiral E2E project store must be valid"),
         )
@@ -4190,11 +4202,11 @@ mod tests {
 
     async fn drop_studio_relations(
         connection: &mut ProjectConnection,
-        namespace: &str,
+        table_prefix: &str,
     ) -> Result<(), String> {
-        connection.drop_video_dataset(namespace).await?;
+        connection.drop_video_dataset(table_prefix).await?;
         for table in Table::ALL.into_iter().rev() {
-            let relation = table.qualified_name(namespace);
+            let relation = table.qualified_name(table_prefix);
             connection
                 .execute_update_sql(&format!("DROP TABLE IF EXISTS {relation}"))
                 .await?;
@@ -4202,22 +4214,19 @@ mod tests {
         Ok(())
     }
 
-    struct TestNamespace {
+    struct TestStudioTables {
         project_store: Arc<ProjectStore>,
     }
 
-    impl TestNamespace {
+    impl TestStudioTables {
         fn new(project_store: Arc<ProjectStore>) -> Self {
             Self { project_store }
         }
 
         async fn cleanup(&self) {
-            let namespace = self.project_store.namespace().to_owned();
+            let table_prefix = self.project_store.table_prefix().to_owned();
             if let Ok(mut connection) = self.project_store.connect_exclusive().await {
-                let _ = drop_studio_relations(&mut connection, &namespace).await;
-                let _ = connection
-                    .execute_update_sql(&format!("DROP TABLE IF EXISTS {namespace}"))
-                    .await;
+                let _ = drop_studio_relations(&mut connection, &table_prefix).await;
             }
         }
     }

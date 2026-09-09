@@ -192,7 +192,7 @@ impl ModelRunContext {
                 &request.features,
                 FeatureRegistryTimestamps::now_millis(),
             ),
-            project_store.namespace(),
+            project_store.table_prefix(),
         )?;
         let mut cache =
             FeatureCache::load(&project_store, &request.feature_cache_relation, &registry).await?;
@@ -580,7 +580,7 @@ impl FeatureRegistry {
     fn register(
         &mut self,
         registration: FeatureRegistration<'_>,
-        namespace: &str,
+        table_prefix: &str,
     ) -> Result<bool, String> {
         let FeatureRegistration {
             cache_relation,
@@ -615,7 +615,7 @@ impl FeatureRegistry {
                 ));
             }
             let entry = FeatureRegistryEntry::new(definition.clone(), cache_relation, now_ms);
-            entry.validate(namespace)?;
+            entry.validate(table_prefix)?;
             self.entries.insert(key, entry);
             changed = true;
         }
@@ -922,7 +922,8 @@ impl CandidateSchemaValidation for Schema {
 
 impl FeatureRegistry {
     async fn load(project_store: &ProjectStore) -> Result<Self, String> {
-        let relation = StorageSchema::workflow_feature_registry_relation(project_store.namespace());
+        let relation =
+            StorageSchema::workflow_feature_registry_relation(project_store.table_prefix());
         let mut connection = project_store.connect().await?;
         let Some(schema) = connection.relation_schema(&relation).await? else {
             return Ok(FeatureRegistry::default());
@@ -996,7 +997,7 @@ impl FeatureRegistry {
                     ),
                 };
                 LoadedFeatureRegistryEntry::new(source_relation, feature_name, entry)
-                    .insert_into(&mut registry, project_store.namespace())?;
+                    .insert_into(&mut registry, project_store.table_prefix())?;
             }
         }
         Ok(registry)
@@ -1018,8 +1019,8 @@ impl LoadedFeatureRegistryEntry {
         }
     }
 
-    fn insert_into(self, registry: &mut FeatureRegistry, namespace: &str) -> Result<(), String> {
-        self.entry.validate(namespace)?;
+    fn insert_into(self, registry: &mut FeatureRegistry, table_prefix: &str) -> Result<(), String> {
+        self.entry.validate(table_prefix)?;
         if registry
             .entries
             .contains_key(&(self.source_relation.clone(), self.feature_name.clone()))
@@ -1041,7 +1042,7 @@ impl LoadedFeatureRegistryEntry {
 }
 
 impl FeatureRegistryEntry {
-    fn validate(&self, namespace: &str) -> Result<(), String> {
+    fn validate(&self, table_prefix: &str) -> Result<(), String> {
         QualifiedRelation::try_from(self.definition.applicability().source_relation()).map_err(
             |error| format!("Workflow feature registry source relation is unsafe: {error}"),
         )?;
@@ -1050,7 +1051,7 @@ impl FeatureRegistryEntry {
         })?;
         if self.cache_relation
             != StorageSchema::workflow_feature_cache_relation(
-                namespace,
+                table_prefix,
                 self.definition.applicability().source_relation(),
             )
         {
@@ -1596,7 +1597,7 @@ impl<'a> FeaturePublication<'a> {
     async fn replace(self, project_store: &ProjectStore) -> Result<(), String> {
         let relation = self.relation.to_owned();
         let registry_relation =
-            StorageSchema::workflow_feature_registry_relation(project_store.namespace());
+            StorageSchema::workflow_feature_registry_relation(project_store.table_prefix());
         let batches = self.cache.record_batches()?;
         let registry_batch = self.registry.record_batch()?;
         relation
@@ -3139,7 +3140,7 @@ mod tests {
             FeatureRegistryTimestamps::now_millis()
         );
         let cache_relation = StorageSchema::workflow_feature_cache_relation(
-            project_store.namespace(),
+            project_store.table_prefix(),
             &source_relation,
         );
         let mut cleanup = RegistryRoundTripCleanup {
@@ -3158,7 +3159,7 @@ mod tests {
         registry
             .register(
                 FeatureRegistration::new(&cache_relation, std::slice::from_ref(&definition), 42),
-                project_store.namespace(),
+                project_store.table_prefix(),
             )
             .expect("the test feature must register");
         let mut cache = FeatureCache::default();
@@ -3350,11 +3351,11 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis();
-        let namespace = format!("workflow_golden_{}_{}", std::process::id(), suffix);
-        let input_relation = format!("{namespace}.images");
-        let registry_relation = StorageSchema::workflow_feature_registry_relation(&namespace);
+        let table_prefix = format!("workflow_golden_{}_{}", std::process::id(), suffix);
+        let input_relation = format!("{table_prefix}_images");
+        let registry_relation = StorageSchema::workflow_feature_registry_relation(&table_prefix);
         let output_relation =
-            StorageSchema::workflow_feature_cache_relation(&namespace, &input_relation);
+            StorageSchema::workflow_feature_cache_relation(&table_prefix, &input_relation);
         let connection = SpiralConnectionSettings::new(
             stored
                 .as_ref()
@@ -3373,7 +3374,7 @@ mod tests {
                 let settings = connection;
                 let database =
                     Arc::new(spiral_robotics_storage::AdbcDatabase::new(settings.clone()));
-                ProjectStore::new(settings, namespace.clone(), database)
+                ProjectStore::new(settings, table_prefix.clone(), database)
             }
             .expect("the Workflow golden project store must be valid"),
         );
@@ -3384,7 +3385,6 @@ mod tests {
                 output_relation.clone(),
                 registry_relation.clone(),
             ],
-            namespace: namespace.clone(),
         };
 
         let valid_pixels = vec![Some(0_u8); 32 * 32 * 3];
@@ -3434,15 +3434,10 @@ mod tests {
         )
         .expect("the golden image fixture must match its schema");
         let seed_relation = input_relation.clone();
-        let seed_namespace = namespace.clone();
         let mut connection = project_store
             .connect_exclusive()
             .await
             .expect("the golden image project must connect");
-        connection
-            .ensure_dataset_namespace(&seed_namespace)
-            .await
-            .expect("the golden image namespace must exist");
         connection
             .replace_or_create_batches(
                 &registry_relation,
@@ -3560,8 +3555,9 @@ mod tests {
                 return Ok(());
             }
             let cache_relation = self.cache_relation.clone();
-            let registry_relation =
-                StorageSchema::workflow_feature_registry_relation(self.project_store.namespace());
+            let registry_relation = StorageSchema::workflow_feature_registry_relation(
+                self.project_store.table_prefix(),
+            );
             let registry_batch = self.previous_registry.record_batch()?;
             let mut connection = self.project_store.connect_exclusive().await?;
             connection.begin_transaction().await?;
@@ -3596,22 +3592,17 @@ mod tests {
     struct GoldenRelations {
         project_store: Arc<ProjectStore>,
         relations: Vec<String>,
-        namespace: String,
     }
 
     impl GoldenRelations {
         async fn cleanup_now(&self) -> Result<(), String> {
             let relations = self.relations.clone();
-            let namespace = self.namespace.clone();
             let mut connection = self.project_store.connect_exclusive().await?;
             for relation in relations {
                 connection
                     .execute_update_sql(&format!("DROP TABLE IF EXISTS {relation}"))
                     .await?;
             }
-            connection
-                .execute_update_sql(&format!("DROP TABLE IF EXISTS {namespace}"))
-                .await?;
             Ok(())
         }
     }

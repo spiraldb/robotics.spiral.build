@@ -98,7 +98,7 @@ impl<'a> WorkflowDocumentPersistence<'a> {
         if !self.project_store.is_configured() {
             return Ok(None);
         }
-        let relation = Table::WorkflowRuns.qualified_name(self.project_store.namespace());
+        let relation = Table::WorkflowRuns.qualified_name(self.project_store.table_prefix());
         let mut connection = self.project_store.connect().await?;
         Ok(connection
             .relation_rows(&relation, WorkflowDocumentSchema::decode)
@@ -111,7 +111,7 @@ impl<'a> WorkflowDocumentPersistence<'a> {
     /// Rewrite the document relation with one key replaced, preserving the
     /// other document in the same transaction.
     async fn save(&self, write: WorkflowDocumentWrite<'_>) -> Result<(), String> {
-        let relation = Table::WorkflowRuns.qualified_name(self.project_store.namespace());
+        let relation = Table::WorkflowRuns.qualified_name(self.project_store.table_prefix());
         let mut connection = self.project_store.connect_exclusive().await?;
         connection.begin_transaction().await?;
         let mutation = async {

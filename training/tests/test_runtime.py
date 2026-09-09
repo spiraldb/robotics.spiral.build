@@ -51,7 +51,7 @@ from spiral_training_runtime.spiral import (
 )
 
 CANONICAL_FIXTURES = (
-    Path(__file__).resolve().parents[2] / "crates" / "spiral-robotics-training" / "fixtures"
+    Path(__file__).resolve().parents[2] / "crates" / "backend" / "training" / "fixtures"
 )
 
 
@@ -90,7 +90,7 @@ def job_request() -> dict:
             "api_url": "https://api.spiraldb.dev",
             "spfs_url": "https://spfs.spiraldb.dev",
             "project_id": "project-test",
-            "namespace": "spiral_robotics",
+            "table_prefix": "spiral_robotics",
             "client_id": "client-id",
             "client_secret": "client-secret",
         },
@@ -439,7 +439,7 @@ def test_training_batch_stays_within_one_weighted_episode() -> None:
     assert 140 <= long_batches <= 180
 
 
-def test_checkpoint_ingest_keeps_namespace_in_the_table_path() -> None:
+def test_checkpoint_ingest_uses_flat_table_prefix() -> None:
     calls: list[tuple[str, pa.Table, dict[str, object]]] = []
 
     class Cursor:
@@ -457,7 +457,7 @@ def test_checkpoint_ingest_keeps_namespace_in_the_table_path() -> None:
             return Cursor()
 
     dataset = object.__new__(SpiralActDataset)
-    dataset.namespace = "spiral_robotics"
+    dataset.table_prefix = "spiral_robotics"
     dataset.connection = Connection()
 
     dataset.write_checkpoint(
@@ -472,7 +472,7 @@ def test_checkpoint_ingest_keeps_namespace_in_the_table_path() -> None:
 
     assert len(calls) == 1
     table_name, table, options = calls[0]
-    assert table_name == "spiral_robotics.training_checkpoints"
+    assert table_name == "spiral_robotics_training_checkpoints"
     assert table.num_rows == 1
     assert options == {"mode": "append"}
 
@@ -488,21 +488,21 @@ def test_checkpoint_ingest_reports_an_unprovisioned_relation() -> None:
         def adbc_ingest(
             self, _table_name: str, _table: pa.Table, **_options: object
         ) -> None:
-            raise RuntimeError("unknown table spiral_robotics.training_checkpoints")
+            raise RuntimeError("unknown table spiral_robotics_training_checkpoints")
 
     class Connection:
         def cursor(self) -> Cursor:
             return Cursor()
 
     dataset = object.__new__(SpiralActDataset)
-    dataset.namespace = "spiral_robotics"
+    dataset.table_prefix = "spiral_robotics"
     dataset.connection = Connection()
 
     with pytest.raises(RuntimeRequestError) as failure:
         dataset.write_checkpoint("run-id", "run-name", 1, 123, None, "{}", b"checkpoint")
 
     assert failure.value.status_code == 422
-    assert "unknown table spiral_robotics.training_checkpoints" in str(failure.value)
+    assert "unknown table spiral_robotics_training_checkpoints" in str(failure.value)
     assert "Settings → SpiralDB → Test connection" in str(failure.value)
     assert isinstance(failure.value.__cause__, RuntimeError)
 
@@ -527,7 +527,7 @@ def test_job_api_owns_data_training_and_checkpoint_lifecycle(
         action_std = np.ones(2, dtype=np.float32)
         has_validation = False
         summary = "one test anchor"
-        namespace = "spiral_robotics"
+        table_prefix = "spiral_robotics"
 
         def __init__(self, _request: dict) -> None:
             pass

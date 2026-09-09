@@ -398,7 +398,7 @@ impl TrainingManager {
                 self.inner.storage.spiral_spfs_endpoint(),
             ),
             self.inner.storage.project_id(),
-            self.inner.storage.namespace(),
+            self.inner.storage.table_prefix(),
         )
         .with_credentials(
             credentials
@@ -975,7 +975,7 @@ impl TrainingManager {
             (_, Ok(backend)) => format!(
                 "Runtime ready · {probe} · Spiral project {} · namespace {} · query checked at run start",
                 self.inner.storage.project_id(),
-                self.inner.storage.namespace(),
+                self.inner.storage.table_prefix(),
                 probe = backend.display_summary(),
             ),
         };

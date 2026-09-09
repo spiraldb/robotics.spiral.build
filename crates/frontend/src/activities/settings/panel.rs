@@ -291,7 +291,7 @@ pub(crate) fn SettingsPanel(
                                             move |value| current.write().spiral_mut().set_project_id(value),
                                         ),
                                     }
-                                    SettingsField { label: "Namespace", value: current().spiral().namespace(), behavior: SettingsInputBehavior::new("spiral_robotics", move |_| {}).with_disabled() }
+                                    SettingsField { label: "Table prefix", value: current().spiral().table_prefix(), behavior: SettingsInputBehavior::new("studio", move |_| {}).with_disabled() }
                                 }
                                 div { class: "settings-field-row",
                                     SettingsField {

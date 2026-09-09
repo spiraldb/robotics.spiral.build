@@ -1,53 +1,63 @@
-# Studio data namespaces
+# Studio catalog layout
 
-Studio application state lives under `spiral_robotics`: robot configuration,
-settings, feature registry, and workflow, training, and rollout records.
+The selected Spiral project contains Studio resources at its root:
 
-Native datasets and their source tables live under `spiral_dataset`. Imports
-create `spiral_dataset.<name>` and `spiral_dataset.<name>_sources`; the namespace
-is created in the same import transaction when absent. The dataset definition's
-`sourceRelation` records the association. Names are not used to infer ownership.
+| Resource | Kind | Purpose |
+| --- | --- | --- |
+| `studio_*` | Table | Robots, settings, feature registry, workflow, training, and rollout state |
+| `dataset_source` | Table | All recording sources, with `dataset_name`, `recording`, and `source` columns |
+| `dataset_source_<name>` | Ordinary view | Selects `recording, source` where `dataset_name = '<name>'` |
+| `dataset_<name>` | Native Dataset | Uses the corresponding source view through `spql.mcap.dataset` |
+
+The source views are logical queries. A Dataset refresh consumes its view's
+selected rows and updates the Dataset's native population. Different datasets
+can therefore share one source table without sharing their selected recordings.
+The definition's `sourceRelation` records the association; ownership is not
+inferred from the naming convention.
+
+Studio imports create or append the shared table, create the filtered root view,
+create and refresh the Dataset, and verify its episode count in one transaction.
+Existing target resources or source rows with the same dataset name are refused.
+The source table does not declare a primary key. `recording` is the native
+producer's member key within each dataset's filtered input.
+
+`spiral_robotics` and `spiral_dataset` were marker tables used as containers.
+They are removed by this migration. Source views are at the root because the
+current Spiral child-view path requires keyed parent metadata that Arbor does
+not expose. Dataset-owned resources retain their native parent relationship.
+
+The server's `--studio-table-prefix` defaults to `studio`; it is a naming prefix,
+not a namespace. Storage schema 10 and training protocol 7 use this layout.
+Rebuild/restart Studio and its training workers together after migration.
 
 ## Existing-project migration
 
-`migrations/dataset_namespace.py` uses Spiral's native resource versions and
-project-journal namespace publication. It does not copy table rows, re-upload
-recordings, rebuild video indexes, or convert the preserved HF demo format.
+`migrations/root_source_views.py` copies legacy source rows into the shared table
+using native SQL, comparing all values including SHA-256 hashes of embedded Blob
+bytes. Studio tables move through the project journal with their exact IDs and
+versions. Dataset definitions receive immutable successors that use the root
+views while retaining their logical member contents and private storage layout.
+Publication moves the names, selects the Dataset successors, and removes legacy
+source and container bindings in one compare-and-swap journal commit. Historical
+commits retain the previous catalog and immutable resources.
 
-The migration moves the root `default` dataset and its source, renaming that
-source to `spiral_dataset.default_sources`. The old `spiral_robotics.hf_demo_*`
-objects move to `spiral_dataset` with their existing leaf names. Child resources
-follow their stable parent's identity automatically.
-
-Dataset definitions receive successor versions with corrected source paths.
-For the MCAP dataset, the same logical member contents and private storage
-backing are retained through the native Dataset revision API. The project
-selects these successors and all path changes atomically. Dataset IDs and all
-table IDs/versions are preserved. Historical project commits retain old paths.
-
-Run using Python 3.14+ with `pyarrow` and `adbc_driver_manager` installed, and the
-current native driver. The default mode is read-only:
+Run Python 3.14+ with `pyarrow` and `adbc_driver_manager` and the current native
+driver. Credentials default to Studio's local bootstrap file and never enter
+the audit. Use a new audit directory for preparation:
 
 ```sh
-python migrations/dataset_namespace.py \
-  --project PROJECT_ID --audit /absolute/path/to/audit
+python migrations/root_source_views.py prepare --audit /absolute/path/to/audit
+python migrations/root_source_views.py publish --audit /absolute/path/to/audit
+python migrations/root_source_views.py verify --audit /absolute/path/to/audit
 ```
 
-`--apply` prepares and publishes the migration. `--verify` checks the published
-catalog and counts against the audit. `--publish` replays only the saved
-idempotent publication request after its outcome has been inspected; it does
-not prepare duplicate Dataset versions. The script refuses to rerun preparation
-when an earlier publication request exists. Credentials are read from Studio's
-local bootstrap file and are not included in the audit.
+The script refuses a changed catalog or a second publication attempt. After an
+uncertain network result, inspect the saved request and journal before taking
+further action. The `verify` phase compares Studio table contents, full episode
+rows, source contents, resource identities, and the selected Dataset versions.
 
-The September 8, 2026 migration audit for the current project is stored locally
-in `exports/dataset-namespace-2026-09-08/`. The catalog publication is
-`01a08344-7a09-7370-bc60-9efbca01fa77`.
-
-After migration, the obsolete HF demo was removed at the user's request. Its
-six resources (episodes, frames, tasks, video Dataset, video assets, and video
-source table) were removed together through the native journal. Every retained
-resource and the default Dataset's exact contents were verified unchanged.
-The current `spiral_dataset` namespace contains only `default` and
-`default_sources`. The cleanup audit is in `exports/remove-hf-demo-2026-09-08/`;
-previous journal commits retain the historical HF objects.
+The September 8, 2026 audit is stored locally in
+`exports/flat-catalog-root-views-2026-09-08/`. The earlier namespace migration
+and obsolete HF demo removal are retained in their corresponding audit folders.
+The saved default Workflow still refers to that previously removed HF demo;
+this migration preserves that document unchanged.

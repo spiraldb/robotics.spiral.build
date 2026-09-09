@@ -13,6 +13,9 @@ contract revision and client migration. This migration removes the former
 `/api/server-functions/*` endpoints and replaces `/api/session` with the combined
 `/api/project/status` read.
 
+Version 2.0.0 replaces the settings response field `spiral.namespace` with
+`spiral.table_prefix` and uses flat Studio table and import resource names.
+
 ## Request and response conventions
 
 1. Fetch `GET /api/project/status`. The response contains `session` and `readiness`.
@@ -214,9 +217,10 @@ schemas served by `/api/openapi.json`. `—` means no request body.
 
 Dataset import accepts public Hugging Face repositories containing MCAP files. The
 request has `dataset_id`, `repository`, and optional `revision` (default `main`);
-imports create `spiral_dataset.<dataset_id>` and
-`spiral_dataset.<dataset_id>_sources`. The dataset namespace is provisioned
-in the import transaction. Studio application state remains in `spiral_robotics`.
+imports append rows tagged with `dataset_name` to the shared root `dataset_source`
+table, create the root filtered view `dataset_source_<dataset_id>`, and derive
+`dataset_<dataset_id>` from that view in one transaction. Studio application state
+uses root `studio_*` tables.
 There is no format selector or LeRobot import. Inspection pins a revision and
 lists the native dataset and source relation to create. Import uses Spiral's
 `spql.mcap.dataset` producer, refreshes its population, and checks episode count

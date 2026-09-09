@@ -240,17 +240,18 @@ impl HuggingFaceResponse for reqwest::Response {
 /// One native dataset and the durable source relation it reads.
 #[derive(Clone, Debug)]
 struct ImportRelations {
+    dataset_name: String,
     dataset: String,
     source: String,
 }
 impl ImportRelations {
-    const NAMESPACE: &str = "spiral_dataset";
+    const SOURCE_TABLE: &str = "dataset_source";
 
     fn new(dataset_id: &str) -> Self {
-        let namespace = Self::NAMESPACE;
         Self {
-            dataset: format!("{namespace}.{dataset_id}"),
-            source: format!("{namespace}.{dataset_id}_sources"),
+            dataset_name: dataset_id.to_owned(),
+            dataset: format!("dataset_{dataset_id}"),
+            source: format!("dataset_source_{dataset_id}"),
         }
     }
     fn quoted(name: &str) -> String {
@@ -267,6 +268,14 @@ impl ImportRelations {
             "CREATE DATASET {} USING spql.mcap.dataset FROM {} WITH (key = 'recording', blob = 'source', on_error = 'fail')",
             Self::quoted(&self.dataset),
             Self::quoted(&self.source)
+        )
+    }
+    fn source_view_sql(&self) -> String {
+        format!(
+            "CREATE VIEW {} AS SELECT recording, source FROM {} WHERE dataset_name = {}",
+            Self::quoted(&self.source),
+            Self::SOURCE_TABLE,
+            SpiralSql::string_literal(&self.dataset_name)
         )
     }
 }
@@ -476,15 +485,44 @@ impl HuggingFaceInspectionStorage for HuggingFaceDatasetInspection {
         connection: &mut ProjectConnection,
         relations: &ImportRelations,
     ) -> Result<(), String> {
-        connection
-            .ensure_dataset_namespace(ImportRelations::NAMESPACE)
-            .await?;
         let files = self.files().iter().collect::<Vec<_>>();
+        // Orphaned source rows must not silently become a second import with
+        // duplicate member keys after a Dataset or View was removed manually.
+        if connection
+            .table_exists(ImportRelations::SOURCE_TABLE)
+            .await?
+        {
+            let rows = connection
+                .query_rows(
+                    &format!(
+                        "SELECT COUNT(*) AS sources FROM {} WHERE dataset_name = {}",
+                        ImportRelations::SOURCE_TABLE,
+                        SpiralSql::string_literal(self.dataset_id())
+                    ),
+                    1,
+                )
+                .await?;
+            if rows
+                .rows()
+                .first()
+                .and_then(|row| row.get("sources"))
+                .and_then(|value| value.as_u64())
+                != Some(0)
+            {
+                return Err(
+                    "Source rows already exist for this dataset; choose another dataset name"
+                        .to_owned(),
+                );
+            }
+        }
         connection
-            .ingest_batch(
-                &relations.source,
-                HuggingFaceSourceBatch::build(self.repository(), self.resolved_revision(), &files)?,
+            .create_or_append_batches(
+                ImportRelations::SOURCE_TABLE,
+                vec![HuggingFaceSourceBatch::build(self)?],
             )
+            .await?;
+        connection
+            .execute_update_sql(&relations.source_view_sql())
             .await?;
         connection
             .execute_update_sql(&relations.create_sql())
@@ -523,18 +561,17 @@ impl HuggingFaceInspectionStorage for HuggingFaceDatasetInspection {
 struct HuggingFaceSourceBatch;
 
 impl HuggingFaceSourceBatch {
-    fn build(
-        repository: &str,
-        revision: &str,
-        files: &[&HuggingFaceDatasetFile],
-    ) -> Result<RecordBatch, String> {
+    fn build(inspection: &HuggingFaceDatasetInspection) -> Result<RecordBatch, String> {
+        let files = inspection.files().iter().collect::<Vec<_>>();
         let uris = files
             .iter()
             .map(|file| {
-                HuggingFaceRepository::try_from(repository)?.file_uri(revision, file.path())
+                HuggingFaceRepository::try_from(inspection.repository())?
+                    .file_uri(inspection.resolved_revision(), file.path())
             })
             .collect::<Result<Vec<_>, _>>()?;
         let schema = Arc::new(Schema::new(vec![
+            Field::new("dataset_name", DataType::Utf8, false),
             Field::new("recording", DataType::Utf8, false),
             ImportBlobStorage::field("source"),
         ]));
@@ -542,9 +579,12 @@ impl HuggingFaceSourceBatch {
             schema,
             vec![
                 Arc::new(StringArray::from_iter_values(
+                    files.iter().map(|_| inspection.dataset_id()),
+                )) as ArrayRef,
+                Arc::new(StringArray::from_iter_values(
                     files.iter().map(|file| file.path()),
                 )) as ArrayRef,
-                ImportBlobStorage::external_array(&uris, files)?,
+                ImportBlobStorage::external_array(&uris, &files)?,
             ],
         )
         .map_err(|error| format!("building Hugging Face source batch: {error}"))
@@ -573,7 +613,7 @@ impl ImportBlobStorage {
     }
 
     fn field(name: &str) -> Field {
-        Field::new(name, DataType::Struct(Self::fields()), false).with_metadata(
+        Field::new(name, DataType::Struct(Self::fields()), true).with_metadata(
             [(
                 EXTENSION_TYPE_NAME_KEY.to_owned(),
                 BLOB_EXTENSION_NAME.to_owned(),
@@ -640,16 +680,48 @@ mod tests {
     fn import_uses_native_producer_and_quoted_names() {
         let target = ImportRelations::new("pick-place");
         assert!(
-            target.create_sql().contains(
-                "CREATE DATASET \"spiral_dataset\".\"pick-place\" USING spql.mcap.dataset"
-            )
+            target
+                .create_sql()
+                .contains("CREATE DATASET \"dataset_pick-place\" USING spql.mcap.dataset")
         );
         assert_eq!(
             target.planned(),
-            [
-                "spiral_dataset.pick-place",
-                "spiral_dataset.pick-place_sources"
-            ]
+            ["dataset_pick-place", "dataset_source_pick-place"]
+        );
+        assert_eq!(
+            target.source_view_sql(),
+            "CREATE VIEW \"dataset_source_pick-place\" AS SELECT recording, source FROM dataset_source WHERE dataset_name = 'pick-place'"
+        );
+    }
+    #[test]
+    fn shared_source_rows_retain_dataset_identity_and_pinned_blob_uri() {
+        let source = HuggingFaceInspectionSource::new("pick-place", "org/recordings")
+            .with_revisions("main", "abcdef");
+        let contents = HuggingFaceInspectionContents::new(
+            vec![HuggingFaceDatasetFile::new("episode.mcap", 12)],
+            12,
+            ImportRelations::new("pick-place").planned(),
+        );
+        let inspection = HuggingFaceDatasetInspection::new(source, contents);
+        let batch = HuggingFaceSourceBatch::build(&inspection).unwrap();
+        let names = batch.column_by_name("dataset_name").unwrap();
+        assert_eq!(
+            names
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .value(0),
+            "pick-place"
+        );
+        let blobs = batch.column_by_name("source").unwrap();
+        let blobs = blobs.as_any().downcast_ref::<StructArray>().unwrap();
+        let uris = blobs.column_by_name("uri").unwrap();
+        assert_eq!(
+            uris.as_any()
+                .downcast_ref::<StringViewArray>()
+                .unwrap()
+                .value(0),
+            "hf://datasets/org/recordings@abcdef/episode.mcap"
         );
     }
     #[test]

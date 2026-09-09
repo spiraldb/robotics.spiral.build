@@ -127,5 +127,6 @@ and deployment isolation.
 Studio currently has no product simulation mode. Use `--no-cameras` only when
 camera discovery is intentionally unavailable; configured robot connections
 remain physical. Settings may switch the SpiralDB project only while robots and
-project activity are stopped. The namespace remains fixed for the server
-lifetime; project-owned training and video preferences remain inside Spiral.
+project activity are stopped. The Studio table prefix (`studio` by default,
+configured with `--studio-table-prefix`) remains fixed for the server lifetime;
+project-owned training and video preferences remain inside Spiral.

@@ -161,15 +161,15 @@ impl ProjectHardware {
 
 pub(crate) struct ProjectSessionFactory {
     hardware: ProjectHardware,
-    namespace: String,
+    table_prefix: String,
     admission: Arc<ProjectAdmissionGate>,
 }
 
 impl ProjectSessionFactory {
-    pub(crate) fn new(hardware: ProjectHardware, namespace: String) -> Self {
+    pub(crate) fn new(hardware: ProjectHardware, table_prefix: String) -> Self {
         Self {
             hardware,
-            namespace,
+            table_prefix,
             admission: Arc::new(ProjectAdmissionGate::default()),
         }
     }
@@ -186,7 +186,7 @@ impl ProjectSessionFactory {
             connection.clone(),
         ));
         let store = Arc::new(
-            ProjectStore::new(connection, self.namespace.clone(), database)
+            ProjectStore::new(connection, self.table_prefix.clone(), database)
                 .map_err(OperationError::External)?,
         );
         let workspace = Arc::new(RobotWorkspace::new(store.clone()));
@@ -303,7 +303,7 @@ impl ProjectSession {
                     .unwrap_or_default(),
                 connection.credentials().is_some(),
             )
-            .with_namespace(self.storage().namespace()),
+            .with_table_prefix(self.storage().table_prefix()),
             TrainingRuntimeSettings::new(preferences.training().endpoint()),
             VideoSettings::new(preferences.video().enabled()),
         )
@@ -819,7 +819,7 @@ pub(crate) mod tests {
             settings.spiral().spfs_endpoint(),
             "https://spfs.spiraldb.dev"
         );
-        assert_eq!(settings.spiral().namespace(), "project_lifetime_test");
+        assert_eq!(settings.spiral().table_prefix(), "project_lifetime_test");
         assert_eq!(settings.spiral().client_id(), "client");
         assert!(settings.spiral().client_secret_configured());
         assert_eq!(settings.training().endpoint(), "http://127.0.0.1:5050");

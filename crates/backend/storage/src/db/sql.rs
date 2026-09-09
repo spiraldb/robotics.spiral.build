@@ -1,6 +1,6 @@
 //! Backend-only SQL construction and policy adaptation for SpiralDB.
 //!
-//! Owned relation names, namespace qualification, and column names come from
+//! Owned relation names, table prefix qualification, and column names come from
 //! this module group's `schema` layer. This module turns those names into
 //! auditable statements. Raw user queries delegate to the framework-free core
 //! authorization policy before a database driver sees them.
@@ -29,7 +29,7 @@ use spiral_robotics_common::sql::QualifiedRelation;
 
 use super::database::{DatabaseSession, RelationKind};
 use super::project_store::{ProjectConnection, ProjectStore};
-use super::schema::{self as spiral, Table, column};
+use super::schema::{Table, column};
 use crate::episodes::video::{VideoAssetKey, VideoByteRange};
 use spiral_robotics_common::sql::ReadOnlyQueryMode;
 
@@ -232,20 +232,12 @@ impl SpiralSql {
         )
     }
 
-    pub(crate) fn create_dataset_namespace(dataset: &str) -> String {
-        format!(
-            "CREATE TABLE {dataset} AS SELECT {} AS {}",
-            Self::string_literal(dataset),
-            spiral::DATASET_NAMESPACE_MARKER
-        )
-    }
-
     pub(crate) fn video_sources_relation(dataset: &str) -> String {
         format!("{dataset}_video_sources")
     }
 
     pub(crate) fn video_dataset_relation(dataset: &str) -> String {
-        format!("{dataset}.video")
+        format!("{dataset}_video")
     }
 
     pub(crate) fn video_dataset_output(dataset: &str) -> String {
@@ -356,7 +348,7 @@ impl<'a> ProjectQueries<'a> {
     }
 
     pub(crate) async fn datasets(&self) -> Result<Vec<DatasetSummary>, String> {
-        let relation = Table::Datasets.qualified_name(self.project_store.namespace());
+        let relation = Table::Datasets.qualified_name(self.project_store.table_prefix());
         let mut connection = self.project_store.connect().await?;
         if !connection.table_exists(&relation).await? {
             return Ok(Vec::new());
@@ -507,15 +499,15 @@ mod tests {
 
         let cases = [
             (
-                SpiralSql::dataset_exists("robot.datasets", "dataset-'one"),
+                SpiralSql::dataset_exists("robot_datasets", "dataset-'one"),
                 "dataset-'one",
             ),
             (
-                SpiralSql::delete_episode("robot.episodes", "take-'one"),
+                SpiralSql::delete_episode("robot_episodes", "take-'one"),
                 "take-'one",
             ),
             (
-                SpiralSql::delete_training_run("robot.training_checkpoints", "run-'one"),
+                SpiralSql::delete_training_run("robot_training_checkpoints", "run-'one"),
                 "run-'one",
             ),
             (
@@ -553,18 +545,18 @@ mod tests {
             SpiralSql::video_sources_relation("robot"),
             "robot_video_sources"
         );
-        assert_eq!(SpiralSql::video_dataset_relation("robot"), "robot.video");
+        assert_eq!(SpiralSql::video_dataset_relation("robot"), "robot_video");
         assert_eq!(
             SpiralSql::video_dataset_output("robot"),
-            "robot.video.assets"
+            "robot_video.assets"
         );
         assert_eq!(
-            SpiralSql::drop_video_dataset("robot.video"),
-            "DROP DATASET IF EXISTS robot.video CASCADE"
+            SpiralSql::drop_video_dataset("robot_video"),
+            "DROP DATASET IF EXISTS robot_video CASCADE"
         );
         assert_eq!(
-            SpiralSql::create_video_sources("robot_video_sources", "robot.video_assets"),
-            "CREATE OR REPLACE VIEW robot_video_sources AS SELECT assets.episode_id, assets.stream_id, assets.segment_index, assets.timeline_offset_ns, assets.payload AS source FROM robot.video_assets AS assets"
+            SpiralSql::create_video_sources("robot_video_sources", "robot_video_assets"),
+            "CREATE OR REPLACE VIEW robot_video_sources AS SELECT assets.episode_id, assets.stream_id, assets.segment_index, assets.timeline_offset_ns, assets.payload AS source FROM robot_video_assets AS assets"
         );
         assert_eq!(
             SpiralSql::video_asset_range(
@@ -572,7 +564,7 @@ mod tests {
                 &VideoAssetKey::new("episode".to_owned(), "camera.main".to_owned(), Some(2),),
                 VideoByteRange::new(512, 1024),
             ),
-            "SELECT spql.io.read_bytes(source, CAST(512 AS UINT64), CAST(1024 AS UINT64)) AS payload FROM robot.video.assets WHERE episode_id = 'episode' AND stream_id = 'camera.main' AND segment_index = 2 ORDER BY segment_index LIMIT 1"
+            "SELECT spql.io.read_bytes(source, CAST(512 AS UINT64), CAST(1024 AS UINT64)) AS payload FROM robot_video.assets WHERE episode_id = 'episode' AND stream_id = 'camera.main' AND segment_index = 2 ORDER BY segment_index LIMIT 1"
         );
     }
 
@@ -588,11 +580,11 @@ mod tests {
     fn episode_sample_id_is_encoded_as_exactly_one_string_literal() {
         assert_eq!(
             SpiralSql::episode_samples("robotics", "episode_000051"),
-            "SELECT * FROM robotics.joint_samples WHERE episode_id = 'episode_000051' ORDER BY sample_index, stream_id"
+            "SELECT * FROM robotics_joint_samples WHERE episode_id = 'episode_000051' ORDER BY sample_index, stream_id"
         );
         assert_eq!(
             SpiralSql::episode_samples("robotics", "episode_'quoted"),
-            "SELECT * FROM robotics.joint_samples WHERE episode_id = 'episode_''quoted' ORDER BY sample_index, stream_id"
+            "SELECT * FROM robotics_joint_samples WHERE episode_id = 'episode_''quoted' ORDER BY sample_index, stream_id"
         );
     }
 

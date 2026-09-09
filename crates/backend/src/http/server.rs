@@ -77,9 +77,9 @@ struct SpiralArguments {
     #[arg(long, value_name = "PROJECT")]
     spiral_project: Option<String>,
 
-    /// Namespace containing every Studio-owned relation.
-    #[arg(long, default_value = "spiral_robotics", value_name = "NAMESPACE")]
-    spiral_namespace: String,
+    /// Prefix for Studio-owned root tables.
+    #[arg(long, default_value = "studio", value_name = "PREFIX")]
+    studio_table_prefix: String,
 }
 
 #[derive(Debug, clap::Args)]
@@ -256,14 +256,14 @@ impl ServerStartup {
             .filter(|project| !project.trim().is_empty())
             .or_else(|| backend_state.project_id());
         if !spiral_robotics_storage::StorageSchema::is_identifier(
-            arguments.spiral.spiral_namespace.trim(),
+            arguments.spiral.studio_table_prefix.trim(),
         ) {
             return Err(std::io::Error::other(
-            "Spiral namespace must start with a letter or '_' and contain only letters, numbers, or '_'",
+            "Studio table prefix must start with a letter or '_' and contain only letters, numbers, or '_'",
         )
         .into());
         }
-        let namespace = arguments.spiral.spiral_namespace.trim().to_owned();
+        let table_prefix = arguments.spiral.studio_table_prefix.trim().to_owned();
         let mut connection = SpiralConnectionSettings::new(spiral_endpoint, spiral_spfs_endpoint)
             .map_err(std::io::Error::other)?;
         if let Some(project) = spiral_project {
@@ -285,7 +285,7 @@ impl ServerStartup {
                 arguments.video.video_codec.clone(),
             ),
         );
-        let factory = crate::project_session::ProjectSessionFactory::new(resources, namespace);
+        let factory = crate::project_session::ProjectSessionFactory::new(resources, table_prefix);
         let projects =
             crate::project_session::ProjectCoordinator::new(factory, backend_state, connection)
                 .map_err(|error| std::io::Error::other(error.to_string()))?;

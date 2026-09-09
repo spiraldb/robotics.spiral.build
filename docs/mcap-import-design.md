@@ -1,8 +1,8 @@
 # MCAP import and dataset inspection
 
 Update, September 8: the dataset and its source now live at
-`spiral_dataset.default` and `spiral_dataset.default_sources`. The commands below
-record the original migration. See [current namespaces](dataset-namespaces.md).
+`dataset_default` and the root `dataset_source_default` view of `dataset_source`. The commands below
+record the original migration. See [current catalog layout](dataset-namespaces.md).
 
 September 7, 2026. This replaces the older MCAP output-table assumptions in
 `data-viewer-study.md`. The installed ADBC driver uses native Dataset resources,

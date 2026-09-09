@@ -27,7 +27,7 @@ class SpiralJobConnectionModel(RuntimeModel):
     api_url: str = Field(min_length=1)
     spfs_url: str = Field(min_length=1)
     project_id: str = Field(min_length=1)
-    namespace: str = Field(min_length=1)
+    table_prefix: str = Field(min_length=1)
     client_id: str | None = None
     client_secret: str | None = None
 

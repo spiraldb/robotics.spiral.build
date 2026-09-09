@@ -21,8 +21,7 @@ use crate::LEGACY_PROJECT_ERROR;
 use crate::settings::{SpiralConnectionSettings, SpiralCredentials};
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard};
 
-use super::schema::{self as spiral, Table, column as db};
-use super::sql::SpiralSql;
+use super::schema::{Table, column as db};
 use crate::transfer::ManagedRelationCatalog;
 
 const SPIRAL_UNAVAILABLE_PREFIX: &str = "SpiralDB is unavailable at ";
@@ -267,7 +266,6 @@ impl ProjectConnection {
             .await
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     pub async fn create_or_append_batches(
         &mut self,
         target: &str,
@@ -302,11 +300,11 @@ impl ProjectConnection {
 
     pub(crate) async fn create_managed_relation(
         &mut self,
-        namespace: &str,
+        table_prefix: &str,
         table: Table,
     ) -> Result<(), String> {
         let batch = RecordBatch::new_empty(Arc::new(ManagedRelationCatalog::schema(table)));
-        let target = table.qualified_name(namespace);
+        let target = table.qualified_name(table_prefix);
         BatchWrite::new(&target, vec![batch], BatchWriteMode::CreateOrAppend)
             .save(self)
             .await
@@ -324,31 +322,6 @@ impl ProjectConnection {
             .await
             .map(|_| ())
             .map_err(|error| error.to_string())
-    }
-
-    /// Ensure the durable root relation that acts as the managed namespace.
-    pub async fn ensure_dataset_namespace(&mut self, dataset: &str) -> Result<(), String> {
-        match self.relation_schema(dataset).await {
-            Ok(Some(schema))
-                if schema
-                    .field_with_name(spiral::DATASET_NAMESPACE_MARKER)
-                    .is_ok() =>
-            {
-                return Ok(());
-            }
-            Ok(Some(_)) => {
-                return Err(format!(
-                    "SpiralDB namespace {dataset} exists but is not managed by Spiral Robotics; choose a new namespace or remove that resource"
-                ));
-            }
-            Ok(None) => {}
-            Err(error) => {
-                return Err(format!("checking SpiralDB namespace {dataset}: {error}"));
-            }
-        }
-        self.execute_update_sql(&SpiralSql::create_dataset_namespace(dataset))
-            .await
-            .map_err(|error| format!("creating SpiralDB namespace {dataset}: {error}"))
     }
 }
 
@@ -455,7 +428,7 @@ impl DatabaseSession for ProjectConnection {
 /// an existing request can never follow a later change to the active project.
 pub struct ProjectStore {
     connection_settings: SpiralConnectionSettings,
-    namespace: String,
+    table_prefix: String,
     database: Arc<dyn Database>,
     async_operation_gate: Arc<tokio::sync::RwLock<()>>,
 }
@@ -479,15 +452,15 @@ impl ProjectStore {
 
     pub fn new(
         connection_settings: SpiralConnectionSettings,
-        namespace: String,
+        table_prefix: String,
         database: Arc<dyn Database>,
     ) -> Result<Self, String> {
-        if !super::schema::StorageSchema::is_identifier(&namespace) {
-            return Err("Spiral namespace is not a safe SQL identifier".to_owned());
+        if !super::schema::StorageSchema::is_identifier(&table_prefix) {
+            return Err("Studio table prefix is not a safe SQL identifier".to_owned());
         }
         Ok(Self {
             connection_settings,
-            namespace,
+            table_prefix,
             database,
             async_operation_gate: Arc::new(tokio::sync::RwLock::new(())),
         })
@@ -523,7 +496,9 @@ impl ProjectStore {
     /// Initialize the configured database adapter and force one authenticated
     /// project-catalog lookup without mutating project data.
     pub(crate) async fn prewarm(&self) -> Result<(), String> {
-        let relation = RelationName::parse(&self.namespace).map_err(|error| error.to_string())?;
+        let relation =
+            RelationName::parse(Table::StudioSettings.qualified_name(&self.table_prefix))
+                .map_err(|error| error.to_string())?;
         let mut connection = self.connect().await?;
         let _ = connection
             .table_schema(relation)
@@ -532,8 +507,8 @@ impl ProjectStore {
         Ok(())
     }
 
-    pub fn namespace(&self) -> &str {
-        &self.namespace
+    pub fn table_prefix(&self) -> &str {
+        &self.table_prefix
     }
 
     pub async fn connect(&self) -> Result<ProjectConnection, String> {
@@ -650,7 +625,7 @@ impl<'a> ProjectDatabasePersistence<'a> {
     pub(crate) async fn prewarm(&self) -> Result<(), String> {
         self.project_store.prewarm().await?;
         let mut connection = self.project_store.connect_exclusive().await?;
-        ManagedRelationProvisioner::new(&mut connection, self.project_store.namespace())
+        ManagedRelationProvisioner::new(&mut connection, self.project_store.table_prefix())
             .verify()
             .await
     }
@@ -666,7 +641,7 @@ impl<'a> ProjectDatabasePersistence<'a> {
         }
         let provisioning = async {
             let mut connection = self.project_store.connect_exclusive().await?;
-            ManagedRelationProvisioner::new(&mut connection, self.project_store.namespace())
+            ManagedRelationProvisioner::new(&mut connection, self.project_store.table_prefix())
                 .provision()
                 .await
         }
@@ -679,27 +654,20 @@ impl<'a> ProjectDatabasePersistence<'a> {
             true,
             format!(
                 "Connected to {endpoint} · project {project} · {}",
-                provisioning.describe(self.project_store.namespace())
+                provisioning.describe()
             ),
         )
     }
 }
 
 struct ManagedRelationProvisioning {
-    namespace_created: bool,
     created_relations: Vec<Table>,
 }
 
 impl ManagedRelationProvisioning {
-    fn describe(&self, namespace: &str) -> String {
+    fn describe(&self) -> String {
         let count = self.created_relations.len();
         if count == 0 {
-            if self.namespace_created {
-                return format!(
-                    "created namespace {namespace} · all {} managed relations present",
-                    ManagedRelationProvisioner::tables().len()
-                );
-            }
             return format!(
                 "all {} managed relations present",
                 ManagedRelationProvisioner::tables().len()
@@ -711,17 +679,13 @@ impl ManagedRelationProvisioning {
             .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join(", ");
-        if self.namespace_created {
-            format!("created namespace {namespace} plus {count} missing relations: {relations}")
-        } else {
-            format!("created {count} missing relations: {relations}")
-        }
+        format!("created {count} missing relations: {relations}")
     }
 }
 
 struct ManagedRelationProvisioner<'a> {
     connection: &'a mut ProjectConnection,
-    namespace: &'a str,
+    table_prefix: &'a str,
 }
 
 impl<'a> ManagedRelationProvisioner<'a> {
@@ -732,29 +696,24 @@ impl<'a> ManagedRelationProvisioner<'a> {
             .collect()
     }
 
-    const fn new(connection: &'a mut ProjectConnection, namespace: &'a str) -> Self {
+    const fn new(connection: &'a mut ProjectConnection, table_prefix: &'a str) -> Self {
         Self {
             connection,
-            namespace,
+            table_prefix,
         }
     }
 
     async fn provision(mut self) -> Result<ManagedRelationProvisioning, String> {
-        let namespace_created = self.ensure_namespace().await?;
         let created_relations = self.relation_readiness().await?;
         for table in &created_relations {
             self.connection
-                .create_managed_relation(self.namespace, *table)
+                .create_managed_relation(self.table_prefix, *table)
                 .await?;
         }
-        Ok(ManagedRelationProvisioning {
-            namespace_created,
-            created_relations,
-        })
+        Ok(ManagedRelationProvisioning { created_relations })
     }
 
     async fn verify(mut self) -> Result<(), String> {
-        self.verify_namespace().await?;
         let missing = self.relation_readiness().await?;
         if missing.is_empty() {
             return Ok(());
@@ -765,58 +724,16 @@ impl<'a> ManagedRelationProvisioner<'a> {
             .collect::<Vec<_>>()
             .join(", ");
         Err(format!(
-            "SpiralDB namespace {} is missing managed relations: {relations}. Run Settings → SpiralDB → Test connection to provision them.",
-            self.namespace
+            "Studio table prefix {} is missing managed relations: {relations}. Run Settings → SpiralDB → Test connection to provision them.",
+            self.table_prefix
         ))
-    }
-
-    async fn ensure_namespace(&mut self) -> Result<bool, String> {
-        let existed = self.namespace_is_ready().await?;
-        if !existed {
-            self.connection
-                .ensure_dataset_namespace(self.namespace)
-                .await?;
-        }
-        Ok(!existed)
-    }
-
-    async fn verify_namespace(&mut self) -> Result<(), String> {
-        if self.namespace_is_ready().await? {
-            return Ok(());
-        }
-        Err(format!(
-            "SpiralDB namespace {} is missing. Run Settings → SpiralDB → Test connection to provision it and its {} managed relations.",
-            self.namespace,
-            ManagedRelationProvisioner::tables().len(),
-        ))
-    }
-
-    async fn namespace_is_ready(&mut self) -> Result<bool, String> {
-        match self.connection.relation_schema(self.namespace).await {
-            Ok(Some(schema))
-                if schema
-                    .field_with_name(spiral::DATASET_NAMESPACE_MARKER)
-                    .is_ok() =>
-            {
-                Ok(true)
-            }
-            Ok(Some(_)) => Err(format!(
-                "SpiralDB namespace {} exists but is not managed by Spiral Robotics; choose a new namespace or remove that resource",
-                self.namespace
-            )),
-            Ok(None) => Ok(false),
-            Err(error) => Err(format!(
-                "checking SpiralDB namespace {}: {error}",
-                self.namespace
-            )),
-        }
     }
 
     async fn relation_readiness(&mut self) -> Result<Vec<Table>, String> {
         let tables = Self::tables();
         let names = tables
             .iter()
-            .map(|table| RelationName::parse(table.qualified_name(self.namespace)))
+            .map(|table| RelationName::parse(table.qualified_name(self.table_prefix)))
             .collect::<DatabaseResult<Vec<_>>>()
             .map_err(|error| error.to_string())?;
         let schemas = self
@@ -853,7 +770,7 @@ impl<'a> ManagedRelationProvisioner<'a> {
         ManagedRelationCatalog::validate(table, &schema, "SpiralDB destination")
             .map_err(|error| {
                 format!(
-                    "{error}; existing managed relation {relation} was not modified. Choose a fresh namespace or remove that relation, then run Settings → SpiralDB → Test connection."
+                    "{error}; existing managed relation {relation} was not modified. Choose a fresh table prefix or remove that relation, then run Settings → SpiralDB → Test connection."
                 )
             })
     }
@@ -934,21 +851,16 @@ mod managed_relation_tests {
     #[test]
     fn provisioning_summary_reports_present_and_created_relations() {
         let present = ManagedRelationProvisioning {
-            namespace_created: false,
             created_relations: Vec::new(),
         };
-        assert_eq!(
-            present.describe("spiral_robotics"),
-            "all 9 managed relations present"
-        );
+        assert_eq!(present.describe(), "all 9 managed relations present");
 
         let created = ManagedRelationProvisioning {
-            namespace_created: true,
             created_relations: vec![Table::Robots, Table::StudioSettings],
         };
         assert_eq!(
-            created.describe("spiral_robotics"),
-            "created namespace spiral_robotics plus 2 missing relations: robots, studio_settings"
+            created.describe(),
+            "created 2 missing relations: robots, studio_settings"
         );
     }
 
