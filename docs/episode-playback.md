@@ -1,8 +1,8 @@
 # Episode-first topic inspection and playback
 
 Open **Data → dataset → episode → topic**. A dataset opens its paginated episode
-list. An episode opens only topics with messages in that recording, sorted by
-name. Each topic is labeled **Video** or **Table** according to its schema:
+list. An episode opens the topics declared in that recording, including channels with
+no messages, sorted by name. Each topic is labeled **Video** or **Table** according to its schema:
 `foxglove.CompressedVideo` opens the player; other schemas open the bounded Arrow
 message table. Breadcrumbs return to the episode's topics or dataset's episode
 list, preserving episode pagination. Recording facts and source details live at
@@ -17,16 +17,16 @@ are not connected to this clock yet.
 ## Data and clock
 
 `POST /api/datasets/episode-topics` accepts `EpisodeSelection` and returns topic
-names and schemas. It checks membership, then the dataset's topics with native
-`read_topic` queries, binding the exact member UUID and selecting only `id` with
-`LIMIT 1`. Empty topics are omitted; errors expose **Retry topics**. Returned
-coverage is one episode with no claimed message count. Discovery does not fetch
-encoded camera payloads into Studio.
+names and schemas. One query selects the episode's source blob by its bound UUID
+and expands `spql.mcap.channels(source)`. The MCAP summary supplies channel names,
+schemas, and optional message counts without reading message chunks. Channels
+with the same topic share one entry with deduplicated schemas and summed counts.
+Missing statistics produce an unknown count; zero-message channels remain visible.
+A left lateral join distinguishes an empty recording from a removed episode.
 
-Discovery currently performs one presence query per dataset topic, in sequence.
-On the connected 52-episode dataset, listing ten topics took over a minute during
-desktop verification. This is a remaining performance limitation of the current
-lookup path; changing the navigation hierarchy alone does not remove that cost.
+Discovery uses the cancellable read path with an eight-second timeout. Errors
+expose **Retry topics**. This requires a Spiral driver that provides
+`spql.mcap.channels`; it performs no per-topic presence queries.
 
 `POST /api/datasets/episode-video` accepts `EpisodeTopicRequest`. Storage reads
 only that recording using a bound Arrow UUID, orders packets by MCAP log time

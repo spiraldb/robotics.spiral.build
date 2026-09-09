@@ -122,7 +122,7 @@ impl DataCommands {
         let commands = self.clone();
         self.state
             .tasks()
-            .execute(async move {
+            .read(async move {
                 let _activity = commands.state.admit()?;
                 commands.require_catalog_ready()?;
                 commands
