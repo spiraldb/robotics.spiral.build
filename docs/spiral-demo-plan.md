@@ -6,6 +6,9 @@ from the discussion are distinguished below from proposed semantics and unresolv
 Spiral capabilities. Earlier repository findings remain leads to verify, not proof
 that the native data path works today.
 
+Implementation is organized in [the milestones](spiral-demo-milestones.md).
+Each task has a Done checkbox for tracking completion.
+
 ## 1. Goal and agreed direction
 
 An ML engineer has a dataset already loaded into Spiral. The dataset contains
@@ -239,8 +242,9 @@ Clicking **Prepare dataset**:
 
 Preparing all required columns and freezing the resulting membership are part of
 one user action. A separate “Publish selection” step is not required for this demo.
-The native commit/materialization mechanism and its atomic visibility must still
-be proven before implementation. No partial output can appear as completed.
+Implement and verify the required native commit/materialization behavior as part
+of the preparation feature, fixing Spiral where needed. No partial output can
+appear as completed.
 
 ### Stage 2 — Use a prepared workflow
 
@@ -387,27 +391,26 @@ its model evaluation on each use. Long jobs may use clearly labeled earlier real
 runs, but the walkthrough must demonstrate actual preparation and reuse, not
 fabricated progress.
 
-The [implementation milestones](spiral-demo-milestones.md) break this flow into
-28 core PR-sized tasks, targeting roughly 700–1,100 handwritten changed lines
-including tests, with dependencies, merge results, and independent verification.
-That breakdown is based on source review at `e2c818a`; native capability gates
-still precede dependent implementation. These are future tasks, not implementation
-authorized by this document.
+The [feature milestones](spiral-demo-milestones.md) break this flow into ten core
+tasks and three optional tasks. Each task delivers something the engineer can use,
+including its UI, execution, persistence, and verification. The review-size target
+is up to roughly 5,000 handwritten changed lines including tests; keep smaller
+features small. Native Spiral fixes belong to the feature that needs them, without
+a separate capability-audit milestone. These are planned features; this document
+does not start implementation.
 
 | Milestone | Acceptance evidence |
 | --- | --- |
-| M0. Establish native contracts | Revalidate existing exact-member playback; separately prove native images for Rust/Python, historical source reads, and atomic prepared-output visibility. |
-| M1. Inspect synchronized episodes | Extend existing single-camera playback to multiple cameras and native joint traces on one clock. |
-| M2. Author episode workflows | Named saved drafts, agent-selected semantics, and backend enforcement of explicit preparation. |
-| M3. Prepare native derived columns | Adapt the existing runner to native images, source-version-aware reuse, and episode summaries with coverage. |
-| M4. Inspect reusable workflow outputs | Persist full membership atomically, show preparation states, reopen evidence, and reuse columns after edits. |
-| M5. Train from a workflow | The worker resolves a pinned output, builds valid batches, trains, and publishes a traceable checkpoint without enrichment inference. |
-| M6. Verify the complete demonstration | A second operator can execute the flow at 1024 pixels and presentation width, with real capability and verification records. |
+| M1. Inspect an episode | Watch multiple cameras together and inspect joint motion at the same playhead. |
+| M2. Describe the dataset to keep | Build and refine a filter with the agent, then save and switch between named workflows. |
+| M3. Prepare and review the dataset | Try a filter on one episode, prepare the population, review/refine selection, retry preparation, and process added episodes. |
+| M4. Train from the workflow | Configure and preview actual training examples, run ACT, and inspect the source data behind a checkpoint. |
 
-M4 is a useful inspection/preparation milestone. The requested end-to-end demo
-includes M5; a saved query or prepared preview alone does not complete it. Optional
-Q tasks add clarification UI; optional B tasks qualify and implement the bowl
-predicate. Neither is on the primary dim-camera demonstration's critical path.
+M3 is a useful inspection/preparation milestone. The requested end-to-end demo
+includes M4; a saved query or prepared preview alone does not complete it. Optional
+Q adds clarification questions, including returning to pending questions. Optional
+B adds detection preview and a combined bowl/lighting filter. Neither is on the
+primary dim-camera demonstration's critical path.
 
 Outside the initial scope: new import formats, live recording or physical robot
 motion, arbitrary graph editing, a general annotation system, interval selection,
@@ -415,12 +418,12 @@ multiple workflow mixtures, distributed training, branch-merge UI, and policy-qu
 claims. The optional bowl predicate is a scoped model extension; a general model
 catalog is not a prerequisite.
 
-## 9. Existing foundations and native capability gates
+## 9. Existing foundations and native work within features
 
 This is a source review, not a live integration test. The milestone breakdown
-contains the detailed implementation inventory and test owners. Findings below
-supersede stale assumptions in earlier drafts; recheck the installed driver before
-dependent implementation.
+contains the implementation starting points. Findings below supersede stale
+assumptions in earlier drafts; inspect the relevant code and native behavior while
+developing each feature.
 
 | Area | Existing evidence / dependency to verify |
 | --- | --- |
@@ -433,10 +436,12 @@ dependent implementation.
 | Training | ACT and the worker job/checkpoint lifecycle exist. The Python MCAP dataset constructor currently raises unavailable, and Studio explicitly blocks these jobs. Implement native worker-owned resolution/loading and prepared-input preflight; do not merely remove the blocker. |
 | Recovery/runtime | Record the actual local driver build and a verified recovery method for the demo project; older fixed-table project bundles may not preserve native datasets. |
 
-For Spiral bugs, limitations, or missing features, stop dependent work and ask the
-user about an upstream fix or explicit scope change. Do not introduce alternate
-identity filters, casts, a second database, a local version catalog, or substitute
-media storage to bypass a missing native capability.
+Spiral bugs or missing features are part of the work needed to deliver the owning
+feature. Fix native support along the way, with an upstream PR when appropriate,
+and verify the Studio feature against it. The native fix must land before a Studio
+change that depends on it can be independently merged. Ask before choosing a
+workaround; do not add alternate identity filters, a second database, a local
+version catalog, or substitute media storage to bypass the intended native path.
 
 Source starting points:
 
@@ -463,7 +468,7 @@ Source starting points:
 | Unknown policy | Agent-owned, visible, and versioned. Suggested starting point: exclusion with a separate review population; preserve unknown status regardless of membership. |
 | Augmented outputs | Persistent derived fields available with the source; optional downstream mappings must match the consumer's contract. |
 | Revision UX | Proposed automatic prepared-output revision on successful preparation or predicate-only re-evaluation, without a separate Publish step. |
-| Native implementation | Unresolved until capability gates are executed under a separate implementation request. |
+| Native implementation | Develop and verify required Spiral support within each feature, including upstream fixes as needed. |
 
 ## Iteration log
 
@@ -485,3 +490,8 @@ Source starting points:
   the filtering/playback/training baseline, and added the linked milestone breakdown
   with PR-sized scopes, dependencies, merge results, and verification lanes. No
   application code changed and no runtime tests were executed in this planning pass.
+- **2026-09-09 · Draft 5:** replaced technical-layer tasks and preliminary capability
+  gates with ten core user-facing feature tasks and three optional tasks. Increased
+  the review-size target to roughly 5,000 handwritten changed lines, retaining Done
+  checkboxes. Required Spiral fixes now belong to the feature being developed.
+  Documentation changes only.
