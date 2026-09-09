@@ -1354,3 +1354,6 @@ mod tests {
 
 mod requests;
 pub use requests::{RobotGoal, SerialPortIdentification, SerialPortScan};
+
+mod setup;
+pub use setup::RobotSetupSnapshot;

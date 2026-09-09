@@ -10,10 +10,24 @@ pub(crate) struct SettingsEndpoints;
 
 impl SettingsEndpoints {
     pub(crate) fn register(routes: &mut ApiRoutes) {
+        routes.get("/settings/connection", Self::connection_settings);
+        routes.put("/settings/connection", Self::update_connection);
         routes.get("/settings", Self::data_settings);
         routes.put("/settings", Self::update_data_settings);
         routes.post("/settings/spiral/test", Self::test_spiral_connection);
         routes.post("/settings/training/test", Self::test_training_runtime);
+    }
+    async fn connection_settings(
+        ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,
+    ) -> Result<Json<spiral_robotics_common::settings::SpiralSettings>, HttpFailure> {
+        Ok(Json(commands.connection_settings()?))
+    }
+    async fn update_connection(
+        ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,
+        ApiJson(change): ApiJson<spiral_robotics_common::settings::SpiralConnectionUpdate>,
+    ) -> Result<Json<()>, HttpFailure> {
+        commands.update_connection(change).await?;
+        Ok(Json(()))
     }
     async fn data_settings(
         ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,

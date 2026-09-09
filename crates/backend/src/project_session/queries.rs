@@ -1,8 +1,6 @@
 //! Read-only projections of one immutable project session.
-use crate::{BackendCommandError, project_session::context::ProjectContext};
+use crate::project_session::context::ProjectContext;
 use spiral_robotics_common::project::ProjectStatus;
-use spiral_robotics_common::robots::TelemetryFrame;
-use spiral_robotics_common::status::StudioSnapshot;
 
 #[derive(Clone)]
 pub(crate) struct ProjectQueries {
@@ -14,26 +12,8 @@ impl ProjectQueries {
         ProjectStatus::new(project.info().clone(), project.readiness().current())
     }
     #[cfg(test)]
-    fn for_session(&self, id: &str) -> Result<Self, BackendCommandError> {
+    fn for_session(&self, id: &str) -> Result<Self, crate::BackendCommandError> {
         Ok(Self::from(self.state.for_session(id)?))
-    }
-    pub(crate) async fn setup(&self) -> Result<StudioSnapshot, BackendCommandError> {
-        let state = self.state.clone();
-        let activity = state.admit()?;
-        self.state
-            .tasks()
-            .read(async move {
-                let _activity = activity;
-                crate::project_session::setup::ProjectSetup::new(&state)
-                    .snapshot()
-                    .await
-            })
-            .await
-            .map_err(Into::into)
-    }
-    pub(crate) fn telemetry(&self) -> Result<TelemetryFrame, BackendCommandError> {
-        let _activity = self.state.admit()?;
-        Ok(self.state.hardware().state().telemetry().clone())
     }
 }
 
@@ -61,11 +41,14 @@ mod tests {
         let pending = queries.status();
         assert_eq!(pending.session(), first.session());
         assert!(!pending.readiness().catalog_available());
-        assert!(scoped.setup().await.is_ok());
         let next = fixture.replace("project_b");
         assert_eq!(queries.status().session(), next.info());
         assert!(queries.for_session(first.session().id()).is_err());
-        assert!(scoped.telemetry().is_err());
+        assert!(
+            crate::robots::commands::DeviceCommands::from(scoped.state.clone())
+                .telemetry()
+                .is_err()
+        );
         assert!(
             crate::recording::commands::RecordingCommands::from(scoped.state.clone())
                 .recording_signals(
@@ -82,6 +65,7 @@ mod tests {
         assert!(
             crate::rollout::commands::RolloutCommands::from(scoped.state.clone())
                 .snapshot()
+                .await
                 .is_err()
         );
         fixture.projects.hardware().shutdown().await.unwrap();

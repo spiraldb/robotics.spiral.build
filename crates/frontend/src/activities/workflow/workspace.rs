@@ -125,7 +125,8 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
     let conversation_id = state.active_conversation_id().to_owned();
     let draft_key = AgentDraftKey::new(state.scope_id(), &conversation_id);
     let draft = drafts.read().get(&draft_key).cloned().unwrap_or_default();
-    let catalog_available = studio.snapshot().read().readiness().catalog_available();
+    let catalog_available =
+        crate::shell::project::ProjectSessionSignals::current().catalog_available();
     let conversation_reason =
         controller.agent_conversation_disabled_reason((studio.live())(), catalog_available);
     let new_conversation_reason =

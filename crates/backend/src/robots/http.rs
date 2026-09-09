@@ -16,6 +16,8 @@ impl RobotEndpoints {
         routes.get("/serial-ports", Self::list_serial_ports);
         routes.post("/serial-ports/identify", Self::identify_serial_port);
         routes.post("/cameras/refresh", Self::refresh_cameras);
+        routes.get("/robots/setup", Self::fetch_setup);
+        routes.get("/robots/telemetry", Self::fetch_telemetry);
         routes.get("/robots", Self::list_robots);
         routes.post("/robots", Self::create_robot);
         routes.patch("/robots", Self::update_robot);
@@ -50,6 +52,18 @@ impl RobotEndpoints {
         ScopedProject(commands): ScopedProject<crate::robots::commands::DeviceCommands>,
     ) -> Result<Json<Vec<CameraStatus>>, HttpFailure> {
         let result = commands.refresh_cameras().await?;
+        Ok(Json(result))
+    }
+    async fn fetch_telemetry(
+        ScopedProject(commands): ScopedProject<crate::robots::commands::DeviceCommands>,
+    ) -> Result<Json<spiral_robotics_common::robots::TelemetryFrame>, HttpFailure> {
+        let result = commands.telemetry()?;
+        Ok(Json(result))
+    }
+    async fn fetch_setup(
+        ScopedProject(commands): ScopedProject<crate::robots::commands::DeviceCommands>,
+    ) -> Result<Json<spiral_robotics_common::robots::RobotSetupSnapshot>, HttpFailure> {
+        let result = commands.setup().await?;
         Ok(Json(result))
     }
     async fn list_robots(

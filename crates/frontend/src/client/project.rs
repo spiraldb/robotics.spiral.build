@@ -26,6 +26,12 @@ impl ProjectSessionState {
             Self::Ready(status) => Some(status.session()),
         }
     }
+    pub(crate) fn readiness(&self) -> spiral_robotics_common::status::BackendReadiness {
+        match self {
+            Self::Ready(status) => status.readiness().clone(),
+            _ => Default::default(),
+        }
+    }
     pub(crate) fn connected(&self) -> bool {
         matches!(self, Self::Ready(_))
     }

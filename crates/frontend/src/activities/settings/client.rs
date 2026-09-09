@@ -16,6 +16,22 @@ impl SettingsClient {
             project: ProjectClient::current(),
         }
     }
+    pub(crate) fn connection_settings(
+        &self,
+    ) -> impl Future<Output = Result<spiral_robotics_common::settings::SpiralSettings, CommandError>>
+    + use<> {
+        self.project
+            .request(HttpRequest::new("GET", "/api/settings/connection"))
+    }
+    pub(crate) fn update_connection(
+        &self,
+        change: spiral_robotics_common::settings::SpiralConnectionUpdate,
+    ) -> impl Future<Output = Result<(), CommandError>> + use<> {
+        self.project.mutate(
+            &[Project, Settings, RobotSetup],
+            HttpRequest::new("PUT", "/api/settings/connection").json(&change),
+        )
+    }
     pub(crate) fn data_settings(
         &self,
     ) -> impl Future<Output = Result<DataSettings, CommandError>> + use<> {
@@ -28,7 +44,9 @@ impl SettingsClient {
         update: SettingsUpdate,
     ) -> impl Future<Output = Result<DataSettings, CommandError>> + use<> {
         self.project.mutate(
-            &[Project, Settings, Setup, Training, Assistant, Catalog, Data],
+            &[
+                Project, Settings, RobotSetup, Training, Assistant, Catalog, Data,
+            ],
             HttpRequest::new("PUT", "/api/settings").json(&update),
         )
     }
@@ -37,7 +55,7 @@ impl SettingsClient {
         &self,
     ) -> impl Future<Output = Result<ConnectionTest, CommandError>> + use<> {
         self.project.mutate(
-            &[Project, Settings, Setup, Catalog, Data],
+            &[Project, Settings, RobotSetup, Catalog, Data],
             HttpRequest::new("POST", "/api/settings/spiral/test"),
         )
     }

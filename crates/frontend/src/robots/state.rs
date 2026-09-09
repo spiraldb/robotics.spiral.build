@@ -1,12 +1,13 @@
-//! Hardware samples owned and polled by a mounted hardware view.
+//! Robot setup and hardware observations owned by a mounted hardware view.
 use crate::client::queries::{QueryDomain, QueryPolicy};
-use crate::shell::{StudioClient, project::ProjectSessionSignals, state::StudioProjectState};
+use crate::shell::{project::ProjectSessionSignals, state::StudioProjectState};
 use dioxus::prelude::*;
 use spiral_robotics_common::recording::{RecordingProgress, ReplayProgress};
-use spiral_robotics_common::robots::{RobotTelemetry, TelemetryFrame};
+use spiral_robotics_common::robots::{ModeSelection, RobotSummary, RobotTelemetry, TelemetryFrame};
 
 #[derive(Clone, Copy, PartialEq)]
-pub(crate) struct HardwareTelemetry {
+pub(crate) struct HardwareViewState {
+    setup: super::RobotSetupState,
     telemetry: Signal<TelemetryFrame>,
     last_telemetry_ms: Signal<f64>,
     clock_ms: Signal<f64>,
@@ -14,14 +15,16 @@ pub(crate) struct HardwareTelemetry {
     catalog_available: Memo<bool>,
     is_active: ReadSignal<bool>,
 }
-impl HardwareTelemetry {
-    pub(crate) fn use_telemetry(
+impl HardwareViewState {
+    pub(crate) fn use_state(
         project: StudioProjectState,
         is_active: ReadSignal<bool>,
         sessions: ProjectSessionSignals,
     ) -> Self {
         let catalog_available = use_memo(move || sessions.catalog_available());
+        let setup = super::RobotSetupState::use_state(is_active, sessions);
         let telemetry = use_hook(|| Self {
+            setup,
             telemetry: Signal::new(TelemetryFrame::default()),
             last_telemetry_ms: Signal::new(0.0),
             clock_ms: project.clock_ms(),
@@ -31,6 +34,36 @@ impl HardwareTelemetry {
         });
         telemetry.use_hardware_polling(is_active);
         telemetry
+    }
+    pub(crate) fn setup(self) -> super::RobotSetupState {
+        self.setup
+    }
+    pub(crate) fn snapshot(
+        self,
+    ) -> MappedSignal<
+        spiral_robotics_common::robots::RobotSetupSnapshot,
+        Signal<super::setup::RobotSetupLoad>,
+    > {
+        self.setup.snapshot()
+    }
+    pub(crate) fn connected_robots(&self) -> Vec<RobotSummary> {
+        self.setup
+            .snapshot()
+            .read()
+            .robots()
+            .iter()
+            .filter(|robot| robot.connection().connected())
+            .cloned()
+            .collect()
+    }
+    pub(crate) fn mode(&self) -> ModeSelection {
+        self.setup.snapshot().read().mode().selection().to_owned()
+    }
+    pub(crate) fn mode_active(&self) -> bool {
+        self.setup.snapshot().read().mode().active()
+    }
+    pub(crate) fn is_manual_target(&self, id: &str) -> bool {
+        self.mode_active() && matches!(self.mode(), ModeSelection::Manual { robot } if robot == id)
     }
     pub(crate) fn is_active(self) -> bool {
         (self.is_active)()
@@ -44,7 +77,7 @@ impl HardwareTelemetry {
     fn use_hardware_polling(self, is_active: ReadSignal<bool>) {
         let telemetry = QueryPolicy::new(QueryDomain::Telemetry, 50).use_when(
             move || *is_active.read(),
-            || StudioClient::current().telemetry_snapshot(),
+            || super::RobotClient::current().telemetry_snapshot(),
         );
         self.use_response(telemetry);
     }
@@ -89,6 +122,7 @@ impl HardwareTelemetry {
         (self.is_active)()
             && (self.connected)()
             && (self.catalog_available)()
+            && self.setup.available()
             && age.is_finite()
             && age < 2.5
     }
@@ -117,7 +151,7 @@ mod tests {
     struct TelemetryHarness(Rc<RefCell<Option<TelemetryInputs>>>);
     #[derive(Clone, Copy)]
     struct TelemetryInputs {
-        telemetry: HardwareTelemetry,
+        telemetry: HardwareViewState,
         sequence: Signal<u64>,
         active: Signal<bool>,
         connected: Signal<bool>,
@@ -131,7 +165,9 @@ mod tests {
             let catalog = use_signal(|| true);
             let connected_memo = use_memo(move || *connected.read());
             let catalog_memo = use_memo(move || *catalog.read());
-            let telemetry = use_hook(|| HardwareTelemetry {
+            let setup = super::super::RobotSetupState::use_ready_state();
+            let telemetry = use_hook(|| HardwareViewState {
+                setup,
                 telemetry: Signal::new(TelemetryFrame::default()),
                 last_telemetry_ms: Signal::new(0.0),
                 clock_ms: Signal::new(js_sys::Date::now()),

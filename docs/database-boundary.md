@@ -153,10 +153,45 @@ cargo test -p spiral-robotics-storage dropped_transaction_waits_for_result_befor
 
 ## Startup and schema checks
 
-Project startup checks Studio tables and loads preferences, robot configuration,
-and rollout safety state. Training history, Workflow, Assistant history, and the
-full relation catalog no longer block project readiness. Training and Workflow
-load on first use from their corresponding views.
+Resuming the saved project publishes readiness without database I/O. It does
+not inspect the nine managed schemas or load preferences, robots, or rollout
+state. First-time project selection, project changes, and Settings → SpiralDB →
+Test connection still provision and validate managed relations before publishing
+the destination. A CLI/environment project override that differs from the saved
+project also takes this validation path. Missing or incompatible feature data on resume is reported by
+that feature when accessed.
+
+Robot configuration is read by the project-scoped robot workspace when needed by
+the hardware views, robot commands, and saved-device auto-connect. The discarded startup
+validation read is gone; auto-connect still runs after project publication.
+Rollout history loads once per project session on the first Rollout snapshot or
+start command. Concurrent callers share initialization, failed or cancelled reads
+leave it available for a later request, and a restored active snapshot becomes
+failed without resuming motion. The Rollout view owns loading/error feedback and
+retains its last successful snapshot if polling fails. Its execution and
+persistence remain owned by the backend after navigating away. Stop does not wait
+for history I/O.
+
+The shell owns only project identity/readiness, connection status, its clock, and
+notifications. `/robots/setup` and hardware telemetry are polled by the active
+Live, Rollout, or Settings view; each view retains its own last successful
+configuration, loading state, and errors until the project scope is disposed.
+Reactivating a hardware view requires fresh setup and telemetry before controls
+are enabled.
+The shell never fetches robot setup, and non-hardware views do not display cached
+robot status. Database errors propagate as feature errors instead of empty robot
+lists. Settings preferences are fetched only by the Settings view. Its connection
+settings remain readable without database access; a connection-only update
+validates and switches the project without overwriting unread preferences.
+
+Backend runtime preferences are shared within one project lifetime and loaded
+once on first Settings, Training, Rollout start, or recording-video access.
+Concurrent readers share initialization; errors and cancellation leave it
+retryable. A preference write wins over an in-flight first read. Training workers
+reject uninitialized preferences instead of choosing a default endpoint.
+
+Training history, Workflow, Assistant history, and the full relation catalog also
+load on feature access rather than blocking project readiness.
 
 Managed-table verification and relation discovery read schemas concurrently on
 up to eight independent ADBC connections. The reads retain their parent project

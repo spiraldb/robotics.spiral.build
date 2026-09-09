@@ -4,7 +4,7 @@ use super::workspace::{InferencePanel, RobotFleet, RolloutWorkbench, TrainingSna
 use crate::panels::camera_panel::{AssignedCamera, CameraPanelRows};
 use crate::panels::scene::SceneSource;
 use crate::panels::scene::{Viewport, ViewportPresentation};
-use crate::robots::{HardwareTelemetry, RobotSelection};
+use crate::robots::{HardwareViewState, RobotSelection};
 use crate::shell::{
     frame::WorkspaceFrame, project::ProjectSessionSignals, state::StudioProjectState,
 };
@@ -50,11 +50,11 @@ impl RolloutLayout {
 struct RolloutCameras;
 impl RolloutCameras {
     fn assigned(
-        project: StudioProjectState,
+        telemetry: HardwareViewState,
         controller: super::state::RolloutController,
         training_history: crate::activities::training::history::TrainingHistory,
     ) -> Vec<AssignedCamera> {
-        let Some(follower) = project.snapshot().read().robots().follower() else {
+        let Some(follower) = telemetry.snapshot().read().robots().follower() else {
             return Vec::new();
         };
         let checkpoint = controller.checkpoint();
@@ -98,8 +98,8 @@ pub(crate) fn RolloutWorkspace(is_active: ReadSignal<bool>) -> Element {
     );
     let project = StudioProjectState::current();
     let telemetry =
-        HardwareTelemetry::use_telemetry(project, is_active, ProjectSessionSignals::current());
-    let robot_selection = RobotSelection::use_selection(project.snapshot());
+        HardwareViewState::use_state(project, is_active, ProjectSessionSignals::current());
+    let robot_selection = RobotSelection::use_selection(telemetry.snapshot());
     let controller = super::state::RolloutController::use_controller(is_active);
     let training_history =
         crate::activities::training::history::TrainingHistory::use_history(is_active, || None);
@@ -109,23 +109,23 @@ pub(crate) fn RolloutWorkspace(is_active: ReadSignal<bool>) -> Element {
 #[component]
 fn RolloutPanels(
     project: StudioProjectState,
-    telemetry: HardwareTelemetry,
+    telemetry: HardwareViewState,
     robot_selection: RobotSelection,
     controller: super::state::RolloutController,
     training_history: crate::activities::training::history::TrainingHistory,
 ) -> Element {
     let mut selection = robot_selection.selected();
-    let follower = project
+    let follower = telemetry
         .snapshot()
         .read()
         .robots()
         .follower()
         .map(|robot| robot.id().to_owned());
-    let cameras = RolloutCameras::assigned(project, controller, training_history);
+    let cameras = RolloutCameras::assigned(telemetry, controller, training_history);
     let mut panels = vec![
         Panel::new("workbench", "Rollout", "workbench", rsx! { aside { class: "studio-v2-workbench", RolloutWorkbench { project, telemetry, controller, training_history } } }).with_class("workbench-editor"),
         Panel::new("scene", "Scene", "primary", rsx! {
-            Viewport { project, telemetry, robot_selection, source: SceneSource::Live, presentation: ViewportPresentation::new(follower) }
+            Viewport { telemetry, robot_selection, source: SceneSource::Live, presentation: ViewportPresentation::new(follower) }
         }).with_class("scene-editor"),
     ];
     for camera in &cameras {

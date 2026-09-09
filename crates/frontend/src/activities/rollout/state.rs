@@ -13,12 +13,15 @@ use spiral_robotics_common::rollout::{
 pub(crate) struct RolloutController {
     snapshot: Signal<spiral_robotics_common::rollout::RolloutSnapshot>,
     checkpoint: Signal<Option<String>>,
+    loaded: Signal<bool>,
+    error: Signal<Option<String>>,
     duration_draft: Signal<String>,
 }
 
 impl RolloutController {
     pub(crate) fn use_controller(is_active: ReadSignal<bool>) -> Self {
         let controller = Self::use_state();
+        let sessions = crate::shell::project::ProjectSessionSignals::current();
         let active = use_memo(move || controller.snapshot.read().phase().active());
         let request = crate::client::queries::QueryPolicy::new(
             crate::client::queries::QueryDomain::Rollout,
@@ -26,7 +29,7 @@ impl RolloutController {
         )
         .with_activity(active.into())
         .use_when(
-            move || *is_active.read(),
+            move || *is_active.read() && sessions.catalog_available(),
             || super::RolloutClient::current().rollout_snapshot(),
         );
         controller.use_response(request);
@@ -36,6 +39,8 @@ impl RolloutController {
         use_hook(|| Self {
             snapshot: Signal::new(Default::default()),
             checkpoint: Signal::new(None),
+            loaded: Signal::new(false),
+            error: Signal::new(None),
             duration_draft: Signal::new(DEFAULT_ROLLOUT_DURATION_SECONDS.to_string()),
         })
     }
@@ -45,17 +50,38 @@ impl RolloutController {
             Result<spiral_robotics_common::rollout::RolloutSnapshot, crate::client::CommandError>,
         >,
     ) {
-        let mut snapshot = self.snapshot;
+        let mut controller = self;
         use_effect(move || {
             let response = request.read();
-            if request.finished()
-                && let Some(Ok(value)) = response.as_ref()
-                && *snapshot.peek() != *value
-            {
-                snapshot.set(value.clone());
+            if !request.finished() {
+                return;
+            }
+            match response.as_ref() {
+                Some(Ok(value)) => {
+                    if *controller.snapshot.peek() != *value {
+                        controller.snapshot.set(value.clone());
+                    }
+                    controller.loaded.set(true);
+                    controller.error.set(None);
+                }
+                Some(Err(error)) => controller.error.set(Some(error.to_string())),
+                None => {}
             }
         });
     }
+    pub(crate) fn loaded(self) -> bool {
+        *self.loaded.read()
+    }
+
+    pub(crate) fn error(self) -> Option<String> {
+        self.error.read().clone()
+    }
+
+    pub(crate) fn retry(self) {
+        crate::client::queries::QueryRefresh::current()
+            .invalidate(&[crate::client::queries::QueryDomain::Rollout]);
+    }
+
     pub(crate) fn snapshot(
         self,
     ) -> MappedSignal<
@@ -149,17 +175,36 @@ mod tests {
             mut phase,
             controller,
         } = harness.0.borrow().unwrap();
-        dom.in_runtime(|| assert_eq!(*controller.snapshot().peek(), RolloutSnapshot::default()));
+        dom.in_runtime(|| {
+            assert_eq!(*controller.snapshot().peek(), RolloutSnapshot::default());
+            assert!(!controller.loaded());
+            assert!(controller.error().is_none());
+        });
         dom.in_runtime(|| phase.set(1));
         dom.render_immediate_to_vec();
         dom.render_immediate_to_vec();
         let expected = RolloutSnapshot::new(Some("session".into()), Some("run".into()))
             .with_robot(Some("follower".into()));
-        dom.in_runtime(|| assert_eq!(*controller.snapshot().peek(), expected));
+        dom.in_runtime(|| {
+            assert_eq!(*controller.snapshot().peek(), expected);
+            assert!(controller.loaded());
+            assert!(controller.error().is_none());
+        });
         dom.in_runtime(|| phase.set(2));
         dom.render_immediate_to_vec();
         dom.render_immediate_to_vec();
-        dom.in_runtime(|| assert_eq!(*controller.snapshot().peek(), expected));
+        dom.in_runtime(|| {
+            assert_eq!(*controller.snapshot().peek(), expected);
+            assert!(controller.loaded());
+            assert_eq!(controller.error().as_deref(), Some("unavailable"));
+        });
+        dom.in_runtime(|| phase.set(1));
+        dom.render_immediate_to_vec();
+        dom.render_immediate_to_vec();
+        dom.in_runtime(|| {
+            assert!(controller.loaded());
+            assert!(controller.error().is_none());
+        });
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]

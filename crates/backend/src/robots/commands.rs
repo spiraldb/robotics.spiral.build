@@ -41,12 +41,18 @@ impl<'a> RobotAdapter<'a> {
         }
     }
 
-    pub(crate) async fn prefetched(state: &'a ProjectContext) -> Self {
-        Self {
+    pub(crate) async fn prefetched(state: &'a ProjectContext) -> Result<Self, OperationError> {
+        Ok(Self {
             state,
             import_document: None,
-            saved_records: Some(state.workspace().list().await),
-        }
+            saved_records: Some(
+                state
+                    .workspace()
+                    .try_list()
+                    .await
+                    .map_err(OperationError::from)?,
+            ),
+        })
     }
 
     fn import(state: &'a ProjectContext, document: Bytes) -> Self {
@@ -335,6 +341,28 @@ impl DeviceCommands {
             .await?
     }
 
+    pub(crate) fn telemetry(
+        &self,
+    ) -> Result<spiral_robotics_common::robots::TelemetryFrame, BackendCommandError> {
+        let _activity = self.state.admit()?;
+        Ok(self.state.hardware().state().telemetry().clone())
+    }
+    pub(crate) async fn setup(
+        &self,
+    ) -> Result<spiral_robotics_common::robots::RobotSetupSnapshot, BackendCommandError> {
+        let state = self.state.clone();
+        let activity = state.admit()?;
+        self.state
+            .tasks()
+            .read(async move {
+                let _activity = activity;
+                crate::robots::setup::RobotSetup::new(&state)
+                    .snapshot()
+                    .await
+            })
+            .await?
+            .map_err(Into::into)
+    }
     pub(crate) async fn list_robots(&self) -> Result<Vec<RobotSummary>, BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
@@ -343,7 +371,7 @@ impl DeviceCommands {
             .execute(async move {
                 let _activity = activity;
                 commands.require_catalog_ready()?;
-                let adapter = RobotAdapter::prefetched(&commands.state).await;
+                let adapter = RobotAdapter::prefetched(&commands.state).await?;
                 let hardware = commands.state.hardware().state();
                 let mut summaries = Vec::new();
                 for robot in RobotCatalogActions::new(&adapter).list().await {

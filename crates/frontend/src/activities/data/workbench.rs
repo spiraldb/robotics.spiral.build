@@ -10,8 +10,9 @@ pub(crate) fn QueryPanel(
     studio: StudioProjectState,
     controller: super::state::QueryController,
 ) -> Element {
-    let configuration = studio.configuration();
-    let query_available = configuration.spiral_query_available();
+    let query_available = crate::shell::project::ProjectSessionSignals::current()
+        .mounted_session()
+        .is_some_and(|session| !session.project_id().trim().is_empty());
     let can_query = query_available;
     let query_running = controller.query_running();
     let run_query = move || controller.run_query(studio, can_query);

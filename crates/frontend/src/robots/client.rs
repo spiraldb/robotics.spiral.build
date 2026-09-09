@@ -19,6 +19,23 @@ impl RobotClient {
             project: ProjectClient::current(),
         }
     }
+    pub(crate) fn telemetry_snapshot(
+        &self,
+    ) -> impl Future<Output = Result<spiral_robotics_common::robots::TelemetryFrame, CommandError>> + use<>
+    {
+        self.project
+            .request(HttpRequest::new("GET", "/api/robots/telemetry"))
+    }
+
+    pub(crate) fn setup_snapshot(
+        &self,
+    ) -> impl Future<
+        Output = Result<spiral_robotics_common::robots::RobotSetupSnapshot, CommandError>,
+    > + use<> {
+        self.project
+            .request(HttpRequest::new("GET", "/api/robots/setup"))
+    }
+
     pub(crate) fn list_serial_ports(
         &self,
     ) -> impl Future<Output = Result<Vec<SerialPortSummary>, CommandError>> + use<> {
@@ -39,8 +56,10 @@ impl RobotClient {
     pub(crate) fn refresh_cameras(
         &self,
     ) -> impl Future<Output = Result<Vec<CameraStatus>, CommandError>> + use<> {
-        self.project
-            .mutate(&[Setup], HttpRequest::new("POST", "/api/cameras/refresh"))
+        self.project.mutate(
+            &[RobotSetup],
+            HttpRequest::new("POST", "/api/cameras/refresh"),
+        )
     }
 
     pub(crate) fn create_robot(
@@ -48,7 +67,7 @@ impl RobotClient {
         request: NewRobot,
     ) -> impl Future<Output = Result<RobotSummary, CommandError>> + use<> {
         self.project.mutate(
-            &[Setup, Catalog],
+            &[RobotSetup, Catalog],
             HttpRequest::new("POST", "/api/robots").json(&request),
         )
     }
@@ -58,7 +77,7 @@ impl RobotClient {
         document: Vec<u8>,
     ) -> impl Future<Output = Result<RobotSummary, CommandError>> + use<> {
         self.project.mutate(
-            &[Setup, Catalog],
+            &[RobotSetup, Catalog],
             HttpRequest::new("POST", "/api/robots/import").raw_json(document),
         )
     }
@@ -68,7 +87,7 @@ impl RobotClient {
         request: RobotUpdate<Vec<CameraBinding>>,
     ) -> impl Future<Output = Result<RobotSummary, CommandError>> + use<> {
         self.project.mutate(
-            &[Setup],
+            &[RobotSetup],
             HttpRequest::new("PATCH", "/api/robots").json(&request),
         )
     }
@@ -78,7 +97,7 @@ impl RobotClient {
         id: String,
     ) -> impl Future<Output = Result<(), CommandError>> + use<> {
         self.project.mutate(
-            &[Setup, Catalog],
+            &[RobotSetup, Catalog],
             HttpRequest::new(
                 "DELETE",
                 format!("/api/robots/{id}", id = id.url_component()),
@@ -91,7 +110,7 @@ impl RobotClient {
         id: String,
     ) -> impl Future<Output = Result<(), CommandError>> + use<> {
         self.project.mutate(
-            &[Setup, Telemetry],
+            &[RobotSetup, Telemetry],
             HttpRequest::new(
                 "POST",
                 format!("/api/robots/{id}/connect", id = id.url_component()),
@@ -104,7 +123,7 @@ impl RobotClient {
         id: String,
     ) -> impl Future<Output = Result<(), CommandError>> + use<> {
         self.project.mutate(
-            &[Setup, Telemetry],
+            &[RobotSetup, Telemetry],
             HttpRequest::new(
                 "POST",
                 format!("/api/robots/{id}/disconnect", id = id.url_component()),
@@ -158,7 +177,7 @@ impl RobotClient {
         id: String,
     ) -> impl Future<Output = Result<(), CommandError>> + use<> {
         self.project.mutate(
-            &[Telemetry, Setup],
+            &[Telemetry, RobotSetup],
             HttpRequest::new(
                 "POST",
                 format!(
@@ -174,7 +193,7 @@ impl RobotClient {
         id: String,
     ) -> impl Future<Output = Result<RobotSummary, CommandError>> + use<> {
         self.project.mutate(
-            &[Telemetry, Setup],
+            &[Telemetry, RobotSetup],
             HttpRequest::new(
                 "POST",
                 format!(
@@ -190,7 +209,7 @@ impl RobotClient {
         id: String,
     ) -> impl Future<Output = Result<(), CommandError>> + use<> {
         self.project.mutate(
-            &[Telemetry, Setup],
+            &[Telemetry, RobotSetup],
             HttpRequest::new(
                 "POST",
                 format!(
@@ -206,7 +225,7 @@ impl RobotClient {
         selection: ModeSelection,
     ) -> impl Future<Output = Result<(), CommandError>> + use<> {
         self.project.mutate(
-            &[Setup, Telemetry],
+            &[RobotSetup, Telemetry],
             HttpRequest::new("PUT", "/api/mode").json(&selection),
         )
     }

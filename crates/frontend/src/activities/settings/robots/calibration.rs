@@ -1,16 +1,16 @@
-use crate::activities::settings::robots::RobotClient;
 use crate::components::interaction::{Action, ActionPurpose, ActionVariant};
+use crate::robots::RobotClient;
 use dioxus::prelude::*;
 use spiral_robotics_common::robots::{CalibrationJointProgress, RobotSummary};
 use spiral_robotics_viewport as arm;
 
-use crate::robots::{HardwareCommands, HardwareTelemetry};
+use crate::robots::{HardwareCommands, HardwareViewState};
 use crate::shell::state::StudioProjectState;
 
 #[component]
 pub(super) fn CalibrationSection(
     project: StudioProjectState,
-    telemetry: HardwareTelemetry,
+    telemetry: HardwareViewState,
     robot: RobotSummary,
 ) -> Element {
     let progress = telemetry

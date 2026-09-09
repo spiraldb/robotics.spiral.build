@@ -155,6 +155,32 @@ impl DataCommands {
             .await?
     }
 
+    pub(crate) fn connection_settings(
+        &self,
+    ) -> Result<spiral_robotics_common::settings::SpiralSettings, BackendCommandError> {
+        let _activity = self.state.admit()?;
+        Ok(self.state.project().connection_settings())
+    }
+
+    pub(crate) async fn update_connection(
+        &self,
+        change: spiral_robotics_common::settings::SpiralConnectionUpdate,
+    ) -> Result<(), BackendCommandError> {
+        let commands = self.clone();
+        self.state
+            .tasks()
+            .execute(async move {
+                commands
+                    .state
+                    .projects()
+                    .update_connection(commands.state.project(), change.into())
+                    .await?;
+                commands.spawn_auto_connect_saved_robots();
+                Ok(())
+            })
+            .await?
+    }
+
     pub(crate) async fn settings(&self) -> Result<DataSettings, BackendCommandError> {
         let commands = self.clone();
         self.state
@@ -164,7 +190,8 @@ impl DataCommands {
     }
 
     async fn settings_in_project(&self) -> Result<DataSettings, BackendCommandError> {
-        Ok(self.state.project().settings())
+        let _activity = self.state.admit()?;
+        self.state.project().settings().await.map_err(Into::into)
     }
 
     pub(crate) async fn update_settings(
@@ -243,6 +270,7 @@ impl DataCommands {
         &self,
     ) -> Result<ConnectionTest, BackendCommandError> {
         let _activity = self.state.admit()?;
+        self.state.preferences().load().await?;
         Ok(ConnectionTest::from(
             self.state.training().test_runtime().await,
         ))

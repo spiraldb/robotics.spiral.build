@@ -10,7 +10,7 @@ use spiral_robotics_common::rollout::{
 use spiral_robotics_common::training::{TrainingCheckpoint, TrainingRun, TrainingSnapshot};
 
 use crate::format::LossPresentation;
-use crate::robots::HardwareTelemetry;
+use crate::robots::HardwareViewState;
 use crate::shell::notifications::MessageSource;
 use crate::shell::state::StudioProjectState;
 
@@ -72,12 +72,12 @@ impl RobotFleet for [RobotSummary] {
 #[component]
 pub(crate) fn RolloutWorkbench(
     project: StudioProjectState,
-    telemetry: HardwareTelemetry,
+    telemetry: HardwareViewState,
     controller: super::state::RolloutController,
     training_history: crate::activities::training::history::TrainingHistory,
 ) -> Element {
     let mut pending_action = use_signal(|| None::<PendingRolloutAction>);
-    let snapshot = project.snapshot().read().to_owned();
+    let snapshot = telemetry.snapshot().read().to_owned();
     let training = training_history.snapshot().read().to_owned();
     let rollout = controller.snapshot().read().to_owned();
     let checkpoints = training.checkpoint_choices();
@@ -137,11 +137,18 @@ pub(crate) fn RolloutWorkbench(
         controller.duration_draft()
     };
     let duration_valid = duration_seconds.is_some();
-    let blocker = precondition_blocker.clone().or_else(|| {
-        (!duration_valid).then_some(format!(
-            "Set a whole-number duration from 1 to {MAX_ROLLOUT_DURATION_SECONDS} seconds."
-        ))
-    });
+    let load_error = controller.error();
+    let load_issue = load_error
+        .clone()
+        .or_else(|| (!controller.loaded()).then(|| "Loading rollout history…".to_owned()));
+    let blocker = load_issue
+        .clone()
+        .or(precondition_blocker.clone())
+        .or_else(|| {
+            (!duration_valid).then_some(format!(
+                "Set a whole-number duration from 1 to {MAX_ROLLOUT_DURATION_SECONDS} seconds."
+            ))
+        });
     let action_steps = selected.map_or(0, |choice| choice.policy.action_steps);
     let control_rate = selected.map_or(0.0, |choice| choice.policy.sample_hz);
     let validation_loss = selected
@@ -256,13 +263,28 @@ pub(crate) fn RolloutWorkbench(
 
             div { class: "rollout-action-area",
                 div {
-                    class: rollout.runtime_note_class(),
-                    role: "status",
+                    class: if load_error.is_some() {
+                        "rollout-runtime-note rollout-runtime-note-failed"
+                    } else {
+                        rollout.runtime_note_class()
+                    },
+                    role: if load_error.is_some() { "alert" } else { "status" },
                     span { class: "rollout-runtime-dot", "aria-hidden": "true" }
                     div {
                         div { class: "rollout-runtime-summary",
-                            strong { "{rollout.runtime_title(blocker.as_deref())}" }
-                            small { "{rollout.runtime_detail()}" }
+                            strong {
+                                if load_error.is_some() { "Rollout status unavailable" }
+                                else if !controller.loaded() { "Loading rollout" }
+                                else { "{rollout.runtime_title(blocker.as_deref())}" }
+                            }
+                            small { "{load_issue.clone().unwrap_or_else(|| rollout.runtime_detail())}" }
+                        }
+                        if load_error.is_some() {
+                            Action {
+                                purpose: ActionPurpose::Retry,
+                                onclick: move |_| controller.retry(),
+                                "Retry rollout status"
+                            }
                         }
                         if let Some(warning) = rollout.warning().as_ref() {
                             small { class: "rollout-runtime-warning", "{warning}" }
@@ -349,7 +371,7 @@ pub(crate) fn RolloutWorkbench(
                         }
                     }
                 }
-                if !active && let Some(reason) = blocker.as_ref() {
+                if !active && load_issue.is_none() && let Some(reason) = blocker.as_ref() {
                     p { class: "rollout-blocker", "{reason}" }
                 }
                 if rollout.phase() == RolloutPhase::Failed && let Some(reason) = rollout.message().as_ref() {

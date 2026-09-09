@@ -35,8 +35,8 @@ use crate::sync::MutexRecovery;
 use spiral_robotics_hardware::{
     HardwareHandle, HardwareState, ModeSelection, PolicyGoals, RobotTelemetry,
 };
+use spiral_robotics_storage::StorageManager;
 use spiral_robotics_storage::checkpoints::{CheckpointArtifact, CheckpointKey, CheckpointStore};
-use spiral_robotics_storage::{StorageManager, StudioPreferencesStore};
 
 const INPUT_STALE_AFTER: Duration = Duration::from_millis(350);
 const INITIAL_CAMERA_TIMEOUT: Duration = Duration::from_secs(5);
@@ -518,6 +518,7 @@ impl RolloutPersistence {
 }
 
 struct RolloutLifecycle {
+    loaded: tokio::sync::OnceCell<()>,
     state: watch::Sender<RolloutSnapshot>,
     coordinator: Mutex<RolloutCoordinator>,
     active: Mutex<Option<ActiveRollout>>,
@@ -534,7 +535,7 @@ impl RolloutLifecycle {
 pub(crate) struct RolloutManager {
     storage: Arc<StorageManager>,
     hardware: RolloutHardwareResources,
-    preferences: Arc<StudioPreferencesStore>,
+    preferences: Arc<crate::data::preferences::RuntimePreferences>,
     clock: Arc<dyn Clock>,
     lifecycle: RolloutLifecycle,
 }
@@ -543,10 +544,10 @@ impl RolloutManager {
     pub(crate) fn new(
         storage: Arc<StorageManager>,
         hardware: RolloutHardwareResources,
-        preferences: Arc<StudioPreferencesStore>,
+        preferences: Arc<crate::data::preferences::RuntimePreferences>,
     ) -> Arc<Self> {
-        // Persisted state is hydrated after the listener starts. Constructing
-        // the manager must not put Spiral I/O on the server's critical path.
+        // Persisted state loads on the first Rollout read or start command.
+        // The project owns execution even while its views are unmounted.
         let initial = RolloutSnapshot::default();
         let (persistence, changes) = watch::channel(initial.clone());
         let persistence_worker = RolloutPersistence::new(changes);
@@ -562,6 +563,7 @@ impl RolloutManager {
             preferences,
             clock: Arc::new(SystemClock),
             lifecycle: RolloutLifecycle {
+                loaded: tokio::sync::OnceCell::new(),
                 state,
                 coordinator: Mutex::new(RolloutCoordinator::new(events)),
                 active: Mutex::new(None),
@@ -571,7 +573,7 @@ impl RolloutManager {
         })
     }
 
-    pub(crate) fn activate(&self) {
+    fn activate(&self) {
         let storage = self.storage.clone();
         self.lifecycle.persistence.start(move |snapshot| {
             let storage = storage.clone();
@@ -587,28 +589,31 @@ impl RolloutManager {
         self.lifecycle.active.recover_lock().is_some() || self.snapshot().phase().active()
     }
 
-    pub(crate) async fn prepare_from_storage(&self) -> Result<(), String> {
-        if self.lifecycle.active.recover_lock().is_some() {
-            return Err("cannot reload rollout history while a session is active".to_owned());
-        }
-        let snapshot = self
-            .storage
-            .load_rollout_session()
-            .await?
-            .unwrap_or_default();
-        // Install under the same lock `start()` holds for admission, so a
-        // session admitted while storage was being read is never overwritten
-        // by this older snapshot.
-        let active = self.lifecycle.active.recover_lock();
-        if active.is_some() {
-            return Err(
-                "a rollout session started while reloading; keeping the live session".to_owned(),
-            );
-        }
+    /// Initialization is shared by reads and starts. A failed or cancelled read
+    /// leaves the cell empty; a later request may load it again. No command can
+    /// start execution until the previous session has been restored.
+    async fn ensure_loaded(&self) -> Result<(), String> {
         self.lifecycle
-            .state
-            .send_replace(snapshot.restored_after_restart());
-        Ok(())
+            .loaded
+            .get_or_try_init(|| async {
+                let snapshot = self
+                    .storage
+                    .load_rollout_session()
+                    .await?
+                    .unwrap_or_default();
+                self.lifecycle
+                    .state
+                    .send_replace(snapshot.restored_after_restart());
+                self.activate();
+                Ok::<(), String>(())
+            })
+            .await
+            .map(|_| ())
+    }
+
+    pub(crate) async fn load_snapshot(&self) -> Result<RolloutSnapshot, String> {
+        self.ensure_loaded().await?;
+        Ok(self.snapshot())
     }
 
     pub(crate) fn snapshot(&self) -> RolloutSnapshot {
@@ -619,6 +624,8 @@ impl RolloutManager {
         self: &Arc<Self>,
         config: RolloutConfig,
     ) -> Result<RolloutSnapshot, String> {
+        self.ensure_loaded().await?;
+        self.preferences.load().await?;
         let mut active = self.lifecycle.active.recover_lock();
         let (session, created_ms) = self
             .lifecycle
@@ -732,7 +739,8 @@ impl RolloutManager {
         let model_artifact =
             spiral_robotics_inference::ModelArtifact::from_bytes(config_json, payload)
                 .map_err(|error| format!("checkpoint identity is invalid: {error}"))?;
-        let policy_loader = HttpPolicyLoader::new(self.preferences.get().training().endpoint());
+        let policy_loader =
+            HttpPolicyLoader::new(self.preferences.load().await?.training().endpoint());
         let policy = tokio::task::spawn_blocking(move || policy_loader.load(model_artifact))
             .await
             .map_err(|error| format!("policy loader stopped unexpectedly: {error}"))?

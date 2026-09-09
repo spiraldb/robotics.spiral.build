@@ -4,7 +4,6 @@ pub(crate) mod bootstrap;
 pub(crate) mod context;
 pub(crate) mod http;
 pub(crate) mod queries;
-pub(crate) mod setup;
 pub(crate) mod tasks;
 
 use std::collections::BTreeSet;
@@ -20,7 +19,6 @@ use spiral_robotics_hardware::{
 use spiral_robotics_storage::episodes::EpisodeStore;
 use spiral_robotics_storage::{
     BackendStateStore, ProjectStore, SpiralConnectionSettings, SpiralCredentials, StorageManager,
-    StudioPreferencesStore,
 };
 use tokio::sync::{Mutex, watch};
 
@@ -78,10 +76,6 @@ impl ProjectReadiness {
         ));
     }
 
-    pub(crate) fn degraded(&self, catalog_available: bool, detail: impl Into<String>) {
-        self.failed(catalog_available, &OperationError::External(detail.into()));
-    }
-
     pub(crate) fn failed(&self, catalog_available: bool, error: &OperationError) {
         self.current.send_replace(
             BackendReadiness::new(
@@ -115,7 +109,7 @@ pub(crate) struct ProjectSession {
     info: ProjectSessionInfo,
     catalog: ProjectCatalog,
     activities: ProjectActivities,
-    preferences: Arc<StudioPreferencesStore>,
+    preferences: Arc<crate::data::preferences::RuntimePreferences>,
     recording: Arc<RecordingSessionManager>,
     readiness: ProjectReadiness,
 }
@@ -184,11 +178,21 @@ impl ProjectSessionFactory {
             ProjectStore::new(connection, self.table_prefix.clone(), database)
                 .map_err(OperationError::External)?,
         );
+        Ok(self.create_session(info, store))
+    }
+
+    fn create_session(
+        &self,
+        info: ProjectSessionInfo,
+        store: Arc<ProjectStore>,
+    ) -> Arc<ProjectSession> {
         let workspace = Arc::new(RobotWorkspace::new(store.clone()));
         let episodes = Arc::new(EpisodeStore::new(store.clone()));
         let storage = Arc::new(StorageManager::new(store));
         let lease = Arc::new(CatalogMutationLease::default());
-        let preferences = Arc::new(StudioPreferencesStore::new(Default::default()));
+        let preferences = Arc::new(crate::data::preferences::RuntimePreferences::new(
+            storage.clone(),
+        ));
         let training = Arc::new(TrainingManager::new(
             storage.clone(),
             Arc::new(ConfiguredHttpTrainingBackend::new(preferences.clone())),
@@ -210,7 +214,7 @@ impl ProjectSessionFactory {
             preferences.clone(),
         );
         let recording = Arc::new(RecordingSessionManager::new(lease.clone()));
-        Ok(Arc::new(ProjectSession {
+        Arc::new(ProjectSession {
             info,
             catalog: ProjectCatalog {
                 workspace,
@@ -227,21 +231,26 @@ impl ProjectSessionFactory {
             preferences,
             recording,
             readiness: ProjectReadiness::new(),
-        }))
+        })
     }
 
     async fn prepare(
         &self,
         connection: SpiralConnectionSettings,
+        preparation: ProjectPreparation,
     ) -> Result<Arc<ProjectSession>, OperationError> {
         let candidate = self.create(connection)?;
-        let (available, detail) = candidate.storage().test_spiral().await;
-        if !available {
-            return Err(OperationError::External(detail));
-        }
-        candidate.load().await?;
+        candidate.prepare(preparation).await?;
         Ok(candidate)
     }
+}
+
+/// Resuming a saved destination leaves feature validation to its first use.
+/// Explicit selection and connection tests provision and validate the project.
+#[derive(Clone, Copy)]
+enum ProjectPreparation {
+    Resume,
+    Validate,
 }
 
 impl ProjectSession {
@@ -260,7 +269,7 @@ impl ProjectSession {
     pub(crate) fn catalog_lease(&self) -> &Arc<CatalogMutationLease> {
         &self.catalog.lease
     }
-    pub(crate) fn preferences(&self) -> &Arc<StudioPreferencesStore> {
+    pub(crate) fn preferences(&self) -> &Arc<crate::data::preferences::RuntimePreferences> {
         &self.preferences
     }
     pub(crate) fn recording(&self) -> &Arc<RecordingSessionManager> {
@@ -282,57 +291,50 @@ impl ProjectSession {
         &self.activities.assistant
     }
 
-    pub(crate) fn settings(&self) -> DataSettings {
-        let connection = self.storage().connection_settings();
-        let preferences = self.preferences.get();
-        DataSettings::new(
-            SpiralSettings::new(
-                connection.endpoint(),
-                connection.spfs_endpoint(),
-                connection.project_id().unwrap_or_default(),
-            )
-            .with_client(
-                connection
-                    .credentials()
-                    .map(SpiralCredentials::client_id)
-                    .unwrap_or_default(),
-                connection.credentials().is_some(),
-            )
-            .with_table_prefix(self.storage().table_prefix()),
-            TrainingRuntimeSettings::new(preferences.training().endpoint()),
-            VideoSettings::new(preferences.video().enabled()),
-        )
-    }
-
-    async fn load(&self) -> Result<(), OperationError> {
+    pub(crate) async fn settings(&self) -> Result<DataSettings, OperationError> {
         let preferences = self
-            .storage()
-            .load_studio_preferences()
+            .preferences
+            .load()
             .await
             .map_err(OperationError::External)?;
-        self.preferences.replace(preferences);
-        // Preparation only reads and installs private in-memory state. Jobs and
-        // hardware effects begin after this entire session has been published.
-        tokio::try_join!(
-            async {
-                self.rollout()
-                    .prepare_from_storage()
-                    .await
-                    .map_err(OperationError::External)
-            },
-            async {
-                self.workspace()
-                    .try_list()
-                    .await
-                    .map_err(|error| OperationError::External(error.to_string()))
-            },
-        )?;
-        self.readiness.ready();
-        Ok(())
+        Ok(DataSettings::new(
+            self.connection_settings(),
+            TrainingRuntimeSettings::new(preferences.training().endpoint()),
+            VideoSettings::new(preferences.video().enabled()),
+        ))
     }
 
-    fn activate(self: &Arc<Self>, _activity: ProjectActivity) {
-        self.rollout().activate();
+    pub(crate) fn connection_settings(&self) -> SpiralSettings {
+        let connection = self.storage().connection_settings();
+        SpiralSettings::new(
+            connection.endpoint(),
+            connection.spfs_endpoint(),
+            connection.project_id().unwrap_or_default(),
+        )
+        .with_client(
+            connection
+                .credentials()
+                .map(SpiralCredentials::client_id)
+                .unwrap_or_default(),
+            connection.credentials().is_some(),
+        )
+        .with_table_prefix(self.storage().table_prefix())
+    }
+
+    async fn prepare(&self, preparation: ProjectPreparation) -> Result<(), OperationError> {
+        if !self.storage().is_configured() {
+            return Err(OperationError::invalid_input(
+                "Choose a Spiral project in Settings before loading it.",
+            ));
+        }
+        if matches!(preparation, ProjectPreparation::Validate) {
+            let (available, detail) = self.storage().test_spiral().await;
+            if !available {
+                return Err(OperationError::External(detail));
+            }
+        }
+        self.readiness.ready();
+        Ok(())
     }
 
     fn busy(&self) -> bool {
@@ -511,10 +513,37 @@ impl ProjectCoordinator {
     fn publish(&self, candidate: Arc<ProjectSession>, transition: PendingProjectChange) {
         self.hardware().clear_recording_signals();
         let previous = self.active.send_replace(candidate.clone());
-        candidate.activate(transition.into_activity());
+        let _activity = transition.into_activity();
         tokio::spawn(async move {
             previous.shutdown().await;
         });
+    }
+
+    pub(crate) async fn update_connection(
+        &self,
+        origin: &ProjectSession,
+        update: crate::data::settings::ProjectConnectionUpdate,
+    ) -> Result<(), OperationError> {
+        let _serialization = self.transition.lock().await;
+        self.resolve(origin.info().id())?;
+        let connection = update.resolve(&origin.storage().connection_settings())?;
+        let transition = self.begin_change(origin, "Checking the project connection")?;
+        self.require_idle(origin, ProjectChangeKind::Destination)
+            .await?;
+        origin
+            .rollout()
+            .flush_persistence()
+            .await
+            .map_err(OperationError::External)?;
+        let candidate = self
+            .factory
+            .prepare(connection.clone(), ProjectPreparation::Validate)
+            .await?;
+        self.backend_state
+            .save_connection(&connection)
+            .map_err(OperationError::Internal)?;
+        self.publish(candidate, transition);
+        Ok(())
     }
 
     pub(crate) async fn update_settings(
@@ -526,39 +555,23 @@ impl ProjectCoordinator {
         let _serialization = self.transition.lock().await;
         self.resolve(origin.info().id())?;
         let previous = origin.storage().connection_settings();
-        let credentials = match command.client_secret() {
-            Some("") => None,
-            Some(secret) => Some(SpiralCredentials::new(
-                command.client_id().to_owned(),
-                secret.to_owned(),
-            )),
-            None if command.client_id().is_empty() => None,
-            None => Some(
-                previous
-                    .credentials()
-                    .filter(|credentials| credentials.client_id() == command.client_id())
-                    .cloned()
-                    .ok_or_else(|| {
-                        OperationError::invalid_input(
-                            "Enter the client secret when changing the Spiral client ID",
-                        )
-                    })?,
-            ),
-        };
-        let connection = SpiralConnectionSettings::new(
-            command.spiral_endpoint().to_owned(),
-            command.spiral_spfs_endpoint().to_owned(),
+        let connection =
+            crate::data::settings::ProjectConnectionUpdate::from(&command).resolve(&previous)?;
+        let preferences = spiral_robotics_storage::StoredStudioPreferences::from_settings(
+            command.training_endpoint(),
+            command.video_enabled(),
         )
-        .and_then(|settings| settings.with_project(command.project_id()))
-        .map(|settings| settings.with_credentials(credentials))
         .map_err(OperationError::InvalidInput)?;
-        let preferences = origin
-            .preferences()
-            .stage_update(command.training_endpoint(), command.video_enabled())
-            .map_err(OperationError::InvalidInput)?;
         let replace = connection != previous
-            || origin.preferences().get().training().endpoint() != command.training_endpoint()
-            || !origin.readiness().current().catalog_available();
+            || !origin.readiness().current().catalog_available()
+            || origin
+                .preferences()
+                .load()
+                .await
+                .map_err(OperationError::External)?
+                .training()
+                .endpoint()
+                != command.training_endpoint();
         if !replace {
             let _activity = self.admit(origin.info().id())?;
             origin
@@ -566,8 +579,8 @@ impl ProjectCoordinator {
                 .save_studio_preferences(&preferences)
                 .await
                 .map_err(OperationError::External)?;
-            origin.preferences().replace(preferences);
-            return Ok(DataSettingsUpdate::new(origin.settings(), false));
+            origin.preferences().replace(preferences).await;
+            return Ok(DataSettingsUpdate::new(origin.settings().await?, false));
         }
         let transition =
             self.begin_change(origin, "Connecting to SpiralDB and loading the project")?;
@@ -587,25 +600,48 @@ impl ProjectCoordinator {
                 .await
                 .map_err(OperationError::External)?;
         }
-        let candidate = self.factory.prepare(connection.clone()).await?;
+        let candidate = self
+            .factory
+            .prepare(connection.clone(), ProjectPreparation::Validate)
+            .await?;
         candidate
             .storage()
             .save_studio_preferences(&preferences)
             .await
             .map_err(OperationError::External)?;
-        candidate.preferences().replace(preferences);
+        candidate.preferences().replace(preferences).await;
         candidate.training().refresh_readiness().await;
         if connection != previous {
             self.backend_state
                 .save_connection(&connection)
                 .map_err(OperationError::Internal)?;
         }
-        let result = candidate.settings();
+        let result = candidate.settings().await?;
         self.publish(candidate, transition);
         Ok(DataSettingsUpdate::new(result, true))
     }
 
+    pub(crate) async fn resume(&self, origin: &ProjectSession) -> Result<(), OperationError> {
+        // A CLI/environment override selecting another destination is an
+        // explicit project selection, even though it happens during startup.
+        let preparation =
+            if self.backend_state.project_id().as_deref() == Some(origin.info().project_id()) {
+                ProjectPreparation::Resume
+            } else {
+                ProjectPreparation::Validate
+            };
+        self.reload(origin, preparation).await
+    }
+
     pub(crate) async fn recover(&self, origin: &ProjectSession) -> Result<(), OperationError> {
+        self.reload(origin, ProjectPreparation::Validate).await
+    }
+
+    async fn reload(
+        &self,
+        origin: &ProjectSession,
+        preparation: ProjectPreparation,
+    ) -> Result<(), OperationError> {
         let _serialization = self.transition.lock().await;
         self.resolve(origin.info().id())?;
         let transition =
@@ -618,7 +654,7 @@ impl ProjectCoordinator {
             .map_err(OperationError::External)?;
         let candidate = self
             .factory
-            .prepare(origin.storage().connection_settings())
+            .prepare(origin.storage().connection_settings(), preparation)
             .await?;
         self.publish(candidate, transition);
         Ok(())
@@ -643,24 +679,12 @@ impl ProjectCoordinator {
         let candidate = self
             .factory
             .create(origin.storage().connection_settings())?;
-        // Construct the empty fallback before committing: after commit, failure
-        // to load must invalidate the old scope even if no state can be shown.
-        let unavailable = self
-            .factory
-            .create(origin.storage().connection_settings())?;
         let summary = candidate
             .storage()
             .import_project_bundle(document)
             .await
             .map_err(OperationError::External)?;
-        if let Err(error) = candidate.load().await {
-            let message = format!(
-                "The project import committed, but the imported state could not be loaded: {error}. Test the connection to retry loading."
-            );
-            unavailable.readiness().degraded(false, message.clone());
-            self.publish(unavailable, transition);
-            return Err(OperationError::External(message));
-        }
+        candidate.readiness().ready();
         self.publish(candidate, transition);
         Ok(summary)
     }
@@ -802,12 +826,13 @@ pub(crate) mod tests {
                 "private-secret".to_owned(),
             )));
         let session = fixture.projects.factory.create(connection).unwrap();
-        let preferences = session
-            .preferences()
-            .stage_update("http://127.0.0.1:5050", false)
-            .unwrap();
-        session.preferences().replace(preferences);
-        let settings = session.settings();
+        let preferences = spiral_robotics_storage::StoredStudioPreferences::from_settings(
+            "http://127.0.0.1:5050",
+            false,
+        )
+        .unwrap();
+        session.preferences().replace(preferences).await;
+        let settings = session.settings().await.unwrap();
         assert_eq!(settings.spiral().project_id(), "configured_project");
         assert_eq!(settings.spiral().endpoint(), "https://api.spiraldb.dev");
         assert_eq!(
@@ -831,9 +856,10 @@ pub(crate) mod tests {
     async fn failed_preparation_keeps_the_published_session_and_releases_admission() {
         let fixture = ProjectFixture::new();
         let original = fixture.projects.active();
-        original
-            .readiness()
-            .degraded(true, "History recovery needs attention");
+        original.readiness().failed(
+            true,
+            &OperationError::External("History recovery needs attention".to_owned()),
+        );
         let previous_readiness = original.readiness().current();
         let announcements = fixture.projects.subscribe();
         // No configured project: the real storage preparation fails locally,
@@ -953,3 +979,6 @@ pub(crate) mod tests {
         assert_eq!(hardware.admission(), DestinationChangeAdmission::Busy);
     }
 }
+
+#[cfg(test)]
+mod loading_tests;

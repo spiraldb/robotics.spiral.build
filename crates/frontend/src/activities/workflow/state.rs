@@ -925,7 +925,8 @@ impl WorkflowController {
     }
 
     pub(crate) fn create_agent_conversation(mut self, studio: StudioProjectState) {
-        let catalog_available = studio.snapshot().read().readiness().catalog_available();
+        let catalog_available =
+            crate::shell::project::ProjectSessionSignals::current().catalog_available();
         if self
             .new_agent_conversation_disabled_reason((studio.live())(), catalog_available)
             .is_some()
@@ -963,7 +964,8 @@ impl WorkflowController {
         studio: StudioProjectState,
     ) {
         let current = self.assistant.agent.peek().to_owned();
-        let catalog_available = studio.snapshot().read().readiness().catalog_available();
+        let catalog_available =
+            crate::shell::project::ProjectSessionSignals::current().catalog_available();
         if conversation_id == current.active_conversation_id()
             || self
                 .agent_conversation_disabled_reason((studio.live())(), catalog_available)

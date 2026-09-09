@@ -22,7 +22,10 @@ fn bootstrap_lifecycle_controls_catalog_admission() {
     assert!(state.current().catalog_available());
     assert!(state.catalog_unavailable().is_none());
 
-    state.degraded(false, "authentication expired");
+    state.failed(
+        false,
+        &crate::OperationError::External("authentication expired".to_owned()),
+    );
     assert_eq!(state.current().state(), BackendReadinessState::Degraded);
     assert_eq!(
         state

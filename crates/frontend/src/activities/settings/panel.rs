@@ -9,7 +9,7 @@ use dioxus::prelude::*;
 use spiral_robotics_common::settings::{DataSettings, SpiralConnectionUpdate};
 
 use crate::activities::settings::robots::RobotPanel;
-use crate::robots::{HardwareTelemetry, RobotSelection};
+use crate::robots::{HardwareViewState, RobotSelection};
 use crate::shell::notifications::MessageSource;
 use crate::shell::{project::ProjectSessionSignals, state::StudioProjectState};
 use crate::tasks::SingleFlight;
@@ -81,14 +81,19 @@ impl SettingsPanelState {
 #[component]
 pub(crate) fn SettingsPanel(
     project: StudioProjectState,
-    telemetry: HardwareTelemetry,
+    telemetry: HardwareViewState,
     selection: RobotSelection,
 ) -> Element {
-    let initial = project.loaded_settings();
-    let load_error = project.settings_result().and_then(Result::err);
+    let settings = super::resource::SettingsResource::use_resource(telemetry.is_active_signal());
+    let initial = settings.loaded();
+    let load_error = settings.error();
     let initial_value = initial.clone().unwrap_or_default();
     let settings_loaded = initial.is_some();
-    let initial_section = if initial_value.spiral().project_id().trim().is_empty() {
+    let preferences_loaded = settings.preferences_loaded();
+    let initial_section = if ProjectSessionSignals::current()
+        .mounted_session()
+        .is_none_or(|session| session.project_id().trim().is_empty())
+    {
         SettingsSection::Spiral
     } else {
         SettingsSection::Robots
@@ -117,7 +122,7 @@ pub(crate) fn SettingsPanel(
             },
     } = SettingsPanelState::use_state(initial_value, initial_section);
     let on_saved = move || {
-        project.refresh_settings();
+        settings.refresh();
     };
 
     use_effect(move || {
@@ -171,17 +176,25 @@ pub(crate) fn SettingsPanel(
         let training = current().training().to_owned();
         let video = current().video().to_owned();
         crate::client::project::ProjectClient::current().spawn(async move {
-            match SettingsClient::current()
-                .update_data_settings(spiral_robotics_common::settings::SettingsUpdate::new(
-                    connection, training, video,
-                ))
-                .await
-            {
+            let result = if preferences_loaded {
+                SettingsClient::current()
+                    .update_data_settings(spiral_robotics_common::settings::SettingsUpdate::new(
+                        connection, training, video,
+                    ))
+                    .await
+                    .map(|_| ())
+            } else {
+                SettingsClient::current()
+                    .update_connection(connection)
+                    .await
+            };
+            match result {
                 Ok(_) => {
                     saved.set(Some(submitted));
                     client_secret.set(String::new());
                     on_saved();
-                    if let Some(connection_test) = connection_test.filter(|_| !destination_changed)
+                    if let Some(connection_test) =
+                        connection_test.filter(|_| !destination_changed && preferences_loaded)
                     {
                         testing.set(true);
                         test_result.set(None);
@@ -255,8 +268,11 @@ pub(crate) fn SettingsPanel(
                     if section() == SettingsSection::Robots {
                         ProviderHeading { title: "Robot setup", description: "Configure ports, camera assignments, and calibration for each arm." }
                         div { class: "robot-settings-panel", RobotPanel { project, telemetry, selection } }
-                    } else if let Some(error) = load_error.as_ref() {
-                        div { class: "settings-loading data-error", "{error}" }
+                    } else if section() != SettingsSection::Spiral && !preferences_loaded {
+                        div { class: "settings-loading", role: "status",
+                            if let Some(error) = load_error.as_ref() { span { "{error}" } } else { span { "Loading runtime preferences…" } }
+                            Action { purpose: ActionPurpose::Retry, variant: ActionVariant::Link, onclick: move |_| settings.refresh(), "Retry preferences" }
+                        }
                     } else if !settings_loaded {
                         div { class: "settings-loading", "Loading data settings…" }
                     } else {
@@ -264,6 +280,9 @@ pub(crate) fn SettingsPanel(
                             SettingsSection::Robots => rsx! {},
                             SettingsSection::Spiral => rsx! {
                                 ProviderHeading { title: "SpiralDB", description: "The one persistent store for robots, episodes, video, runs, and Studio preferences." }
+                                if !preferences_loaded {
+                                    p { class: "settings-help", role: "status", if load_error.is_some() { "Runtime preferences are unavailable. Saving this connection preserves them in the project." } else { "Loading runtime preferences. Connection changes preserve them in the project." } }
+                                }
                                 div { class: "settings-field-row",
                                     SettingsField {
                                         label: "API endpoint",
@@ -575,8 +594,8 @@ pub(crate) fn SettingsWorkspace(is_active: ReadSignal<bool>) -> Element {
     );
     let project = StudioProjectState::current();
     let telemetry =
-        HardwareTelemetry::use_telemetry(project, is_active, ProjectSessionSignals::current());
-    let selection = RobotSelection::use_selection(project.snapshot());
+        HardwareViewState::use_state(project, is_active, ProjectSessionSignals::current());
+    let selection = RobotSelection::use_selection(telemetry.snapshot());
     rsx! {
         crate::shell::frame::WorkspaceFrame { workspace, status: crate::shell::frame::WorkspaceStatus::Hardware(telemetry),
             SettingsPanel { project, telemetry, selection }

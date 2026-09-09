@@ -25,6 +25,9 @@ impl ProjectSessionSignals {
     pub(crate) fn client(self, session: ProjectSessionInfo) -> ProjectClient {
         ProjectClient::new(session, self.state.into(), self.refresh)
     }
+    pub(crate) fn readiness(self) -> spiral_robotics_common::status::BackendReadiness {
+        self.state.read().readiness()
+    }
     pub(crate) fn connected(self) -> bool {
         self.state.read().connected()
     }

@@ -92,7 +92,9 @@ async fn every_documented_scoped_endpoint_is_registered_and_rejects_missing_or_s
             }
         }
     }
-    assert_eq!(count, 55);
+    assert_eq!(count, 58);
+    assert!(contract["paths"]["/robots/setup"]["get"].is_object());
+    assert!(contract["paths"].get("/project/setup").is_none());
     fixture.shutdown().await;
 }
 
@@ -111,7 +113,7 @@ async fn snapshots_are_plain_gets_and_old_sessions_cannot_read_the_replacement()
     assert_eq!(project["session"]["id"], fixture.session());
     let session = fixture.session();
     for path in [
-        "/project/telemetry",
+        "/robots/telemetry",
         "/recording/signals?generation=0&offset=0",
         "/training",
         "/rollout",
@@ -132,7 +134,7 @@ async fn snapshots_are_plain_gets_and_old_sessions_cannot_read_the_replacement()
     let (status, failure) = fixture
         .send(
             Request::builder()
-                .uri("/project/telemetry")
+                .uri("/robots/telemetry")
                 .header("X-Project-Session", &session)
                 .body(Body::empty())
                 .unwrap(),
@@ -220,7 +222,7 @@ async fn malformed_requests_and_unknown_routes_have_structured_failures() {
         ("GET", "/unknown", "", None, StatusCode::NOT_FOUND),
         (
             "POST",
-            "/project/telemetry",
+            "/robots/telemetry",
             "",
             None,
             StatusCode::METHOD_NOT_ALLOWED,
@@ -317,7 +319,7 @@ async fn openapi_is_available_without_a_ready_project_and_all_references_resolve
         json!(["dataset_id"])
     );
     assert_eq!(
-        contract["paths"]["/project/telemetry"]["get"]["requestBody"],
+        contract["paths"]["/robots/telemetry"]["get"]["requestBody"],
         Value::Null
     );
     if let Ok(path) = std::env::var("SPIRAL_HTTP_SCHEMA_OUTPUT") {

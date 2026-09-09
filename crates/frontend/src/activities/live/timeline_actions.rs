@@ -278,8 +278,8 @@ impl LiveSession {
             )
         } else if !self.telemetry().controls_available() {
             TimelineGate::blocked("Reconnect telemetry before synchronizing a robot.")
-        } else if self.project().mode_active()
-            && !matches!(self.project().mode(), ModeSelection::Replay { .. })
+        } else if self.telemetry().mode_active()
+            && !matches!(self.telemetry().mode(), ModeSelection::Replay { .. })
         {
             TimelineGate::blocked("Stop the active control mode before synchronizing a robot.")
         } else if self.timeline_seek_context(subject).is_none() {
@@ -296,7 +296,7 @@ impl LiveSession {
         subject: &TimelineSubject,
     ) -> Option<(String, String, Option<String>)> {
         let follower = self
-            .project()
+            .telemetry()
             .connected_robots()
             .into_iter()
             .find(|robot| {

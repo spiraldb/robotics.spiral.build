@@ -20,6 +20,3 @@ pub fn App() -> Element {
         StudioRouter {}
     }
 }
-
-mod client;
-pub(crate) use client::StudioClient;

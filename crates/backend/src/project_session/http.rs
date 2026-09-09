@@ -7,8 +7,6 @@ use crate::project_session::context::ProjectContext;
 use axum::Json;
 use spiral_robotics_common::datasets::ProjectImportSummary;
 use spiral_robotics_common::project::ProjectStatus;
-use spiral_robotics_common::robots::TelemetryFrame;
-use spiral_robotics_common::status::StudioSnapshot;
 
 pub(crate) struct ProjectEndpoints;
 
@@ -16,25 +14,11 @@ impl ProjectEndpoints {
     pub(crate) fn register(routes: &mut ApiRoutes) {
         routes.post("/project/import", Self::import_project);
         routes.get("/project/status", Self::project_status);
-        routes.get("/project/setup", Self::fetch_setup);
-        routes.get("/project/telemetry", Self::fetch_telemetry);
     }
     async fn project_status(
         axum::extract::State(state): axum::extract::State<ProjectContext>,
     ) -> Result<Json<ProjectStatus>, HttpFailure> {
         let result = crate::project_session::queries::ProjectQueries::from(state).status();
-        Ok(Json(result))
-    }
-    async fn fetch_setup(
-        ScopedProject(commands): ScopedProject<crate::project_session::queries::ProjectQueries>,
-    ) -> Result<Json<StudioSnapshot>, HttpFailure> {
-        let result = commands.setup().await?;
-        Ok(Json(result))
-    }
-    async fn fetch_telemetry(
-        ScopedProject(commands): ScopedProject<crate::project_session::queries::ProjectQueries>,
-    ) -> Result<Json<TelemetryFrame>, HttpFailure> {
-        let result = commands.telemetry()?;
         Ok(Json(result))
     }
 }

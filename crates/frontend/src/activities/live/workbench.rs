@@ -14,7 +14,7 @@ use crate::activities::data::dataset_catalog::DatasetChoices;
 use crate::activities::live::actions::LiveAction;
 use crate::activities::live::control::JointPanel;
 use crate::robots::Selection;
-use crate::robots::{HardwareTelemetry, RobotSelection};
+use crate::robots::{HardwareViewState, RobotSelection};
 use crate::shell::state::StudioProjectState;
 use spiral_robotics_common::recording::RecordingProgress;
 
@@ -22,12 +22,12 @@ use spiral_robotics_common::recording::RecordingProgress;
 #[component]
 pub(crate) fn LiveWorkbench(
     project: StudioProjectState,
-    hardware: HardwareTelemetry,
+    hardware: HardwareViewState,
     selection: RobotSelection,
     datasets: DatasetChoices,
     on_action: EventHandler<LiveAction>,
 ) -> Element {
-    let robots = project.snapshot().read().robots().to_owned();
+    let robots = hardware.snapshot().read().robots().to_owned();
 
     rsx! {
         div { class: "studio-workbench-scroll live-workbench",
@@ -181,18 +181,18 @@ fn RobotRoster(
 #[component]
 fn ControlSection(
     project: StudioProjectState,
-    hardware: HardwareTelemetry,
+    hardware: HardwareViewState,
     selection: RobotSelection,
     on_action: EventHandler<LiveAction>,
 ) -> Element {
-    let focused = selection.focused(project.snapshot().read().robots());
+    let focused = selection.focused(hardware.snapshot().read().robots());
     let telemetry = focused
         .as_ref()
         .and_then(|robot| hardware.robot_telemetry(robot.id()));
     let holding = telemetry.as_ref().is_some_and(|robot| robot.torque());
     let teleop =
-        matches!(project.mode(), ModeSelection::Teleoperate { .. }) && project.mode_active();
-    let pair = project.snapshot().read().default_teleoperation_pair();
+        matches!(hardware.mode(), ModeSelection::Teleoperate { .. }) && hardware.mode_active();
+    let pair = hardware.snapshot().read().default_teleoperation_pair();
     let mut confirm_release = use_signal(|| false);
 
     rsx! {

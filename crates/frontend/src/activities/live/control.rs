@@ -1,6 +1,6 @@
 //! Joint controls for the arm selected on the Live screen.
 
-use crate::activities::settings::robots::RobotClient;
+use crate::robots::RobotClient;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -15,7 +15,7 @@ use spiral_robotics_common::robots::{
 use spiral_robotics_viewport::{self as arm, ArmPose};
 
 use crate::robots::Selection;
-use crate::robots::{HardwareTelemetry, RobotSelection};
+use crate::robots::{HardwareViewState, RobotSelection};
 use crate::shell::state::StudioProjectState;
 
 #[derive(Default)]
@@ -39,11 +39,11 @@ impl PendingGoals {
 pub(crate) fn JointPanel(
     robot_selection: RobotSelection,
     project: StudioProjectState,
-    hardware: HardwareTelemetry,
+    hardware: HardwareViewState,
     on_select: EventHandler<Option<Selection>>,
     on_point: EventHandler<Option<Selection>>,
 ) -> Element {
-    let Some(robot) = robot_selection.focused(project.snapshot().read().robots()) else {
+    let Some(robot) = robot_selection.focused(hardware.snapshot().read().robots()) else {
         return rsx! {
             p { class: "px-2 py-1 text-[11px] text-ink-faint", "Add an arm to see its joints." }
         };
@@ -443,7 +443,7 @@ impl MeasuredJointTelemetry for [JointTelemetry] {
 #[component]
 fn JointControls(
     project: StudioProjectState,
-    hardware: HardwareTelemetry,
+    hardware: HardwareViewState,
     robot: RobotSummary,
     behavior: JointInteraction,
 ) -> Element {
@@ -454,7 +454,7 @@ fn JointControls(
         on_point,
     } = behavior;
     let torque = telemetry.as_ref().is_some_and(|robot| robot.torque());
-    let drivable = project.is_manual_target(robot.id()) && torque && robot.calibrated();
+    let drivable = hardware.is_manual_target(robot.id()) && torque && robot.calibrated();
     // While a slider is being dragged the arm is still catching up, so the
     // commanded value is shown until the measurement agrees with it. That echo
     // is only meaningful for as long as this arm is actually being driven, so
@@ -479,7 +479,7 @@ fn JointControls(
                     gloo_timers::future::TimeoutFuture::new(32).await;
                     let may_drive = hardware.is_active()
                         && hardware.controls_available()
-                        && project.is_manual_target(&command_robot)
+                        && hardware.is_manual_target(&command_robot)
                         && hardware
                             .robot_telemetry(&command_robot)
                             .is_some_and(|robot| robot.torque());
@@ -521,7 +521,7 @@ fn JointControls(
                 .robots()
                 .iter()
                 .any(|robot| robot.id() == watched && robot.torque())
-            && project.is_manual_target(&watched);
+            && hardware.is_manual_target(&watched);
         // `peek` deliberately: an effect that subscribes to the signal it
         // writes retriggers itself, and this one only needs to observe
         // telemetry.

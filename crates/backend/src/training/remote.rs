@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-use spiral_robotics_storage::StudioPreferencesStore;
 use spiral_robotics_training::{
     TrainingBackend, TrainingBackendError, TrainingBackendInfo, TrainingJobCursor,
     TrainingJobRequest, TrainingJobSnapshot,
@@ -13,29 +12,35 @@ use crate::adapters::compute_runtime::HttpTrainingBackend;
 /// Resolve the selected endpoint for every probe and new session. Existing
 /// sessions retain their selected HTTP endpoint when Settings changes.
 pub(crate) struct ConfiguredHttpTrainingBackend {
-    preferences: Arc<StudioPreferencesStore>,
+    preferences: Arc<crate::data::preferences::RuntimePreferences>,
 }
 
 impl ConfiguredHttpTrainingBackend {
-    pub(crate) fn new(preferences: Arc<StudioPreferencesStore>) -> Self {
+    pub(crate) fn new(preferences: Arc<crate::data::preferences::RuntimePreferences>) -> Self {
         Self { preferences }
     }
 
-    fn selected(&self) -> HttpTrainingBackend {
-        HttpTrainingBackend::new(self.preferences.get().training().endpoint())
+    fn selected(&self) -> Result<HttpTrainingBackend, TrainingBackendError> {
+        Ok(HttpTrainingBackend::new(
+            self.preferences
+                .loaded()
+                .map_err(TrainingBackendError::new)?
+                .training()
+                .endpoint(),
+        ))
     }
 }
 
 impl TrainingBackend for ConfiguredHttpTrainingBackend {
     fn health(&self) -> Result<TrainingBackendInfo, TrainingBackendError> {
-        self.selected().health()
+        self.selected()?.health()
     }
 
     fn create_job(
         &self,
         request: TrainingJobRequest,
     ) -> Result<TrainingJobSnapshot, TrainingBackendError> {
-        self.selected().create_job(request)
+        self.selected()?.create_job(request)
     }
 
     fn job_snapshot(
@@ -43,7 +48,7 @@ impl TrainingBackend for ConfiguredHttpTrainingBackend {
         job_id: &str,
         cursor: TrainingJobCursor,
     ) -> Result<TrainingJobSnapshot, TrainingBackendError> {
-        self.selected().job_snapshot(job_id, cursor)
+        self.selected()?.job_snapshot(job_id, cursor)
     }
 
     fn stop_job(
@@ -51,6 +56,6 @@ impl TrainingBackend for ConfiguredHttpTrainingBackend {
         job_id: &str,
         cursor: TrainingJobCursor,
     ) -> Result<TrainingJobSnapshot, TrainingBackendError> {
-        self.selected().stop_job(job_id, cursor)
+        self.selected()?.stop_job(job_id, cursor)
     }
 }

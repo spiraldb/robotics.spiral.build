@@ -26,7 +26,7 @@ impl RolloutEndpoints {
     async fn fetch_rollout(
         ScopedProject(commands): ScopedProject<crate::rollout::commands::RolloutCommands>,
     ) -> Result<Json<RolloutSnapshot>, HttpFailure> {
-        let result = commands.snapshot()?;
+        let result = commands.snapshot().await?;
         Ok(Json(result))
     }
 }

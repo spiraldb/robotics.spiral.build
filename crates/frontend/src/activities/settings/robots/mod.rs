@@ -16,7 +16,7 @@ use spiral_robotics_common::robots::{
 };
 
 use crate::panels::scene::ScenePalette;
-use crate::robots::{HardwareCommands, HardwareTelemetry, RobotSelection, Selection};
+use crate::robots::{HardwareCommands, HardwareViewState, RobotSelection, Selection};
 use crate::shell::project::ProjectSessionSignals;
 use crate::shell::state::StudioProjectState;
 use crate::tasks::SingleFlight;
@@ -35,10 +35,10 @@ const ROBOT_TYPES: [(&str, &str); 2] = [
 #[component]
 pub(super) fn RobotPanel(
     project: StudioProjectState,
-    telemetry: HardwareTelemetry,
+    telemetry: HardwareViewState,
     selection: RobotSelection,
 ) -> Element {
-    let robots = project.snapshot().read().robots().to_owned();
+    let robots = telemetry.snapshot().read().robots().to_owned();
     let focused = selection.focused(&robots);
     let sessions = ProjectSessionSignals::current();
     let mut ports = use_resource(move || {
@@ -88,7 +88,7 @@ pub(super) fn RobotPanel(
 #[component]
 fn RobotEntry(
     project: StudioProjectState,
-    telemetry: HardwareTelemetry,
+    telemetry: HardwareViewState,
     selection: RobotSelection,
     robot: RobotSummary,
     state: RobotEntryState,
@@ -338,7 +338,7 @@ fn ImportRobotConfiguration(project: StudioProjectState, selection: RobotSelecti
 #[component]
 fn RobotSetup(
     project: StudioProjectState,
-    telemetry: HardwareTelemetry,
+    telemetry: HardwareViewState,
     robot: RobotSummary,
     port_catalog: PortCatalogState,
 ) -> Element {
@@ -455,7 +455,7 @@ impl PortCatalogState {
 #[component]
 fn ConnectionAction(
     project: StudioProjectState,
-    telemetry: HardwareTelemetry,
+    telemetry: HardwareViewState,
     robot: RobotSummary,
     sweeping: bool,
 ) -> Element {
@@ -525,7 +525,7 @@ impl PortSectionState {
 #[component]
 fn PortSection(
     project: StudioProjectState,
-    telemetry: HardwareTelemetry,
+    telemetry: HardwareViewState,
     robot: RobotSummary,
     state: PortSectionState,
 ) -> Element {
@@ -731,7 +731,7 @@ enum IdentifyStep {
 #[component]
 fn IdentifyPort(
     project: StudioProjectState,
-    telemetry: HardwareTelemetry,
+    telemetry: HardwareViewState,
     robot: RobotSummary,
     step: Signal<IdentifyStep>,
     on_found: EventHandler<String>,
@@ -813,10 +813,10 @@ fn IdentifyPort(
 #[component]
 fn CameraSection(
     project: StudioProjectState,
-    telemetry: HardwareTelemetry,
+    telemetry: HardwareViewState,
     robot: RobotSummary,
 ) -> Element {
-    let available = project.snapshot().read().cameras().to_owned();
+    let available = telemetry.snapshot().read().cameras().to_owned();
     let mut role = use_signal(|| "wrist".to_owned());
     let mut device = use_signal(String::new);
     let saving_cameras = use_signal(|| false);
@@ -1033,5 +1033,4 @@ impl CameraAssignments {
     }
 }
 
-mod client;
-pub(crate) use client::RobotClient;
+use crate::robots::RobotClient;

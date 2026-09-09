@@ -31,8 +31,7 @@ use web_sys::HtmlCanvasElement;
 use crate::activities::data::episode_cache::{EpisodePreview, TimelineArmSample, TimelineSample};
 use crate::panels::recorded_source::{LoadState, RecordedSource};
 use crate::robots::Selection;
-use crate::robots::{HardwareTelemetry, RobotSelection};
-use crate::shell::state::StudioProjectState;
+use crate::robots::{HardwareViewState, RobotSelection};
 
 /// The colours arms are told apart by, as WebGL values and as CSS.
 ///
@@ -138,8 +137,7 @@ impl ViewportPresentation {
 
 #[component]
 pub(crate) fn Viewport(
-    project: StudioProjectState,
-    telemetry: HardwareTelemetry,
+    telemetry: HardwareViewState,
     robot_selection: RobotSelection,
     source: SceneSource,
     presentation: ViewportPresentation,
@@ -177,7 +175,7 @@ pub(crate) fn Viewport(
                 BTreeMap::new()
             };
             let frame = match (SceneBuildRequest {
-                robots: &SceneRobot::capture(project, telemetry),
+                robots: &SceneRobot::capture(telemetry),
                 selection: robot_selection,
                 grid,
                 source: &draw_source,
@@ -224,7 +222,7 @@ pub(crate) fn Viewport(
         },
     ));
 
-    let arms = project
+    let arms = telemetry
         .snapshot()
         .read()
         .robots()
@@ -375,7 +373,7 @@ pub(crate) fn Viewport(
                         }
                         Key::Character(value) if value == "0" => Some(Command::Home),
                         Key::Character(value) if value.eq_ignore_ascii_case("f") => {
-                            let robot = robot_selection.framed_robot(visible_robot.as_deref(), project.snapshot().read().robots());
+                            let robot = robot_selection.framed_robot(visible_robot.as_deref(), telemetry.snapshot().read().robots());
                             if let Ok(mut slot) = bench.try_borrow_mut()
                                 && let Some(bench) = slot.as_mut()
                                 && bench.frame_robot(robot.as_deref())
@@ -496,7 +494,7 @@ pub(crate) fn Viewport(
 /// the operator is going next anyway — and which stays reachable without a
 /// pointer at all.
 #[component]
-fn HoverNote(telemetry: HardwareTelemetry, hover: Hover, episode_preview: bool) -> Element {
+fn HoverNote(telemetry: HardwareViewState, hover: Hover, episode_preview: bool) -> Element {
     let (title, detail) = hover.entity.describe(telemetry, episode_preview);
     rsx! {
         div {
@@ -515,7 +513,7 @@ fn HoverNote(telemetry: HardwareTelemetry, hover: Hover, episode_preview: bool) 
 trait TargetPresentation {
     fn describe(
         &self,
-        telemetry: HardwareTelemetry,
+        telemetry: HardwareViewState,
         episode_preview: bool,
     ) -> (String, Option<String>);
 }
@@ -523,7 +521,7 @@ trait TargetPresentation {
 impl TargetPresentation for Target {
     fn describe(
         &self,
-        telemetry: HardwareTelemetry,
+        telemetry: HardwareViewState,
         episode_preview: bool,
     ) -> (String, Option<String>) {
         match self {
@@ -575,8 +573,8 @@ struct SceneRobot {
     accent: usize,
 }
 impl SceneRobot {
-    fn capture(project: StudioProjectState, telemetry: HardwareTelemetry) -> Vec<Self> {
-        project
+    fn capture(telemetry: HardwareViewState) -> Vec<Self> {
+        telemetry
             .snapshot()
             .read()
             .robots()
@@ -690,7 +688,7 @@ impl From<&Selection> for Target {
 }
 
 /// Every hardware-owned motor verdict in the current frame.
-impl HardwareTelemetry {
+impl HardwareViewState {
     fn motor_conditions(self) -> BTreeMap<(String, String), Condition> {
         let telemetry_signal = self.frame();
         let telemetry = telemetry_signal.read();

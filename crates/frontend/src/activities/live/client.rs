@@ -32,7 +32,7 @@ impl RecordingClient {
         dataset_id: String,
     ) -> impl Future<Output = Result<EpisodeInfo, CommandError>> + use<> {
         self.project.mutate(
-            &[Telemetry, Recording, Setup],
+            &[Telemetry, Recording, RobotSetup],
             HttpRequest::new("POST", "/api/recording").json(&RecordingStart::new(dataset_id)),
         )
     }
@@ -42,7 +42,7 @@ impl RecordingClient {
         keep: bool,
     ) -> impl Future<Output = Result<EpisodeInfo, CommandError>> + use<> {
         self.project.mutate(
-            &[Telemetry, Recording, Data, Catalog, Setup],
+            &[Telemetry, Recording, Data, Catalog, RobotSetup],
             HttpRequest::new("POST", "/api/recording/stop").json(&RecordingFinish::new(keep)),
         )
     }
@@ -63,7 +63,7 @@ impl RecordingClient {
         request: EpisodeSeek,
     ) -> impl Future<Output = Result<(), CommandError>> + use<> {
         self.project.mutate(
-            &[Telemetry, Setup],
+            &[Telemetry, RobotSetup],
             HttpRequest::new(
                 "POST",
                 format!("/api/episodes/{id}/seek", id = id.url_component()),
@@ -77,7 +77,7 @@ impl RecordingClient {
         request: ReplayStart,
     ) -> impl Future<Output = Result<(), CommandError>> + use<> {
         self.project.mutate(
-            &[Telemetry, Setup],
+            &[Telemetry, RobotSetup],
             HttpRequest::new("POST", "/api/replay").json(&request),
         )
     }

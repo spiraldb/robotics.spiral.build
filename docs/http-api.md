@@ -105,7 +105,7 @@ Fetch identity, then telemetry (replace the placeholder with `session.id`):
 ```sh
 curl http://127.0.0.1:8080/api/project/status
 curl -H 'X-Project-Session: <session.id>' \
-  http://127.0.0.1:8080/api/project/telemetry
+  http://127.0.0.1:8080/api/robots/telemetry
 curl -H 'X-Project-Session: <session.id>' \
   'http://127.0.0.1:8080/api/recording/signals?generation=0&offset=0'
 ```
@@ -139,8 +139,6 @@ schemas served by `/api/openapi.json`. `—` means no request body.
 | --- | --- | --- | --- |
 | POST | `/project/import` | Raw project bundle | ProjectImportSummary |
 | GET | `/project/status` | — | ProjectStatus |
-| GET | `/project/setup` | — | StudioSnapshot |
-| GET | `/project/telemetry` | — | TelemetryFrame |
 | GET | `/recording/signals` | RecordingCursor (query) | RecordingWindow |
 
 ### Training
@@ -177,6 +175,8 @@ schemas served by `/api/openapi.json`. `—` means no request body.
 | GET | `/serial-ports` | — | Vec<SerialPortSummary> |
 | POST | `/serial-ports/identify` | SerialPortScan | SerialPortIdentification |
 | POST | `/cameras/refresh` | — | Vec<CameraStatus> |
+| GET | `/robots/telemetry` | — | TelemetryFrame |
+| GET | `/robots/setup` | — | RobotSetupSnapshot |
 | GET | `/robots` | — | Vec<RobotSummary> |
 | POST | `/robots` | NewRobot | RobotSummary |
 | POST | `/robots/import` | Robot configuration JSON object | RobotSummary |
@@ -198,6 +198,8 @@ schemas served by `/api/openapi.json`. `—` means no request body.
 
 | Method | Path | Body or query | Response |
 | --- | --- | --- | --- |
+| GET | `/settings/connection` | — | SpiralSettings |
+| PUT | `/settings/connection` | SpiralConnectionUpdate | `null` |
 | GET | `/settings` | — | DataSettings |
 | PUT | `/settings` | SettingsUpdate | DataSettings |
 | POST | `/settings/spiral/test` | — | ConnectionTest |

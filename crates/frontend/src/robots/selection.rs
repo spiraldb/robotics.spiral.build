@@ -1,7 +1,7 @@
 //! Selection belongs to a mounted view; it does not own hardware or project state.
 use dioxus::prelude::*;
+use spiral_robotics_common::robots::RobotSetupSnapshot;
 use spiral_robotics_common::robots::RobotSummary;
-use spiral_robotics_common::status::StudioSnapshot;
 /// The one selection shared by the hierarchy, viewport, cameras, and inspector.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Selection {
@@ -77,7 +77,7 @@ pub(crate) struct RobotSelection {
 }
 impl RobotSelection {
     pub(crate) fn use_selection(
-        snapshot: MappedSignal<StudioSnapshot, Signal<StudioSnapshot>>,
+        snapshot: impl Readable<Target = RobotSetupSnapshot> + Copy + 'static,
     ) -> Self {
         let selection = use_hook(|| Self {
             selected: Signal::new(None),
@@ -209,7 +209,7 @@ mod ownership_tests {
     impl SelectionHarness {
         fn render(self) -> Element {
             let mounted = use_signal(|| true);
-            let snapshot = use_signal(StudioSnapshot::default);
+            let snapshot = use_signal(RobotSetupSnapshot::default);
             self.0.borrow_mut().mounted = Some(mounted);
             rsx! {
                 if mounted() {
@@ -226,7 +226,7 @@ mod ownership_tests {
     }
     #[component]
     fn SelectionOwner(
-        snapshot: Signal<StudioSnapshot>,
+        snapshot: Signal<RobotSetupSnapshot>,
         on_created: EventHandler<RobotSelection>,
     ) -> Element {
         let selection = RobotSelection::use_selection(snapshot.map(|value| value));

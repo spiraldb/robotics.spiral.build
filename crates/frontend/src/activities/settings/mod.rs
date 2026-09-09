@@ -5,3 +5,5 @@ pub(crate) mod robots;
 
 mod client;
 pub(crate) use client::SettingsClient;
+
+mod resource;

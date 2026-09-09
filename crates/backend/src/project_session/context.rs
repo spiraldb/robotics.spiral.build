@@ -10,7 +10,7 @@ use crate::training::manager::TrainingManager;
 use crate::workflow::agent::WorkflowAgentManager;
 use crate::workflow::manager::WorkflowManager;
 use spiral_robotics_hardware::HardwareHandle;
-use spiral_robotics_storage::{StorageManager, StudioPreferencesStore, episodes::EpisodeStore};
+use spiral_robotics_storage::{StorageManager, episodes::EpisodeStore};
 use std::sync::Arc;
 /// A request or task retains one project for its entire lifetime.
 #[derive(Clone)]
@@ -98,7 +98,7 @@ impl ProjectContext {
     pub(crate) fn rollout(&self) -> &Arc<RolloutManager> {
         self.project.rollout()
     }
-    pub(crate) fn preferences(&self) -> &Arc<StudioPreferencesStore> {
+    pub(crate) fn preferences(&self) -> &Arc<crate::data::preferences::RuntimePreferences> {
         self.project.preferences()
     }
     pub(crate) fn bootstrap(&self) -> &ProjectReadiness {

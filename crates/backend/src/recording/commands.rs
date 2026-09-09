@@ -113,9 +113,10 @@ impl RecordingPort for RecordingAdapter<'_> {
     }
 
     async fn default_teleoperation_pair(&self) -> Option<TeleoperationPair> {
-        crate::project_session::setup::ProjectSetup::new(self.state)
+        crate::robots::setup::RobotSetup::new(self.state)
             .snapshot()
             .await
+            .ok()?
             .default_teleoperation_pair()
             .map(|(leader, follower)| TeleoperationPair::new(leader, follower))
     }
@@ -430,9 +431,9 @@ impl PhysicalSeekPort for SeekAdapter<'_> {
     }
 
     async fn target(&self, robot: &str) -> Result<Option<SeekTarget>, OperationError> {
-        Ok(crate::project_session::setup::ProjectSetup::new(self.state)
+        Ok(crate::robots::setup::RobotSetup::new(self.state)
             .snapshot()
-            .await
+            .await?
             .robots()
             .iter()
             .find(|candidate| candidate.id() == robot)
@@ -543,6 +544,7 @@ impl RecordingCommands {
             .execute(async move {
                 let _activity = activity;
                 commands.require_catalog_ready()?;
+                commands.state.preferences().load().await?;
                 commands
                     .state
                     .storage()
@@ -874,10 +876,18 @@ impl RecordingAdapter<'_> {
         episode: &str,
         wanted: &[String],
     ) -> Result<Option<VideoCapture>, OperationError> {
-        if self.state.preferences().get().video().enabled() {
-            let snapshot = crate::project_session::setup::ProjectSetup::new(self.state)
+        if self
+            .state
+            .preferences()
+            .load()
+            .await
+            .map_err(OperationError::External)?
+            .video()
+            .enabled()
+        {
+            let snapshot = crate::robots::setup::RobotSetup::new(self.state)
                 .snapshot()
-                .await;
+                .await?;
             let camera_status = snapshot
                 .cameras()
                 .iter()

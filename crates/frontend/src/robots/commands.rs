@@ -1,15 +1,15 @@
 //! Admission of hardware commands. Stop/release actions use the project's safety path.
-use super::HardwareTelemetry;
+use super::HardwareViewState;
 use crate::shell::state::StudioProjectState;
 use std::future::Future;
 
 #[derive(Clone, Copy)]
 pub(crate) struct HardwareCommands {
     project: StudioProjectState,
-    telemetry: HardwareTelemetry,
+    telemetry: HardwareViewState,
 }
 impl HardwareCommands {
-    pub(crate) fn new(project: StudioProjectState, telemetry: HardwareTelemetry) -> Self {
+    pub(crate) fn new(project: StudioProjectState, telemetry: HardwareViewState) -> Self {
         Self { project, telemetry }
     }
     pub(crate) fn run(

@@ -94,10 +94,10 @@ pub(crate) fn CameraEditor(element_id: String, source: CameraEditorSource) -> El
 
 #[component]
 fn LiveCameraFrame(robot: String, role: String, device: String) -> Element {
-    let studio = crate::shell::state::StudioProjectState::current();
+    let setup = crate::robots::RobotSetupState::current();
     let workspace = crate::shell::activity::WorkspaceActivity::current();
     let panel = dioxus_workbench::PanelContext::current();
-    let status = studio
+    let status = setup
         .snapshot()
         .read()
         .cameras()

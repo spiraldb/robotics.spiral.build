@@ -3,14 +3,14 @@ use super::RecordingClient;
 use crate::activities::data::dataset_catalog::DatasetChoices;
 use crate::client::queries::{QueryDomain, QueryPolicy};
 use crate::panels::timeline::{signals::SignalStore, state::TimelineController};
-use crate::robots::{HardwareCommands, HardwareTelemetry, RobotSelection};
+use crate::robots::{HardwareCommands, HardwareViewState, RobotSelection};
 use crate::shell::state::StudioProjectState;
 use dioxus::prelude::*;
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct LiveSession {
     project: StudioProjectState,
-    telemetry: HardwareTelemetry,
+    telemetry: HardwareViewState,
     selection: RobotSelection,
     datasets: DatasetChoices,
     timeline: TimelineController,
@@ -19,7 +19,7 @@ pub(crate) struct LiveSession {
 impl LiveSession {
     pub(crate) fn use_session(
         project: StudioProjectState,
-        telemetry: HardwareTelemetry,
+        telemetry: HardwareViewState,
         selection: RobotSelection,
     ) -> Self {
         let is_active = telemetry.is_active_signal();
@@ -59,7 +59,7 @@ impl LiveSession {
     pub(crate) fn project(self) -> StudioProjectState {
         self.project
     }
-    pub(crate) fn telemetry(self) -> HardwareTelemetry {
+    pub(crate) fn telemetry(self) -> HardwareViewState {
         self.telemetry
     }
     pub(crate) fn selection(self) -> RobotSelection {

@@ -30,7 +30,7 @@ impl ProjectBootstrap {
         self.0
             .bootstrap()
             .bootstrapping("Connecting to SpiralDB and loading the project");
-        match self.0.projects().recover(self.0.project()).await {
+        match self.0.projects().resume(self.0.project()).await {
             Ok(()) => {
                 crate::robots::commands::DeviceCommands::from(self.0.current())
                     .auto_connect_saved_robots()

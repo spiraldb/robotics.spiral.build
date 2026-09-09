@@ -82,7 +82,7 @@ pub(crate) fn ActivityRail(activity: Activity, on_activity: EventHandler<Activit
 pub(crate) enum WorkspaceStatus {
     #[default]
     General,
-    Hardware(crate::robots::HardwareTelemetry),
+    Hardware(crate::robots::HardwareViewState),
     Training(crate::activities::training::history::TrainingHistory),
     Workflow(Memo<Option<WorkflowSnapshot>>),
 }
@@ -96,7 +96,21 @@ pub(crate) fn WorkspaceFrame(
 ) -> Element {
     let route = crate::shell::routes::StudioRoute::for_activity(workspace.activity());
     rsx! {
-        div { class: "studio-route-content", {children} }
+        div { class: "studio-route-content", style: "grid-template-rows: auto minmax(0, 1fr)",
+            div {
+                if let WorkspaceStatus::Hardware(hardware) = status {
+                    if let Some(error) = hardware.setup().error() {
+                        div { class: "flex items-center gap-2 px-3 py-2 text-xs text-danger", role: "alert",
+                            span { "Robot setup unavailable: {error}" }
+                            Action { purpose: ActionPurpose::Retry, variant: ActionVariant::Link, onclick: move |_| hardware.setup().retry(), "Retry robot setup" }
+                        }
+                    } else if !hardware.setup().loaded() {
+                        div { class: "px-3 py-2 text-xs text-ink-faint", role: "status", "Loading robot setup…" }
+                    }
+                }
+            }
+            {children}
+        }
         if workspace.is_active() {
             StatusBar { route, status }
         }
@@ -107,7 +121,11 @@ pub(crate) fn WorkspaceFrame(
 fn StatusBar(route: crate::shell::routes::StudioRoute, status: WorkspaceStatus) -> Element {
     let mode = route.activity();
     let studio = crate::shell::state::StudioProjectState::current();
-    let snapshot = studio.snapshot().read().to_owned();
+    let readiness = crate::shell::project::ProjectSessionSignals::current().readiness();
+    let snapshot = match status {
+        WorkspaceStatus::Hardware(hardware) => hardware.snapshot().read().clone(),
+        _ => Default::default(),
+    };
     let (telemetry, connected) = match status {
         WorkspaceStatus::Hardware(robot) => {
             (robot.frame().read().clone(), robot.controls_available())
@@ -128,9 +146,15 @@ fn StatusBar(route: crate::shell::routes::StudioRoute, status: WorkspaceStatus) 
     let (service_label, service_style) = if !backend_connected {
         ("Reconnecting", "background: var(--tone-danger)")
     } else {
-        match snapshot.readiness().state() {
+        match readiness.state() {
             BackendReadinessState::Bootstrapping => {
                 ("Loading project…", "background: var(--tone-caution)")
+            }
+            BackendReadinessState::Ready if matches!(status, WorkspaceStatus::Hardware(hardware) if hardware.setup().error().is_some()) => {
+                ("Robot setup unavailable", "background: var(--tone-caution)")
+            }
+            BackendReadinessState::Ready if matches!(status, WorkspaceStatus::Hardware(hardware) if !hardware.setup().available()) => {
+                ("Loading robots…", "background: var(--tone-caution)")
             }
             BackendReadinessState::Ready
                 if matches!(
@@ -141,7 +165,7 @@ fn StatusBar(route: crate::shell::routes::StudioRoute, status: WorkspaceStatus) 
                 ("Reconnecting", "background: var(--tone-danger)")
             }
             BackendReadinessState::Ready => ("Connected", "background: var(--tone-good)"),
-            BackendReadinessState::Degraded if snapshot.readiness().catalog_available() => {
+            BackendReadinessState::Degraded if readiness.catalog_available() => {
                 ("Limited", "background: var(--tone-caution)")
             }
             BackendReadinessState::Degraded => ("Unavailable", "background: var(--tone-danger)"),
@@ -158,7 +182,11 @@ fn StatusBar(route: crate::shell::routes::StudioRoute, status: WorkspaceStatus) 
         .filter(|robot| robot.torque())
         .count();
     let mode_label = snapshot.mode().selection().label();
-    let status_mode = format!("{} · {mode_label}", route.label());
+    let status_mode = if matches!(status, WorkspaceStatus::Hardware(_)) {
+        format!("{} · {mode_label}", route.label())
+    } else {
+        route.label().to_owned()
+    };
     let arms_label = format!("{connected_arms}/{} arms", snapshot.robots().len());
     // A bench with nothing wrong on it does not need a line saying so, and the
     // count that appears when something is wrong should be able to say "1 robot
@@ -168,7 +196,7 @@ fn StatusBar(route: crate::shell::routes::StudioRoute, status: WorkspaceStatus) 
         1 => Some("1 robot problem".to_owned()),
         count => Some(format!("{count} robot problems")),
     };
-    let training_problem_count = snapshot.issues().len() + usize::from(!training.ready);
+    let training_problem_count = usize::from(!training.ready);
     let training_problems_label = format!(
         "{training_problem_count} {}",
         if training_problem_count == 1 {
@@ -189,13 +217,13 @@ fn StatusBar(route: crate::shell::routes::StudioRoute, status: WorkspaceStatus) 
     let training_step = training.step.as_deref();
     let training_runs_label = format!("{} runs", training.runs);
     let workflow_status = workflow
-        .filter(|_| backend_connected && snapshot.readiness().catalog_available())
+        .filter(|_| backend_connected && readiness.catalog_available())
         .unwrap_or_else(|| {
             WorkflowStatusContext {
                 state: None,
                 backend_connected,
-                readiness: snapshot.readiness().state(),
-                catalog_available: snapshot.readiness().catalog_available(),
+                readiness: readiness.state(),
+                catalog_available: readiness.catalog_available(),
             }
             .project()
         });
@@ -292,7 +320,7 @@ fn StatusBar(route: crate::shell::routes::StudioRoute, status: WorkspaceStatus) 
             footer { class: "studio-status-bar",
                 div { class: "status-bar-group",
                     span { class: "status-bar-item",
-                        title: "{snapshot.readiness().detail()}",
+                        title: "{readiness.detail()}",
                         span { class: "status-dot", style: service_style }
                         "{service_label}"
                     }
@@ -321,7 +349,7 @@ fn StatusBar(route: crate::shell::routes::StudioRoute, status: WorkspaceStatus) 
             footer { class: "studio-status-bar",
                 div { class: "status-bar-group",
                     span { class: "status-bar-item",
-                        title: "{snapshot.readiness().detail()}",
+                        title: "{readiness.detail()}",
                         span { class: "status-dot", style: service_style }
                         "{service_label}"
                     }
@@ -346,12 +374,14 @@ fn StatusBar(route: crate::shell::routes::StudioRoute, status: WorkspaceStatus) 
             footer { class: "studio-status-bar",
                 div { class: "status-bar-group",
                     span { class: "status-bar-item",
-                        title: "{snapshot.readiness().detail()}",
+                        title: "{readiness.detail()}",
                         span { class: "status-dot", style: service_style }
                         "{service_label}"
                     }
-                    span { class: "status-bar-item", "Physical hardware" }
-                    span { class: "status-bar-item", "{arms_label}" }
+                    if matches!(status, WorkspaceStatus::Hardware(_)) {
+                        span { class: "status-bar-item", "Physical hardware" }
+                        span { class: "status-bar-item", "{arms_label}" }
+                    }
                 }
                 if let Some(message) = latest {
                     span {

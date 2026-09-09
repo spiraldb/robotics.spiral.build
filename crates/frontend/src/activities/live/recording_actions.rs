@@ -5,7 +5,7 @@
 //! backend remains authoritative for recording, replay, hardware, and safety.
 
 use crate::activities::live::RecordingClient;
-use crate::activities::settings::robots::RobotClient;
+use crate::robots::RobotClient;
 use dioxus::prelude::*;
 use spiral_robotics_common::recording::EpisodeInfo;
 use spiral_robotics_common::robots::ModeSelection;
@@ -19,10 +19,10 @@ impl LiveSession {
             self.datasets().selected().read().trim(),
         ) {
             Some("Choose a dataset ID using letters, numbers, '.', '_' or '-'.".to_owned())
-        } else if matches!(self.project().mode(), ModeSelection::Replay { .. }) {
+        } else if matches!(self.telemetry().mode(), ModeSelection::Replay { .. }) {
             Some("Stop replay before recording.".to_owned())
         } else if self
-            .project()
+            .telemetry()
             .snapshot()
             .read()
             .default_teleoperation_pair()
@@ -113,7 +113,7 @@ impl LiveSession {
 
     pub(crate) fn replay_target(self, episode: &EpisodeInfo) -> Option<(String, Option<String>)> {
         let ready = self
-            .project()
+            .telemetry()
             .connected_robots()
             .into_iter()
             .filter(|robot| robot.calibrated())
@@ -148,7 +148,7 @@ impl LiveSession {
     pub(crate) fn replay_blocker(self, episode: &EpisodeInfo) -> Option<String> {
         if !episode.usable() {
             Some("This episode did not finish and cannot be replayed.".to_owned())
-        } else if self.project().mode_active()
+        } else if self.telemetry().mode_active()
             && !self
                 .telemetry()
                 .replay()

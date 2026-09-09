@@ -113,10 +113,9 @@ fn ProjectStudioShell(session: ProjectSessionInfo) -> Element {
     let navigator = use_navigator();
     let mut project_setup_prompted = use_signal(|| false);
     use_effect(move || {
-        if project
-            .loaded_settings()
-            .as_ref()
-            .is_some_and(|settings| settings.spiral().project_id().trim().is_empty())
+        if sessions
+            .mounted_session()
+            .is_some_and(|session| session.project_id().trim().is_empty())
             && !project_setup_prompted()
         {
             project_setup_prompted.set(true);

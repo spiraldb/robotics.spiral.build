@@ -26,14 +26,14 @@ impl RolloutClient {
         config: RolloutConfig,
     ) -> impl Future<Output = Result<RolloutSnapshot, CommandError>> + use<> {
         self.project.mutate(
-            &[Rollout, Setup, Telemetry],
+            &[Rollout, RobotSetup, Telemetry],
             HttpRequest::new("POST", "/api/rollout").json(&config),
         )
     }
 
     pub(crate) fn stop_rollout(&self) -> impl Future<Output = Result<(), CommandError>> + use<> {
         self.project.mutate(
-            &[Rollout, Setup, Telemetry],
+            &[Rollout, RobotSetup, Telemetry],
             HttpRequest::new("POST", "/api/rollout/stop"),
         )
     }

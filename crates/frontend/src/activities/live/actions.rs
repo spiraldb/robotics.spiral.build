@@ -1,6 +1,6 @@
 //! Semantic actions and backend consequences for the Live screen.
 
-use crate::activities::settings::robots::RobotClient;
+use crate::robots::RobotClient;
 use dioxus::prelude::WritableExt;
 use spiral_robotics_common::robots::ModeSelection;
 

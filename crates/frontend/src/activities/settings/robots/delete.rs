@@ -1,12 +1,12 @@
-use crate::activities::settings::robots::RobotClient;
 use crate::components::interaction::{
     Action, ActionPurpose, ActionVariant, ConfirmationCopy, ConfirmationDismissal,
     ConfirmationResponse, InlineConfirmation,
 };
+use crate::robots::RobotClient;
 use dioxus::prelude::*;
 use spiral_robotics_common::robots::RobotSummary;
 
-use crate::robots::{HardwareCommands, HardwareTelemetry};
+use crate::robots::{HardwareCommands, HardwareViewState};
 use crate::shell::state::StudioProjectState;
 use crate::tasks::SingleFlight;
 
@@ -14,7 +14,7 @@ use crate::tasks::SingleFlight;
 #[component]
 pub(super) fn DeleteRobotAction(
     project: StudioProjectState,
-    telemetry: HardwareTelemetry,
+    telemetry: HardwareViewState,
     robot: RobotSummary,
 ) -> Element {
     let mut confirming = use_signal(|| false);

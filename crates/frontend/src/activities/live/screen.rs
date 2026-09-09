@@ -5,7 +5,7 @@ use super::session::LiveSession;
 use super::workbench::LiveWorkbench;
 use crate::panels::camera_panel::{AssignedCamera, CameraPanelRows};
 use crate::panels::scene::{Viewport, ViewportPresentation};
-use crate::robots::{HardwareTelemetry, RobotSelection};
+use crate::robots::{HardwareViewState, RobotSelection};
 use crate::shell::frame::WorkspaceFrame;
 use crate::shell::{project::ProjectSessionSignals, state::StudioProjectState};
 use dioxus::prelude::*;
@@ -55,8 +55,8 @@ pub(crate) fn LiveWorkspace(is_active: ReadSignal<bool>) -> Element {
     );
     let project = StudioProjectState::current();
     let telemetry =
-        HardwareTelemetry::use_telemetry(project, is_active, ProjectSessionSignals::current());
-    let selection = RobotSelection::use_selection(project.snapshot());
+        HardwareViewState::use_state(project, is_active, ProjectSessionSignals::current());
+    let selection = RobotSelection::use_selection(telemetry.snapshot());
     let session = LiveSession::use_session(project, telemetry, selection);
     rsx! { WorkspaceFrame { workspace, status: crate::shell::frame::WorkspaceStatus::Hardware(session.telemetry()), LivePanels { session } } }
 }
@@ -68,7 +68,7 @@ fn LivePanels(session: LiveSession) -> Element {
     let mut selection = session.selection().selected();
     let cameras = session
         .selection()
-        .focused(session.project().snapshot().read().robots())
+        .focused(session.telemetry().snapshot().read().robots())
         .map(|robot| {
             robot
                 .cameras()
@@ -82,7 +82,7 @@ fn LivePanels(session: LiveSession) -> Element {
             aside { class: "studio-v2-workbench", LiveWorkbench { project: session.project(), hardware: session.telemetry(), selection: session.selection(), datasets: session.datasets(), on_action: move |action| session.dispatch_live_action(action) } }
         }).with_class("workbench-editor"),
         Panel::new("scene", "Scene", "primary", rsx! {
-            Viewport { project: session.project(), telemetry: session.telemetry(), robot_selection: session.selection(), source: timeline.scene_source(), presentation: ViewportPresentation::new(None) }
+            Viewport { telemetry: session.telemetry(), robot_selection: session.selection(), source: timeline.scene_source(), presentation: ViewportPresentation::new(None) }
         }).with_class("scene-editor"),
     ];
     for camera in &cameras {

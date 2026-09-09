@@ -11,3 +11,5 @@ pub(crate) mod mode;
 pub(crate) mod robot_config;
 pub(crate) mod service;
 pub(crate) mod workspace;
+
+pub(crate) mod setup;

@@ -169,6 +169,71 @@ impl UpdateDataSettingsCommand {
     }
 }
 
+/// A connection edit can repair access without reading or overwriting preferences.
+pub(crate) struct ProjectConnectionUpdate(spiral_robotics_common::settings::SpiralConnectionUpdate);
+impl From<spiral_robotics_common::settings::SpiralConnectionUpdate> for ProjectConnectionUpdate {
+    fn from(update: spiral_robotics_common::settings::SpiralConnectionUpdate) -> Self {
+        Self(update)
+    }
+}
+impl ProjectConnectionUpdate {
+    pub(crate) fn resolve(
+        self,
+        previous: &spiral_robotics_storage::SpiralConnectionSettings,
+    ) -> Result<spiral_robotics_storage::SpiralConnectionSettings, OperationError> {
+        let (endpoint, spfs, project, client, secret, clear) = self.0.into_parts();
+        let endpoint = HttpEndpoint::parse(&endpoint, "Spiral endpoint")?.into_string();
+        let spfs = HttpEndpoint::parse(&spfs, "SpFS endpoint")?.into_string();
+        let client = client.trim();
+        let credentials = if clear || client.is_empty() {
+            if client.is_empty() && !secret.trim().is_empty() && !clear {
+                return Err(OperationError::invalid_input(
+                    "Spiral client secret requires a client ID",
+                ));
+            }
+            None
+        } else if !secret.trim().is_empty() {
+            Some(spiral_robotics_storage::SpiralCredentials::new(
+                client.to_owned(),
+                secret.trim().to_owned(),
+            ))
+        } else {
+            Some(
+                previous
+                    .credentials()
+                    .filter(|credentials| credentials.client_id() == client)
+                    .cloned()
+                    .ok_or_else(|| {
+                        OperationError::invalid_input(
+                            "Enter the client secret when changing the Spiral client ID",
+                        )
+                    })?,
+            )
+        };
+        spiral_robotics_storage::SpiralConnectionSettings::new(endpoint, spfs)
+            .and_then(|settings| settings.with_project(project.trim()))
+            .map(|settings| settings.with_credentials(credentials))
+            .map_err(OperationError::InvalidInput)
+    }
+}
+
+impl From<&UpdateDataSettingsCommand> for ProjectConnectionUpdate {
+    fn from(command: &UpdateDataSettingsCommand) -> Self {
+        Self(
+            spiral_robotics_common::settings::SpiralConnectionUpdate::new(
+                command.spiral_endpoint(),
+                command.spiral_spfs_endpoint(),
+                command.project_id(),
+            )
+            .with_client_credentials(
+                command.client_id(),
+                command.client_secret().unwrap_or_default(),
+            )
+            .with_clear_client_secret(command.client_secret() == Some("")),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,6 +257,46 @@ mod tests {
         assert_eq!(command.spiral_spfs_endpoint(), "https://spfs.spiraldb.dev");
         assert_eq!(command.project_id(), "project");
         assert_eq!(command.training_endpoint(), "http://127.0.0.1:50051");
+    }
+
+    #[test]
+    fn connection_repairs_preserve_credentials_unless_the_edit_explicitly_replaces_them() {
+        use spiral_robotics_common::settings::SpiralConnectionUpdate;
+        use spiral_robotics_storage::{SpiralConnectionSettings, SpiralCredentials};
+        let previous = SpiralConnectionSettings::new(
+            "https://api.spiraldb.dev".into(),
+            "https://spfs.spiraldb.dev".into(),
+        )
+        .unwrap()
+        .with_project("old")
+        .unwrap()
+        .with_credentials(Some(SpiralCredentials::new(
+            "client".into(),
+            "saved-secret".into(),
+        )));
+        let update = SpiralConnectionUpdate::new(
+            "https://api.spiraldb.dev",
+            "https://spfs.spiraldb.dev",
+            "new",
+        )
+        .with_client_credentials("client", "");
+        let repaired = ProjectConnectionUpdate::from(update.clone())
+            .resolve(&previous)
+            .unwrap();
+        assert_eq!(repaired.project_id(), Some("new"));
+        assert!(repaired.credentials() == previous.credentials());
+        assert!(
+            ProjectConnectionUpdate::from(update.clone().with_client_credentials("different", ""))
+                .resolve(&previous)
+                .is_err()
+        );
+        assert!(
+            ProjectConnectionUpdate::from(update.with_clear_client_secret(true))
+                .resolve(&previous)
+                .unwrap()
+                .credentials()
+                .is_none()
+        );
     }
 
     #[test]

@@ -12,9 +12,21 @@ impl From<ProjectContext> for RolloutCommands {
     }
 }
 impl RolloutCommands {
-    pub(crate) fn snapshot(&self) -> Result<RolloutSnapshot, BackendCommandError> {
-        let _activity = self.state.admit()?;
-        Ok(self.state.rollout().snapshot())
+    pub(crate) async fn snapshot(&self) -> Result<RolloutSnapshot, BackendCommandError> {
+        let commands = self.clone();
+        let activity = commands.state.admit()?;
+        self.state
+            .tasks()
+            .read(async move {
+                let _activity = activity;
+                commands
+                    .state
+                    .rollout()
+                    .load_snapshot()
+                    .await
+                    .map_err(Into::into)
+            })
+            .await?
     }
     pub(crate) async fn start_rollout(
         &self,
@@ -26,6 +38,7 @@ impl RolloutCommands {
             .tasks()
             .execute(async move {
                 let _activity = activity;
+                commands.state.preferences().load().await?;
                 commands
                     .state
                     .training()

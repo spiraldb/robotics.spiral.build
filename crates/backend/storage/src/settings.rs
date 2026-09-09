@@ -376,6 +376,20 @@ pub struct StoredStudioPreferences {
 }
 
 impl StoredStudioPreferences {
+    /// Validate raw preference edits into the persisted form.
+    pub fn from_settings(
+        training_endpoint: &str,
+        video_enabled: bool,
+    ) -> Result<StoredStudioPreferences, String> {
+        let endpoint = ServiceEndpoint::training_runtime(training_endpoint.trim())?.into_string();
+        Ok(StoredStudioPreferences::new(
+            StoredTrainingRuntimePreference { endpoint },
+            StoredVideoPreference {
+                enabled: video_enabled,
+            },
+        ))
+    }
+
     pub(crate) const fn new(
         training: StoredTrainingRuntimePreference,
         video: StoredVideoPreference,
@@ -442,21 +456,6 @@ impl StudioPreferencesStore {
 
     pub fn get(&self) -> StoredStudioPreferences {
         self.current.lock_unpoisoned().clone()
-    }
-
-    /// Validate raw preference edits into the persisted form.
-    pub fn stage_update(
-        &self,
-        training_endpoint: &str,
-        video_enabled: bool,
-    ) -> Result<StoredStudioPreferences, String> {
-        let endpoint = ServiceEndpoint::training_runtime(training_endpoint.trim())?.into_string();
-        Ok(StoredStudioPreferences::new(
-            StoredTrainingRuntimePreference { endpoint },
-            StoredVideoPreference {
-                enabled: video_enabled,
-            },
-        ))
     }
 
     pub fn replace(&self, preferences: StoredStudioPreferences) -> StoredStudioPreferences {
@@ -594,17 +593,15 @@ mod tests {
 
     #[test]
     fn training_runtime_requires_an_http_or_https_endpoint() {
-        let store = StudioPreferencesStore::new(StoredStudioPreferences::default());
         assert!(
-            store
-                .stage_update("ftp://runtime.example", true)
+            StoredStudioPreferences::from_settings("ftp://runtime.example", true)
                 .unwrap_err()
                 .contains("http:// or https://")
         );
 
-        let staged = store
-            .stage_update(" http://runtime.example:50051 ", false)
-            .expect("HTTP runtime endpoint is accepted");
+        let staged =
+            StoredStudioPreferences::from_settings(" http://runtime.example:50051 ", false)
+                .expect("HTTP runtime endpoint is accepted");
         assert_eq!(staged.training().endpoint(), "http://runtime.example:50051");
         assert!(!staged.video().enabled());
     }

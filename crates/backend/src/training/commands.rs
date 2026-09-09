@@ -22,6 +22,7 @@ impl TrainingCommands {
         self.state
             .tasks()
             .execute(async move {
+                commands.state.preferences().load().await?;
                 commands
                     .state
                     .training()
@@ -44,6 +45,7 @@ impl TrainingCommands {
             .tasks()
             .execute(async move {
                 let _activity = activity;
+                commands.state.preferences().load().await?;
                 commands
                     .state
                     .training()
@@ -67,6 +69,7 @@ impl TrainingCommands {
             .tasks()
             .execute(async move {
                 let _activity = activity;
+                commands.state.preferences().load().await?;
                 commands
                     .state
                     .training()
@@ -87,6 +90,7 @@ impl TrainingCommands {
             .tasks()
             .execute(async move {
                 let _activity = activity;
+                commands.state.preferences().load().await?;
                 commands
                     .state
                     .training()

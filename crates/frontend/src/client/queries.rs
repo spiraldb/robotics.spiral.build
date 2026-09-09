@@ -7,7 +7,7 @@ use std::future::Future;
 #[derive(Clone, Copy)]
 pub(crate) enum QueryDomain {
     Project,
-    Setup,
+    RobotSetup,
     Telemetry,
     Recording,
     Training,

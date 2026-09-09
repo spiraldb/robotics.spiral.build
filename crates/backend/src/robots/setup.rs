@@ -1,21 +1,21 @@
 //! Setup projection from project catalog, hardware, and camera observations.
-use super::context::ProjectContext;
+use crate::project_session::context::ProjectContext;
 use crate::robots::service::RobotCatalogActions;
-use spiral_robotics_common::status::StudioSnapshot;
-pub(crate) struct ProjectSetup<'a> {
+use spiral_robotics_common::robots::RobotSetupSnapshot;
+pub(crate) struct RobotSetup<'a> {
     project: &'a ProjectContext,
 }
-impl<'a> ProjectSetup<'a> {
+impl<'a> RobotSetup<'a> {
     pub(crate) fn new(project: &'a ProjectContext) -> Self {
         Self { project }
     }
     /// Assemble the current setup-level view of the studio.
-    pub(crate) async fn snapshot(&self) -> StudioSnapshot {
+    pub(crate) async fn snapshot(&self) -> Result<RobotSetupSnapshot, crate::OperationError> {
         let state = self.project;
         let hardware = state.hardware().state();
         let readiness = state.bootstrap().current();
         let robots = if readiness.catalog_available() {
-            let robot_adapter = crate::robots::commands::RobotAdapter::prefetched(state).await;
+            let robot_adapter = crate::robots::commands::RobotAdapter::prefetched(state).await?;
             let mut summaries = Vec::new();
             for saved in RobotCatalogActions::new(&robot_adapter).list().await {
                 let connection = hardware
@@ -63,9 +63,9 @@ impl<'a> ProjectSetup<'a> {
         }
 
         let cameras = state.cameras().statuses();
-        StudioSnapshot::new(readiness, "SpiralDB", hardware.mode_status().clone())
+        Ok(RobotSetupSnapshot::new(hardware.mode_status().clone())
             .with_robots(robots)
             .with_cameras(cameras)
-            .with_issues(issues)
+            .with_issues(issues))
     }
 }
