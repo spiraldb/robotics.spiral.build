@@ -3,7 +3,11 @@
 Status: **M1 implemented with the current local Spiral driver**, September 9, 2026.
 Tasks 1.1 and 1.2 share one clock in the Data inspector. The follow-up replaces
 joint-specific reads with native Arrow schema discovery, numeric field selection,
-and one paginated message transport. M2–M4 and optional work remain unimplemented.
+and one paginated message transport. M2’s ownership simplification is implemented:
+named workflows each own one graph and one Assistant conversation; authoring cannot
+start computation. Native episode-filter semantics in 2.1 and the M3–M4
+preparation/training features remain unimplemented. See
+[workflow-authoring.md](workflow-authoring.md) for the simplified ownership model.
 
 **Driver requirement:** local `xiangpeng/dev` commit `02d06b5c5` includes the
 nested-projection optimizer fix. Rebuild with `adbc-build` and run Studio with
@@ -59,9 +63,9 @@ starting a feature; this is not a new live integration result.
 | Browse datasets, episodes, and topics | [Dataset storage](../crates/backend/storage/src/datasets.rs), [episode browser](../crates/frontend/src/activities/data/episode_browser.rs), [topic inspector](../crates/frontend/src/activities/data/episode_topics.rs) | An episode workspace with cameras and joints together. Import is already outside this flow. |
 | Play one recorded camera | [Native packet reads](../crates/backend/storage/src/datasets/playback.rs), [WebCodecs decoder](../crates/frontend/src/activities/data/episode_decoder.rs), [player](../crates/frontend/src/activities/data/episode_playback.rs) | Multiple feeds sharing one clock. Exact UUID reads and keyframe seeking already exist. |
 | Render recorded joint traces | [Episode cache](../crates/frontend/src/activities/data/episode_cache.rs), [Timeline](../crates/frontend/src/panels/timeline/panel.rs) | Read imported native member/topic samples, without requiring Studio-private recording headers or a filename lookup. |
-| Ask the Workflow Assistant to build a graph | [Agent](../crates/backend/src/workflow/agent.rs), [manager](../crates/backend/src/workflow/manager.rs), [Workflow UI](../crates/frontend/src/activities/workflow/workspace.rs) | Episode-filter semantics, explicit preparation, named workflows, and optional questions. The existing agent can currently launch Model work. |
+| Ask the Workflow Assistant to build a graph | [Agent](../crates/backend/src/workflow/agent.rs), [manager](../crates/backend/src/workflow/manager.rs), [Workflow UI](../crates/frontend/src/activities/workflow/workspace.rs) | Native episode-filter semantics, explicit preparation, and optional questions. The Assistant authors and inspects; computation requires an explicit workflow action. |
 | Run SigLIP and retain feature cells | [Model runner](../crates/backend/src/workflow/model.rs), [feature persistence](../crates/backend/storage/src/workflow_features.rs) | Native MCAP inputs, source-version-aware reuse, episode decisions, and prepared workflow outputs. Existing reuse uses source-relation identity. |
-| Save a graph and its revisions | [Workflow documents](../crates/backend/storage/src/workflow_documents.rs), [common contracts](../crates/common/src/workflow.rs) | Multiple named workflows and durable complete output membership. Current query previews are bounded results, not complete training selections. |
+| Save and switch named graphs | [Workflow storage](../crates/backend/storage/src/workflows.rs), [common contracts](../crates/common/src/workflow.rs) | Durable complete output membership. Current query previews are bounded results, not complete training selections. |
 | Configure ACT and manage jobs/checkpoints | [Training manager](../crates/backend/src/training/manager.rs), [worker jobs](../training/src/spiral_training_runtime/jobs.py), [training UI](../crates/frontend/src/activities/training/workspace.rs) | Prepared-workflow inputs and native training examples. The [MCAP loader](../training/src/spiral_training_runtime/mcap.py) currently raises unavailable. |
 
 The worker continues to own training reads, batches, optimization, and checkpoint
@@ -141,8 +145,10 @@ and unknown policy. Show the resulting explanation, required columns, and
 **Needs preparation** state. Drafting must not run enrichment; enforce that in the
 backend as well as the agent tools. Read-only inspection remains available. Apply
 corrections such as “use the wrist camera” or “only when most of the episode is
-dark” to the executable definition and explanation together, preserving identity
-and revision history.
+dark” to the executable definition and explanation together, preserving workflow
+identity. Save the current definition; use an internal revision counter to reject
+stale edits. Derive the mechanical explanation and required columns from the graph,
+with the Assistant’s rationale retained in its conversation.
 
 **Verify:** the real instruction produces a valid saved draft against the actual
 schema without asking the human to set every parameter. An absent camera is
@@ -161,13 +167,17 @@ agent named it.
 workflow, and return to either one with its own definition and conversation context.
 
 **Build:** add create/name/select behavior to the current workflow persistence and
-picker. Carry real workflow identities through the existing manager, Assistant,
-and UI instead of hard-coding the default graph. Preserve existing history. Keep
-current serialized execution; concurrent workflow scheduling is unnecessary.
+picker. Each workflow owns one Assistant conversation; there is no separate
+conversation picker. Open the latest workflow and carry its real identity through
+the manager, Assistant, and UI. Graph and conversation JSON are stored independently
+under that identity. Preserve legacy data without accumulating new graph history.
+Keep current serialized execution; concurrent workflow scheduling is unnecessary.
 
 **Verify:** create two workflows, edit them independently, reconnect, and switch
 between them. Delayed responses and Assistant saves cannot change the wrong graph.
 The existing default workflow remains readable after the persistence change.
+The original legacy graph history and inactive conversations remain in storage and
+project exports; only its selected conversation enters the current authoring UI.
 
 **Depends on:** 2.1.
 

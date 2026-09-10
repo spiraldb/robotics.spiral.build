@@ -17,7 +17,7 @@ use spiral_robotics_common::workflow::{
     WorkflowCommand as WorkflowRequest, WorkflowEdgeSpec, WorkflowFeatureApplicability,
     WorkflowFeatureDefinition, WorkflowModelRunMetadata, WorkflowNodeConfig, WorkflowNodePhase,
     WorkflowNodeProgress, WorkflowNodeSnapshot, WorkflowQuarantineSummary, WorkflowRunPhase,
-    WorkflowRunSnapshot, WorkflowSnapshot, WorkflowSpec, WorkflowValidationReport,
+    WorkflowRunSnapshot, WorkflowSnapshot, WorkflowSpec, WorkflowSummary, WorkflowValidationReport,
 };
 
 use crate::shell::notifications::MessageSource;
@@ -221,6 +221,7 @@ impl WorkflowUiState {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WorkflowPendingCommand {
     Applying,
+    Selecting,
     Starting,
     Cancelling,
 }
@@ -229,15 +230,10 @@ pub(crate) enum WorkflowPendingCommand {
 pub(crate) enum AgentPendingCommand {
     Sending,
     Cancelling,
-    CreatingConversation,
-    ActivatingConversation,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub(crate) struct AgentDraftKey {
-    scope_id: String,
-    conversation_id: String,
-}
+pub(crate) struct AgentDraftKey(String);
 
 pub(crate) struct ModelFeatureTarget<'a> {
     node_id: &'a str,
@@ -251,11 +247,8 @@ impl<'a> ModelFeatureTarget<'a> {
 }
 
 impl AgentDraftKey {
-    pub(crate) fn new(scope_id: &str, conversation_id: &str) -> Self {
-        Self {
-            scope_id: scope_id.to_owned(),
-            conversation_id: conversation_id.to_owned(),
-        }
+    pub(crate) fn new(workflow_id: &str) -> Self {
+        Self(workflow_id.to_owned())
     }
 
     pub(crate) fn clear_if_unchanged(
@@ -274,7 +267,7 @@ impl AgentDraftKey {
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct WorkflowController {
     graph: WorkflowGraphSignals,
-    document: WorkflowDocumentSignals,
+    document: WorkflowDefinitionSignals,
     lifecycle: WorkflowLifecycleSignals,
     assistant: WorkflowAssistantSignals,
     relation_catalog: ReadSignal<Option<Result<RelationCatalog, String>>>,
@@ -288,7 +281,7 @@ struct WorkflowGraphSignals {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-struct WorkflowDocumentSignals {
+struct WorkflowDefinitionSignals {
     server: Signal<WorkflowSnapshot>,
     draft: Signal<WorkflowSpec>,
     saved: Signal<Option<WorkflowSaveReceipt>>,
@@ -337,7 +330,7 @@ impl WorkflowController {
                 edges: Signal::new(initial_edges),
                 ui: Signal::new(WorkflowUiState::default()),
             },
-            document: WorkflowDocumentSignals {
+            document: WorkflowDefinitionSignals {
                 server: Signal::new(initial),
                 draft: Signal::new(initial_spec),
                 saved: Signal::new(None),
@@ -465,41 +458,31 @@ impl WorkflowController {
         self.assistant.agent_drafts
     }
 
-    pub(crate) fn agent_conversation_disabled_reason(
-        &self,
-        connected: bool,
-        catalog_available: bool,
-    ) -> Option<String> {
-        let agent = self.agent_state();
-        let snapshot = self.snapshot();
-        AgentConversationChange {
-            loaded: self.agent_loaded(),
-            connected,
-            catalog_available,
-            command: self.agent_command(),
-            agent: &agent,
-            snapshot: &snapshot,
-        }
-        .reason()
+    pub(crate) fn workflows(&self) -> Vec<WorkflowSummary> {
+        self.document.server.read().workflows().to_owned()
     }
 
-    pub(crate) fn new_agent_conversation_disabled_reason(
-        &self,
-        connected: bool,
-        catalog_available: bool,
-    ) -> Option<String> {
-        if let Some(reason) = self.agent_conversation_disabled_reason(connected, catalog_available)
-        {
-            return Some(reason);
+    pub(crate) fn workflow_selection_reason(&self) -> Option<String> {
+        if !self.loaded() || !self.agent_loaded() {
+            return Some("Loading workflows…".to_owned());
         }
-        let agent = self.agent_state();
-        if agent.conversations().len() >= agent.conversation_limit() {
-            return Some(format!(
-                "The {0}-conversation limit is reached. Previous conversations are kept; continue one of them instead.",
-                agent.conversation_limit()
-            ));
+        if self.command().is_some() || self.agent_command().is_some() {
+            return Some("Wait for the current action to finish.".to_owned());
+        }
+        if self.snapshot().phase().active() || self.agent_state().session().phase().active() {
+            return Some("Stop the active work before switching workflows.".to_owned());
+        }
+        if self.dirty() {
+            return Some("Apply or discard your edits before switching workflows.".to_owned());
+        }
+        if !crate::shell::project::ProjectSessionSignals::current().catalog_available() {
+            return Some("Reconnect Spiral before switching workflows.".to_owned());
         }
         None
+    }
+
+    pub(crate) fn set_name(mut self, name: String) {
+        self.document.draft.write().set_name(name);
     }
 
     pub(crate) fn dirty(&self) -> bool {
@@ -662,22 +645,6 @@ impl WorkflowController {
             .draft
             .set(self.document.server.peek().workflow().to_owned());
         self.lifecycle.load_error.set(None);
-        self.sync_graph();
-    }
-
-    pub(crate) fn clear_workflow_draft(mut self) {
-        if self
-            .snapshot()
-            .phase()
-            .topology_mutation_blocked(self.command())
-            || self.agent_state().session().phase().active()
-            || self.agent_command().is_some()
-        {
-            return;
-        }
-        let empty = self.document.draft.peek().empty_draft();
-        self.document.draft.set(empty);
-        self.clear_selection();
         self.sync_graph();
     }
 
@@ -924,78 +891,34 @@ impl WorkflowController {
         );
     }
 
-    pub(crate) fn create_agent_conversation(mut self, studio: StudioProjectState) {
-        let catalog_available =
-            crate::shell::project::ProjectSessionSignals::current().catalog_available();
-        if self
-            .new_agent_conversation_disabled_reason((studio.live())(), catalog_available)
-            .is_some()
-        {
-            return;
-        }
-        let current = self.assistant.agent.peek().to_owned();
-        self.assistant
-            .agent_command
-            .set(Some(AgentPendingCommand::CreatingConversation));
-        self.assistant.agent_error.set(None);
-        let request = AgentRequest::create_conversation(current.scope_id(), current.revision());
-        dioxus::dioxus_core::Runtime::current().spawn(
-            self.document.draft.origin_scope(),
-            async move {
-                let response = WorkflowClient::current()
-                    .run_workflow_agent_command(request.clone())
-                    .await
-                    .map_err(|error| error.to_string());
-                self.assistant.agent_command.set(None);
-                match response {
-                    Ok(_) => {}
-                    Err(error) => {
-                        self.assistant.agent_error.set(Some(error.clone()));
-                        studio.report_from(MessageSource::Workflow, error);
-                    }
-                }
-            },
-        );
-    }
-
-    pub(crate) fn activate_agent_conversation(
+    pub(crate) fn select_workflow(
         mut self,
-        conversation_id: String,
+        workflow_id: Option<String>,
         studio: StudioProjectState,
     ) {
-        let current = self.assistant.agent.peek().to_owned();
-        let catalog_available =
-            crate::shell::project::ProjectSessionSignals::current().catalog_available();
-        if conversation_id == current.active_conversation_id()
-            || self
-                .agent_conversation_disabled_reason((studio.live())(), catalog_available)
-                .is_some()
-        {
+        if self.workflow_selection_reason().is_some() {
             return;
         }
-        self.assistant
-            .agent_command
-            .set(Some(AgentPendingCommand::ActivatingConversation));
-        self.assistant.agent_error.set(None);
-        let request = AgentRequest::activate_conversation(
-            current.scope_id(),
-            conversation_id,
-            current.revision(),
-        );
+        let scope_id = self.document.server.peek().scope_id().to_owned();
+        let request = match workflow_id {
+            Some(id) => WorkflowRequest::select(&scope_id, id),
+            None => WorkflowRequest::create(&scope_id),
+        };
+        self.lifecycle
+            .command
+            .set(Some(WorkflowPendingCommand::Selecting));
         dioxus::dioxus_core::Runtime::current().spawn(
             self.document.draft.origin_scope(),
             async move {
-                let response = WorkflowClient::current()
-                    .run_workflow_agent_command(request.clone())
-                    .await
-                    .map_err(|error| error.to_string());
-                self.assistant.agent_command.set(None);
-                match response {
-                    Ok(_) => {}
-                    Err(error) => {
-                        self.assistant.agent_error.set(Some(error.clone()));
-                        studio.report_from(MessageSource::Workflow, error);
+                let result = WorkflowClient::current()
+                    .run_workflow_command(request)
+                    .await;
+                self.finish_command(&scope_id);
+                match result {
+                    Ok(state) => {
+                        self.accept_fetched_state(state);
                     }
+                    Err(error) => studio.report_from(MessageSource::Workflow, error.to_string()),
                 }
             },
         );
@@ -1005,6 +928,9 @@ impl WorkflowController {
         let text = text.trim().to_owned();
         let state = self.assistant.agent.peek().to_owned();
         if text.is_empty()
+            || !self.loaded()
+            || !self.agent_loaded()
+            || state.session().workflow_id() != self.document.server.peek().workflow().id()
             || !state.readiness().configured()
             || state.session().phase().active()
             || self.assistant.agent_command.peek().is_some()
@@ -1016,9 +942,10 @@ impl WorkflowController {
             .agent_command
             .set(Some(AgentPendingCommand::Sending));
         self.assistant.agent_error.set(None);
+        let draft_key = AgentDraftKey::new(state.session().workflow_id());
         let request = AgentRequest::Turn {
             scope_id: state.scope_id().to_owned(),
-            conversation_id: state.active_conversation_id().to_owned(),
+            conversation_id: state.session().conversation_id().to_owned(),
             text: text.clone(),
             expected_revision: state.revision(),
         };
@@ -1033,13 +960,10 @@ impl WorkflowController {
                 match response {
                     Ok(_) => {
                         if self.assistant.agent.peek().scope_id() == request.scope_id() {
-                            let key = AgentDraftKey::new(
-                                request.scope_id(),
-                                request
-                                    .conversation_id()
-                                    .expect("turn commands carry a conversation"),
+                            draft_key.clear_if_unchanged(
+                                &mut self.assistant.agent_drafts.write(),
+                                &text,
                             );
-                            key.clear_if_unchanged(&mut self.assistant.agent_drafts.write(), &text);
                         }
                     }
                     Err(error) => {
@@ -1068,7 +992,7 @@ impl WorkflowController {
                 };
                 let request = AgentRequest::cancel(
                     current.scope_id(),
-                    current.active_conversation_id(),
+                    current.session().conversation_id(),
                     turn_id,
                 );
                 let response = WorkflowClient::current()
@@ -1180,6 +1104,10 @@ impl WorkflowController {
             self.document.saved.set(None);
         }
         if scope_changed {
+            self.graph.nodes.set(Vec::new());
+            self.graph.edges.set(Vec::new());
+            self.assistant.agent_loaded.set(false);
+            QueryRefresh::current().invalidate(&[QueryDomain::Assistant]);
             self.graph.ui.set(WorkflowUiState::default());
             self.lifecycle.command.set(None);
         }
@@ -1200,6 +1128,9 @@ impl WorkflowController {
     }
 
     fn accept_fetched_agent(mut self, state: WorkflowAgentSnapshot) {
+        if state.session().workflow_id() != self.document.server.peek().workflow().id() {
+            return;
+        }
         let current = self.assistant.agent.peek();
         if !current.accepts_fetched(&state) {
             return;
@@ -1311,54 +1242,6 @@ impl WorkflowAgentReconciliation for WorkflowAgentSnapshot {
     }
 }
 
-struct AgentConversationChange<'a> {
-    loaded: bool,
-    connected: bool,
-    catalog_available: bool,
-    command: Option<AgentPendingCommand>,
-    agent: &'a WorkflowAgentSnapshot,
-    snapshot: &'a WorkflowRunSnapshot,
-}
-
-impl AgentConversationChange<'_> {
-    fn reason(&self) -> Option<String> {
-        if !self.loaded {
-            return Some("Conversation history is still loading.".to_owned());
-        }
-        if !self.connected {
-            return Some("Reconnect to Studio before changing conversations.".to_owned());
-        }
-        if !self.catalog_available {
-            return Some("Configure or reconnect Spiral before changing conversations.".to_owned());
-        }
-        if !self.agent.history_available() {
-            return Some(self.agent.readiness().detail().to_owned());
-        }
-        if self.command.is_some() {
-            return Some("Wait for the current conversation action to finish.".to_owned());
-        }
-        if self.agent.session().phase().active() {
-            return Some(
-                "Stop the active Assistant turn before changing conversations.".to_owned(),
-            );
-        }
-        if self.snapshot.phase().active()
-            && self.snapshot.run_id().is_some_and(|run_id| {
-                self.agent
-                    .conversations()
-                    .iter()
-                    .any(|conversation| conversation.owned_run_id() == Some(run_id))
-            })
-        {
-            return Some(
-                "Stop the Workflow run started by the Assistant before changing conversations."
-                    .to_owned(),
-            );
-        }
-        None
-    }
-}
-
 trait WorkflowStateReconciliation {
     fn accepts(&self, incoming: &WorkflowSnapshot) -> bool;
 }
@@ -1455,7 +1338,6 @@ trait WorkflowDraft {
         features: &[WorkflowFeatureDefinition],
     );
     fn revision_conflicts_with(&self, server: &WorkflowSpec) -> bool;
-    fn empty_draft(&self) -> WorkflowSpec;
 }
 
 impl WorkflowDraft for WorkflowSpec {
@@ -1656,10 +1538,6 @@ impl WorkflowDraft for WorkflowSpec {
     /// normalization at admission; the browser never chooses a cache relation.
     fn revision_conflicts_with(&self, server: &WorkflowSpec) -> bool {
         self != server && self.revision() != server.revision()
-    }
-
-    fn empty_draft(&self) -> WorkflowSpec {
-        WorkflowSpec::new(self.id(), "Untitled workflow").with_revision(self.revision())
     }
 }
 
@@ -1989,30 +1867,6 @@ mod tests {
         assert_eq!(nodes[2].id, "result");
         assert_eq!(nodes[1].position.x - nodes[0].position.x, 224.0);
         assert_eq!(nodes[2].position.x - nodes[1].position.x, 224.0);
-    }
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn starting_fresh_preserves_server_identity_but_removes_all_topology() {
-        let workflow = WorkflowSpec::new("inspection", "Existing workflow").with_revision(17);
-
-        let empty = workflow.empty_draft();
-
-        assert_eq!(empty.id(), "inspection");
-        assert_eq!(empty.revision(), 17);
-        assert_eq!(empty.name(), "Untitled workflow");
-        assert!(empty.nodes().is_empty());
-        assert!(empty.edges().is_empty());
-        assert!(!empty.validate().valid());
-        assert!(
-            empty
-                .graph_nodes(&WorkflowRunSnapshot::idle_for(&empty), &[])
-                .is_empty()
-        );
-        assert!(
-            empty
-                .graph_edges(&WorkflowRunSnapshot::idle_for(&empty))
-                .is_empty()
-        );
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]
@@ -2410,97 +2264,6 @@ mod tests {
         assert!(
             current.accepts_fetched(&project_b),
             "a new project scope owns an independent revision sequence"
-        );
-    }
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn conversation_switching_is_gated_only_by_authoritative_active_work() {
-        let mut agent = WorkflowAgentSnapshot::default();
-        agent.set_history_available(true);
-        agent.conversations_mut().push(
-            spiral_robotics_common::workflow::WorkflowAgentConversationSummary::new(
-                "conversation-a",
-                "Inspect relations",
-                0,
-            ),
-        );
-        let mut snapshot = WorkflowRunSnapshot::default();
-        assert!(
-            AgentConversationChange {
-                loaded: true,
-                connected: true,
-                catalog_available: true,
-                command: None,
-                agent: &agent,
-                snapshot: &snapshot,
-            }
-            .reason()
-            .is_none()
-        );
-
-        assert_eq!(
-            AgentConversationChange {
-                loaded: true,
-                connected: true,
-                catalog_available: false,
-                command: None,
-                agent: &agent,
-                snapshot: &snapshot,
-            }
-            .reason()
-            .as_deref(),
-            Some("Configure or reconnect Spiral before changing conversations.")
-        );
-
-        agent
-            .session_mut()
-            .set_phase(spiral_robotics_common::workflow::WorkflowAgentPhase::Responding);
-        assert_eq!(
-            AgentConversationChange {
-                loaded: true,
-                connected: true,
-                catalog_available: true,
-                command: None,
-                agent: &agent,
-                snapshot: &snapshot,
-            }
-            .reason()
-            .as_deref(),
-            Some("Stop the active Assistant turn before changing conversations.")
-        );
-        agent
-            .session_mut()
-            .set_phase(spiral_robotics_common::workflow::WorkflowAgentPhase::Idle);
-
-        snapshot.set_phase(WorkflowRunPhase::Running);
-        snapshot.set_run_id(Some("run-agent".to_owned()));
-        agent.conversations_mut()[0].set_owned_run_id(Some("run-agent".to_owned()));
-        assert_eq!(
-            AgentConversationChange {
-                loaded: true,
-                connected: true,
-                catalog_available: true,
-                command: None,
-                agent: &agent,
-                snapshot: &snapshot,
-            }
-            .reason()
-            .as_deref(),
-            Some("Stop the Workflow run started by the Assistant before changing conversations.")
-        );
-        agent.conversations_mut()[0].set_owned_run_id(Some("other-run".to_owned()));
-        assert!(
-            AgentConversationChange {
-                loaded: true,
-                connected: true,
-                catalog_available: true,
-                command: None,
-                agent: &agent,
-                snapshot: &snapshot,
-            }
-            .reason()
-            .is_none(),
-            "a manual or unrelated run does not falsely claim Assistant conversation ownership"
         );
     }
 

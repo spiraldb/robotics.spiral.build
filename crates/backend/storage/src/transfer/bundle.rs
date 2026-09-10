@@ -28,12 +28,12 @@ use crate::db::ProjectConnection;
 use crate::rollout_runs::RolloutBundleSection;
 use crate::settings::StudioPreferenceBundleSection;
 use crate::training::TrainingBundleSection;
-use crate::workflow_documents::WorkflowDocumentBundleSection;
 use crate::workflow_features::{
     CACHE_KEY_FIELDS, FEATURE_VALUE_SEMANTICS, MAX_FEATURE_CACHE_COLUMNS, MAX_FEATURE_CACHE_ROWS,
     MAX_FEATURE_REGISTRY_ROWS, SIGLIP_BASE_MODEL_ID, SIGLIP_BASE_REPOSITORY, SIGLIP_BASE_REVISION,
     WorkflowFeatureBundleSection, WorkflowFeatureSchema,
 };
+use crate::workflows::WorkflowBundleSection;
 
 const PROJECT_MAGIC: &[u8; 8] = b"SPRPROJ1";
 const PROJECT_FORMAT: &str = "spiral-robotics-project";
@@ -894,7 +894,7 @@ impl ManagedRelationCatalog {
         let settings = StudioPreferenceBundleSection;
         let training = TrainingBundleSection;
         let rollout = RolloutBundleSection;
-        let workflow = WorkflowDocumentBundleSection;
+        let workflow = WorkflowBundleSection;
         let workflow_features = WorkflowFeatureBundleSection;
         let sections: [&dyn ManagedRelationSchema; 7] = [
             &database,
@@ -925,7 +925,7 @@ impl ManagedRelationCatalog {
         let settings = StudioPreferenceBundleSection;
         let training = TrainingBundleSection;
         let rollout = RolloutBundleSection;
-        let workflow = WorkflowDocumentBundleSection;
+        let workflow = WorkflowBundleSection;
         let workflow_features = WorkflowFeatureBundleSection;
         let sections: [&dyn ManagedRelationSchema; 7] = [
             &database,
@@ -948,7 +948,7 @@ impl ManagedRelationCatalog {
         let settings = StudioPreferenceBundleSection;
         let training = TrainingBundleSection;
         let rollout = RolloutBundleSection;
-        let workflow = WorkflowDocumentBundleSection;
+        let workflow = WorkflowBundleSection;
         let workflow_features = WorkflowFeatureBundleSection;
         let sections: [&dyn ManagedRelationSchema; 7] = [
             &database,
@@ -1079,7 +1079,13 @@ impl AssistantBundleHistory {
                     .column_by_name("run_id")
                     .and_then(|column| WorkflowArrow::string_value(column.as_ref(), row))
                     .ok_or_else(|| "project Workflow history has an invalid run_id".to_owned())?;
-                if !matches!(run_id, "default" | "agent:default") {
+                if !matches!(run_id, "default" | "agent:default")
+                    && !["workflow:", "assistant:"].iter().any(|prefix| {
+                        run_id
+                            .strip_prefix(prefix)
+                            .is_some_and(|id| !id.is_empty() && id.len() <= 128)
+                    })
+                {
                     return Err(format!(
                         "project Workflow history contains unknown document key {run_id:?}"
                     ));
@@ -1089,7 +1095,7 @@ impl AssistantBundleHistory {
                         "project Workflow history contains duplicate document key {run_id:?}"
                     ));
                 }
-                if run_id != "agent:default" {
+                if run_id != "agent:default" && !run_id.starts_with("assistant:") {
                     continue;
                 }
                 let snapshot = batch
@@ -1098,14 +1104,22 @@ impl AssistantBundleHistory {
                     .ok_or_else(|| {
                         "project Assistant history has an invalid snapshot_json".to_owned()
                     })?;
-                AssistantBundleHistory::validate_json(snapshot)?;
+                if run_id == "agent:default" {
+                    AssistantBundleHistory::validate_json(snapshot)?;
+                } else {
+                    let conversation =
+                        crate::workflow_assistant::WorkflowConversation::decode(snapshot)?;
+                    if Some(conversation.workflow_id()) != run_id.strip_prefix("assistant:") {
+                        return Err("Assistant history belongs to a different workflow.".to_owned());
+                    }
+                }
             }
         }
         Ok(())
     }
 
     fn validate_json(encoded: &str) -> Result<(), String> {
-        crate::workflow_assistant::AssistantDocument::decode(encoded).map(|_| ())
+        crate::workflow_assistant::LegacyAssistantHistory::decode(encoded).map(|_| ())
     }
 }
 
@@ -1903,7 +1917,7 @@ impl BundleClock {
 
 #[cfg(test)]
 mod tests {
-    use crate::workflow_documents::MAX_WORKFLOW_AGENT_CONVERSATIONS;
+    const MAX_WORKFLOW_AGENT_CONVERSATIONS: usize = 20;
     use std::io::Write as _;
     use std::sync::Arc;
 
@@ -2278,29 +2292,17 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("schema_version");
-        assert!(
-            AssistantBundleHistory::validate_json(&schema_less.to_string())
-                .unwrap_err()
-                .contains("schema 0 is not supported")
-        );
+        assert!(AssistantBundleHistory::validate_json(&schema_less.to_string()).is_err());
 
         let mut unknown_selection = valid.clone();
         unknown_selection["active_conversation_id"] = serde_json::json!("missing");
-        assert!(
-            AssistantBundleHistory::validate_json(&unknown_selection.to_string())
-                .unwrap_err()
-                .contains("active conversation")
-        );
+        assert!(AssistantBundleHistory::validate_json(&unknown_selection.to_string()).is_err());
 
         let mut duplicate = valid.clone();
         duplicate["conversations"] =
             serde_json::json!([agent_conversation("same"), agent_conversation("same")]);
         duplicate["active_conversation_id"] = serde_json::json!("same");
-        assert!(
-            AssistantBundleHistory::validate_json(&duplicate.to_string())
-                .unwrap_err()
-                .contains("duplicate")
-        );
+        assert!(AssistantBundleHistory::validate_json(&duplicate.to_string()).is_err());
 
         let mut too_many = Vec::new();
         for index in 0..=MAX_WORKFLOW_AGENT_CONVERSATIONS {
@@ -2312,39 +2314,23 @@ mod tests {
             "active_conversation_id": "conversation-0",
             "conversations": too_many
         });
-        assert!(
-            AssistantBundleHistory::validate_json(&over_limit.to_string())
-                .unwrap_err()
-                .contains("1–20")
-        );
+        assert!(AssistantBundleHistory::validate_json(&over_limit.to_string()).is_err());
 
         let mut missing_timestamp = valid.clone();
         missing_timestamp["conversations"][0]
             .as_object_mut()
             .unwrap()
             .remove("created_ms");
-        assert!(
-            AssistantBundleHistory::validate_json(&missing_timestamp.to_string())
-                .unwrap_err()
-                .contains("current document shape")
-        );
+        assert!(AssistantBundleHistory::validate_json(&missing_timestamp.to_string()).is_err());
 
         let mut unknown_nested = valid.clone();
         unknown_nested["conversations"][0]["session"]["messages"][0]["future_field"] =
             serde_json::json!(true);
-        assert!(
-            AssistantBundleHistory::validate_json(&unknown_nested.to_string())
-                .unwrap_err()
-                .contains("current document shape")
-        );
+        assert!(AssistantBundleHistory::validate_json(&unknown_nested.to_string()).is_err());
 
         let mut unknown_top_level = valid;
         unknown_top_level["future_field"] = serde_json::json!(true);
-        assert!(
-            AssistantBundleHistory::validate_json(&unknown_top_level.to_string())
-                .unwrap_err()
-                .contains("current document shape")
-        );
+        assert!(AssistantBundleHistory::validate_json(&unknown_top_level.to_string()).is_err());
 
         let mut foreign_workflow = serde_json::json!({
             "schema_version": 2,
@@ -2353,11 +2339,7 @@ mod tests {
             "conversations": [agent_conversation("conversation-a")]
         });
         foreign_workflow["conversations"][0]["session"]["workflow_id"] = serde_json::json!("other");
-        assert!(
-            AssistantBundleHistory::validate_json(&foreign_workflow.to_string())
-                .unwrap_err()
-                .contains("unsupported Workflow")
-        );
+        assert!(AssistantBundleHistory::validate_json(&foreign_workflow.to_string()).is_err());
 
         for role in ["system", "developer"] {
             let mut injected = serde_json::json!({

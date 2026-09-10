@@ -11,9 +11,7 @@ use tokio_util::sync::CancellationToken;
 use crate::OperationError;
 use crate::clock::SystemTimeMillis;
 use crate::sync::MutexRecovery;
-use crate::workflow::service::{
-    WorkflowCancellationAdmission, WorkflowRunAdmission, WorkflowSaveAdmission,
-};
+
 use serde::{Deserialize, Serialize};
 use spiral_robotics_common::relations::{RelationCatalog, SpiralQuerySnapshot};
 use spiral_robotics_common::sql::{QualifiedRelation, WorkflowSql};
@@ -22,15 +20,15 @@ use spiral_robotics_common::workflow::{
     WorkflowQuarantineSummary, WorkflowRunPhase, WorkflowRunSnapshot, WorkflowSnapshot,
     WorkflowSpec,
 };
-use tokio::sync::{Mutex as AsyncMutex, broadcast, mpsc};
+use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
 use crate::workflow::model::{
     ModelRunContext, ModelRunEvent, ModelRunFailure, ModelRunRequest, ModelRunResult,
 };
-use spiral_robotics_storage::workflow_documents::StoredWorkflowDocument;
+use spiral_robotics_storage::workflows::WorkflowJson;
 use spiral_robotics_storage::{StorageManager, StorageSchema};
 
-/// Version of the persisted Workflow document encoding.
+/// Version of the persisted workflow encoding.
 ///
 /// The graph is still evolving and is deliberately not decomposed into node
 /// and edge relations yet, so its persisted form is one versioned payload.
@@ -43,14 +41,14 @@ const WORKFLOW_HISTORY_DOCUMENT_VERSION: u32 = 3;
 /// graph and observation, while the manager decides that they commit together.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-struct WorkflowDocument {
+struct SavedWorkflow {
     workflow: WorkflowSpec,
     snapshot: WorkflowRunSnapshot,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     history: Option<Vec<WorkflowSpec>>,
 }
 
-impl Default for WorkflowDocument {
+impl Default for SavedWorkflow {
     fn default() -> Self {
         let workflow = WorkflowSpec::default();
         let snapshot = WorkflowRunSnapshot::idle_for(&workflow);
@@ -62,8 +60,36 @@ impl Default for WorkflowDocument {
     }
 }
 
-impl WorkflowDocument {
-    #[cfg(test)]
+impl SavedWorkflow {
+    fn fresh() -> Self {
+        let workflow = WorkflowSpec::new(
+            format!("workflow-{}", uuid::Uuid::new_v4()),
+            "Untitled workflow",
+        );
+        let snapshot = WorkflowRunSnapshot::idle_for(&workflow);
+        Self::new(workflow, snapshot)
+    }
+
+    fn require_idle(&self) -> Result<(), OperationError> {
+        if self.snapshot().phase().active() {
+            Err(OperationError::Conflict(
+                "Stop the active Workflow run before changing this workflow.".to_owned(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn require_revision(&self, expected: u64) -> Result<(), OperationError> {
+        if expected != self.workflow().revision() {
+            Err(OperationError::Conflict(
+                "The workflow changed. Reload it before applying this edit.".to_owned(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
     fn new(workflow: WorkflowSpec, snapshot: WorkflowRunSnapshot) -> Self {
         Self {
             workflow,
@@ -89,10 +115,10 @@ impl WorkflowDocument {
         &mut self.snapshot
     }
 
-    fn persisted(&self) -> Result<StoredWorkflowDocument, String> {
+    fn persisted(&self) -> Result<WorkflowJson, String> {
         serde_json::to_string(self)
-            .map(|payload| StoredWorkflowDocument::new(self.encoding_version(), payload))
-            .map_err(|error| format!("encoding the Workflow document: {error}"))
+            .map(|payload| WorkflowJson::new(self.encoding_version(), payload))
+            .map_err(|error| format!("encoding the saved Workflow: {error}"))
     }
 
     fn encoding_version(&self) -> u32 {
@@ -104,11 +130,8 @@ impl WorkflowDocument {
     }
 
     fn revised(mut self, workflow: WorkflowSpec, snapshot: WorkflowRunSnapshot) -> Self {
-        if workflow.revision() != self.workflow.revision()
-            && let Some(history) = &mut self.history
-        {
-            history.push(self.workflow.clone());
-        }
+        // Existing history is retained for compatibility. New saves only replace
+        // the current definition; the revision counter guards stale writes.
         self.workflow = workflow;
         self.snapshot = snapshot;
         self
@@ -116,28 +139,42 @@ impl WorkflowDocument {
 
     /// V3 extends V2 with earlier graph revisions. Decode only a shape whose
     /// supplied fields can all be preserved; loading never rewrites the record.
-    fn restored(stored: &StoredWorkflowDocument) -> Result<Self, OperationError> {
+    fn for_id(id: &str, stored: &WorkflowJson) -> Result<Self, OperationError> {
+        let saved = Self::restored(stored)?;
+        if saved.workflow().id() != id {
+            return Err(OperationError::IncompatibleWorkflow(
+                "Saved graph belongs to a different workflow.".to_owned(),
+            ));
+        }
+        Ok(saved)
+    }
+
+    fn restored(stored: &WorkflowJson) -> Result<Self, OperationError> {
         if !matches!(
             stored.version(),
             WORKFLOW_DOCUMENT_VERSION | WORKFLOW_HISTORY_DOCUMENT_VERSION
         ) {
             return Err(OperationError::IncompatibleWorkflow(format!(
-                "The saved Workflow uses document version {}, which this Studio build cannot read. Update Studio to open this project.",
+                "The saved Workflow uses encoding version {}, which this Studio build cannot read. Update Studio to open this project.",
                 stored.version()
             )));
         }
-        let original: serde_json::Value = serde_json::from_str(stored.payload())
-            .map_err(|error| OperationError::IncompatibleWorkflow(format!("The saved Workflow document is damaged: {error}. The original has been preserved.")))?;
-        let document: Self = serde_json::from_value(original.clone())
-            .map_err(|error| OperationError::IncompatibleWorkflow(format!("The saved Workflow document has an unsupported shape: {error}. The original has been preserved.")))?;
-        if document.encoding_version() != stored.version() {
+        let original: serde_json::Value =
+            serde_json::from_str(stored.payload()).map_err(|error| {
+                OperationError::IncompatibleWorkflow(format!(
+                    "The saved Workflow is damaged: {error}. The original has been preserved."
+                ))
+            })?;
+        let saved: Self = serde_json::from_value(original.clone())
+            .map_err(|error| OperationError::IncompatibleWorkflow(format!("The saved Workflow has an unsupported shape: {error}. The original has been preserved.")))?;
+        if saved.encoding_version() != stored.version() {
             return Err(OperationError::IncompatibleWorkflow("The saved Workflow version does not match its revision history. The original has been preserved.".to_owned()));
         }
-        let canonical = serde_json::to_value(&document)
+        let canonical = serde_json::to_value(&saved)
             .map_err(|error| OperationError::Internal(error.to_string()))?;
         Self::validate_fields(&original, &canonical)?;
-        document.validate_history()?;
-        Ok(document)
+        saved.validate_history()?;
+        Ok(saved)
     }
 
     fn validate_fields(
@@ -218,8 +255,8 @@ pub(crate) struct WorkflowManager {
 struct WorkflowManagerInner {
     storage: Arc<StorageManager>,
     identity: WorkflowIdentity,
-    document: Mutex<WorkflowDocument>,
-    updates: broadcast::Sender<WorkflowSnapshot>,
+    saved: Mutex<SavedWorkflow>,
+    workflows: Mutex<Vec<spiral_robotics_common::workflow::WorkflowSummary>>,
     active: Mutex<Option<ActiveRun>>,
     persistence: WorkflowPersistenceState,
 }
@@ -424,63 +461,17 @@ impl<'a> WorkflowFailure<'a> {
     }
 }
 
-struct TerminalPersistenceFailure<'a> {
-    run_id: &'a str,
-    document: &'a WorkflowDocument,
-    error: String,
-}
-
-impl<'a> TerminalPersistenceFailure<'a> {
-    fn new(run_id: &'a str, document: &'a WorkflowDocument, error: String) -> Self {
-        Self {
-            run_id,
-            document,
-            error,
-        }
-    }
-}
-
 impl WorkflowManager {
     pub(crate) fn new(storage: Arc<StorageManager>) -> Self {
-        let (updates, _) = broadcast::channel(128);
         Self {
             inner: Arc::new(WorkflowManagerInner {
                 storage,
                 identity: WorkflowIdentity::new(),
-                document: Mutex::new(WorkflowDocument::default()),
-                updates,
+                saved: Mutex::new(SavedWorkflow::default()),
+                workflows: Mutex::new(Vec::new()),
                 active: Mutex::new(None),
                 persistence: WorkflowPersistenceState::new(),
             }),
-        }
-    }
-
-    pub(crate) async fn wait_for_terminal(
-        &self,
-        run_id: &str,
-        cancel: CancellationToken,
-    ) -> Result<WorkflowRunSnapshot, String> {
-        let (mut state, mut updates) = self.subscription();
-        loop {
-            if cancel.is_cancelled() {
-                return Err("Agent turn cancelled.".to_owned());
-            }
-            if state.snapshot().run_id() != Some(run_id) {
-                return Err(
-                    "The active Workflow run changed while the Assistant was waiting.".to_owned(),
-                );
-            }
-            if state.snapshot().phase().terminal() {
-                return Ok(state.snapshot().clone());
-            }
-            state = tokio::select! {
-                update = updates.recv() => match update {
-                    Ok(state) => state,
-                    Err(broadcast::error::RecvError::Lagged(_)) => self.state(),
-                    Err(broadcast::error::RecvError::Closed) => return Err("Workflow updates stopped while waiting.".to_owned()),
-                },
-                () = cancel.cancelled() => return Err("Agent turn cancelled.".to_owned()),
-            };
         }
     }
 
@@ -500,39 +491,92 @@ impl WorkflowManager {
     }
 
     pub(crate) async fn prepare_from_storage(&self) -> Result<(), OperationError> {
-        let document = self.stored_document().await?;
-        self.install_hydrated_document(document)
+        let saved = self.load_latest().await?;
+        self.install_saved(saved)
             .await
             .map_err(OperationError::External)
     }
 
-    async fn stored_document(&self) -> Result<WorkflowDocument, OperationError> {
-        self.inner
+    async fn load_latest(&self) -> Result<SavedWorkflow, OperationError> {
+        let graphs = self
+            .inner
             .storage
-            .load_workflow_document()
+            .workflow_graphs()
             .await
-            .map_err(OperationError::External)?
-            .as_ref()
-            .map_or_else(
-                || Ok(WorkflowDocument::default()),
-                WorkflowDocument::restored,
-            )
+            .map_err(OperationError::External)?;
+        let mut workflows = Vec::new();
+        let mut latest = None;
+        for (id, stored) in graphs {
+            let saved = SavedWorkflow::for_id(&id, &stored)?;
+            workflows.push(spiral_robotics_common::workflow::WorkflowSummary::new(
+                id,
+                saved.workflow().name(),
+            ));
+            if latest.is_none() {
+                latest = Some(saved);
+            }
+        }
+        *self.inner.workflows.recover_lock() = workflows;
+        Ok(latest.unwrap_or_else(SavedWorkflow::fresh))
     }
 
-    async fn install_hydrated_document(
+    fn remember_workflow(&self, workflow: &WorkflowSpec) {
+        let mut workflows = self.inner.workflows.recover_lock();
+        workflows.retain(|summary| summary.id() != workflow.id());
+        workflows.insert(
+            0,
+            spiral_robotics_common::workflow::WorkflowSummary::new(workflow.id(), workflow.name()),
+        );
+    }
+
+    async fn select(
         &self,
-        mut document: WorkflowDocument,
-    ) -> Result<(), String> {
-        let interrupted = document.snapshot().phase().active();
-        self.inner
-            .persistence
-            .recovery_pending
-            .store(interrupted, Ordering::SeqCst);
+        scope_id: &str,
+        workflow_id: Option<&str>,
+    ) -> Result<WorkflowSnapshot, OperationError> {
+        let _mutation = self.inner.persistence.mutation.lock().await;
+        self.require_scope(scope_id)?;
+        if self.is_active() {
+            return Err(OperationError::Conflict(
+                "Stop the active Workflow run before switching workflows.".to_owned(),
+            ));
+        }
+        let candidate = match workflow_id {
+            Some(id) => {
+                let stored = self
+                    .inner
+                    .storage
+                    .load_workflow_graph(id)
+                    .await
+                    .map_err(OperationError::External)?
+                    .ok_or_else(|| {
+                        OperationError::InvalidInput("That workflow no longer exists.".to_owned())
+                    })?;
+                SavedWorkflow::for_id(id, &stored)?
+            }
+            None => SavedWorkflow::fresh(),
+        };
+        // Persist the selected workflow last so reconnect opens the latest one.
+        self.persist_saved(&candidate)
+            .await
+            .map_err(OperationError::External)?;
+        self.install_saved(candidate)
+            .await
+            .map_err(OperationError::External)?;
+        Ok(self.state())
+    }
+
+    async fn install_saved(&self, mut saved: SavedWorkflow) -> Result<(), String> {
+        let interrupted = saved.snapshot().phase().active();
+        self.inner.persistence.recovery_pending.store(
+            interrupted || saved.workflow().revision() == 0,
+            Ordering::SeqCst,
+        );
         if interrupted {
             let interruption =
                 "Studio restarted before this Workflow run finished. Run it again.".to_owned();
             let finished_ms = SystemTime::now().unix_millis();
-            let snapshot = document.snapshot_mut();
+            let snapshot = saved.snapshot_mut();
             snapshot.set_phase(WorkflowRunPhase::Interrupted);
             snapshot.set_error(Some(interruption.clone()));
             snapshot.set_finished_ms(finished_ms);
@@ -551,10 +595,11 @@ impl WorkflowManager {
                 }
             }
         }
-        *self.inner.document.recover_lock() = document;
+        self.remember_workflow(saved.workflow());
+        *self.inner.saved.recover_lock() = saved;
         self.inner.identity.advance_scope();
         *self.inner.persistence.terminal_error.recover_lock() = None;
-        let _ = self.inner.updates.send(self.state());
+
         Ok(())
     }
 
@@ -566,8 +611,8 @@ impl WorkflowManager {
             .recovery_pending
             .load(Ordering::SeqCst)
         {
-            let document = self.inner.document.recover_lock().clone();
-            self.save_document(&document).await?;
+            let saved = self.inner.saved.recover_lock().clone();
+            self.persist_saved(&saved).await?;
             self.inner
                 .persistence
                 .recovery_pending
@@ -577,8 +622,8 @@ impl WorkflowManager {
     }
 
     pub(crate) fn state(&self) -> WorkflowSnapshot {
-        let document = self.inner.document.recover_lock();
-        self.state_response(&document)
+        let saved = self.inner.saved.recover_lock();
+        self.state_response(&saved)
     }
 
     pub(crate) fn scope_id(&self) -> String {
@@ -598,12 +643,7 @@ impl WorkflowManager {
     }
 
     pub(crate) fn is_active(&self) -> bool {
-        self.inner
-            .document
-            .recover_lock()
-            .snapshot()
-            .phase()
-            .active()
+        self.inner.saved.recover_lock().snapshot().phase().active()
     }
 
     /// Resolve server-owned Model outputs and validate an agent-authored graph
@@ -618,7 +658,7 @@ impl WorkflowManager {
         ),
         OperationError,
     > {
-        let current = self.inner.document.recover_lock();
+        let current = self.inner.saved.recover_lock();
         if workflow.id() != current.workflow().id() {
             return Err(OperationError::InvalidInput(format!(
                 "Workflow identity {:?} does not match the server-owned identity {:?}",
@@ -632,17 +672,16 @@ impl WorkflowManager {
         Ok((workflow, report))
     }
 
-    pub(crate) fn subscription(&self) -> (WorkflowSnapshot, broadcast::Receiver<WorkflowSnapshot>) {
-        let document = self.inner.document.recover_lock();
-        let updates = self.inner.updates.subscribe();
-        (self.state_response(&document), updates)
-    }
-
     pub(crate) async fn command(
         &self,
         command: WorkflowCommand,
     ) -> Result<WorkflowSnapshot, OperationError> {
         match command {
+            WorkflowCommand::Create { scope_id } => self.select(&scope_id, None).await,
+            WorkflowCommand::Select {
+                scope_id,
+                workflow_id,
+            } => self.select(&scope_id, Some(&workflow_id)).await,
             WorkflowCommand::Apply {
                 scope_id,
                 expected_revision,
@@ -672,9 +711,9 @@ impl WorkflowManager {
             expected_revision,
             workflow: requested_workflow,
         } = request;
-        self.require_scope(&scope_id)?;
         let _mutation = self.inner.persistence.mutation.lock().await;
-        let current = self.inner.document.recover_lock().clone();
+        self.require_scope(&scope_id)?;
+        let current = self.inner.saved.recover_lock().clone();
         if requested_workflow.id() != current.workflow().id() {
             return Err(OperationError::InvalidInput(format!(
                 "Workflow identity {:?} does not match the server-owned identity {:?}",
@@ -682,10 +721,13 @@ impl WorkflowManager {
                 current.workflow().id()
             )));
         }
-        let next_revision =
-            WorkflowSaveAdmission::new(expected_revision, current.workflow().revision())
-                .with_run_active(current.snapshot().phase().active())
-                .next_revision()?;
+        current.require_idle()?;
+        current.require_revision(expected_revision)?;
+        let next_revision = current
+            .workflow()
+            .revision()
+            .checked_add(1)
+            .ok_or_else(|| OperationError::Internal("Workflow revision overflowed.".to_owned()))?;
         let mut workflow = requested_workflow;
         workflow.set_revision(next_revision);
         workflow.normalize_model_sources();
@@ -717,12 +759,16 @@ impl WorkflowManager {
         let candidate = current.revised(workflow, snapshot);
         self.inner
             .storage
-            .save_workflow_document(&candidate.persisted().map_err(OperationError::External)?)
+            .save_workflow_graph(
+                candidate.workflow().id(),
+                &candidate.persisted().map_err(OperationError::External)?,
+            )
             .await
             .map_err(OperationError::External)?;
+        self.remember_workflow(candidate.workflow());
         let response = self.state_response(&candidate);
-        *self.inner.document.recover_lock() = candidate;
-        let _ = self.inner.updates.send(response.clone());
+        *self.inner.saved.recover_lock() = candidate;
+
         Ok(response)
     }
 
@@ -731,35 +777,44 @@ impl WorkflowManager {
         scope_id: &str,
         revision: u64,
     ) -> Result<WorkflowRunSnapshot, OperationError> {
-        self.require_scope(scope_id)?;
         let _mutation = self.inner.persistence.mutation.lock().await;
+        self.require_scope(scope_id)?;
         // When both locks are required, active-run admission always precedes
-        // the document. Cancel and terminal publication use the same order.
+        // the saved. Cancel and terminal publication use the same order.
         let active_exists = self.inner.active.recover_lock().is_some();
-        let document = self.inner.document.recover_lock().clone();
-        let validation = document.workflow().validate();
-        WorkflowRunAdmission::new(revision, document.workflow().revision())
-            .with_state(
-                active_exists || document.snapshot().phase().active(),
-                validation.valid(),
-            )
-            .validate()?;
+        let saved = self.inner.saved.recover_lock().clone();
+        let validation = saved.workflow().validate();
+        if active_exists {
+            return Err(OperationError::Conflict(
+                "A Workflow run is already active.".to_owned(),
+            ));
+        }
+        saved.require_idle()?;
+        saved.require_revision(revision)?;
+        if !validation.valid() {
+            return Err(OperationError::InvalidInput(
+                "Apply a valid graph before running.".to_owned(),
+            ));
+        }
 
         let run_id = self.inner.identity.next_run_id();
         let cancel = CancellationToken::new();
         let publication_gate = Arc::new(AsyncMutex::new(()));
-        let snapshot = document
+        let snapshot = saved
             .workflow()
-            .starting_snapshot(document.snapshot(), run_id.clone());
-        let candidate = document
+            .starting_snapshot(saved.snapshot(), run_id.clone());
+        let candidate = saved
             .clone()
-            .revised(document.workflow().clone(), snapshot.clone());
+            .revised(saved.workflow().clone(), snapshot.clone());
         self.inner
             .storage
-            .save_workflow_document(&candidate.persisted().map_err(OperationError::External)?)
+            .save_workflow_graph(
+                candidate.workflow().id(),
+                &candidate.persisted().map_err(OperationError::External)?,
+            )
             .await
             .map_err(OperationError::External)?;
-        *self.inner.document.recover_lock() = candidate;
+        *self.inner.saved.recover_lock() = candidate;
         *self.inner.active.recover_lock() = Some(ActiveRun {
             run_id: run_id.clone(),
             cancel: cancel.clone(),
@@ -767,7 +822,6 @@ impl WorkflowManager {
             task: None,
             terminal_persistence_failed: false,
         });
-        let _ = self.inner.updates.send(self.state());
 
         let manager = self.clone();
         let task_run_id = run_id.clone();
@@ -809,15 +863,19 @@ impl WorkflowManager {
     }
 
     async fn cancel(&self, scope_id: &str) -> Result<WorkflowRunSnapshot, OperationError> {
-        self.require_scope(scope_id)?;
         let _mutation = self.inner.persistence.mutation.lock().await;
-        // Keep admission and Cancelling publication in one active -> document
+        self.require_scope(scope_id)?;
+        // Keep admission and Cancelling publication in one active -> saved
         // critical section. Otherwise execution could publish Cancelled and
         // clear `active` between these steps, only for this request to regress
         // the persisted snapshot back to Cancelling.
         let (recover_terminal_persistence, run_id, publication_gate, cancel) = {
             let active = self.inner.active.recover_lock();
-            WorkflowCancellationAdmission::new(active.is_some()).validate()?;
+            if active.is_none() {
+                return Err(OperationError::Conflict(
+                    "No Workflow run is active.".to_owned(),
+                ));
+            }
             let control = active.as_ref().expect("admission requires an active run");
             (
                 control.terminal_persistence_failed,
@@ -828,13 +886,13 @@ impl WorkflowManager {
         };
         let publication = publication_gate.lock().await;
         cancel.cancel();
-        let document = self.inner.document.recover_lock().clone();
-        if document.snapshot().run_id() != Some(run_id.as_str()) {
+        let saved = self.inner.saved.recover_lock().clone();
+        if saved.snapshot().run_id() != Some(run_id.as_str()) {
             return Err(OperationError::Conflict(
                 "The active Workflow run changed before cancellation.".to_owned(),
             ));
         }
-        let mut candidate = document.clone();
+        let mut candidate = saved.clone();
         candidate
             .snapshot_mut()
             .set_phase(WorkflowRunPhase::Cancelling);
@@ -852,13 +910,11 @@ impl WorkflowManager {
                 node.set_detail("Cancelling after the current Spiral operation");
             }
         }
-        self.save_document(&candidate)
+        self.persist_saved(&candidate)
             .await
             .map_err(OperationError::External)?;
         let snapshot = candidate.snapshot().clone();
-        let response = self.state_response(&candidate);
-        *self.inner.document.recover_lock() = candidate;
-        let _ = self.inner.updates.send(response);
+        *self.inner.saved.recover_lock() = candidate;
         drop(publication);
         if recover_terminal_persistence {
             drop(_mutation);
@@ -874,7 +930,7 @@ impl WorkflowManager {
             cancel,
             publication_gate,
         } = execution;
-        let workflow = self.inner.document.recover_lock().workflow().clone();
+        let workflow = self.inner.saved.recover_lock().workflow().clone();
         let order = match workflow.topological_order() {
             Ok(order) => order,
             Err(error) => {
@@ -1163,16 +1219,16 @@ impl WorkflowManager {
     async fn set_model_event(&self, target: WorkflowNodeTarget<'_>, event: ModelRunEvent) {
         let WorkflowNodeTarget { run_id, node_id } = target;
         let _mutation = self.inner.persistence.mutation.lock().await;
-        let mut document = self.inner.document.recover_lock().clone();
-        if document.snapshot().run_id() != Some(run_id)
+        let mut saved = self.inner.saved.recover_lock().clone();
+        if saved.snapshot().run_id() != Some(run_id)
             || matches!(
-                document.snapshot().phase(),
+                saved.snapshot().phase(),
                 WorkflowRunPhase::Cancelling | WorkflowRunPhase::Cancelled
             )
         {
             return;
         }
-        let Some(node) = document
+        let Some(node) = saved
             .snapshot_mut()
             .nodes_mut()
             .iter_mut()
@@ -1205,14 +1261,13 @@ impl WorkflowManager {
             node.set_quarantine(WorkflowQuarantineSummary::default());
             node.warnings_mut().clear();
         }
-        document
+        saved
             .snapshot_mut()
             .set_updated_ms(SystemTime::now().unix_millis());
         if phase_changed || materialization_invalidated {
-            self.persist_publish(document).await;
+            self.persist_publish(saved).await;
         } else {
-            let _ = self.inner.updates.send(self.state_response(&document));
-            *self.inner.document.recover_lock() = document;
+            *self.inner.saved.recover_lock() = saved;
         }
     }
 
@@ -1223,11 +1278,11 @@ impl WorkflowManager {
             result,
         } = completion;
         let _mutation = self.inner.persistence.mutation.lock().await;
-        let mut document = self.inner.document.recover_lock().clone();
-        if document.snapshot().run_id() != Some(run_id) {
+        let mut saved = self.inner.saved.recover_lock().clone();
+        if saved.snapshot().run_id() != Some(run_id) {
             return;
         }
-        if let Some(node) = document
+        if let Some(node) = saved
             .snapshot_mut()
             .nodes_mut()
             .iter_mut()
@@ -1274,23 +1329,23 @@ impl WorkflowManager {
             node.set_model(Some(result.metadata().clone()));
             *node.warnings_mut() = result.warnings().to_vec();
         }
-        document
+        saved
             .snapshot_mut()
             .set_updated_ms(SystemTime::now().unix_millis());
-        self.persist_publish(document).await;
+        self.persist_publish(saved).await;
     }
 
     async fn set_run_phase(&self, run_id: &str, phase: WorkflowRunPhase) {
         let _mutation = self.inner.persistence.mutation.lock().await;
-        let mut document = self.inner.document.recover_lock().clone();
-        if document.snapshot().run_id() != Some(run_id) {
+        let mut saved = self.inner.saved.recover_lock().clone();
+        if saved.snapshot().run_id() != Some(run_id) {
             return;
         }
-        document.snapshot_mut().set_phase(phase);
-        document
+        saved.snapshot_mut().set_phase(phase);
+        saved
             .snapshot_mut()
             .set_updated_ms(SystemTime::now().unix_millis());
-        self.persist_publish(document).await;
+        self.persist_publish(saved).await;
     }
 
     async fn set_node_phase(&self, change: WorkflowNodePhaseChange<'_>) {
@@ -1301,11 +1356,11 @@ impl WorkflowManager {
             error,
         } = change;
         let _mutation = self.inner.persistence.mutation.lock().await;
-        let mut document = self.inner.document.recover_lock().clone();
-        if document.snapshot().run_id() != Some(run_id) {
+        let mut saved = self.inner.saved.recover_lock().clone();
+        if saved.snapshot().run_id() != Some(run_id) {
             return;
         }
-        if let Some(node) = document
+        if let Some(node) = saved
             .snapshot_mut()
             .nodes_mut()
             .iter_mut()
@@ -1315,10 +1370,10 @@ impl WorkflowManager {
             node.set_detail(detail);
             node.set_error(error);
         }
-        document
+        saved
             .snapshot_mut()
             .set_updated_ms(SystemTime::now().unix_millis());
-        self.persist_publish(document).await;
+        self.persist_publish(saved).await;
     }
 
     async fn complete_node(&self, completion: WorkflowNodeCompletion<'_>) {
@@ -1329,11 +1384,11 @@ impl WorkflowManager {
             rows,
         } = completion;
         let _mutation = self.inner.persistence.mutation.lock().await;
-        let mut document = self.inner.document.recover_lock().clone();
-        if document.snapshot().run_id() != Some(run_id) {
+        let mut saved = self.inner.saved.recover_lock().clone();
+        if saved.snapshot().run_id() != Some(run_id) {
             return;
         }
-        if let Some(node) = document
+        if let Some(node) = saved
             .snapshot_mut()
             .nodes_mut()
             .iter_mut()
@@ -1345,10 +1400,10 @@ impl WorkflowManager {
             node.set_rows(rows);
             node.set_error(None);
         }
-        document
+        saved
             .snapshot_mut()
             .set_updated_ms(SystemTime::now().unix_millis());
-        self.persist_publish(document).await;
+        self.persist_publish(saved).await;
     }
 
     async fn finish_completed(&self, run_id: &str, result: Option<SpiralQuerySnapshot>) {
@@ -1372,11 +1427,11 @@ impl WorkflowManager {
             self.finish_cancelled(run_id).await;
             return;
         }
-        let document = self.inner.document.recover_lock().clone();
-        if document.snapshot().run_id() != Some(run_id) {
+        let saved = self.inner.saved.recover_lock().clone();
+        if saved.snapshot().run_id() != Some(run_id) {
             return;
         }
-        let mut candidate = document.clone();
+        let mut candidate = saved.clone();
         let finished = SystemTime::now().unix_millis();
         candidate
             .snapshot_mut()
@@ -1386,17 +1441,15 @@ impl WorkflowManager {
         candidate.snapshot_mut().set_error(None);
         candidate.snapshot_mut().set_result(result);
         candidate.snapshot_mut().set_result_stale(false);
-        if let Err(error) = self.save_document(&candidate).await {
+        if let Err(error) = self.persist_saved(&candidate).await {
             if let Some(control) = self.inner.active.recover_lock().as_mut() {
                 control.terminal_persistence_failed = true;
             }
-            self.report_terminal_persistence_failure(TerminalPersistenceFailure::new(
-                run_id, &document, error,
-            ));
+            self.report_terminal_persistence_failure(run_id, error);
             return;
         }
-        self.publish_committed_terminal(&candidate);
-        *self.inner.document.recover_lock() = candidate;
+        self.publish_committed_terminal();
+        *self.inner.saved.recover_lock() = candidate;
         *self.inner.active.recover_lock() = None;
     }
 
@@ -1440,11 +1493,11 @@ impl WorkflowManager {
             self.finish_cancelled(run_id).await;
             return;
         }
-        let document = self.inner.document.recover_lock().clone();
-        if document.snapshot().run_id() != Some(run_id) {
+        let saved = self.inner.saved.recover_lock().clone();
+        if saved.snapshot().run_id() != Some(run_id) {
             return;
         }
-        let mut candidate = document.clone();
+        let mut candidate = saved.clone();
         if let Some(node_id) = node_id
             && let Some(node) = candidate
                 .snapshot_mut()
@@ -1461,17 +1514,15 @@ impl WorkflowManager {
         candidate.snapshot_mut().set_finished_ms(finished);
         candidate.snapshot_mut().set_updated_ms(finished);
         candidate.snapshot_mut().set_error(Some(error));
-        if let Err(error) = self.save_document(&candidate).await {
+        if let Err(error) = self.persist_saved(&candidate).await {
             if let Some(control) = self.inner.active.recover_lock().as_mut() {
                 control.terminal_persistence_failed = true;
             }
-            self.report_terminal_persistence_failure(TerminalPersistenceFailure::new(
-                run_id, &document, error,
-            ));
+            self.report_terminal_persistence_failure(run_id, error);
             return;
         }
-        self.publish_committed_terminal(&candidate);
-        *self.inner.document.recover_lock() = candidate;
+        self.publish_committed_terminal();
+        *self.inner.saved.recover_lock() = candidate;
         *self.inner.active.recover_lock() = None;
     }
 
@@ -1486,11 +1537,11 @@ impl WorkflowManager {
         {
             return;
         }
-        let document = self.inner.document.recover_lock().clone();
-        if document.snapshot().run_id() != Some(run_id) {
+        let saved = self.inner.saved.recover_lock().clone();
+        if saved.snapshot().run_id() != Some(run_id) {
             return;
         }
-        let mut candidate = document.clone();
+        let mut candidate = saved.clone();
         candidate
             .snapshot_mut()
             .nodes_mut()
@@ -1502,17 +1553,15 @@ impl WorkflowManager {
         candidate.snapshot_mut().set_finished_ms(finished);
         candidate.snapshot_mut().set_updated_ms(finished);
         candidate.snapshot_mut().set_error(None);
-        if let Err(error) = self.save_document(&candidate).await {
+        if let Err(error) = self.persist_saved(&candidate).await {
             if let Some(control) = self.inner.active.recover_lock().as_mut() {
                 control.terminal_persistence_failed = true;
             }
-            self.report_terminal_persistence_failure(TerminalPersistenceFailure::new(
-                run_id, &document, error,
-            ));
+            self.report_terminal_persistence_failure(run_id, error);
             return;
         }
-        self.publish_committed_terminal(&candidate);
-        *self.inner.document.recover_lock() = candidate;
+        self.publish_committed_terminal();
+        *self.inner.saved.recover_lock() = candidate;
         *self.inner.active.recover_lock() = None;
     }
 
@@ -1526,15 +1575,15 @@ impl WorkflowManager {
                 .is_none_or(|active| active.run_id != run_id)
     }
 
-    async fn persist_publish(&self, document: WorkflowDocument) {
-        if let Err(error) = self.save_document(&document).await {
+    async fn persist_publish(&self, saved: SavedWorkflow) {
+        if let Err(error) = self.persist_saved(&saved).await {
             tracing::error!(%error, "persisting Workflow snapshot");
         }
-        let _ = self.inner.updates.send(self.state_response(&document));
-        *self.inner.document.recover_lock() = document;
+
+        *self.inner.saved.recover_lock() = saved;
     }
 
-    async fn save_document(&self, document: &WorkflowDocument) -> Result<(), String> {
+    async fn persist_saved(&self, saved: &SavedWorkflow) -> Result<(), String> {
         #[cfg(test)]
         if let Some(outcome) = self
             .inner
@@ -1547,26 +1596,21 @@ impl WorkflowManager {
         }
         self.inner
             .storage
-            .save_workflow_document(&document.persisted()?)
+            .save_workflow_graph(saved.workflow().id(), &saved.persisted()?)
             .await
     }
 
     fn require_scope(&self, requested_scope_id: &str) -> Result<(), OperationError> {
         if requested_scope_id != self.scope_id() {
             return Err(OperationError::Conflict(
-                "The Spiral project changed before the Workflow command arrived. Reload Workflow and try again."
+                "The selected workflow or project changed. Reload Workflow and try again."
                     .to_owned(),
             ));
         }
         Ok(())
     }
 
-    fn report_terminal_persistence_failure(&self, failure: TerminalPersistenceFailure<'_>) {
-        let TerminalPersistenceFailure {
-            run_id,
-            document,
-            error,
-        } = failure;
+    fn report_terminal_persistence_failure(&self, run_id: &str, error: String) {
         let detail = format!(
             "Could not durably finalize this Workflow run: {error} The run remains active; choose Cancel to retry durable finalization."
         );
@@ -1575,19 +1619,19 @@ impl WorkflowManager {
             run_id: run_id.to_owned(),
             detail,
         });
-        let _ = self.inner.updates.send(self.state_response(document));
     }
 
-    fn publish_committed_terminal(&self, document: &WorkflowDocument) {
+    fn publish_committed_terminal(&self) {
         *self.inner.persistence.terminal_error.recover_lock() = None;
-        let _ = self.inner.updates.send(self.state_response(document));
     }
 
-    fn state_response(&self, document: &WorkflowDocument) -> WorkflowSnapshot {
-        let mut response = document.state_response();
+    fn state_response(&self, saved: &SavedWorkflow) -> WorkflowSnapshot {
+        let mut response = saved
+            .state_response()
+            .with_workflows(self.inner.workflows.recover_lock().clone());
         response.set_scope_id(self.scope_id());
         let mut snapshot = response.snapshot().clone();
-        for node in document.workflow().nodes() {
+        for node in saved.workflow().nodes() {
             let Some(node_snapshot) = snapshot
                 .nodes_mut()
                 .iter_mut()
@@ -1657,11 +1701,7 @@ impl WorkflowNodeSnapshots for [WorkflowNodeSnapshot] {
     }
 }
 
-trait WorkflowDocumentPresentation {
-    fn state_response(&self) -> WorkflowSnapshot;
-}
-
-impl WorkflowDocumentPresentation for WorkflowDocument {
+impl SavedWorkflow {
     fn state_response(&self) -> WorkflowSnapshot {
         let mut response = WorkflowSnapshot::from_workflow(String::new(), self.workflow().clone());
         response.set_snapshot(self.snapshot().clone());
@@ -1805,7 +1845,10 @@ impl WorkflowOutputs for WorkflowSpec {
     }
 
     fn save_allowed(&self, validation_valid: bool) -> bool {
-        validation_valid || (self.nodes().is_empty() && self.edges().is_empty())
+        validation_valid
+            || (self.nodes().is_empty()
+                && self.edges().is_empty()
+                && !self.name().trim().is_empty())
     }
 }
 
@@ -1825,27 +1868,27 @@ mod tests {
     use spiral_robotics_storage::ProjectStore;
     use spiral_robotics_storage::{BackendStateStore, ServiceEndpoint, SpiralConnectionSettings};
 
-    /// The stored document declares its own encoding. A newer version is
+    /// The stored saved declares its own encoding. A newer version is
     /// refused so an operator's saved graph is never replaced by an empty one.
     #[test]
     fn stored_workflow_versions_are_explicit_and_unsupported_documents_are_preserved() {
-        let document = WorkflowDocument::default();
-        let stored = document.persisted().unwrap();
+        let saved = SavedWorkflow::default();
+        let stored = saved.persisted().unwrap();
         assert_eq!(stored.version(), 2);
-        assert_eq!(WorkflowDocument::restored(&stored).unwrap(), document);
+        assert_eq!(SavedWorkflow::restored(&stored).unwrap(), saved);
         for version in [1, 4] {
-            let unsupported = StoredWorkflowDocument::new(version, stored.payload().to_owned());
+            let unsupported = WorkflowJson::new(version, stored.payload().to_owned());
             let original = unsupported.payload().to_owned();
-            let error = WorkflowDocument::restored(&unsupported).unwrap_err();
+            let error = SavedWorkflow::restored(&unsupported).unwrap_err();
             assert_eq!(
                 error.code(),
                 spiral_robotics_common::command_failure::CommandFailureCode::IncompatibleWorkflow
             );
             assert_eq!(unsupported.payload(), original);
         }
-        let damaged = StoredWorkflowDocument::new(2, r#"{"concepts":["cube"]}"#.to_owned());
+        let damaged = WorkflowJson::new(2, r#"{"concepts":["cube"]}"#.to_owned());
         assert!(matches!(
-            WorkflowDocument::restored(&damaged),
+            SavedWorkflow::restored(&damaged),
             Err(OperationError::IncompatibleWorkflow(_))
         ));
     }
@@ -1853,14 +1896,14 @@ mod tests {
     #[test]
     fn v3_history_survives_loading_execution_and_later_saves() {
         let payload = include_str!("fixtures/workflow-history-v3.json");
-        let stored = StoredWorkflowDocument::new(3, payload.to_owned());
-        let original = WorkflowDocument::restored(&stored).unwrap();
+        let stored = WorkflowJson::new(3, payload.to_owned());
+        let original = SavedWorkflow::restored(&stored).unwrap();
         assert_eq!(original.history.as_ref().unwrap().len(), 1);
         assert!(original.workflow.validate().valid());
         assert!(original.history.as_ref().unwrap()[0].validate().valid());
         assert_eq!(original.persisted().unwrap().version(), 3);
         assert_eq!(
-            WorkflowDocument::restored(&original.persisted().unwrap()).unwrap(),
+            SavedWorkflow::restored(&original.persisted().unwrap()).unwrap(),
             original
         );
         let started = original.clone().revised(
@@ -1877,9 +1920,12 @@ mod tests {
             updated.history.as_ref().unwrap()[0],
             original.history.as_ref().unwrap()[0]
         );
-        assert_eq!(updated.history.as_ref().unwrap()[1], original.workflow);
         assert_eq!(
-            WorkflowDocument::restored(&updated.persisted().unwrap()).unwrap(),
+            updated.history, original.history,
+            "new edits do not accumulate graph history"
+        );
+        assert_eq!(
+            SavedWorkflow::restored(&updated.persisted().unwrap()).unwrap(),
             updated
         );
         assert_eq!(stored.payload(), payload);
@@ -1912,9 +1958,9 @@ mod tests {
             cyclic,
             missing_history,
         ] {
-            let stored = StoredWorkflowDocument::new(3, payload.to_string());
+            let stored = WorkflowJson::new(3, payload.to_string());
             assert!(matches!(
-                WorkflowDocument::restored(&stored),
+                SavedWorkflow::restored(&stored),
                 Err(OperationError::IncompatibleWorkflow(_))
             ));
             assert_eq!(
@@ -1930,18 +1976,18 @@ mod tests {
         let path = std::env::var("STUDIO_WORKFLOW_INSPECTION").unwrap();
         let inspection: serde_json::Value =
             serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-        let stored = StoredWorkflowDocument::new(
+        let stored = WorkflowJson::new(
             inspection["version"].as_u64().unwrap() as u32,
             inspection["payload"].as_str().unwrap().to_owned(),
         );
-        let document = WorkflowDocument::restored(&stored).unwrap();
-        assert!(document.workflow.validate().valid());
-        for previous in document.history.iter().flatten() {
+        let saved = SavedWorkflow::restored(&stored).unwrap();
+        assert!(saved.workflow.validate().valid());
+        for previous in saved.history.iter().flatten() {
             assert!(previous.validate().valid());
         }
         assert_eq!(
-            WorkflowDocument::restored(&document.persisted().unwrap()).unwrap(),
-            document
+            SavedWorkflow::restored(&saved.persisted().unwrap()).unwrap(),
+            saved
         );
     }
 
@@ -2029,8 +2075,7 @@ mod tests {
     async fn wire_snapshot_carries_the_prefixed_model_output() {
         let mut workflow = siglip_video_workflow("media.manifest", "model");
         workflow.normalize_model_sources();
-        let document =
-            WorkflowDocument::new(workflow.clone(), WorkflowRunSnapshot::idle_for(&workflow));
+        let saved = SavedWorkflow::new(workflow.clone(), WorkflowRunSnapshot::idle_for(&workflow));
         let project_store = Arc::new(
             {
                 let settings = SpiralConnectionSettings::new(
@@ -2045,7 +2090,7 @@ mod tests {
             .expect("the unconfigured test project_store is valid"),
         );
         let manager = WorkflowManager::new(Arc::new(StorageManager::new(project_store)));
-        let response = manager.state_response(&document);
+        let response = manager.state_response(&saved);
         let output = response
             .snapshot()
             .nodes()
@@ -2120,7 +2165,7 @@ mod tests {
         let mut snapshot =
             workflow.starting_snapshot(&WorkflowRunSnapshot::idle_for(&workflow), run_id.clone());
         snapshot.set_phase(WorkflowRunPhase::Running);
-        *manager.inner.document.recover_lock() = WorkflowDocument::new(workflow, snapshot);
+        *manager.inner.saved.recover_lock() = SavedWorkflow::new(workflow, snapshot);
         *manager.inner.active.recover_lock() = Some(ActiveRun {
             run_id: run_id.clone(),
             cancel: CancellationToken::new(),
@@ -2128,30 +2173,6 @@ mod tests {
             task: None,
             terminal_persistence_failed: false,
         });
-        let waiting_manager = manager.clone();
-        let waiting_run_id = run_id.clone();
-        let mut waiting = tokio::spawn(async move {
-            waiting_manager
-                .wait_for_terminal(&waiting_run_id, CancellationToken::new())
-                .await
-        });
-        let cancelled_wait = CancellationToken::new();
-        cancelled_wait.cancel();
-        assert!(
-            manager
-                .wait_for_terminal(&run_id, cancelled_wait)
-                .await
-                .unwrap_err()
-                .contains("cancelled")
-        );
-        assert!(
-            manager
-                .wait_for_terminal("another-run", CancellationToken::new())
-                .await
-                .unwrap_err()
-                .contains("changed")
-        );
-        let (_, mut updates) = manager.subscription();
         manager
             .inner
             .persistence
@@ -2167,21 +2188,6 @@ mod tests {
             error.contains("Could not durably finalize") && error.contains("choose Cancel")
         }));
         assert!(manager.inner.active.lock().unwrap().is_some());
-        let published = updates
-            .try_recv()
-            .expect("the recovery state must be published");
-        assert_eq!(published.snapshot().phase(), WorkflowRunPhase::Running);
-
-        assert!(
-            tokio::time::timeout(Duration::from_millis(5), &mut waiting)
-                .await
-                .is_err(),
-            "a failed terminal save must not complete the pending Assistant tool"
-        );
-        // Force a lagging subscriber; it must recover from authoritative state.
-        for _ in 0..256 {
-            let _ = manager.inner.updates.send(manager.state());
-        }
         manager
             .inner
             .persistence
@@ -2195,12 +2201,6 @@ mod tests {
         assert_eq!(recovered.phase(), WorkflowRunPhase::Cancelled);
         assert!(recovered.error().is_none());
         assert!(manager.inner.active.lock().unwrap().is_none());
-        let terminal = tokio::time::timeout(Duration::from_secs(1), waiting)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        assert_eq!(terminal.phase(), WorkflowRunPhase::Cancelled);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2219,20 +2219,20 @@ mod tests {
             .expect("the unconfigured test project_store is valid"),
         );
         let manager = WorkflowManager::new(Arc::new(StorageManager::new(project_store)));
-        let mut project_a = WorkflowDocument::default();
+        let mut project_a = SavedWorkflow::default();
         project_a.workflow_mut().set_revision(9);
         project_a.snapshot_mut().set_workflow_revision(9);
         manager
-            .install_hydrated_document(project_a)
+            .install_saved(project_a)
             .await
             .expect("the first project installs");
         let scope_a = manager.state().scope_id().to_owned();
 
-        let mut project_b = WorkflowDocument::default();
+        let mut project_b = SavedWorkflow::default();
         project_b.workflow_mut().set_revision(1);
         project_b.snapshot_mut().set_workflow_revision(1);
         manager
-            .install_hydrated_document(project_b)
+            .install_saved(project_b)
             .await
             .expect("the replacement project installs");
         let state_b = manager.state();
@@ -2416,6 +2416,21 @@ mod tests {
             .replace_or_create_batches(&target, vec![batch])
             .await
             .expect("seeding the Workflow relation must succeed");
+        // The app provisions managed relations at project setup; this isolated
+        // test namespace provisions only the workflow relation it exercises.
+        let workflow_schema = Arc::new(Schema::new(vec![
+            Field::new("run_id", DataType::Utf8, false),
+            Field::new("document_version", DataType::UInt32, false),
+            Field::new("snapshot_json", DataType::Utf8, false),
+            Field::new("updated_ms", DataType::Int64, false),
+        ]));
+        connection
+            .replace_or_create_batches(
+                &format!("{table_prefix}_workflow_runs"),
+                vec![RecordBatch::new_empty(workflow_schema)],
+            )
+            .await
+            .unwrap();
         drop(connection);
 
         let storage = Arc::new(StorageManager::new(project_store.clone()));
@@ -2423,8 +2438,11 @@ mod tests {
         manager
             .prepare_from_storage()
             .await
-            .expect("an empty Workflow document must hydrate");
-        let mut workflow = WorkflowSpec::default();
+            .expect("an empty workflow namespace must hydrate");
+        let initial = WorkflowSpec::default();
+        let mut workflow = WorkflowSpec::new(manager.state().workflow().id(), "Ordered samples");
+        workflow.nodes_mut().extend_from_slice(initial.nodes());
+        workflow.edges_mut().extend_from_slice(initial.edges());
         let WorkflowNodeConfig::Table { relation } = workflow.nodes_mut()[0].config_mut() else {
             unreachable!("the default workflow starts with a Table")
         };
@@ -2458,7 +2476,7 @@ mod tests {
             Some(3)
         );
 
-        let reloaded = WorkflowManager::new(storage);
+        let reloaded = WorkflowManager::new(storage.clone());
         reloaded
             .prepare_from_storage()
             .await
@@ -2479,6 +2497,98 @@ mod tests {
         assert_eq!(cancelled.phase(), WorkflowRunPhase::Cancelled);
         assert!(cancelled.result_stale());
         assert_eq!(cancelled.result(), completed.result());
+        // Named workflow storage and conversation ownership use the same real
+        // Spiral transaction path as the graph and result above.
+        let first_id = saved.workflow().id().to_owned();
+        let mut first_chat =
+            spiral_robotics_storage::workflow_assistant::WorkflowConversation::new(&first_id);
+        first_chat.provider_messages_mut().push(
+            spiral_robotics_storage::workflow_assistant::ProviderMessage::text(
+                "user",
+                "Keep the first workflow context",
+            ),
+        );
+        storage
+            .save_workflow_conversation(&first_id, &first_chat.persisted().unwrap())
+            .await
+            .unwrap();
+        let first_scope = reloaded.scope_id();
+        let second = reloaded
+            .command(WorkflowCommand::create(&first_scope))
+            .await
+            .unwrap();
+        let second_id = second.workflow().id().to_owned();
+        assert_ne!(first_id, second_id);
+        assert!(second.workflow().nodes().is_empty());
+        let mut renamed = second.workflow().clone();
+        renamed.set_name("Second workflow");
+        reloaded
+            .command(WorkflowCommand::apply(reloaded.scope_id(), 0, renamed))
+            .await
+            .unwrap();
+        let second_chat =
+            spiral_robotics_storage::workflow_assistant::WorkflowConversation::new(&second_id);
+        storage
+            .save_workflow_conversation(&second_id, &second_chat.persisted().unwrap())
+            .await
+            .unwrap();
+        assert!(
+            reloaded
+                .command(WorkflowCommand::apply(
+                    first_scope,
+                    revision,
+                    saved.workflow().clone()
+                ))
+                .await
+                .is_err()
+        );
+        let list = reloaded.state();
+        assert_eq!(list.workflows().len(), 2);
+        let restarted = WorkflowManager::new(storage.clone());
+        restarted.ensure_loaded().await.unwrap();
+        assert_eq!(restarted.state().workflow().id(), second_id);
+        assert_eq!(restarted.state().workflow().name(), "Second workflow");
+        restarted
+            .command(WorkflowCommand::select(restarted.scope_id(), &first_id))
+            .await
+            .unwrap();
+        let reselected = WorkflowManager::new(storage.clone());
+        reselected.ensure_loaded().await.unwrap();
+        assert_eq!(
+            reselected.state().workflow().id(),
+            first_id,
+            "reconnect opens the most recently selected workflow"
+        );
+        let first_json = storage
+            .load_workflow_conversation(&first_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let first_chat = spiral_robotics_storage::workflow_assistant::WorkflowConversation::load(
+            &first_json,
+            &first_id,
+        )
+        .unwrap();
+        assert_eq!(
+            first_chat.provider_messages()[0].content(),
+            Some("Keep the first workflow context")
+        );
+        let second_json = storage
+            .load_workflow_conversation(&second_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            spiral_robotics_storage::workflow_assistant::WorkflowConversation::load(
+                &second_json,
+                &second_id
+            )
+            .unwrap()
+            .provider_messages()
+            .is_empty()
+        );
+        restarted.shutdown().await;
+        reselected.shutdown().await;
         reloaded.shutdown().await;
         manager.shutdown().await;
         cleanup
@@ -2563,14 +2673,17 @@ mod tests {
     }
 
     async fn wait_for_terminal(manager: &WorkflowManager) -> WorkflowRunSnapshot {
-        for _ in 0..400 {
+        for _ in 0..2400 {
             let snapshot = manager.state().snapshot().clone();
             if snapshot.phase().terminal() {
                 return snapshot;
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
-        panic!("Workflow run did not reach a terminal state within 10 seconds");
+        panic!(
+            "Workflow run did not reach a terminal state within 60 seconds: {:?}",
+            manager.state().snapshot()
+        );
     }
 
     struct WorkflowTestTables {

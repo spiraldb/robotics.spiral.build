@@ -4,4 +4,3 @@ pub(crate) mod http;
 pub(crate) mod manager;
 pub(crate) mod model;
 pub(crate) mod provider;
-pub(crate) mod service;

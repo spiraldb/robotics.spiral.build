@@ -2539,39 +2539,49 @@
   .workflow-assistant-presence.is-active::before {
     background-color: var(--tone-accent);
   }
-  .workflow-assistant-conversation-controls {
-    margin-top: calc(var(--spacing) * 2.5);
+  .workflow-workspace {
+    display: flex;
+    height: 100%;
+    min-height: 0px;
+    min-width: 0px;
+    flex-direction: column;
   }
-  .workflow-assistant-conversation-controls > label {
-    margin-bottom: var(--spacing);
-    display: block;
-    font-size: 11px;
+  .workflow-panels {
+    min-height: 0px;
+    min-width: 0px;
+    flex: 1;
+  }
+  .workflow-picker {
+    display: flex;
+    flex-shrink: 0;
+    align-items: center;
+    gap: calc(var(--spacing) * 2);
+    border-bottom-style: var(--tw-border-style);
+    border-bottom-width: 1px;
+    border-color: var(--tone-line);
+    padding-inline: calc(var(--spacing) * 3);
+    padding-block: calc(var(--spacing) * 2);
+  }
+  .workflow-picker label {
+    font-size: var(--text-xs);
+    line-height: var(--tw-leading, var(--text-xs--line-height));
     --tw-font-weight: var(--font-weight-medium);
     font-weight: var(--font-weight-medium);
     color: var(--tone-ink-soft);
   }
-  .workflow-assistant-conversation-row {
-    display: flex;
-    min-width: 0px;
-    align-items: center;
-    gap: calc(var(--spacing) * 1.5);
-  }
-  .workflow-assistant-conversation-select {
+  .workflow-picker select, .workflow-name-input {
     min-height: calc(var(--spacing) * 8);
     min-width: 0px;
-    flex: 1;
     border-radius: 0.25rem;
     border-style: var(--tw-border-style);
     border-width: 1px;
     border-color: var(--tone-line);
     background-color: var(--tone-surface);
     padding-inline: calc(var(--spacing) * 2);
-    padding-block: calc(var(--spacing) * 1.5);
-    font-size: 11px;
+    padding-block: var(--spacing);
+    font-size: var(--text-xs);
+    line-height: var(--tw-leading, var(--text-xs--line-height));
     color: var(--tone-ink);
-    transition-property: border-color,box-shadow;
-    transition-timing-function: var(--tw-ease, var(--default-transition-timing-function));
-    transition-duration: var(--tw-duration, var(--default-transition-duration));
     --tw-outline-style: none;
     outline-style: none;
     &:focus-visible {
@@ -2588,26 +2598,19 @@
       }
     }
     &:disabled {
-      cursor: not-allowed;
-    }
-    &:disabled {
-      background-color: var(--tone-sunken);
-    }
-    &:disabled {
       color: var(--tone-ink-faint);
     }
   }
-  .workflow-assistant-new-action {
-    min-height: calc(var(--spacing) * 8);
-    flex-shrink: 0;
-    padding-inline: calc(var(--spacing) * 2.5);
+  .workflow-picker select {
+    width: calc(var(--spacing) * 64);
   }
-  .workflow-assistant-conversation-reason {
-    margin-top: calc(var(--spacing) * 1.5);
-    font-size: 10px;
-    --tw-leading: calc(var(--spacing) * 4);
-    line-height: calc(var(--spacing) * 4);
-    color: var(--tone-ink-faint);
+  .workflow-name-input {
+    width: calc(var(--spacing) * 44);
+  }
+  .workflow-picker > span {
+    font-size: var(--text-xs);
+    line-height: var(--tw-leading, var(--text-xs--line-height));
+    color: var(--tone-ink-soft);
   }
   .workflow-assistant-empty {
     padding-inline: calc(var(--spacing) * 4);

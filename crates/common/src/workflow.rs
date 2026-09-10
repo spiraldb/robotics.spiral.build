@@ -324,6 +324,13 @@ impl WorkflowValidationIssue {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkflowCommand {
+    Create {
+        scope_id: String,
+    },
+    Select {
+        scope_id: String,
+        workflow_id: String,
+    },
     Apply {
         scope_id: String,
         expected_revision: u64,
@@ -339,6 +346,18 @@ pub enum WorkflowCommand {
 }
 
 impl WorkflowCommand {
+    pub fn create(scope_id: impl Into<String>) -> Self {
+        Self::Create {
+            scope_id: scope_id.into(),
+        }
+    }
+    pub fn select(scope_id: impl Into<String>, workflow_id: impl Into<String>) -> Self {
+        Self::Select {
+            scope_id: scope_id.into(),
+            workflow_id: workflow_id.into(),
+        }
+    }
+
     pub fn apply(
         scope_id: impl Into<String>,
         expected_revision: u64,
@@ -373,6 +392,8 @@ pub struct WorkflowSnapshot {
     #[serde(default)]
     scope_id: String,
     workflow: WorkflowSpec,
+    #[serde(default)]
+    workflows: Vec<WorkflowSummary>,
     validation: WorkflowValidationReport,
     snapshot: WorkflowRunSnapshot,
 }
@@ -382,6 +403,7 @@ impl Default for WorkflowSnapshot {
         let workflow = WorkflowSpec::default();
         Self {
             scope_id: String::new(),
+            workflows: Vec::new(),
             validation: workflow.validate(),
             snapshot: WorkflowRunSnapshot::idle_for(&workflow),
             workflow,
@@ -1205,35 +1227,43 @@ impl WorkflowAgentSession {
 }
 
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct WorkflowAgentConversationSummary {
-    conversation_id: String,
-    title: String,
-    created_ms: u64,
-    updated_ms: u64,
-    message_count: usize,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    owned_run_id: Option<String>,
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorkflowSummary {
+    id: String,
+    name: String,
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-struct AgentStateContext {
-    history_available: bool,
-    scope_id: String,
-    revision: u64,
-    active_conversation_id: String,
-    conversation_limit: usize,
+impl WorkflowSummary {
+    pub fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+        }
+    }
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl WorkflowSnapshot {
+    pub fn with_workflows(mut self, workflows: Vec<WorkflowSummary>) -> Self {
+        self.workflows = workflows;
+        self
+    }
+    pub fn workflows(&self) -> &[WorkflowSummary] {
+        &self.workflows
+    }
 }
 
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkflowAgentSnapshot {
     readiness: WorkflowAgentReadiness,
-    #[serde(flatten)]
-    context: AgentStateContext,
-    #[serde(default)]
-    conversations: Vec<WorkflowAgentConversationSummary>,
+    history_available: bool,
+    scope_id: String,
     session: WorkflowAgentSession,
 }
 
@@ -1241,86 +1271,50 @@ impl WorkflowAgentSnapshot {
     pub fn new(readiness: WorkflowAgentReadiness, session: WorkflowAgentSession) -> Self {
         Self {
             readiness,
-            context: AgentStateContext::default(),
-            conversations: Vec::new(),
+            history_available: false,
+            scope_id: String::new(),
             session,
         }
     }
-
-    pub const fn with_history_available(mut self, history_available: bool) -> Self {
-        self.context.history_available = history_available;
+    pub const fn with_history_available(mut self, available: bool) -> Self {
+        self.history_available = available;
         self
     }
-
     pub fn with_scope(mut self, scope_id: impl Into<String>, revision: u64) -> Self {
-        self.context.scope_id = scope_id.into();
-        self.context.revision = revision;
-        self
-    }
-
-    pub fn with_active_conversation(
-        mut self,
-        conversation_id: impl Into<String>,
-        limit: usize,
-    ) -> Self {
-        self.context.active_conversation_id = conversation_id.into();
-        self.context.conversation_limit = limit;
-        self
-    }
-    pub fn with_conversations(
-        mut self,
-        conversations: Vec<WorkflowAgentConversationSummary>,
-    ) -> Self {
-        self.conversations = conversations;
+        self.scope_id = scope_id.into();
+        self.session.set_revision(revision);
         self
     }
     pub const fn readiness(&self) -> &WorkflowAgentReadiness {
         &self.readiness
     }
     pub const fn history_available(&self) -> bool {
-        self.context.history_available
+        self.history_available
     }
     pub fn scope_id(&self) -> &str {
-        &self.context.scope_id
+        &self.scope_id
     }
     pub const fn revision(&self) -> u64 {
-        self.context.revision
-    }
-    pub fn active_conversation_id(&self) -> &str {
-        &self.context.active_conversation_id
-    }
-    pub fn conversations(&self) -> &[WorkflowAgentConversationSummary] {
-        &self.conversations
-    }
-    pub const fn conversation_limit(&self) -> usize {
-        self.context.conversation_limit
+        self.session.revision()
     }
     pub const fn session(&self) -> &WorkflowAgentSession {
         &self.session
     }
     #[cfg(any(test, feature = "test-support"))]
-    pub fn conversations_mut(&mut self) -> &mut Vec<WorkflowAgentConversationSummary> {
-        &mut self.conversations
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
     pub const fn session_mut(&mut self) -> &mut WorkflowAgentSession {
         &mut self.session
     }
-
     #[cfg(any(test, feature = "test-support"))]
-    pub const fn set_history_available(&mut self, history_available: bool) {
-        self.context.history_available = history_available;
+    pub const fn set_history_available(&mut self, available: bool) {
+        self.history_available = available;
     }
-
     #[cfg(any(test, feature = "test-support"))]
     pub const fn set_revision(&mut self, revision: u64) {
-        self.context.revision = revision;
+        self.session.set_revision(revision);
     }
-
     #[cfg(any(test, feature = "test-support"))]
     pub fn set_scope_id(&mut self, scope_id: impl Into<String>) {
-        self.context.scope_id = scope_id.into();
+        self.scope_id = scope_id.into();
     }
 }
 
@@ -1329,15 +1323,6 @@ impl WorkflowAgentSnapshot {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkflowAgentCommand {
-    CreateConversation {
-        scope_id: String,
-        expected_revision: u64,
-    },
-    ActivateConversation {
-        scope_id: String,
-        conversation_id: String,
-        expected_revision: u64,
-    },
     Turn {
         scope_id: String,
         conversation_id: String,
@@ -1780,12 +1765,10 @@ impl WorkflowSpec {
             .iter()
             .any(|node| matches!(node.config, WorkflowNodeConfig::Model { .. }))
     }
-    #[cfg(any(test, feature = "test-support"))]
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     pub fn set_name(&mut self, name: impl Into<String>) {
         self.name = name.into();
     }
@@ -1844,7 +1827,6 @@ impl WorkflowNodeSpec {
         self.id = id.into();
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     pub fn set_name(&mut self, name: impl Into<String>) {
         self.name = name.into();
     }
@@ -1875,6 +1857,7 @@ impl WorkflowSnapshot {
         Self {
             scope_id: scope_id.into(),
             workflow,
+            workflows: Vec::new(),
             validation,
             snapshot,
         }
@@ -2048,67 +2031,7 @@ impl WorkflowAgentToolSummary {
         self.receipt.as_ref()
     }
 }
-impl WorkflowAgentConversationSummary {
-    pub fn new(
-        conversation_id: impl Into<String>,
-        title: impl Into<String>,
-        created_ms: u64,
-    ) -> Self {
-        Self {
-            conversation_id: conversation_id.into(),
-            title: title.into(),
-            created_ms,
-            updated_ms: created_ms,
-            message_count: 0,
-            owned_run_id: None,
-        }
-    }
-    pub const fn with_activity(mut self, updated_ms: u64, message_count: usize) -> Self {
-        self.updated_ms = updated_ms;
-        self.message_count = message_count;
-        self
-    }
-    pub fn with_owned_run_id(mut self, owned_run_id: Option<String>) -> Self {
-        self.owned_run_id = owned_run_id;
-        self
-    }
-    pub fn conversation_id(&self) -> &str {
-        &self.conversation_id
-    }
-    pub fn title(&self) -> &str {
-        &self.title
-    }
-    pub const fn message_count(&self) -> usize {
-        self.message_count
-    }
-    pub fn owned_run_id(&self) -> Option<&str> {
-        self.owned_run_id.as_deref()
-    }
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn set_owned_run_id(&mut self, owned_run_id: Option<String>) {
-        self.owned_run_id = owned_run_id;
-    }
-}
 impl WorkflowAgentCommand {
-    pub fn create_conversation(scope_id: impl Into<String>, expected_revision: u64) -> Self {
-        Self::CreateConversation {
-            scope_id: scope_id.into(),
-            expected_revision,
-        }
-    }
-
-    pub fn activate_conversation(
-        scope_id: impl Into<String>,
-        conversation_id: impl Into<String>,
-        expected_revision: u64,
-    ) -> Self {
-        Self::ActivateConversation {
-            scope_id: scope_id.into(),
-            conversation_id: conversation_id.into(),
-            expected_revision,
-        }
-    }
-
     pub fn cancel(
         scope_id: impl Into<String>,
         conversation_id: impl Into<String>,
@@ -2123,25 +2046,17 @@ impl WorkflowAgentCommand {
 
     pub fn scope_id(&self) -> &str {
         match self {
-            Self::CreateConversation { scope_id, .. }
-            | Self::ActivateConversation { scope_id, .. }
-            | Self::Turn { scope_id, .. }
-            | Self::Cancel { scope_id, .. } => scope_id,
+            Self::Turn { scope_id, .. } | Self::Cancel { scope_id, .. } => scope_id,
         }
     }
-
-    pub fn conversation_id(&self) -> Option<&str> {
+    pub fn conversation_id(&self) -> &str {
         match self {
-            Self::ActivateConversation {
-                conversation_id, ..
-            }
-            | Self::Turn {
+            Self::Turn {
                 conversation_id, ..
             }
             | Self::Cancel {
                 conversation_id, ..
-            } => Some(conversation_id),
-            Self::CreateConversation { .. } => None,
+            } => conversation_id,
         }
     }
 }
@@ -2329,6 +2244,7 @@ mod tests {
         let workflow = runnable_spec();
         let state = WorkflowSnapshot {
             scope_id: "workflow-scope-1".to_owned(),
+            workflows: Vec::new(),
             validation: workflow.validate(),
             snapshot: WorkflowRunSnapshot::idle_for(&workflow),
             workflow,
@@ -2343,54 +2259,9 @@ mod tests {
     }
 
     #[test]
-    fn agent_state_and_named_update_are_serde_stable_and_secret_free() {
-        let readiness = WorkflowAgentReadiness::ready("Ready");
-        let conversation = WorkflowAgentConversationSummary {
-            conversation_id: "conversation-1".to_owned(),
-            title: "Inspect the catalog".to_owned(),
-            created_ms: 9,
-            updated_ms: 10,
-            message_count: 1,
-            owned_run_id: None,
-        };
-        let message = WorkflowAgentMessage::new("message-1", WorkflowAgentRole::Assistant)
-            .with_sequence(1)
-            .with_phase(WorkflowAgentMessagePhase::Complete)
-            .with_text("I inspected the catalog.")
-            .with_tools(vec![WorkflowAgentToolSummary {
-                call_id: "call-1".to_owned(),
-                name: "list_relations".to_owned(),
-                phase: WorkflowAgentToolPhase::Complete,
-                summary: "Relation catalog complete".to_owned(),
-                error: None,
-                receipt: None,
-            }])
-            .with_created_ms(10);
-        let session = WorkflowAgentSession::new(DEFAULT_WORKFLOW_ID, "conversation-1")
-            .with_revision(2)
-            .with_messages(vec![message]);
-        let state = WorkflowAgentSnapshot::new(readiness, session)
-            .with_history_available(true)
-            .with_scope("agent-scope-1", 3)
-            .with_active_conversation("conversation-1", 20)
-            .with_conversations(vec![conversation]);
-        let json = serde_json::to_value(&state).unwrap();
-        assert_eq!(json["session"]["revision"], 2);
-        assert_eq!(json["readiness"]["status"], "ready");
-        assert_eq!(json["revision"], 3);
-        assert_eq!(json["active_conversation_id"], "conversation-1");
-        assert_eq!(json["conversations"][0]["title"], "Inspect the catalog");
-        let encoded = json.to_string();
-        assert!(!encoded.contains("api_key"));
-        assert!(!encoded.contains("client_secret"));
-        let decoded: WorkflowAgentSnapshot = serde_json::from_value(json).unwrap();
-        assert_eq!(decoded, state);
-    }
-
-    #[test]
     fn agent_conversation_commands_are_explicitly_scoped_and_secret_free() {
-        let create = WorkflowAgentCommand::create_conversation("scope-1", 4);
-        let activate = WorkflowAgentCommand::activate_conversation("scope-1", "conversation-2", 4);
+        let create = WorkflowCommand::create("scope-1");
+        let activate = WorkflowCommand::select("scope-1", "workflow-2");
         let cancel = WorkflowAgentCommand::cancel("scope-1", "conversation-2", "turn-8");
         for encoded in [
             serde_json::to_string(&create).unwrap(),

@@ -9,8 +9,8 @@ mod settings;
 mod training;
 mod transfer;
 pub mod workflow_assistant;
-pub mod workflow_documents;
 pub mod workflow_features;
+pub mod workflows;
 
 pub mod bundle {
     //! Portable single-file snapshots of the Studio-owned Spiral tables.

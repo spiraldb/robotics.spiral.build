@@ -20,7 +20,7 @@ use crate::settings::{
 };
 use crate::training::TrainingHistoryPersistence;
 use crate::transfer::TransferPersistence;
-use crate::workflow_documents::{StoredWorkflowDocument, WorkflowDocumentPersistence};
+use crate::workflows::{WorkflowJson, WorkflowPersistence};
 
 pub struct StorageManager {
     project_store: Arc<ProjectStore>,
@@ -125,35 +125,45 @@ impl StorageManager {
             .await
     }
 
-    pub async fn load_workflow_document(&self) -> Result<Option<StoredWorkflowDocument>, String> {
-        WorkflowDocumentPersistence::new(&self.project_store)
-            .load_graph()
+    pub async fn workflow_graphs(&self) -> Result<Vec<(String, WorkflowJson)>, String> {
+        WorkflowPersistence::new(&self.project_store).graphs().await
+    }
+
+    pub async fn load_workflow_graph(
+        &self,
+        workflow_id: &str,
+    ) -> Result<Option<WorkflowJson>, String> {
+        WorkflowPersistence::new(&self.project_store)
+            .load_graph(workflow_id)
             .await
     }
 
-    pub async fn save_workflow_document(
+    pub async fn save_workflow_graph(
         &self,
-        document: &StoredWorkflowDocument,
+        workflow_id: &str,
+        graph: &WorkflowJson,
     ) -> Result<(), String> {
-        WorkflowDocumentPersistence::new(&self.project_store)
-            .save_graph(document)
+        WorkflowPersistence::new(&self.project_store)
+            .save_graph(workflow_id, graph)
             .await
     }
 
-    pub async fn load_workflow_agent_document(
+    pub async fn load_workflow_conversation(
         &self,
-    ) -> Result<Option<StoredWorkflowDocument>, String> {
-        WorkflowDocumentPersistence::new(&self.project_store)
-            .load_assistant()
+        workflow_id: &str,
+    ) -> Result<Option<WorkflowJson>, String> {
+        WorkflowPersistence::new(&self.project_store)
+            .load_assistant(workflow_id)
             .await
     }
 
-    pub async fn save_workflow_agent_document(
+    pub async fn save_workflow_conversation(
         &self,
-        document: &StoredWorkflowDocument,
+        workflow_id: &str,
+        conversation: &WorkflowJson,
     ) -> Result<(), String> {
-        WorkflowDocumentPersistence::new(&self.project_store)
-            .save_assistant(document)
+        WorkflowPersistence::new(&self.project_store)
+            .save_assistant(workflow_id, conversation)
             .await
     }
 

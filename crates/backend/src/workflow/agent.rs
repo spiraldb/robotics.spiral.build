@@ -12,11 +12,10 @@ use crate::sync::MutexRecovery;
 use serde_json::{Value, json};
 use spiral_robotics_common::relations::SpiralQuerySnapshot;
 use spiral_robotics_common::workflow::{
-    DEFAULT_WORKFLOW_ID, WorkflowAgentArtifactReceipt, WorkflowAgentCommand,
-    WorkflowAgentConversationSummary, WorkflowAgentMessage, WorkflowAgentMessagePhase,
-    WorkflowAgentPhase, WorkflowAgentReadiness, WorkflowAgentRole, WorkflowAgentSession,
-    WorkflowAgentSnapshot, WorkflowAgentToolPhase, WorkflowAgentToolSummary, WorkflowCommand,
-    WorkflowNodeConfig, WorkflowRunPhase, WorkflowSpec,
+    WorkflowAgentArtifactReceipt, WorkflowAgentCommand, WorkflowAgentMessage,
+    WorkflowAgentMessagePhase, WorkflowAgentPhase, WorkflowAgentReadiness, WorkflowAgentRole,
+    WorkflowAgentSession, WorkflowAgentSnapshot, WorkflowAgentToolPhase, WorkflowAgentToolSummary,
+    WorkflowCommand, WorkflowNodeConfig, WorkflowSpec,
 };
 
 use crate::workflow::manager::WorkflowManager;
@@ -24,12 +23,9 @@ use crate::workflow::provider::{
     OpenAiProvider, ProviderCompletion, ProviderConfig, ProviderResponse,
 };
 use spiral_robotics_storage::workflow_assistant::{
-    AssistantConversation as AgentConversation, AssistantDocument as AgentDocument,
-    ProviderMessage, ProviderMessageHistory, ProviderToolCall,
+    ProviderMessage, ProviderMessageHistory, ProviderToolCall, WorkflowConversation,
 };
-use spiral_robotics_storage::workflow_documents::{
-    MAX_WORKFLOW_AGENT_CONVERSATIONS, MAX_WORKFLOW_AGENT_MESSAGES_PER_CONVERSATION,
-};
+use spiral_robotics_storage::workflows::MAX_WORKFLOW_AGENT_MESSAGES_PER_CONVERSATION;
 use spiral_robotics_storage::{StorageManager, StorageSchema};
 
 const MAX_PUBLIC_MESSAGES: usize = MAX_WORKFLOW_AGENT_MESSAGES_PER_CONVERSATION;
@@ -53,7 +49,7 @@ struct WorkflowAgentInner {
     services: WorkflowAgentServices,
     readiness: WorkflowAgentReadiness,
     scope_id: Mutex<String>,
-    document: Mutex<AgentDocument>,
+    conversation: Mutex<WorkflowConversation>,
     turn: AgentTurnState,
 }
 
@@ -75,11 +71,10 @@ struct ActiveTurn {
     conversation_id: String,
     turn_id: String,
     cancel: CancellationToken,
-    owned_run_id: Arc<Mutex<Option<String>>>,
     task: Option<tokio::task::JoinHandle<()>>,
 }
 
-trait AgentDocumentRuntime {
+trait ConversationUpdates {
     fn with_completed_tool(
         &self,
         identity: TurnIdentity<'_>,
@@ -96,7 +91,7 @@ trait AgentDocumentRuntime {
     where
         Self: Sized;
 }
-impl AgentDocumentRuntime for AgentDocument {
+impl ConversationUpdates for WorkflowConversation {
     fn with_completed_tool(
         &self,
         identity: TurnIdentity<'_>,
@@ -110,8 +105,6 @@ impl AgentDocumentRuntime for AgentDocument {
         let mut candidate = self.clone();
         candidate.ensure_turn(conversation_id, turn_id)?;
         let message = candidate
-            .conversation_mut(conversation_id)
-            .expect("the active conversation was checked")
             .session_mut()
             .current_assistant_mut()
             .ok_or_else(|| "Assistant message disappeared during tool execution.".to_owned())?;
@@ -140,9 +133,7 @@ impl AgentDocumentRuntime for AgentDocument {
                 .flatten(),
         );
         summary.set_receipt(completion.receipt);
-        let conversation = candidate
-            .conversation_mut(conversation_id)
-            .expect("turn was checked");
+        let conversation = &mut candidate;
         conversation
             .provider_messages_mut()
             .push(ProviderMessage::tool(
@@ -157,7 +148,7 @@ impl AgentDocumentRuntime for AgentDocument {
                 .session_mut()
                 .set_phase(WorkflowAgentPhase::Responding);
         }
-        candidate.bump_conversation(conversation_id)?;
+        candidate.advance()?;
         Ok(candidate)
     }
 
@@ -172,9 +163,7 @@ impl AgentDocumentRuntime for AgentDocument {
         } = identity;
         self.ensure_turn(conversation_id, turn_id)?;
         let mut candidate = self.clone();
-        let conversation = candidate
-            .conversation_mut(conversation_id)
-            .expect("the active conversation was checked");
+        let conversation = &mut candidate;
         conversation.provider_messages_mut().push(message);
         conversation
             .provider_messages_mut()
@@ -273,21 +262,9 @@ impl UnexecutedProviderMessages for Vec<ProviderMessage> {
     }
 }
 
-trait OwnedRunTracking {
-    fn record_and_is_cancelled(&self, cancel: &CancellationToken, run_id: &str) -> bool;
-}
-
-impl OwnedRunTracking for Arc<Mutex<Option<String>>> {
-    fn record_and_is_cancelled(&self, cancel: &CancellationToken, run_id: &str) -> bool {
-        *self.recover_lock() = Some(run_id.to_owned());
-        cancel.is_cancelled()
-    }
-}
-
 struct ToolContext {
-    conversation_id: String,
+    workflow_id: String,
     workflow_revision: u64,
-    owned_run_id: Arc<Mutex<Option<String>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -305,18 +282,6 @@ impl<'a> TurnIdentity<'a> {
     }
 }
 
-struct ConversationChange<'a> {
-    turn_active: bool,
-    scope_id: &'a str,
-    expected_revision: u64,
-}
-
-struct ConversationSelection {
-    scope_id: String,
-    conversation_id: String,
-    expected_revision: u64,
-}
-
 struct TurnStart {
     scope_id: String,
     conversation_id: String,
@@ -330,21 +295,10 @@ struct TurnCancellation {
     turn_id: String,
 }
 
-impl<'a> ConversationChange<'a> {
-    fn new(turn_active: bool, scope_id: &'a str, expected_revision: u64) -> Self {
-        Self {
-            turn_active,
-            scope_id,
-            expected_revision,
-        }
-    }
-}
-
 struct TurnTask {
     conversation_id: String,
     turn_id: String,
     cancel: CancellationToken,
-    owned_run_id: Arc<Mutex<Option<String>>>,
 }
 
 impl TurnTask {
@@ -353,17 +307,11 @@ impl TurnTask {
             conversation_id,
             turn_id,
             cancel: CancellationToken::new(),
-            owned_run_id: Arc::new(Mutex::new(None)),
         }
     }
 
-    fn with_runtime(
-        mut self,
-        cancel: CancellationToken,
-        owned_run_id: Arc<Mutex<Option<String>>>,
-    ) -> Self {
+    fn with_runtime(mut self, cancel: CancellationToken) -> Self {
         self.cancel = cancel;
-        self.owned_run_id = owned_run_id;
         self
     }
 }
@@ -381,31 +329,10 @@ impl<'a> ProviderLoop<'a> {
             identity: TurnIdentity::new(&task.conversation_id, &task.turn_id),
             cancel: task.cancel.clone(),
             context: ToolContext {
-                conversation_id: task.conversation_id.clone(),
+                workflow_id: String::new(),
                 workflow_revision,
-                owned_run_id: task.owned_run_id.clone(),
             },
             budget: TurnBudget::default(),
-        }
-    }
-}
-
-struct ToolRuntime<'a> {
-    context: &'a mut ToolContext,
-    cancel: CancellationToken,
-    identity: TurnIdentity<'a>,
-}
-
-impl<'a> ToolRuntime<'a> {
-    fn new(
-        context: &'a mut ToolContext,
-        cancel: CancellationToken,
-        identity: TurnIdentity<'a>,
-    ) -> Self {
-        Self {
-            context,
-            cancel,
-            identity,
         }
     }
 }
@@ -556,7 +483,7 @@ impl WorkflowAgentManager {
                 },
                 readiness,
                 scope_id: Mutex::new(AgentIdentifier::next("agent-scope")),
-                document: Mutex::new(AgentDocument::default()),
+                conversation: Mutex::new(WorkflowConversation::new("unloaded")),
                 turn: AgentTurnState {
                     loaded: tokio::sync::OnceCell::new(),
                     active: Mutex::new(None),
@@ -588,37 +515,63 @@ impl WorkflowAgentManager {
 
     /// Candidate preparation validates history without rewriting it or starting a turn.
     pub(crate) async fn prepare_from_storage(&self) -> Result<(), String> {
-        let stored = self.stored_document().await?;
-        let (document, rewrite) = AgentDocument::restored_snapshot(
-            stored.as_deref(),
-            "Studio reconnected before this Assistant turn finished. Retry the turn.",
-        )?;
-        *self.inner.document.recover_lock() = document;
-        self.inner
-            .turn
-            .recovery_pending
-            .store(rewrite, Ordering::SeqCst);
+        let workflow_id = self
+            .inner
+            .services
+            .workflow
+            .state()
+            .workflow()
+            .id()
+            .to_owned();
+        let stored = self
+            .inner
+            .services
+            .storage
+            .load_workflow_conversation(&workflow_id)
+            .await?;
+        let mut conversation = match stored.as_ref() {
+            Some(stored) => WorkflowConversation::load(stored, &workflow_id)?,
+            None => WorkflowConversation::new(&workflow_id),
+        };
+        let interrupted = conversation.interrupt()?;
+        *self.inner.conversation.recover_lock() = conversation;
+        *self.inner.scope_id.recover_lock() = AgentIdentifier::next("agent-scope");
+        self.inner.turn.recovery_pending.store(
+            interrupted || stored.is_none() || stored.is_some_and(|stored| stored.version() == 2),
+            Ordering::SeqCst,
+        );
         Ok(())
     }
 
-    /// Read the persisted Assistant payload, refusing a document version this
-    /// build cannot read instead of replacing it.
-    async fn stored_document(&self) -> Result<Option<String>, String> {
-        self.inner
+    pub(crate) async fn conversation_for(
+        &self,
+        workflow_id: &str,
+    ) -> Result<WorkflowConversation, String> {
+        let stored = self
+            .inner
             .services
             .storage
-            .load_workflow_agent_document()
-            .await?
-            .as_ref()
-            .map(|stored| AgentDocument::supported_payload(stored).map(str::to_owned))
-            .transpose()
+            .load_workflow_conversation(workflow_id)
+            .await?;
+        let mut conversation = match stored {
+            Some(stored) => WorkflowConversation::load(&stored, workflow_id)?,
+            None => WorkflowConversation::new(workflow_id),
+        };
+        conversation.interrupt()?;
+        Ok(conversation)
+    }
+
+    pub(crate) fn select_conversation(&self, conversation: WorkflowConversation) {
+        debug_assert!(!self.is_active());
+        *self.inner.conversation.recover_lock() = conversation;
+        *self.inner.scope_id.recover_lock() = AgentIdentifier::next("agent-scope");
     }
 
     pub(crate) async fn persist_recovery(&self) -> Result<(), String> {
         let _mutation = self.inner.turn.mutation.lock().await;
         if self.inner.turn.recovery_pending.load(Ordering::SeqCst) {
-            let document = self.inner.document.recover_lock().clone();
-            self.persist_document(&document).await?;
+            let conversation = self.inner.conversation.recover_lock().clone();
+            self.persist_conversation(&conversation).await?;
             self.inner
                 .turn
                 .recovery_pending
@@ -628,8 +581,8 @@ impl WorkflowAgentManager {
     }
 
     pub(crate) fn state(&self) -> WorkflowAgentSnapshot {
-        let document = self.inner.document.recover_lock();
-        self.state_for(&document)
+        let conversation = self.inner.conversation.recover_lock();
+        self.state_for(&conversation)
     }
 
     pub(crate) fn is_active(&self) -> bool {
@@ -641,22 +594,6 @@ impl WorkflowAgentManager {
         command: WorkflowAgentCommand,
     ) -> Result<WorkflowAgentSnapshot, OperationError> {
         match command {
-            WorkflowAgentCommand::CreateConversation {
-                scope_id,
-                expected_revision,
-            } => self.create_conversation(&scope_id, expected_revision).await,
-            WorkflowAgentCommand::ActivateConversation {
-                scope_id,
-                conversation_id,
-                expected_revision,
-            } => {
-                self.activate_conversation(ConversationSelection {
-                    scope_id,
-                    conversation_id,
-                    expected_revision,
-                })
-                .await
-            }
             WorkflowAgentCommand::Turn {
                 scope_id,
                 conversation_id,
@@ -684,122 +621,6 @@ impl WorkflowAgentManager {
                 .await
             }
         }
-    }
-
-    async fn create_conversation(
-        &self,
-        scope_id: &str,
-        expected_revision: u64,
-    ) -> Result<WorkflowAgentSnapshot, OperationError> {
-        let _mutation = self.inner.turn.mutation.lock().await;
-        let candidate = {
-            let active = self.inner.turn.active.recover_lock();
-            let document = self.inner.document.recover_lock();
-            self.admit_conversation_change(
-                &document,
-                ConversationChange::new(active.is_some(), scope_id, expected_revision),
-            )?;
-            let Some(candidate) = document
-                .with_new_conversation(AgentClock::now_millis())
-                .map_err(OperationError::Conflict)?
-            else {
-                return Ok(self.state_for(&document));
-            };
-            candidate
-        };
-        self.persist_document(&candidate)
-            .await
-            .map_err(OperationError::External)?;
-        let state = self.state_for(&candidate);
-        *self.inner.document.recover_lock() = candidate;
-        Ok(state)
-    }
-
-    async fn activate_conversation(
-        &self,
-        selection: ConversationSelection,
-    ) -> Result<WorkflowAgentSnapshot, OperationError> {
-        let ConversationSelection {
-            scope_id,
-            conversation_id,
-            expected_revision,
-        } = selection;
-        let _mutation = self.inner.turn.mutation.lock().await;
-        let candidate = {
-            let active = self.inner.turn.active.recover_lock();
-            let document = self.inner.document.recover_lock();
-            self.admit_conversation_change(
-                &document,
-                ConversationChange::new(active.is_some(), &scope_id, expected_revision),
-            )?;
-            if document.conversation(&conversation_id).is_none() {
-                return Err(OperationError::InvalidInput(
-                    "That Assistant conversation no longer exists. Reload the conversation list."
-                        .to_owned(),
-                ));
-            }
-            let Some(candidate) = document
-                .activated_conversation(&conversation_id)
-                .map_err(OperationError::External)?
-            else {
-                return Ok(self.state_for(&document));
-            };
-            candidate
-        };
-        self.persist_document(&candidate)
-            .await
-            .map_err(OperationError::External)?;
-        let state = self.state_for(&candidate);
-        *self.inner.document.recover_lock() = candidate;
-        Ok(state)
-    }
-
-    fn admit_conversation_change(
-        &self,
-        document: &AgentDocument,
-        change: ConversationChange<'_>,
-    ) -> Result<(), OperationError> {
-        let ConversationChange {
-            turn_active,
-            scope_id,
-            expected_revision,
-        } = change;
-        if !self.inner.services.storage.is_configured() {
-            return Err(OperationError::Conflict(
-                "Configure or reconnect Spiral before changing Assistant conversations.".to_owned(),
-            ));
-        }
-        if scope_id != *self.inner.scope_id.recover_lock() {
-            return Err(OperationError::Conflict(
-                "The active Spiral project changed. Reload Assistant conversations.".to_owned(),
-            ));
-        }
-        if expected_revision != document.revision() {
-            return Err(OperationError::Conflict(
-                "Assistant conversations changed in another session. Reload them first.".to_owned(),
-            ));
-        }
-        if turn_active {
-            return Err(OperationError::Conflict(
-                "Stop the active Assistant turn before changing conversations.".to_owned(),
-            ));
-        }
-        let workflow_state = self.inner.services.workflow.state();
-        let workflow = workflow_state.snapshot();
-        if workflow.phase().active()
-            && workflow.run_id().is_some_and(|run_id| {
-                document
-                    .conversations()
-                    .iter()
-                    .any(|conversation| conversation.owned_run_id() == Some(run_id))
-            })
-        {
-            return Err(OperationError::Conflict(
-                "Stop the Workflow run started by the Assistant before changing conversations."
-                    .to_owned(),
-            ));
-        }
-        Ok(())
     }
 
     async fn start_turn(
@@ -858,50 +679,35 @@ impl WorkflowAgentManager {
                 ));
             }
             let (mut candidate, conversation_id) = {
-                let document = self.inner.document.recover_lock();
+                let conversation = self.inner.conversation.recover_lock();
                 if scope_id != *self.inner.scope_id.recover_lock()
-                    || conversation_id != document.active_conversation_id()
+                    || conversation_id != conversation.conversation_id()
                 {
                     return Err(OperationError::Conflict(
                         "The active Assistant conversation changed. Reload it before sending."
                             .to_owned(),
                     ));
                 }
-                if expected_revision != document.revision() {
+                if expected_revision != conversation.revision() {
                     return Err(OperationError::Conflict(
                         "Assistant history changed in another session. Reload it before sending."
                             .to_owned(),
                     ));
                 }
-                let conversation = document.active().ok_or_else(|| {
-                    OperationError::External(
-                        "The selected Assistant conversation is unavailable.".to_owned(),
-                    )
-                })?;
+                let conversation = &*conversation;
                 PublicMessageCapacity::new(conversation.session().messages().len())
                     .ensure_additional(2)
                     .map_err(OperationError::Conflict)?;
                 (
-                    document.clone(),
-                    document.active_conversation_id().to_owned(),
+                    conversation.clone(),
+                    conversation.conversation_id().to_owned(),
                 )
             };
             let turn_id = AgentIdentifier::next("agent-turn");
             let user_id = AgentIdentifier::next("agent-user");
             let assistant_id = AgentIdentifier::next("agent-assistant");
             let created_ms = AgentClock::now_millis();
-            let conversation = candidate
-                .conversation_mut(&conversation_id)
-                .expect("the selected conversation was checked");
-            if conversation.title() == "New conversation"
-                && !conversation
-                    .session()
-                    .messages()
-                    .iter()
-                    .any(|message| message.role() == WorkflowAgentRole::User)
-            {
-                conversation.set_title(AgentConversation::title_from_user_text(text));
-            }
+            let conversation = &mut candidate;
             let user_sequence = conversation.session().next_message_sequence();
             conversation.session_mut().messages_mut().push(
                 WorkflowAgentMessage::new(user_id, WorkflowAgentRole::User)
@@ -927,29 +733,24 @@ impl WorkflowAgentManager {
                 .set_active_turn_id(Some(turn_id.clone()));
             conversation.session_mut().set_deferred_run_id(None);
             conversation.session_mut().set_error(None);
-            candidate
-                .bump_conversation(&conversation_id)
-                .map_err(OperationError::External)?;
-            candidate.trim_provider_history(&conversation_id);
-            self.persist_document(&candidate)
+            candidate.advance().map_err(OperationError::External)?;
+            candidate.provider_messages_mut().trim_to_provider_bound();
+            self.persist_conversation(&candidate)
                 .await
                 .map_err(OperationError::External)?;
             let cancel = CancellationToken::new();
-            let owned_run_id = Arc::new(Mutex::new(None));
             let response = self.state_for(&candidate);
-            *self.inner.document.recover_lock() = candidate;
+            *self.inner.conversation.recover_lock() = candidate;
             *self.inner.turn.active.recover_lock() = Some(ActiveTurn {
                 conversation_id: conversation_id.clone(),
                 turn_id: turn_id.clone(),
                 cancel: cancel.clone(),
-                owned_run_id: owned_run_id.clone(),
                 task: None,
             });
             let manager = self.clone();
             let task_conversation_id = conversation_id.clone();
             let task_turn_id = turn_id.clone();
-            let turn_task = TurnTask::new(task_conversation_id, task_turn_id)
-                .with_runtime(cancel, owned_run_id);
+            let turn_task = TurnTask::new(task_conversation_id, task_turn_id).with_runtime(cancel);
             let task = tokio::spawn(async move {
                 manager.run_turn(turn_task).await;
             });
@@ -983,7 +784,7 @@ impl WorkflowAgentManager {
                 "The active Spiral project changed. Reload Assistant conversations.".to_owned(),
             ));
         }
-        let (conversation_id, turn_id, owned_run_id, task) = {
+        let (conversation_id, turn_id, task) = {
             let mut active = self.inner.turn.active.recover_lock();
             let active = active.as_mut().ok_or_else(|| {
                 OperationError::Conflict("No Assistant turn is active.".to_owned())
@@ -999,75 +800,34 @@ impl WorkflowAgentManager {
             (
                 active.conversation_id.clone(),
                 active.turn_id.clone(),
-                active.owned_run_id.clone(),
                 active.task.take(),
             )
         };
         {
             let _mutation = self.inner.turn.mutation.lock().await;
-            let mut candidate = self.inner.document.recover_lock().clone();
-            if let Some(conversation) = candidate.conversation_mut(&conversation_id)
-                && conversation.session().active_turn_id() == Some(turn_id.as_str())
-            {
+            let mut candidate = self.inner.conversation.recover_lock().clone();
+            if candidate.ensure_turn(&conversation_id, &turn_id).is_ok() {
+                let conversation = &mut candidate;
                 conversation
                     .session_mut()
                     .set_phase(WorkflowAgentPhase::Cancelling);
                 conversation.session_mut().set_error(None);
-                if candidate.bump_conversation(&conversation_id).is_ok()
-                    && self.persist_document(&candidate).await.is_ok()
+                if candidate.advance().is_ok()
+                    && self.persist_conversation(&candidate).await.is_ok()
                 {
-                    *self.inner.document.recover_lock() = candidate;
+                    *self.inner.conversation.recover_lock() = candidate;
                 }
             }
         }
-        self.cancel_owned_run(&owned_run_id).await;
         if let Some(task) = task {
             let _ = task.await;
         }
-        // `run_workflow` may have started after the first snapshot but before
-        // observing the turn token. Re-read the synchronized ownership cell
-        // after the task exits so Stop cannot orphan that run.
-        self.cancel_owned_run(&owned_run_id).await;
         self.finish_failed(
             TurnIdentity::new(&conversation_id, &turn_id),
             TurnFailureDetail::new("Agent turn cancelled.", true),
         )
         .await;
         Ok(self.state())
-    }
-
-    async fn cancel_owned_run(&self, owned_run_id: &Arc<Mutex<Option<String>>>) {
-        let owned_run = owned_run_id.recover_lock().clone();
-        if let Some(run_id) = owned_run
-            && self.inner.services.workflow.state().snapshot().run_id() == Some(run_id.as_str())
-            && self.inner.services.workflow.is_active()
-        {
-            let _ = self
-                .inner
-                .services
-                .workflow
-                .command(WorkflowCommand::cancel(
-                    self.inner.services.workflow.scope_id(),
-                ))
-                .await;
-        }
-    }
-
-    async fn record_conversation_owned_run(
-        &self,
-        conversation_id: &str,
-        run_id: &str,
-    ) -> Result<(), String> {
-        let _mutation = self.inner.turn.mutation.lock().await;
-        let mut candidate = self.inner.document.recover_lock().clone();
-        let conversation = candidate
-            .conversation_mut(conversation_id)
-            .ok_or_else(|| "Assistant conversation disappeared.".to_owned())?;
-        conversation.set_owned_run_id(Some(run_id.to_owned()));
-        candidate.bump_conversation(conversation_id)?;
-        self.persist_document(&candidate).await?;
-        *self.inner.document.recover_lock() = candidate;
-        Ok(())
     }
 
     pub(crate) async fn shutdown(&self) {
@@ -1081,12 +841,11 @@ impl WorkflowAgentManager {
     }
 
     async fn run_turn(&self, task: TurnTask) {
-        let workflow_revision = self.inner.services.workflow.state().workflow().revision();
+        let workflow = self.inner.services.workflow.state().workflow().clone();
+        let mut provider_loop = ProviderLoop::new(&task, workflow.revision());
+        provider_loop.context.workflow_id = workflow.id().to_owned();
         let identity = TurnIdentity::new(&task.conversation_id, &task.turn_id);
-        match self
-            .run_provider_loop(ProviderLoop::new(&task, workflow_revision))
-            .await
-        {
+        match self.run_provider_loop(provider_loop).await {
             Ok(()) => self.finish_complete(identity).await,
             Err(error) => {
                 self.finish_failed(
@@ -1124,10 +883,8 @@ impl WorkflowAgentManager {
             let mut messages = vec![ProviderMessage::text("system", SYSTEM_PROMPT)];
             messages.extend(
                 self.inner
-                    .document
+                    .conversation
                     .recover_lock()
-                    .conversation(conversation_id)
-                    .ok_or_else(|| "Assistant conversation disappeared.".to_owned())?
                     .provider_messages()
                     .clone(),
             );
@@ -1172,12 +929,7 @@ impl WorkflowAgentManager {
                     return Err("Agent turn cancelled.".to_owned());
                 }
                 self.tool_started(identity, call)?;
-                let result = self
-                    .execute_tool(
-                        call,
-                        ToolRuntime::new(&mut context, cancel.clone(), identity),
-                    )
-                    .await;
+                let result = self.execute_tool(call, &mut context).await;
                 let (output, transport_ok) = match result {
                     Ok(output) => (output, true),
                     Err(error) => (json!({"ok": false, "error": error}).to_string(), false),
@@ -1195,13 +947,8 @@ impl WorkflowAgentManager {
     async fn execute_tool(
         &self,
         call: &ProviderToolCall,
-        runtime: ToolRuntime<'_>,
+        context: &mut ToolContext,
     ) -> Result<String, String> {
-        let ToolRuntime {
-            context,
-            cancel,
-            identity,
-        } = runtime;
         let args: Value = serde_json::from_str(call.function().arguments())
             .map_err(|error| format!("Tool arguments are malformed: {error}"))?;
         match call.function().name() {
@@ -1253,7 +1000,7 @@ impl WorkflowAgentManager {
                 // visible failed tool step in an otherwise successful turn.
                 workflow_object.insert(
                     "id".to_owned(),
-                    Value::String(DEFAULT_WORKFLOW_ID.to_owned()),
+                    Value::String(context.workflow_id.clone()),
                 );
                 workflow_object.insert("revision".to_owned(), json!(context.workflow_revision));
                 let workflow: WorkflowSpec = serde_json::from_value(workflow_value)
@@ -1306,109 +1053,7 @@ impl WorkflowAgentManager {
                 })
                 .to_string())
             }
-            "run_workflow" => {
-                let lease = self
-                    .inner
-                    .services
-                    .catalog_lease
-                    .try_acquire(CatalogLeaseOwner::WorkflowStart)
-                    .ok_or_else(|| {
-                        "A recording or catalog change currently prevents Workflow start."
-                            .to_owned()
-                    })?;
-                let result = self
-                    .inner
-                    .services
-                    .workflow
-                    .command(WorkflowCommand::run(
-                        self.inner.services.workflow.scope_id(),
-                        context.workflow_revision,
-                    ))
-                    .await
-                    .map_err(|error| error.to_string());
-                let released = self.inner.services.catalog_lease.release(lease);
-                debug_assert!(released, "agent Workflow start releases its lease once");
-                let state = result?;
-                let snapshot = state.snapshot();
-                let run_id = snapshot
-                    .run_id()
-                    .ok_or_else(|| "Workflow start returned no run identity.".to_owned())?
-                    .to_owned();
-                let cancelled = context
-                    .owned_run_id
-                    .record_and_is_cancelled(&cancel, &run_id);
-                if let Err(error) = self
-                    .record_conversation_owned_run(&context.conversation_id, &run_id)
-                    .await
-                {
-                    if self.inner.services.workflow.state().snapshot().run_id() == Some(&run_id)
-                        && self.inner.services.workflow.is_active()
-                    {
-                        let _ = self
-                            .inner
-                            .services
-                            .workflow
-                            .command(WorkflowCommand::cancel(
-                                self.inner.services.workflow.scope_id(),
-                            ))
-                            .await;
-                    }
-                    return Err(format!(
-                        "Could not persist Assistant ownership of the Workflow run: {error}"
-                    ));
-                }
-                if cancelled {
-                    if self.inner.services.workflow.state().snapshot().run_id() == Some(&run_id)
-                        && self.inner.services.workflow.is_active()
-                    {
-                        let _ = self
-                            .inner
-                            .services
-                            .workflow
-                            .command(WorkflowCommand::cancel(
-                                self.inner.services.workflow.scope_id(),
-                            ))
-                            .await;
-                    }
-                    return Err(
-                        "Agent turn was cancelled after starting the Workflow run.".to_owned()
-                    );
-                }
-                self.mark_waiting(identity, &run_id).await?;
-                Ok(self
-                    .inner
-                    .services
-                    .workflow
-                    .wait_for_terminal(&run_id, cancel)
-                    .await?
-                    .agent_summary()
-                    .to_string())
-            }
-            "wait_for_run" => {
-                let run_id = context
-                    .owned_run_id
-                    .recover_lock()
-                    .clone()
-                    .or_else(|| {
-                        self.inner
-                            .services
-                            .workflow
-                            .state()
-                            .snapshot()
-                            .run_id()
-                            .map(str::to_owned)
-                    })
-                    .ok_or_else(|| "There is no Workflow run to wait for.".to_owned())?;
-                self.mark_waiting(identity, &run_id).await?;
-                Ok(self
-                    .inner
-                    .services
-                    .workflow
-                    .wait_for_terminal(&run_id, cancel)
-                    .await?
-                    .agent_summary()
-                    .to_string())
-            }
+            "run_workflow" | "wait_for_run" => Err("The Assistant only authors workflows. Run computation explicitly from the workflow controls.".to_owned()),
             "run_query" => {
                 let sql = args
                     .get("sql")
@@ -1435,11 +1080,8 @@ impl WorkflowAgentManager {
         if delta.is_empty() {
             return;
         }
-        let mut document = self.inner.document.recover_lock();
-        let Some(conversation) = document.conversation_mut(conversation_id) else {
-            return;
-        };
-        if conversation.session().active_turn_id() != Some(turn_id) {
+        let mut conversation = self.inner.conversation.recover_lock();
+        if conversation.ensure_turn(conversation_id, turn_id).is_err() {
             return;
         }
         if let Some(message) = conversation.session_mut().current_assistant_mut() {
@@ -1450,8 +1092,8 @@ impl WorkflowAgentManager {
             }
             message.set_text(text);
         }
-        let _ = document.bump_conversation(conversation_id);
-        drop(document);
+        let _ = conversation.advance();
+        drop(conversation);
     }
 
     async fn record_provider_response(
@@ -1462,11 +1104,11 @@ impl WorkflowAgentManager {
         let _mutation = self.inner.turn.mutation.lock().await;
         let candidate = self
             .inner
-            .document
+            .conversation
             .recover_lock()
             .with_provider_message(identity, message)?;
-        self.persist_document(&candidate).await?;
-        *self.inner.document.recover_lock() = candidate;
+        self.persist_conversation(&candidate).await?;
+        *self.inner.conversation.recover_lock() = candidate;
         Ok(())
     }
 
@@ -1480,16 +1122,14 @@ impl WorkflowAgentManager {
             turn_id,
         } = identity;
         let _mutation = self.inner.turn.mutation.lock().await;
-        let mut candidate = self.inner.document.recover_lock().clone();
+        let mut candidate = self.inner.conversation.recover_lock().clone();
         candidate.ensure_turn(conversation_id, turn_id)?;
         candidate
-            .conversation_mut(conversation_id)
-            .expect("the active conversation was checked")
             .provider_messages_mut()
             .append_unexecuted_tool_outputs(unexecuted);
-        candidate.trim_provider_history(conversation_id);
-        self.persist_document(&candidate).await?;
-        *self.inner.document.recover_lock() = candidate;
+        candidate.provider_messages_mut().trim_to_provider_bound();
+        self.persist_conversation(&candidate).await?;
+        *self.inner.conversation.recover_lock() = candidate;
         Ok(())
     }
 
@@ -1502,11 +1142,9 @@ impl WorkflowAgentManager {
             conversation_id,
             turn_id,
         } = identity;
-        let mut document = self.inner.document.recover_lock();
-        document.ensure_turn(conversation_id, turn_id)?;
-        let message = document
-            .conversation_mut(conversation_id)
-            .expect("the active conversation was checked")
+        let mut conversation = self.inner.conversation.recover_lock();
+        conversation.ensure_turn(conversation_id, turn_id)?;
+        let message = conversation
             .session_mut()
             .current_assistant_mut()
             .ok_or_else(|| "Assistant message disappeared during tool execution.".to_owned())?;
@@ -1515,8 +1153,8 @@ impl WorkflowAgentManager {
             call.function().name(),
             ToolPresentation::for_name(call.function().name()).running_summary(),
         ));
-        document.bump_conversation(conversation_id)?;
-        drop(document);
+        conversation.advance()?;
+        drop(conversation);
         Ok(())
     }
 
@@ -1528,11 +1166,11 @@ impl WorkflowAgentManager {
         let _mutation = self.inner.turn.mutation.lock().await;
         let candidate = self
             .inner
-            .document
+            .conversation
             .recover_lock()
             .with_completed_tool(identity, completion)?;
-        self.persist_document(&candidate).await?;
-        *self.inner.document.recover_lock() = candidate;
+        self.persist_conversation(&candidate).await?;
+        *self.inner.conversation.recover_lock() = candidate;
         Ok(())
     }
 
@@ -1583,10 +1221,11 @@ impl WorkflowAgentManager {
         {
             return;
         }
-        let mut candidate = self.inner.document.recover_lock().clone();
-        let Some(conversation) = candidate.conversation_mut(conversation_id) else {
+        let mut candidate = self.inner.conversation.recover_lock().clone();
+        if candidate.ensure_turn(conversation_id, turn_id).is_err() {
             return;
-        };
+        }
+        let conversation = &mut candidate;
         if conversation.session().active_turn_id() != Some(turn_id) {
             return;
         }
@@ -1610,10 +1249,9 @@ impl WorkflowAgentManager {
         conversation
             .provider_messages_mut()
             .remove_incomplete_tool_exchange();
-        let _ = candidate.bump_conversation(conversation_id);
-        if let Err(persist_error) = self.persist_document(&candidate).await
-            && let Some(conversation) = candidate.conversation_mut(conversation_id)
-        {
+        let _ = candidate.advance();
+        if let Err(persist_error) = self.persist_conversation(&candidate).await {
+            let conversation = &mut candidate;
             conversation
                 .session_mut()
                 .set_phase(WorkflowAgentPhase::Failed);
@@ -1624,76 +1262,33 @@ impl WorkflowAgentManager {
         }
         // Even when durable storage is temporarily unavailable, install only
         // the structurally valid candidate. A later Retry can persist it; the
-        // live document is never left with an inactive orphaned tool exchange.
-        *self.inner.document.recover_lock() = candidate;
+        // live conversation is never left with an inactive orphaned tool exchange.
+        *self.inner.conversation.recover_lock() = candidate;
         *self.inner.turn.active.recover_lock() = None;
     }
 
-    async fn mark_waiting(&self, identity: TurnIdentity<'_>, run_id: &str) -> Result<(), String> {
-        let _mutation = self.inner.turn.mutation.lock().await;
-        let mut candidate = self.inner.document.recover_lock().clone();
-        candidate.ensure_turn(identity.conversation_id, identity.turn_id)?;
-        let session = candidate
-            .conversation_mut(identity.conversation_id)
-            .expect("turn was checked")
-            .session_mut();
-        if session.phase() != WorkflowAgentPhase::Cancelling {
-            session.set_phase(WorkflowAgentPhase::WaitingForRun);
-        }
-        if let Some(message) = session.current_assistant_mut() {
-            message.set_run_id(Some(run_id.to_owned()));
-        }
-        candidate.bump_conversation(identity.conversation_id)?;
-        self.persist_document(&candidate).await?;
-        *self.inner.document.recover_lock() = candidate;
-        Ok(())
-    }
-
-    fn state_for(&self, document: &AgentDocument) -> WorkflowAgentSnapshot {
-        let session = document
-            .active()
-            .map(|conversation| conversation.session().clone())
-            .unwrap_or_default();
-        WorkflowAgentSnapshot::new(self.inner.readiness.clone(), session)
+    fn state_for(&self, conversation: &WorkflowConversation) -> WorkflowAgentSnapshot {
+        WorkflowAgentSnapshot::new(self.inner.readiness.clone(), conversation.session().clone())
             .with_history_available(true)
             .with_scope(
                 self.inner.scope_id.recover_lock().clone(),
-                document.revision(),
-            )
-            .with_active_conversation(
-                document.active_conversation_id().to_owned(),
-                MAX_WORKFLOW_AGENT_CONVERSATIONS,
-            )
-            .with_conversations(
-                document
-                    .conversations()
-                    .iter()
-                    .map(|conversation| {
-                        WorkflowAgentConversationSummary::new(
-                            conversation.conversation_id().to_owned(),
-                            conversation.title().to_owned(),
-                            conversation.created_ms(),
-                        )
-                        .with_activity(
-                            conversation.updated_ms(),
-                            conversation.session().messages().len(),
-                        )
-                        .with_owned_run_id(conversation.owned_run_id().map(str::to_owned))
-                    })
-                    .collect(),
+                conversation.revision(),
             )
     }
 
-    async fn persist_document(&self, document: &AgentDocument) -> Result<(), String> {
+    async fn persist_conversation(
+        &self,
+        conversation: &WorkflowConversation,
+    ) -> Result<(), String> {
         self.inner
             .services
             .storage
-            .save_workflow_agent_document(&document.persisted()?)
+            .save_workflow_conversation(conversation.workflow_id(), &conversation.persisted()?)
             .await
     }
 }
 
-const SYSTEM_PROMPT: &str = r#"You are the Workflow Assistant in Spiral Robotics Studio. Work only with relations already materialized in the active Spiral project. Never import Hugging Face datasets or MCAP files. Build relation-first DAGs using Table, optional siglip-base Model, Query, and exactly one terminal Result. Name workflows and nodes for the user's intent. Query SQL is read-only. Model output relations and feature columns are resolved by the server. Use tools to inspect authoritative schemas, validate and save the graph, run it, wait, and inspect bounded results.
+const SYSTEM_PROMPT: &str = r#"You are the Workflow Assistant in Spiral Robotics Studio. Work only with relations already materialized in the active Spiral project. Never import Hugging Face datasets or MCAP files. Build relation-first DAGs using Table, optional siglip-base Model, Query, and exactly one terminal Result. Name workflows and nodes for the user's intent. Query SQL is read-only. Model output relations and feature columns are resolved by the server. Use tools to inspect authoritative schemas, validate and save the graph, and inspect bounded read-only query results. You only author workflows; never start or wait for computation. The user explicitly runs computation from the workflow controls.
 
 SigLIP enrichment operates on a SQL-defined candidate cohort. The graph shape is source Table → candidate Query → Model → final Query → Result. Also connect the candidate Query directly to the final Query so it can join candidate identity to the Model feature cache. Other evidence such as a joint-samples Table joins only at the final Query. Reference every connected upstream node through its exact placeholder, for example {{node:candidates}}, {{node:visual_features}}, and {{node:joint_samples}}. Every ordinary durable relation used by SQL must be represented by a connected Table node; the only exception is the actual managed media relation needed to resolve a manifest's media value. Never hide a joint-state or other scalar relation inside candidate SQL: add it as a Table root, join it in the final Query, apply its predicates there, and return the matching scalar evidence in Results. A Model must trace to exactly one authoritative source Table; the server derives one cross-workflow feature-cache relation from that source identity.
 
@@ -1707,7 +1302,7 @@ Write SQL identifiers conservatively. Never use SQL keywords such as top, table,
 
 Define every requested Model feature explicitly with a safe descriptive name ending in _feature, a short human description, the SigLIP text concept, and applicability containing the source relation, candidate media field, and optional stream_ids. Inspect the Studio namespace's feature_registry relation with the ordinary relation/query tools before introducing a name: a compatible source-scoped definition is reused across workflows, while a conflicting same-name definition is rejected. The Model cache contains only the five stable identity fields plus nullable feature columns such as is_raining_feature or is_gripper_open_feature; it never contains decoded images. The backend reuses matching cells across workflows over the same source and fills only missing applicable feature cells. A final Query joins the candidate cohort, feature cache, and optional joint state, then may recover full-resolution image evidence from an actual managed media relation using only read-only Spiral functions and fields verified through the relation tools.
 
-Never invent relations, columns, managed media values, model support, run state, or SPQL functions. Do not request or reveal provider credentials. Do not put binary, tensor, image, or full media payloads in the conversation. Keep final answers concise and structured: state what graph was saved or run, summarize bounded evidence, and point the user to the authoritative graph or Results."#;
+Never invent relations, columns, managed media values, model support, run state, or SPQL functions. Do not request or reveal provider credentials. Do not put binary, tensor, image, or full media payloads in the conversation. Keep final answers concise and structured: state what graph was saved, summarize bounded evidence, and point the user to the authoritative graph or Results."#;
 
 struct WorkflowToolCatalog;
 
@@ -1848,16 +1443,6 @@ impl WorkflowToolCatalog {
                 }),
             ),
             Self::function(
-                "run_workflow",
-                "Run the current saved Workflow revision and wait for its durable completion. Progress remains visible while this tool is pending.",
-                json!({"type":"object","properties":{},"additionalProperties":false}),
-            ),
-            Self::function(
-                "wait_for_run",
-                "Wait for the current Workflow run to reach its durable terminal state.",
-                json!({"type":"object","properties":{},"additionalProperties":false}),
-            ),
-            Self::function(
                 "run_query",
                 "Run a bounded read-only Spiral query for inspection only.",
                 json!({"type":"object","properties":{"sql":{"type":"string"},"max_rows":{"type":"integer","minimum":1,"maximum":50}},"required":["sql","max_rows"],"additionalProperties":false}),
@@ -1990,30 +1575,6 @@ impl AgentPromptCell for Value {
             }
             value => value,
         }
-    }
-}
-
-trait WorkflowRunAgentSummary {
-    fn agent_summary(&self) -> Value;
-}
-
-impl WorkflowRunAgentSummary for spiral_robotics_common::workflow::WorkflowRunSnapshot {
-    fn agent_summary(&self) -> Value {
-        json!({
-            "ok": self.phase() == WorkflowRunPhase::Completed,
-            "run_id": self.run_id(),
-            "phase": self.phase(),
-            "error": self.error(),
-            "result_stale": self.result_stale(),
-            "result": self.result().as_ref().filter(|_| {
-                self.phase() == WorkflowRunPhase::Completed && !self.result_stale()
-            }).map(|result| json!({
-                "columns": result.columns(),
-                "row_count": result.rows().len(),
-                "truncated": result.truncated(),
-                "elapsed_ms": result.elapsed_ms(),
-            })),
-        })
     }
 }
 
@@ -2320,8 +1881,43 @@ mod tests {
         assert_eq!(payload["truncated"], true);
     }
 
+    #[tokio::test]
+    async fn authoring_rejects_old_run_tools_at_the_backend_boundary() {
+        let settings = spiral_robotics_storage::SpiralConnectionSettings::new(
+            "http://127.0.0.1:1".to_owned(),
+            "http://127.0.0.1:2".to_owned(),
+        )
+        .unwrap();
+        let database = Arc::new(spiral_robotics_storage::AdbcDatabase::new(settings.clone()));
+        let project = spiral_robotics_storage::ProjectStore::new(
+            settings,
+            "authoring_rejection".to_owned(),
+            database,
+        )
+        .unwrap();
+        let storage = Arc::new(StorageManager::new(Arc::new(project)));
+        let workflow = Arc::new(WorkflowManager::new(storage.clone()));
+        let agent = WorkflowAgentManager::new(
+            storage,
+            workflow.clone(),
+            Arc::new(CatalogMutationLease::default()),
+        );
+        let before = workflow.state();
+        let mut context = ToolContext {
+            workflow_id: before.workflow().id().to_owned(),
+            workflow_revision: before.workflow().revision(),
+        };
+        for name in ["run_workflow", "wait_for_run"] {
+            let call = ProviderToolCall::new("unadvertised-call", name, "{}");
+            let error = agent.execute_tool(&call, &mut context).await.unwrap_err();
+            assert!(error.contains("only authors"));
+            assert_eq!(workflow.state(), before);
+            assert!(!workflow.is_active());
+        }
+    }
+
     #[test]
-    fn tool_schema_exposes_only_the_seven_typed_tools() {
+    fn tool_schema_exposes_only_authoring_and_inspection() {
         let definitions = WorkflowToolCatalog::definitions();
         let names = definitions
             .iter()
@@ -2334,13 +1930,11 @@ mod tests {
                 "describe_relations",
                 "list_model_capabilities",
                 "set_workflow",
-                "run_workflow",
-                "wait_for_run",
                 "run_query",
             ]
         );
         assert_eq!(
-            definitions[6]["function"]["parameters"]["properties"]["max_rows"]["maximum"],
+            definitions[4]["function"]["parameters"]["properties"]["max_rows"]["maximum"],
             MAX_WORKFLOW_AGENT_QUERY_ROWS
         );
         let workflow = &definitions[3]["function"]["parameters"]["properties"]["workflow"];
@@ -2621,9 +2215,8 @@ mod tests {
 
     #[test]
     fn provider_response_candidate_does_not_mutate_live_history_before_persistence() {
-        let mut document = AgentDocument::default();
-        let conversation_id = document.active_conversation_id().to_owned();
-        let conversation = document.conversation_mut(&conversation_id).unwrap();
+        let mut conversation = WorkflowConversation::new("default");
+        let conversation_id = conversation.conversation_id().to_owned();
         conversation
             .session_mut()
             .set_phase(WorkflowAgentPhase::Responding);
@@ -2634,7 +2227,7 @@ mod tests {
             .provider_messages_mut()
             .push(ProviderMessage::text("user", "inspect relations"));
 
-        let candidate = document
+        let candidate = conversation
             .with_provider_message(
                 TurnIdentity::new(&conversation_id, "turn-1"),
                 ProviderMessage::text("assistant", "I found them."),
@@ -2642,22 +2235,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            document
-                .conversation(&conversation_id)
-                .unwrap()
-                .provider_messages()
-                .len(),
+            conversation.provider_messages().len(),
             1,
             "a failed candidate persistence must leave the live history unchanged"
         );
-        assert_eq!(
-            candidate
-                .conversation(&conversation_id)
-                .unwrap()
-                .provider_messages()
-                .len(),
-            2
-        );
+        assert_eq!(candidate.provider_messages().len(), 2);
     }
 
     #[test]
@@ -2666,10 +2248,9 @@ mod tests {
             WorkflowAgentPhase::WaitingForRun,
             WorkflowAgentPhase::Cancelling,
         ] {
-            let mut document = AgentDocument::default();
-            let conversation_id = document.active_conversation_id().to_owned();
+            let mut conversation = WorkflowConversation::new("default");
+            let conversation_id = conversation.conversation_id().to_owned();
             let call = ProviderToolCall::new("call-1", "run_workflow", "{}");
-            let conversation = document.conversation_mut(&conversation_id).unwrap();
             conversation.session_mut().set_phase(phase);
             conversation
                 .session_mut()
@@ -2689,19 +2270,19 @@ mod tests {
             let detail =
                 json!({"ok": true, "phase": "completed", "run_id": "run-1", "result": {"row_count": 3}})
                     .to_string();
-            let candidate = document
+            let candidate = conversation
                 .with_completed_tool(
                     TurnIdentity::new(&conversation_id, "turn-1"),
                     ToolRunCompletion::new(&call, true, &detail),
                 )
                 .unwrap();
-            let original = document.conversation(&conversation_id).unwrap();
+            let original = &conversation;
             assert_eq!(original.provider_messages().len(), 1);
             assert_eq!(
                 original.session().messages()[0].tools()[0].phase(),
                 WorkflowAgentToolPhase::Running
             );
-            let completed = candidate.conversation(&conversation_id).unwrap();
+            let completed = &candidate;
             assert_eq!(completed.provider_messages().len(), 2);
             assert_eq!(
                 completed.provider_messages()[1].tool_call_id(),
@@ -2726,10 +2307,10 @@ mod tests {
                     phase
                 }
             );
-            assert!(candidate.revision() > document.revision());
+            assert!(candidate.revision() > conversation.revision());
             assert!(candidate.persisted().is_ok());
             assert!(
-                document
+                conversation
                     .with_completed_tool(
                         TurnIdentity::new(&conversation_id, "stale-turn"),
                         ToolRunCompletion::new(&call, true, &detail)
@@ -2737,18 +2318,6 @@ mod tests {
                     .is_err()
             );
         }
-    }
-
-    #[test]
-    fn run_identity_assigned_after_stop_remains_visible_to_cancellation() {
-        let owned_run_id = Arc::new(Mutex::new(None));
-        let cancel = CancellationToken::new();
-        cancel.cancel();
-        assert!(owned_run_id.record_and_is_cancelled(&cancel, "run-after-stop"));
-        assert_eq!(
-            owned_run_id.recover_lock().as_deref(),
-            Some("run-after-stop")
-        );
     }
 
     #[test]

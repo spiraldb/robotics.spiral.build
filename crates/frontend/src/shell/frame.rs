@@ -521,10 +521,9 @@ impl WorkflowStatusContext<'_> {
             domain: "Spiral relations".to_owned(),
             phase: phase.to_owned(),
             graph: format!(
-                "{} {node_label} · {} {connection_label} · r{}",
+                "{} {node_label} · {} {connection_label}",
                 state.workflow().nodes().len(),
                 state.workflow().edges().len(),
-                state.workflow().revision(),
             ),
         }
     }
@@ -550,7 +549,7 @@ mod tests {
 
         assert_eq!(status.domain, "Spiral relations");
         assert_eq!(status.phase, "Running");
-        assert_eq!(status.graph, "3 nodes · 2 connections · r7");
+        assert_eq!(status.graph, "3 nodes · 2 connections");
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]

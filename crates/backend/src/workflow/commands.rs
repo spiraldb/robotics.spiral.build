@@ -59,7 +59,24 @@ impl WorkflowCommands {
                         "Wait for the active Assistant turn before changing Workflow manually",
                     ));
                 }
-                let result = commands.state.workflow().command(command).await.map_err(Into::into);
+                let result = async {
+                    // Resolve the conversation before changing the graph. A failed
+                    // read leaves the selected graph and chat together.
+                    let conversation = match &command {
+                        WorkflowCommand::Select { workflow_id, .. } => Some(commands.state.workflow_agent().conversation_for(workflow_id).await?),
+                        _ => None,
+                    };
+                    let creating = matches!(&command, WorkflowCommand::Create { .. });
+                    let state = commands.state.workflow().command(command).await?;
+                    if let Some(conversation) = conversation {
+                        commands.state.workflow_agent().select_conversation(conversation);
+                    } else if creating {
+                        commands.state.workflow_agent().select_conversation(
+                            spiral_robotics_storage::workflow_assistant::WorkflowConversation::new(state.workflow().id())
+                        );
+                    }
+                    Ok::<_, BackendCommandError>(commands.state.workflow().state())
+                }.await;
                 let released = commands.state.catalog_lease().release(token);
                 debug_assert!(
                     released,
@@ -92,47 +109,25 @@ impl WorkflowCommands {
     ) -> Result<WorkflowAgentSnapshot, BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
-        self.state.tasks()
+        self.state
+            .tasks()
             .execute(async move {
                 let _activity = activity;
                 commands.require_catalog_ready()?;
                 commands.state.workflow_agent().ensure_loaded().await?;
                 if !matches!(&command, WorkflowAgentCommand::Cancel { .. })
-                    && !commands.state.bootstrap()
-                        .current()
-                        .catalog_available()
+                    && !commands.state.bootstrap().current().catalog_available()
                 {
                     return Err(BackendCommandError::conflict(
                         "Configure or reconnect Spiral before changing Assistant conversations.",
                     ));
                 }
-                let history_mutation = matches!(
-                    &command,
-                    WorkflowAgentCommand::CreateConversation { .. }
-                        | WorkflowAgentCommand::ActivateConversation { .. }
-                );
-                let token = if history_mutation {
-                    Some(
-                        commands.state.catalog_lease()
-                            .try_acquire(CatalogLeaseOwner::WorkflowAgentHistory)
-                            .ok_or_else(|| {
-                                BackendCommandError::conflict(
-                                    "Wait for the current recording or catalog change before changing Assistant conversations",
-                                )
-                            })?,
-                    )
-                } else {
-                    None
-                };
-                let result = commands.state.workflow_agent().command(command).await.map_err(Into::into);
-                if let Some(token) = token {
-                    let released = commands.state.catalog_lease().release(token);
-                    debug_assert!(
-                        released,
-                        "Assistant command releases its history lease once"
-                    );
-                }
-                result
+                commands
+                    .state
+                    .workflow_agent()
+                    .command(command)
+                    .await
+                    .map_err(Into::into)
             })
             .await?
     }

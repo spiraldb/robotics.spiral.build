@@ -10,9 +10,8 @@ use dioxus_flow::{
 };
 use dioxus_workbench::{LayoutNode, Panel, PanelId, PanelLayout, PanelWorkspace, SplitAxis};
 use spiral_robotics_common::workflow::{
-    WorkflowAgentConversationSummary, WorkflowAgentMessagePhase, WorkflowAgentPhase,
-    WorkflowAgentRole, WorkflowAgentToolPhase, WorkflowAgentToolSummary, WorkflowNodeConfig,
-    WorkflowNodePhase, WorkflowRunPhase,
+    WorkflowAgentMessagePhase, WorkflowAgentPhase, WorkflowAgentRole, WorkflowAgentToolPhase,
+    WorkflowAgentToolSummary, WorkflowNodeConfig, WorkflowNodePhase, WorkflowRunPhase,
 };
 
 use crate::activities::data::query_result::{QueryExecutionPresentation, QueryState};
@@ -48,6 +47,10 @@ enum AssistantInline {
 
 #[component]
 fn WorkflowPanels(controller: super::state::WorkflowController) -> Element {
+    let studio = StudioProjectState::current();
+    let workflows = controller.workflows();
+    let selected = controller.spec().id().to_owned();
+    let reason = controller.workflow_selection_reason();
     let panels = vec![
         Panel::new(
             ASSISTANT_PANEL_ID,
@@ -80,12 +83,36 @@ fn WorkflowPanels(controller: super::state::WorkflowController) -> Element {
     ];
 
     rsx! {
+        div { class: "workflow-workspace",
+            header { class: "workflow-picker",
+                label { r#for: "workflow-picker", "Workflow" }
+                select {
+                    id: "workflow-picker",
+                    value: "{selected}",
+                    disabled: reason.is_some(),
+                    onchange: move |event| controller.select_workflow(Some(event.value()), studio),
+                    for workflow in workflows {
+                        option { value: "{workflow.id()}", selected: workflow.id() == selected, "{workflow.name()}" }
+                    }
+                }
+                Action {
+                    purpose: ActionPurpose::Create,
+                    variant: ActionVariant::Outline,
+                    disabled: reason.is_some(),
+                    onclick: move |_| controller.select_workflow(None, studio),
+                    "New workflow"
+                }
+                if let Some(reason) = reason.as_ref() { span { role: "status", "{reason}" } }
+            }
+            div { class: "workflow-panels",
         PanelWorkspace {
             panels,
             initial_layout: WorkflowWorkspaceLayout::initial(),
             layout_scope: Some(WORKFLOW_LAYOUT_SCOPE.to_owned()),
             active_panel: controller.active_panel(),
             on_panel_activate: move |id: PanelId| controller.activate_panel(id),
+        }
+            }
         }
     }
 }
@@ -122,17 +149,13 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
     let command = controller.agent_command();
     let active = state.session().phase().active();
     let configured = state.readiness().configured();
-    let conversation_id = state.active_conversation_id().to_owned();
-    let draft_key = AgentDraftKey::new(state.scope_id(), &conversation_id);
+    let draft_key = AgentDraftKey::new(state.session().workflow_id());
     let draft = drafts.read().get(&draft_key).cloned().unwrap_or_default();
     let catalog_available =
         crate::shell::project::ProjectSessionSignals::current().catalog_available();
-    let conversation_reason =
-        controller.agent_conversation_disabled_reason((studio.live())(), catalog_available);
-    let new_conversation_reason =
-        controller.new_agent_conversation_disabled_reason((studio.live())(), catalog_available);
     let workflow_active = controller.snapshot().phase().active();
     let can_send = configured
+        && controller.loaded()
         && state.history_available()
         && controller.agent_loaded()
         && !active
@@ -224,41 +247,6 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
                         "{status}"
                     }
                 }
-                div { class: "workflow-assistant-conversation-controls",
-                    label { r#for: "workflow-agent-conversation", "Conversation" }
-                    div { class: "workflow-assistant-conversation-row",
-                        select {
-                            id: "workflow-agent-conversation",
-                            class: "workflow-assistant-conversation-select",
-                            disabled: conversation_reason.is_some(),
-                            value: "{state.active_conversation_id()}",
-                            title: conversation_reason.clone().unwrap_or_else(|| "Switch Assistant conversation".to_owned()),
-                            onchange: move |event| {
-                                controller.activate_agent_conversation(event.value(), studio);
-                            },
-                            for conversation in &state.conversations() {
-                                option {
-                                    value: "{conversation.conversation_id()}",
-                                    selected: conversation.conversation_id() == state.active_conversation_id(),
-                                    "{conversation.option_label()}"
-                                }
-                            }
-                        }
-                        Action {
-                            purpose: ActionPurpose::Create,
-                            variant: ActionVariant::Outline,
-                            class: "workflow-assistant-new-action",
-                            aria_label: "New Assistant conversation",
-                            disabled: new_conversation_reason.is_some(),
-                            title: new_conversation_reason.clone().unwrap_or_else(|| "Start a new Assistant conversation".to_owned()),
-                            onclick: move |_| controller.create_agent_conversation(studio),
-                            if command == Some(AgentPendingCommand::CreatingConversation) { "Creating…" } else { "New" }
-                        }
-                    }
-                    if let Some(reason) = conversation_reason.as_ref().or(new_conversation_reason.as_ref()) {
-                        p { class: "workflow-assistant-conversation-reason", role: "status", "{reason}" }
-                    }
-                }
             }
             div {
                 id: "workflow-assistant-scroll",
@@ -273,7 +261,7 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
                 if messages.is_empty() {
                     section { class: "workflow-assistant-empty",
                         h3 { "What should we find?" }
-                        p { "Describe a moment or comparison. I’ll inspect Spiral, build the graph, and show the evidence." }
+                        p { "Describe a moment or comparison. I’ll inspect Spiral and save a graph you can review and run." }
                         if configured {
                             div { class: "workflow-assistant-examples",
                                 Action {
@@ -313,7 +301,7 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
                                     }
                                 }
                                 if !message.text().is_empty() {
-                                    {AssistantDocument::parse(message.text()).render()}
+                                    {AssistantText::parse(message.text()).render()}
                                 }
                                 if !message.tools().is_empty() {
                                     details {
@@ -464,24 +452,6 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
     }
 }
 
-trait ConversationPresentation {
-    fn option_label(&self) -> String;
-}
-
-impl ConversationPresentation for WorkflowAgentConversationSummary {
-    fn option_label(&self) -> String {
-        if self.message_count() == 0 {
-            return self.title().to_owned();
-        }
-        let noun = if self.message_count() == 1 {
-            "message"
-        } else {
-            "messages"
-        };
-        format!("{} · {} {noun}", self.title(), self.message_count())
-    }
-}
-
 trait ToolTracePresentation {
     fn trace_summary(&self, message_phase: WorkflowAgentMessagePhase) -> String;
 }
@@ -569,9 +539,9 @@ impl AssistantComposerState {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct AssistantDocument(Vec<AssistantBlock>);
+struct AssistantText(Vec<AssistantBlock>);
 
-impl AssistantDocument {
+impl AssistantText {
     fn parse(text: &str) -> Self {
         let lines = text.lines().collect::<Vec<_>>();
         let mut document = Self(Vec::new());
@@ -1114,15 +1084,13 @@ fn WorkflowCanvas(controller: super::state::WorkflowController) -> Element {
     let command = controller.command();
     let active = snapshot.phase().active();
     let topology_blocked = active || command.is_some();
-    let agent_topology_blocked =
-        controller.agent_state().session().phase().active() || controller.agent_command().is_some();
     let state_load_failed = controller.load_error().is_some();
     let dirty = controller.dirty();
     let empty = spec.nodes().is_empty() && spec.edges().is_empty();
     let edit_label = if dirty {
         "Modified".to_owned()
     } else {
-        format!("Saved · r{}", spec.revision())
+        "Saved".to_owned()
     };
     let complete_with_warnings = snapshot.phase() == WorkflowRunPhase::Completed
         && snapshot.nodes().iter().any(|node| {
@@ -1208,20 +1176,19 @@ fn WorkflowCanvas(controller: super::state::WorkflowController) -> Element {
     rsx! {
         section { class: "workflow-canvas", "aria-label": "Spiral relation workflow",
             header { class: "workflow-canvas-toolbar",
+                input {
+                    class: "workflow-name-input",
+                    "aria-label": "Workflow name",
+                    value: "{spec.name()}",
+                    disabled: topology_blocked || controller.agent_state().session().phase().active(),
+                    oninput: move |event| controller.set_name(event.value()),
+                }
                 div {
                     strong { class: if dirty { "workflow-edit-badge is-modified" } else { "workflow-edit-badge" }, "{edit_label}" }
-                    strong { class: snapshot.phase().badge_class(complete_with_warnings), "{run_label}" }
-                    span { "{spec.nodes().len()} nodes · {spec.edges().len()} connections" }
-                }
-                if !spec.nodes().is_empty() {
-                    Action {
-                        purpose: ActionPurpose::Create,
-                        variant: ActionVariant::Outline,
-                        disabled: topology_blocked || agent_topology_blocked,
-                        title: if active { "Cancel the active run before starting a new Workflow" } else if command.is_some() { "Wait for the current Workflow command before starting a new Workflow" } else if agent_topology_blocked { "Stop the active Assistant turn before starting a new Workflow" } else { "Clear the canvas as an unapplied draft; Apply replaces the saved Workflow" },
-                        onclick: move |_| controller.clear_workflow_draft(),
-                        "New workflow"
+                    if snapshot.phase() != WorkflowRunPhase::Idle {
+                        strong { class: snapshot.phase().badge_class(complete_with_warnings), "{run_label}" }
                     }
+                    span { "{spec.nodes().len()} nodes · {spec.edges().len()} connections" }
                 }
                 if !spec.nodes().is_empty() && !controller.has_model() {
                     Action {
@@ -1752,7 +1719,7 @@ mod tests {
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn assistant_parser_handles_safe_structure_and_incomplete_streams() {
         assert_eq!(
-            AssistantDocument::parse(
+            AssistantText::parse(
                 "Saved **Holding evidence** with `score_cube`.\n\n- Camera frames\n* Joint state\n\n```sql\nSELECT * FROM scores\n```"
             )
             .0,
@@ -1775,13 +1742,13 @@ mod tests {
             ]
         );
         assert_eq!(
-            AssistantDocument::parse("Streaming **unfinished").0,
+            AssistantText::parse("Streaming **unfinished").0,
             vec![AssistantBlock::Paragraph(vec![AssistantInline::Text(
                 "Streaming **unfinished".to_owned()
             )])]
         );
         assert_eq!(
-            AssistantDocument::parse("```sql\nSELECT 1").0,
+            AssistantText::parse("```sql\nSELECT 1").0,
             vec![AssistantBlock::Code {
                 language: Some("sql".to_owned()),
                 text: "SELECT 1".to_owned(),
@@ -1790,98 +1757,20 @@ mod tests {
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]
-    fn conversation_and_tool_summaries_stay_specific_without_exposing_provider_plumbing() {
-        let conversation =
-            WorkflowAgentConversationSummary::new("", "Gripper evidence", 0).with_activity(0, 4);
-        assert_eq!(conversation.option_label(), "Gripper evidence · 4 messages");
-        let tools = [WorkflowAgentToolSummary::new(
-            "call-1",
-            "get_relations",
-            "Inspecting camera relations",
-        )];
-        assert_eq!(
-            tools.trace_summary(WorkflowAgentMessagePhase::Streaming),
-            "Working · Inspecting camera relations"
-        );
-        let mut recovered_tool =
-            WorkflowAgentToolSummary::new("call-2", "run_query", "Couldn’t inspect query results");
-        recovered_tool.set_phase(WorkflowAgentToolPhase::Failed);
-        recovered_tool.set_error(Some("Unsupported extension".to_owned()));
-        let recovered = [recovered_tool];
-        assert_eq!(
-            recovered.trace_summary(WorkflowAgentMessagePhase::Complete),
-            "1 step · 1 recovered"
-        );
-        let production = include_str!("workspace.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .unwrap();
-        assert!(!production.contains("LLM_API_KEY"));
-        assert!(!production.contains("Configure the backend provider"));
-        assert!(!production.contains("readiness.provider"));
-        assert!(!production.contains("readiness.model"));
-    }
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn composer_draft_clears_only_after_the_matching_scoped_turn_is_accepted() {
+    fn composer_draft_belongs_to_its_workflow_and_preserves_new_typing() {
+        let first = AgentDraftKey::new("workflow-a");
+        let second = AgentDraftKey::new("workflow-b");
         let mut drafts = BTreeMap::from([
-            (
-                AgentDraftKey::new("project-a", "conversation-a"),
-                "first request".to_owned(),
-            ),
-            (
-                AgentDraftKey::new("project-b", "conversation-a"),
-                "other project draft".to_owned(),
-            ),
-            (
-                AgentDraftKey::new("project-a", "conversation-b"),
-                "other draft".to_owned(),
-            ),
+            (first.clone(), "use top camera".to_owned()),
+            (second.clone(), "use wrist camera".to_owned()),
         ]);
-        // A project cutover can legitimately load the same durable
-        // conversation identity. The active scope selects only its own draft,
-        // while returning to the original scope restores the untouched text.
+        assert!(!first.clear_if_unchanged(&mut drafts, "old request"));
         assert_eq!(
-            drafts
-                .get(&AgentDraftKey::new("project-a", "conversation-a"))
-                .unwrap(),
-            "first request"
+            drafts.get(&AgentDraftKey::new("workflow-a")).unwrap(),
+            "use top camera"
         );
-        assert_eq!(
-            drafts
-                .get(&AgentDraftKey::new("project-b", "conversation-a"))
-                .unwrap(),
-            "other project draft"
-        );
-        assert_eq!(
-            drafts
-                .get(&AgentDraftKey::new("project-a", "conversation-a"))
-                .unwrap(),
-            "first request"
-        );
-        let project_a = AgentDraftKey::new("project-a", "conversation-a");
-        assert!(!project_a.clear_if_unchanged(&mut drafts, "stale request"));
-        assert_eq!(drafts.len(), 3);
-        assert_eq!(
-            drafts
-                .get(&AgentDraftKey::new("project-b", "conversation-a"))
-                .unwrap(),
-            "other project draft",
-            "a rejected/stale project-a acceptance cannot clear project-b text"
-        );
-        assert!(project_a.clear_if_unchanged(&mut drafts, "first request"));
-        assert_eq!(
-            drafts
-                .get(&AgentDraftKey::new("project-b", "conversation-a"))
-                .unwrap(),
-            "other project draft"
-        );
-        assert_eq!(
-            drafts
-                .get(&AgentDraftKey::new("project-a", "conversation-b"))
-                .unwrap(),
-            "other draft"
-        );
+        assert!(first.clear_if_unchanged(&mut drafts, "use top camera"));
+        assert_eq!(drafts.get(&second).unwrap(), "use wrist camera");
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]

@@ -16,7 +16,6 @@ pub(crate) enum CatalogLeaseOwner {
     WorkflowStart,
     StudioCatalogRead,
     WorkflowAgentStart,
-    WorkflowAgentHistory,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -164,7 +163,7 @@ mod tests {
         assert!(lease.release(manual));
 
         let history = lease
-            .try_acquire(CatalogLeaseOwner::WorkflowAgentHistory)
+            .try_acquire(CatalogLeaseOwner::WorkflowAgentStart)
             .expect("Assistant conversation persistence claims the handshake slot");
         assert!(
             lease

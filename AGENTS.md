@@ -1,8 +1,8 @@
 - Do not workaround Spiral's bugs/limitations/missing features. Ask user first.
-- Treat Studio as a strict desktop-only application with a 1024 CSS-pixel minimum viewport. Do not add mobile or touch-specific layouts, breakpoints, gestures, hit-target overrides, or alternate UI; design for mouse, touchpad, and keyboard input.
 - You should care less about breaking changes, and more about doing the right thing.
 - Do things smartly, e.g., use native features instead of reinventing the wheel.
 - Don't prematurely optimize for scaling, e.g., setup a memory pool to limit allocation, setup a worker pool to limit concurrency, etc. If you really think it is necessary, ask user first.
+- Write human-readable code, follow Rust best practices.
 
 ## Engineering
 
