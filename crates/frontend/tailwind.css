@@ -1375,12 +1375,16 @@
 
   .workflow-workspace { @apply flex h-full min-h-0 min-w-0 flex-col; }
   .workflow-panels { @apply min-h-0 min-w-0 flex-1; }
-  .workflow-picker { @apply flex shrink-0 items-center gap-2 border-b border-line px-3 py-2; }
+  .workflow-picker { @apply flex flex-wrap shrink-0 items-center gap-2 border-b border-line px-3 py-2; }
   .workflow-picker label { @apply text-xs font-medium text-ink-soft; }
   .workflow-picker select, .workflow-name-input {
     @apply min-h-8 min-w-0 rounded border border-line bg-surface px-2 py-1 text-xs text-ink outline-none focus-visible:border-accent focus-visible:ring-2 focus-visible:ring-accent/15 disabled:text-ink-faint;
   }
-  .workflow-picker select { @apply w-64; }
+  .workflow-picker select { @apply w-48; }
+  .workflow-filter-summary { @apply min-h-0 overflow-auto p-3 text-xs leading-relaxed; }
+  .workflow-filter-summary p { @apply mb-3; }
+  .workflow-filter-summary ul { @apply my-2 list-disc pl-4; }
+  .workflow-filter-note { @apply text-ink-soft; }
   .workflow-name-input { @apply w-44; }
   .workflow-picker > span { @apply text-xs text-ink-soft; }
 

@@ -26,7 +26,7 @@ use spiral_robotics_common::relations::{
 };
 use spiral_robotics_common::sql::QualifiedRelation;
 
-use super::database::{DatabaseSession, RelationKind, SqlStatement};
+use super::database::{DatabaseSession, RecordBatchStream, RelationKind, SqlStatement};
 use super::project_store::{ProjectConnection, ProjectStore};
 use super::schema::{Table, column};
 use spiral_robotics_common::sql::ReadOnlyQueryMode;
@@ -375,10 +375,28 @@ impl QueryExecution<'_> {
         }
         let started = Instant::now();
         let statement = SqlStatement::from(sql);
-        let mut records = connection
+        let records = connection
             .query(statement)
             .await
             .map_err(|error| format!("executing Spiral query: {error}"))?;
+        self.limits.collect(records).await.map(|result| {
+            result.with_elapsed_ms(started.elapsed().as_millis().try_into().unwrap_or(u64::MAX))
+        })
+    }
+}
+
+impl RecordBatchStream {
+    /// Convert only the terminal output to a bounded browser preview. Graph
+    /// operators exchange Arrow values without a JSON round trip.
+    pub async fn into_preview(self, max_rows: usize) -> Result<SpiralQuerySnapshot, String> {
+        QueryLimits::new(max_rows.clamp(1, MAX_QUERY_ROWS), MAX_QUERY_RESPONSE_BYTES)
+            .collect(self)
+            .await
+    }
+}
+
+impl QueryLimits {
+    async fn collect(self, mut records: RecordBatchStream) -> Result<SpiralQuerySnapshot, String> {
         let schema = Arc::clone(records.schema());
         let columns = schema
             .fields()
@@ -405,11 +423,8 @@ impl QueryExecution<'_> {
         } else {
             QUERY_JSON_CHUNK_ROWS
         };
-        let fetch = self.limits.rows.saturating_add(1);
-        let mut rows = QueryRows::with_capacity(
-            self.limits.rows.min(QUERY_JSON_CHUNK_ROWS),
-            self.limits.bytes,
-        );
+        let fetch = self.rows.saturating_add(1);
+        let mut rows = QueryRows::with_capacity(self.rows.min(QUERY_JSON_CHUNK_ROWS), self.bytes);
         let mut inspected = 0_usize;
         let mut truncated = false;
         'result: while let Some(batch) = records.next().await {
@@ -423,7 +438,7 @@ impl QueryExecution<'_> {
                 let preview = chunk.query_preview()?;
                 for row in preview.to_json_rows()? {
                     inspected += 1;
-                    if rows.values.len() >= self.limits.rows {
+                    if rows.values.len() >= self.rows {
                         truncated = true;
                         break 'result;
                     }
@@ -435,10 +450,11 @@ impl QueryExecution<'_> {
                 offset += count;
             }
         }
-        Ok(
-            SpiralQuerySnapshot::new(columns, rows.into_values(), truncated)
-                .with_elapsed_ms(started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)),
-        )
+        Ok(SpiralQuerySnapshot::new(
+            columns,
+            rows.into_values(),
+            truncated,
+        ))
     }
 }
 

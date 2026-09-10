@@ -48,6 +48,14 @@ impl DatabaseSession for SchemaConnection {
         }
         .boxed()
     }
+    fn query_schema(&mut self, _: SqlStatement) -> DatabaseFuture<'_, Arc<Schema>> {
+        async {
+            Err(super::super::database::DatabaseError::invalid_input(
+                "relation schema discovery must not plan queries",
+            ))
+        }
+        .boxed()
+    }
     fn query(&mut self, _: SqlStatement) -> DatabaseFuture<'_, RecordBatchStream> {
         unimplemented!()
     }

@@ -82,6 +82,28 @@ impl ProjectConnection {
             .map_err(|error| error.to_string())
     }
 
+    pub async fn plan_query(&mut self, sql: impl AsRef<str>) -> Result<Arc<Schema>, String> {
+        self.query_schema(sql.as_ref().into())
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    pub async fn bind_arrow_input(
+        &mut self,
+        name: &str,
+        batches: RecordBatchStream,
+    ) -> Result<(), String> {
+        let name = RelationName::parse(name).map_err(|error| error.to_string())?;
+        self.ingest(BatchIngestion::new(
+            name,
+            super::database::IngestMode::ReplaceTemporary,
+            batches,
+        ))
+        .await
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+    }
+
     pub async fn relation_schema(&mut self, table: &str) -> Result<Option<Schema>, String> {
         let relation = RelationName::parse(table).map_err(|error| error.to_string())?;
         self.table_schema(relation)
@@ -403,6 +425,10 @@ impl DatabaseSession for ProjectConnection {
                 .retain(self.database.clone()))
         }
         .boxed()
+    }
+
+    fn query_schema(&mut self, sql: SqlStatement) -> DatabaseFuture<'_, Arc<Schema>> {
+        async move { self.state.session()?.query_schema(sql).await }.boxed()
     }
 
     fn execute_update(&mut self, sql: SqlStatement) -> DatabaseFuture<'_, ExecutionSummary> {

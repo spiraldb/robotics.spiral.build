@@ -62,6 +62,16 @@ impl Database for LoadingDatabaseAdapter {
 struct LoadingConnection(Arc<LoadingDatabase>);
 
 impl DatabaseSession for LoadingConnection {
+    fn query_schema(&mut self, _: SqlStatement) -> DatabaseFuture<'_, Arc<Schema>> {
+        async {
+            Err(DatabaseError::new(
+                DatabaseErrorKind::InvalidState,
+                "project loading must not plan workflow queries",
+            ))
+        }
+        .boxed()
+    }
+
     fn query(&mut self, sql: SqlStatement) -> DatabaseFuture<'_, RecordBatchStream> {
         async move {
             self.0

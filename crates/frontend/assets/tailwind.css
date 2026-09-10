@@ -16,6 +16,7 @@
     --font-weight-semibold: 600;
     --leading-tight: 1.25;
     --leading-snug: 1.375;
+    --leading-relaxed: 1.625;
     --radius-sm: 0.25rem;
     --radius-md: 0.375rem;
     --aspect-video: 16 / 9;
@@ -2554,6 +2555,7 @@
   .workflow-picker {
     display: flex;
     flex-shrink: 0;
+    flex-wrap: wrap;
     align-items: center;
     gap: calc(var(--spacing) * 2);
     border-bottom-style: var(--tw-border-style);
@@ -2602,7 +2604,27 @@
     }
   }
   .workflow-picker select {
-    width: calc(var(--spacing) * 64);
+    width: calc(var(--spacing) * 48);
+  }
+  .workflow-filter-summary {
+    min-height: 0px;
+    overflow: auto;
+    padding: calc(var(--spacing) * 3);
+    font-size: var(--text-xs);
+    line-height: var(--tw-leading, var(--text-xs--line-height));
+    --tw-leading: var(--leading-relaxed);
+    line-height: var(--leading-relaxed);
+  }
+  .workflow-filter-summary p {
+    margin-bottom: calc(var(--spacing) * 3);
+  }
+  .workflow-filter-summary ul {
+    margin-block: calc(var(--spacing) * 2);
+    list-style-type: disc;
+    padding-left: calc(var(--spacing) * 4);
+  }
+  .workflow-filter-note {
+    color: var(--tone-ink-soft);
   }
   .workflow-name-input {
     width: calc(var(--spacing) * 44);

@@ -85,6 +85,9 @@ pub trait Database: Send + Sync {
 pub trait DatabaseSession: Send + 'static {
     fn query(&mut self, sql: SqlStatement) -> DatabaseFuture<'_, RecordBatchStream>;
 
+    /// Plan a query and return its Arrow schema without consuming result rows.
+    fn query_schema(&mut self, sql: SqlStatement) -> DatabaseFuture<'_, Arc<Schema>>;
+
     fn execute_update(&mut self, sql: SqlStatement) -> DatabaseFuture<'_, ExecutionSummary>;
 
     fn ingest(&mut self, ingestion: BatchIngestion) -> DatabaseFuture<'_, ExecutionSummary>;
@@ -196,6 +199,8 @@ pub enum IngestMode {
     CreateOrAppend,
     ReplaceExisting,
     ReplaceOrCreate,
+    /// Engine-local Arrow input, owned by the connection rather than the project catalog.
+    ReplaceTemporary,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

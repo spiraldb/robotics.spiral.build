@@ -25,15 +25,13 @@ impl StorageManager {
         }
         let query = MessageQuery { request: &request };
         let mut connection = self.project_store().connect().await?;
-        let schema_stream = connection
-            .query(query.statement(
+        let schema = connection
+            .query_schema(query.statement(
                 "log_time, publish_time, channel_id, chunk_start_offset, sample_ordinal, value",
-                "LIMIT 0",
+                "",
             )?)
             .await
             .map_err(|e| e.to_string())?;
-        let schema = schema_stream.schema().clone();
-        drop(schema_stream);
         let mut page = MessagePage::new(schema);
         if let Some(window) = request.window() {
             let projection = query.projection(&page.schema)?;

@@ -6,7 +6,7 @@ use futures::{StreamExt as _, TryStreamExt as _};
 use serde::Deserialize;
 
 impl AdbcDatabase {
-    fn memory() -> Self {
+    pub(crate) fn memory() -> Self {
         Self {
             configuration: DriverConfiguration::memory(),
             database: OnceCell::new(),
@@ -421,4 +421,125 @@ async fn query_reader_errors_are_terminal_and_release_the_connection() {
         .await
         .unwrap();
     assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 1);
+}
+
+#[tokio::test]
+async fn temporary_arrow_inputs_support_schema_planning_filters_and_joins() {
+    use crate::db::{BatchIngestion, IngestMode, RelationName};
+    let database = AdbcDatabase::memory();
+    let mut connection = database.connect().await.unwrap();
+    for (name, column, values) in [
+        ("left_input", "value", vec![1, 2, 3]),
+        ("right_input", "selected", vec![2, 3]),
+    ] {
+        let schema = Arc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+            column,
+            arrow_schema::DataType::Int64,
+            false,
+        )]));
+        let batch =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(values))]).unwrap();
+        connection
+            .ingest(BatchIngestion::new(
+                RelationName::parse(name).unwrap(),
+                IngestMode::ReplaceTemporary,
+                RecordBatchStream::new(schema, futures::stream::iter([Ok(batch)]).boxed()),
+            ))
+            .await
+            .unwrap();
+    }
+    let sql = "SELECT l.value + 10 AS result FROM left_input l JOIN right_input r ON l.value = r.selected WHERE l.value > 2";
+    let schema = connection.query_schema(sql.into()).await.unwrap();
+    assert_eq!(schema.fields().len(), 1);
+    assert_eq!(schema.field(0).name(), "result");
+    assert_eq!(schema.field(0).data_type(), &arrow_schema::DataType::Int64);
+    assert!(
+        connection
+            .query_schema("SELECT missing FROM left_input".into())
+            .await
+            .is_err()
+    );
+    let batches = connection
+        .query(sql.into())
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 1);
+    assert_eq!(
+        batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0),
+        13
+    );
+    assert!(
+        connection.relations().await.unwrap().is_empty(),
+        "temporary inputs must not enter the project catalog"
+    );
+    let mut other = database.connect().await.unwrap();
+    assert!(
+        other
+            .query_schema("SELECT * FROM left_input".into())
+            .await
+            .is_err(),
+        "temporary inputs are scoped to their connection"
+    );
+}
+
+#[tokio::test]
+async fn temporary_arrow_inputs_preserve_image_type_for_schema_planning() {
+    use crate::db::{BatchIngestion, IngestMode, RelationName};
+    use arrow_schema::{DataType, Field, Schema, extension::EXTENSION_TYPE_NAME_KEY};
+
+    let image = Field::new(
+        "image",
+        DataType::Struct(
+            vec![
+                Field::new(
+                    "data",
+                    DataType::List(Arc::new(Field::new("item", DataType::UInt8, false))),
+                    false,
+                ),
+                Field::new("width", DataType::UInt32, false),
+                Field::new("height", DataType::UInt32, false),
+                Field::new("pixel_format", DataType::UInt8, false),
+            ]
+            .into(),
+        ),
+        true,
+    )
+    .with_metadata(std::collections::HashMap::from([(
+        EXTENSION_TYPE_NAME_KEY.to_owned(),
+        "spql.image.Image".to_owned(),
+    )]));
+    let schema = Arc::new(Schema::new(vec![image]));
+    let database = AdbcDatabase::memory();
+    let mut connection = database.connect().await.unwrap();
+    connection
+        .ingest(BatchIngestion::new(
+            RelationName::parse("images").unwrap(),
+            IngestMode::ReplaceTemporary,
+            RecordBatchStream::new(
+                schema.clone(),
+                futures::stream::iter([Ok(RecordBatch::new_empty(schema))]).boxed(),
+            ),
+        ))
+        .await
+        .unwrap();
+    let schema = connection
+        .query_schema("SELECT image FROM images".into())
+        .await
+        .unwrap();
+    assert_eq!(
+        schema
+            .field(0)
+            .metadata()
+            .get(EXTENSION_TYPE_NAME_KEY)
+            .map(String::as_str),
+        Some("spql.image.Image")
+    );
 }

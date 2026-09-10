@@ -1,12 +1,14 @@
 # Spiral demo feature milestones
 
-Status: **M1 implemented with the current local Spiral driver**, September 9, 2026.
+Status: **M1 and M2.1 implemented with the current local Spiral driver**, September 10, 2026.
 Tasks 1.1 and 1.2 share one clock in the Data inspector. The follow-up replaces
 joint-specific reads with native Arrow schema discovery, numeric field selection,
 and one paginated message transport. M2’s ownership simplification is implemented:
 named workflows each own one graph and one Assistant conversation; authoring cannot
-start computation. Native episode-filter semantics in 2.1 and the M3–M4
-preparation/training features remain unimplemented. See
+start computation. Native episode-filter authoring in 2.1 is verified against the
+real schema, including live Assistant authoring, two corrections, an absent camera,
+and reopening the saved graph and conversation. M3–M4 preparation/training remains
+unimplemented. See
 [workflow-authoring.md](workflow-authoring.md) for the simplified ownership model.
 
 **Driver requirement:** local `xiangpeng/dev` commit `02d06b5c5` includes the
@@ -132,7 +134,7 @@ remain aligned without a physical robot connection.
 
 ### 2.1 — Build and refine an episode filter with the agent
 
-- [ ] Done
+- [x] Done — native schema, live Assistant corrections, backend authoring boundary, and reopen verified September 10, 2026.
 
 **After this lands:** the engineer chooses a dataset and types “select all episodes
 but remove the ones whose top camera is too dim.” The agent creates an inspectable

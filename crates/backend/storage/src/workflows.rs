@@ -1,6 +1,8 @@
 //! One row per workflow. The list reads metadata; graph and conversation JSON
 //! are loaded by identity and saved independently in the same transaction.
 
+mod episode_inputs;
+
 use std::sync::Arc;
 
 use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray, UInt32Array};

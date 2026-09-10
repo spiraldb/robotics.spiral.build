@@ -30,6 +30,9 @@ pub(crate) const RESULTS_PANEL_ID: &str = "workflow-results";
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum WorkflowNodeKind {
+    Dataset,
+    CameraScore,
+    EpisodeFilter,
     Table,
     Model,
     Query,
@@ -39,6 +42,9 @@ pub(crate) enum WorkflowNodeKind {
 impl From<&WorkflowNodeConfig> for WorkflowNodeKind {
     fn from(config: &WorkflowNodeConfig) -> Self {
         match config {
+            WorkflowNodeConfig::Dataset { .. } => Self::Dataset,
+            WorkflowNodeConfig::CameraScore { .. } => Self::CameraScore,
+            WorkflowNodeConfig::EpisodeFilter { .. } => Self::EpisodeFilter,
             WorkflowNodeConfig::Table { .. } => Self::Table,
             WorkflowNodeConfig::Model { .. } => Self::Model,
             WorkflowNodeConfig::Query { .. } => Self::Query,
@@ -140,6 +146,9 @@ impl WorkflowNodeData {
 
     pub(crate) const fn kind_label(&self) -> &'static str {
         match self.kind {
+            WorkflowNodeKind::Dataset => "Dataset",
+            WorkflowNodeKind::CameraScore => "Camera scoring",
+            WorkflowNodeKind::EpisodeFilter => "Episode filter",
             WorkflowNodeKind::Table => "Table",
             WorkflowNodeKind::Model => "Model",
             WorkflowNodeKind::Query => "Query",
@@ -149,9 +158,9 @@ impl WorkflowNodeData {
 
     pub(crate) const fn kind_class(&self) -> &'static str {
         match self.kind {
-            WorkflowNodeKind::Table => "workflow-node-kind-table",
-            WorkflowNodeKind::Model => "workflow-node-kind-model",
-            WorkflowNodeKind::Query => "workflow-node-kind-query",
+            WorkflowNodeKind::Table | WorkflowNodeKind::Dataset => "workflow-node-kind-table",
+            WorkflowNodeKind::Model | WorkflowNodeKind::CameraScore => "workflow-node-kind-model",
+            WorkflowNodeKind::Query | WorkflowNodeKind::EpisodeFilter => "workflow-node-kind-query",
             WorkflowNodeKind::Result => "workflow-node-kind-result",
         }
     }
@@ -481,6 +490,19 @@ impl WorkflowController {
         None
     }
 
+    pub(crate) fn select_dataset(
+        mut self,
+        source: spiral_robotics_common::datasets::DatasetSummary,
+        studio: StudioProjectState,
+    ) {
+        if self.workflow_selection_reason().is_some() {
+            return;
+        }
+        self.document.draft.write().select_dataset(source);
+        self.sync_graph();
+        self.apply(studio);
+    }
+
     pub(crate) fn set_name(mut self, name: String) {
         self.document.draft.write().set_name(name);
     }
@@ -538,6 +560,9 @@ impl WorkflowController {
         }
         if self.dirty() {
             return Some("Apply graph changes before running.".to_owned());
+        }
+        if self.spec().uses_native_episodes() {
+            return Some("Needs preparation. Native episode scoring is not available yet.".into());
         }
         let draft = self.document.draft.read();
         if draft.nodes().is_empty() && draft.edges().is_empty() {
@@ -1597,9 +1622,9 @@ impl WorkflowGraphProjection for WorkflowSpec {
                 );
                 *rank_index += 1;
                 let type_name = match WorkflowNodeKind::from(node.config()) {
-                    WorkflowNodeKind::Table => "table",
-                    WorkflowNodeKind::Model => "model",
-                    WorkflowNodeKind::Query => "query",
+                    WorkflowNodeKind::Table | WorkflowNodeKind::Dataset => "table",
+                    WorkflowNodeKind::Model | WorkflowNodeKind::CameraScore => "model",
+                    WorkflowNodeKind::Query | WorkflowNodeKind::EpisodeFilter => "query",
                     WorkflowNodeKind::Result => "result",
                 };
                 Node::with_data(
@@ -1711,6 +1736,22 @@ impl NodeProjection<'_> {
             warnings,
         };
         match node.config() {
+        WorkflowNodeConfig::Dataset { source } => WorkflowNodeData {
+            kind: WorkflowNodeKind::Dataset,
+            description: format!("Native episodes from {}", source.selection().label()),
+            source: WorkflowNodeSource { fields: vec!["Episode identity".into(), "Camera topics".into()], ..WorkflowNodeSource::default() },
+            execution, model: WorkflowNodeModel::default(),
+        },
+        WorkflowNodeConfig::CameraScore { scoring } => WorkflowNodeData {
+            kind: WorkflowNodeKind::CameraScore, description: scoring.description(),
+            source: WorkflowNodeSource { fields: vec![scoring.camera().topic().to_owned(), format!("{} ms sampling", scoring.interval_ms()), "SigLIP score".into()], ..WorkflowNodeSource::default() },
+            execution, model: WorkflowNodeModel::default(),
+        },
+        WorkflowNodeConfig::EpisodeFilter { rule } => WorkflowNodeData {
+            kind: WorkflowNodeKind::EpisodeFilter, description: rule.description(),
+            source: WorkflowNodeSource { fields: vec!["Included / excluded / unknown".into()], ..WorkflowNodeSource::default() },
+            execution, model: WorkflowNodeModel::default(),
+        },
         WorkflowNodeConfig::Table { relation } => {
             let metadata = self.relations.get(relation.as_str());
             WorkflowNodeData {

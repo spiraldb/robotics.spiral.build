@@ -92,6 +92,25 @@ impl DatabaseSession for AdbcConnection {
         .boxed()
     }
 
+    fn query_schema(&mut self, sql: SqlStatement) -> DatabaseFuture<'_, Arc<Schema>> {
+        async move {
+            let permit = self.reserve_operation()?;
+            self.worker
+                .run(move |state| {
+                    let _permit = permit;
+                    let mut statement = state.connection().new_statement()?;
+                    statement.set_sql_query(sql.as_str())?;
+                    if let Some(parameters) = sql.parameters() {
+                        statement.prepare()?;
+                        statement.bind(parameters.clone())?;
+                    }
+                    Ok(Arc::new(statement.execute_schema()?))
+                })
+                .await
+        }
+        .boxed()
+    }
+
     fn execute_update(&mut self, sql: SqlStatement) -> DatabaseFuture<'_, ExecutionSummary> {
         async move {
             let permit = self.reserve_operation()?;

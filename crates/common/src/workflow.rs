@@ -7,6 +7,8 @@
 //! names; storage qualifies persisted relations inside Studio's configured
 //! namespace.
 
+pub mod episode_filter;
+
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::sql::workflow::{WorkflowNodeId, WorkflowSql};
@@ -90,6 +92,15 @@ pub struct WorkflowNodeSpec {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkflowNodeConfig {
+    Dataset {
+        source: crate::datasets::DatasetSummary,
+    },
+    CameraScore {
+        scoring: episode_filter::CameraScoring,
+    },
+    EpisodeFilter {
+        rule: episode_filter::EpisodeFilterRule,
+    },
     Table {
         relation: String,
     },
@@ -221,6 +232,9 @@ impl WorkflowNodeConfig {
 
     const fn label(&self) -> &'static str {
         match self {
+            Self::Dataset { .. } => "Dataset",
+            Self::CameraScore { .. } => "Camera scoring",
+            Self::EpisodeFilter { .. } => "Episode filter",
             Self::Table { .. } => "Table",
             Self::Model { .. } => "Model",
             Self::Query { .. } => "Query",
@@ -1336,6 +1350,9 @@ impl WorkflowSpec {
     }
 
     pub fn validate(&self) -> WorkflowValidationReport {
+        if self.uses_native_episodes() {
+            return self.validate_episode_graph();
+        }
         let spec = self;
         let mut report = WorkflowValidationReport::default();
         if WorkflowNodeId::try_from(spec.id.as_str()).is_err() {
@@ -1502,15 +1519,18 @@ impl WorkflowSpec {
                         );
                     }
                 }
-                WorkflowNodeConfig::Result => {}
+                WorkflowNodeConfig::Result
+                | WorkflowNodeConfig::Dataset { .. }
+                | WorkflowNodeConfig::CameraScore { .. }
+                | WorkflowNodeConfig::EpisodeFilter { .. } => {}
             }
         }
 
         if spec.nodes.is_empty() {
             report.errors.push(WorkflowValidationIssue::new(
                 "empty_workflow",
-                "A workflow needs Table, Query, and Result nodes.",
-                "Add at least one Table root and one terminal Result.",
+                "A workflow needs a source and a Result node.",
+                "Add a SQL or Table source and connect it to a terminal Result.",
             ));
             return report;
         }
@@ -1583,19 +1603,21 @@ impl WorkflowSpec {
         let nodes = &topology.nodes;
         let incoming = &topology.incoming;
         let outgoing = &topology.outgoing;
-        let table_roots = spec
+        let source_count = spec
             .nodes
             .iter()
             .filter(|node| {
-                matches!(node.config, WorkflowNodeConfig::Table { .. })
-                    && incoming.get(node.id.as_str()).is_none_or(Vec::is_empty)
+                matches!(
+                    node.config,
+                    WorkflowNodeConfig::Table { .. } | WorkflowNodeConfig::Query { .. }
+                ) && incoming.get(node.id.as_str()).is_none_or(Vec::is_empty)
             })
             .count();
-        if table_roots == 0 {
+        if source_count == 0 {
             report.errors.push(WorkflowValidationIssue::new(
-                "missing_table_root",
-                "A workflow needs at least one Table root.",
-                "Choose an existing Spiral relation as the first node.",
+                "missing_source",
+                "A workflow needs at least one SQL or Table source.",
+                "Read a dataset or table with a SQL source, or choose a Table source.",
             ));
         }
 
@@ -1653,7 +1675,7 @@ impl WorkflowSpec {
                         .flatten()
                         .copied()
                         .collect::<BTreeSet<_>>();
-                    if placeholders.is_empty() {
+                    if placeholders.is_empty() && !upstream.is_empty() {
                         report.errors.push(WorkflowValidationIssue::new("query_placeholder_required", "Workflow SQL must reference an upstream node placeholder.", "Use a placeholder such as {{node:table}} in FROM or JOIN.").with_node_id(&node.id));
                     }
                     for placeholder in &placeholders {
@@ -2108,6 +2130,47 @@ impl<'a> WorkflowTopology<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sql_sources_join_without_table_nodes_and_require_matching_connections() {
+        let mut workflow = WorkflowSpec::new("sql-sources", "Join SQL sources");
+        for (id, sql) in [
+            ("left", "SELECT 1 AS id"),
+            ("right", "SELECT 1 AS id"),
+            (
+                "joined",
+                "SELECT l.id FROM {{node:left}} l JOIN {{node:right}} r ON l.id = r.id",
+            ),
+        ] {
+            workflow.nodes_mut().push(WorkflowNodeSpec::new(
+                id,
+                id,
+                WorkflowNodeConfig::Query {
+                    sql: sql.into(),
+                    max_rows: 100,
+                },
+            ));
+        }
+        workflow.nodes_mut().push(WorkflowNodeSpec::new(
+            "result",
+            "Result",
+            WorkflowNodeConfig::Result,
+        ));
+        *workflow.edges_mut() = vec![
+            WorkflowEdgeSpec::new("left", "joined"),
+            WorkflowEdgeSpec::new("right", "joined"),
+            WorkflowEdgeSpec::new("joined", "result"),
+        ];
+        assert!(workflow.validate().valid(), "{:?}", workflow.validate());
+        workflow.edges_mut().remove(1);
+        assert!(
+            workflow
+                .validate()
+                .errors()
+                .iter()
+                .any(|issue| issue.code() == "non_upstream_placeholder")
+        );
+    }
 
     fn feature(source: &str, name: &str, concept: &str) -> WorkflowFeatureDefinition {
         WorkflowFeatureDefinition {

@@ -102,6 +102,7 @@ fn WorkflowPanels(controller: super::state::WorkflowController) -> Element {
                     onclick: move |_| controller.select_workflow(None, studio),
                     "New workflow"
                 }
+                WorkflowDatasetPicker { controller }
                 if let Some(reason) = reason.as_ref() { span { role: "status", "{reason}" } }
             }
             div { class: "workflow-panels",
@@ -112,6 +113,77 @@ fn WorkflowPanels(controller: super::state::WorkflowController) -> Element {
             active_panel: controller.active_panel(),
             on_panel_activate: move |id: PanelId| controller.activate_panel(id),
         }
+            }
+        }
+    }
+}
+
+#[component]
+fn WorkflowDatasetPicker(controller: super::state::WorkflowController) -> Element {
+    use crate::activities::data::DatasetClient;
+    use crate::client::queries::{QueryDomain, QueryPolicy};
+    let sessions = crate::shell::project::ProjectSessionSignals::current();
+    let datasets = QueryPolicy::on_demand(QueryDomain::Catalog).use_when(
+        move || sessions.catalog_available(),
+        || DatasetClient::current().list_datasets(),
+    );
+    let studio = StudioProjectState::current();
+    let spec = controller.spec();
+    let selected = spec
+        .dataset()
+        .map(|source| source.resource_id().to_owned())
+        .unwrap_or_default();
+    let response = datasets.read();
+    match response.as_ref() {
+        Some(Ok(items)) => {
+            let items = items.clone();
+            let choices = items.clone();
+            let empty = items.is_empty();
+            rsx! {
+                label { r#for: "workflow-dataset", "Dataset" }
+                select {
+                    id: "workflow-dataset", value: "{selected}",
+                    disabled: controller.workflow_selection_reason().is_some() || empty,
+                    title: "Choose the source dataset. Changing it clears the current filter.",
+                    onchange: move |event| {
+                        if let Some(source) = choices.iter().find(|source| source.resource_id() == event.value()) {
+                            controller.select_dataset(source.clone(), studio);
+                        }
+                    },
+                    option { value: "", disabled: true, if empty { "No datasets available" } else { "Choose a dataset" } }
+                    for source in items {
+                        option { value: "{source.resource_id()}", selected: source.resource_id() == selected, "{source.selection().label()}" }
+                    }
+                }
+            }
+        }
+        Some(Err(error)) => rsx! { span { role: "alert", "Could not load datasets: {error}" } },
+        None => rsx! { span { role: "status", "Loading datasets…" } },
+    }
+}
+
+#[component]
+fn EpisodeFilterSummary(
+    spec: spiral_robotics_common::workflow::WorkflowSpec,
+    dirty: bool,
+) -> Element {
+    let explanation = spec.episode_explanation();
+    let columns = spec.episode_required_columns();
+    rsx! {
+        section { class: "workflow-results", "aria-label": "Episode filter interpretation",
+            header { class: "workflow-results-meta",
+                strong { "Filter interpretation" }
+                span { if dirty { "Unapplied changes" } else if explanation.is_some() { "Needs preparation" } else { "Dataset selected" } }
+            }
+            div { class: "workflow-filter-summary",
+                if let Some(explanation) = explanation {
+                    p { "{explanation}" }
+                    strong { "Required inputs and derived values" }
+                    ul { for column in columns { li { "{column}" } } }
+                    p { class: "workflow-filter-note", "SigLIP scores are text/image matches, not measured brightness. The threshold is provisional. No episodes have been evaluated; native scoring becomes available with preparation." }
+                } else {
+                    p { "Describe which episodes to keep. The Assistant will inspect this dataset’s cameras and save a filter here." }
+                }
             }
         }
     }
@@ -227,6 +299,7 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
         },
     }
     .hint();
+    let native_episodes = controller.spec().uses_native_episodes();
     let starter_relations_key = draft_key.clone();
     let starter_siglip_key = draft_key.clone();
     let submit_key = draft_key.clone();
@@ -260,7 +333,7 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
                 if messages.is_empty() {
                     section { class: "workflow-assistant-empty",
                         h3 { "What should we find?" }
-                        p { "Describe a moment or comparison. I’ll inspect Spiral and save a graph you can review and run." }
+                        p { if native_episodes { "Describe which episodes to keep. I’ll inspect the cameras and save a filter for you to review." } else { "Choose a dataset above to describe an episode filter, or ask about an existing Spiral relation." } }
                         if configured {
                             div { class: "workflow-assistant-examples",
                                 Action {
@@ -269,10 +342,10 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
                                     onclick: {
                                         let draft_key = starter_relations_key.clone();
                                         move |_| {
-                                            drafts.write().insert(draft_key.clone(), "Show the available Spiral relations and build a read-only Table → Query → Result workflow for the most relevant one.".to_owned());
+                                            drafts.write().insert(draft_key.clone(), (if native_episodes { "Select all episodes but remove the ones whose top camera is too dim." } else { "Show the available Spiral relations and build a read-only Table → Query → Result workflow for the most relevant one." }).to_owned());
                                         }
                                     },
-                                    "Find an interesting relation and summarize it"
+                                    if native_episodes { "Remove episodes with dim top-camera footage" } else { "Find an interesting relation and summarize it" }
                                 }
                                 Action {
                                     purpose: ActionPurpose::Select,
@@ -280,10 +353,10 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
                                     onclick: {
                                         let draft_key = starter_siglip_key.clone();
                                         move |_| {
-                                            drafts.write().insert(draft_key.clone(), "Find an image relation, add SigLIP concepts for gripper and cube, run the workflow, and summarize the bounded results.".to_owned());
+                                            drafts.write().insert(draft_key.clone(), (if native_episodes { "Use the gripper camera and exclude an episode only when most sampled frames show a dimly lit scene." } else { "Find an image relation and draft SigLIP concepts for gripper and cube." }).to_owned());
                                         }
                                     },
-                                    "Find moments when the gripper holds an object"
+                                    if native_episodes { "Check lighting through the gripper camera" } else { "Find moments when the gripper holds an object" }
                                 }
                             }
                         }
@@ -1173,7 +1246,7 @@ fn WorkflowCanvas(controller: super::state::WorkflowController) -> Element {
     });
 
     rsx! {
-        section { class: "workflow-canvas", "aria-label": "Spiral relation workflow",
+        section { class: "workflow-canvas", "aria-label": "Workflow graph",
             header { class: "workflow-canvas-toolbar",
                 input {
                     class: "workflow-name-input",
@@ -1189,7 +1262,7 @@ fn WorkflowCanvas(controller: super::state::WorkflowController) -> Element {
                     }
                     span { "{spec.nodes().len()} nodes · {spec.edges().len()} connections" }
                 }
-                if !spec.nodes().is_empty() && !controller.has_model() {
+                if !spec.nodes().is_empty() && !spec.uses_native_episodes() && !controller.has_model() {
                     Action {
                         purpose: ActionPurpose::Create,
                         variant: ActionVariant::Outline,
@@ -1360,6 +1433,9 @@ fn WorkflowNodeCard(ctx: NodeViewCtx<WorkflowNodeData>) -> Element {
     let data = &node.data;
     let fields = if data.fields().is_empty() {
         match data.kind() {
+            WorkflowNodeKind::Dataset => "Native episodes".to_owned(),
+            WorkflowNodeKind::CameraScore => "Sampled camera scores".to_owned(),
+            WorkflowNodeKind::EpisodeFilter => "Episode decisions".to_owned(),
             WorkflowNodeKind::Table => "Choose a relation".to_owned(),
             WorkflowNodeKind::Model => "Define a feature".to_owned(),
             WorkflowNodeKind::Query => "Read-only SQL".to_owned(),
@@ -1384,7 +1460,7 @@ fn WorkflowNodeCard(ctx: NodeViewCtx<WorkflowNodeData>) -> Element {
             class: "workflow-node-card {data.kind_class()} {data.phase_class()} {selected_class} {dragging_class}",
             title: data.error().unwrap_or_default(),
             "aria-current": if node.selected { "true" } else { "false" },
-            if data.kind() != WorkflowNodeKind::Table {
+            if !matches!(data.kind(), WorkflowNodeKind::Table | WorkflowNodeKind::Dataset) {
                 Handle { kind: HandleKind::Target, position: node.target_side }
             }
             header { class: "workflow-node-heading",
@@ -1432,9 +1508,9 @@ fn WorkflowNodeCard(ctx: NodeViewCtx<WorkflowNodeData>) -> Element {
 
 fn node_kind_icon(kind: WorkflowNodeKind) -> Element {
     match kind {
-        WorkflowNodeKind::Table => rsx! { TableNodeIcon {} },
-        WorkflowNodeKind::Model => rsx! { ModelNodeIcon {} },
-        WorkflowNodeKind::Query => rsx! { QueryNodeIcon {} },
+        WorkflowNodeKind::Table | WorkflowNodeKind::Dataset => rsx! { TableNodeIcon {} },
+        WorkflowNodeKind::Model | WorkflowNodeKind::CameraScore => rsx! { ModelNodeIcon {} },
+        WorkflowNodeKind::Query | WorkflowNodeKind::EpisodeFilter => rsx! { QueryNodeIcon {} },
         WorkflowNodeKind::Result => rsx! { ResultNodeIcon {} },
     }
 }
@@ -1449,6 +1525,10 @@ fn WorkflowResults(controller: super::state::WorkflowController) -> Element {
         WorkflowRunPhase::Cancelled | WorkflowRunPhase::Interrupted | WorkflowRunPhase::Failed
     ) && run_reason.is_none();
     let spec = controller.spec();
+    if spec.uses_native_episodes() {
+        return rsx! { EpisodeFilterSummary { spec, dirty: controller.dirty() } };
+    }
+
     let empty_workflow = spec.nodes().is_empty() && spec.edges().is_empty();
     let query = spec.nodes().iter().find_map(|node| {
         let WorkflowNodeConfig::Query { sql, max_rows } = node.config() else {

@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 use tokio_util::sync::CancellationToken;
 
 use crate::OperationError;
@@ -25,6 +25,7 @@ use tokio::sync::{Mutex as AsyncMutex, mpsc};
 use crate::workflow::model::{
     ModelRunContext, ModelRunEvent, ModelRunFailure, ModelRunRequest, ModelRunResult,
 };
+use spiral_robotics_storage::workflow_sql::WorkflowSqlNode;
 use spiral_robotics_storage::workflows::WorkflowJson;
 use spiral_robotics_storage::{StorageManager, StorageSchema};
 
@@ -687,6 +688,12 @@ impl WorkflowManager {
             return Err(OperationError::InvalidInput(issue));
         }
 
+        self.inner
+            .storage
+            .validate_episode_workflow(&workflow)
+            .await
+            .map_err(OperationError::InvalidInput)?;
+
         let changed = current.workflow().content_changed(&workflow);
         let mut snapshot = current.snapshot().clone();
         snapshot.set_workflow_revision(workflow.revision());
@@ -736,6 +743,10 @@ impl WorkflowManager {
         }
         saved.require_idle()?;
         saved.require_revision(revision)?;
+        if saved.workflow().uses_native_episodes() {
+            return Err(OperationError::InvalidInput("Needs preparation. Native episode scoring is not available yet; this saved filter is an authoring draft.".into()));
+        }
+
         if !validation.valid() {
             return Err(OperationError::InvalidInput(
                 "Apply a valid graph before running.".to_owned(),
@@ -924,6 +935,16 @@ impl WorkflowManager {
             };
             let node_started = SystemTime::now().unix_millis();
             match node.config() {
+                WorkflowNodeConfig::Dataset { .. }
+                | WorkflowNodeConfig::CameraScore { .. }
+                | WorkflowNodeConfig::EpisodeFilter { .. } => {
+                    self.finish_failed(WorkflowFailure::new(
+                        &run_id,
+                        "Native episode filters need preparation before execution.".into(),
+                    ))
+                    .await;
+                    return;
+                }
                 WorkflowNodeConfig::Table { relation } => {
                     self.set_node_phase(WorkflowNodePhaseChange::new(
                         WorkflowNodeTarget::new(&run_id, node.id()),
@@ -967,6 +988,17 @@ impl WorkflowManager {
                             return;
                         }
                     };
+                    let sql_node = match WorkflowSqlNode::new(&substituted) {
+                        Ok(node) => node,
+                        Err(error) => {
+                            self.finish_failed(
+                                WorkflowFailure::new(&run_id, error).at_node(Some(node.id())),
+                            )
+                            .await;
+                            return;
+                        }
+                    };
+                    let store = self.inner.storage.workflow_model_store();
                     let feeds_result = workflow.edges().iter().any(|edge| {
                         edge.source() == node.id()
                             && workflow.nodes().iter().any(|target| {
@@ -975,6 +1007,13 @@ impl WorkflowManager {
                             })
                     });
                     if !feeds_result {
+                        if let Err(error) = sql_node.plan(&store, BTreeMap::new()).await {
+                            self.finish_failed(
+                                WorkflowFailure::new(&run_id, error).at_node(Some(node.id())),
+                            )
+                            .await;
+                            return;
+                        }
                         outputs
                             .insert(node.id().to_owned(), ResolvedNodeOutput::Query(substituted));
                         self.complete_node(WorkflowNodeCompletion::new(
@@ -991,7 +1030,19 @@ impl WorkflowManager {
                         "Running bounded read-only SQL".to_owned(),
                     ))
                     .await;
-                    let response = match self.inner.storage.query(&substituted, *max_rows).await {
+                    let response = async {
+                        let started = Instant::now();
+                        let result = sql_node
+                            .execute(&store, BTreeMap::new())
+                            .await?
+                            .into_preview(*max_rows)
+                            .await?;
+                        Ok::<_, String>(result.with_elapsed_ms(
+                            started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+                        ))
+                    }
+                    .await;
+                    let response = match response {
                         Ok(response) => response,
                         Err(error) => {
                             if self.cancelled(&run_id, &cancel) {
@@ -1857,6 +1908,32 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn native_episode_drafts_cannot_enter_the_relation_runner() {
+        let settings = SpiralConnectionSettings::new(
+            "https://api.spiraldb.dev".into(),
+            "https://spfs.spiraldb.dev".into(),
+        )
+        .unwrap();
+        let database = Arc::new(spiral_robotics_storage::AdbcDatabase::new(settings.clone()));
+        let store =
+            Arc::new(ProjectStore::new(settings, "native_draft_test".into(), database).unwrap());
+        let manager = WorkflowManager::new(Arc::new(StorageManager::new(store)));
+        let source = spiral_robotics_common::datasets::DatasetSummary::new(
+            spiral_robotics_common::datasets::DatasetSelection::new(vec!["dataset_demo".into()])
+                .unwrap(),
+            ("resource".into(), "version".into()),
+        );
+        let mut graph = WorkflowSpec::new("workflow-native", "Lighting");
+        graph.select_dataset(source);
+        *manager.inner.saved.recover_lock() =
+            SavedWorkflow::new(graph.clone(), WorkflowRunSnapshot::idle_for(&graph));
+        let error = manager.start(&manager.scope_id(), 0).await.unwrap_err();
+        assert!(error.to_string().contains("Needs preparation"));
+        assert!(!manager.is_active());
+        assert!(manager.state().snapshot().run_id().is_none());
     }
 
     #[test]

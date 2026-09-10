@@ -97,14 +97,18 @@ impl IngestionOperation {
                 ),
             ));
         }
+        let temporary = mode == IngestMode::ReplaceTemporary;
         let mode = match mode {
             IngestMode::Append => AdbcIngestMode::Append,
             IngestMode::CreateOrAppend => AdbcIngestMode::CreateAppend,
-            IngestMode::ReplaceExisting | IngestMode::ReplaceOrCreate => AdbcIngestMode::Replace,
+            IngestMode::ReplaceExisting
+            | IngestMode::ReplaceOrCreate
+            | IngestMode::ReplaceTemporary => AdbcIngestMode::Replace,
         };
         let mut statement = state.connection().new_statement()?;
         statement.set_option(OptionStatement::TargetTable, relation.as_str().into())?;
         statement.set_option(OptionStatement::IngestMode, mode.into())?;
+        statement.set_option(OptionStatement::Temporary, temporary.to_string().into())?;
         statement.bind_stream(Box::new(reader))?;
         statement.execute_update()?;
         Ok(ExecutionSummary)
