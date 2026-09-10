@@ -115,13 +115,14 @@ impl StorageManager {
             .await
     }
 
-    pub async fn save_workflow_graph(
+    /// Persist one user-requested graph and conversation checkpoint atomically.
+    pub async fn save_workflow(
         &self,
         workflow: &spiral_robotics_common::workflow::WorkflowSpec,
-        graph: &WorkflowJson,
+        contents: (&WorkflowJson, &WorkflowJson),
     ) -> Result<(), String> {
         WorkflowPersistence::new(&self.project_store)
-            .save_graph(workflow, graph)
+            .save(workflow, contents)
             .await
     }
 
@@ -131,16 +132,6 @@ impl StorageManager {
     ) -> Result<Option<WorkflowJson>, String> {
         WorkflowPersistence::new(&self.project_store)
             .load_assistant(workflow_id)
-            .await
-    }
-
-    pub async fn save_workflow_conversation(
-        &self,
-        workflow_id: &str,
-        conversation: &WorkflowJson,
-    ) -> Result<(), String> {
-        WorkflowPersistence::new(&self.project_store)
-            .save_assistant(workflow_id, conversation)
             .await
     }
 

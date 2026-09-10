@@ -1,5 +1,4 @@
-//! One durable Assistant conversation per workflow. Graphs and conversations
-//! have independent writes and share the workflow identity in storage.
+//! One Assistant conversation per workflow, included in an explicit Save checkpoint.
 use crate::db::StorageClock;
 use crate::workflows::{MAX_WORKFLOW_AGENT_MESSAGES_PER_CONVERSATION, WorkflowJson};
 use serde::{Deserialize, Serialize};

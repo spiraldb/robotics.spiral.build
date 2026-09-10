@@ -362,6 +362,14 @@ pub enum WorkflowCommand {
         scope_id: String,
         workflow_id: String,
     },
+    Save {
+        scope_id: String,
+        expected_revision: u64,
+        workflow: WorkflowSpec,
+    },
+    Discard {
+        scope_id: String,
+    },
     Apply {
         scope_id: String,
         expected_revision: u64,
@@ -418,6 +426,8 @@ impl WorkflowCommand {
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct WorkflowSnapshot {
+    #[serde(default)]
+    unsaved_changes: bool,
     /// Ephemeral server identity for the active Spiral destination/project.
     /// Revisions are monotonic only within one scope.
     #[serde(default)]
@@ -435,6 +445,7 @@ impl Default for WorkflowSnapshot {
         Self {
             scope_id: String::new(),
             workflows: Vec::new(),
+            unsaved_changes: false,
             validation: workflow.validate(),
             snapshot: WorkflowRunSnapshot::idle_for(&workflow),
             workflow,
@@ -1254,6 +1265,14 @@ impl WorkflowSummary {
 }
 
 impl WorkflowSnapshot {
+    pub const fn unsaved_changes(&self) -> bool {
+        self.unsaved_changes
+    }
+    pub const fn with_unsaved_changes(mut self, unsaved: bool) -> Self {
+        self.unsaved_changes = unsaved;
+        self
+    }
+
     pub fn with_workflows(mut self, workflows: Vec<WorkflowSummary>) -> Self {
         self.workflows = workflows;
         self
@@ -1266,6 +1285,8 @@ impl WorkflowSnapshot {
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkflowAgentSnapshot {
+    #[serde(default)]
+    unsaved_changes: bool,
     readiness: WorkflowAgentReadiness,
     history_available: bool,
     scope_id: String,
@@ -1273,10 +1294,19 @@ pub struct WorkflowAgentSnapshot {
 }
 
 impl WorkflowAgentSnapshot {
+    pub const fn unsaved_changes(&self) -> bool {
+        self.unsaved_changes
+    }
+    pub const fn with_unsaved_changes(mut self, unsaved: bool) -> Self {
+        self.unsaved_changes = unsaved;
+        self
+    }
+
     pub fn new(readiness: WorkflowAgentReadiness, session: WorkflowAgentSession) -> Self {
         Self {
             readiness,
             history_available: false,
+            unsaved_changes: false,
             scope_id: String::new(),
             session,
         }
@@ -1843,6 +1873,7 @@ impl WorkflowSnapshot {
             scope_id: scope_id.into(),
             workflow,
             workflows: Vec::new(),
+            unsaved_changes: false,
             validation,
             snapshot,
         }
@@ -2194,6 +2225,7 @@ mod tests {
         let state = WorkflowSnapshot {
             scope_id: "workflow-scope-1".to_owned(),
             workflows: Vec::new(),
+            unsaved_changes: false,
             validation: workflow.validate(),
             snapshot: WorkflowRunSnapshot::idle_for(&workflow),
             workflow,

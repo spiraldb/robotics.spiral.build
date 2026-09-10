@@ -1,7 +1,7 @@
 //! Shell-owned Workflow editor state and backend commands.
 //!
 //! Canvas geometry and inspector selection are browser interaction state. The
-//! saved graph, validation, execution phases, and result payload are backend
+//! current graph, validation, execution phases, and result payload are backend
 //! truth, refreshed exclusively by the project-scoped queries.
 
 use crate::activities::workflow::WorkflowClient;
@@ -211,6 +211,8 @@ impl WorkflowUiState {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WorkflowPendingCommand {
     Applying,
+    Saving,
+    Discarding,
     Selecting,
     Starting,
     Cancelling,
@@ -274,17 +276,16 @@ struct WorkflowGraphSignals {
 struct WorkflowDefinitionSignals {
     server: Signal<WorkflowSnapshot>,
     draft: Signal<WorkflowSpec>,
-    saved: Signal<Option<WorkflowSaveReceipt>>,
+    acknowledged: Signal<Option<GraphEditReceipt>>,
 }
 
-/// A save receipt acknowledges a submitted draft, without installing a
-/// command response into the fetched server state.
+/// Acknowledges the submitted graph while preserving edits made during a request.
 #[derive(Clone)]
-struct WorkflowSaveReceipt {
+struct GraphEditReceipt {
     submitted: WorkflowSpec,
     revision: u64,
 }
-impl WorkflowSaveReceipt {
+impl GraphEditReceipt {
     fn acknowledges(&self, draft: &WorkflowSpec, fetched: &WorkflowSpec) -> bool {
         draft == &self.submitted && fetched.revision() >= self.revision
     }
@@ -323,7 +324,7 @@ impl WorkflowController {
             document: WorkflowDefinitionSignals {
                 server: Signal::new(initial),
                 draft: Signal::new(initial_spec),
-                saved: Signal::new(None),
+                acknowledged: Signal::new(None),
             },
             lifecycle: WorkflowLifecycleSignals {
                 loaded: Signal::new(false),
@@ -462,8 +463,8 @@ impl WorkflowController {
         if self.snapshot().phase().active() || self.agent_state().session().phase().active() {
             return Some("Stop the active work before switching workflows.".to_owned());
         }
-        if self.dirty() {
-            return Some("Apply or discard your edits before switching workflows.".to_owned());
+        if self.unsaved_changes() {
+            return Some("Save or discard your changes before switching workflows.".to_owned());
         }
         if !crate::shell::project::ProjectSessionSignals::current().catalog_available() {
             return Some("Reconnect Spiral before switching workflows.".to_owned());
@@ -561,12 +562,9 @@ impl WorkflowController {
         }
         if self.revision_conflict() {
             return Some(
-                "The saved Workflow changed in another session. Reload the saved graph before editing again."
+                "The workflow changed in another session. Reload the current graph before editing again."
                     .to_owned(),
             );
-        }
-        if self.dirty() {
-            return Some("Apply graph changes before running.".to_owned());
         }
         let draft = self.document.draft.read();
         if draft.nodes().is_empty() && draft.edges().is_empty() {
@@ -579,26 +577,24 @@ impl WorkflowController {
             .map(|issue| issue.message().to_owned())
     }
 
-    pub(crate) fn apply_disabled_reason(&self) -> Option<String> {
+    pub(crate) fn save_disabled_reason(&self) -> Option<String> {
+        if !self.loaded() || !self.agent_loaded() {
+            return Some("Loading workflow…".into());
+        }
         if let Some(error) = self.load_error() {
             return Some(format!("Could not load the saved Workflow: {error}"));
         }
-        if !self.dirty() {
-            return Some("No unapplied graph changes.".to_owned());
-        }
         if self.revision_conflict() {
             return Some(
-                "The saved Workflow changed in another session. Reload the saved graph before editing again."
+                "The workflow changed in another session. Reload the current graph before editing again."
                     .to_owned(),
             );
         }
         if self.command().is_some() || self.snapshot().phase().active() {
-            return Some("Cancel the active run before applying changes.".to_owned());
+            return Some("Cancel the active run before saving.".to_owned());
         }
         if self.agent_state().session().phase().active() || self.agent_command().is_some() {
-            return Some(
-                "Wait for the active Assistant turn before applying graph changes.".to_owned(),
-            );
+            return Some("Wait for the active Assistant turn before saving.".to_owned());
         }
         let draft = self.document.draft.read();
         if draft.nodes().is_empty() && draft.edges().is_empty() {
@@ -669,7 +665,7 @@ impl WorkflowController {
         self.graph.ui.set(next);
     }
 
-    pub(crate) fn reload_saved(mut self) {
+    pub(crate) fn reload_current(mut self) {
         self.document
             .draft
             .set(self.document.server.peek().workflow().to_owned());
@@ -808,39 +804,94 @@ impl WorkflowController {
         self.select_node(query_id);
     }
 
-    pub(crate) fn apply(mut self, studio: StudioProjectState) {
-        if self.apply_disabled_reason().is_some() {
+    pub(crate) fn unsaved_changes(&self) -> bool {
+        self.dirty()
+            || self.document.server.read().unsaved_changes()
+            || self.assistant.agent.read().unsaved_changes()
+    }
+
+    pub(crate) fn save(self, studio: StudioProjectState) {
+        self.submit_graph(studio, true);
+    }
+
+    pub(crate) fn apply(self, studio: StudioProjectState) {
+        self.submit_graph(studio, false);
+    }
+
+    fn submit_graph(mut self, studio: StudioProjectState, persist: bool) {
+        if self.save_disabled_reason().is_some() {
             return;
         }
-        self.lifecycle
-            .command
-            .set(Some(WorkflowPendingCommand::Applying));
-        let requested_scope_id = self.document.server.peek().scope_id().to_owned();
-        let submitted = self.document.draft.peek().to_owned();
-        let request = WorkflowRequest::apply(
-            requested_scope_id.clone(),
-            self.document.draft.peek().revision(),
-            self.document.draft.peek().to_owned(),
-        );
+        self.lifecycle.command.set(Some(if persist {
+            WorkflowPendingCommand::Saving
+        } else {
+            WorkflowPendingCommand::Applying
+        }));
+        let scope = self.document.server.peek().scope_id().to_owned();
         dioxus::dioxus_core::Runtime::current().spawn(
             self.document.draft.origin_scope(),
             async move {
-                let response = WorkflowClient::current()
-                    .run_workflow_command(request)
-                    .await
-                    .map_err(|error| error.to_string());
-                self.finish_command(&requested_scope_id);
-                match response {
+                let result = self.send_graph(persist).await;
+                self.finish_command(&scope);
+                if let Err(error) = result {
+                    studio.report_from(MessageSource::Workflow, error);
+                }
+            },
+        );
+    }
+
+    async fn send_graph(mut self, persist: bool) -> Result<WorkflowSnapshot, String> {
+        let submitted = self.document.draft.peek().to_owned();
+        let scope_id = self.document.server.peek().scope_id().to_owned();
+        let expected_revision = submitted.revision();
+        let request = if persist {
+            WorkflowRequest::Save {
+                scope_id,
+                expected_revision,
+                workflow: submitted.clone(),
+            }
+        } else {
+            WorkflowRequest::apply(scope_id, expected_revision, submitted.clone())
+        };
+        let response = WorkflowClient::current()
+            .run_workflow_command(request)
+            .await
+            .map_err(|e| e.to_string())?;
+        self.document.acknowledged.set(Some(GraphEditReceipt {
+            submitted,
+            revision: response.workflow().revision(),
+        }));
+        self.accept_fetched_state(response.clone());
+        QueryRefresh::current().invalidate(&[QueryDomain::Workflow, QueryDomain::Assistant]);
+        Ok(response)
+    }
+
+    pub(crate) fn discard(mut self, studio: StudioProjectState) {
+        if self.command().is_some()
+            || self.agent_command().is_some()
+            || self.snapshot().phase().active()
+            || self.agent_state().session().phase().active()
+        {
+            return;
+        }
+        let scope = self.document.server.peek().scope_id().to_owned();
+        self.lifecycle
+            .command
+            .set(Some(WorkflowPendingCommand::Discarding));
+        dioxus::dioxus_core::Runtime::current().spawn(
+            self.document.draft.origin_scope(),
+            async move {
+                let result = WorkflowClient::current()
+                    .run_workflow_command(WorkflowRequest::Discard {
+                        scope_id: scope.clone(),
+                    })
+                    .await;
+                self.finish_command(&scope);
+                match result {
                     Ok(response) => {
-                        self.document.saved.set(Some(WorkflowSaveReceipt {
-                            submitted,
-                            revision: response.workflow().revision(),
-                        }));
-                        QueryRefresh::current().invalidate(&[QueryDomain::Workflow]);
+                        self.accept_fetched_state(response);
                     }
-                    Err(error) => {
-                        studio.report_from(MessageSource::Workflow, error);
-                    }
+                    Err(error) => studio.report_from(MessageSource::Workflow, error.to_string()),
                 }
             },
         );
@@ -855,17 +906,24 @@ impl WorkflowController {
             .command
             .set(Some(WorkflowPendingCommand::Starting));
         let requested_scope_id = self.document.server.peek().scope_id().to_owned();
-        let request = WorkflowRequest::run(
-            requested_scope_id.clone(),
-            self.document.server.peek().workflow().revision(),
-        );
         dioxus::dioxus_core::Runtime::current().spawn(
             self.document.draft.origin_scope(),
             async move {
-                let response = WorkflowClient::current()
-                    .run_workflow_command(request)
-                    .await
-                    .map_err(|error| error.to_string());
+                let response = async {
+                    let current = if self.dirty() {
+                        self.send_graph(false).await?
+                    } else {
+                        self.document.server.peek().clone()
+                    };
+                    WorkflowClient::current()
+                        .run_workflow_command(WorkflowRequest::run(
+                            current.scope_id(),
+                            current.workflow().revision(),
+                        ))
+                        .await
+                        .map_err(|error| error.to_string())
+                }
+                .await;
                 self.finish_command(&requested_scope_id);
                 match response {
                     Ok(_) => {}
@@ -942,6 +1000,7 @@ impl WorkflowController {
             || state.session().workflow_id() != self.document.server.peek().workflow().id()
             || !state.readiness().configured()
             || state.session().phase().active()
+            || self.command().is_some()
             || self.assistant.agent_command.peek().is_some()
             || self.document.server.peek().snapshot().phase().active()
         {
@@ -961,10 +1020,16 @@ impl WorkflowController {
         dioxus::dioxus_core::Runtime::current().spawn(
             self.document.draft.origin_scope(),
             async move {
-                let response = WorkflowClient::current()
-                    .run_workflow_agent_command(request.clone())
-                    .await
-                    .map_err(|error| error.to_string());
+                let response = async {
+                    if self.dirty() {
+                        self.send_graph(false).await?;
+                    }
+                    WorkflowClient::current()
+                        .run_workflow_agent_command(request.clone())
+                        .await
+                        .map_err(|error| error.to_string())
+                }
+                .await;
                 self.assistant.agent_command.set(None);
                 match response {
                     Ok(_) => {
@@ -1092,13 +1157,13 @@ impl WorkflowController {
         if !self.document.server.peek().accepts(&state) {
             return false;
         }
-        if *self.document.server.peek() == state && self.document.saved.peek().is_none() {
+        if *self.document.server.peek() == state && self.document.acknowledged.peek().is_none() {
             self.lifecycle.load_error.set(None);
             self.lifecycle.loaded.set(true);
             return false;
         }
         let scope_changed = state.scope_id() != self.document.server.peek().scope_id();
-        let saved = self.document.saved.peek().clone();
+        let saved = self.document.acknowledged.peek().clone();
         let acknowledged = saved.as_ref().is_some_and(|receipt| {
             receipt.acknowledges(&self.document.draft.peek(), state.workflow())
         });
@@ -1110,7 +1175,7 @@ impl WorkflowController {
                 .as_ref()
                 .is_some_and(|receipt| state.workflow().revision() >= receipt.revision)
         {
-            self.document.saved.set(None);
+            self.document.acknowledged.set(None);
         }
         if scope_changed {
             self.graph.nodes.set(Vec::new());
@@ -1905,7 +1970,7 @@ mod tests {
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn a_save_receipt_waits_for_the_fetched_revision_and_preserves_later_edits() {
         let submitted = WorkflowSpec::new("workflow", "submitted").with_revision(2);
-        let receipt = WorkflowSaveReceipt {
+        let receipt = GraphEditReceipt {
             submitted: submitted.clone(),
             revision: 3,
         };

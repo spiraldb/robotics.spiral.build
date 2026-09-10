@@ -301,7 +301,7 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
                 if messages.is_empty() {
                     section { class: "workflow-assistant-empty",
                         h3 { "What should we find?" }
-                        p { "Describe what to find. I’ll inspect the data and save a workflow for you to run." }
+                        p { "Describe what to find. I’ll inspect the data and build a workflow for you to run. Click Save to keep your work." }
                         if configured {
                             div { class: "workflow-assistant-examples",
                                 Action {
@@ -1058,17 +1058,17 @@ fn WorkflowCanvas(controller: super::state::WorkflowController) -> Element {
     let spec = controller.spec();
     let snapshot = controller.snapshot();
     let run_reason = controller.run_disabled_reason();
-    let apply_reason = controller.apply_disabled_reason();
+    let apply_reason = controller.save_disabled_reason();
     let command = controller.command();
     let active = snapshot.phase().active();
     let topology_blocked = active || command.is_some();
     let state_load_failed = controller.load_error().is_some();
-    let dirty = controller.dirty();
+    let dirty = controller.unsaved_changes();
     let empty = spec.nodes().is_empty() && spec.edges().is_empty();
     let edit_label = if dirty {
-        "Modified".to_owned()
+        "Unsaved changes".to_owned()
     } else {
-        "Saved".to_owned()
+        "No pending changes".to_owned()
     };
     let complete_with_warnings = snapshot.phase() == WorkflowRunPhase::Completed
         && snapshot.nodes().iter().any(|node| {
@@ -1192,16 +1192,17 @@ fn WorkflowCanvas(controller: super::state::WorkflowController) -> Element {
                     Action {
                         purpose: ActionPurpose::Sync,
                         variant: ActionVariant::Outline,
-                        title: "Discard local edits and reload the newer saved Workflow",
-                        onclick: move |_| controller.reload_saved(),
-                        "Reload saved"
+                        title: "Discard local edits and reload the current workflow",
+                        onclick: move |_| controller.reload_current(),
+                        "Reload current"
                     }
                 } else if dirty {
                     Action {
                         purpose: ActionPurpose::Sync,
                         variant: ActionVariant::Outline,
-                        title: "Discard unapplied graph changes and restore the saved Workflow",
-                        onclick: move |_| controller.reload_saved(),
+                        title: "Discard unsaved graph, conversation, and run changes",
+                        disabled: command.is_some() || active || controller.agent_state().session().phase().active() || controller.agent_command().is_some(),
+                        onclick: move |_| controller.discard(studio),
                         "Discard changes"
                     }
                 }
@@ -1209,10 +1210,10 @@ fn WorkflowCanvas(controller: super::state::WorkflowController) -> Element {
                     purpose: ActionPurpose::Apply,
                     variant: ActionVariant::Outline,
                     disabled: apply_reason.is_some(),
-                    aria_busy: command == Some(WorkflowPendingCommand::Applying),
-                    title: apply_reason.clone().unwrap_or_else(|| "Apply graph changes".to_owned()),
-                    onclick: move |_| controller.apply(studio),
-                    if command == Some(WorkflowPendingCommand::Applying) { "Applying…" } else { "Apply" }
+                    aria_busy: command == Some(WorkflowPendingCommand::Saving),
+                    title: apply_reason.clone().unwrap_or_else(|| "Save the graph and Assistant conversation".to_owned()),
+                    onclick: move |_| controller.save(studio),
+                    if command == Some(WorkflowPendingCommand::Saving) { "Saving…" } else { "Save" }
                 }
                 if active {
                     Action {
@@ -1230,7 +1231,7 @@ fn WorkflowCanvas(controller: super::state::WorkflowController) -> Element {
                         variant: ActionVariant::Solid,
                         disabled: run_reason.is_some(),
                         aria_busy: command == Some(WorkflowPendingCommand::Starting),
-                        title: run_reason.clone().unwrap_or_else(|| "Run this saved workflow".to_owned()),
+                        title: run_reason.clone().unwrap_or_else(|| "Run this workflow without saving".to_owned()),
                         onclick: move |_| controller.run(studio),
                         if command == Some(WorkflowPendingCommand::Starting) { "Starting…" } else { "Run workflow" }
                     }
@@ -1275,9 +1276,9 @@ fn WorkflowCanvas(controller: super::state::WorkflowController) -> Element {
                         strong { "Empty workflow" }
                         p {
                             if dirty {
-                                "Apply to start fresh. Then ask the Assistant to build from your Spiral relations."
+                                "Ask the Assistant to build from your Spiral relations. Changes stay in memory until Save."
                             } else {
-                                "Ask the Assistant a question. Its saved nodes and connections will appear here."
+                                "Ask the Assistant a question. Its nodes and connections will appear here."
                             }
                         }
                     }
@@ -1553,7 +1554,7 @@ impl WorkflowRunPresentation for WorkflowRunPhase {
         match self {
             WorkflowRunPhase::Idle if configured => (
                 "Ready for a result",
-                "Run the saved graph from the canvas to produce authoritative rows.",
+                "Run the graph to see results. Click Save to keep your work.",
             ),
             WorkflowRunPhase::Idle => (
                 "Configure the workflow",
@@ -1565,11 +1566,11 @@ impl WorkflowRunPresentation for WorkflowRunPhase {
             ),
             WorkflowRunPhase::Interrupted => (
                 "Run interrupted",
-                "Studio recovered an unfinished run without pretending it completed. The saved graph is unchanged.",
+                "Studio recovered an unfinished run without pretending it completed. The graph is unchanged.",
             ),
             WorkflowRunPhase::Failed => (
                 "Run failed",
-                "Review the affected node, then run the unchanged saved graph again.",
+                "Review the affected node, then run the unchanged graph again.",
             ),
             WorkflowRunPhase::Completed => (
                 "No terminal payload",
@@ -1595,13 +1596,13 @@ impl WorkflowRunPresentation for WorkflowRunPhase {
             WorkflowRunPhase::Failed => {
                 "The latest run failed. These rows remain evidence from the previous completed run."
             }
-            _ => "These rows remain stale until the current saved graph completes.",
+            _ => "These rows remain stale until the current graph completes.",
         }
     }
 
     fn run_label(self) -> &'static str {
         match self {
-            WorkflowRunPhase::Idle => "Saved",
+            WorkflowRunPhase::Idle => "Ready",
             WorkflowRunPhase::Validating => "Validating",
             WorkflowRunPhase::Running => "Running",
             WorkflowRunPhase::Cancelling => "Cancelling",

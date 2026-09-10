@@ -54,9 +54,9 @@ impl ToolInvocation<'_> {
         &self.agent.inner.services.storage
     }
 
-    async fn save(self, workflow: WorkflowSpec) -> Result<String, String> {
+    async fn update_graph(self, workflow: WorkflowSpec) -> Result<String, String> {
         self.agent
-            .save_authored_workflow(workflow, self.context)
+            .update_authored_workflow(workflow, self.context)
             .await
     }
 }
@@ -180,7 +180,7 @@ impl ToolCompletion {
         WorkflowToolCatalog::completion(name, &value)
     }
 
-    fn graph_saved(value: &Value) -> Self {
+    fn graph_updated(value: &Value) -> Self {
         let Some(workflow) = value.get("workflow") else {
             return ToolCompletion {
                 summary: "Graph needs changes".to_owned(),
@@ -196,7 +196,7 @@ impl ToolCompletion {
         let revision = workflow.get("revision").and_then(Value::as_u64);
         let suffix = revision.map_or_else(String::new, |revision| format!(" · r{revision}"));
         ToolCompletion {
-            summary: format!("Saved {name}{suffix}"),
+            summary: format!("Updated {name}{suffix}"),
             receipt: revision
                 .map(|revision| WorkflowAgentArtifactReceipt::graph("View graph", revision)),
         }

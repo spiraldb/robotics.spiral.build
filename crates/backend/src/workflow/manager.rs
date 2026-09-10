@@ -1,8 +1,6 @@
-//! Persisted Table, Model, Query, and Result execution over Spiral relations.
+//! In-memory workflow editing and execution, with explicit graph/chat checkpoints.
 
-#[cfg(test)]
-use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use tokio_util::sync::CancellationToken;
@@ -189,10 +187,20 @@ impl SavedWorkflow {
     }
 }
 
-struct WorkflowSave {
+pub(super) struct GraphEdit {
     scope_id: String,
     expected_revision: u64,
     workflow: WorkflowSpec,
+}
+
+impl GraphEdit {
+    pub(super) fn new(scope_id: String, expected_revision: u64, workflow: WorkflowSpec) -> Self {
+        Self {
+            scope_id,
+            expected_revision,
+            workflow,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -212,10 +220,7 @@ struct WorkflowManagerInner {
 struct WorkflowPersistenceState {
     loaded: tokio::sync::OnceCell<()>,
     mutation: AsyncMutex<()>,
-    terminal_error: Mutex<Option<TerminalPersistenceError>>,
-    recovery_pending: AtomicBool,
-    #[cfg(test)]
-    test_outcomes: Mutex<VecDeque<Result<(), String>>>,
+    checkpoint: Mutex<Option<SavedWorkflow>>,
 }
 
 impl WorkflowPersistenceState {
@@ -223,10 +228,7 @@ impl WorkflowPersistenceState {
         Self {
             loaded: tokio::sync::OnceCell::new(),
             mutation: AsyncMutex::new(()),
-            terminal_error: Mutex::new(None),
-            recovery_pending: AtomicBool::new(false),
-            #[cfg(test)]
-            test_outcomes: Mutex::new(VecDeque::new()),
+            checkpoint: Mutex::new(None),
         }
     }
 }
@@ -270,13 +272,6 @@ struct ActiveRun {
     run_id: String,
     cancel: CancellationToken,
     task: Option<tokio::task::JoinHandle<()>>,
-    terminal_persistence_failed: bool,
-}
-
-#[derive(Clone)]
-struct TerminalPersistenceError {
-    run_id: String,
-    detail: String,
 }
 
 struct WorkflowExecution {
@@ -374,9 +369,6 @@ impl WorkflowManager {
             .loaded
             .get_or_try_init(|| async {
                 self.prepare_from_storage().await?;
-                self.persist_recovery()
-                    .await
-                    .map_err(OperationError::External)?;
                 Ok::<(), OperationError>(())
             })
             .await
@@ -401,6 +393,8 @@ impl WorkflowManager {
             Some(workflow) => self.load_saved(workflow.id()).await?,
             None => SavedWorkflow::fresh(),
         };
+        *self.inner.persistence.checkpoint.recover_lock() =
+            (!workflows.is_empty()).then(|| saved.clone());
         *self.inner.workflows.recover_lock() = workflows;
         Ok(saved)
     }
@@ -443,10 +437,71 @@ impl WorkflowManager {
             Some(id) => self.load_saved(id).await?,
             None => SavedWorkflow::fresh(),
         };
-        // Persist the selected workflow last so reconnect opens the latest one.
-        self.persist_saved(&candidate)
+        if self.inner.persistence.checkpoint.recover_lock().is_none() {
+            let previous_id = self.inner.saved.recover_lock().workflow().id().to_owned();
+            self.inner
+                .workflows
+                .recover_lock()
+                .retain(|workflow| workflow.id() != previous_id);
+        }
+        *self.inner.persistence.checkpoint.recover_lock() = workflow_id.map(|_| candidate.clone());
+        self.install_saved(candidate)
             .await
             .map_err(OperationError::External)?;
+        Ok(self.state())
+    }
+
+    #[cfg(test)]
+    async fn checkpoint(
+        &self,
+        conversation: &spiral_robotics_storage::workflow_assistant::WorkflowConversation,
+    ) -> Result<WorkflowSnapshot, OperationError> {
+        let _mutation = self.inner.persistence.mutation.lock().await;
+        let current = self.inner.saved.recover_lock().clone();
+        self.commit_checkpoint(current, conversation).await
+    }
+
+    async fn commit_checkpoint(
+        &self,
+        current: SavedWorkflow,
+        conversation: &spiral_robotics_storage::workflow_assistant::WorkflowConversation,
+    ) -> Result<WorkflowSnapshot, OperationError> {
+        current.require_idle()?;
+        if current.workflow().id() != conversation.workflow_id() {
+            return Err(OperationError::Conflict(
+                "The selected conversation changed.".into(),
+            ));
+        }
+        self.inner
+            .storage
+            .save_workflow(
+                current.workflow(),
+                (
+                    &current.persisted().map_err(OperationError::External)?,
+                    &conversation.persisted().map_err(OperationError::External)?,
+                ),
+            )
+            .await
+            .map_err(OperationError::External)?;
+        self.remember_workflow(current.workflow());
+        *self.inner.saved.recover_lock() = current.clone();
+        *self.inner.persistence.checkpoint.recover_lock() = Some(current);
+        Ok(self.state())
+    }
+
+    async fn discard(&self, scope_id: &str) -> Result<WorkflowSnapshot, OperationError> {
+        let _mutation = self.inner.persistence.mutation.lock().await;
+        self.require_scope(scope_id)?;
+        self.inner.saved.recover_lock().require_idle()?;
+        let checkpoint = self.inner.persistence.checkpoint.recover_lock().clone();
+        let candidate = checkpoint.unwrap_or_else(|| {
+            let workflow = WorkflowSpec::new(
+                self.inner.saved.recover_lock().workflow().id(),
+                "Untitled workflow",
+            );
+            let snapshot = WorkflowRunSnapshot::idle_for(&workflow);
+            SavedWorkflow::new(workflow, snapshot)
+        });
         self.install_saved(candidate)
             .await
             .map_err(OperationError::External)?;
@@ -455,10 +510,6 @@ impl WorkflowManager {
 
     async fn install_saved(&self, mut saved: SavedWorkflow) -> Result<(), String> {
         let interrupted = saved.snapshot().phase().active();
-        self.inner.persistence.recovery_pending.store(
-            interrupted || saved.workflow().revision() == 0,
-            Ordering::SeqCst,
-        );
         if interrupted {
             let interruption =
                 "Studio restarted before this Workflow run finished. Run it again.".to_owned();
@@ -485,26 +536,7 @@ impl WorkflowManager {
         self.remember_workflow(saved.workflow());
         *self.inner.saved.recover_lock() = saved;
         self.inner.identity.advance_scope();
-        *self.inner.persistence.terminal_error.recover_lock() = None;
 
-        Ok(())
-    }
-
-    pub(crate) async fn persist_recovery(&self) -> Result<(), String> {
-        let _mutation = self.inner.persistence.mutation.lock().await;
-        if self
-            .inner
-            .persistence
-            .recovery_pending
-            .load(Ordering::SeqCst)
-        {
-            let saved = self.inner.saved.recover_lock().clone();
-            self.persist_saved(&saved).await?;
-            self.inner
-                .persistence
-                .recovery_pending
-                .store(false, Ordering::SeqCst);
-        }
         Ok(())
     }
 
@@ -563,6 +595,10 @@ impl WorkflowManager {
         command: WorkflowCommand,
     ) -> Result<WorkflowSnapshot, OperationError> {
         match command {
+            WorkflowCommand::Save { .. } => Err(OperationError::InvalidInput(
+                "Save requires the graph and conversation together.".into(),
+            )),
+            WorkflowCommand::Discard { scope_id } => self.discard(&scope_id).await,
             WorkflowCommand::Create { scope_id } => self.select(&scope_id, None).await,
             WorkflowCommand::Select {
                 scope_id,
@@ -573,7 +609,7 @@ impl WorkflowManager {
                 expected_revision,
                 workflow,
             } => {
-                self.save(WorkflowSave {
+                self.apply(GraphEdit {
                     scope_id,
                     expected_revision,
                     workflow,
@@ -591,13 +627,12 @@ impl WorkflowManager {
         }
     }
 
-    async fn save(&self, request: WorkflowSave) -> Result<WorkflowSnapshot, OperationError> {
-        let WorkflowSave {
+    fn edit(&self, request: GraphEdit) -> Result<SavedWorkflow, OperationError> {
+        let GraphEdit {
             scope_id,
             expected_revision,
             workflow: requested_workflow,
         } = request;
-        let _mutation = self.inner.persistence.mutation.lock().await;
         self.require_scope(&scope_id)?;
         let current = self.inner.saved.recover_lock().clone();
         if requested_workflow.id() != current.workflow().id() {
@@ -609,6 +644,9 @@ impl WorkflowManager {
         }
         current.require_idle()?;
         current.require_revision(expected_revision)?;
+        if !current.workflow().content_changed(&requested_workflow) {
+            return Ok(current);
+        }
         let next_revision = current
             .workflow()
             .revision()
@@ -642,19 +680,25 @@ impl WorkflowManager {
             }
         }
         let candidate = current.revised(workflow, snapshot);
-        self.inner
-            .storage
-            .save_workflow_graph(
-                candidate.workflow(),
-                &candidate.persisted().map_err(OperationError::External)?,
-            )
-            .await
-            .map_err(OperationError::External)?;
-        self.remember_workflow(candidate.workflow());
-        let response = self.state_response(&candidate);
-        *self.inner.saved.recover_lock() = candidate;
+        Ok(candidate)
+    }
 
-        Ok(response)
+    async fn apply(&self, request: GraphEdit) -> Result<WorkflowSnapshot, OperationError> {
+        let _mutation = self.inner.persistence.mutation.lock().await;
+        let candidate = self.edit(request)?;
+        self.remember_workflow(candidate.workflow());
+        *self.inner.saved.recover_lock() = candidate;
+        Ok(self.state())
+    }
+
+    pub(super) async fn save(
+        &self,
+        request: GraphEdit,
+        conversation: &spiral_robotics_storage::workflow_assistant::WorkflowConversation,
+    ) -> Result<WorkflowSnapshot, OperationError> {
+        let _mutation = self.inner.persistence.mutation.lock().await;
+        let candidate = self.edit(request)?;
+        self.commit_checkpoint(candidate, conversation).await
     }
 
     async fn start(
@@ -690,20 +734,11 @@ impl WorkflowManager {
         let candidate = saved
             .clone()
             .revised(saved.workflow().clone(), snapshot.clone());
-        self.inner
-            .storage
-            .save_workflow_graph(
-                candidate.workflow(),
-                &candidate.persisted().map_err(OperationError::External)?,
-            )
-            .await
-            .map_err(OperationError::External)?;
         *self.inner.saved.recover_lock() = candidate;
         *self.inner.active.recover_lock() = Some(ActiveRun {
             run_id: run_id.clone(),
             cancel: cancel.clone(),
             task: None,
-            terminal_persistence_failed: false,
         });
 
         let manager = self.clone();
@@ -746,7 +781,7 @@ impl WorkflowManager {
         // critical section. Otherwise execution could publish Cancelled and
         // clear `active` between these steps, only for this request to regress
         // the persisted snapshot back to Cancelling.
-        let (recover_terminal_persistence, run_id, cancel) = {
+        let (run_id, cancel) = {
             let active = self.inner.active.recover_lock();
             if active.is_none() {
                 return Err(OperationError::Conflict(
@@ -754,11 +789,7 @@ impl WorkflowManager {
                 ));
             }
             let control = active.as_ref().expect("admission requires an active run");
-            (
-                control.terminal_persistence_failed,
-                control.run_id.clone(),
-                control.cancel.clone(),
-            )
+            (control.run_id.clone(), control.cancel.clone())
         };
         cancel.cancel();
         let saved = self.inner.saved.recover_lock().clone();
@@ -785,15 +816,8 @@ impl WorkflowManager {
                 node.set_detail("Cancelling after the current Spiral operation");
             }
         }
-        // In-flight observations are live state. Persist only the terminal
-        // snapshot after Arrow streams release their catalog read leases.
         let snapshot = candidate.snapshot().clone();
         *self.inner.saved.recover_lock() = candidate;
-        if recover_terminal_persistence {
-            drop(_mutation);
-            self.finish_cancelled(&run_id).await;
-            return Ok(self.state().snapshot().clone());
-        }
         Ok(snapshot)
     }
 
@@ -985,14 +1009,6 @@ impl WorkflowManager {
         candidate.snapshot_mut().set_error(None);
         candidate.snapshot_mut().set_result(result);
         candidate.snapshot_mut().set_result_stale(false);
-        if let Err(error) = self.persist_saved(&candidate).await {
-            if let Some(control) = self.inner.active.recover_lock().as_mut() {
-                control.terminal_persistence_failed = true;
-            }
-            self.report_terminal_persistence_failure(run_id, error);
-            return;
-        }
-        self.publish_committed_terminal();
         *self.inner.saved.recover_lock() = candidate;
         *self.inner.active.recover_lock() = None;
     }
@@ -1029,14 +1045,6 @@ impl WorkflowManager {
         candidate.snapshot_mut().set_finished_ms(finished);
         candidate.snapshot_mut().set_updated_ms(finished);
         candidate.snapshot_mut().set_error(Some(error));
-        if let Err(error) = self.persist_saved(&candidate).await {
-            if let Some(control) = self.inner.active.recover_lock().as_mut() {
-                control.terminal_persistence_failed = true;
-            }
-            self.report_terminal_persistence_failure(run_id, error);
-            return;
-        }
-        self.publish_committed_terminal();
         *self.inner.saved.recover_lock() = candidate;
         *self.inner.active.recover_lock() = None;
     }
@@ -1068,14 +1076,6 @@ impl WorkflowManager {
         candidate.snapshot_mut().set_finished_ms(finished);
         candidate.snapshot_mut().set_updated_ms(finished);
         candidate.snapshot_mut().set_error(None);
-        if let Err(error) = self.persist_saved(&candidate).await {
-            if let Some(control) = self.inner.active.recover_lock().as_mut() {
-                control.terminal_persistence_failed = true;
-            }
-            self.report_terminal_persistence_failure(run_id, error);
-            return;
-        }
-        self.publish_committed_terminal();
         *self.inner.saved.recover_lock() = candidate;
         *self.inner.active.recover_lock() = None;
     }
@@ -1090,23 +1090,6 @@ impl WorkflowManager {
                 .is_none_or(|active| active.run_id != run_id)
     }
 
-    async fn persist_saved(&self, saved: &SavedWorkflow) -> Result<(), String> {
-        #[cfg(test)]
-        if let Some(outcome) = self
-            .inner
-            .persistence
-            .test_outcomes
-            .recover_lock()
-            .pop_front()
-        {
-            return outcome;
-        }
-        self.inner
-            .storage
-            .save_workflow_graph(saved.workflow(), &saved.persisted()?)
-            .await
-    }
-
     fn require_scope(&self, requested_scope_id: &str) -> Result<(), OperationError> {
         if requested_scope_id != self.scope_id() {
             return Err(OperationError::Conflict(
@@ -1117,40 +1100,21 @@ impl WorkflowManager {
         Ok(())
     }
 
-    fn report_terminal_persistence_failure(&self, run_id: &str, error: String) {
-        let detail = format!(
-            "Could not durably finalize this Workflow run: {error} The run remains active; choose Cancel to retry durable finalization."
-        );
-        tracing::error!(%error, %run_id, "persisting terminal Workflow snapshot");
-        *self.inner.persistence.terminal_error.recover_lock() = Some(TerminalPersistenceError {
-            run_id: run_id.to_owned(),
-            detail,
-        });
-    }
-
-    fn publish_committed_terminal(&self) {
-        *self.inner.persistence.terminal_error.recover_lock() = None;
-    }
-
     fn state_response(&self, saved: &SavedWorkflow) -> WorkflowSnapshot {
         let mut response = saved
             .state_response()
             .with_workflows(self.inner.workflows.recover_lock().clone());
         response.set_scope_id(self.scope_id());
-        if let Some(error) = self
-            .inner
-            .persistence
-            .terminal_error
-            .recover_lock()
-            .as_ref()
-            && response.snapshot().run_id() == Some(error.run_id.as_str())
-            && response.snapshot().phase().active()
-        {
-            let mut snapshot = response.snapshot().clone();
-            snapshot.set_error(Some(error.detail.clone()));
-            response.set_snapshot(snapshot);
-        }
-        response
+        response.with_unsaved_changes(
+            match self.inner.persistence.checkpoint.recover_lock().as_ref() {
+                Some(checkpoint) => checkpoint != saved,
+                None => {
+                    saved.workflow().revision() != 0
+                        || !saved.workflow().nodes().is_empty()
+                        || saved.snapshot().phase() != WorkflowRunPhase::Idle
+                }
+            },
+        )
     }
 }
 
@@ -1369,6 +1333,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn draft_execution_needs_no_saved_row_and_failed_save_keeps_the_draft() {
+        let store = Arc::new(ProjectStore::workflow_test());
+        let manager = WorkflowManager::new(Arc::new(StorageManager::new(store)));
+        let fresh = manager
+            .command(WorkflowCommand::create(manager.scope_id()))
+            .await
+            .unwrap();
+        let mut graph = fresh.workflow().clone();
+        graph
+            .nodes_mut()
+            .push(spiral_robotics_common::workflow::WorkflowNodeSpec::new(
+                "source",
+                "Source",
+                WorkflowNodeConfig::Query {
+                    sql: "SELECT 42 AS answer".into(),
+                    max_rows: 10,
+                },
+            ));
+        graph
+            .nodes_mut()
+            .push(spiral_robotics_common::workflow::WorkflowNodeSpec::new(
+                "result",
+                "Result",
+                WorkflowNodeConfig::Result,
+            ));
+        graph
+            .edges_mut()
+            .push(spiral_robotics_common::workflow::WorkflowEdgeSpec::new(
+                "source", "result",
+            ));
+        let draft = manager
+            .command(WorkflowCommand::apply(manager.scope_id(), 0, graph))
+            .await
+            .unwrap();
+        assert!(draft.unsaved_changes());
+        manager
+            .start(&manager.scope_id(), draft.workflow().revision())
+            .await
+            .unwrap();
+        let result = wait_for_terminal(&manager).await;
+        assert_eq!(result.phase(), WorkflowRunPhase::Completed);
+        assert_eq!(result.result().unwrap().rows()[0]["answer"], 42);
+        let before = manager.state();
+        let mut renamed = before.workflow().clone();
+        renamed.set_name("Keep this edit after save fails");
+        let chat =
+            spiral_robotics_storage::workflow_assistant::WorkflowConversation::new(renamed.id());
+        assert!(
+            manager
+                .save(
+                    GraphEdit::new(manager.scope_id(), renamed.revision(), renamed),
+                    &chat
+                )
+                .await
+                .is_err(),
+            "this fixture has no durable workflows table"
+        );
+        assert_eq!(
+            manager.state(),
+            before,
+            "failed Save must not advance the server revision or discard the draft"
+        );
+        manager
+            .command(WorkflowCommand::Discard {
+                scope_id: manager.scope_id(),
+            })
+            .await
+            .unwrap();
+        assert!(manager.state().workflow().nodes().is_empty());
+        assert!(!manager.state().unsaved_changes());
+    }
+
+    #[tokio::test]
     async fn progress_and_cancel_do_not_wait_for_live_arrow_read_leases() {
         let store = Arc::new(ProjectStore::workflow_test());
         let manager = WorkflowManager::new(Arc::new(StorageManager::new(store.clone())));
@@ -1379,7 +1416,6 @@ mod tests {
             run_id: "lease-test".into(),
             cancel: CancellationToken::new(),
             task: None,
-            terminal_persistence_failed: false,
         });
         let _live_input = store.connect().await.unwrap();
         tokio::time::timeout(
@@ -1408,64 +1444,6 @@ mod tests {
                 .cancel
                 .is_cancelled()
         );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn terminal_save_failure_keeps_the_run_active_and_cancel_can_retry_finalization() {
-        let project_store = Arc::new(
-            {
-                let settings = SpiralConnectionSettings::new(
-                    "https://api.spiraldb.dev".to_owned(),
-                    "https://spfs.spiraldb.dev".to_owned(),
-                )
-                .expect("the unconfigured test connection is valid");
-                let database =
-                    Arc::new(spiral_robotics_storage::AdbcDatabase::new(settings.clone()));
-                ProjectStore::new(settings, "workflow_terminal_failure".to_owned(), database)
-            }
-            .expect("the unconfigured test project_store is valid"),
-        );
-        let manager = WorkflowManager::new(Arc::new(StorageManager::new(project_store)));
-        let workflow = WorkflowSpec::default();
-        let run_id = "terminal-save-failure".to_owned();
-        let mut snapshot =
-            workflow.starting_snapshot(&WorkflowRunSnapshot::idle_for(&workflow), run_id.clone());
-        snapshot.set_phase(WorkflowRunPhase::Running);
-        *manager.inner.saved.recover_lock() = SavedWorkflow::new(workflow, snapshot);
-        *manager.inner.active.recover_lock() = Some(ActiveRun {
-            run_id: run_id.clone(),
-            cancel: CancellationToken::new(),
-            task: None,
-            terminal_persistence_failed: false,
-        });
-        manager
-            .inner
-            .persistence
-            .test_outcomes
-            .recover_lock()
-            .push_back(Err("injected terminal write failure".to_owned()));
-
-        manager.finish_completed(&run_id, None).await;
-
-        let state = manager.state();
-        assert_eq!(state.snapshot().phase(), WorkflowRunPhase::Running);
-        assert!(state.snapshot().error().is_some_and(|error| {
-            error.contains("Could not durably finalize") && error.contains("choose Cancel")
-        }));
-        assert!(manager.inner.active.lock().unwrap().is_some());
-        manager
-            .inner
-            .persistence
-            .test_outcomes
-            .recover_lock()
-            .push_back(Ok(()));
-        let recovered = manager
-            .cancel(&manager.scope_id())
-            .await
-            .expect("Cancel must retry the durable terminal transition");
-        assert_eq!(recovered.phase(), WorkflowRunPhase::Cancelled);
-        assert!(recovered.error().is_none());
-        assert!(manager.inner.active.lock().unwrap().is_none());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1647,6 +1625,16 @@ mod tests {
             Some(3)
         );
 
+        assert!(
+            storage.workflows().await.unwrap().is_empty(),
+            "authoring and running must not autosave"
+        );
+        let checkpoint_chat =
+            spiral_robotics_storage::workflow_assistant::WorkflowConversation::new(
+                saved.workflow().id(),
+            );
+        manager.checkpoint(&checkpoint_chat).await.unwrap();
+        assert!(!manager.state().unsaved_changes());
         let reloaded = WorkflowManager::new(storage.clone());
         reloaded
             .prepare_from_storage()
@@ -1679,10 +1667,7 @@ mod tests {
                 "Keep the first workflow context",
             ),
         );
-        storage
-            .save_workflow_conversation(&first_id, &first_chat.persisted().unwrap())
-            .await
-            .unwrap();
+        reloaded.checkpoint(&first_chat).await.unwrap();
         let first_scope = reloaded.scope_id();
         let second = reloaded
             .command(WorkflowCommand::create(&first_scope))
@@ -1699,10 +1684,7 @@ mod tests {
             .unwrap();
         let second_chat =
             spiral_robotics_storage::workflow_assistant::WorkflowConversation::new(&second_id);
-        storage
-            .save_workflow_conversation(&second_id, &second_chat.persisted().unwrap())
-            .await
-            .unwrap();
+        reloaded.checkpoint(&second_chat).await.unwrap();
         assert!(
             reloaded
                 .command(WorkflowCommand::apply(
@@ -1727,8 +1709,8 @@ mod tests {
         reselected.ensure_loaded().await.unwrap();
         assert_eq!(
             reselected.state().workflow().id(),
-            first_id,
-            "reconnect opens the most recently selected workflow"
+            second_id,
+            "selection does not save; reconnect opens the most recently saved workflow"
         );
         let first_json = storage
             .load_workflow_conversation(&first_id)

@@ -62,8 +62,23 @@ impl WorkflowCommands {
                 let result = async {
                     // Resolve the conversation before changing the graph. A failed
                     // read leaves the selected graph and chat together.
+                    if matches!(&command, WorkflowCommand::Create { .. } | WorkflowCommand::Select { .. })
+                        && (commands.state.workflow().state().unsaved_changes()
+                            || commands.state.workflow_agent().state().unsaved_changes())
+                    {
+                        return Err(BackendCommandError::conflict("Save or discard your changes before switching workflows."));
+                    }
+                    if let WorkflowCommand::Save { scope_id, expected_revision, workflow } = command {
+                        commands.state.workflow().save(
+                            super::manager::GraphEdit::new(scope_id, expected_revision, workflow),
+                            &commands.state.workflow_agent().conversation(),
+                        ).await?;
+                        commands.state.workflow_agent().mark_saved();
+                        return Ok(commands.state.workflow().state());
+                    }
                     let conversation = match &command {
                         WorkflowCommand::Select { workflow_id, .. } => Some(commands.state.workflow_agent().conversation_for(workflow_id).await?),
+                        WorkflowCommand::Discard { .. } => Some(commands.state.workflow_agent().conversation_for(commands.state.workflow().state().workflow().id()).await?),
                         _ => None,
                     };
                     let creating = matches!(&command, WorkflowCommand::Create { .. });

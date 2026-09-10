@@ -1,10 +1,9 @@
-//! Backend-owned Workflow agent, tool loop, durable session, and query state.
+//! Backend-owned Workflow agent, tool loop, ephemeral session, and query state.
 
 mod tools;
 use tools::{ToolCompletion, WorkflowToolCatalog};
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio_util::sync::CancellationToken;
@@ -60,7 +59,7 @@ struct AgentTurnState {
     loaded: tokio::sync::OnceCell<()>,
     active: Mutex<Option<ActiveTurn>>,
     mutation: tokio::sync::Mutex<()>,
-    recovery_pending: AtomicBool,
+    saved_revision: Mutex<u64>,
 }
 
 struct WorkflowAgentServices {
@@ -486,7 +485,7 @@ impl WorkflowAgentManager {
                     loaded: tokio::sync::OnceCell::new(),
                     active: Mutex::new(None),
                     mutation: tokio::sync::Mutex::new(()),
-                    recovery_pending: AtomicBool::new(false),
+                    saved_revision: Mutex::new(0),
                 },
             }),
         }
@@ -504,7 +503,6 @@ impl WorkflowAgentManager {
                     .await
                     .map_err(|error| error.to_string())?;
                 self.prepare_from_storage().await?;
-                self.persist_recovery().await?;
                 Ok::<(), String>(())
             })
             .await
@@ -531,13 +529,10 @@ impl WorkflowAgentManager {
             Some(stored) => WorkflowConversation::load(stored, &workflow_id)?,
             None => WorkflowConversation::new(&workflow_id),
         };
-        let interrupted = conversation.interrupt()?;
+        *self.inner.turn.saved_revision.recover_lock() = conversation.revision();
+        conversation.interrupt()?;
         *self.inner.conversation.recover_lock() = conversation;
         *self.inner.scope_id.recover_lock() = AgentIdentifier::next("agent-scope");
-        self.inner.turn.recovery_pending.store(
-            interrupted || stored.is_none() || stored.is_some_and(|stored| stored.version() == 2),
-            Ordering::SeqCst,
-        );
         Ok(())
     }
 
@@ -561,21 +556,18 @@ impl WorkflowAgentManager {
 
     pub(crate) fn select_conversation(&self, conversation: WorkflowConversation) {
         debug_assert!(!self.is_active());
+        *self.inner.turn.saved_revision.recover_lock() = conversation.revision();
         *self.inner.conversation.recover_lock() = conversation;
         *self.inner.scope_id.recover_lock() = AgentIdentifier::next("agent-scope");
     }
 
-    pub(crate) async fn persist_recovery(&self) -> Result<(), String> {
-        let _mutation = self.inner.turn.mutation.lock().await;
-        if self.inner.turn.recovery_pending.load(Ordering::SeqCst) {
-            let conversation = self.inner.conversation.recover_lock().clone();
-            self.persist_conversation(&conversation).await?;
-            self.inner
-                .turn
-                .recovery_pending
-                .store(false, Ordering::SeqCst);
-        }
-        Ok(())
+    pub(crate) fn conversation(&self) -> WorkflowConversation {
+        self.inner.conversation.recover_lock().clone()
+    }
+
+    pub(crate) fn mark_saved(&self) {
+        let revision = self.inner.conversation.recover_lock().revision();
+        *self.inner.turn.saved_revision.recover_lock() = revision;
     }
 
     pub(crate) fn state(&self) -> WorkflowAgentSnapshot {
@@ -732,9 +724,6 @@ impl WorkflowAgentManager {
             conversation.session_mut().set_error(None);
             candidate.advance().map_err(OperationError::External)?;
             candidate.provider_messages_mut().trim_to_provider_bound();
-            self.persist_conversation(&candidate)
-                .await
-                .map_err(OperationError::External)?;
             let cancel = CancellationToken::new();
             let response = self.state_for(&candidate);
             *self.inner.conversation.recover_lock() = candidate;
@@ -781,7 +770,7 @@ impl WorkflowAgentManager {
                 "The active Spiral project changed. Reload Assistant conversations.".to_owned(),
             ));
         }
-        let (conversation_id, turn_id, task) = {
+        let (conversation_id, turn_id) = {
             let mut active = self.inner.turn.active.recover_lock();
             let active = active.as_mut().ok_or_else(|| {
                 OperationError::Conflict("No Assistant turn is active.".to_owned())
@@ -794,11 +783,7 @@ impl WorkflowAgentManager {
                 ));
             }
             active.cancel.cancel();
-            (
-                active.conversation_id.clone(),
-                active.turn_id.clone(),
-                active.task.take(),
-            )
+            (active.conversation_id.clone(), active.turn_id.clone())
         };
         {
             let _mutation = self.inner.turn.mutation.lock().await;
@@ -809,21 +794,11 @@ impl WorkflowAgentManager {
                     .session_mut()
                     .set_phase(WorkflowAgentPhase::Cancelling);
                 conversation.session_mut().set_error(None);
-                if candidate.advance().is_ok()
-                    && self.persist_conversation(&candidate).await.is_ok()
-                {
+                if candidate.advance().is_ok() {
                     *self.inner.conversation.recover_lock() = candidate;
                 }
             }
         }
-        if let Some(task) = task {
-            let _ = task.await;
-        }
-        self.finish_failed(
-            TurnIdentity::new(&conversation_id, &turn_id),
-            TurnFailureDetail::new("Agent turn cancelled.", true),
-        )
-        .await;
         Ok(self.state())
     }
 
@@ -883,7 +858,7 @@ impl WorkflowAgentManager {
             let mut messages = vec![ProviderMessage::text(
                 "system",
                 format!(
-                    "{prompt}\nCurrent saved workflow (authoritative): {}",
+                    "{prompt}\nCurrent workflow draft (authoritative): {}",
                     serde_json::to_string(current.workflow()).map_err(|error| error.to_string())?
                 ),
             )];
@@ -912,9 +887,9 @@ impl WorkflowAgentManager {
                     tracing::warn!(error = %error, "Workflow Assistant provider turn failed");
                     ASSISTANT_UNAVAILABLE_DETAIL.to_owned()
                 })?;
-            // Admit the whole response before persisting its assistant tool
+            // Admit the whole response before recording its assistant tool
             // calls. A budget rejection must not leave calls with no matching
-            // tool-result messages in durable provider history.
+            // tool-result messages in provider history.
             let provider_message = budget.admit_provider_response(&response)?;
             let identity = TurnIdentity::new(conversation_id, turn_id);
             self.record_provider_response(identity, provider_message)
@@ -935,7 +910,11 @@ impl WorkflowAgentManager {
                     return Err("Agent turn cancelled.".to_owned());
                 }
                 self.tool_started(identity, call)?;
-                let result = WorkflowToolCatalog::execute(self, call, &mut context).await;
+                let result = tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => return Err("Agent turn cancelled.".into()),
+                    result = WorkflowToolCatalog::execute(self, call, &mut context) => result,
+                };
                 let (output, transport_ok) = match result {
                     Ok(output) => (output, true),
                     Err(error) => (json!({"ok": false, "error": error}).to_string(), false),
@@ -950,7 +929,7 @@ impl WorkflowAgentManager {
         }
     }
 
-    async fn save_authored_workflow(
+    async fn update_authored_workflow(
         &self,
         workflow: WorkflowSpec,
         context: &mut ToolContext,
@@ -1043,7 +1022,6 @@ impl WorkflowAgentManager {
             .conversation
             .recover_lock()
             .with_provider_message(identity, message)?;
-        self.persist_conversation(&candidate).await?;
         *self.inner.conversation.recover_lock() = candidate;
         Ok(())
     }
@@ -1064,7 +1042,6 @@ impl WorkflowAgentManager {
             .provider_messages_mut()
             .append_unexecuted_tool_outputs(unexecuted);
         candidate.provider_messages_mut().trim_to_provider_bound();
-        self.persist_conversation(&candidate).await?;
         *self.inner.conversation.recover_lock() = candidate;
         Ok(())
     }
@@ -1105,7 +1082,6 @@ impl WorkflowAgentManager {
             .conversation
             .recover_lock()
             .with_completed_tool(identity, completion)?;
-        self.persist_conversation(&candidate).await?;
         *self.inner.conversation.recover_lock() = candidate;
         Ok(())
     }
@@ -1177,7 +1153,7 @@ impl WorkflowAgentManager {
                 WorkflowAgentMessagePhase::Complete
             });
         }
-        // A turn may fail after the assistant tool-call batch was durably
+        // A turn may fail after the assistant tool-call batch was
         // recorded but before all tool results were saved. Do not transition
         // that incomplete exchange to an inactive phase: remove the entire
         // tail so the next Retry always starts from provider-valid history.
@@ -1185,45 +1161,24 @@ impl WorkflowAgentManager {
             .provider_messages_mut()
             .remove_incomplete_tool_exchange();
         let _ = candidate.advance();
-        if let Err(persist_error) = self.persist_conversation(&candidate).await {
-            let conversation = &mut candidate;
-            conversation
-                .session_mut()
-                .set_phase(WorkflowAgentPhase::Failed);
-            conversation.session_mut().set_error(Some(format!(
-                "Could not persist Assistant history: {}",
-                ToolPublicText::error(&persist_error)
-            )));
-        }
-        // Even when durable storage is temporarily unavailable, install only
-        // the structurally valid candidate. A later Retry can persist it; the
-        // live conversation is never left with an inactive orphaned tool exchange.
         *self.inner.conversation.recover_lock() = candidate;
         *self.inner.turn.active.recover_lock() = None;
     }
 
     fn state_for(&self, conversation: &WorkflowConversation) -> WorkflowAgentSnapshot {
         WorkflowAgentSnapshot::new(self.inner.readiness.clone(), conversation.session().clone())
+            .with_unsaved_changes(
+                conversation.revision() != *self.inner.turn.saved_revision.recover_lock(),
+            )
             .with_history_available(true)
             .with_scope(
                 self.inner.scope_id.recover_lock().clone(),
                 conversation.revision(),
             )
     }
-
-    async fn persist_conversation(
-        &self,
-        conversation: &WorkflowConversation,
-    ) -> Result<(), String> {
-        self.inner
-            .services
-            .storage
-            .save_workflow_conversation(conversation.workflow_id(), &conversation.persisted()?)
-            .await
-    }
 }
 
-const SYSTEM_PROMPT: &str = r#"You are the Workflow Assistant in Spiral Robotics Studio. Author a single executable Arrow DAG, then let the user choose Run. Use inspect_dataset without arguments to list datasets, then with the actual path to inspect topics and camera schema variants. Also inspect relations and model capabilities as needed. Never invent dataset paths, topics, columns, or functions. Keep the workflow's identity and existing intent when editing it.
+const SYSTEM_PROMPT: &str = r#"You are the Workflow Assistant in Spiral Robotics Studio. Author a single executable Arrow DAG in memory, then let the user choose Run. Only the user's Save button persists the graph and conversation. Use inspect_dataset without arguments to list datasets, then with the actual path to inspect topics and camera schema variants. Also inspect relations and model capabilities as needed. Never invent dataset paths, topics, columns, or functions. Keep the workflow's identity and existing intent when editing it.
 
 A Query with no parents is a SQL source. A Query with parents uses {{node:id}} for each connected input, including joins. A Model has one parent, an image_column, and features with name, description, and concept. It appends nullable Float32 SigLIP scores to all input columns. Result consumes one output. There is no preparation phase or feature-cache relation. Every Run executes inference anew; cross-workflow reuse is a future milestone. No fixed episode/frame key schema is required. Keep useful source identifiers as ordinary columns when the question needs grouping or joins. Schema validation runs before execution. Query max_rows limits the displayed preview, not inference; select the intended cohort and frame sampling in SQL.
 
@@ -1456,6 +1411,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn history_and_stop_do_not_wait_for_storage_or_tool_cleanup() {
+        let store = Arc::new(spiral_robotics_storage::ProjectStore::workflow_test());
+        let storage = Arc::new(StorageManager::new(store.clone()));
+        let workflow = Arc::new(WorkflowManager::new(storage.clone()));
+        let agent = WorkflowAgentManager::new(
+            storage,
+            workflow.clone(),
+            Arc::new(CatalogMutationLease::default()),
+        );
+        let mut conversation = WorkflowConversation::new(workflow.state().workflow().id());
+        let conversation_id = conversation.conversation_id().to_owned();
+        let turn_id = "stop-test".to_owned();
+        conversation
+            .session_mut()
+            .set_active_turn_id(Some(turn_id.clone()));
+        conversation
+            .session_mut()
+            .set_phase(WorkflowAgentPhase::Responding);
+        agent.select_conversation(conversation);
+        let cancel = CancellationToken::new();
+        let (release, pending) = tokio::sync::oneshot::channel::<()>();
+        *agent.inner.turn.active.recover_lock() = Some(ActiveTurn {
+            conversation_id: conversation_id.clone(),
+            turn_id: turn_id.clone(),
+            cancel: cancel.clone(),
+            task: Some(tokio::spawn(async move {
+                let _ = pending.await;
+            })),
+        });
+        let _exclusive_storage = store.connect_exclusive().await.unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            agent.record_provider_response(
+                TurnIdentity::new(&conversation_id, &turn_id),
+                ProviderMessage::text("assistant", "Draft response"),
+            ),
+        )
+        .await
+        .expect("history changes must not write storage")
+        .unwrap();
+        let state = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            agent.cancel(TurnCancellation {
+                scope_id: agent.state().scope_id().into(),
+                conversation_id,
+                turn_id,
+            }),
+        )
+        .await
+        .expect("Stop must acknowledge before tool cleanup")
+        .unwrap();
+        assert_eq!(state.session().phase(), WorkflowAgentPhase::Cancelling);
+        assert!(state.unsaved_changes());
+        assert!(cancel.is_cancelled());
+        assert!(
+            agent
+                .inner
+                .turn
+                .active
+                .recover_lock()
+                .as_ref()
+                .unwrap()
+                .task
+                .is_some()
+        );
+        release.send(()).unwrap();
+        agent.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn authoring_rejects_old_run_tools_at_the_backend_boundary() {
         let settings = spiral_robotics_storage::SpiralConnectionSettings::new(
             "http://127.0.0.1:1".to_owned(),
@@ -1550,7 +1575,7 @@ mod tests {
             })
             .to_string(),
         );
-        assert_eq!(saved.summary, "Saved Holding evidence · r7");
+        assert_eq!(saved.summary, "Updated Holding evidence · r7");
         let receipt = saved.receipt.expect("saved graph receipt");
         assert_eq!(receipt.revision(), 7);
         assert!(!serde_json::to_string(&receipt).unwrap().contains("secret"));
@@ -1589,7 +1614,7 @@ mod tests {
             })
             .to_string(),
         );
-        assert_eq!(rejected.summary, "Couldn’t save the workflow");
+        assert_eq!(rejected.summary, "Couldn’t update the workflow");
         assert!(rejected.receipt.is_none());
         assert_eq!(
             ToolPublicText::detail(

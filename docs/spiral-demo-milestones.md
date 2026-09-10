@@ -11,6 +11,9 @@ The no-reuse executor is implemented and the native H.264 → SigLIP → SQL pat
 been verified twice. Native scan pruning is verified with the updated local driver.
 Dataset-level reuse is the immediate next milestone; the full bright/dark episode
 demo remains to verify.
+Workflow changes now stay in memory until the user clicks **Save**. The graph,
+conversation, and current result are saved together; Send, Stop, Run, and selection
+never autosave. Save or Discard before switching workflows.
 See
 [workflow-authoring.md](workflow-authoring.md) for the simplified ownership model.
 

@@ -11,35 +11,37 @@ The Spiral `workflows` relation stores one row per workflow: `workflow_id`, `nam
 `updated_ms`. Graph nodes and edges remain inside the graph JSON. Conversation JSON
 contains the visible messages and provider history for one Assistant conversation.
 
-Startup reads IDs and names, ordered latest first, selects the first workflow, and
-loads its graph and conversation. An empty list creates a fresh workflow. Switching
-loads the selected identity's details; other graphs are not decoded for the picker.
+Startup reads IDs and names ordered by the last explicit Save, selects the first
+workflow, and loads its graph and conversation. An empty list opens a new in-memory
+workflow. Creating or selecting a workflow does not write storage.
 
-The graph manager owns graph saves; the Assistant owns conversation saves. Each save
-updates its part of the row in a transaction, preserving the other part. Saving a
-graph also updates its name. Conversation saves require an existing workflow.
-`WorkflowJson` pairs each payload with its encoding version, independently of the
-internal edit counter used to reject stale requests. New graphs use encoding version
-3. Compatible version-2 SQL graphs can still open; retired episode/cache node shapes
-are refused without rewriting or deleting their saved payloads.
+**Save is the only persistence action.** It atomically stores the current graph,
+run snapshot, and Assistant conversation in one workflow row. Graph edits,
+Assistant messages and tool results, Run, Stop, and completion stay in session
+memory until Save. Editor edits remain in the browser until Run, Send, or Save
+submits them. A browser refresh can reconnect to backend session state, but loses
+unsubmitted editor edits. A backend restart or project close loses unsaved work.
 
-The graph counter advances only on definition edits. The conversation counter
-advances on conversation updates. Selecting a workflow changes neither counter.
-Selection touches the graph's storage timestamp, so reconnect opens the latest
-workflow. Timestamps are ordered even when two writes occur in the same millisecond.
-New workflows receive server-generated identities and an empty graph.
+Run and Send use the graph currently visible in the editor, including unsaved
+edits. The Assistant's `set_workflow` tool updates the in-memory graph and reports
+“Updated”; it cannot save or run it. Save is available when authoring and execution
+are idle. A failed Save preserves the draft and leaves its revision retryable.
 
-The workspace picker selects the graph and its conversation together. Selection is
-serialized with authoring and execution: stop active work and apply or discard
-unsaved graph edits before switching. Responses carry server scopes and conversation
-identities, so old commands cannot overwrite or cancel work after selection changes.
-Canvas selection and layout remain frontend concerns; changing them does not save a
-new graph definition. Unsent chat text belongs to its workflow in the frontend.
+The UI marks unsaved changes. Save or Discard before switching workflows. Discard
+restores the last saved graph, conversation, and results; for a never-saved
+workflow it returns to an empty draft. Selection does not change saved timestamps.
+
+`WorkflowJson` carries an encoding version independently of the edit counter used
+to reject stale requests. New graphs use encoding version 3. Compatible version-2
+SQL graphs can still open; retired episode/cache node shapes are refused.
+
+Canvas selection and layout remain frontend concerns. Unsent chat text belongs to
+its workflow in the frontend and is not part of a saved conversation.
 
 ## Authoring and execution
 
 There is one intent graph and one Run action. The Assistant can inspect datasets,
-relations, model capabilities, and bounded read-only results, then save a graph.
+relations, model capabilities, and bounded read-only results, then update the graph in memory.
 It cannot start or wait for a workflow run. Run and Cancel own computation.
 
 The graph has four node kinds:
@@ -95,9 +97,8 @@ Only the terminal output becomes JSON. The preview's row/byte limits bound the
 browser payload; use SQL filters, frame selection, or LIMIT to bound model work.
 The runner drains the remaining output so inference finishes and
 late failures are not hidden. Progress and cancellation are live observations during
-execution. The terminal snapshot is saved after streams release their catalog read
-leases, avoiding progress writes that would block downstream reads. On interruption,
-the persisted in-progress run is recovered as interrupted.
+execution. Run admission, progress, cancellation, and terminal snapshots make no
+storage writes. An explicit Save after the run includes the result preview.
 
 Every Run computes inference again. The old candidate/cache preflight, second
 image-producing query, feature backfill, and cache publication are removed from the
@@ -139,5 +140,5 @@ Each implementation under `workflow/agent/tools` owns its description, parameter
 schema, argument parsing, execution, and receipt. The single registry advertises and
 dispatches `inspect_dataset`, `list_relations`, `describe_relations`,
 `list_model_capabilities`, `set_workflow`, and `run_query`. There are no preparation,
-execution, or separate episode-filter tools. Graph saves use the existing identity,
-revision, and catalog-lease checks.
+execution, or separate episode-filter tools. Graph updates use the existing identity,
+revision, and catalog-lease checks. Only the user can persist changes with Save.

@@ -498,7 +498,7 @@ impl WorkflowStatusContext<'_> {
         };
 
         let phase = match state.snapshot().phase() {
-            WorkflowRunPhase::Idle => "Idle · saved",
+            WorkflowRunPhase::Idle => "Idle",
             WorkflowRunPhase::Validating => "Validating",
             WorkflowRunPhase::Running => "Running",
             WorkflowRunPhase::Cancelling => "Cancelling",

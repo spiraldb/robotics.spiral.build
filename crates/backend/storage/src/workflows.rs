@@ -1,5 +1,5 @@
 //! One row per workflow. The list reads metadata; graph and conversation JSON
-//! are loaded by identity and saved independently in the same transaction.
+//! are loaded by identity and saved together only on explicit Save.
 
 mod cameras;
 
@@ -106,10 +106,11 @@ impl<'a> WorkflowPersistence<'a> {
         Ok(found)
     }
 
-    pub(crate) async fn save_graph(
+    /// Save the graph and its conversation as one explicit checkpoint.
+    pub(crate) async fn save(
         &self,
         workflow: &WorkflowSpec,
-        graph: &WorkflowJson,
+        contents: (&WorkflowJson, &WorkflowJson),
     ) -> Result<(), String> {
         self.update(|rows| {
             let updated_ms = StorageClock::unix_millis().max(
@@ -118,31 +119,12 @@ impl<'a> WorkflowPersistence<'a> {
                     .max()
                     .unwrap_or(0)
                     .checked_add(1)
-                    .ok_or_else(|| "Workflow timestamp overflowed.".to_owned())?,
+                    .ok_or("Workflow timestamp overflowed.")?,
             );
-            if let Some(row) = rows.iter_mut().find(|row| row.id == workflow.id()) {
-                row.name = workflow.name().to_owned();
-                row.graph = graph.clone();
-                row.updated_ms = updated_ms;
-            } else {
-                rows.push(WorkflowRow::new(workflow, graph.clone(), updated_ms));
-            }
-            Ok(())
-        })
-        .await
-    }
-
-    pub(crate) async fn save_assistant(
-        &self,
-        workflow_id: &str,
-        conversation: &WorkflowJson,
-    ) -> Result<(), String> {
-        self.update(|rows| {
-            let row = rows
-                .iter_mut()
-                .find(|row| row.id == workflow_id)
-                .ok_or_else(|| "Save the workflow before its conversation.".to_owned())?;
-            row.conversation = Some(conversation.clone());
+            let mut row = WorkflowRow::new(workflow, contents.0.clone(), updated_ms);
+            row.conversation = Some(contents.1.clone());
+            rows.retain(|row| row.id != workflow.id());
+            rows.push(row);
             Ok(())
         })
         .await

@@ -12,7 +12,7 @@ impl WorkflowTool for SetWorkflow {
         "set_workflow"
     }
     fn description(&self) -> &'static str {
-        "Validate and save an Arrow workflow. SQL sources have no incoming edges. SQL transforms reference connected inputs with {{node:id}}. A Model consumes one parent, reads image_column, and appends named SigLIP scores while preserving input columns. Connect the final output to Result. Query max_rows bounds the preview; use SQL filters or LIMIT to bound inference inputs. Run is separate; every run recomputes inference."
+        "Validate and update an Arrow workflow in memory. Only the user's Save button persists the graph and conversation. SQL sources have no incoming edges. SQL transforms reference connected inputs with {{node:id}}. A Model consumes one parent, reads image_column, and appends named SigLIP scores while preserving input columns. Connect the final output to Result. Query max_rows bounds the preview; use SQL filters or LIMIT to bound inference inputs. Run is separate; every run recomputes inference."
     }
     fn parameters(&self) -> Value {
         let feature_definition_schema = json!({
@@ -119,10 +119,10 @@ impl WorkflowTool for SetWorkflow {
         })
     }
     fn presentation(&self) -> ToolPresentation {
-        ToolPresentation::new("Validating graph", "Graph save", "save the workflow")
+        ToolPresentation::new("Validating graph", "Graph update", "update the workflow")
     }
     fn completion(&self, output: &Value) -> ToolCompletion {
-        ToolCompletion::graph_saved(output)
+        ToolCompletion::graph_updated(output)
     }
     fn call<'a>(&'a self, invocation: ToolInvocation<'a>) -> BoxFuture<'a, Result<String, String>> {
         Box::pin(async move {
@@ -139,7 +139,7 @@ impl WorkflowTool for SetWorkflow {
             );
             let workflow: WorkflowSpec = serde_json::from_value(value)
                 .map_err(|error| format!("Workflow shape is invalid: {error}"))?;
-            invocation.save(workflow).await
+            invocation.update_graph(workflow).await
         })
     }
 }
