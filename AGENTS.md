@@ -2,7 +2,16 @@
 - You should care less about breaking changes, and more about doing the right thing.
 - Do things smartly, e.g., use native features instead of reinventing the wheel.
 - Don't prematurely optimize for scaling, e.g., setup a memory pool to limit allocation, setup a worker pool to limit concurrency, etc. If you really think it is necessary, ask user first.
-- Write human-readable code, follow Rust best practices.
+
+## Write code that requires minimal human attention 
+
+- Fact: every line of code requires human review, so write readable code not just working code.
+
+- Build reusable, trustworthy components that has deep logic but thin interface, so that human only need to review the complexity once (reuse the attention).
+
+- Follow Rust best practices to save human attention from reviewing for common mistakes.
+
+- Before implementing a new feature, identify similar existing features, and check if it's worth to refactor existing code so it's reusable.
 
 ## Engineering
 
