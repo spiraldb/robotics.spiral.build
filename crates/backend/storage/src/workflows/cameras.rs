@@ -2,7 +2,7 @@
 use crate::StorageManager;
 use arrow_schema::DataType;
 use spiral_robotics_common::datasets::DatasetInspection;
-use spiral_robotics_common::workflow::{WorkflowSpec, episode_filter::CameraBinding};
+use spiral_robotics_common::workflow::camera::CameraBinding;
 
 impl StorageManager {
     pub async fn workflow_cameras(
@@ -34,8 +34,7 @@ impl StorageManager {
                 quote(topic.name()),
                 quote(revision.variant())
             );
-            let stream = connection.execute_query(sql).await?;
-            let schema = stream.schema();
+            let schema = connection.plan_query(sql).await?;
             let DataType::Struct(fields) = schema
                 .field_with_name("value")
                 .map_err(|e| e.to_string())?
@@ -65,27 +64,5 @@ impl StorageManager {
             }
         }
         Ok(cameras)
-    }
-
-    pub async fn validate_episode_workflow(&self, workflow: &WorkflowSpec) -> Result<(), String> {
-        let Some(source) = workflow.dataset() else {
-            return Ok(());
-        };
-        let inspection = self.inspect_dataset(source.selection().clone()).await?;
-        if inspection.dataset() != source {
-            return Err(
-                "The selected dataset changed. Reselect it and inspect its cameras again.".into(),
-            );
-        }
-        if let Some(scoring) = workflow.camera_scoring() {
-            let cameras = self.workflow_cameras(&inspection).await?;
-            if !cameras.contains(scoring.camera()) {
-                return Err(format!(
-                    "Camera {} is not a supported encoded-video input in this dataset/schema. Inspect the dataset's available cameras.",
-                    scoring.camera().topic()
-                ));
-            }
-        }
-        Ok(())
     }
 }

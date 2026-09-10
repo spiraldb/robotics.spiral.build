@@ -220,3 +220,13 @@ impl DatabaseTransaction for AdbcConnection {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(any(test, feature = "test-support"))]
+impl AdbcDatabase {
+    pub(crate) fn memory() -> Self {
+        Self {
+            configuration: DriverConfiguration::memory(),
+            database: OnceCell::new(),
+        }
+    }
+}

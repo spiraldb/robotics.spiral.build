@@ -5,15 +5,6 @@ use arrow_array::{Array as _, Int64Array, RecordBatch, StringViewArray};
 use futures::{StreamExt as _, TryStreamExt as _};
 use serde::Deserialize;
 
-impl AdbcDatabase {
-    pub(crate) fn memory() -> Self {
-        Self {
-            configuration: DriverConfiguration::memory(),
-            database: OnceCell::new(),
-        }
-    }
-}
-
 #[tokio::test]
 async fn bound_parameters_preserve_arrow_types_and_connection_reuse() {
     let database = AdbcDatabase::memory();

@@ -12,7 +12,7 @@ impl WorkflowTool for SetWorkflow {
         "set_workflow"
     }
     fn description(&self) -> &'static str {
-        "Validate and save a complete Workflow graph. Provide its name, nodes, and edges; the server supplies identity and revision. A Query can be a SQL source with no incoming edges, or a transform referencing each connected input with {{node:id}}. A Model enriches one upstream candidate Query, and the final Query may join that cohort, the source-scoped feature cache, and other sources. Server-owned Model outputs are resolved automatically."
+        "Validate and save an Arrow workflow. SQL sources have no incoming edges. SQL transforms reference connected inputs with {{node:id}}. A Model consumes one parent, reads image_column, and appends named SigLIP scores while preserving input columns. Connect the final output to Result. Query max_rows bounds the preview; use SQL filters or LIMIT to bound inference inputs. Run is separate; every run recomputes inference."
     }
     fn parameters(&self) -> Value {
         let feature_definition_schema = json!({
@@ -21,26 +21,13 @@ impl WorkflowTool for SetWorkflow {
                 "name": {
                     "type": "string",
                     "maxLength": 96,
-                    "pattern": "^[a-z_][a-z0-9_]*_feature$"
+                    "pattern": "^[a-z_][a-z0-9_]*$"
                 },
                 "description": {"type": "string", "maxLength": 240},
-                "concept": {"type": "string", "maxLength": 80},
-                "applicability": {
-                    "type": "object",
-                    "properties": {
-                        "source_relation": {"type": "string"},
-                        "media_field": {"type": "string"},
-                        "stream_ids": {
-                            "type": "array",
-                            "maxItems": 8,
-                            "items": {"type": "string", "maxLength": 128}
-                        }
-                    },
-                    "required": ["source_relation", "media_field"],
-                    "additionalProperties": false
-                }
+                "concept": {"type": "string", "maxLength": 80}
+
             },
-            "required": ["name", "description", "concept", "applicability"],
+            "required": ["name", "description", "concept"],
             "additionalProperties": false
         });
 
@@ -73,7 +60,7 @@ impl WorkflowTool for SetWorkflow {
                                             "id": {"type": "string"},
                                             "name": {"type": "string"},
                                             "kind": {"const": "model"},
-                                            "model_id": {"const": "siglip-base"},
+                                            "image_column": {"type": "string"},
                                             "features": {
                                                 "type": "array",
                                                 "minItems": 1,
@@ -81,7 +68,7 @@ impl WorkflowTool for SetWorkflow {
                                                 "items": feature_definition_schema
                                             }
                                         },
-                                        "required": ["id", "name", "kind", "model_id", "features"],
+                                        "required": ["id", "name", "kind", "image_column", "features"],
                                         "additionalProperties": false
                                     },
                                     {

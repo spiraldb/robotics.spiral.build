@@ -16,8 +16,8 @@ trait WorkflowTool: Send + Sync {
     fn description(&self) -> &'static str;
     fn parameters(&self) -> Value;
     fn presentation(&self) -> ToolPresentation;
-    fn available(&self, workflow: &WorkflowSpec) -> bool {
-        !workflow.uses_native_episodes()
+    fn available(&self, _workflow: &WorkflowSpec) -> bool {
+        true
     }
     fn completion(&self, _output: &Value) -> ToolCompletion {
         ToolCompletion {
@@ -53,15 +53,7 @@ impl ToolInvocation<'_> {
     fn storage(&self) -> &spiral_robotics_storage::StorageManager {
         &self.agent.inner.services.storage
     }
-    fn workflow(&self) -> WorkflowSpec {
-        self.agent
-            .inner
-            .services
-            .workflow
-            .state()
-            .workflow()
-            .clone()
-    }
+
     async fn save(self, workflow: WorkflowSpec) -> Result<String, String> {
         self.agent
             .save_authored_workflow(workflow, self.context)
@@ -76,10 +68,9 @@ struct NoArguments {}
 pub(super) struct WorkflowToolCatalog;
 
 impl WorkflowToolCatalog {
-    fn tools() -> [Box<dyn WorkflowTool>; 7] {
+    fn tools() -> [Box<dyn WorkflowTool>; 6] {
         [
             Box::new(dataset::InspectDataset),
-            Box::new(dataset::SetEpisodeFilter),
             Box::new(relations::ListRelations),
             Box::new(relations::DescribeRelations),
             Box::new(models::ListModelCapabilities),
@@ -252,7 +243,6 @@ mod tests {
     use super::*;
     use crate::data::catalog_lease::CatalogMutationLease;
     use crate::workflow::manager::WorkflowManager;
-    use spiral_robotics_common::datasets::{DatasetSelection, DatasetSummary};
     use spiral_robotics_storage::workflow_assistant::ProviderToolCall;
     use std::collections::BTreeSet;
     use std::sync::Arc;
@@ -302,18 +292,13 @@ mod tests {
     #[test]
     fn registry_dispatch_and_advertisement_share_the_same_availability_policy() {
         let relation = WorkflowSpec::new("relations", "Relations");
-        let mut episodes = WorkflowSpec::new("episodes", "Episodes");
-        episodes.select_dataset(DatasetSummary::new(
-            DatasetSelection::new(vec!["dataset_demo".into()]).unwrap(),
-            ("resource".into(), "version".into()),
-        ));
         let tools = WorkflowToolCatalog::tools();
         let names = tools
             .iter()
             .map(|tool| tool.name())
             .collect::<BTreeSet<_>>();
         assert_eq!(names.len(), tools.len(), "tool names must be unique");
-        for workflow in [&relation, &episodes] {
+        for workflow in [&relation] {
             let advertised = WorkflowToolCatalog::for_workflow(workflow);
             for name in
                 names
@@ -339,7 +324,6 @@ mod tests {
         let before = fixture.agent.inner.services.workflow.state();
         for (name, arguments) in [
             ("inspect_dataset", "[]"),
-            ("set_episode_filter", r#"{"name":"Lighting"}"#),
             ("list_relations", r#"{"unexpected":true}"#),
             ("describe_relations", r#"{"relations":[42]}"#),
             ("list_model_capabilities", "null"),
@@ -370,7 +354,10 @@ mod tests {
             serde_json::from_str(&fixture.call("list_model_capabilities", "{}").await.unwrap())
                 .unwrap();
         assert_eq!(output["models"][0]["id"], "siglip-base");
-        assert_eq!(output["models"][0]["native_episode_execution"], false);
+        assert_eq!(
+            output["models"][0]["reuse"],
+            "not implemented; each Run recomputes inference"
+        );
         assert_eq!(
             WorkflowToolCatalog::completion("list_model_capabilities", &output).summary,
             "Found 1 model capabilities"

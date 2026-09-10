@@ -42,7 +42,7 @@ impl StorageManager {
         self.project_store.connection_settings()
     }
 
-    pub fn workflow_model_store(&self) -> Arc<ProjectStore> {
+    pub fn workflow_store(&self) -> Arc<ProjectStore> {
         self.project_store.clone()
     }
 

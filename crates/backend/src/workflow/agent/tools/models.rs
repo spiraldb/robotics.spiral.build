@@ -33,8 +33,9 @@ impl WorkflowTool for ListModelCapabilities {
                     "label": "SigLIP base",
                     "max_features": 32,
                     "score_semantics": "text/image matching score, not measured brightness or a calibrated probability",
-                    "native_episode_authoring": true,
-                    "native_episode_execution": false,
+                    "input": "one Arrow input; image_column names a decoded spql.image.Image column",
+                    "output": "all input columns plus nullable Float32 scores, one per named concept; null images produce null scores",
+                    "reuse": "not implemented; each Run recomputes inference",
                     "device_policy": "Metal when available; CPU fallback"
                 }]
             }).to_string())

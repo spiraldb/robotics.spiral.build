@@ -1,11 +1,10 @@
 //! Persisted Table, Model, Query, and Result execution over Spiral relations.
 
-use std::collections::BTreeMap;
 #[cfg(test)]
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Instant, SystemTime};
+use std::time::SystemTime;
 use tokio_util::sync::CancellationToken;
 
 use crate::OperationError;
@@ -14,20 +13,15 @@ use crate::sync::MutexRecovery;
 
 use serde::{Deserialize, Serialize};
 use spiral_robotics_common::relations::{RelationCatalog, SpiralQuerySnapshot};
-use spiral_robotics_common::sql::{QualifiedRelation, WorkflowSql};
 use spiral_robotics_common::workflow::{
-    WorkflowCommand, WorkflowNodeConfig, WorkflowNodePhase, WorkflowNodeSnapshot,
-    WorkflowQuarantineSummary, WorkflowRunPhase, WorkflowRunSnapshot, WorkflowSnapshot,
-    WorkflowSpec,
+    WorkflowCommand, WorkflowNodePhase, WorkflowNodeSnapshot, WorkflowRunPhase,
+    WorkflowRunSnapshot, WorkflowSnapshot, WorkflowSpec,
 };
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
-use crate::workflow::model::{
-    ModelRunContext, ModelRunEvent, ModelRunFailure, ModelRunRequest, ModelRunResult,
-};
-use spiral_robotics_storage::workflow_sql::WorkflowSqlNode;
+use super::execution::{GraphExecution, NodeEvent};
+use spiral_robotics_storage::StorageManager;
 use spiral_robotics_storage::workflows::WorkflowJson;
-use spiral_robotics_storage::{StorageManager, StorageSchema};
 
 /// Version of the persisted workflow encoding.
 ///
@@ -35,7 +29,7 @@ use spiral_robotics_storage::{StorageManager, StorageSchema};
 /// and edge relations yet, so its persisted form is one versioned payload.
 /// Bump this constant when the payload's shape or persisted relation naming
 /// changes. Unsupported versions are refused rather than rewritten.
-const WORKFLOW_ENCODING_VERSION: u32 = 2;
+const WORKFLOW_ENCODING_VERSION: u32 = 3;
 
 /// Persistence is a backend implementation detail. The shared API exposes the
 /// graph and observation, while the manager decides that they commit together.
@@ -128,7 +122,9 @@ impl SavedWorkflow {
     }
 
     fn restored(stored: &WorkflowJson) -> Result<Self, OperationError> {
-        if stored.version() != WORKFLOW_ENCODING_VERSION {
+        // Version 2 uses the same envelope. Unchanged SQL/Table/Result graphs
+        // still decode exactly; retired node shapes fail below, without migration.
+        if !matches!(stored.version(), 2 | WORKFLOW_ENCODING_VERSION) {
             return Err(OperationError::IncompatibleWorkflow(format!(
                 "The saved Workflow uses encoding version {}, which this Studio build cannot read. Update Studio to open this project.",
                 stored.version()
@@ -273,7 +269,6 @@ impl WorkflowIdentity {
 struct ActiveRun {
     run_id: String,
     cancel: CancellationToken,
-    publication_gate: Arc<AsyncMutex<()>>,
     task: Option<tokio::task::JoinHandle<()>>,
     terminal_persistence_failed: bool,
 }
@@ -284,35 +279,14 @@ struct TerminalPersistenceError {
     detail: String,
 }
 
-#[derive(Clone, Copy)]
-enum FailureCancellationPolicy {
-    CancelWins,
-    FailureWins,
-}
-
-impl FailureCancellationPolicy {
-    fn supersedes_failure(self, cancel_requested: bool) -> bool {
-        cancel_requested && matches!(self, Self::CancelWins)
-    }
-}
-
 struct WorkflowExecution {
     run_id: String,
     cancel: CancellationToken,
-    publication_gate: Arc<AsyncMutex<()>>,
 }
 
 impl WorkflowExecution {
-    fn new(
-        run_id: String,
-        cancel: CancellationToken,
-        publication_gate: Arc<AsyncMutex<()>>,
-    ) -> Self {
-        Self {
-            run_id,
-            cancel,
-            publication_gate,
-        }
+    fn new(run_id: String, cancel: CancellationToken) -> Self {
+        Self { run_id, cancel }
     }
 }
 
@@ -369,47 +343,14 @@ impl<'a> WorkflowNodeCompletion<'a> {
     }
 }
 
-struct ModelNodeCompletion<'a> {
-    target: WorkflowNodeTarget<'a>,
-    started_ms: u64,
-    result: ModelRunResult,
-}
-
-impl<'a> ModelNodeCompletion<'a> {
-    fn new(target: WorkflowNodeTarget<'a>, started_ms: u64, result: ModelRunResult) -> Self {
-        Self {
-            target,
-            started_ms,
-            result,
-        }
-    }
-}
-
 struct WorkflowFailure<'a> {
     run_id: &'a str,
-    node_id: Option<&'a str>,
     error: String,
-    policy: FailureCancellationPolicy,
 }
 
 impl<'a> WorkflowFailure<'a> {
     fn new(run_id: &'a str, error: String) -> Self {
-        Self {
-            run_id,
-            node_id: None,
-            error,
-            policy: FailureCancellationPolicy::CancelWins,
-        }
-    }
-
-    fn at_node(mut self, node_id: Option<&'a str>) -> Self {
-        self.node_id = node_id;
-        self
-    }
-
-    fn with_policy(mut self, policy: FailureCancellationPolicy) -> Self {
-        self.policy = policy;
-        self
+        Self { run_id, error }
     }
 }
 
@@ -592,8 +533,8 @@ impl WorkflowManager {
         self.inner.saved.recover_lock().snapshot().phase().active()
     }
 
-    /// Resolve server-owned Model outputs and validate an agent-authored graph
-    /// without mutating the saved Workflow.
+    /// Validate an authored graph against its server-owned identity and revision
+    /// without mutating the saved workflow.
     pub(crate) fn prepare_candidate(
         &self,
         mut workflow: WorkflowSpec,
@@ -613,7 +554,6 @@ impl WorkflowManager {
             )));
         }
         workflow.set_revision(current.workflow().revision());
-        workflow.normalize_model_sources();
         let report = workflow.validate();
         Ok((workflow, report))
     }
@@ -676,7 +616,6 @@ impl WorkflowManager {
             .ok_or_else(|| OperationError::Internal("Workflow revision overflowed.".to_owned()))?;
         let mut workflow = requested_workflow;
         workflow.set_revision(next_revision);
-        workflow.normalize_model_sources();
         let validation = workflow.validate();
         let empty_draft = workflow.nodes().is_empty() && workflow.edges().is_empty();
         if !workflow.save_allowed(validation.valid()) {
@@ -687,12 +626,6 @@ impl WorkflowManager {
                 .unwrap_or_else(|| "Workflow validation failed.".to_owned());
             return Err(OperationError::InvalidInput(issue));
         }
-
-        self.inner
-            .storage
-            .validate_episode_workflow(&workflow)
-            .await
-            .map_err(OperationError::InvalidInput)?;
 
         let changed = current.workflow().content_changed(&workflow);
         let mut snapshot = current.snapshot().clone();
@@ -743,10 +676,6 @@ impl WorkflowManager {
         }
         saved.require_idle()?;
         saved.require_revision(revision)?;
-        if saved.workflow().uses_native_episodes() {
-            return Err(OperationError::InvalidInput("Needs preparation. Native episode scoring is not available yet; this saved filter is an authoring draft.".into()));
-        }
-
         if !validation.valid() {
             return Err(OperationError::InvalidInput(
                 "Apply a valid graph before running.".to_owned(),
@@ -755,7 +684,6 @@ impl WorkflowManager {
 
         let run_id = self.inner.identity.next_run_id();
         let cancel = CancellationToken::new();
-        let publication_gate = Arc::new(AsyncMutex::new(()));
         let snapshot = saved
             .workflow()
             .starting_snapshot(saved.snapshot(), run_id.clone());
@@ -774,14 +702,13 @@ impl WorkflowManager {
         *self.inner.active.recover_lock() = Some(ActiveRun {
             run_id: run_id.clone(),
             cancel: cancel.clone(),
-            publication_gate: publication_gate.clone(),
             task: None,
             terminal_persistence_failed: false,
         });
 
         let manager = self.clone();
         let task_run_id = run_id.clone();
-        let execution = WorkflowExecution::new(run_id, cancel, publication_gate);
+        let execution = WorkflowExecution::new(run_id, cancel);
         let task = tokio::spawn(async move {
             manager.execute(execution).await;
         });
@@ -800,18 +727,12 @@ impl WorkflowManager {
     pub(crate) async fn shutdown(&self) {
         let control = {
             let mut active = self.inner.active.recover_lock();
-            active.as_mut().map(|run| {
-                (
-                    run.publication_gate.clone(),
-                    run.cancel.clone(),
-                    run.task.take(),
-                )
-            })
+            active
+                .as_mut()
+                .map(|run| (run.cancel.clone(), run.task.take()))
         };
-        if let Some((publication_gate, cancel, task)) = control {
-            let publication = publication_gate.lock().await;
+        if let Some((cancel, task)) = control {
             cancel.cancel();
-            drop(publication);
             if let Some(task) = task {
                 let _ = task.await;
             }
@@ -825,7 +746,7 @@ impl WorkflowManager {
         // critical section. Otherwise execution could publish Cancelled and
         // clear `active` between these steps, only for this request to regress
         // the persisted snapshot back to Cancelling.
-        let (recover_terminal_persistence, run_id, publication_gate, cancel) = {
+        let (recover_terminal_persistence, run_id, cancel) = {
             let active = self.inner.active.recover_lock();
             if active.is_none() {
                 return Err(OperationError::Conflict(
@@ -836,11 +757,9 @@ impl WorkflowManager {
             (
                 control.terminal_persistence_failed,
                 control.run_id.clone(),
-                control.publication_gate.clone(),
                 control.cancel.clone(),
             )
         };
-        let publication = publication_gate.lock().await;
         cancel.cancel();
         let saved = self.inner.saved.recover_lock().clone();
         if saved.snapshot().run_id() != Some(run_id.as_str()) {
@@ -866,12 +785,10 @@ impl WorkflowManager {
                 node.set_detail("Cancelling after the current Spiral operation");
             }
         }
-        self.persist_saved(&candidate)
-            .await
-            .map_err(OperationError::External)?;
+        // In-flight observations are live state. Persist only the terminal
+        // snapshot after Arrow streams release their catalog read leases.
         let snapshot = candidate.snapshot().clone();
         *self.inner.saved.recover_lock() = candidate;
-        drop(publication);
         if recover_terminal_persistence {
             drop(_mutation);
             self.finish_cancelled(&run_id).await;
@@ -881,339 +798,78 @@ impl WorkflowManager {
     }
 
     async fn execute(&self, execution: WorkflowExecution) {
-        let WorkflowExecution {
-            run_id,
-            cancel,
-            publication_gate,
-        } = execution;
+        let WorkflowExecution { run_id, cancel, .. } = execution;
         let workflow = self.inner.saved.recover_lock().workflow().clone();
-        let order = match workflow.topological_order() {
-            Ok(order) => order,
-            Err(error) => {
-                self.finish_failed(WorkflowFailure::new(&run_id, error))
-                    .await;
-                return;
+        let (events, mut receiver) = mpsc::unbounded_channel();
+        let graph =
+            GraphExecution::new(self.inner.storage.workflow_store(), cancel.clone(), events);
+        self.set_run_phase(&run_id, WorkflowRunPhase::Running).await;
+        let run = async {
+            let result = graph.run(&workflow).await;
+            drop(graph);
+            result
+        };
+        let progress = async {
+            while let Some(event) = receiver.recv().await {
+                match event {
+                    NodeEvent::Started(id) => {
+                        self.set_node_phase(WorkflowNodePhaseChange::new(
+                            WorkflowNodeTarget::new(&run_id, &id),
+                            WorkflowNodePhase::Running,
+                            "Executing Arrow operator".into(),
+                        ))
+                        .await
+                    }
+                    NodeEvent::FusedComplete(id) => {
+                        self.complete_node(WorkflowNodeCompletion::new(
+                            WorkflowNodeTarget::new(&run_id, &id),
+                            SystemTime::now().unix_millis(),
+                            "Executed with downstream SQL".into(),
+                        ))
+                        .await
+                    }
+                    NodeEvent::Failed { id, error } => {
+                        let mut change = WorkflowNodePhaseChange::new(
+                            WorkflowNodeTarget::new(&run_id, &id),
+                            WorkflowNodePhase::Failed,
+                            "Failed".into(),
+                        );
+                        change.error = Some(error);
+                        self.set_node_phase(change).await;
+                    }
+                    NodeEvent::Complete {
+                        id,
+                        rows,
+                        elapsed_ms,
+                    } => {
+                        self.complete_node(
+                            WorkflowNodeCompletion::new(
+                                WorkflowNodeTarget::new(&run_id, &id),
+                                SystemTime::now().unix_millis().saturating_sub(elapsed_ms),
+                                format!("Produced {rows} rows"),
+                            )
+                            .with_rows(Some(rows)),
+                        )
+                        .await
+                    }
+                }
             }
         };
-        let discovered = match self.inner.storage.relation_catalog().await {
-            Ok(relations) => relations,
-            Err(error) => {
-                self.finish_failed(
-                    WorkflowFailure::new(&run_id, format!("Discovering Spiral relations: {error}"))
-                        .at_node(workflow.first_table_id()),
-                )
-                .await;
-                return;
-            }
-        };
-        let discovered = discovered
-            .relations()
-            .iter()
-            .map(|relation| (relation.name(), relation.columns().len()))
-            .collect::<BTreeMap<_, _>>();
-        let mut outputs = BTreeMap::new();
-        let mut query_outputs: BTreeMap<String, SpiralQuerySnapshot> = BTreeMap::new();
-        let mut terminal_result = None;
-
+        let (result, ()) = tokio::join!(run, progress);
         if self.cancelled(&run_id, &cancel) {
             self.finish_cancelled(&run_id).await;
-            return;
-        }
-        self.set_run_phase(&run_id, WorkflowRunPhase::Running).await;
-        for node_id in order {
-            if self.cancelled(&run_id, &cancel) {
-                self.finish_cancelled(&run_id).await;
-                return;
-            }
-            let Some(node) = workflow.nodes().iter().find(|node| node.id() == node_id) else {
-                self.finish_failed(WorkflowFailure::new(
-                    &run_id,
-                    format!("Unknown node {node_id:?}"),
-                ))
-                .await;
-                return;
-            };
-            let node_started = SystemTime::now().unix_millis();
-            match node.config() {
-                WorkflowNodeConfig::Dataset { .. }
-                | WorkflowNodeConfig::CameraScore { .. }
-                | WorkflowNodeConfig::EpisodeFilter { .. } => {
-                    self.finish_failed(WorkflowFailure::new(
-                        &run_id,
-                        "Native episode filters need preparation before execution.".into(),
-                    ))
-                    .await;
-                    return;
-                }
-                WorkflowNodeConfig::Table { relation } => {
-                    self.set_node_phase(WorkflowNodePhaseChange::new(
-                        WorkflowNodeTarget::new(&run_id, node.id()),
-                        WorkflowNodePhase::Validating,
-                        "Resolving Spiral relation".to_owned(),
-                    ))
-                    .await;
-                    let Some(field_count) = discovered.get(relation.as_str()) else {
-                        self.finish_failed(
-                            WorkflowFailure::new(
-                                &run_id,
-                                format!(
-                                    "Spiral relation {relation:?} is not in the active project catalog. Choose another relation and Apply."
-                                ),
-                            )
-                            .at_node(Some(node.id())),
-                        )
-                        .await;
-                        return;
-                    };
-                    outputs.insert(
-                        node.id().to_owned(),
-                        ResolvedNodeOutput::Relation(relation.clone()),
-                    );
-                    self.complete_node(WorkflowNodeCompletion::new(
-                        WorkflowNodeTarget::new(&run_id, node.id()),
-                        node_started,
-                        format!("Resolved {field_count} fields"),
-                    ))
-                    .await;
-                }
-                WorkflowNodeConfig::Query { sql, max_rows } => {
-                    let substituted = match outputs.substitute_in(sql) {
-                        Ok(sql) => sql,
-                        Err(error) => {
-                            self.finish_failed(
-                                WorkflowFailure::new(&run_id, error.to_string())
-                                    .at_node(Some(node.id())),
-                            )
-                            .await;
-                            return;
-                        }
-                    };
-                    let sql_node = match WorkflowSqlNode::new(&substituted) {
-                        Ok(node) => node,
-                        Err(error) => {
-                            self.finish_failed(
-                                WorkflowFailure::new(&run_id, error).at_node(Some(node.id())),
-                            )
-                            .await;
-                            return;
-                        }
-                    };
-                    let store = self.inner.storage.workflow_model_store();
-                    let feeds_result = workflow.edges().iter().any(|edge| {
-                        edge.source() == node.id()
-                            && workflow.nodes().iter().any(|target| {
-                                target.id() == edge.target()
-                                    && matches!(target.config(), WorkflowNodeConfig::Result)
-                            })
-                    });
-                    if !feeds_result {
-                        if let Err(error) = sql_node.plan(&store, BTreeMap::new()).await {
-                            self.finish_failed(
-                                WorkflowFailure::new(&run_id, error).at_node(Some(node.id())),
-                            )
-                            .await;
-                            return;
-                        }
-                        outputs
-                            .insert(node.id().to_owned(), ResolvedNodeOutput::Query(substituted));
-                        self.complete_node(WorkflowNodeCompletion::new(
-                            WorkflowNodeTarget::new(&run_id, node.id()),
-                            node_started,
-                            "Resolved read-only candidate SQL".to_owned(),
-                        ))
-                        .await;
-                        continue;
-                    }
-                    self.set_node_phase(WorkflowNodePhaseChange::new(
-                        WorkflowNodeTarget::new(&run_id, node.id()),
-                        WorkflowNodePhase::Running,
-                        "Running bounded read-only SQL".to_owned(),
-                    ))
-                    .await;
-                    let response = async {
-                        let started = Instant::now();
-                        let result = sql_node
-                            .execute(&store, BTreeMap::new())
-                            .await?
-                            .into_preview(*max_rows)
-                            .await?;
-                        Ok::<_, String>(result.with_elapsed_ms(
-                            started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
-                        ))
-                    }
-                    .await;
-                    let response = match response {
-                        Ok(response) => response,
-                        Err(error) => {
-                            if self.cancelled(&run_id, &cancel) {
-                                self.finish_cancelled(&run_id).await;
-                            } else {
-                                self.finish_failed(
-                                    WorkflowFailure::new(&run_id, error).at_node(Some(node.id())),
-                                )
-                                .await;
-                            }
-                            return;
-                        }
-                    };
-                    if self.cancelled(&run_id, &cancel) {
-                        self.finish_cancelled(&run_id).await;
-                        return;
-                    }
-                    let rows = response.rows().len();
-                    query_outputs.insert(node.id().to_owned(), response);
-                    outputs.insert(node.id().to_owned(), ResolvedNodeOutput::Query(substituted));
-                    self.complete_node(
-                        WorkflowNodeCompletion::new(
-                            WorkflowNodeTarget::new(&run_id, node.id()),
-                            node_started,
-                            format!("Returned {rows} rows"),
-                        )
-                        .with_rows(Some(rows)),
-                    )
-                    .await;
-                }
-                WorkflowNodeConfig::Result => {
-                    self.set_node_phase(WorkflowNodePhaseChange::new(
-                        WorkflowNodeTarget::new(&run_id, node.id()),
-                        WorkflowNodePhase::Running,
-                        "Preparing result payload".to_owned(),
-                    ))
-                    .await;
-                    let source = workflow
-                        .edges()
-                        .iter()
-                        .find(|edge| edge.target() == node.id())
-                        .map(|edge| edge.source());
-                    let Some(result) = source.and_then(|source| query_outputs.get(source)).cloned()
-                    else {
-                        self.finish_failed(
-                            WorkflowFailure::new(
-                                &run_id,
-                                "Result has no completed Query payload.".to_owned(),
-                            )
-                            .at_node(Some(node.id())),
-                        )
-                        .await;
-                        return;
-                    };
-                    let rows = result.rows().len();
-                    terminal_result = Some(result);
-                    self.complete_node(
-                        WorkflowNodeCompletion::new(
-                            WorkflowNodeTarget::new(&run_id, node.id()),
-                            node_started,
-                            format!("Ready · {rows} rows"),
-                        )
-                        .with_rows(Some(rows)),
-                    )
-                    .await;
-                }
-                WorkflowNodeConfig::Model { features } => {
-                    let source = workflow
-                        .edges()
-                        .iter()
-                        .find(|edge| edge.target() == node.id())
-                        .map(|edge| edge.source());
-                    let Some(candidate_sql) = source
-                        .and_then(|source| outputs.get(source))
-                        .and_then(|output| match output {
-                            ResolvedNodeOutput::Query(sql) => Some(sql.clone()),
-                            ResolvedNodeOutput::Relation(_) => None,
-                        })
-                    else {
-                        self.finish_failed(
-                            WorkflowFailure::new(
-                                &run_id,
-                                "Model has no resolved upstream candidate Query.".to_owned(),
-                            )
-                            .at_node(Some(node.id())),
-                        )
-                        .await;
-                        return;
-                    };
-                    let Some(output_relation) = node
-                        .config()
-                        .qualified_model_output(self.inner.storage.table_prefix())
-                    else {
-                        self.finish_failed(
-                            WorkflowFailure::new(
-                                &run_id,
-                                "Model output relation was not derived by the server. Apply the workflow again."
-                                    .to_owned(),
-                            )
-                            .at_node(Some(node.id())),
-                        )
-                        .await;
-                        return;
-                    };
-                    let request = ModelRunRequest::new(
-                        candidate_sql,
-                        output_relation.clone(),
-                        features.clone(),
-                    );
-                    let project_store = self.inner.storage.workflow_model_store();
-                    let (event_sender, mut events) = mpsc::unbounded_channel();
-                    let event_manager = self.clone();
-                    let event_run_id = run_id.clone();
-                    let event_node_id = node.id().to_owned();
-                    let worker_cancel = cancel.clone();
-                    let worker_publication_gate = publication_gate.clone();
-                    let progress = async move {
-                        while let Some(event) = events.recv().await {
-                            event_manager
-                                .set_model_event(
-                                    WorkflowNodeTarget::new(&event_run_id, &event_node_id),
-                                    event,
-                                )
-                                .await;
-                        }
-                    };
-                    let model = ModelRunContext::new(project_store, request, worker_cancel)
-                        .with_publication_gate(worker_publication_gate)
-                        .run(event_sender);
-                    let (result, ()) = tokio::join!(model, progress);
-                    let result = match result {
-                        Ok(result) => result,
-                        Err(ModelRunFailure::Cancelled) => {
-                            self.finish_cancelled(&run_id).await;
-                            return;
-                        }
-                        Err(ModelRunFailure::Failed(error)) => {
-                            self.finish_model_failed(
-                                WorkflowNodeTarget::new(&run_id, node.id()),
-                                error,
-                            )
-                            .await;
-                            return;
-                        }
-                    };
-                    outputs.insert(
-                        node.id().to_owned(),
-                        ResolvedNodeOutput::Relation(output_relation),
-                    );
-                    self.complete_model_node(ModelNodeCompletion::new(
-                        WorkflowNodeTarget::new(&run_id, node.id()),
-                        node_started,
-                        result,
-                    ))
-                    .await;
-                    if self.cancelled(&run_id, &cancel) {
-                        // A successful worker result means the cache+registry
-                        // transaction committed before cancellation acquired
-                        // the publication gate. Preserve that Model truth, then
-                        // stop before the next node.
-                        self.finish_cancelled(&run_id).await;
-                        return;
-                    }
+        } else {
+            match result {
+                Ok(result) => self.finish_completed(&run_id, Some(result)).await,
+                Err(error) => {
+                    self.finish_failed(WorkflowFailure::new(&run_id, error))
+                        .await
                 }
             }
         }
-        self.finish_completed(&run_id, terminal_result).await;
     }
 
-    async fn set_model_event(&self, target: WorkflowNodeTarget<'_>, event: ModelRunEvent) {
-        let WorkflowNodeTarget { run_id, node_id } = target;
+    async fn set_run_phase(&self, run_id: &str, phase: WorkflowRunPhase) {
         let _mutation = self.inner.persistence.mutation.lock().await;
         let mut saved = self.inner.saved.recover_lock().clone();
         if saved.snapshot().run_id() != Some(run_id)
@@ -1224,124 +880,11 @@ impl WorkflowManager {
         {
             return;
         }
-        let Some(node) = saved
-            .snapshot_mut()
-            .nodes_mut()
-            .iter_mut()
-            .find(|node| node.node_id() == node_id)
-        else {
-            return;
-        };
-        if node.phase() == WorkflowNodePhase::Cancelling {
-            return;
-        }
-        let mut materialization_invalidated = false;
-        let (phase, detail, progress) = match event {
-            ModelRunEvent::Loading(detail) => (WorkflowNodePhase::Loading, detail, None),
-            ModelRunEvent::Validating(detail) => (WorkflowNodePhase::Validating, detail, None),
-            ModelRunEvent::Materializing(detail) => {
-                materialization_invalidated = true;
-                (WorkflowNodePhase::Validating, detail, None)
-            }
-            ModelRunEvent::Running { detail, progress } => {
-                (WorkflowNodePhase::Running, detail, Some(progress))
-            }
-        };
-        let phase_changed = node.phase() != phase;
-        node.set_phase(phase);
-        node.set_detail(detail);
-        node.set_progress(progress);
-        node.set_error(None);
-        if materialization_invalidated {
-            node.set_model(None);
-            node.set_quarantine(WorkflowQuarantineSummary::default());
-            node.warnings_mut().clear();
-        }
-        saved
-            .snapshot_mut()
-            .set_updated_ms(SystemTime::now().unix_millis());
-        if phase_changed || materialization_invalidated {
-            self.persist_publish(saved).await;
-        } else {
-            *self.inner.saved.recover_lock() = saved;
-        }
-    }
-
-    async fn complete_model_node(&self, completion: ModelNodeCompletion<'_>) {
-        let ModelNodeCompletion {
-            target: WorkflowNodeTarget { run_id, node_id },
-            started_ms,
-            result,
-        } = completion;
-        let _mutation = self.inner.persistence.mutation.lock().await;
-        let mut saved = self.inner.saved.recover_lock().clone();
-        if saved.snapshot().run_id() != Some(run_id) {
-            return;
-        }
-        if let Some(node) = saved
-            .snapshot_mut()
-            .nodes_mut()
-            .iter_mut()
-            .find(|node| node.node_id() == node_id)
-        {
-            let has_warnings = !result.warnings().is_empty() || result.quarantine().count() > 0;
-            node.set_phase(if has_warnings {
-                WorkflowNodePhase::CompleteWithWarnings
-            } else {
-                WorkflowNodePhase::Complete
-            });
-            node.set_detail(if result.metadata().reused() {
-                format!(
-                    "Feature cache hit · {} cells reused",
-                    result.reused_feature_cells()
-                )
-            } else if has_warnings {
-                format!(
-                    "Backfilled {} feature cells with warnings · {} cache rows",
-                    result.computed_feature_cells(),
-                    result.rows()
-                )
-            } else {
-                format!(
-                    "Backfilled {} feature cells · {} reused · {} cache rows",
-                    result.computed_feature_cells(),
-                    result.reused_feature_cells(),
-                    result.rows()
-                )
-            });
-            node.set_elapsed_ms(SystemTime::now().unix_millis().saturating_sub(started_ms));
-            node.set_rows(Some(result.rows()));
-            node.set_error(None);
-            node.set_progress(Some(
-                spiral_robotics_common::workflow::WorkflowNodeProgress::new(
-                    result
-                        .computed_feature_cells()
-                        .saturating_add(result.reused_feature_cells()),
-                    result.requested_feature_cells(),
-                    "feature cells",
-                ),
-            ));
-            node.set_quarantine(result.quarantine().clone());
-            node.set_model(Some(result.metadata().clone()));
-            *node.warnings_mut() = result.warnings().to_vec();
-        }
-        saved
-            .snapshot_mut()
-            .set_updated_ms(SystemTime::now().unix_millis());
-        self.persist_publish(saved).await;
-    }
-
-    async fn set_run_phase(&self, run_id: &str, phase: WorkflowRunPhase) {
-        let _mutation = self.inner.persistence.mutation.lock().await;
-        let mut saved = self.inner.saved.recover_lock().clone();
-        if saved.snapshot().run_id() != Some(run_id) {
-            return;
-        }
         saved.snapshot_mut().set_phase(phase);
         saved
             .snapshot_mut()
             .set_updated_ms(SystemTime::now().unix_millis());
-        self.persist_publish(saved).await;
+        *self.inner.saved.recover_lock() = saved;
     }
 
     async fn set_node_phase(&self, change: WorkflowNodePhaseChange<'_>) {
@@ -1353,7 +896,12 @@ impl WorkflowManager {
         } = change;
         let _mutation = self.inner.persistence.mutation.lock().await;
         let mut saved = self.inner.saved.recover_lock().clone();
-        if saved.snapshot().run_id() != Some(run_id) {
+        if saved.snapshot().run_id() != Some(run_id)
+            || matches!(
+                saved.snapshot().phase(),
+                WorkflowRunPhase::Cancelling | WorkflowRunPhase::Cancelled
+            )
+        {
             return;
         }
         if let Some(node) = saved
@@ -1369,7 +917,7 @@ impl WorkflowManager {
         saved
             .snapshot_mut()
             .set_updated_ms(SystemTime::now().unix_millis());
-        self.persist_publish(saved).await;
+        *self.inner.saved.recover_lock() = saved;
     }
 
     async fn complete_node(&self, completion: WorkflowNodeCompletion<'_>) {
@@ -1399,7 +947,7 @@ impl WorkflowManager {
         saved
             .snapshot_mut()
             .set_updated_ms(SystemTime::now().unix_millis());
-        self.persist_publish(saved).await;
+        *self.inner.saved.recover_lock() = saved;
     }
 
     async fn finish_completed(&self, run_id: &str, result: Option<SpiralQuerySnapshot>) {
@@ -1450,29 +998,7 @@ impl WorkflowManager {
     }
 
     async fn finish_failed(&self, failure: WorkflowFailure<'_>) {
-        self.finish_failed_with_policy(failure).await;
-    }
-
-    async fn finish_model_failed(&self, target: WorkflowNodeTarget<'_>, error: String) {
-        // `run_model` classifies cancellation while it still owns the
-        // publication boundary. A typed Failed outcome—including an uncertain
-        // rollback—must not be rewritten as Cancelled by a token set after
-        // that failure crossed the gate.
-        self.finish_failed_with_policy(
-            WorkflowFailure::new(target.run_id, error)
-                .at_node(Some(target.node_id))
-                .with_policy(FailureCancellationPolicy::FailureWins),
-        )
-        .await;
-    }
-
-    async fn finish_failed_with_policy(&self, failure: WorkflowFailure<'_>) {
-        let WorkflowFailure {
-            run_id,
-            node_id,
-            error,
-            policy,
-        } = failure;
+        let WorkflowFailure { run_id, error } = failure;
         let mutation = self.inner.persistence.mutation.lock().await;
         let Some(cancelled) = self
             .inner
@@ -1484,7 +1010,7 @@ impl WorkflowManager {
         else {
             return;
         };
-        if policy.supersedes_failure(cancelled) {
+        if cancelled {
             drop(mutation);
             self.finish_cancelled(run_id).await;
             return;
@@ -1494,17 +1020,10 @@ impl WorkflowManager {
             return;
         }
         let mut candidate = saved.clone();
-        if let Some(node_id) = node_id
-            && let Some(node) = candidate
-                .snapshot_mut()
-                .nodes_mut()
-                .iter_mut()
-                .find(|node| node.node_id() == node_id)
-        {
-            node.set_phase(WorkflowNodePhase::Failed);
-            node.set_detail("Failed");
-            node.set_error(Some(error.clone()));
-        }
+        candidate
+            .snapshot_mut()
+            .nodes_mut()
+            .mark_inflight_cancelled();
         let finished = SystemTime::now().unix_millis();
         candidate.snapshot_mut().set_phase(WorkflowRunPhase::Failed);
         candidate.snapshot_mut().set_finished_ms(finished);
@@ -1571,14 +1090,6 @@ impl WorkflowManager {
                 .is_none_or(|active| active.run_id != run_id)
     }
 
-    async fn persist_publish(&self, saved: SavedWorkflow) {
-        if let Err(error) = self.persist_saved(&saved).await {
-            tracing::error!(%error, "persisting Workflow snapshot");
-        }
-
-        *self.inner.saved.recover_lock() = saved;
-    }
-
     async fn persist_saved(&self, saved: &SavedWorkflow) -> Result<(), String> {
         #[cfg(test)]
         if let Some(outcome) = self
@@ -1626,21 +1137,6 @@ impl WorkflowManager {
             .state_response()
             .with_workflows(self.inner.workflows.recover_lock().clone());
         response.set_scope_id(self.scope_id());
-        let mut snapshot = response.snapshot().clone();
-        for node in saved.workflow().nodes() {
-            let Some(node_snapshot) = snapshot
-                .nodes_mut()
-                .iter_mut()
-                .find(|candidate| candidate.node_id() == node.id())
-            else {
-                continue;
-            };
-            node_snapshot.set_output_relation(
-                node.config()
-                    .qualified_model_output(self.inner.storage.table_prefix()),
-            );
-        }
-        response.set_snapshot(snapshot);
         if let Some(error) = self
             .inner
             .persistence
@@ -1655,23 +1151,6 @@ impl WorkflowManager {
             response.set_snapshot(snapshot);
         }
         response
-    }
-}
-
-trait WorkflowNodeConfigStorageExt {
-    fn qualified_model_output(&self, table_prefix: &str) -> Option<String>;
-}
-
-impl WorkflowNodeConfigStorageExt for WorkflowNodeConfig {
-    fn qualified_model_output(&self, table_prefix: &str) -> Option<String> {
-        let Self::Model { features } = self else {
-            return None;
-        };
-        let source_relation = features.first()?.applicability().source_relation();
-        Some(StorageSchema::workflow_feature_cache_relation(
-            table_prefix,
-            source_relation,
-        ))
     }
 }
 
@@ -1705,46 +1184,11 @@ impl SavedWorkflow {
     }
 }
 
-#[derive(Clone)]
-enum ResolvedNodeOutput {
-    Relation(String),
-    Query(String),
-}
-
-trait ResolvedNodeOutputs {
-    fn substitute_in(&self, sql: &str) -> Result<String, String>;
-}
-
-impl ResolvedNodeOutputs for BTreeMap<String, ResolvedNodeOutput> {
-    fn substitute_in(&self, sql: &str) -> Result<String, String> {
-        let mut substituted = sql.to_owned();
-        for id in WorkflowSql::from(sql)
-            .node_placeholders()
-            .map_err(|error| error.to_string())?
-        {
-            let output = self.get(&id).ok_or_else(|| {
-                format!("Workflow query references unresolved node placeholder {id:?}")
-            })?;
-            let replacement = match output {
-                ResolvedNodeOutput::Relation(relation) => {
-                    QualifiedRelation::try_from(relation.as_str())
-                        .map_err(|error| error.to_string())?;
-                    relation.clone()
-                }
-                ResolvedNodeOutput::Query(query) => format!("({query})"),
-            };
-            substituted = substituted.replace(&format!("{{{{node:{id}}}}}"), &replacement);
-        }
-        Ok(substituted)
-    }
-}
-
 trait WorkflowOutputs {
-    fn first_table_id(&self) -> Option<&str>;
     fn content_changed(&self, next: &Self) -> bool;
     fn saved_node_snapshots(
         &self,
-        previous: &WorkflowRunSnapshot,
+        _previous: &WorkflowRunSnapshot,
         had_result: bool,
     ) -> Vec<WorkflowNodeSnapshot>;
     fn starting_snapshot(
@@ -1756,12 +1200,6 @@ trait WorkflowOutputs {
 }
 
 impl WorkflowOutputs for WorkflowSpec {
-    fn first_table_id(&self) -> Option<&str> {
-        self.nodes().iter().find_map(|node| {
-            matches!(node.config(), WorkflowNodeConfig::Table { .. }).then_some(node.id())
-        })
-    }
-
     fn content_changed(&self, next: &Self) -> bool {
         let mut normalized = next.clone();
         normalized.set_revision(self.revision());
@@ -1770,16 +1208,12 @@ impl WorkflowOutputs for WorkflowSpec {
 
     fn saved_node_snapshots(
         &self,
-        previous: &WorkflowRunSnapshot,
+        _previous: &WorkflowRunSnapshot,
         had_result: bool,
     ) -> Vec<WorkflowNodeSnapshot> {
         self.nodes()
             .iter()
             .map(|node| {
-                let prior = previous
-                    .nodes()
-                    .iter()
-                    .find(|snapshot| snapshot.node_id() == node.id());
                 WorkflowNodeSnapshot::new(
                     node.id(),
                     if had_result {
@@ -1792,15 +1226,6 @@ impl WorkflowOutputs for WorkflowSpec {
                     } else {
                         "Not run".to_owned()
                     },
-                )
-                .with_quarantine(
-                    prior
-                        .map(|snapshot| snapshot.quarantine().clone())
-                        .unwrap_or_default(),
-                )
-                .with_artifacts(
-                    prior.and_then(|snapshot| snapshot.model().cloned()),
-                    Vec::new(),
                 )
             })
             .collect()
@@ -1815,22 +1240,7 @@ impl WorkflowOutputs for WorkflowSpec {
         let nodes = self
             .nodes()
             .iter()
-            .map(|node| {
-                let prior = previous
-                    .nodes()
-                    .iter()
-                    .find(|snapshot| snapshot.node_id() == node.id());
-                WorkflowNodeSnapshot::new(node.id(), WorkflowNodePhase::Pending, "Pending")
-                    .with_quarantine(
-                        prior
-                            .map(|snapshot| snapshot.quarantine().clone())
-                            .unwrap_or_default(),
-                    )
-                    .with_artifacts(
-                        prior.and_then(|snapshot| snapshot.model().cloned()),
-                        Vec::new(),
-                    )
-            })
+            .map(|node| WorkflowNodeSnapshot::new(node.id(), WorkflowNodePhase::Pending, "Pending"))
             .collect();
         let mut snapshot = WorkflowRunSnapshot::started(self, run_id)
             .with_nodes(nodes)
@@ -1857,8 +1267,7 @@ mod tests {
     use arrow_schema::{DataType, Field, Schema};
     use spiral_robotics_common::relations::SpiralQuerySnapshot;
     use spiral_robotics_common::workflow::{
-        WorkflowEdgeSpec, WorkflowFeatureApplicability, WorkflowFeatureDefinition,
-        WorkflowModelRunMetadata, WorkflowNodeConfig, WorkflowNodeSpec, WorkflowRunPhase,
+        WorkflowNodeConfig, WorkflowNodeSpec, WorkflowRunPhase,
     };
 
     use spiral_robotics_storage::ProjectStore;
@@ -1870,9 +1279,13 @@ mod tests {
     fn stored_workflow_versions_are_explicit_and_unsupported_documents_are_preserved() {
         let saved = SavedWorkflow::default();
         let stored = saved.persisted().unwrap();
-        assert_eq!(stored.version(), 2);
+        assert_eq!(stored.version(), 3);
+        assert_eq!(
+            SavedWorkflow::restored(&WorkflowJson::new(2, stored.payload().to_owned())).unwrap(),
+            saved
+        );
         assert_eq!(SavedWorkflow::restored(&stored).unwrap(), saved);
-        for version in [1, 3, 4] {
+        for version in [1, 4] {
             let unsupported = WorkflowJson::new(version, stored.payload().to_owned());
             let original = unsupported.payload().to_owned();
             let error = SavedWorkflow::restored(&unsupported).unwrap_err();
@@ -1910,32 +1323,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn native_episode_drafts_cannot_enter_the_relation_runner() {
-        let settings = SpiralConnectionSettings::new(
-            "https://api.spiraldb.dev".into(),
-            "https://spfs.spiraldb.dev".into(),
-        )
-        .unwrap();
-        let database = Arc::new(spiral_robotics_storage::AdbcDatabase::new(settings.clone()));
-        let store =
-            Arc::new(ProjectStore::new(settings, "native_draft_test".into(), database).unwrap());
-        let manager = WorkflowManager::new(Arc::new(StorageManager::new(store)));
-        let source = spiral_robotics_common::datasets::DatasetSummary::new(
-            spiral_robotics_common::datasets::DatasetSelection::new(vec!["dataset_demo".into()])
-                .unwrap(),
-            ("resource".into(), "version".into()),
-        );
-        let mut graph = WorkflowSpec::new("workflow-native", "Lighting");
-        graph.select_dataset(source);
-        *manager.inner.saved.recover_lock() =
-            SavedWorkflow::new(graph.clone(), WorkflowRunSnapshot::idle_for(&graph));
-        let error = manager.start(&manager.scope_id(), 0).await.unwrap_err();
-        assert!(error.to_string().contains("Needs preparation"));
-        assert!(!manager.is_active());
-        assert!(manager.state().snapshot().run_id().is_none());
-    }
-
     #[test]
     fn revision_increment_alone_does_not_stale_a_result() {
         let current = WorkflowSpec::default();
@@ -1968,85 +1355,6 @@ mod tests {
     }
 
     #[test]
-    fn query_outputs_substitute_as_scoped_subqueries_while_tables_remain_identifiers() {
-        let outputs = BTreeMap::from([
-            (
-                "table".to_owned(),
-                ResolvedNodeOutput::Relation("robotics.frames".to_owned()),
-            ),
-            (
-                "candidates".to_owned(),
-                ResolvedNodeOutput::Query(
-                    "SELECT episode_id, frame_index FROM robotics.frames".to_owned(),
-                ),
-            ),
-        ]);
-        let sql = outputs
-            .substitute_in(
-                "SELECT * FROM {{node:candidates}} c JOIN {{node:table}} t ON c.frame_index = t.frame_index",
-            )
-            .unwrap();
-        assert!(sql.contains("FROM (SELECT episode_id, frame_index FROM robotics.frames) c"));
-        assert!(sql.contains("JOIN robotics.frames t"));
-        assert!(!sql.contains("{{node:"));
-    }
-
-    #[test]
-    fn model_output_is_one_shared_server_owned_feature_cache() {
-        let mut workflow = siglip_video_workflow("media.manifest", "model");
-        workflow.normalize_model_sources();
-        let config = workflow
-            .nodes()
-            .iter()
-            .find(|node| node.id() == "model")
-            .unwrap()
-            .config();
-        assert_eq!(
-            config.model_output_name(),
-            Some(WorkflowFeatureApplicability::derived_cache_name(
-                "media.manifest"
-            ))
-        );
-        assert_eq!(
-            config.qualified_model_output("studio"),
-            Some(StorageSchema::workflow_feature_cache_relation(
-                "studio",
-                "media.manifest"
-            ))
-        );
-    }
-
-    #[tokio::test]
-    async fn wire_snapshot_carries_the_prefixed_model_output() {
-        let mut workflow = siglip_video_workflow("media.manifest", "model");
-        workflow.normalize_model_sources();
-        let saved = SavedWorkflow::new(workflow.clone(), WorkflowRunSnapshot::idle_for(&workflow));
-        let project_store = Arc::new(
-            {
-                let settings = SpiralConnectionSettings::new(
-                    "https://api.spiraldb.dev".to_owned(),
-                    "https://spfs.spiraldb.dev".to_owned(),
-                )
-                .expect("the unconfigured test connection is valid");
-                let database =
-                    Arc::new(spiral_robotics_storage::AdbcDatabase::new(settings.clone()));
-                ProjectStore::new(settings, "studio".to_owned(), database)
-            }
-            .expect("the unconfigured test project_store is valid"),
-        );
-        let manager = WorkflowManager::new(Arc::new(StorageManager::new(project_store)));
-        let response = manager.state_response(&saved);
-        let output = response
-            .snapshot()
-            .nodes()
-            .iter()
-            .find(|node| node.node_id() == "model")
-            .and_then(WorkflowNodeSnapshot::output_relation);
-        let expected = StorageSchema::workflow_feature_cache_relation("studio", "media.manifest");
-        assert_eq!(output, Some(expected.as_str()));
-    }
-
-    #[test]
     fn rerun_keeps_previous_rows_visibly_stale_until_result_replacement() {
         let workflow = WorkflowSpec::default();
         let mut previous = WorkflowRunSnapshot::idle_for(&workflow);
@@ -2060,32 +1368,45 @@ mod tests {
         assert_eq!(next.phase(), WorkflowRunPhase::Validating);
     }
 
-    #[test]
-    fn cancellation_after_model_publication_preserves_the_completed_model_truth() {
-        let mut nodes = [
-            WorkflowNodeSnapshot::new(
-                "model",
-                WorkflowNodePhase::Complete,
-                "Backfilled 4 feature cells",
-            ),
-            WorkflowNodeSnapshot::new(
-                "query",
+    #[tokio::test]
+    async fn progress_and_cancel_do_not_wait_for_live_arrow_read_leases() {
+        let store = Arc::new(ProjectStore::workflow_test());
+        let manager = WorkflowManager::new(Arc::new(StorageManager::new(store.clone())));
+        let workflow = WorkflowSpec::default();
+        let snapshot = WorkflowRunSnapshot::started(&workflow, "lease-test");
+        *manager.inner.saved.recover_lock() = SavedWorkflow::new(workflow, snapshot);
+        *manager.inner.active.recover_lock() = Some(ActiveRun {
+            run_id: "lease-test".into(),
+            cancel: CancellationToken::new(),
+            task: None,
+            terminal_persistence_failed: false,
+        });
+        let _live_input = store.connect().await.unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            manager.set_node_phase(WorkflowNodePhaseChange::new(
+                WorkflowNodeTarget::new("lease-test", "query"),
                 WorkflowNodePhase::Running,
-                "Running read-only query",
-            ),
-        ];
-        nodes.mark_inflight_cancelled();
-        assert_eq!(nodes[0].phase(), WorkflowNodePhase::Complete);
-        assert_eq!(nodes[0].detail(), "Backfilled 4 feature cells");
-        assert_eq!(nodes[1].phase(), WorkflowNodePhase::Cancelled);
-    }
-
-    #[test]
-    fn late_cancel_does_not_hide_a_model_publication_failure() {
-        assert!(FailureCancellationPolicy::CancelWins.supersedes_failure(true));
+                "Running".into(),
+            )),
+        )
+        .await
+        .expect("progress must not request a catalog write lease");
+        let result =
+            tokio::time::timeout(Duration::from_secs(2), manager.cancel(&manager.scope_id()))
+                .await
+                .expect("Cancel must return before input streams release their leases")
+                .unwrap();
+        assert_eq!(result.phase(), WorkflowRunPhase::Cancelling);
         assert!(
-            !FailureCancellationPolicy::FailureWins.supersedes_failure(true),
-            "a rollback or publication failure remains Failed after a later cancellation token"
+            manager
+                .inner
+                .active
+                .recover_lock()
+                .as_ref()
+                .unwrap()
+                .cancel
+                .is_cancelled()
         );
     }
 
@@ -2114,7 +1435,6 @@ mod tests {
         *manager.inner.active.recover_lock() = Some(ActiveRun {
             run_id: run_id.clone(),
             cancel: CancellationToken::new(),
-            publication_gate: Arc::new(AsyncMutex::new(())),
             task: None,
             terminal_persistence_failed: false,
         });
@@ -2138,7 +1458,7 @@ mod tests {
             .persistence
             .test_outcomes
             .recover_lock()
-            .extend([Ok(()), Ok(())]);
+            .push_back(Ok(()));
         let recovered = manager
             .cancel(&manager.scope_id())
             .await
@@ -2194,100 +1514,6 @@ mod tests {
                 .await,
             Err(OperationError::Conflict(_))
         ));
-    }
-
-    #[test]
-    fn query_only_graph_edits_preserve_model_fingerprint_for_safe_reuse() {
-        let mut workflow = siglip_video_workflow("media.manifest", "model");
-        workflow.normalize_model_sources();
-        let mut previous = WorkflowRunSnapshot::idle_for(&workflow);
-        let metadata = WorkflowModelRunMetadata::new("siglip-base", "revision")
-            .with_cache_relation(StorageSchema::workflow_feature_cache_relation(
-                "studio",
-                "media.manifest",
-            ))
-            .with_features(Vec::new())
-            .with_device("Metal")
-            .with_fingerprint("fingerprint")
-            .with_row_counts(2, 2)
-            .with_timings(1, 1);
-        previous
-            .nodes_mut()
-            .iter_mut()
-            .find(|node| node.node_id() == "model")
-            .unwrap()
-            .set_model(Some(metadata.clone()));
-        let WorkflowNodeConfig::Query { sql, .. } = workflow
-            .nodes_mut()
-            .iter_mut()
-            .find(|node| node.id() == "query")
-            .unwrap()
-            .config_mut()
-        else {
-            unreachable!()
-        };
-        sql.push_str(" LIMIT 1");
-
-        let saved = workflow.saved_node_snapshots(&previous, true);
-        assert_eq!(
-            saved
-                .iter()
-                .find(|node| node.node_id() == "model")
-                .and_then(WorkflowNodeSnapshot::model),
-            Some(&metadata)
-        );
-    }
-
-    #[test]
-    fn model_cache_identity_has_no_caller_controlled_field() {
-        let current = siglip_video_workflow("media.manifest", "model");
-        let config = current
-            .nodes()
-            .iter()
-            .find(|node| node.id() == "model")
-            .unwrap()
-            .config();
-        assert_eq!(
-            config.model_output_name(),
-            Some(WorkflowFeatureApplicability::derived_cache_name(
-                "media.manifest"
-            ))
-        );
-    }
-
-    #[test]
-    fn model_cache_and_feature_source_are_server_derived() {
-        let mut workflow = siglip_video_workflow("pick_place.camera_frames", "score-node");
-        let WorkflowNodeConfig::Model { features, .. } = workflow
-            .nodes_mut()
-            .iter_mut()
-            .find(|node| node.id() == "score-node")
-            .unwrap()
-            .config_mut()
-        else {
-            unreachable!()
-        };
-        features[0].set_source_relation("provider.chosen");
-        workflow.normalize_model_sources();
-        let config = workflow
-            .nodes()
-            .iter()
-            .find(|node| node.id() == "score-node")
-            .unwrap()
-            .config();
-        let WorkflowNodeConfig::Model { features } = config else {
-            unreachable!()
-        };
-        assert_eq!(
-            config.model_output_name(),
-            Some(WorkflowFeatureApplicability::derived_cache_name(
-                "pick_place.camera_frames"
-            ))
-        );
-        assert_eq!(
-            features[0].applicability().source_relation(),
-            "pick_place.camera_frames"
-        );
     }
 
     /// Run against a disposable Spiral project with:
@@ -2544,77 +1770,6 @@ mod tests {
             .assert_absent()
             .await
             .expect("the SQL E2E must leave no catalog resources behind");
-    }
-
-    fn siglip_video_workflow(relation: &str, model_node_id: &str) -> WorkflowSpec {
-        let mut workflow = WorkflowSpec::new("default", "SigLIP video E2E");
-        workflow.nodes_mut().extend([
-                WorkflowNodeSpec::new(
-                    "table",
-                    "Video manifest",
-                    WorkflowNodeConfig::Table {
-                        relation: relation.to_owned(),
-                    },
-                ),
-                WorkflowNodeSpec::new(
-                    "candidates",
-                    "Decode candidate frames",
-                    WorkflowNodeConfig::Query {
-                        sql: "SELECT episode_id, stream_id, segment_index, frame_index, episode_time_ns, image FROM {{node:table}}".to_owned(),
-                        max_rows: 100,
-                    },
-                ),
-                WorkflowNodeSpec::new(
-                    model_node_id,
-                    "Backfill visual features",
-                    WorkflowNodeConfig::Model {
-                        features: vec![
-                            feature_definition(
-                                relation,
-                                "is_black_square_feature",
-                                "black square",
-                            ),
-                            feature_definition(
-                                relation,
-                                "is_white_square_feature",
-                                "white square",
-                            ),
-                        ],
-                    },
-                ),
-                WorkflowNodeSpec::new(
-                    "query",
-                    "Inspect scores",
-                    WorkflowNodeConfig::Query {
-                        sql: format!(
-                            "SELECT candidates.*, features.is_black_square_feature, features.is_white_square_feature FROM {{{{node:candidates}}}} candidates JOIN {{{{node:{model_node_id}}}}} features ON candidates.episode_id = features.episode_id AND candidates.stream_id = features.stream_id AND candidates.segment_index = features.segment_index AND candidates.frame_index = features.frame_index AND candidates.episode_time_ns = features.episode_time_ns ORDER BY candidates.frame_index"
-                        ),
-                        max_rows: 100,
-                    },
-                ),
-                WorkflowNodeSpec::new("result", "Scored frames", WorkflowNodeConfig::Result),
-            ]);
-        workflow.edges_mut().extend([
-            WorkflowEdgeSpec::new("table", "candidates"),
-            WorkflowEdgeSpec::new("candidates", model_node_id),
-            WorkflowEdgeSpec::new("candidates", "query"),
-            WorkflowEdgeSpec::new(model_node_id, "query"),
-            WorkflowEdgeSpec::new("query", "result"),
-        ]);
-        workflow
-    }
-
-    fn feature_definition(
-        source_relation: &str,
-        name: &str,
-        concept: &str,
-    ) -> WorkflowFeatureDefinition {
-        WorkflowFeatureDefinition::new(
-            name,
-            format!("Probability that the frame shows {concept}"),
-            concept,
-        )
-        .with_applicability(WorkflowFeatureApplicability::new(source_relation, "image"))
     }
 
     async fn wait_for_terminal(manager: &WorkflowManager) -> WorkflowRunSnapshot {

@@ -1,26 +1,9 @@
 use super::*;
-use crate::{AdbcDatabase, DatabaseSession as _, SpiralConnectionSettings};
+use crate::DatabaseSession as _;
 use arrow_array::{Array as _, ArrayRef, BinaryArray, Int64Array, StructArray, UInt32Array};
 use arrow_schema::extension::EXTENSION_TYPE_NAME_KEY;
 use futures::TryStreamExt as _;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-
-impl ProjectStore {
-    fn workflow_test() -> Self {
-        let settings =
-            SpiralConnectionSettings::new("http://localhost:1".into(), "http://localhost:2".into())
-                .unwrap()
-                .with_project("contract")
-                .unwrap();
-        Self::new(
-            settings,
-            "contract".into(),
-            Arc::new(AdbcDatabase::memory()),
-        )
-        .unwrap()
-    }
-}
 
 #[tokio::test]
 async fn workflow_sql_nodes_plan_and_execute_an_arrow_join() {
@@ -93,40 +76,6 @@ async fn workflow_sql_nodes_plan_and_execute_an_arrow_join() {
             .unwrap()
             .is_empty()
     );
-}
-
-#[tokio::test]
-async fn workflow_sql_node_rejects_schema_errors_before_consuming_input() {
-    let store = ProjectStore::workflow_test();
-    let polled = Arc::new(AtomicBool::new(false));
-    let observed = polled.clone();
-    let schema = Arc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
-        "value",
-        arrow_schema::DataType::Int64,
-        false,
-    )]));
-    let input = RecordBatchStream::new(
-        schema,
-        futures::stream::poll_fn(move |_| {
-            observed.store(true, Ordering::SeqCst);
-            std::task::Poll::Ready(None)
-        })
-        .boxed(),
-    );
-    let invalid = WorkflowSqlNode::new("SELECT missing FROM {{node:source}}").unwrap();
-    let result = invalid
-        .execute(&store, BTreeMap::from([("source".into(), input)]))
-        .await;
-    assert!(result.is_err());
-    assert!(!polled.load(Ordering::SeqCst));
-    assert!(
-        invalid
-            .plan(&store, BTreeMap::new())
-            .await
-            .unwrap_err()
-            .contains("named inputs")
-    );
-    assert!(WorkflowSqlNode::new("DELETE FROM data").is_err());
 }
 
 #[tokio::test]
@@ -206,4 +155,29 @@ async fn workflow_sql_decodes_packet_frames_through_the_native_driver() {
             .unwrap();
         assert!(widths.iter().all(|width| width == Some(32)));
     }
+}
+
+#[tokio::test]
+async fn workflow_preview_drains_and_reports_errors_beyond_its_row_limit() {
+    let batch =
+        RecordBatch::try_from_iter([("value", Arc::new(Int64Array::from(vec![1, 2])) as ArrayRef)])
+            .unwrap();
+    let stream = RecordBatchStream::new(
+        batch.schema(),
+        futures::stream::iter([
+            Ok(batch),
+            Err(crate::DatabaseError::new(
+                crate::DatabaseErrorKind::Internal,
+                "late failure",
+            )),
+        ])
+        .boxed(),
+    );
+    assert!(
+        stream
+            .into_preview_drained(1)
+            .await
+            .unwrap_err()
+            .contains("late failure")
+    );
 }

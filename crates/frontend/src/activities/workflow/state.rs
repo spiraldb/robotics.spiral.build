@@ -14,10 +14,10 @@ use dioxus_workbench::PanelId;
 use spiral_robotics_common::relations::{CatalogRelation, RelationCatalog};
 use spiral_robotics_common::workflow::{
     WorkflowAgentArtifactReceipt, WorkflowAgentCommand as AgentRequest, WorkflowAgentSnapshot,
-    WorkflowCommand as WorkflowRequest, WorkflowEdgeSpec, WorkflowFeatureApplicability,
-    WorkflowFeatureDefinition, WorkflowModelRunMetadata, WorkflowNodeConfig, WorkflowNodePhase,
-    WorkflowNodeProgress, WorkflowNodeSnapshot, WorkflowQuarantineSummary, WorkflowRunPhase,
-    WorkflowRunSnapshot, WorkflowSnapshot, WorkflowSpec, WorkflowSummary, WorkflowValidationReport,
+    WorkflowCommand as WorkflowRequest, WorkflowEdgeSpec, WorkflowModelFeature, WorkflowNodeConfig,
+    WorkflowNodePhase, WorkflowNodeProgress, WorkflowNodeSnapshot, WorkflowQuarantineSummary,
+    WorkflowRunPhase, WorkflowRunSnapshot, WorkflowSnapshot, WorkflowSpec, WorkflowSummary,
+    WorkflowValidationReport,
 };
 
 use crate::shell::notifications::MessageSource;
@@ -30,9 +30,6 @@ pub(crate) const RESULTS_PANEL_ID: &str = "workflow-results";
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum WorkflowNodeKind {
-    Dataset,
-    CameraScore,
-    EpisodeFilter,
     Table,
     Model,
     Query,
@@ -42,9 +39,6 @@ pub(crate) enum WorkflowNodeKind {
 impl From<&WorkflowNodeConfig> for WorkflowNodeKind {
     fn from(config: &WorkflowNodeConfig) -> Self {
         match config {
-            WorkflowNodeConfig::Dataset { .. } => Self::Dataset,
-            WorkflowNodeConfig::CameraScore { .. } => Self::CameraScore,
-            WorkflowNodeConfig::EpisodeFilter { .. } => Self::EpisodeFilter,
             WorkflowNodeConfig::Table { .. } => Self::Table,
             WorkflowNodeConfig::Model { .. } => Self::Model,
             WorkflowNodeConfig::Query { .. } => Self::Query,
@@ -66,7 +60,6 @@ pub(crate) struct WorkflowNodeData {
 struct WorkflowNodeSource {
     fields: Vec<String>,
     relation: Option<String>,
-    feature_cache_relation: Option<String>,
     sql: Option<String>,
 }
 
@@ -82,8 +75,8 @@ struct WorkflowNodeExecution {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 struct WorkflowNodeModel {
-    features: Vec<WorkflowFeatureDefinition>,
-    metadata: Option<WorkflowModelRunMetadata>,
+    features: Vec<WorkflowModelFeature>,
+    image_column: String,
 }
 
 impl WorkflowNodeData {
@@ -103,21 +96,12 @@ impl WorkflowNodeData {
         self.source.relation.as_deref()
     }
 
-    pub(crate) fn feature_cache_relation(&self) -> Option<&str> {
-        self.source.feature_cache_relation.as_deref()
-    }
-
     pub(crate) fn sql(&self) -> Option<&str> {
         self.source.sql.as_deref()
     }
 
     pub(crate) fn detail(&self) -> &str {
         &self.execution.detail
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn phase(&self) -> WorkflowNodePhase {
-        self.execution.phase
     }
 
     pub(crate) fn error(&self) -> Option<&str> {
@@ -136,19 +120,16 @@ impl WorkflowNodeData {
         &self.execution.quarantine
     }
 
-    pub(crate) fn features(&self) -> &[WorkflowFeatureDefinition] {
+    pub(crate) fn features(&self) -> &[WorkflowModelFeature] {
         &self.model.features
     }
 
-    pub(crate) const fn model_run(&self) -> Option<&WorkflowModelRunMetadata> {
-        self.model.metadata.as_ref()
+    pub(crate) fn image_column(&self) -> &str {
+        &self.model.image_column
     }
 
     pub(crate) const fn kind_label(&self) -> &'static str {
         match self.kind {
-            WorkflowNodeKind::Dataset => "Dataset",
-            WorkflowNodeKind::CameraScore => "Camera scoring",
-            WorkflowNodeKind::EpisodeFilter => "Episode filter",
             WorkflowNodeKind::Table => "Table",
             WorkflowNodeKind::Model => "Model",
             WorkflowNodeKind::Query => "Query",
@@ -158,9 +139,9 @@ impl WorkflowNodeData {
 
     pub(crate) const fn kind_class(&self) -> &'static str {
         match self.kind {
-            WorkflowNodeKind::Table | WorkflowNodeKind::Dataset => "workflow-node-kind-table",
-            WorkflowNodeKind::Model | WorkflowNodeKind::CameraScore => "workflow-node-kind-model",
-            WorkflowNodeKind::Query | WorkflowNodeKind::EpisodeFilter => "workflow-node-kind-query",
+            WorkflowNodeKind::Table => "workflow-node-kind-table",
+            WorkflowNodeKind::Model => "workflow-node-kind-model",
+            WorkflowNodeKind::Query => "workflow-node-kind-query",
             WorkflowNodeKind::Result => "workflow-node-kind-result",
         }
     }
@@ -498,7 +479,33 @@ impl WorkflowController {
         if self.workflow_selection_reason().is_some() {
             return;
         }
-        self.document.draft.write().select_dataset(source);
+        let mut draft = self.document.draft.write();
+        draft.nodes_mut().clear();
+        draft.edges_mut().clear();
+        draft
+            .nodes_mut()
+            .push(spiral_robotics_common::workflow::WorkflowNodeSpec::new(
+                "source",
+                source.selection().label(),
+                WorkflowNodeConfig::Query {
+                    sql: format!(
+                        "SELECT * FROM spql.mcap.episodes('{}')",
+                        source.selection().sql_name().replace('\'', "''")
+                    ),
+                    max_rows: 100,
+                },
+            ));
+        draft
+            .nodes_mut()
+            .push(spiral_robotics_common::workflow::WorkflowNodeSpec::new(
+                "result",
+                "Results",
+                WorkflowNodeConfig::Result,
+            ));
+        draft
+            .edges_mut()
+            .push(WorkflowEdgeSpec::new("source", "result"));
+        drop(draft);
         self.sync_graph();
         self.apply(studio);
     }
@@ -560,9 +567,6 @@ impl WorkflowController {
         }
         if self.dirty() {
             return Some("Apply graph changes before running.".to_owned());
-        }
-        if self.spec().uses_native_episodes() {
-            return Some("Needs preparation. Native episode scoring is not available yet.".into());
         }
         let draft = self.document.draft.read();
         if draft.nodes().is_empty() && draft.edges().is_empty() {
@@ -685,9 +689,6 @@ impl WorkflowController {
             *current = relation;
             true
         });
-        if changed {
-            draft.normalize_model_sources();
-        }
         drop(draft);
         if changed {
             self.sync_graph();
@@ -710,10 +711,21 @@ impl WorkflowController {
         }
     }
 
+    pub(crate) fn set_model_image(mut self, node_id: &str, value: String) {
+        self.document.draft.write().edit_node(node_id, |config| {
+            let WorkflowNodeConfig::Model { image_column, .. } = config else {
+                return false;
+            };
+            *image_column = value;
+            true
+        });
+        self.sync_graph();
+    }
+
     pub(crate) fn set_model_feature(
         mut self,
         target: ModelFeatureTarget<'_>,
-        edit: impl FnOnce(&mut WorkflowFeatureDefinition),
+        edit: impl FnOnce(&mut WorkflowModelFeature),
     ) {
         let mut draft = self.document.draft.write();
         let changed = draft.edit_node(target.node_id, |config| {
@@ -726,18 +738,6 @@ impl WorkflowController {
             edit(feature);
             true
         });
-        let features = draft
-            .nodes()
-            .iter()
-            .find(|node| node.id() == target.node_id)
-            .and_then(|node| match &node.config() {
-                WorkflowNodeConfig::Model { features, .. } => Some(features.clone()),
-                _ => None,
-            })
-            .unwrap_or_default();
-        if changed {
-            draft.refresh_generated_feature_query(target.node_id, &features);
-        }
         drop(draft);
         if changed {
             self.sync_graph();
@@ -750,21 +750,9 @@ impl WorkflowController {
             let WorkflowNodeConfig::Model { features, .. } = config else {
                 return false;
             };
-            let Some(first) = features.first() else {
-                return false;
-            };
-            let applicability = WorkflowFeatureApplicability::new(
-                first.applicability().source_relation(),
-                first.applicability().media_field(),
-            );
-            features
-                .push(WorkflowFeatureDefinition::new("", "", "").with_applicability(applicability));
+            features.push(WorkflowModelFeature::new("", "", ""));
             true
         });
-        if changed {
-            let features = draft.model_features(node_id);
-            draft.refresh_generated_feature_query(node_id, &features);
-        }
         drop(draft);
         if changed {
             self.sync_graph();
@@ -783,10 +771,6 @@ impl WorkflowController {
             features.remove(index);
             true
         });
-        if changed {
-            let features = draft.model_features(node_id);
-            draft.refresh_generated_feature_query(node_id, &features);
-        }
         drop(draft);
         if changed {
             self.sync_graph();
@@ -1340,12 +1324,6 @@ trait WorkflowDraft {
     ) -> bool;
     fn insert_siglip_model(&mut self) -> Option<String>;
     fn remove_siglip_model(&mut self, node_id: &str) -> Option<String>;
-    fn model_features(&self, model_id: &str) -> Vec<WorkflowFeatureDefinition>;
-    fn refresh_generated_feature_query(
-        &mut self,
-        model_id: &str,
-        features: &[WorkflowFeatureDefinition],
-    );
     fn revision_conflicts_with(&self, server: &WorkflowSpec) -> bool;
 }
 
@@ -1362,206 +1340,70 @@ impl WorkflowDraft for WorkflowSpec {
     }
 
     fn insert_siglip_model(&mut self) -> Option<String> {
-        let result_edge_index = self.edges().iter().position(|edge| {
-            let source = self.nodes().iter().find(|node| node.id() == edge.source());
-            let target = self.nodes().iter().find(|node| node.id() == edge.target());
-            source.is_some_and(|node| {
-                WorkflowNodeKind::from(node.config()) == WorkflowNodeKind::Query
-            }) && target.is_some_and(|node| {
-                WorkflowNodeKind::from(node.config()) == WorkflowNodeKind::Result
+        let edge_index = self.edges().iter().position(|edge| {
+            self.nodes().iter().any(|node| {
+                node.id() == edge.target() && matches!(node.config(), WorkflowNodeConfig::Result)
             })
         })?;
-        let result_edge = self.edges()[result_edge_index].clone();
-        let candidate_id = result_edge.source().to_owned();
-        let source_id = self
-            .edges()
-            .iter()
-            .find(|edge| edge.target() == candidate_id)
-            .and_then(|edge| {
-                self.nodes()
-                    .iter()
-                    .find(|node| node.id() == edge.source())
-                    .filter(|node| WorkflowNodeKind::from(node.config()) == WorkflowNodeKind::Table)
-                    .map(|_| edge.source().to_owned())
-            })?;
-        let source_relation = self
-            .nodes()
-            .iter()
-            .find(|node| node.id() == source_id)
-            .and_then(|node| match &node.config() {
-                WorkflowNodeConfig::Table { relation } => Some(relation.clone()),
-                _ => None,
-            })?;
-        self.edges_mut().remove(result_edge_index);
-        let mut suffix = 1_u32;
+        let edge = self.edges_mut().remove(edge_index);
+        let mut suffix = 1;
         let node_id = loop {
-            let candidate = if suffix == 1 {
-                "siglip".to_owned()
-            } else {
-                format!("siglip_{suffix}")
-            };
-            if !self.nodes().iter().any(|node| node.id() == candidate) {
-                break candidate;
+            let id = format!("siglip_{suffix}");
+            if !self.nodes().iter().any(|node| node.id() == id) {
+                break id;
             }
             suffix += 1;
         };
-        let mut query_suffix = 1_u32;
-        let final_query_id = loop {
-            let candidate = if query_suffix == 1 {
-                "feature_query".to_owned()
-            } else {
-                format!("feature_query_{query_suffix}")
-            };
-            if !self.nodes().iter().any(|node| node.id() == candidate) {
-                break candidate;
-            }
-            query_suffix += 1;
-        };
-        let insert_at = self
-            .nodes()
-            .iter()
-            .position(|node| node.id() == result_edge.target())
-            .unwrap_or(self.nodes().len());
-        self.nodes_mut().insert(
-            insert_at,
-            spiral_robotics_common::workflow::WorkflowNodeSpec::new(
+        self.nodes_mut()
+            .push(spiral_robotics_common::workflow::WorkflowNodeSpec::new(
                 node_id.clone(),
-                "Backfill visual features",
+                "Score images",
                 WorkflowNodeConfig::Model {
-                    features: vec![
-                        WorkflowFeatureDefinition::new("", "", "").with_applicability(
-                            WorkflowFeatureApplicability::new(source_relation, "image"),
-                        ),
-                    ],
+                    image_column: "image".into(),
+                    features: vec![WorkflowModelFeature::new("", "", "")],
                 },
-            ),
-        );
-        self.nodes_mut().insert(
-            insert_at + 1,
-            spiral_robotics_common::workflow::WorkflowNodeSpec::new(
-                final_query_id.clone(),
-                "Join candidates and features",
-                WorkflowNodeConfig::Query {
-                    sql: FeatureJoinSql::build(&candidate_id, &node_id, &[]),
-                    max_rows: 100,
-                },
-            ),
-        );
+            ));
         self.edges_mut().extend([
-            WorkflowEdgeSpec::new(candidate_id.clone(), node_id.clone()),
-            WorkflowEdgeSpec::new(candidate_id.clone(), final_query_id.clone()),
-            WorkflowEdgeSpec::new(node_id.clone(), final_query_id.clone()),
-            WorkflowEdgeSpec::new(final_query_id, result_edge.target()),
+            WorkflowEdgeSpec::new(edge.source(), node_id.clone()),
+            WorkflowEdgeSpec::new(node_id.clone(), edge.target()),
         ]);
         Some(node_id)
     }
 
     fn remove_siglip_model(&mut self, node_id: &str) -> Option<String> {
-        let model_index = self.nodes().iter().position(|node| {
-            node.id() == node_id && WorkflowNodeKind::from(node.config()) == WorkflowNodeKind::Model
-        })?;
-        let candidate_id = self
+        let parent = self
             .edges()
             .iter()
-            .find(|edge| edge.target() == node_id)
-            .map(|edge| edge.source().to_owned())?;
-        let final_query_id = self
+            .find(|edge| edge.target() == node_id)?
+            .source()
+            .to_owned();
+        let children = self
             .edges()
             .iter()
-            .find(|edge| edge.source() == node_id)
-            .map(|edge| edge.target().to_owned())?;
-        let result_id = self
-            .edges()
-            .iter()
-            .find(|edge| edge.source() == final_query_id)
-            .map(|edge| edge.target().to_owned())?;
-        let query_is_upstream = self.nodes().iter().any(|node| {
-            node.id() == candidate_id
-                && WorkflowNodeKind::from(node.config()) == WorkflowNodeKind::Query
-        });
-        let query_is_downstream = self.nodes().iter().any(|node| {
-            node.id() == final_query_id
-                && WorkflowNodeKind::from(node.config()) == WorkflowNodeKind::Query
-        });
-        if !query_is_upstream || !query_is_downstream {
-            return None;
-        }
-
-        self.nodes_mut().remove(model_index);
-        self.nodes_mut().retain(|node| node.id() != final_query_id);
-        self.edges_mut().retain(|edge| {
-            edge.source() != node_id
-                && edge.target() != node_id
-                && edge.source() != final_query_id
-                && edge.target() != final_query_id
-        });
-        self.edges_mut()
-            .push(WorkflowEdgeSpec::new(candidate_id.clone(), result_id));
-        Some(candidate_id)
-    }
-
-    fn model_features(&self, model_id: &str) -> Vec<WorkflowFeatureDefinition> {
-        self.nodes()
-            .iter()
-            .find(|node| node.id() == model_id)
-            .and_then(|node| match &node.config() {
-                WorkflowNodeConfig::Model { features, .. } => Some(features.clone()),
-                _ => None,
-            })
-            .unwrap_or_default()
-    }
-
-    fn refresh_generated_feature_query(
-        &mut self,
-        model_id: &str,
-        features: &[WorkflowFeatureDefinition],
-    ) {
-        let Some(candidate_id) = self
-            .edges()
-            .iter()
-            .find(|edge| edge.target() == model_id)
-            .map(|edge| edge.source().to_owned())
-        else {
-            return;
-        };
-        let Some(final_query_id) = self
-            .edges()
-            .iter()
-            .find(|edge| edge.source() == model_id)
+            .filter(|edge| edge.source() == node_id)
             .map(|edge| edge.target().to_owned())
-        else {
-            return;
-        };
-        if let Some(query) = self
-            .nodes_mut()
-            .iter_mut()
-            .find(|node| node.id() == final_query_id)
-            && let WorkflowNodeConfig::Query { sql, .. } = query.config_mut()
-        {
-            *sql = FeatureJoinSql::build(&candidate_id, model_id, features);
+            .collect::<Vec<_>>();
+        self.nodes_mut().retain(|node| node.id() != node_id);
+        self.edges_mut()
+            .retain(|edge| edge.source() != node_id && edge.target() != node_id);
+        for child in children {
+            self.edges_mut()
+                .push(WorkflowEdgeSpec::new(parent.clone(), child.clone()));
+            self.edit_node(&child, |config| {
+                if let WorkflowNodeConfig::Query { sql, .. } = config {
+                    *sql = sql.replace(
+                        &format!("{{{{node:{node_id}}}}}"),
+                        &format!("{{{{node:{parent}}}}}"),
+                    );
+                }
+                true
+            });
         }
+        Some(parent)
     }
 
-    /// Keep deterministic server-owned Model fields visible and valid while the
-    /// user edits its one authoritative source Table. The backend repeats this
-    /// normalization at admission; the browser never chooses a cache relation.
     fn revision_conflicts_with(&self, server: &WorkflowSpec) -> bool {
         self != server && self.revision() != server.revision()
-    }
-}
-
-struct FeatureJoinSql;
-
-impl FeatureJoinSql {
-    fn build(candidate_id: &str, model_id: &str, features: &[WorkflowFeatureDefinition]) -> String {
-        let feature_projection = features
-            .iter()
-            .filter(|feature| !feature.name().is_empty())
-            .map(|feature| format!(", features.{}", feature.name()))
-            .collect::<String>();
-        format!(
-            "SELECT candidates.*{feature_projection} FROM {{{{node:{candidate_id}}}}} candidates JOIN {{{{node:{model_id}}}}} features ON candidates.episode_id = features.episode_id AND candidates.stream_id = features.stream_id AND candidates.segment_index = features.segment_index AND candidates.frame_index = features.frame_index AND candidates.episode_time_ns = features.episode_time_ns"
-        )
     }
 }
 
@@ -1622,9 +1464,9 @@ impl WorkflowGraphProjection for WorkflowSpec {
                 );
                 *rank_index += 1;
                 let type_name = match WorkflowNodeKind::from(node.config()) {
-                    WorkflowNodeKind::Table | WorkflowNodeKind::Dataset => "table",
-                    WorkflowNodeKind::Model | WorkflowNodeKind::CameraScore => "model",
-                    WorkflowNodeKind::Query | WorkflowNodeKind::EpisodeFilter => "query",
+                    WorkflowNodeKind::Table => "table",
+                    WorkflowNodeKind::Model => "model",
+                    WorkflowNodeKind::Query => "query",
                     WorkflowNodeKind::Result => "result",
                 };
                 Node::with_data(
@@ -1720,10 +1562,6 @@ impl NodeProjection<'_> {
         let quarantine = node_snapshot
             .map(|snapshot| snapshot.quarantine().to_owned())
             .unwrap_or_default();
-        let model_snapshot = node_snapshot.and_then(|snapshot| snapshot.model().cloned());
-        let model_output_relation = node_snapshot
-            .and_then(WorkflowNodeSnapshot::output_relation)
-            .map(str::to_owned);
         let warnings = node_snapshot
             .map(|snapshot| snapshot.warnings().to_owned())
             .unwrap_or_default();
@@ -1736,115 +1574,94 @@ impl NodeProjection<'_> {
             warnings,
         };
         match node.config() {
-        WorkflowNodeConfig::Dataset { source } => WorkflowNodeData {
-            kind: WorkflowNodeKind::Dataset,
-            description: format!("Native episodes from {}", source.selection().label()),
-            source: WorkflowNodeSource { fields: vec!["Episode identity".into(), "Camera topics".into()], ..WorkflowNodeSource::default() },
-            execution, model: WorkflowNodeModel::default(),
-        },
-        WorkflowNodeConfig::CameraScore { scoring } => WorkflowNodeData {
-            kind: WorkflowNodeKind::CameraScore, description: scoring.description(),
-            source: WorkflowNodeSource { fields: vec![scoring.camera().topic().to_owned(), format!("{} ms sampling", scoring.interval_ms()), "SigLIP score".into()], ..WorkflowNodeSource::default() },
-            execution, model: WorkflowNodeModel::default(),
-        },
-        WorkflowNodeConfig::EpisodeFilter { rule } => WorkflowNodeData {
-            kind: WorkflowNodeKind::EpisodeFilter, description: rule.description(),
-            source: WorkflowNodeSource { fields: vec!["Included / excluded / unknown".into()], ..WorkflowNodeSource::default() },
-            execution, model: WorkflowNodeModel::default(),
-        },
-        WorkflowNodeConfig::Table { relation } => {
-            let metadata = self.relations.get(relation.as_str());
-            WorkflowNodeData {
-                kind: WorkflowNodeKind::Table,
-                description: metadata.map_or_else(
-                    || "Choose an existing qualified Spiral relation.".to_owned(),
-                    |metadata| {
-                        format!(
-                            "{} · {} fields",
-                            metadata.relation_type(),
-                            metadata.columns().len()
-                        )
+            WorkflowNodeConfig::Table { relation } => {
+                let metadata = self.relations.get(relation.as_str());
+                WorkflowNodeData {
+                    kind: WorkflowNodeKind::Table,
+                    description: metadata.map_or_else(
+                        || "Choose an existing qualified Spiral relation.".to_owned(),
+                        |metadata| {
+                            format!(
+                                "{} · {} fields",
+                                metadata.relation_type(),
+                                metadata.columns().len()
+                            )
+                        },
+                    ),
+                    source: WorkflowNodeSource {
+                        fields: metadata
+                            .map(|metadata| {
+                                metadata
+                                    .columns()
+                                    .iter()
+                                    .map(|column| column.name().to_owned())
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        relation: (!relation.is_empty()).then(|| relation.clone()),
+                        ..WorkflowNodeSource::default()
                     },
-                ),
+                    execution,
+                    model: WorkflowNodeModel::default(),
+                }
+            }
+            WorkflowNodeConfig::Model {
+                image_column,
+                features,
+            } => WorkflowNodeData {
+                kind: WorkflowNodeKind::Model,
+                description:
+                    "SigLIP appends scores to its input rows. Every run recomputes inference."
+                        .to_owned(),
                 source: WorkflowNodeSource {
-                    fields: metadata
-                        .map(|metadata| {
-                            metadata
+                    fields: features
+                        .iter()
+                        .map(|feature| feature.name().trim())
+                        .filter(|name| !name.is_empty())
+                        .map(str::to_owned)
+                        .collect(),
+                    ..WorkflowNodeSource::default()
+                },
+                execution,
+                model: WorkflowNodeModel {
+                    features: features.clone(),
+                    image_column: image_column.clone(),
+                },
+            },
+            WorkflowNodeConfig::Query { sql, .. } => WorkflowNodeData {
+                kind: WorkflowNodeKind::Query,
+                description:
+                    "Bounded read-only Spiral SQL with server-owned relation placeholders."
+                        .to_owned(),
+                source: WorkflowNodeSource {
+                    sql: Some(sql.clone()),
+                    ..WorkflowNodeSource::default()
+                },
+                execution,
+                model: WorkflowNodeModel::default(),
+            },
+            WorkflowNodeConfig::Result => WorkflowNodeData {
+                kind: WorkflowNodeKind::Result,
+                description: "Terminal media-aware query result.".to_owned(),
+                source: WorkflowNodeSource {
+                    fields: self
+                        .run_snapshot
+                        .result()
+                        .as_ref()
+                        .map(|result| {
+                            result
                                 .columns()
                                 .iter()
                                 .map(|column| column.name().to_owned())
                                 .collect()
                         })
                         .unwrap_or_default(),
-                    relation: (!relation.is_empty()).then(|| relation.clone()),
                     ..WorkflowNodeSource::default()
                 },
                 execution,
-                model: WorkflowNodeModel {
-                    metadata: model_snapshot,
-                    ..WorkflowNodeModel::default()
-                },
-            }
+                model: WorkflowNodeModel::default(),
+            },
         }
-        WorkflowNodeConfig::Model { features } => WorkflowNodeData {
-            kind: WorkflowNodeKind::Model,
-            description:
-                "Pinned SigLIP backfills registered features for a SQL-defined candidate cohort."
-                    .to_owned(),
-            source: WorkflowNodeSource {
-                fields: features
-                    .iter()
-                    .map(|feature| feature.name().trim())
-                    .filter(|name| !name.is_empty())
-                    .map(str::to_owned)
-                    .collect(),
-                feature_cache_relation: model_output_relation,
-                ..WorkflowNodeSource::default()
-            },
-            execution,
-            model: WorkflowNodeModel {
-                features: features.clone(),
-                metadata: model_snapshot,
-            },
-        },
-        WorkflowNodeConfig::Query { sql, .. } => WorkflowNodeData {
-            kind: WorkflowNodeKind::Query,
-            description: "Bounded read-only Spiral SQL with server-owned relation placeholders."
-                .to_owned(),
-            source: WorkflowNodeSource {
-                sql: Some(sql.clone()),
-                ..WorkflowNodeSource::default()
-            },
-            execution,
-            model: WorkflowNodeModel {
-                metadata: model_snapshot,
-                ..WorkflowNodeModel::default()
-            },
-        },
-        WorkflowNodeConfig::Result => WorkflowNodeData {
-            kind: WorkflowNodeKind::Result,
-            description: "Terminal media-aware query result.".to_owned(),
-            source: WorkflowNodeSource {
-                fields: self.run_snapshot
-                    .result()
-                    .as_ref()
-                    .map(|result| {
-                        result
-                            .columns()
-                            .iter()
-                            .map(|column| column.name().to_owned())
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                ..WorkflowNodeSource::default()
-            },
-            execution,
-            model: WorkflowNodeModel {
-                metadata: model_snapshot,
-                ..WorkflowNodeModel::default()
-            },
-        },
-    }
     }
 }
 
@@ -1909,230 +1726,18 @@ mod tests {
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]
-    fn inserting_siglip_makes_candidate_backfill_and_final_join_visible() {
-        let mut workflow = WorkflowSpec::default();
-        let WorkflowNodeConfig::Table { relation } = workflow.nodes_mut()[0].config_mut() else {
-            unreachable!()
-        };
-        *relation = "pick_place.camera_frames".to_owned();
-        let node_id = workflow.insert_siglip_model().unwrap();
-        assert_eq!(node_id, "siglip");
-        assert_eq!(workflow.nodes().len(), 5);
-        assert_eq!(workflow.edges().len(), 5);
-        assert_eq!(workflow.edges()[0].source(), "table");
-        assert_eq!(workflow.edges()[0].target(), "query");
+    fn model_insertion_and_removal_preserve_the_existing_sql() {
+        let mut graph = WorkflowSpec::default();
+        let before = graph.clone();
+        let id = graph.insert_siglip_model().unwrap();
+        assert_eq!(graph.nodes().len(), 4);
+        let model = graph.nodes().iter().find(|node| node.id() == id).unwrap();
         assert!(
-            workflow
-                .edges()
-                .iter()
-                .any(|edge| edge.source() == "query" && edge.target() == "siglip")
+            matches!(model.config(), WorkflowNodeConfig::Model { image_column, .. } if image_column == "image")
         );
-        assert!(
-            workflow
-                .edges()
-                .iter()
-                .any(|edge| edge.source() == "query" && edge.target() == "feature_query")
-        );
-        assert!(
-            workflow
-                .edges()
-                .iter()
-                .any(|edge| edge.source() == "siglip" && edge.target() == "feature_query")
-        );
-        assert!(
-            workflow
-                .edges()
-                .iter()
-                .any(|edge| edge.source() == "feature_query" && edge.target() == "result")
-        );
-        let WorkflowNodeConfig::Model { features, .. } = &workflow
-            .nodes()
-            .iter()
-            .find(|node| node.id() == "siglip")
-            .unwrap()
-            .config()
-        else {
-            unreachable!()
-        };
-        assert_eq!(features[0].applicability().media_field(), "image");
-        assert_eq!(
-            features[0].applicability().source_relation(),
-            "pick_place.camera_frames"
-        );
-        let WorkflowNodeConfig::Query { sql, .. } = &workflow
-            .nodes()
-            .iter()
-            .find(|node| node.id() == "feature_query")
-            .unwrap()
-            .config()
-        else {
-            unreachable!()
-        };
-        assert!(sql.contains("{{node:query}}"));
-        assert!(sql.contains("{{node:siglip}}"));
-    }
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn model_fallback_uses_five_topology_ranks_with_two_table_roots() {
-        let mut workflow = WorkflowSpec::default();
-        let WorkflowNodeConfig::Table { relation } = workflow.nodes_mut()[0].config_mut() else {
-            unreachable!()
-        };
-        *relation = "pick_place.camera_frames".to_owned();
-        workflow.insert_siglip_model().unwrap();
-        let mut joint_state = workflow.nodes()[0].clone();
-        joint_state.set_id("joint_state");
-        joint_state.set_name("Joint state");
-        joint_state.set_config(WorkflowNodeConfig::Table {
-            relation: "pick_place.joint_state".to_owned(),
-        });
-        workflow.nodes_mut().push(joint_state);
-        workflow
-            .edges_mut()
-            .push(WorkflowEdgeSpec::new("joint_state", "feature_query"));
-
-        let ranks = workflow.fallback_node_ranks();
-        assert_eq!(ranks["table"], 0);
-        assert_eq!(ranks["joint_state"], 0);
-        assert_eq!(ranks["query"], 1);
-        assert_eq!(ranks["siglip"], 2);
-        assert_eq!(ranks["feature_query"], 3);
-        assert_eq!(ranks["result"], 4);
-
-        let snapshot = WorkflowRunSnapshot::idle_for(&workflow);
-        let nodes = workflow.graph_nodes(&snapshot, &[]);
-        let positions = nodes
-            .iter()
-            .map(|node| (node.id.as_str(), node.position.x))
-            .collect::<BTreeMap<_, _>>();
-        assert_eq!(positions["query"] - positions["table"], 224.0);
-        assert_eq!(positions["siglip"] - positions["query"], 224.0);
-        assert_eq!(positions["feature_query"] - positions["siglip"], 224.0);
-        assert_eq!(positions["result"] - positions["feature_query"], 224.0);
-    }
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn rejected_model_insertion_never_mutates_a_chained_query_graph() {
-        let mut workflow = WorkflowSpec::default();
-        workflow
-            .nodes_mut()
-            .push(spiral_robotics_common::workflow::WorkflowNodeSpec::new(
-                "second_query",
-                "Second query",
-                WorkflowNodeConfig::Query {
-                    sql: "SELECT * FROM {{node:query}}".to_owned(),
-                    max_rows: 100,
-                },
-            ));
-        workflow
-            .edges_mut()
-            .retain(|edge| !(edge.source() == "query" && edge.target() == "result"));
-        workflow.edges_mut().extend([
-            WorkflowEdgeSpec::new("query", "second_query"),
-            WorkflowEdgeSpec::new("second_query", "result"),
-        ]);
-        let before = workflow.clone();
-
-        assert!(workflow.insert_siglip_model().is_none());
-        assert_eq!(workflow, before);
-    }
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn configured_source_and_feature_make_the_manual_model_draft_applicable() {
-        let mut workflow = WorkflowSpec::default();
-        let model_id = workflow.insert_siglip_model().unwrap();
-        let blank_report = workflow.validate();
-        assert_eq!(
-            blank_report
-                .errors()
-                .iter()
-                .filter(|issue| issue.code() == "incomplete_feature_definition")
-                .count(),
-            1
-        );
-        assert!(!blank_report.errors().iter().any(|issue| matches!(
-            issue.code(),
-            "invalid_feature_name" | "invalid_feature_description" | "invalid_feature_concept"
-        )));
-        let WorkflowNodeConfig::Table { relation } = workflow.nodes_mut()[0].config_mut() else {
-            unreachable!()
-        };
-        *relation = "pick_place.camera_frames".to_owned();
-        let WorkflowNodeConfig::Model { features, .. } = &mut workflow
-            .nodes_mut()
-            .iter_mut()
-            .find(|node| node.id() == model_id)
-            .unwrap()
-            .config_mut()
-        else {
-            unreachable!()
-        };
-        features[0].set_name("is_raining_feature");
-        features[0].set_description("Probability that the frame shows rain");
-        features[0].set_concept("raining");
-        let features = features.clone();
-        workflow.refresh_generated_feature_query(&model_id, &features);
-        workflow.normalize_model_sources();
-
-        assert!(workflow.validate().valid());
-        let config = workflow
-            .nodes()
-            .iter()
-            .find(|node| node.id() == model_id)
-            .unwrap()
-            .config();
-        let WorkflowNodeConfig::Model { features } = config else {
-            unreachable!()
-        };
-        assert_eq!(
-            features[0].applicability().source_relation(),
-            "pick_place.camera_frames"
-        );
-        assert_eq!(
-            config.model_output_name(),
-            Some(WorkflowFeatureApplicability::derived_cache_name(
-                "pick_place.camera_frames"
-            ))
-        );
-        let WorkflowNodeConfig::Query { sql, .. } = &workflow
-            .nodes()
-            .iter()
-            .find(|node| node.id() == "feature_query")
-            .unwrap()
-            .config()
-        else {
-            unreachable!()
-        };
-        assert!(sql.contains("features.is_raining_feature"));
-    }
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn removing_siglip_restores_the_candidate_query_as_terminal() {
-        let mut workflow = WorkflowSpec::default();
-        workflow.insert_siglip_model().unwrap();
-
-        let selected = workflow.remove_siglip_model("siglip").unwrap();
-
-        assert_eq!(selected, "query");
-        assert_eq!(workflow.nodes().len(), 3);
-        assert_eq!(workflow.edges().len(), 2);
-        assert!(
-            workflow
-                .edges()
-                .iter()
-                .any(|edge| edge.source() == "table" && edge.target() == "query")
-        );
-        assert!(
-            workflow
-                .edges()
-                .iter()
-                .any(|edge| edge.source() == "query" && edge.target() == "result")
-        );
-        let WorkflowNodeConfig::Query { sql, .. } = workflow.nodes()[1].config() else {
-            unreachable!()
-        };
-        assert!(sql.contains("{{node:table}}"));
-        assert!(!sql.contains("{{node:siglip}}"));
+        assert_eq!(graph.nodes()[1].config(), before.nodes()[1].config());
+        graph.remove_siglip_model(&id).unwrap();
+        assert_eq!(graph, before);
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]
@@ -2142,50 +1747,6 @@ mod tests {
                 .topology_mutation_blocked(Some(WorkflowPendingCommand::Starting))
         );
         assert!(!WorkflowRunPhase::Idle.topology_mutation_blocked(None));
-    }
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn model_projection_preserves_authoritative_progress_and_warning_evidence() {
-        let node = spiral_robotics_common::workflow::WorkflowNodeSpec::new(
-            "siglip",
-            "SigLIP scores",
-            WorkflowNodeConfig::Model {
-                features: vec![
-                    WorkflowFeatureDefinition::new(
-                        "is_red_cube_feature",
-                        "Probability that a red cube is visible",
-                        "red cube",
-                    )
-                    .with_applicability(WorkflowFeatureApplicability::new(
-                        "pick_place.camera_frames",
-                        "image",
-                    )),
-                ],
-            },
-        );
-        let snapshot = WorkflowNodeSnapshot::new(
-            node.id(),
-            WorkflowNodePhase::CompleteWithWarnings,
-            "Complete with warnings",
-        )
-        .with_progress(WorkflowNodeProgress::new(8, 8, "feature cells"))
-        .with_quarantine(WorkflowQuarantineSummary::new(
-            1,
-            vec!["row 3: image is null".to_owned()],
-        ))
-        .with_artifacts(None, vec!["1 input row was quarantined.".to_owned()]);
-        let mut run = WorkflowRunSnapshot::default();
-        run.nodes_mut().push(snapshot.clone());
-        let relations = BTreeMap::new();
-        let projected = NodeProjection {
-            run_snapshot: &run,
-            relations: &relations,
-        }
-        .project(&node, Some(&snapshot));
-        assert_eq!(projected.phase(), WorkflowNodePhase::CompleteWithWarnings);
-        assert_eq!(projected.progress().unwrap().completed(), 8);
-        assert_eq!(projected.quarantine().count(), 1);
-        assert_eq!(projected.fields(), ["is_red_cube_feature"]);
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]

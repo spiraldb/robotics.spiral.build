@@ -1,17 +1,9 @@
 use super::*;
 
-#[derive(serde::Deserialize, schemars::JsonSchema)]
+#[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct EpisodeFilterEdit {
-    name: String,
-    scoring: spiral_robotics_common::workflow::episode_filter::CameraScoring,
-    rule: spiral_robotics_common::workflow::episode_filter::EpisodeFilterRule,
-}
-impl EpisodeFilterEdit {
-    fn apply(self, workflow: &mut WorkflowSpec) -> Result<(), String> {
-        workflow.set_name(self.name);
-        workflow.set_episode_filter(self.scoring, self.rule)
-    }
+struct DatasetArguments {
+    path: Option<Vec<String>>,
 }
 
 pub(super) struct InspectDataset;
@@ -20,10 +12,10 @@ impl WorkflowTool for InspectDataset {
         "inspect_dataset"
     }
     fn description(&self) -> &'static str {
-        "Inspect the selected native dataset, real topics/schema variants, and supported camera bindings. No model execution or media decoding."
+        "List datasets when path is omitted, or inspect a dataset path and its camera topics, schema variants, and packet columns. No inference or media decoding."
     }
     fn parameters(&self) -> Value {
-        json!({"type":"object", "properties":{}, "additionalProperties":false})
+        json!({"type":"object", "properties":{"path":{"type":"array","items":{"type":"string"}}}, "additionalProperties":false})
     }
     fn presentation(&self) -> ToolPresentation {
         ToolPresentation::new(
@@ -37,56 +29,18 @@ impl WorkflowTool for InspectDataset {
     }
     fn call<'a>(&'a self, invocation: ToolInvocation<'a>) -> BoxFuture<'a, Result<String, String>> {
         Box::pin(async move {
-            let _: NoArguments = invocation.arguments()?;
-            let workflow = invocation.workflow();
-            let source = workflow
-                .dataset()
-                .ok_or("Choose a dataset in the workflow selector first.")?;
-            let inspection = invocation
-                .storage()
-                .inspect_dataset(source.selection().clone())
-                .await?;
+            let arguments: DatasetArguments = invocation.arguments()?;
+            let Some(path) = arguments.path else {
+                return Ok(json!({"datasets": invocation.storage().datasets().await?}).to_string());
+            };
+            let selection = spiral_robotics_common::datasets::DatasetSelection::new(path)?;
+            let inspection = invocation.storage().inspect_dataset(selection).await?;
             let cameras = invocation.storage().workflow_cameras(&inspection).await?;
             Ok(json!({
                 "dataset": inspection,
                 "cameras": cameras,
-                "camera_input": "foxglove.CompressedVideo value.data and value.format. Spiral supports packet video through spql.video.from_packets, spql.video.frames, and spql.video.decode. The typed episode-filter draft is not yet connected to that execution path.",
+                "camera_input": "foxglove.CompressedVideo value.data and value.format. Spiral supports packet video through spql.video.from_packets, spql.video.frames, and spql.video.decode.",
             }).to_string())
-        })
-    }
-}
-
-pub(super) struct SetEpisodeFilter;
-impl WorkflowTool for SetEpisodeFilter {
-    fn name(&self) -> &'static str {
-        "set_episode_filter"
-    }
-    fn description(&self) -> &'static str {
-        "Save or refine the selected dataset's episode-filter graph. Camera binding must come from inspect_dataset. Preserves workflow and node identities; never executes. Specify the full scoring and decision rule."
-    }
-    fn parameters(&self) -> Value {
-        serde_json::to_value(schemars::schema_for!(EpisodeFilterEdit))
-            .expect("episode filter tool schema")
-    }
-    fn presentation(&self) -> ToolPresentation {
-        ToolPresentation::new(
-            "Saving episode filter",
-            "Episode filter",
-            "save the episode filter",
-        )
-    }
-    fn available(&self, _workflow: &WorkflowSpec) -> bool {
-        true
-    }
-    fn completion(&self, output: &Value) -> ToolCompletion {
-        ToolCompletion::graph_saved(output)
-    }
-    fn call<'a>(&'a self, invocation: ToolInvocation<'a>) -> BoxFuture<'a, Result<String, String>> {
-        Box::pin(async move {
-            let edit: EpisodeFilterEdit = invocation.arguments()?;
-            let mut workflow = invocation.workflow();
-            edit.apply(&mut workflow)?;
-            invocation.save(workflow).await
         })
     }
 }

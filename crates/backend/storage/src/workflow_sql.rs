@@ -33,6 +33,24 @@ impl WorkflowSqlNode {
         Ok(Self { sql, inputs })
     }
 
+    /// Repeated references need one shared Arrow binding, even with one consumer.
+    pub fn can_inline_input(&self, name: &str) -> bool {
+        self.sql.matches(&format!("{{{{node:{name}}}}}")).count() == 1
+    }
+
+    /// Fuse a single-consumer SQL input into this SQL operator. Shared graph
+    /// inputs remain bound Arrow relations, so fusion never replays a source.
+    pub fn inline_input(&mut self, name: &str, input: &Self) -> Result<(), String> {
+        if !self.can_inline_input(name) || !self.inputs.remove(name) {
+            return Err(format!("SQL has no input {name:?}"));
+        }
+        self.sql = self
+            .sql
+            .replace(&format!("{{{{node:{name}}}}}"), &format!("({})", input.sql));
+        self.inputs.extend(input.inputs.iter().cloned());
+        Ok(())
+    }
+
     /// Native planning checks field references and expression types without
     /// consuming upstream data or running inference.
     pub async fn plan(
@@ -63,27 +81,13 @@ impl WorkflowSqlNode {
         connection.plan_query(sql).await
     }
 
-    /// Each execution owns its input bindings. An upstream query may still be
-    /// streaming on another connection while Spiral consumes its Arrow batches.
+    /// Execute an operator whose input/output schemas the graph already checked.
     pub async fn execute(
         &self,
         store: &ProjectStore,
         inputs: BTreeMap<String, RecordBatchStream>,
     ) -> Result<RecordBatchStream, String> {
         let mut connection = store.connect().await?;
-        // Validate transforms before consuming upstream streams. A source has
-        // no upstream work to protect: execute_query already binds and checks
-        // its SQL, so preplanning it would repeat remote catalog resolution.
-        if !inputs.is_empty() {
-            self.plan_on(
-                &mut connection,
-                inputs
-                    .iter()
-                    .map(|(name, stream)| (name.clone(), stream.schema().clone()))
-                    .collect(),
-            )
-            .await?;
-        }
         let sql = self.bind(&mut connection, inputs).await?;
         connection.execute_query(sql).await
     }
@@ -108,5 +112,24 @@ impl WorkflowSqlNode {
             sql = sql.replace(&format!("{{{{node:{name}}}}}"), &relation);
         }
         Ok(sql)
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl ProjectStore {
+    pub fn workflow_test() -> Self {
+        let settings = crate::SpiralConnectionSettings::new(
+            "http://localhost:1".into(),
+            "http://localhost:2".into(),
+        )
+        .unwrap()
+        .with_project("contract")
+        .unwrap();
+        Self::new(
+            settings,
+            "contract".into(),
+            std::sync::Arc::new(crate::AdbcDatabase::memory()),
+        )
+        .unwrap()
     }
 }

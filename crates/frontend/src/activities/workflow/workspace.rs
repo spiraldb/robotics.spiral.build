@@ -128,11 +128,7 @@ fn WorkflowDatasetPicker(controller: super::state::WorkflowController) -> Elemen
         || DatasetClient::current().list_datasets(),
     );
     let studio = StudioProjectState::current();
-    let spec = controller.spec();
-    let selected = spec
-        .dataset()
-        .map(|source| source.resource_id().to_owned())
-        .unwrap_or_default();
+    let selected = String::new();
     let response = datasets.read();
     match response.as_ref() {
         Some(Ok(items)) => {
@@ -140,11 +136,11 @@ fn WorkflowDatasetPicker(controller: super::state::WorkflowController) -> Elemen
             let choices = items.clone();
             let empty = items.is_empty();
             rsx! {
-                label { r#for: "workflow-dataset", "Dataset" }
+                label { r#for: "workflow-dataset", "Start from dataset" }
                 select {
                     id: "workflow-dataset", value: "{selected}",
                     disabled: controller.workflow_selection_reason().is_some() || empty,
-                    title: "Choose the source dataset. Changing it clears the current filter.",
+                    title: "Start a workflow from this dataset. Replaces the current graph.",
                     onchange: move |event| {
                         if let Some(source) = choices.iter().find(|source| source.resource_id() == event.value()) {
                             controller.select_dataset(source.clone(), studio);
@@ -159,33 +155,6 @@ fn WorkflowDatasetPicker(controller: super::state::WorkflowController) -> Elemen
         }
         Some(Err(error)) => rsx! { span { role: "alert", "Could not load datasets: {error}" } },
         None => rsx! { span { role: "status", "Loading datasets…" } },
-    }
-}
-
-#[component]
-fn EpisodeFilterSummary(
-    spec: spiral_robotics_common::workflow::WorkflowSpec,
-    dirty: bool,
-) -> Element {
-    let explanation = spec.episode_explanation();
-    let columns = spec.episode_required_columns();
-    rsx! {
-        section { class: "workflow-results", "aria-label": "Episode filter interpretation",
-            header { class: "workflow-results-meta",
-                strong { "Filter interpretation" }
-                span { if dirty { "Unapplied changes" } else if explanation.is_some() { "Needs preparation" } else { "Dataset selected" } }
-            }
-            div { class: "workflow-filter-summary",
-                if let Some(explanation) = explanation {
-                    p { "{explanation}" }
-                    strong { "Required inputs and derived values" }
-                    ul { for column in columns { li { "{column}" } } }
-                    p { class: "workflow-filter-note", "SigLIP scores are text/image matches, not measured brightness. The threshold is provisional. No episodes have been evaluated; native scoring becomes available with preparation." }
-                } else {
-                    p { "Describe which episodes to keep. The Assistant will inspect this dataset’s cameras and save a filter here." }
-                }
-            }
-        }
     }
 }
 
@@ -299,7 +268,6 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
         },
     }
     .hint();
-    let native_episodes = controller.spec().uses_native_episodes();
     let starter_relations_key = draft_key.clone();
     let starter_siglip_key = draft_key.clone();
     let submit_key = draft_key.clone();
@@ -333,7 +301,7 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
                 if messages.is_empty() {
                     section { class: "workflow-assistant-empty",
                         h3 { "What should we find?" }
-                        p { if native_episodes { "Describe which episodes to keep. I’ll inspect the cameras and save a filter for you to review." } else { "Choose a dataset above to describe an episode filter, or ask about an existing Spiral relation." } }
+                        p { "Describe what to find. I’ll inspect the data and save a workflow for you to run." }
                         if configured {
                             div { class: "workflow-assistant-examples",
                                 Action {
@@ -342,10 +310,10 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
                                     onclick: {
                                         let draft_key = starter_relations_key.clone();
                                         move |_| {
-                                            drafts.write().insert(draft_key.clone(), (if native_episodes { "Select all episodes but remove the ones whose top camera is too dim." } else { "Show the available Spiral relations and build a read-only Table → Query → Result workflow for the most relevant one." }).to_owned());
+                                            drafts.write().insert(draft_key.clone(), ("Select all episodes but remove the ones whose top camera is too dim.").to_owned());
                                         }
                                     },
-                                    if native_episodes { "Remove episodes with dim top-camera footage" } else { "Find an interesting relation and summarize it" }
+                                    "Remove episodes with dim top-camera footage"
                                 }
                                 Action {
                                     purpose: ActionPurpose::Select,
@@ -353,10 +321,10 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
                                     onclick: {
                                         let draft_key = starter_siglip_key.clone();
                                         move |_| {
-                                            drafts.write().insert(draft_key.clone(), (if native_episodes { "Use the gripper camera and exclude an episode only when most sampled frames show a dimly lit scene." } else { "Find an image relation and draft SigLIP concepts for gripper and cube." }).to_owned());
+                                            drafts.write().insert(draft_key.clone(), ("Find moments when the gripper holds an object.").to_owned());
                                         }
                                     },
-                                    if native_episodes { "Check lighting through the gripper camera" } else { "Find moments when the gripper holds an object" }
+                                    "Find moments when the gripper holds an object"
                                 }
                             }
                         }
@@ -836,15 +804,6 @@ fn WorkflowNodeInspector(controller: super::state::WorkflowController) -> Elemen
                             dd { code { "{relation}" } }
                         }
                     }
-                    if let Some(output) = data
-                        .feature_cache_relation()
-                        .filter(|output| !output.is_empty())
-                    {
-                        div {
-                            dt { "Writes" }
-                            dd { code { "{output}" } }
-                        }
-                    }
                     if !data.fields().is_empty() {
                         div {
                             dt { "Fields" }
@@ -863,23 +822,6 @@ fn WorkflowNodeInspector(controller: super::state::WorkflowController) -> Elemen
                         div {
                             dt { "Quarantine" }
                             dd { "{data.quarantine().count()} rows" }
-                        }
-                    }
-                    if let Some(model) = &data.model_run() {
-                        div {
-                            dt { "Device" }
-                            dd { "{model.device()}" }
-                        }
-                        div {
-                            dt { "Materialization" }
-                            dd {
-                                if model.reused() { "Reused · " } else { "Computed · " }
-                                span { class: "font-mono tabular-nums", "{model.decode_ms()} ms decode · {model.inference_ms()} ms inference" }
-                            }
-                        }
-                        div {
-                            dt { "Fingerprint" }
-                            dd { code { title: "{model.fingerprint()}", "{model.fingerprint().chars().take(12).collect::<String>()}" } }
                         }
                     }
                 }
@@ -933,7 +875,7 @@ fn WorkflowNodeInspector(controller: super::state::WorkflowController) -> Elemen
                             }
                         }
                         p { class: "workflow-inspector-help",
-                            "Reference each connected Table, candidate Query, or Model feature cache with an exact placeholder such as "
+                            "Reference each connected input with an exact placeholder such as "
                             code { "{{node:table}}" }
                             "."
                         }
@@ -950,9 +892,16 @@ fn WorkflowNodeInspector(controller: super::state::WorkflowController) -> Elemen
                             }
                         }
                         p { class: "workflow-inspector-help",
-                            "The candidate Query must project the five stable frame identity fields and each decoded spql.image.Image field named below. Studio registers compatible definitions and fills only missing applicable cells in the shared source cache; decoded images are never cached."
+                            "Choose a decoded image column from the parent node. SigLIP appends one score per concept and preserves the input rows. Every Run computes the scores again."
                         }
                         div { class: "workflow-feature-definitions",
+                            label {
+                                span { class: "label", "Input image column" }
+                                input {
+                                    class: "field font-mono", disabled: active, value: data.image_column(),
+                                    oninput: { let node_id = node_id.clone(); move |event| controller.set_model_image(&node_id, event.value()) },
+                                }
+                            }
                             for (index, feature) in data.features().iter().enumerate() {
                                 section { class: "workflow-feature-definition",
                                     header {
@@ -1022,50 +971,7 @@ fn WorkflowNodeInspector(controller: super::state::WorkflowController) -> Elemen
                                             },
                                         }
                                     }
-                                    div { class: "workflow-feature-applicability",
-                                        label {
-                                            span { class: "label", "Candidate image field" }
-                                            input {
-                                                class: "field font-mono",
-                                                r#type: "text",
-                                                spellcheck: "false",
-                                                disabled: active,
-                                                value: feature.applicability().media_field().to_owned(),
-                                                oninput: {
-                                                    let node_id = node_id.clone();
-                                                    move |event| {
-                                                        let value = event.value();
-                                                        controller.set_model_feature(ModelFeatureTarget::new(&node_id, index), move |feature| feature.set_media_field(value));
-                                                    }
-                                                },
-                                            }
-                                        }
-                                        label {
-                                            span { class: "label", "Streams (optional)" }
-                                            input {
-                                                class: "field",
-                                                r#type: "text",
-                                                disabled: active,
-                                                placeholder: "camera.top, camera.wrist",
-                                                value: feature.applicability().stream_ids().join(", "),
-                                                oninput: {
-                                                    let node_id = node_id.clone();
-                                                    move |event| {
-                                                        let streams = event.value().split(',').map(str::trim).filter(|value| !value.is_empty()).map(str::to_owned).collect();
-                                                        controller.set_model_feature(ModelFeatureTarget::new(&node_id, index), move |feature| feature.set_stream_ids(streams));
-                                                    }
-                                                },
-                                            }
-                                        }
-                                    }
-                                    p { class: "workflow-inspector-help",
-                                        "Source "
-                                        if feature.applicability().source_relation().is_empty() {
-                                            span { "Not configured" }
-                                        } else {
-                                            code { "{feature.applicability().source_relation()}" }
-                                        }
-                                    }
+
                                 }
                             }
                         }
@@ -1074,7 +980,7 @@ fn WorkflowNodeInspector(controller: super::state::WorkflowController) -> Elemen
                                 purpose: ActionPurpose::Create,
                                 variant: ActionVariant::Outline,
                                 disabled: active,
-                                title: "Add another registered feature definition",
+                                title: "Add another output score",
                                 onclick: {
                                     let node_id = node_id.clone();
                                     move |_| controller.add_model_feature(&node_id)
@@ -1085,7 +991,7 @@ fn WorkflowNodeInspector(controller: super::state::WorkflowController) -> Elemen
                                 purpose: ActionPurpose::Remove,
                                 variant: ActionVariant::Outline,
                                 disabled: active,
-                                title: if snapshot_active { "Cancel the active run before removing this Model node" } else if command_pending { "Wait for the current Workflow command before removing this Model node" } else { "Remove this Model and its generated feature join, then restore the candidate Query as the terminal read" },
+                                title: if snapshot_active { "Cancel the active run before removing this Model node" } else if command_pending { "Wait for the current Workflow command before removing this Model node" } else { "Remove this Model and reconnect its input to the downstream nodes" },
                                 onclick: {
                                     let node_id = node_id.clone();
                                     move |_| controller.remove_siglip_model(&node_id)
@@ -1262,7 +1168,7 @@ fn WorkflowCanvas(controller: super::state::WorkflowController) -> Element {
                     }
                     span { "{spec.nodes().len()} nodes · {spec.edges().len()} connections" }
                 }
-                if !spec.nodes().is_empty() && !spec.uses_native_episodes() && !controller.has_model() {
+                if !spec.nodes().is_empty() && !controller.has_model() {
                     Action {
                         purpose: ActionPurpose::Create,
                         variant: ActionVariant::Outline,
@@ -1433,9 +1339,6 @@ fn WorkflowNodeCard(ctx: NodeViewCtx<WorkflowNodeData>) -> Element {
     let data = &node.data;
     let fields = if data.fields().is_empty() {
         match data.kind() {
-            WorkflowNodeKind::Dataset => "Native episodes".to_owned(),
-            WorkflowNodeKind::CameraScore => "Sampled camera scores".to_owned(),
-            WorkflowNodeKind::EpisodeFilter => "Episode decisions".to_owned(),
             WorkflowNodeKind::Table => "Choose a relation".to_owned(),
             WorkflowNodeKind::Model => "Define a feature".to_owned(),
             WorkflowNodeKind::Query => "Read-only SQL".to_owned(),
@@ -1460,7 +1363,7 @@ fn WorkflowNodeCard(ctx: NodeViewCtx<WorkflowNodeData>) -> Element {
             class: "workflow-node-card {data.kind_class()} {data.phase_class()} {selected_class} {dragging_class}",
             title: data.error().unwrap_or_default(),
             "aria-current": if node.selected { "true" } else { "false" },
-            if !matches!(data.kind(), WorkflowNodeKind::Table | WorkflowNodeKind::Dataset) {
+            if !matches!(data.kind(), WorkflowNodeKind::Table) {
                 Handle { kind: HandleKind::Target, position: node.target_side }
             }
             header { class: "workflow-node-heading",
@@ -1472,12 +1375,6 @@ fn WorkflowNodeCard(ctx: NodeViewCtx<WorkflowNodeData>) -> Element {
                 p { class: "workflow-node-fields", title: "{fields}", "{fields}" }
                 if let Some(relation) = &data.relation() {
                     p { class: "workflow-node-relation", "reads ", code { "{relation}" } }
-                }
-                if let Some(output) = data
-                    .feature_cache_relation()
-                    .filter(|output| !output.is_empty())
-                {
-                    p { class: "workflow-node-relation", "writes ", code { "{output}" } }
                 }
                 if let Some(sql) = &data.sql() {
                     code { class: "workflow-node-sql", "{sql}" }
@@ -1508,9 +1405,9 @@ fn WorkflowNodeCard(ctx: NodeViewCtx<WorkflowNodeData>) -> Element {
 
 fn node_kind_icon(kind: WorkflowNodeKind) -> Element {
     match kind {
-        WorkflowNodeKind::Table | WorkflowNodeKind::Dataset => rsx! { TableNodeIcon {} },
-        WorkflowNodeKind::Model | WorkflowNodeKind::CameraScore => rsx! { ModelNodeIcon {} },
-        WorkflowNodeKind::Query | WorkflowNodeKind::EpisodeFilter => rsx! { QueryNodeIcon {} },
+        WorkflowNodeKind::Table => rsx! { TableNodeIcon {} },
+        WorkflowNodeKind::Model => rsx! { ModelNodeIcon {} },
+        WorkflowNodeKind::Query => rsx! { QueryNodeIcon {} },
         WorkflowNodeKind::Result => rsx! { ResultNodeIcon {} },
     }
 }
@@ -1525,9 +1422,6 @@ fn WorkflowResults(controller: super::state::WorkflowController) -> Element {
         WorkflowRunPhase::Cancelled | WorkflowRunPhase::Interrupted | WorkflowRunPhase::Failed
     ) && run_reason.is_none();
     let spec = controller.spec();
-    if spec.uses_native_episodes() {
-        return rsx! { EpisodeFilterSummary { spec, dirty: controller.dirty() } };
-    }
 
     let empty_workflow = spec.nodes().is_empty() && spec.edges().is_empty();
     let query = spec.nodes().iter().find_map(|node| {
@@ -1667,7 +1561,7 @@ impl WorkflowRunPresentation for WorkflowRunPhase {
             ),
             WorkflowRunPhase::Cancelled => (
                 "Run cancelled",
-                "No terminal result was published. Uncommitted feature work was discarded; any cache publication that completed before cancellation remains authoritative.",
+                "No new result was published. Run again to recompute the workflow.",
             ),
             WorkflowRunPhase::Interrupted => (
                 "Run interrupted",

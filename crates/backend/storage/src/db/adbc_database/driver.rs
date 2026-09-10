@@ -68,7 +68,7 @@ impl DriverConfiguration {
         Ok(executable.with_file_name(filename))
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn memory() -> Self {
         Self {
             options: vec![(OptionDatabase::Uri, "spiral:memory:".into())],

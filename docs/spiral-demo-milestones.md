@@ -5,15 +5,19 @@ Tasks 1.1 and 1.2 share one clock in the Data inspector. The follow-up replaces
 joint-specific reads with native Arrow schema discovery, numeric field selection,
 and one paginated message transport. M2’s ownership simplification is implemented:
 named workflows each own one graph and one Assistant conversation; authoring cannot
-start computation. Native episode-filter authoring in 2.1 is verified against the
-real schema, including live Assistant authoring, two corrections, an absent camera,
-and reopening the saved graph and conversation. M3–M4 preparation/training remains
-unimplemented. See
+start computation. M2.1's special episode draft has now been replaced by a
+single Arrow graph with SQL sources/transforms, Model enrichment, and Result.
+The no-reuse executor is implemented and the native H.264 → SigLIP → SQL path has
+been verified twice. Native scan pruning is verified with the updated local driver.
+Dataset-level reuse is the immediate next milestone; the full bright/dark episode
+demo remains to verify.
+See
 [workflow-authoring.md](workflow-authoring.md) for the simplified ownership model.
 
-**Driver requirement:** local `xiangpeng/dev` commit `02d06b5c5` includes the
-nested-projection optimizer fix. Rebuild with `adbc-build` and run Studio with
-`local-driver`; the default shell's public archive still predates the fix.
+**Driver requirement:** local `xiangpeng/dev` commit `fe0726b14` includes the
+nested-projection optimizer fix, packet video decoding, and scan pruning across
+streaming exchanges. Rebuild with `adbc-build` and run Studio with `local-driver`;
+the default shell's public archive predates these fixes.
 Position/action arrays now work through the normal Arrow transport. See
 [episode-playback.md](episode-playback.md) for the contract, bounds and verification,
 and [database-boundary.md](database-boundary.md) for exact driver provenance.
@@ -65,10 +69,10 @@ starting a feature; this is not a new live integration result.
 | Browse datasets, episodes, and topics | [Dataset storage](../crates/backend/storage/src/datasets.rs), [episode browser](../crates/frontend/src/activities/data/episode_browser.rs), [topic inspector](../crates/frontend/src/activities/data/episode_topics.rs) | An episode workspace with cameras and joints together. Import is already outside this flow. |
 | Play one recorded camera | [Native packet reads](../crates/backend/storage/src/datasets/playback.rs), [WebCodecs decoder](../crates/frontend/src/activities/data/episode_decoder.rs), [player](../crates/frontend/src/activities/data/episode_playback.rs) | Multiple feeds sharing one clock. Exact UUID reads and keyframe seeking already exist. |
 | Render recorded joint traces | [Dataset messages](../crates/backend/storage/src/datasets/messages.rs), [Timeline](../crates/frontend/src/panels/timeline/panel.rs) | Read imported native member/topic samples, without requiring Studio-private recording headers or a filename lookup. |
-| Ask the Workflow Assistant to build a graph | [Agent](../crates/backend/src/workflow/agent.rs), [manager](../crates/backend/src/workflow/manager.rs), [Workflow UI](../crates/frontend/src/activities/workflow/workspace.rs) | Native episode-filter semantics, explicit preparation, and optional questions. The Assistant authors and inspects; computation requires an explicit workflow action. |
-| Run SigLIP and retain feature cells | [Model runner](../crates/backend/src/workflow/model.rs), [feature persistence](../crates/backend/storage/src/workflow_features.rs) | Native MCAP inputs, source-version-aware reuse, episode decisions, and prepared workflow outputs. Existing reuse uses source-relation identity. |
+| Ask the Workflow Assistant to build a graph | [Agent](../crates/backend/src/workflow/agent.rs), [manager](../crates/backend/src/workflow/manager.rs), [Workflow UI](../crates/frontend/src/activities/workflow/workspace.rs) | One intent graph with explicit Run, followed by ML reuse and optional questions. The Assistant authors and inspects; computation requires an explicit workflow action. |
+| Run SigLIP over Arrow batches | [Arrow Model operator](../crates/backend/src/workflow/model.rs) | Single-pass inference is implemented; dataset-level reuse follows in 3.2. |
 | Save and switch named graphs | [Workflow storage](../crates/backend/storage/src/workflows.rs), [common contracts](../crates/common/src/workflow.rs) | Durable complete output membership. Current query previews are bounded results, not complete training selections. |
-| Configure ACT and manage jobs/checkpoints | [Training manager](../crates/backend/src/training/manager.rs), [worker jobs](../training/src/spiral_training_runtime/jobs.py), [training UI](../crates/frontend/src/activities/training/workspace.rs) | Prepared-workflow inputs and native training examples. The [MCAP loader](../training/src/spiral_training_runtime/mcap.py) currently raises unavailable. |
+| Configure ACT and manage jobs/checkpoints | [Training manager](../crates/backend/src/training/manager.rs), [worker jobs](../training/src/spiral_training_runtime/jobs.py), [training UI](../crates/frontend/src/activities/training/workspace.rs) | Completed workflow outputs as training inputs and native training examples. The [MCAP loader](../training/src/spiral_training_runtime/mcap.py) currently raises unavailable. |
 
 The worker continues to own training reads, batches, optimization, and checkpoint
 writes. Existing Arrow batch transport serves rollout inference; these features
@@ -80,12 +84,12 @@ do not require introducing a Studio-to-worker training-batch upload architecture
 | --- | --- | --- |
 | M1 — Inspect an episode | Watch its cameras together and inspect the joints at the same time. | 1.1–1.2 |
 | M2 — Describe the dataset to keep | Ask for an episode filter, save it, and refine its meaning. | 2.1–2.2 |
-| M3 — Prepare and review the dataset | Try a filter, prepare the population, inspect decisions, and reuse the work. | 3.1–3.4 |
-| M4 — Train from the workflow | Choose prepared data, inspect training examples, configure sampling, and train. | 4.1–4.2 |
+| M3 — Run and review the dataset | Execute the Arrow graph, then add ML reuse, full-population outputs, and review. | 3.1–3.5 |
+| M4 — Train from the workflow | Choose workflow outputs, inspect training examples, configure sampling, and train. | 4.1–4.2 |
 | Optional Q — Clarify an instruction | Answer an agent question and return to an unanswered one later. | Q.1 |
 | Optional B — Filter by ball-in-bowl outcome | Inspect visual detections and use the outcome alongside lighting. | B.1–B.2 |
 
-There are **10 core feature tasks and three optional tasks**. M1 and M2 can start
+There are **11 core feature tasks and three optional tasks**. M1 and M2 can start
 independently. The main sequence is M2 → M3 → M4, with M1 supplying the inspector
 used by result review and training-example preview. Q and B can be added when
 wanted without holding up the initial lighting-filter flow.
@@ -143,8 +147,8 @@ that meaning in plain language and see the same draft update.
 
 **Build:** extend the existing Assistant's discovery and graph authoring for native
 episodes. The agent chooses the actual camera, producer, sampling, episode rule,
-and unknown policy. Show the resulting explanation, required columns, and
-**Needs preparation** state. Drafting must not run enrichment; enforce that in the
+and unknown policy. Show the SQL and Model nodes that implement that interpretation. There is one
+Run action; the special **Needs preparation** state has been removed. Drafting must not run enrichment; enforce that in the
 backend as well as the agent tools. Read-only inspection remains available. Apply
 corrections such as “use the wrist camera” or “only when most of the episode is
 dark” to the executable definition and explanation together, preserving workflow
@@ -183,97 +187,136 @@ compatibility are removed.
 
 **Depends on:** 2.1.
 
-## M3 — Prepare and review the dataset
+## M3 — Run and review the dataset
 
-### 3.1 — Try the filter on one episode
+### 3.1 — Execute the Arrow graph without ML reuse
+
+- [ ] Full demo verification pending; executor implemented.
+
+**After this lands:** the engineer clicks **Run** on a workflow scoped to one episode
+and sees its model outputs, SQL-derived episode decision, and supporting frame times.
+The graph always describes intent; execution does not create a different prepared graph.
+
+**Implementation:** `workflow/execution.rs` and `workflow/model.rs` now replace the special episode-filter execution path with one push-based
+DAG. Sources emit Arrow batches; downstream SQL and ML operators consume and emit
+Arrow batches. The ML node records its model/configuration and input/output columns,
+preserves upstream columns, and appends inference results. Plan schemas before
+execution and use native SQL for filtering, sampling, aggregation, and joins.
+Keep connected SQL operations optimizable together. The local native packet
+video decoder supplies camera inputs. The release build of Spiral `xiangpeng/dev`
+at `fe0726b14` fixes native scan scheduling across streaming exchanges: both the
+original `IN` query and diagnostic JOIN now read only the selected 274 camera
+packets instead of all 10,990. Native execution measured 3.8 and 5.2 seconds.
+
+There is **no ML reuse in this milestone**: no cache lookup, persisted sparse score
+columns, candidate/cache preflight, or ML-to-scanner pushdown. Each run evaluates
+its selected inputs once through the ML operator. Remove the current two-pass
+candidate execution from this path. Model/column configuration stays explicit so
+the immediate follow-up can optimize the same graph. Authoring does not start a run.
+
+**Verify:** run the lighting graph on a bright and a dark episode. Check actual
+Arrow image values, appended model scores, downstream SQL decisions, and evidence
+times. Reject incompatible schemas before inference. Confirm that inputs are not
+decoded in a preliminary cache scan and then executed again for ML. A second Run
+performs inference again. Missing evidence remains unknown. Verify cancellation
+and that the graph definition is unchanged by execution.
+
+**Depends on:** 2.1. Its former **Needs preparation** boundary is replaced by the unified executor.
+
+### 3.2 — Reuse ML outputs through scanner pushdown
 
 - [ ] Done
 
-**After this lands:** the engineer explicitly tries the draft on a chosen episode
-and sees its model-derived values, episode decision, and supporting frame times.
+**After this lands:** repeated runs and other workflows can reuse compatible model
+outputs without changing the logical graph or introducing a preparation step.
+This is the immediately following milestone, not a requirement for 3.1.
 
-**Build:** connect the real native camera input to the existing model runner and
-persist the sampled observations and episode summary with source/producer identity.
-Use the producer selected by the workflow; pinned SigLIP is the existing starting
-point when its score matches the interpretation. Implement missing native decode
-support in Spiral here. Label the result as a one-episode preview, not a prepared
-population. This preview is an explicit action, not a side effect of authoring.
+**Build:** add a planner optimization for eligible source/filter/sample/ML paths.
+When pushdown is safe, the scanner applies eligible filters, reads compatible cached
+values, computes missing selected values, and attaches the requested model column.
+Store sparse outputs at dataset scope with stable input identity and explicit
+producer semantics; uncomputed rows remain distinguishable from computed results.
+Keep ordinary Arrow ML execution for paths whose pushdown cannot be proven safe.
+Do not tie cached columns to workflow IDs. Define partial publication and retry
+behavior here, rather than adding cache machinery to 3.1.
 
-**Verify:** run on a bright and a dark episode, inspect actual model outputs, and
-compare evidence times to the recording. Repeating the same preview reuses compatible
-values; changing source bytes or producer semantics does not. Missing evidence is
-unknown, not a successful assessment. Confirm native image values, not just SQL shape.
+**Verify:** rerun an unchanged workflow and reuse its scores in another workflow.
+Changing only a downstream threshold performs no inference for cached inputs.
+Changing model semantics or source content must not reuse incompatible values.
+A sampled run leaves uncomputed positions in the persisted column; a later run
+computes missing selected values. Verify empty selections, interrupted runs, and
+ordinary execution when pushdown is unsupported.
 
-**Depends on:** 2.1.
+**Depends on:** 3.1.
 
-### 3.2 — Prepare the full dataset
+### 3.3 — Run the full dataset
 
 - [ ] Done
 
-**After this lands:** clicking **Prepare dataset** evaluates all required episodes
-and produces a saved, prepared workflow output ready for inspection and downstream
+**After this lands:** clicking **Run** evaluates all required episodes
+and produces a saved, completed workflow output ready for inspection and downstream
 use. The engineer can cancel, leave the activity, and retry later.
 
 **Build:** expand the working one-episode path to the source population. Show real
 progress; persist required columns, coverage, inclusion decisions, and complete
-membership against pinned source/workflow revisions. Only a completed output becomes
-Prepared. Include native snapshot/atomic publication support in this feature where
-needed. Reuse existing backfill and execution owners instead of adding another
+membership against pinned source/workflow revisions. Only successful completion
+publishes an output for downstream use. Include native snapshot/atomic publication
+support in this feature where needed. Reuse existing backfill and execution owners instead of adding another
 runner. Include cancel/retry controls and reconnect recovery. Retain the last
 completed output and reuse successful compatible dependency work; do not claim
 resumability for partial values that were never durably committed.
 
 **Verify:** the included/excluded/unknown populations reconcile with the source.
 Test a population larger than the preview limit, reconnect, and reopen the result.
-A failed or canceled run cannot appear Prepared; exceeding a supported bound cannot
+A failed or canceled run cannot appear completed; exceeding a supported bound cannot
 silently truncate membership. Cancel during computation and near publication,
 reconnect, and retry; actual reused/computed counts must match durable work.
 Source advance cannot change a completed output.
 
-**Depends on:** 3.1. Durable output identity is part of this feature, not deferred
+**Depends on:** 3.2. Durable output identity is part of this feature, not deferred
 until Training needs it.
 
-### 3.3 — Review and refine which episodes are selected
+### 3.4 — Review and refine which episodes are selected
 
 - [ ] Done
 
 **After this lands:** the engineer sees why episodes were included, excluded, or
 left unknown, opens their evidence, and adjusts the rule without rerunning models
-when the required values are already prepared.
+when the required values are already cached.
 
 **Build:** add decision views with derived values, reasons, accurate counts, and
 paginated results. Connect **Inspect episode** to the existing multi-camera/joint
 inspector with pinned source/member/evidence-time identity. Apply natural-language
 or manual edits through dependency-aware re-evaluation and save a new output
-revision. Explain when a changed camera/model/sampling rule needs preparation;
+revision. Explain when a changed camera/model/sampling rule needs new inference;
 keep the previous output selectable.
 
 **Verify:** inspect one episode from each outcome and change a lighting threshold.
-The selection changes with zero enrichment calls; a producer change requests new
-preparation. Reopen both outputs after source advance and confirm independent
+The selection changes with zero enrichment calls; a producer change performs new
+inference on the next Run. Reopen both outputs after source advance and confirm independent
 membership and original evidence. Overlapping reasons do not duplicate episodes,
 and filtering never deletes source recordings. Reuse observations for a changed
 aggregation only when their stored coverage supports it.
 
-**Depends on:** 3.2, 1.2.
+**Depends on:** 3.3, 1.2.
 
-### 3.4 — Prepare newly added episodes without losing the old result
+### 3.5 — Run newly added episodes without losing the old result
 
 - [ ] Done
 
 **After this lands:** after the source dataset grows, the engineer sees that the
-workflow has new data to prepare and can produce an updated output.
+workflow has new data to evaluate and can produce an updated output.
 
-**Build:** show source changes relative to the prepared revision and prepare the
+**Build:** show source changes relative to the last completed output and run the
 new snapshot. Reuse observations for provably unchanged native members with the
 same producer semantics; compute new/changed inputs. Preserve earlier outputs
 and their source dependencies so ongoing training can keep using them.
 
-**Verify:** append an episode, replace one source member, and prepare again. Counts
+**Verify:** append an episode, replace one source member, and run again. Counts
 reflect both changes; unchanged inputs reuse safely, changed bytes do not. Opening
 the old output still resolves its original membership and recording evidence.
 
-**Depends on:** 3.3.
+**Depends on:** 3.4.
 
 ## M4 — Train from the workflow
 
@@ -281,7 +324,7 @@ the old output still resolves its original membership and recording evidence.
 
 - [ ] Done
 
-**After this lands:** the engineer chooses a prepared workflow in Training, configures
+**After this lands:** the engineer chooses a completed workflow output in Training, configures
 its camera/state/action inputs, sampling and evaluation split, and inspects real
 aligned training examples before starting a run.
 
@@ -294,7 +337,7 @@ whole episode, reject gaps/invalid horizons, and derive normalization from train
 samples only. Include wire contracts and their consumers in the feature.
 
 Show available mappings, eligible example counts, and specific compatibility errors.
-An unprepared draft links back to preparation; no-match or missing-action input
+A workflow without a completed output links back to Run; no-match or missing-action input
 cannot train. Keep Start unavailable until 4.2, while making configuration and
 real example inspection fully usable. The worker owns data loading; there is no
 Studio-to-worker training-batch upload path.
@@ -306,21 +349,21 @@ training-only statistics. Reconnect and retain the configuration. Input resoluti
 and preview perform no workflow enrichment. Exercise real native reads as well as
 Rust/Python contract round trips.
 
-**Depends on:** 3.2, 2.2, 1.2.
+**Depends on:** 3.3, 2.2, 1.2.
 
 ### 4.2 — Train ACT and inspect the data behind its checkpoint
 
 - [ ] Done
 
-**After this lands:** the engineer starts ACT from the prepared selection, sees real
+**After this lands:** the engineer starts ACT from the completed selection, sees real
 optimization progress, obtains a persisted checkpoint, and can open the exact
 workflow output and episodes that supplied its training data.
 
 **Build:** feed the validated loader into the existing worker job loop and ACT
 session. Enable Start from actual readiness, retain stop/reconnect behavior, and
-publish checkpoints through native storage. Record the prepared output and resolved
+publish checkpoints through native storage. Record the completed output and resolved
 input/split/sampler/normalization configuration with the run/checkpoint. Expose this
-lineage in existing history and checkpoint details, with links back to the prepared
+lineage in existing history and checkpoint details, with links back to the completed
 result and recorded evidence. Keep the existing ACT artifact readers compatible.
 
 **Verify:** execute a real short optimization job and reload its persisted checkpoint.
@@ -328,10 +371,10 @@ Inspect actual batch identities against the output and split, with zero workflow
 enrichment calls during training. Edit the workflow and advance the dataset after
 Start; neither changes the run's inputs or its checkpoint's evidence links. A failed
 checkpoint write cannot appear successful. Exercise stop and reconnect, then run
-the complete inspect → instruct → prepare → review → train sequence on real data.
+the complete inspect → instruct → run → review → train sequence on real data.
 This proves traceable training inputs, not policy improvement or bitwise GPU reproducibility.
 
-**Depends on:** 4.1, 3.3.
+**Depends on:** 4.1, 3.4.
 
 ## Optional Q — Clarify an instruction
 
@@ -351,8 +394,8 @@ Questions remain optional agent behavior, not a mandatory authoring form.
 
 **Verify:** answer using each input method, reconnect with a pending question, and
 switch workflows before answering. A preselected option is not a submitted answer;
-a stale answer cannot change the wrong draft. Answering never launches preparation;
-a change to a prepared workflow uses normal reuse/invalidation behavior. The agent
+a stale answer cannot change the wrong draft. Answering never launches execution;
+the next Run applies normal reuse/invalidation behavior once 3.2 is implemented. The agent
 can still decide and explain semantics without asking a question.
 
 **Depends on:** 2.2.
@@ -376,18 +419,18 @@ occluded objects, and confirm repeat evaluation reuses compatible outputs. SigLI
 scores must not be mislabeled as object detections. Detections alone do not establish
 a successful placement; that episode interpretation is the next feature.
 
-**Depends on:** 3.1, 1.1. This optional example requires recordings of the bowl task.
+**Depends on:** 3.2, 1.1. This optional example requires recordings of the bowl task.
 
 ### B.2 — Keep episodes where the ball was placed in the bowl
 
 - [ ] Done
 
 **After this lands:** the engineer adds the bowl instruction to the lighting workflow,
-prepares the added outputs, and reviews the resulting combined selection.
+runs the updated graph, and reviews the resulting combined selection.
 
 **Build:** let the agent choose and explain the temporal interpretation, aggregate
 stored observations into an episode assessment, and compose it with lighting.
-Use existing preparation/review/training paths; reuse compatible lighting columns.
+Use existing execution/review/training paths; reuse compatible lighting columns.
 Optional Q can clarify the interpretation, but is not required.
 
 **Verify:** review successful, unsuccessful, and ambiguous episodes. Change “ever
@@ -395,7 +438,7 @@ inside” to “inside at the end” and inspect the difference. Confirm that ad
 condition computes only missing compatible dependencies and that Training uses the
 same combined membership.
 
-**Depends on:** B.1, 3.3.
+**Depends on:** B.1, 3.4.
 
 ## Verification and delivery
 
@@ -413,7 +456,7 @@ test an error path; it cannot prove that the new feature works on native recordi
 
 M1 is complete when cameras and joints can be inspected together. M2 is complete
 when the engineer can create, save, and correct a workflow through the Assistant.
-M3 is complete when the engineer can prepare, inspect, refine, retry, and update
+M3 is complete when the engineer can run, reuse, inspect, refine, retry, and update
 its dataset. M4 completes the requested training flow. Optional Q/B features have
 their own checkboxes and do not delay the initial lighting example.
 

@@ -71,6 +71,19 @@ published; a source fix alone does not update the downloaded library.
 
 ## Current local driver refresh
 
+The workflow verification preview on port 8080 uses local `xiangpeng/dev` commit
+`fe0726b14c8256626060e3caf48681b169a48390`, rebuilt in release mode on September 10,
+2026 with the `adbc-build` command above. The library SHA-256 is
+`0cc4d559e0db14d837a41f88def3820b871469d18439abb00ce07926eb3688ab`.
+This includes packet video decoding and join-filter publication gates across
+streaming exchanges. Live IN and JOIN queries now read only the selected 274 MCAP
+camera packets instead of 10,990; decoded images are unchanged. The native
+H.264 → SigLIP → SQL workflow regression passes twice without score reuse.
+Other running Studio processes must restart to load this library. The default
+Nix shell's public archive pin is unchanged.
+
+### Earlier schema inspector validation
+
 The schema inspector uses local `xiangpeng/dev` commit
 `02d06b5c59df0d67bc2ca9c4624520e24e328af5`, rebuilt on September 9, 2026 with
 the `adbc-build` command above. It includes `320d50ddb`, which fixes

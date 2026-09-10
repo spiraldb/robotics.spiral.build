@@ -1,13 +1,10 @@
 //! Shared Workflow command and observation contract.
 //!
-//! Workflow starts at relations already materialized in Spiral. External
-//! ingestion remains outside Workflow; executable Model nodes consume those
-//! relations and write server-derived relations for downstream Query nodes.
-//! This crate derives only the stable unqualified component of generated
-//! names; storage qualifies persisted relations inside Studio's configured
-//! namespace.
+//! A workflow is an intent DAG. SQL sources and transforms exchange Arrow
+//! batches with Model operators, which preserve inputs and append scores.
+//! Execution observations are separate from the graph's saved definition.
 
-pub mod episode_filter;
+pub mod camera;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -92,20 +89,12 @@ pub struct WorkflowNodeSpec {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkflowNodeConfig {
-    Dataset {
-        source: crate::datasets::DatasetSummary,
-    },
-    CameraScore {
-        scoring: episode_filter::CameraScoring,
-    },
-    EpisodeFilter {
-        rule: episode_filter::EpisodeFilterRule,
-    },
     Table {
         relation: String,
     },
     Model {
-        features: Vec<WorkflowFeatureDefinition>,
+        image_column: String,
+        features: Vec<WorkflowModelFeature>,
     },
     Query {
         sql: String,
@@ -113,6 +102,52 @@ pub enum WorkflowNodeConfig {
         max_rows: usize,
     },
     Result,
+}
+
+/// A model output is a nullable score appended to its input batch.
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowModelFeature {
+    name: String,
+    description: String,
+    concept: String,
+}
+
+impl WorkflowModelFeature {
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        concept: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            concept: concept.into(),
+        }
+    }
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub fn description(&self) -> &str {
+        &self.description
+    }
+    pub fn concept(&self) -> &str {
+        &self.concept
+    }
+    pub fn set_name(&mut self, value: impl Into<String>) {
+        self.name = value.into();
+    }
+    pub fn set_description(&mut self, value: impl Into<String>) {
+        self.description = value.into();
+    }
+    pub fn set_concept(&mut self, value: impl Into<String>) {
+        self.concept = value.into();
+    }
+    pub fn has_valid_name(&self) -> bool {
+        self.name.len() <= MAX_WORKFLOW_FEATURE_NAME_LENGTH
+            && UnquotedSqlIdentifier::try_from(self.name.as_str()).is_ok()
+    }
 }
 
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
@@ -232,9 +267,6 @@ impl WorkflowNodeConfig {
 
     const fn label(&self) -> &'static str {
         match self {
-            Self::Dataset { .. } => "Dataset",
-            Self::CameraScore { .. } => "Camera scoring",
-            Self::EpisodeFilter { .. } => "Episode filter",
             Self::Table { .. } => "Table",
             Self::Model { .. } => "Model",
             Self::Query { .. } => "Query",
@@ -245,26 +277,11 @@ impl WorkflowNodeConfig {
     const fn allows_transition_to(&self, target: &Self) -> bool {
         matches!(
             (self, target),
-            (Self::Table { .. }, Self::Query { .. })
-                | (Self::Query { .. }, Self::Model { .. })
-                | (Self::Query { .. }, Self::Query { .. })
-                | (Self::Model { .. }, Self::Query { .. })
-                | (Self::Query { .. }, Self::Result)
-        )
-    }
-
-    /// The writable name component is a pure server-owned derivation, never
-    /// graph input. Storage adds the configured namespace before execution.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn model_output_name(&self) -> Option<String> {
-        let Self::Model { features } = self else {
-            return None;
-        };
-        features.first().map(|feature| {
-            WorkflowFeatureApplicability::derived_cache_name(
-                feature.applicability().source_relation(),
+            (
+                Self::Table { .. } | Self::Query { .. } | Self::Model { .. },
+                Self::Query { .. } | Self::Model { .. } | Self::Result
             )
-        })
+        )
     }
 }
 
@@ -1350,9 +1367,6 @@ impl WorkflowSpec {
     }
 
     pub fn validate(&self) -> WorkflowValidationReport {
-        if self.uses_native_episodes() {
-            return self.validate_episode_graph();
-        }
         let spec = self;
         let mut report = WorkflowValidationReport::default();
         if WorkflowNodeId::try_from(spec.id.as_str()).is_err() {
@@ -1403,7 +1417,20 @@ impl WorkflowSpec {
                         );
                     }
                 }
-                WorkflowNodeConfig::Model { features } => {
+                WorkflowNodeConfig::Model {
+                    image_column,
+                    features,
+                } => {
+                    if UnquotedSqlIdentifier::try_from(image_column.as_str()).is_err() {
+                        report.errors.push(
+                            WorkflowValidationIssue::new(
+                                "invalid_image_column",
+                                "Choose the input image column.",
+                                "Use a column returned by the parent node.",
+                            )
+                            .with_node_id(&node.id),
+                        );
+                    }
                     if features.is_empty() {
                         report.errors.push(
                             WorkflowValidationIssue::new(
@@ -1435,7 +1462,7 @@ impl WorkflowSpec {
                             );
                         } else {
                             if !feature.has_valid_name() {
-                                report.errors.push(WorkflowValidationIssue::new("invalid_feature_name", "Feature names must be safe descriptive identifiers ending in _feature.", "Use a name such as is_raining_feature or is_gripper_open_feature.").with_node_id(&node.id));
+                                report.errors.push(WorkflowValidationIssue::new("invalid_feature_name", "Output names must be unique SQL identifiers.", "Use a name such as is_raining_feature or is_gripper_open_feature.").with_node_id(&node.id));
                             } else if !feature_names.insert(feature.name.as_str()) {
                                 report.errors.push(
                                     WorkflowValidationIssue::new(
@@ -1450,7 +1477,7 @@ impl WorkflowSpec {
                                 || feature.description.chars().count()
                                     > MAX_WORKFLOW_FEATURE_DESCRIPTION_LENGTH
                             {
-                                report.errors.push(WorkflowValidationIssue::new("invalid_feature_description", "Feature descriptions must be present and bounded.", "Describe what a non-null probability means in 240 characters or fewer.").with_node_id(&node.id));
+                                report.errors.push(WorkflowValidationIssue::new("invalid_feature_description", "Feature descriptions must be present and bounded.", "Describe what the score measures in 240 characters or fewer.").with_node_id(&node.id));
                             }
                             if feature.concept.trim().is_empty()
                                 || feature.concept.chars().count() > MAX_SIGLIP_CONCEPT_LENGTH
@@ -1464,29 +1491,6 @@ impl WorkflowSpec {
                                     .with_node_id(&node.id),
                                 );
                             }
-                        }
-                        if QualifiedRelation::try_from(
-                            feature.applicability.source_relation.as_str(),
-                        )
-                        .is_err()
-                        {
-                            report.errors.push(WorkflowValidationIssue::new("invalid_feature_source", "Feature applicability needs one authoritative qualified source relation.", "Choose the upstream source Table relation.").with_node_id(&node.id));
-                        }
-                        if UnquotedSqlIdentifier::try_from(
-                            feature.applicability.media_field.as_str(),
-                        )
-                        .is_err()
-                        {
-                            report.errors.push(WorkflowValidationIssue::new("invalid_feature_media_field", "Feature applicability media_field must be one safe candidate image field.", "Project a decoded image with a stable field name such as image.").with_node_id(&node.id));
-                        }
-                        let streams = &feature.applicability.stream_ids;
-                        if streams.len() > MAX_WORKFLOW_FEATURE_STREAMS
-                            || streams
-                                .iter()
-                                .any(|stream| stream.trim().is_empty() || stream.len() > 128)
-                            || streams.iter().collect::<BTreeSet<_>>().len() != streams.len()
-                        {
-                            report.errors.push(WorkflowValidationIssue::new("invalid_feature_streams", "Feature applicability supports up to eight unique non-empty stream IDs.", "Remove duplicate or unsupported stream filters.").with_node_id(&node.id));
                         }
                     }
                 }
@@ -1519,10 +1523,7 @@ impl WorkflowSpec {
                         );
                     }
                 }
-                WorkflowNodeConfig::Result
-                | WorkflowNodeConfig::Dataset { .. }
-                | WorkflowNodeConfig::CameraScore { .. }
-                | WorkflowNodeConfig::EpisodeFilter { .. } => {}
+                WorkflowNodeConfig::Result => {}
             }
         }
 
@@ -1576,11 +1577,11 @@ impl WorkflowSpec {
                     WorkflowValidationIssue::new(
                         "invalid_transition",
                         &format!(
-                            "{} cannot feed {} in a relation-first workflow.",
+                            "{} cannot feed {} in a workflow.",
                             source.config.label(),
                             target.config.label(),
                         ),
-                        "Use Table→Query, Query→Model, Query→Query, Model→Query, or Query→Result.",
+                        "Connect sources, SQL, and Models to a terminal Result.",
                     )
                     .with_node_id(&edge.target),
                 );
@@ -1654,61 +1655,75 @@ impl WorkflowSpec {
                 );
             }
             match &node.config {
-            WorkflowNodeConfig::Table { .. } if in_degree != 0 => report.errors.push(WorkflowValidationIssue::new("table_not_root", "Table nodes must be roots.", "Remove incoming edges from this Table node.").with_node_id(&node.id)),
-            WorkflowNodeConfig::Result if out_degree != 0 => report.errors.push(WorkflowValidationIssue::new("result_not_terminal", "Result nodes must be terminal.", "Remove outgoing edges from this Result node.").with_node_id(&node.id)),
-            WorkflowNodeConfig::Result if in_degree != 1 => report.errors.push(WorkflowValidationIssue::new("result_input_count", "A Result node must have exactly one Query input.", "Connect one Query node to this Result.").with_node_id(&node.id)),
-            WorkflowNodeConfig::Model { .. } if in_degree != 1 => report.errors.push(WorkflowValidationIssue::new("model_input_count", "A SigLIP Model node needs exactly one upstream candidate Query.", "Connect one read-only Query that returns stable frame identity and a decoded image field.").with_node_id(&node.id)),
-            WorkflowNodeConfig::Model { .. }
-                if incoming
-                    .get(node.id.as_str())
-                    .and_then(|sources| sources.first())
-                    .and_then(|source| nodes.get(*source))
-                    .is_some_and(|source| !matches!(&source.config, WorkflowNodeConfig::Query { .. })) =>
-            {
-                report.errors.push(WorkflowValidationIssue::new("model_input_kind", "A SigLIP Model enriches the rows selected by an upstream candidate Query.", "Insert a Query between the source Table and this Model, and project the stable frame keys plus one decoded image field.").with_node_id(&node.id));
-            }
-            WorkflowNodeConfig::Query { sql, .. } => {
-                if let Ok(placeholders) = WorkflowSql::from(sql.as_str()).node_placeholders() {
-                    let upstream = incoming
-                        .get(node.id.as_str())
-                        .into_iter()
-                        .flatten()
-                        .copied()
-                        .collect::<BTreeSet<_>>();
-                    if placeholders.is_empty() && !upstream.is_empty() {
-                        report.errors.push(WorkflowValidationIssue::new("query_placeholder_required", "Workflow SQL must reference an upstream node placeholder.", "Use a placeholder such as {{node:table}} in FROM or JOIN.").with_node_id(&node.id));
-                    }
-                    for placeholder in &placeholders {
-                        if !nodes.contains_key(placeholder.as_str()) {
-                            report.errors.push(WorkflowValidationIssue::new("unknown_placeholder", &format!("Workflow SQL references unknown node {placeholder:?}."), "Reference an existing connected upstream Table, Query, or Model node.").with_node_id(&node.id));
-                        } else if !upstream.contains(placeholder.as_str()) {
-                            report.errors.push(WorkflowValidationIssue::new("non_upstream_placeholder", &format!(
+                WorkflowNodeConfig::Table { .. } if in_degree != 0 => report.errors.push(
+                    WorkflowValidationIssue::new(
+                        "table_not_root",
+                        "Table nodes must be roots.",
+                        "Remove incoming edges from this Table node.",
+                    )
+                    .with_node_id(&node.id),
+                ),
+                WorkflowNodeConfig::Result if out_degree != 0 => report.errors.push(
+                    WorkflowValidationIssue::new(
+                        "result_not_terminal",
+                        "Result nodes must be terminal.",
+                        "Remove outgoing edges from this Result node.",
+                    )
+                    .with_node_id(&node.id),
+                ),
+                WorkflowNodeConfig::Result if in_degree != 1 => report.errors.push(
+                    WorkflowValidationIssue::new(
+                        "result_input_count",
+                        "A Result node must have exactly one input.",
+                        "Connect one Query node to this Result.",
+                    )
+                    .with_node_id(&node.id),
+                ),
+                WorkflowNodeConfig::Model { .. } if in_degree != 1 => report.errors.push(
+                    WorkflowValidationIssue::new(
+                        "model_input_count",
+                        "A Model node needs exactly one input.",
+                        "Connect a node that returns the configured image column.",
+                    )
+                    .with_node_id(&node.id),
+                ),
+                WorkflowNodeConfig::Query { sql, .. } => {
+                    if let Ok(placeholders) = WorkflowSql::from(sql.as_str()).node_placeholders() {
+                        let upstream = incoming
+                            .get(node.id.as_str())
+                            .into_iter()
+                            .flatten()
+                            .copied()
+                            .collect::<BTreeSet<_>>();
+                        if placeholders.is_empty() && !upstream.is_empty() {
+                            report.errors.push(
+                                WorkflowValidationIssue::new(
+                                    "query_placeholder_required",
+                                    "Workflow SQL must reference an upstream node placeholder.",
+                                    "Use a placeholder such as {{node:table}} in FROM or JOIN.",
+                                )
+                                .with_node_id(&node.id),
+                            );
+                        }
+                        for placeholder in &placeholders {
+                            if !nodes.contains_key(placeholder.as_str()) {
+                                report.errors.push(WorkflowValidationIssue::new("unknown_placeholder", &format!("Workflow SQL references unknown node {placeholder:?}."), "Reference an existing connected upstream Table, Query, or Model node.").with_node_id(&node.id));
+                            } else if !upstream.contains(placeholder.as_str()) {
+                                report.errors.push(WorkflowValidationIssue::new("non_upstream_placeholder", &format!(
                                     "Workflow SQL references {placeholder:?}, which is not connected upstream."
                                 ), "Connect that node to this Query or remove the placeholder.").with_node_id(&node.id));
+                            }
                         }
-                    }
-                    for upstream_id in upstream {
-                        if !placeholders.iter().any(|id| id == upstream_id) {
-                            report.errors.push(WorkflowValidationIssue::new("unused_upstream_edge", &format!(
+                        for upstream_id in upstream {
+                            if !placeholders.iter().any(|id| id == upstream_id) {
+                                report.errors.push(WorkflowValidationIssue::new("unused_upstream_edge", &format!(
                                     "Upstream node {upstream_id:?} is connected but not referenced by Workflow SQL."
                                 ), "Use its {{node:<id>}} placeholder or remove the edge.").with_node_id(&node.id));
+                            }
                         }
                     }
                 }
-            }
-            _ => {}
-        }
-            if let WorkflowNodeConfig::Model { features } = &node.config {
-                let table_sources = topology.source_relations(&node.id);
-                if table_sources.len() != 1 {
-                    report.errors.push(WorkflowValidationIssue::new("model_source_count", "A Model feature cache must belong to exactly one authoritative source relation.", "Build the candidate Query from one source Table; join other evidence only after the Model.").with_node_id(&node.id));
-                } else if let Some(source) = table_sources.first()
-                    && features
-                        .iter()
-                        .any(|feature| feature.applicability.source_relation != **source)
-                {
-                    report.errors.push(WorkflowValidationIssue::new("feature_source_mismatch", "Feature applicability does not match the Model's authoritative source Table.", "Apply the workflow again so the server can normalize every feature source.").with_node_id(&node.id));
-                }
+                _ => {}
             }
         }
 
@@ -1728,32 +1743,6 @@ impl WorkflowSpec {
             return Err("Workflow node identities must be unique.".to_owned());
         }
         topology.ordered_nodes()
-    }
-
-    /// Derive model applicability from graph lineage in both the editor and backend.
-    pub fn normalize_model_sources(&mut self) {
-        let topology = WorkflowTopology::from(&*self);
-        let sources = self
-            .nodes
-            .iter()
-            .filter(|node| matches!(node.config, WorkflowNodeConfig::Model { .. }))
-            .map(|node| {
-                let relations = topology.source_relations(&node.id);
-                let source = if relations.len() == 1 {
-                    relations.into_iter().next().unwrap().to_owned()
-                } else {
-                    String::new()
-                };
-                (node.id.clone(), source)
-            })
-            .collect::<BTreeMap<_, _>>();
-        for node in &mut self.nodes {
-            if let WorkflowNodeConfig::Model { features } = &mut node.config {
-                for feature in features {
-                    feature.set_source_relation(sources[&node.id].clone());
-                }
-            }
-        }
     }
 
     pub fn has_model(&self) -> bool {
@@ -2067,27 +2056,6 @@ impl<'a> From<&'a WorkflowSpec> for WorkflowTopology<'a> {
 }
 
 impl<'a> WorkflowTopology<'a> {
-    fn source_relations(&self, node_id: &str) -> BTreeSet<&'a str> {
-        let mut sources = BTreeSet::new();
-        let mut visited = BTreeSet::new();
-        let mut pending = self.incoming.get(node_id).cloned().unwrap_or_default();
-        while let Some(upstream) = pending.pop() {
-            if !visited.insert(upstream) {
-                continue;
-            }
-            match self.nodes.get(upstream).map(|node| &node.config) {
-                Some(WorkflowNodeConfig::Table { relation }) => {
-                    sources.insert(relation.as_str());
-                }
-                Some(_) => {
-                    pending.extend(self.incoming.get(upstream).into_iter().flatten().copied())
-                }
-                None => {}
-            }
-        }
-        sources
-    }
-
     fn ordered_nodes(&self) -> Result<Vec<String>, String> {
         for source in self.outgoing.keys() {
             if !self.nodes.contains_key(source) {
@@ -2170,19 +2138,6 @@ mod tests {
                 .iter()
                 .any(|issue| issue.code() == "non_upstream_placeholder")
         );
-    }
-
-    fn feature(source: &str, name: &str, concept: &str) -> WorkflowFeatureDefinition {
-        WorkflowFeatureDefinition {
-            name: name.to_owned(),
-            description: format!("Probability that the frame shows {concept}."),
-            concept: concept.to_owned(),
-            applicability: WorkflowFeatureApplicability {
-                source_relation: source.to_owned(),
-                media_field: "image".to_owned(),
-                stream_ids: Vec::new(),
-            },
-        }
     }
 
     fn runnable_spec() -> WorkflowSpec {
@@ -2269,17 +2224,6 @@ mod tests {
     }
 
     #[test]
-    fn feature_cache_name_is_server_owned_and_stable() {
-        assert_eq!(
-            WorkflowFeatureApplicability::derived_cache_name("pick/place"),
-            format!(
-                "features_{}",
-                crate::identity::SqlNameComponent::from("pick/place").as_str()
-            )
-        );
-    }
-
-    #[test]
     fn agent_phase_reports_only_real_active_work() {
         assert!(WorkflowAgentPhase::Responding.active());
         assert!(WorkflowAgentPhase::Cancelling.active());
@@ -2295,52 +2239,6 @@ mod tests {
             spec.topological_order().unwrap(),
             ["frames", "query", "result"]
         );
-    }
-
-    #[test]
-    fn model_source_normalization_follows_lineage_and_clears_ambiguous_or_missing_sources() {
-        let mut spec = runnable_spec();
-        spec.nodes.push(WorkflowNodeSpec::new(
-            "model",
-            "Features",
-            WorkflowNodeConfig::Model {
-                features: vec![feature("stale.source", "is_raining_feature", "rain")],
-            },
-        ));
-        spec.edges.push(WorkflowEdgeSpec::new("query", "model"));
-        spec.normalize_model_sources();
-        let source = |spec: &WorkflowSpec| match &spec.nodes.last().unwrap().config {
-            WorkflowNodeConfig::Model { features } => {
-                features[0].applicability().source_relation().to_owned()
-            }
-            _ => unreachable!(),
-        };
-        assert_eq!(source(&spec), "pick_place.camera_frames");
-        spec.nodes.insert(
-            0,
-            WorkflowNodeSpec::new(
-                "other",
-                "Other frames",
-                WorkflowNodeConfig::Table {
-                    relation: "other.frames".to_owned(),
-                },
-            ),
-        );
-        spec.edges.push(WorkflowEdgeSpec::new("other", "query"));
-        spec.normalize_model_sources();
-        assert!(source(&spec).is_empty());
-        assert!(
-            spec.validate()
-                .errors
-                .iter()
-                .any(|issue| issue.code == "model_source_count")
-        );
-        spec.edges.retain(|edge| edge.source != "other");
-        spec.normalize_model_sources();
-        assert_eq!(source(&spec), "pick_place.camera_frames");
-        spec.edges.retain(|edge| edge.target != "model");
-        spec.normalize_model_sources();
-        assert!(source(&spec).is_empty());
     }
 
     #[test]
@@ -2429,207 +2327,46 @@ mod tests {
     }
 
     #[test]
-    fn repeated_placeholder_is_valid_and_siglip_model_is_executable() {
-        let mut repeated = runnable_spec();
-        let WorkflowNodeConfig::Query { sql, .. } = &mut repeated.nodes[1].config else {
-            unreachable!()
-        };
-        *sql = "SELECT * FROM {{node:frames}} a JOIN {{node:frames}} b ON a.frame_index = b.frame_index".to_owned();
-        assert!(repeated.validate().valid());
-
-        let mut model = runnable_spec();
-        model.nodes.insert(
-            2,
-            WorkflowNodeSpec {
-                id: "model".to_owned(),
-                name: "Reserved model".to_owned(),
-                config: WorkflowNodeConfig::Model {
-                    features: vec![
-                        feature(
-                            "pick_place.camera_frames",
-                            "is_red_cube_feature",
-                            "red cube",
-                        ),
-                        feature("pick_place.camera_frames", "is_gripper_feature", "gripper"),
-                    ],
+    fn model_columns_use_ordinary_sql_names() {
+        assert!(WorkflowModelFeature::new("weather", "Weather match", "rain").has_valid_name());
+        assert!(!WorkflowModelFeature::new("bad-name", "Bad", "rain").has_valid_name());
+        let mut graph = WorkflowSpec::new("generic", "Generic model");
+        graph.nodes_mut().extend([
+            WorkflowNodeSpec::new(
+                "source",
+                "Images",
+                WorkflowNodeConfig::Query {
+                    sql: "SELECT 1 AS image".into(),
+                    max_rows: 10,
                 },
-            },
-        );
-        model.nodes.insert(
-            3,
-            WorkflowNodeSpec {
-                id: "final_query".to_owned(),
-                name: "Join features".to_owned(),
-                config: WorkflowNodeConfig::Query {
-                    sql: "SELECT candidates.*, features.is_red_cube_feature, features.is_gripper_feature FROM {{node:query}} candidates JOIN {{node:model}} features ON candidates.episode_id = features.episode_id AND candidates.stream_id = features.stream_id AND candidates.segment_index = features.segment_index AND candidates.frame_index = features.frame_index AND candidates.episode_time_ns = features.episode_time_ns".to_owned(),
-                    max_rows: 100,
+            ),
+            WorkflowNodeSpec::new(
+                "model",
+                "Weather",
+                WorkflowNodeConfig::Model {
+                    image_column: "image".into(),
+                    features: vec![WorkflowModelFeature::new(
+                        "weather",
+                        "Weather match",
+                        "rain",
+                    )],
                 },
-            },
-        );
-        model.edges.insert(
-            1,
-            WorkflowEdgeSpec {
-                source: "query".to_owned(),
-                target: "model".to_owned(),
-            },
-        );
-        model.edges.insert(
-            2,
-            WorkflowEdgeSpec {
-                source: "query".to_owned(),
-                target: "final_query".to_owned(),
-            },
-        );
-        model.edges.insert(
-            3,
-            WorkflowEdgeSpec {
-                source: "model".to_owned(),
-                target: "final_query".to_owned(),
-            },
-        );
-        model.edges[4].source = "final_query".to_owned();
-        assert!(model.has_model());
-        assert!(model.validate().valid());
-    }
-
-    #[test]
-    fn sql_candidate_model_cache_and_joint_table_converge_in_final_query() {
-        let spec = WorkflowSpec {
-            id: "demo".to_owned(),
-            name: "Holding evidence".to_owned(),
-            revision: 0,
-            nodes: vec![
-                WorkflowNodeSpec {
-                    id: "manifest".to_owned(),
-                    name: "Camera manifest".to_owned(),
-                    config: WorkflowNodeConfig::Table {
-                        relation: "pick_place.video_manifest".to_owned(),
-                    },
-                },
-                WorkflowNodeSpec {
-                    id: "candidates".to_owned(),
-                    name: "Periodic candidates".to_owned(),
-                    config: WorkflowNodeConfig::Query {
-                        sql: "SELECT episode_id, stream_id, segment_index, frame_index, episode_time_ns, image FROM {{node:manifest}}".to_owned(),
-                        max_rows: 100,
-                    },
-                },
-                WorkflowNodeSpec {
-                    id: "holding_features".to_owned(),
-                    name: "Backfill holding feature".to_owned(),
-                    config: WorkflowNodeConfig::Model {
-                        features: vec![feature(
-                            "pick_place.video_manifest",
-                            "is_holding_cube_feature",
-                            "holding cube",
-                        )],
-                    },
-                },
-                WorkflowNodeSpec {
-                    id: "joints".to_owned(),
-                    name: "Joint evidence".to_owned(),
-                    config: WorkflowNodeConfig::Table {
-                        relation: "pick_place.joint_samples".to_owned(),
-                    },
-                },
-                WorkflowNodeSpec {
-                    id: "query".to_owned(),
-                    name: "Join evidence".to_owned(),
-                    config: WorkflowNodeConfig::Query {
-                        sql: "SELECT candidates.*, features.is_holding_cube_feature, joints.positions FROM {{node:candidates}} candidates JOIN {{node:holding_features}} features ON candidates.episode_id = features.episode_id AND candidates.frame_index = features.frame_index JOIN {{node:joints}} joints ON candidates.episode_id = joints.episode_id".to_owned(),
-                        max_rows: 100,
-                    },
-                },
-                WorkflowNodeSpec {
-                    id: "result".to_owned(),
-                    name: "Matching moments".to_owned(),
-                    config: WorkflowNodeConfig::Result,
-                },
-            ],
-            edges: vec![
-                WorkflowEdgeSpec { source: "manifest".to_owned(), target: "candidates".to_owned() },
-                WorkflowEdgeSpec { source: "candidates".to_owned(), target: "holding_features".to_owned() },
-                WorkflowEdgeSpec { source: "candidates".to_owned(), target: "query".to_owned() },
-                WorkflowEdgeSpec { source: "holding_features".to_owned(), target: "query".to_owned() },
-                WorkflowEdgeSpec { source: "joints".to_owned(), target: "query".to_owned() },
-                WorkflowEdgeSpec { source: "query".to_owned(), target: "result".to_owned() },
-            ],
-        };
-
-        assert!(spec.validate().valid());
-
-        let mut direct_table_model = spec.clone();
-        direct_table_model.edges[1].source = "manifest".to_owned();
+            ),
+            WorkflowNodeSpec::new("result", "Results", WorkflowNodeConfig::Result),
+        ]);
+        graph.edges_mut().extend([
+            WorkflowEdgeSpec::new("source", "model"),
+            WorkflowEdgeSpec::new("model", "result"),
+        ]);
+        // Arrow types are checked by the backend planner, independently of structure.
+        assert!(graph.validate().valid());
+        let wire = serde_json::to_value(&graph).unwrap();
         assert!(
-            direct_table_model
-                .validate()
-                .errors
-                .iter()
-                .any(|issue| issue.code == "model_input_kind")
+            wire["nodes"][1]["features"][0]
+                .get("applicability")
+                .is_none()
         );
-    }
-
-    #[test]
-    fn typed_feature_names_are_descriptive_and_safe() {
-        let source_relation = "weather.camera_frames";
-        assert!(feature(source_relation, "is_raining_feature", "rain").has_valid_name());
-        assert!(
-            feature(source_relation, "is_gripper_open_feature", "open gripper").has_valid_name()
-        );
-        assert!(!feature(source_relation, "score_1", "rain").has_valid_name());
-        assert!(!feature(source_relation, "is-raining-feature", "rain").has_valid_name());
-    }
-
-    #[test]
-    fn model_wire_shape_requires_typed_feature_definitions() {
-        let model: WorkflowNodeConfig = serde_json::from_value(serde_json::json!({
-            "kind": "model",
-            "features": [{
-                "name": "is_raining_feature",
-                "description": "Probability that rain is visible.",
-                "concept": "raining",
-                "applicability": {
-                    "source_relation": "weather.camera_frames",
-                    "media_field": "image",
-                    "stream_ids": ["camera.front"]
-                }
-            }]
-        }))
-        .unwrap();
-        let WorkflowNodeConfig::Model { features, .. } = model else {
-            unreachable!()
-        };
-        assert_eq!(features[0].name, "is_raining_feature");
-        assert_eq!(features[0].applicability.stream_ids, ["camera.front"]);
-    }
-
-    #[test]
-    fn model_wire_shape_rejects_backend_owned_identity_and_output_fields() {
-        for forbidden in ["model_id", "feature_cache_relation"] {
-            let mut model = serde_json::json!({
-                "kind": "model",
-                "features": []
-            });
-            model[forbidden] = serde_json::json!("caller-controlled");
-            assert!(serde_json::from_value::<WorkflowNodeConfig>(model).is_err());
-        }
-    }
-
-    #[test]
-    fn model_output_is_derived_from_typed_feature_applicability() {
-        let config = WorkflowNodeConfig::Model {
-            features: vec![feature(
-                "weather.camera_frames",
-                "is_raining_feature",
-                "rain",
-            )],
-        };
-        assert_eq!(
-            config.model_output_name(),
-            Some(WorkflowFeatureApplicability::derived_cache_name(
-                "weather.camera_frames"
-            ))
-        );
+        assert_eq!(serde_json::from_value::<WorkflowSpec>(wire).unwrap(), graph);
     }
 
     #[test]

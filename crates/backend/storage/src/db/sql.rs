@@ -393,10 +393,31 @@ impl RecordBatchStream {
             .collect(self)
             .await
     }
+    /// A preview limit bounds the browser payload, not graph execution. Drain
+    /// the remaining batches to finish inference and surface late errors.
+    pub async fn into_preview_drained(
+        mut self,
+        max_rows: usize,
+    ) -> Result<SpiralQuerySnapshot, String> {
+        let preview = QueryLimits::new(max_rows.clamp(1, MAX_QUERY_ROWS), MAX_QUERY_RESPONSE_BYTES)
+            .collect_preview(&mut self)
+            .await?;
+        while let Some(batch) = self.next().await {
+            batch.map_err(|e| e.to_string())?;
+        }
+        Ok(preview)
+    }
 }
 
 impl QueryLimits {
     async fn collect(self, mut records: RecordBatchStream) -> Result<SpiralQuerySnapshot, String> {
+        self.collect_preview(&mut records).await
+    }
+
+    async fn collect_preview(
+        self,
+        records: &mut RecordBatchStream,
+    ) -> Result<SpiralQuerySnapshot, String> {
         let schema = Arc::clone(records.schema());
         let columns = schema
             .fields()
