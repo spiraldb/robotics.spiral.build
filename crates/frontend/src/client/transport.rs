@@ -136,11 +136,36 @@ impl HttpRequest {
     }
 
     pub(crate) async fn send<T: serde::de::DeserializeOwned>(self) -> Result<T, CommandError> {
+        let (response, _abort) = self.response("application/json").await?;
+        let status = response.status();
+        let body = response.text().await.map_err(CommandError::transport)?;
+        CommandError::decode_response(status, &body)
+    }
+
+    pub(crate) async fn bytes(self) -> Result<Vec<u8>, CommandError> {
+        let (response, _abort) = self.response("application/vnd.apache.arrow.stream").await?;
+        if !(200..300).contains(&response.status()) {
+            let status = response.status();
+            let body = response.text().await.map_err(CommandError::transport)?;
+            return CommandError::decode_response(status, &body);
+        }
+        if response.headers().get("Content-Type").as_deref()
+            != Some("application/vnd.apache.arrow.stream")
+        {
+            return Err(CommandError::transport("Expected Arrow IPC response"));
+        }
+        response.binary().await.map_err(CommandError::transport)
+    }
+
+    async fn response(
+        self,
+        accept: &str,
+    ) -> Result<(gloo_net::http::Response, RequestCancellation), CommandError> {
         use gloo_net::http::{Method, RequestBuilder};
         let abort = RequestCancellation::new()?;
         let mut request = RequestBuilder::new(&self.url?)
             .method(self.method.parse::<Method>().expect("declared HTTP method"))
-            .header("Accept", "application/json")
+            .header("Accept", accept)
             .abort_signal(Some(&abort.0.signal()));
         if let Some(session) = self.session {
             request = request.header("X-Project-Session", &session);
@@ -169,9 +194,7 @@ impl HttpRequest {
         }
         .map_err(CommandError::transport)?;
         let response = request.send().await.map_err(CommandError::transport)?;
-        let status = response.status();
-        let body = response.text().await.map_err(CommandError::transport)?;
-        CommandError::decode_response(status, &body)
+        Ok((response, abort))
     }
 }
 

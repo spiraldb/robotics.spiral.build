@@ -248,6 +248,28 @@ impl<T: JsonSchema> ResponseSchema for Result<Created<T>, HttpFailure> {
     }
 }
 
+/// A bounded IPC stream with its native schema and record batches.
+pub(crate) struct ArrowResponse(pub(crate) Vec<u8>);
+impl IntoResponse for ArrowResponse {
+    fn into_response(self) -> Response {
+        (
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "application/vnd.apache.arrow.stream",
+            )],
+            self.0,
+        )
+            .into_response()
+    }
+}
+impl ResponseSchema for Result<ArrowResponse, HttpFailure> {
+    fn responses(schemas: &mut SchemaGenerator) -> Value {
+        let failure =
+            schemas.subschema_for::<spiral_robotics_common::command_failure::CommandFailure>();
+        json!({"200": {"description": "Bounded message page; schema metadata includes its read identity and continuation cursor.", "content": {"application/vnd.apache.arrow.stream": {"schema": {"type": "string", "format": "binary"}}}}, "default": {"description": "Structured failure", "content": {"application/json": {"schema": failure}}}})
+    }
+}
+
 pub(crate) trait DocumentedHandler<Arguments> {
     fn describe(schemas: &mut SchemaGenerator) -> OperationSchema;
 }

@@ -55,16 +55,11 @@ impl QueryLimits {
 struct QueryExecution<'a> {
     sql: &'a str,
     limits: QueryLimits,
-    parameters: Option<RecordBatch>,
 }
 
 impl<'a> QueryExecution<'a> {
     const fn new(sql: &'a str, limits: QueryLimits) -> Self {
-        Self {
-            sql,
-            limits,
-            parameters: None,
-        }
+        Self { sql, limits }
     }
 }
 
@@ -193,21 +188,6 @@ impl<'a> ProjectQueries<'a> {
         )
         .run_async(&mut connection)
         .await
-    }
-
-    pub(crate) async fn query_with_parameters(
-        &self,
-        statement: SqlStatement,
-        max_rows: usize,
-    ) -> Result<SpiralQuerySnapshot, String> {
-        SpiralSql::ensure_read_only(statement.as_str(), ReadOnlyQueryMode::Preview)?;
-        let mut connection = self.project_store.connect().await?;
-        let mut execution = QueryExecution::new(
-            statement.as_str(),
-            QueryLimits::new(max_rows.clamp(1, MAX_QUERY_ROWS), MAX_QUERY_RESPONSE_BYTES),
-        );
-        execution.parameters = statement.parameters().cloned();
-        execution.run_async(&mut connection).await
     }
 
     pub(crate) async fn relation_catalog(&self) -> Result<RelationCatalog, String> {
@@ -394,12 +374,7 @@ impl QueryExecution<'_> {
             return Err("Spiral query is too large".to_owned());
         }
         let started = Instant::now();
-        let mut statement = SqlStatement::from(sql);
-        if let Some(parameters) = self.parameters {
-            statement = statement
-                .with_parameters(parameters)
-                .map_err(|error| error.to_string())?;
-        }
+        let statement = SqlStatement::from(sql);
         let mut records = connection
             .query(statement)
             .await

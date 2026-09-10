@@ -2,6 +2,7 @@
 
 use super::panel::TimelinePlayback;
 use super::state::TimelineController;
+use crate::components::preview_clock::PreviewClock;
 use dioxus::prelude::*;
 use spiral_robotics_common::recording::{ReplayPhase, ReplayProgress, ReplayPurpose};
 
@@ -67,28 +68,6 @@ impl TimelineController {
                     TimelinePlayback::Stopped
                 }
             })
-    }
-}
-
-/// Bound wall-clock gaps and clamp the final frame to the episode duration.
-struct PreviewClock {
-    duration: f64,
-    previous_tick: Option<f64>,
-}
-
-impl PreviewClock {
-    fn new(duration: f64, previous_tick: Option<f64>) -> Self {
-        Self {
-            duration,
-            previous_tick,
-        }
-    }
-    fn advance(&self, playhead: f64, now: f64) -> f64 {
-        let delta = self
-            .previous_tick
-            .map(|previous| (now - previous).clamp(0.0, 0.25))
-            .unwrap_or_default();
-        (playhead + delta).clamp(0.0, self.duration.max(0.0))
     }
 }
 

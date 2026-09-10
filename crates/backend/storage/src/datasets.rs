@@ -1,4 +1,5 @@
 //! Native Dataset discovery through the same project journal used by the ADBC driver.
+mod messages;
 mod playback;
 mod topics;
 pub(crate) use playback::CameraPackets;
@@ -144,7 +145,7 @@ impl DatasetCatalogClient {
             .schema
             .observations
             .into_iter()
-            .map(|observation| observation.topic())
+            .map(|observation| observation.topic(dataset.version_id()))
             .collect::<Result<Vec<_>, _>>()?;
         topics.sort_by(|left, right| left.name().cmp(right.name()));
         Ok(DatasetInspection::new(
@@ -295,12 +296,14 @@ struct ScanLocator {
     payload: String,
 }
 impl DatasetObservation {
-    fn topic(self) -> Result<DatasetTopic, String> {
+    fn topic(self, version: &str) -> Result<DatasetTopic, String> {
+        let mut variant = String::new();
         let name = if self.scan_locator.codec == "spiral.mcap.topic-scan"
             && self.scan_locator.codec_version == 1
         {
             let locator: McapTopicLocator = serde_json::from_str(&self.scan_locator.payload)
                 .map_err(|error| format!("Reading MCAP topic identity: {error}"))?;
+            variant = locator.variant;
             locator.topic
         } else {
             self.name
@@ -313,24 +316,22 @@ impl DatasetObservation {
             .into_iter()
             .collect();
         Ok(DatasetTopic::new(name, schemas)
+            .with_revision(spiral_robotics_common::datasets::TopicRevision::new(
+                version.into(),
+                variant,
+            ))
             .with_coverage(self.coverage.member_count, self.coverage.sample_count))
     }
 }
 #[derive(Deserialize)]
 struct McapTopicLocator {
     topic: String,
+    #[serde(default)]
+    variant: String,
 }
 
 struct EpisodeTopicQuery {
     statement: crate::db::SqlStatement,
-}
-
-impl TryFrom<EpisodeTopicRequest> for EpisodeTopicQuery {
-    type Error = String;
-
-    fn try_from(request: EpisodeTopicRequest) -> Result<Self, Self::Error> {
-        Self::for_sql(&request, request.sql())
-    }
 }
 
 impl EpisodeTopicQuery {
@@ -367,15 +368,6 @@ impl EpisodeTopicQuery {
 }
 
 impl StorageManager {
-    pub async fn preview_episode_topic(
-        &self,
-        request: EpisodeTopicRequest,
-    ) -> Result<spiral_robotics_common::relations::SpiralQuerySnapshot, String> {
-        crate::db::ProjectQueries::new(self.project_store())
-            .query_with_parameters(EpisodeTopicQuery::try_from(request)?.statement, 100)
-            .await
-    }
-
     pub async fn project_resources(&self) -> Result<Vec<ProjectResource>, String> {
         DatasetCatalogClient::connect(self.connection_settings())
             .await?
@@ -487,13 +479,15 @@ impl crate::ProjectStore {
 mod tests {
     use super::*;
     #[test]
-    fn episode_preview_binds_uuid_bytes_and_rejects_invalid_ids() {
+    fn episode_reads_bind_uuid_bytes_and_reject_invalid_ids() {
         let dataset = DatasetSelection::new(vec!["dataset_default".into()]).unwrap();
         let id = uuid::Uuid::parse_str("01900000-0000-7000-8000-000000000001").unwrap();
         let request =
             EpisodeTopicRequest::new(dataset.clone(), "/camera' --".into(), id.to_string());
-        let statement = EpisodeTopicQuery::try_from(request).unwrap().statement;
-        assert!(statement.as_str().contains("'/camera'' --'"));
+        let statement =
+            EpisodeTopicQuery::for_sql(&request, "SELECT value FROM source WHERE id = $1".into())
+                .unwrap()
+                .statement;
         assert!(statement.as_str().contains("WHERE id = $1"));
         assert!(!statement.as_str().contains(&id.to_string()));
         let parameters = statement.parameters().unwrap();
@@ -513,7 +507,10 @@ mod tests {
             .unwrap();
         assert_eq!(values.value(0), id.as_bytes());
         let invalid = EpisodeTopicRequest::new(dataset, "/topic".into(), "' OR true --".into());
-        assert!(EpisodeTopicQuery::try_from(invalid).is_err());
+        assert!(
+            EpisodeTopicQuery::for_sql(&invalid, "SELECT value FROM source WHERE id = $1".into())
+                .is_err()
+        );
     }
 
     #[test]
@@ -541,7 +538,7 @@ mod tests {
             "coverage":{"memberCount":52,"sampleCount":10937},
             "scanLocator":{"codec":"spiral.mcap.topic-scan","codecVersion":1,"payload":"{\"topic\":\"/camera/top/video\"}"}
         })).unwrap();
-        let topic = observation.topic().unwrap();
+        let topic = observation.topic("version").unwrap();
         assert_eq!(topic.name(), "/camera/top/video");
         assert_eq!(topic.samples(), Some(10937));
         assert_eq!(topic.members(), 52);

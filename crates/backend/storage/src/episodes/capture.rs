@@ -541,18 +541,6 @@ impl FullEpisode {
             completion,
         }
     }
-    #[cfg(test)]
-    pub(super) fn fixture_without_samples(
-        start: EpisodeStart,
-        completion: EpisodeCompletion,
-    ) -> Self {
-        Self {
-            start,
-            samples: Vec::new(),
-            completion,
-        }
-    }
-
     pub const fn start(&self) -> &EpisodeStart {
         &self.start
     }

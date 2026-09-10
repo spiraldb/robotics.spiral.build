@@ -92,7 +92,7 @@ async fn every_documented_scoped_endpoint_is_registered_and_rejects_missing_or_s
             }
         }
     }
-    assert_eq!(count, 58);
+    assert_eq!(count, 57);
     assert!(contract["paths"]["/robots/setup"]["get"].is_object());
     assert!(contract["paths"].get("/project/setup").is_none());
     fixture.shutdown().await;
@@ -154,7 +154,6 @@ fn dataset_catalogs_and_episode_playback_keep_distinct_wire_contracts() {
             ["$ref"],
         "#/components/schemas/DatasetSummary"
     );
-    let playback = &paths["/datasets/episode-video"]["post"];
     let topics = &paths["/datasets/episode-topics"]["post"];
     assert_eq!(
         topics["requestBody"]["content"]["application/json"]["schema"]["$ref"],
@@ -164,13 +163,14 @@ fn dataset_catalogs_and_episode_playback_keep_distinct_wire_contracts() {
         topics["responses"]["200"]["content"]["application/json"]["schema"]["items"]["$ref"],
         "#/components/schemas/DatasetTopic"
     );
+    let messages = &paths["/datasets/episode-messages"]["post"];
     assert_eq!(
-        playback["requestBody"]["content"]["application/json"]["schema"]["$ref"],
-        "#/components/schemas/EpisodeTopicRequest"
+        messages["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+        "#/components/schemas/MessageRead"
     );
     assert_eq!(
-        playback["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
-        "#/components/schemas/EpisodeVideo"
+        messages["responses"]["200"]["content"]["application/vnd.apache.arrow.stream"]["schema"]["format"],
+        "binary"
     );
     // Nanosecond timestamps must survive the browser's numeric precision limit.
     assert_eq!(

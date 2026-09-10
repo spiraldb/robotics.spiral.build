@@ -71,6 +71,18 @@ published; a source fix alone does not update the downloaded library.
 
 ## Current local driver refresh
 
+The schema inspector uses local `xiangpeng/dev` commit
+`02d06b5c59df0d67bc2ca9c4624520e24e328af5`, rebuilt on September 9, 2026 with
+the `adbc-build` command above. It includes `320d50ddb`, which fixes
+demand-pruning convergence for nested projections. The local library SHA-256 is
+`be631980da06733ddc2e26624a81f76dc18d84dcab65b7b5272008329ee85751`.
+Studio's verification preview on port 8091 was restarted with that library;
+recorded position/action arrays now load through the normal projected Arrow
+transport. Other running Studio processes must restart to load the new library.
+This does not update the public archive pinned by the default Nix shell.
+
+### Earlier catalog validation
+
 The local driver was rebuilt from the unchanged checkout
 `/private/tmp/spiraldb-dataset-catalog-pr`, commit `2f0ffed61`, which includes the
 Dataset classification fix and current MCAP readers. Studio on port 62701 was

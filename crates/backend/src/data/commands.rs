@@ -95,25 +95,6 @@ impl DataCommands {
             })
             .await?
     }
-    pub(crate) async fn preview_episode_topic(
-        &self,
-        request: spiral_robotics_common::datasets::EpisodeTopicRequest,
-    ) -> Result<SpiralQuerySnapshot, BackendCommandError> {
-        let commands = self.clone();
-        self.state
-            .tasks()
-            .execute(async move {
-                let _activity = commands.state.admit()?;
-                commands.require_catalog_ready()?;
-                commands
-                    .state
-                    .storage()
-                    .preview_episode_topic(request)
-                    .await
-                    .map_err(Into::into)
-            })
-            .await?
-    }
 
     pub(crate) async fn episode_topics(
         &self,
@@ -135,10 +116,10 @@ impl DataCommands {
             .await?
     }
 
-    pub(crate) async fn episode_video(
+    pub(crate) async fn episode_messages(
         &self,
-        request: spiral_robotics_common::datasets::EpisodeTopicRequest,
-    ) -> Result<spiral_robotics_common::datasets::EpisodeVideo, BackendCommandError> {
+        request: spiral_robotics_common::datasets::MessageRead,
+    ) -> Result<Vec<u8>, BackendCommandError> {
         let commands = self.clone();
         self.state
             .tasks()
@@ -148,7 +129,7 @@ impl DataCommands {
                 commands
                     .state
                     .storage()
-                    .episode_video(request)
+                    .episode_messages(request)
                     .await
                     .map_err(Into::into)
             })

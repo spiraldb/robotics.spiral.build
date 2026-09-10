@@ -1,4 +1,3 @@
-//! Bounded, exact-member encoded camera reads. Decoding belongs to the browser.
 use super::EpisodeTopicQuery;
 use crate::{
     StorageManager,
@@ -7,6 +6,7 @@ use crate::{
 use arrow_array::{Array, BinaryArray, BinaryViewArray, LargeBinaryArray, RecordBatch};
 use base64::Engine as _;
 use futures::StreamExt as _;
+use spiral_robotics_common::datasets::H264AccessUnit;
 use spiral_robotics_common::datasets::{EpisodeTopicRequest, EpisodeVideo, VideoPacket};
 
 const MAX_PACKETS: usize = 18_000;
@@ -75,10 +75,10 @@ impl CameraPackets {
             return Err("Camera exceeds the 64 MiB encoded playback limit".into());
         }
         let access = H264AccessUnit::parse(bytes)?;
-        if self.packets.is_empty() && !access.keyframe {
+        if self.packets.is_empty() && !access.keyframe() {
             return Err("Camera does not begin with a decodable H.264 keyframe".into());
         }
-        if let Some(codec) = access.codec {
+        if let Some(codec) = access.codec().map(str::to_owned) {
             if self
                 .codec
                 .as_ref()
@@ -91,7 +91,7 @@ impl CameraPackets {
         self.packets.push(VideoPacket::new(
             timestamp,
             base64::engine::general_purpose::STANDARD.encode(bytes),
-            access.keyframe,
+            access.keyframe(),
         ));
         self.previous_time = Some(timestamp);
         Ok(())
@@ -125,44 +125,6 @@ impl CameraPackets {
     }
 }
 
-/// Annex B access units require an IDR plus SPS/PPS at each random-access point.
-struct H264AccessUnit {
-    keyframe: bool,
-    codec: Option<String>,
-}
-impl H264AccessUnit {
-    fn parse(bytes: &[u8]) -> Result<Self, String> {
-        let mut keyframe = false;
-        let mut codec = None;
-        let mut picture = false;
-        let mut parameters = false;
-        for index in 0..bytes.len().saturating_sub(3) {
-            if bytes[index..].starts_with(&[0, 0, 1]) {
-                let nal = &bytes[index + 3..];
-                match nal[0] & 0x1f {
-                    1 => picture = true,
-                    5 => {
-                        keyframe = true;
-                        picture = true;
-                    }
-                    7 if nal.len() >= 4 => {
-                        codec = Some(format!("avc1.{:02x}{:02x}{:02x}", nal[1], nal[2], nal[3]))
-                    }
-                    8 => parameters = true,
-                    _ => {}
-                }
-            }
-        }
-        if !picture {
-            return Err("Camera packet is not an Annex B H.264 picture".into());
-        }
-        if keyframe && (codec.is_none() || !parameters) {
-            return Err("H.264 keyframe is missing its SPS/PPS decoding parameters".into());
-        }
-        Ok(Self { keyframe, codec })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,12 +134,12 @@ mod tests {
             0, 0, 0, 1, 0x67, 0x64, 0, 0x1e, 0, 0, 1, 0x68, 0x88, 0, 0, 1, 0x65, 0x88,
         ];
         let access = H264AccessUnit::parse(&packet).unwrap();
-        assert!(access.keyframe);
-        assert_eq!(access.codec.as_deref(), Some("avc1.64001e"));
+        assert!(access.keyframe());
+        assert_eq!(access.codec(), Some("avc1.64001e"));
         assert!(
             !H264AccessUnit::parse(&[0, 0, 1, 0x41, 0x88])
                 .unwrap()
-                .keyframe
+                .keyframe()
         );
         assert!(H264AccessUnit::parse(&[0, 0, 1, 0x65, 0x88]).is_err());
         assert!(H264AccessUnit::parse(&[0, 0, 0, 5, 0x65]).is_err());

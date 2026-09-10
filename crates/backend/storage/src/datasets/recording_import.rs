@@ -484,7 +484,15 @@ mod tests {
                             "../../../../frontend/src/activities/data/fixtures/seek.h264"
                         )
                         .to_vec(),
-                        (0..8).map(|index| index * 33_333_333).collect(),
+                        (0..8)
+                            .map(|index| {
+                                if stream == "overhead" {
+                                    25_000_000 + index * 25_000_000
+                                } else {
+                                    index * 33_333_333
+                                }
+                            })
+                            .collect(),
                     ),
                 )
                 .unwrap()
@@ -506,7 +514,11 @@ mod tests {
                         None,
                         vec!["joint".into()],
                     )])
-                    .with_timing(1_700_000_000_000, 30.0)
+                    .with_timing(1_700_000_000_000, 500.0)
+                    .with_samples((0..120).map(|index| {
+                        let sample = crate::episodes::Sample::new(index as f64 * 0.002, vec![vec![if index == 60 { None } else { Some(index as f64 / 120.0) }]], vec![vec![index]]);
+                        if camera_count > 0 { sample.with_action(vec![Some(vec![Some(0.5)])]) } else { sample }
+                    }).collect())
                     .with_duration_seconds(0.3)
                     .into_episode();
                 let bytes = McapRecording::encode(&episode, &cameras[..camera_count])?;
@@ -543,11 +555,50 @@ mod tests {
                 assert_eq!(available.iter().filter(|topic| topic.schemas().iter().any(|schema| schema == "foxglove.CompressedVideo")).map(|topic| topic.name()).collect::<Vec<_>>(), expected, "{recording}");
                 assert!(available.iter().any(|topic| topic.name() == "/studio/episode"));
                 assert!(available.iter().all(|topic| topic.members() == 1));
+                let topic = available.iter().find(|topic| topic.name() == "/studio/joints/arm").unwrap();
+                let read = spiral_robotics_common::datasets::MessageRead::schema(
+                    spiral_robotics_common::datasets::EpisodeTopicRequest::new(dataset.clone(), topic.name().into(), member.clone()), topic.revision().unwrap().clone(),
+                );
+                let mut complete_messages = Vec::<serde_json::Value>::new();
+                for fields in [vec![], vec![vec!["value".into(), "state_position".into(), "values".into()]]] {
+                let projected = !fields.is_empty();
+                let window = spiral_robotics_common::datasets::MessageWindow::new((1_700_000_000_000_000_000, 1_700_000_000_300_000_000), fields).with_limit(64);
+                let mut next = None;
+                let mut all = Vec::<serde_json::Value>::new();
+                loop {
+                    let bytes = storage.episode_messages(read.clone().with_window(window.clone().with_cursor(next))).await?;
+                    let reader = arrow_ipc::reader::StreamReader::try_new(std::io::Cursor::new(bytes), None).map_err(|e| e.to_string())?;
+                    next = serde_json::from_str(reader.schema().metadata().get("studio.next_cursor").unwrap()).map_err(|e| e.to_string())?;
+                    let batches = reader.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+                    let mut json = Vec::new();
+                    let mut writer = arrow_json::writer::WriterBuilder::new().with_explicit_nulls(true).build::<_, arrow_json::writer::JsonArray>(&mut json);
+                    writer.write_batches(&batches.iter().collect::<Vec<_>>()).map_err(|e| e.to_string())?;
+                    writer.finish().map_err(|e| e.to_string())?; drop(writer);
+                    all.extend(serde_json::from_slice::<Vec<serde_json::Value>>(&json).map_err(|e| e.to_string())?);
+                    if next.is_none() { break; }
+                }
+                assert_eq!(all.len(), 120, "paginated messages exceed the preview bound");
+                assert_eq!(all[100]["log_time"].as_u64(), Some(1_700_000_000_200_000_000));
+                if projected {
+                    for (projected, complete) in all.iter().zip(&complete_messages) {
+                        assert_eq!(projected["field_0"], complete["value"]["state_position"]["values"]);
+                        assert_eq!(projected["log_time"], complete["log_time"]);
+                    }
+                    continue;
+                }
+                assert_eq!(all[100]["value"]["state_position"]["values"][0]["value"].as_f64(), Some(100.0 / 120.0));
+                assert!(all[60]["value"]["state_position"]["values"][0]["value"].is_null());
+                assert_eq!(all[0]["value"]["action_valid"].as_bool(), Some(!recording.ends_with("_third")));
+                complete_messages = all;
+                }
+
                 for topic in available.into_iter().filter(|topic| topic.schemas().iter().any(|schema| schema == "foxglove.CompressedVideo")) {
                     let video = storage.episode_video(spiral_robotics_common::datasets::EpisodeTopicRequest::new(
                         dataset.clone(), topic.name().to_owned(), member.clone()
                     )).await?;
                     assert_eq!(video.packets().len(), 8);
+                    let offset = if topic.name().contains("overhead") { 25_000_000 } else { 0 };
+                    assert_eq!(video.packets()[0].timestamp_ns().parse::<u64>().unwrap(), 1_700_000_000_000_000_000 + offset);
                 }
             }
             assert!(storage.episode_topics(
@@ -562,6 +613,36 @@ mod tests {
                 )
                 .await?;
             assert_eq!(rows.rows().len(), 2);
+            drop(connection);
+            // A foreign producer needs no Studio DTO or topic-name convention.
+            let bytes = SensorFixture::encode()?;
+            let mut connection = store.connect_exclusive().await?;
+            connection.create_or_append_batches(ImportRelations::SOURCE_TABLE, vec![RecordingImport::new(&name, "foreign-sensor.mcap", &bytes).batch()?]).await?;
+            connection.execute_update_sql(&format!("REFRESH DATASET dataset_{name}")).await?;
+            drop(connection);
+            let members = store.connect().await?.query_rows(&format!("SELECT id FROM spql.mcap.read_topic('dataset_{name}', '/environment') LIMIT 1"), 1).await?;
+            let member = members.rows()[0]["id"].as_str().unwrap().to_owned();
+            let dataset = spiral_robotics_common::datasets::DatasetSelection::new(vec![format!("dataset_{name}")])?;
+            let topics = storage.episode_topics(spiral_robotics_common::datasets::EpisodeSelection::new(dataset.clone(), member.clone())).await?;
+            let topic = topics.iter().find(|topic| topic.name() == "/environment").unwrap();
+            let request = spiral_robotics_common::datasets::MessageRead::schema(
+                spiral_robotics_common::datasets::EpisodeTopicRequest::new(dataset, topic.name().into(), member), topic.revision().unwrap().clone());
+            let schema_bytes = storage.episode_messages(request.clone()).await?;
+            let schema_reader = arrow_ipc::reader::StreamReader::try_new(std::io::Cursor::new(schema_bytes), None).map_err(|e| e.to_string())?;
+            assert!(schema_reader.schema().field_with_name("value").is_ok());
+            let mut cursor = None;
+            let window = spiral_robotics_common::datasets::MessageWindow::new((100, 101), vec![vec!["value".into(), "counter".into()]]).with_limit(1);
+            for expected in [u64::MAX - 1, u64::MAX] {
+                let bytes = storage.episode_messages(request.clone().with_window(window.clone().with_cursor(cursor))).await?;
+                let reader = arrow_ipc::reader::StreamReader::try_new(std::io::Cursor::new(bytes), None).map_err(|e| e.to_string())?;
+                cursor = serde_json::from_str(&reader.schema().metadata()["studio.next_cursor"]).map_err(|e| e.to_string())?;
+                let batches = reader.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+                assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 1);
+                let batch = batches.iter().find(|batch| batch.num_rows() > 0).unwrap();
+                assert_eq!(crate::db::ArrowColumns::new(batch, "sensor").unsigned("field_0", 0)?, expected);
+            }
+            assert!(cursor.is_none());
+
             Ok(())
         }
         .await;
@@ -589,5 +670,79 @@ mod tests {
             }
         }
         outcome.expect("native MCAP recording pipeline");
+    }
+    struct SensorFixture;
+    impl SensorFixture {
+        fn encode() -> Result<Vec<u8>, String> {
+            use prost::Message;
+            use prost_reflect::{
+                DescriptorPool, DynamicMessage, Value,
+                prost_types::{
+                    DescriptorProto, FieldDescriptorProto, FileDescriptorProto, FileDescriptorSet,
+                    field_descriptor_proto::{Label, Type},
+                },
+            };
+            let descriptor = FileDescriptorSet {
+                file: vec![FileDescriptorProto {
+                    name: Some("environment.proto".into()),
+                    package: Some("example".into()),
+                    syntax: Some("proto2".into()),
+                    message_type: vec![DescriptorProto {
+                        name: Some("Environment".into()),
+                        field: vec![
+                            FieldDescriptorProto {
+                                name: Some("temperature".into()),
+                                number: Some(1),
+                                label: Some(Label::Optional as i32),
+                                r#type: Some(Type::Double as i32),
+                                ..Default::default()
+                            },
+                            FieldDescriptorProto {
+                                name: Some("counter".into()),
+                                number: Some(2),
+                                label: Some(Label::Optional as i32),
+                                r#type: Some(Type::Uint64 as i32),
+                                ..Default::default()
+                            },
+                        ],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+            }
+            .encode_to_vec();
+            let pool = DescriptorPool::decode(descriptor.as_slice()).map_err(|e| e.to_string())?;
+            let mut writer =
+                mcap::Writer::new(std::io::Cursor::new(Vec::new())).map_err(|e| e.to_string())?;
+            let schema = writer
+                .add_schema("example.Environment", "protobuf", &descriptor)
+                .map_err(|e| e.to_string())?;
+            let channel_id = writer
+                .add_channel(schema, "/environment", "protobuf", &Default::default())
+                .map_err(|e| e.to_string())?;
+            for sequence in 0..2 {
+                let mut message =
+                    DynamicMessage::new(pool.get_message_by_name("example.Environment").unwrap());
+                message
+                    .set_field_by_name("counter", Value::U64(u64::MAX - 1 + u64::from(sequence)));
+                if sequence == 0 {
+                    message.set_field_by_name("temperature", Value::F64(23.5));
+                }
+                writer
+                    .write_to_known_channel(
+                        &mcap::records::MessageHeader {
+                            channel_id,
+                            sequence,
+                            log_time: 100,
+                            publish_time: 100,
+                        },
+                        &message.encode_to_vec(),
+                    )
+                    .map_err(|e| e.to_string())?;
+                writer.flush().map_err(|e| e.to_string())?;
+            }
+            writer.finish().map_err(|e| e.to_string())?;
+            Ok(writer.into_inner().into_inner())
+        }
     }
 }

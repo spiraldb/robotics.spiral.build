@@ -68,7 +68,7 @@ impl EpisodeSelection {
     }
 }
 
-/// A bounded topic preview scoped to one native recording ID.
+/// One topic scoped to a native recording ID.
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -93,13 +93,6 @@ impl EpisodeTopicRequest {
     }
     pub fn episode_id(&self) -> &str {
         &self.episode_id
-    }
-    pub fn sql(&self) -> String {
-        format!(
-            "SELECT * FROM spql.mcap.read_topic('{}', '{}') WHERE id = $1 ORDER BY log_time, sequence LIMIT 101",
-            self.dataset.sql_name().replace('\'', "''"),
-            self.topic.replace('\'', "''")
-        )
     }
 }
 
@@ -136,6 +129,8 @@ pub struct DatasetTopic {
     schemas: Vec<String>,
     members: u64,
     samples: Option<u64>,
+    #[serde(default)]
+    revision: Option<super::TopicRevision>,
 }
 impl DatasetTopic {
     pub fn new(name: String, schemas: Vec<String>) -> Self {
@@ -144,12 +139,20 @@ impl DatasetTopic {
             schemas,
             members: 0,
             samples: None,
+            revision: None,
         }
     }
     pub fn with_coverage(mut self, members: u64, samples: Option<u64>) -> Self {
         self.members = members;
         self.samples = samples;
         self
+    }
+    pub fn with_revision(mut self, revision: super::TopicRevision) -> Self {
+        self.revision = Some(revision);
+        self
+    }
+    pub fn revision(&self) -> Option<&super::TopicRevision> {
+        self.revision.as_ref()
     }
     pub fn name(&self) -> &str {
         &self.name

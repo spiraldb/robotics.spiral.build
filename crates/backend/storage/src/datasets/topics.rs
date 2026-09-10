@@ -39,9 +39,27 @@ impl StorageManager {
         if !found_episode {
             return Err("This episode is no longer in the dataset".into());
         }
-        Ok(topics
-            .into_iter()
-            .map(|(name, channels)| channels.into_topic(name))
+        let catalog = self.inspect_dataset(episode.dataset().clone()).await?;
+        Ok(catalog
+            .topics()
+            .iter()
+            .filter(|topic| topics.contains_key(topic.name()))
+            .map(|topic| {
+                let coverage = &topics[topic.name()];
+                let variants = catalog
+                    .topics()
+                    .iter()
+                    .filter(|candidate| candidate.name() == topic.name())
+                    .count();
+                topic.clone().with_coverage(
+                    1,
+                    if variants == 1 {
+                        coverage.samples
+                    } else {
+                        None
+                    },
+                )
+            })
             .collect())
     }
 }
@@ -76,6 +94,7 @@ impl TopicChannels {
         Ok(())
     }
 
+    #[cfg(test)]
     fn into_topic(self, name: String) -> DatasetTopic {
         DatasetTopic::new(name, self.schemas.into_iter().collect()).with_coverage(1, self.samples)
     }

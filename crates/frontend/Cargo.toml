@@ -9,6 +9,11 @@ publish = false
 workspace = true
 
 [dependencies]
+arrow-array = { version = "58.4.0", default-features = false }
+arrow-schema = "58.4.0"
+arrow-ipc = { version = "58.4.0", default-features = false }
+arrow-cast = { version = "58.4.0", default-features = false }
+arrow-json = "58.4.0"
 base64.workspace = true
 wasm-bindgen-futures = "0.4"
 charming = { version = "0.6.0", default-features = false, features = ["wasm"] }

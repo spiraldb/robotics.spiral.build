@@ -19,8 +19,7 @@ impl DatasetQueryEndpoints {
         routes.get("/datasets", Self::datasets);
         routes.get("/data-catalog", Self::project_resources);
         routes.post("/datasets/inspect", Self::inspect_dataset);
-        routes.post("/datasets/episode-topic", Self::preview_episode_topic);
-        routes.post("/datasets/episode-video", Self::episode_video);
+        routes.post("/datasets/episode-messages", Self::episode_messages);
         routes.post("/datasets/episode-topics", Self::episode_topics);
         routes.get("/relations", Self::relation_catalog);
         routes.post("/queries", Self::run_spiral_query);
@@ -49,23 +48,21 @@ impl DatasetQueryEndpoints {
     ) -> Result<Json<DatasetInspection>, HttpFailure> {
         Ok(Json(commands.inspect_dataset(selection).await?))
     }
-    async fn preview_episode_topic(
-        ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,
-        ApiJson(request): ApiJson<spiral_robotics_common::datasets::EpisodeTopicRequest>,
-    ) -> Result<Json<SpiralQuerySnapshot>, HttpFailure> {
-        Ok(Json(commands.preview_episode_topic(request).await?))
-    }
+
     async fn episode_topics(
         ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,
         ApiJson(request): ApiJson<spiral_robotics_common::datasets::EpisodeSelection>,
     ) -> Result<Json<Vec<spiral_robotics_common::datasets::DatasetTopic>>, HttpFailure> {
         Ok(Json(commands.episode_topics(request).await?))
     }
-    async fn episode_video(
+
+    async fn episode_messages(
         ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,
-        ApiJson(request): ApiJson<spiral_robotics_common::datasets::EpisodeTopicRequest>,
-    ) -> Result<Json<spiral_robotics_common::datasets::EpisodeVideo>, HttpFailure> {
-        Ok(Json(commands.episode_video(request).await?))
+        ApiJson(request): ApiJson<spiral_robotics_common::datasets::MessageRead>,
+    ) -> Result<crate::http::contract::ArrowResponse, HttpFailure> {
+        Ok(crate::http::contract::ArrowResponse(
+            commands.episode_messages(request).await?,
+        ))
     }
     async fn relation_catalog(
         ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,

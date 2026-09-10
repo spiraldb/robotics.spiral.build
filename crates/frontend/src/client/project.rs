@@ -90,15 +90,24 @@ impl ProjectClient {
                 .for_session(client.session_id().to_owned())
                 .send()
                 .await;
-            if response.as_ref().err().is_some_and(|error| {
-                error.code()
-                    == spiral_robotics_common::command_failure::CommandFailureCode::StaleProject
-            }) {
-                client.refresh.invalidate(&[QueryDomain::Project]);
-            }
             client.accept_response(response)
         }
     }
+    pub(crate) fn request_bytes(
+        &self,
+        request: HttpRequest,
+    ) -> impl Future<Output = Result<Vec<u8>, CommandError>> + use<> {
+        let client = self.clone();
+        async move {
+            client.require_current()?;
+            let response = request
+                .for_session(client.session_id().to_owned())
+                .bytes()
+                .await;
+            client.accept_response(response)
+        }
+    }
+
     pub(crate) fn mutate<T: DeserializeOwned + 'static>(
         &self,
         domains: &'static [QueryDomain],
@@ -136,6 +145,12 @@ impl ProjectClient {
         response: Result<T, CommandError>,
     ) -> Result<T, CommandError> {
         self.require_current()?;
+        if response.as_ref().err().is_some_and(|error| {
+            error.code()
+                == spiral_robotics_common::command_failure::CommandFailureCode::StaleProject
+        }) {
+            self.refresh.invalidate(&[QueryDomain::Project]);
+        }
         response
     }
 

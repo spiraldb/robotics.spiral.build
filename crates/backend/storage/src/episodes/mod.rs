@@ -19,6 +19,7 @@ pub use identity::EpisodeId;
 pub(crate) struct EpisodeFixture {
     start: EpisodeStart,
     duration_seconds: f64,
+    samples: Vec<Sample>,
 }
 
 #[cfg(test)]
@@ -28,6 +29,7 @@ impl EpisodeFixture {
             start: EpisodeStart::new(episode_id.to_owned(), dataset_id.to_owned())
                 .with_source("transfer-e2e".to_owned(), None),
             duration_seconds: 0.0,
+            samples: Vec::new(),
         }
     }
 
@@ -49,9 +51,15 @@ impl EpisodeFixture {
         self
     }
 
+    pub(crate) fn with_samples(mut self, samples: Vec<Sample>) -> Self {
+        self.samples = samples;
+        self
+    }
+
     pub(crate) fn into_episode(self) -> FullEpisode {
-        FullEpisode::fixture_without_samples(
+        FullEpisode::from_recording(
             self.start,
+            self.samples,
             EpisodeCompletion::new(self.duration_seconds, Vec::new(), Vec::new()),
         )
     }

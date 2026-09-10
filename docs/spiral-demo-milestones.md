@@ -1,13 +1,24 @@
 # Spiral demo feature milestones
 
-Status: **design for review**, September 9, 2026. This document plans the features
-in [spiral-demo-plan.md](spiral-demo-plan.md); it does not start implementation.
-It uses the earlier source review at `e2c818a`. No new runtime validation was
-performed for this revision.
+Status: **M1 implemented with the current local Spiral driver**, September 9, 2026.
+Tasks 1.1 and 1.2 share one clock in the Data inspector. The follow-up replaces
+joint-specific reads with native Arrow schema discovery, numeric field selection,
+and one paginated message transport. M2–M4 and optional work remain unimplemented.
+
+**Driver requirement:** local `xiangpeng/dev` commit `02d06b5c5` includes the
+nested-projection optimizer fix. Rebuild with `adbc-build` and run Studio with
+`local-driver`; the default shell's public archive still predates the fix.
+Position/action arrays now work through the normal Arrow transport. See
+[episode-playback.md](episode-playback.md) for the contract, bounds and verification,
+and [database-boundary.md](database-boundary.md) for exact driver provenance.
+
+**M1 dependency:** Studio pins published `dioxus-workbench` revision
+`69cb3a26d7d5f3d0400a989f7e9295a91b965254`, preserving neighboring panel state.
+No local dependency override is required.
 
 **Progress:** choose an unchecked task whose feature dependencies are complete.
-Mark its Done checkbox when its user-visible behavior works and verification passes.
-This breakdown replaces the previous task IDs; none were marked complete.
+Mark its Done checkbox when its user-visible behavior works, verification passes,
+and its required dependencies are reproducible.
 
 ## How to use this plan
 
@@ -77,14 +88,14 @@ wanted without holding up the initial lighting-filter flow.
 
 ### 1.1 — Watch all cameras on one timeline
 
-- [ ] Done
+- [x] Done
 
 **After this lands:** opening an episode lets the engineer view its recorded
 cameras together, play/pause them, and scrub one shared timeline.
 
 **Build:** extend the existing episode/topic workspace and single-camera decoder.
-Move transport ownership to the episode and open its camera panels through the
-existing workbench. Preserve topic-table inspection. Load only the selected native
+Keep transport owned by the episode; every topic gets one panel in the existing
+workbench. Stack topics as tabs and use native splits to compare camera feeds. Preserve topic-table inspection. Load only the selected native
 member; show each camera's gaps or errors and bound combined decoder memory.
 
 **Verify:** open two episodes in turn; scrub cameras with different start times and
@@ -96,15 +107,15 @@ at 1024 pixels. Extend the existing native playback and browser seek tests.
 
 ### 1.2 — Inspect joint motion beside the cameras
 
-- [ ] Done
+- [x] Done — requires the local Spiral driver documented above.
 
 **After this lands:** the engineer sees joint traces and current sample values at
 the camera playhead, including recorded actions when available.
 
 **Build:** read the selected native member's actual joint/action topics and connect
 them to the existing trace renderer. Preserve timestamps, units, nulls, and source
-field names. Start with the real demo dataset's schema; show unsupported channels
-explicitly. Do not derive historical values from live hardware or calibration.
+field names. Discover selectable numeric fields from each topic’s native schema;
+retain message inspection for other field types. Do not derive historical values from live hardware or calibration.
 
 **Verify:** compare displayed values/times with source samples while scrubbing;
 switch episodes; inspect a gap and an episode without action data. A bounded topic

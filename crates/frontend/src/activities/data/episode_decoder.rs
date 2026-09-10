@@ -85,11 +85,105 @@ impl EncodedCamera {
         })
     }
 
-    pub(crate) fn first_frame_seconds(&self) -> f64 {
+    pub(super) fn from_messages(
+        batches: &[arrow_array::RecordBatch],
+        origin: u64,
+    ) -> Result<Self, String> {
+        use arrow_array::Array as _;
+        use spiral_robotics_common::datasets::H264AccessUnit;
+        let mut camera = Self {
+            codec: String::new(),
+            packets: vec![],
+        };
+        for batch in batches {
+            let time = batch
+                .column_by_name("log_time")
+                .and_then(|a| a.as_any().downcast_ref::<arrow_array::UInt64Array>())
+                .ok_or("Missing video time")?;
+            let format = batch
+                .column_by_name("field_0")
+                .ok_or("Missing video format")?;
+            let data = batch
+                .column_by_name("field_1")
+                .ok_or("Missing video data")?;
+            for row in 0..batch.num_rows() {
+                if time.is_null(row) || data.is_null(row) {
+                    return Err("Video packet is null".into());
+                }
+                if arrow_cast::display::array_value_to_string(format.as_ref(), row)
+                    .map_err(|e| e.to_string())?
+                    != "h264"
+                {
+                    return Err("Camera renderer requires H.264".into());
+                }
+                let bytes = if let Some(a) =
+                    data.as_any().downcast_ref::<arrow_array::BinaryArray>()
+                {
+                    a.value(row)
+                } else if let Some(a) = data
+                    .as_any()
+                    .downcast_ref::<arrow_array::LargeBinaryArray>()
+                {
+                    a.value(row)
+                } else if let Some(a) = data.as_any().downcast_ref::<arrow_array::BinaryViewArray>()
+                {
+                    a.value(row)
+                } else {
+                    return Err("Video data must be binary".into());
+                };
+                let access = H264AccessUnit::parse(bytes)?;
+                if camera.packets.is_empty() && !access.keyframe() {
+                    return Err("Video must begin with a keyframe".into());
+                }
+                if let Some(codec) = access.codec() {
+                    if !camera.codec.is_empty() && camera.codec != codec {
+                        return Err("Video codec changes within this window".into());
+                    }
+                    camera.codec = codec.into();
+                }
+                let microseconds =
+                    i64::try_from((i128::from(time.value(row)) - i128::from(origin)) / 1000)
+                        .map_err(|e| e.to_string())?;
+                if camera
+                    .packets
+                    .last()
+                    .is_some_and(|p| p.microseconds >= microseconds)
+                {
+                    return Err("Video packet timestamps must increase".into());
+                }
+                camera.packets.push(CameraPacket {
+                    microseconds,
+                    bytes: bytes.to_vec(),
+                    keyframe: access.keyframe(),
+                });
+            }
+        }
+        if camera.packets.is_empty() {
+            return Err("No recorded video in this episode".into());
+        }
+        Ok(camera)
+    }
+
+    pub(super) fn memory_bytes(&self) -> u64 {
+        (self.packets.capacity() * std::mem::size_of::<CameraPacket>()
+            + self
+                .packets
+                .iter()
+                .map(|packet| packet.bytes.capacity())
+                .sum::<usize>()) as u64
+    }
+
+    pub(super) fn frame_seconds(&self, seconds: f64) -> Option<f64> {
+        let index = self
+            .packets
+            .partition_point(|packet| packet.microseconds as f64 <= seconds * 1e6)
+            .checked_sub(1)?;
+        Some(self.packets[index].microseconds as f64 / 1e6)
+    }
+    pub(super) fn last_frame_seconds(&self) -> Option<f64> {
         self.packets
-            .first()
-            .map(|packet| packet.microseconds.max(0) as f64 / 1e6)
-            .unwrap_or_default()
+            .last()
+            .map(|packet| packet.microseconds as f64 / 1e6)
     }
 
     pub(crate) fn group_at(&self, seconds: f64) -> Option<Range<usize>> {
@@ -110,7 +204,7 @@ impl EncodedCamera {
     }
 }
 
-struct DecodedFrame(VideoFrame);
+struct DecodedFrame(VideoFrame, Option<MediaReservation>);
 impl Drop for DecodedFrame {
     fn drop(&mut self) {
         self.0.close();
@@ -125,7 +219,18 @@ impl DecodedGroup {
         camera: &EncodedCamera,
         range: Range<usize>,
     ) -> Result<Self, String> {
-        let output = Rc::new(RefCell::new(DecoderOutput::default()));
+        Self::decode_with_budget(camera, range, None).await
+    }
+
+    pub(super) async fn decode_with_budget(
+        camera: &EncodedCamera,
+        range: Range<usize>,
+        budget: Option<MediaBudget>,
+    ) -> Result<Self, String> {
+        let output = Rc::new(RefCell::new(DecoderOutput {
+            budget,
+            ..Default::default()
+        }));
         let session = DecoderSession::new(output.clone()).map_err(DecoderSession::error)?;
         let config = Object::new();
         Reflect::set(&config, &"codec".into(), &camera.codec.clone().into())
@@ -201,10 +306,11 @@ struct DecoderOutput {
     frames: Vec<DecodedFrame>,
     bytes: u64,
     error: Option<String>,
+    budget: Option<MediaBudget>,
 }
 impl DecoderOutput {
     fn push(&mut self, frame: VideoFrame) {
-        let frame = DecodedFrame(frame);
+        let mut frame = DecodedFrame(frame, None);
         // Four bytes per coded pixel conservatively bounds common H.264 surfaces.
         self.bytes = self.bytes.saturating_add(
             u64::from(frame.0.coded_width()) * u64::from(frame.0.coded_height()) * 4,
@@ -213,6 +319,17 @@ impl DecoderOutput {
             self.error =
                 Some("Camera keyframe interval exceeds the 128 MiB decoded playback limit".into());
         } else if self.error.is_none() {
+            if let Some(budget) = &self.budget {
+                match budget.reserve(
+                    u64::from(frame.0.coded_width()) * u64::from(frame.0.coded_height()) * 4,
+                ) {
+                    Ok(reservation) => frame.1 = Some(reservation),
+                    Err(error) => {
+                        self.error = Some(error);
+                        return;
+                    }
+                }
+            }
             self.frames.push(frame);
         }
     }
@@ -293,10 +410,86 @@ impl Drop for DecoderSession {
     }
 }
 
+/// One episode's shared encoded or decoded memory accounting. Reservations
+/// follow the owning packet/frame lifetime, including cancelled decode futures.
+#[derive(Clone)]
+pub(super) struct MediaBudget {
+    usage: Rc<RefCell<u64>>,
+    limit: u64,
+}
+impl MediaBudget {
+    pub(super) fn new(limit: u64) -> Self {
+        Self {
+            usage: Rc::new(RefCell::new(0)),
+            limit,
+        }
+    }
+    pub(super) fn reserve(&self, bytes: u64) -> Result<MediaReservation, String> {
+        let mut usage = self.usage.borrow_mut();
+        if bytes > self.limit.saturating_sub(*usage) {
+            return Err("Episode media memory limit reached; close a camera and retry".into());
+        }
+        *usage += bytes;
+        Ok(MediaReservation {
+            budget: self.clone(),
+            bytes,
+        })
+    }
+}
+pub(super) struct MediaReservation {
+    budget: MediaBudget,
+    bytes: u64,
+}
+impl Drop for MediaReservation {
+    fn drop(&mut self) {
+        *self.budget.usage.borrow_mut() -= self.bytes;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use spiral_robotics_common::datasets::VideoPacket;
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn simultaneous_camera_memory_is_bounded_and_released_on_close() {
+        let budget = MediaBudget::new(100);
+        let first = budget.reserve(60).unwrap();
+        assert!(budget.reserve(50).is_err());
+        let second = budget.reserve(40).unwrap();
+        drop(first);
+        assert!(budget.reserve(61).is_err());
+        drop(second);
+        assert!(budget.reserve(100).is_ok());
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn arrow_camera_budget_counts_owned_packets_once() {
+        use arrow_array::{ArrayRef, BinaryArray, RecordBatch, StringArray, UInt64Array};
+        use std::sync::Arc;
+        let bytes = include_bytes!("fixtures/seek.h264");
+        let batch = RecordBatch::try_from_iter(vec![
+            (
+                "log_time",
+                Arc::new(UInt64Array::from(vec![1000])) as ArrayRef,
+            ),
+            ("field_0", Arc::new(StringArray::from(vec!["h264"]))),
+            (
+                "field_1",
+                Arc::new(BinaryArray::from(vec![bytes.as_slice()])),
+            ),
+        ])
+        .unwrap();
+        let camera = EncodedCamera::from_messages(&[batch], 1000).unwrap();
+        assert_eq!(camera.packets[0].bytes, bytes);
+        assert!(camera.memory_bytes() >= bytes.len() as u64);
+        assert!(camera.memory_bytes() < bytes.len() as u64 + 1024);
+        assert!(
+            MediaBudget::new(bytes.len() as u64 + 1024)
+                .reserve(camera.memory_bytes())
+                .is_ok()
+        );
+    }
+
     #[wasm_bindgen_test::wasm_bindgen_test]
     async fn independent_keyframe_decode_matches_continuous_decode() {
         let bytes = include_bytes!("fixtures/seek.h264");

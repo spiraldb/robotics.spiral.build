@@ -6,32 +6,26 @@
 //! when the caller passes an allowed robot-sync [`TimelineGate`] and the
 //! operator has explicitly enabled “Sync robot”.
 
+pub(crate) use crate::components::time_series::{
+    TimelineSignalLane, TimelineSignalLanes, TimelineSignalPoint, TimelineSignalSeries,
+};
 use std::sync::Arc;
 
 use crate::components::interaction::{
     Action, ActionPurpose, ActionSize, ActionVariant, ConfirmationCopy, ConfirmationDismissal,
     ConfirmationResponse, InlineConfirmation, Toggle,
 };
-use charming::Chart;
-use charming::component::{Axis, Grid};
-use charming::datatype::{CompositeValue, DataFrame, DataPoint};
-use charming::element::{
-    AxisLabel, AxisLine, AxisTick, AxisType, Emphasis, LineStyle, Sampling, SplitLine, Symbol,
-};
-use charming::series::Line;
 use dioxus::prelude::*;
 use serde::Deserialize;
 use spiral_robotics_viewport::SO101_JOINTS;
 
 use crate::activities::data::workbench::EpisodeIdPresentation;
-use crate::components::charts::{CharmingChart, ChartPoints, StudioTooltip};
+use crate::components::charts::CharmingChart;
 use crate::format::ClockPresentation;
 use crate::panels::timeline::signals::{SignalNamePresentation, SignalStore};
 use crate::panels::timeline::subject::{TimelineSubject, TimelineTarget};
 
 const TIMELINE_CHART_ID: &str = "studio-timeline-signal-chart";
-const TRACE_POINT_BUDGET: usize = 512;
-const TRACE_LANE_HEIGHT: f64 = 28.0;
 
 /// Whether the Timeline clock is stopped, previewing recorded data, or being
 /// driven by the server-owned consequence of robot synchronization.
@@ -88,79 +82,6 @@ impl StudioTimelineState {
     }
 }
 
-/// One measured point. `None` creates a visible gap rather than bridging a
-/// missing sample with a line the hardware never reported.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct TimelineSignalPoint {
-    seconds: f64,
-    value: Option<f64>,
-}
-
-impl TimelineSignalPoint {
-    pub(crate) const fn new(seconds: f64, value: Option<f64>) -> Self {
-        Self { seconds, value }
-    }
-
-    pub(crate) const fn seconds(&self) -> f64 {
-        self.seconds
-    }
-}
-
-/// One arm's trace within a joint lane.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct TimelineSignalSeries {
-    arm: String,
-    points: Vec<TimelineSignalPoint>,
-}
-
-impl TimelineSignalSeries {
-    pub(crate) fn new(arm: impl Into<String>, points: Vec<TimelineSignalPoint>) -> Self {
-        Self {
-            arm: arm.into(),
-            points,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn points(&self) -> &[TimelineSignalPoint] {
-        &self.points
-    }
-}
-
-/// One of the six fixed SO-101 joint lanes.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct TimelineSignalLane {
-    joint: String,
-    label: String,
-    color: String,
-    series: Vec<TimelineSignalSeries>,
-}
-
-impl TimelineSignalLane {
-    pub(crate) fn new(
-        joint: impl Into<String>,
-        label: impl Into<String>,
-        color: impl Into<String>,
-    ) -> Self {
-        Self {
-            joint: joint.into(),
-            label: label.into(),
-            color: color.into(),
-            series: Vec::new(),
-        }
-    }
-
-    pub(crate) fn with_series(mut self, series: Vec<TimelineSignalSeries>) -> Self {
-        self.series = series;
-        self
-    }
-
-    #[cfg(test)]
-    pub(crate) fn series(&self) -> &[TimelineSignalSeries] {
-        &self.series
-    }
-}
-
 /// Wire response from the bounded recorded trace endpoint.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub(crate) struct RecordedTimelineTraces {
@@ -204,26 +125,27 @@ impl RecordedTimelineTraces {
                 .map(|lane| {
                     lane.series
                         .iter()
-                        .map(|series| TimelineSignalSeries {
-                            arm: series.arm.clone(),
-                            points: series
-                                .points
-                                .iter()
-                                .map(|point| TimelineSignalPoint {
-                                    seconds: point.seconds,
-                                    value: point.value,
-                                })
-                                .collect(),
+                        .map(|series| {
+                            TimelineSignalSeries::new(
+                                series.arm.clone(),
+                                series
+                                    .points
+                                    .iter()
+                                    .map(|point| {
+                                        TimelineSignalPoint::new(point.seconds, point.value)
+                                    })
+                                    .collect(),
+                            )
                         })
                         .collect()
                 })
                 .unwrap_or_default();
-            TimelineSignalLane {
-                joint: definition.name().to_owned(),
-                label: definition.label().to_owned(),
-                color: definition.name().signal_color().to_owned(),
-                series,
-            }
+            TimelineSignalLane::new(
+                definition.name(),
+                definition.label(),
+                definition.name().signal_color(),
+            )
+            .with_series(series)
         })
     }
 }
@@ -250,24 +172,20 @@ impl RecordingTimeline for SignalStore {
                         .times()
                         .iter()
                         .zip(joint.values())
-                        .map(|(seconds, value)| TimelineSignalPoint {
-                            seconds: f64::from(*seconds),
-                            value: value.map(f64::from),
+                        .map(|(seconds, value)| {
+                            TimelineSignalPoint::new(f64::from(*seconds), value.map(f64::from))
                         })
                         .collect();
-                    Some(TimelineSignalSeries {
-                        arm: arm.id().to_owned(),
-                        points,
-                    })
+                    Some(TimelineSignalSeries::new(arm.id(), points))
                 })
                 .collect();
 
-            TimelineSignalLane {
-                joint: definition.name().to_owned(),
-                label: definition.label().to_owned(),
-                color: definition.name().signal_color().to_owned(),
-                series,
-            }
+            TimelineSignalLane::new(
+                definition.name(),
+                definition.label(),
+                definition.name().signal_color(),
+            )
+            .with_series(series)
         })
     }
 }
@@ -867,10 +785,10 @@ pub(crate) fn StudioTimeline(
                         div { class: "timeline-time-label", "Time" }
                         for lane in signal_lanes.iter() {
                             div {
-                                key: "label-{lane.joint}",
+                                key: "label-{lane.id()}",
                                 class: "timeline-signal-label",
-                                span { class: "timeline-signal-swatch", style: "background: {lane.color}" }
-                                span { class: "truncate", "{lane.label}" }
+                                span { class: "timeline-signal-swatch", style: "background: {lane.color()}" }
+                                span { class: "truncate", "{lane.label()}" }
                             }
                         }
                     }
@@ -956,7 +874,7 @@ pub(crate) fn StudioTimeline(
                             div { class: "timeline-signal-lane-overlays",
                                 for lane in signal_lanes.iter() {
                                     SignalLaneState {
-                                        key: "state-{lane.joint}",
+                                        key: "state-{lane.id()}",
                                         lane: lane.clone(),
                                         source: signal_source.clone(),
                                         clocked: duration > 0.0,
@@ -988,7 +906,7 @@ pub(crate) fn StudioTimeline(
 /// is a real fact about that episode and says so.
 #[component]
 fn SignalLaneState(lane: TimelineSignalLane, source: SignalSource, clocked: bool) -> Element {
-    let blank = lane.series.is_empty();
+    let blank = lane.series().is_empty();
     let loading = blank && source.loading();
     let unavailable = blank && source.unavailable().is_some();
     // A request that is still in flight or has already failed is a verdict about
@@ -998,11 +916,11 @@ fn SignalLaneState(lane: TimelineSignalLane, source: SignalSource, clocked: bool
     let missing = blank && clocked && !loading && !unavailable;
     let reported = loading || unavailable || missing;
     let label = if loading {
-        format!("{} samples are loading", lane.label)
+        format!("{} samples are loading", lane.label())
     } else if unavailable {
-        format!("{} samples are unavailable", lane.label)
+        format!("{} samples are unavailable", lane.label())
     } else if missing {
-        format!("{} had no samples", lane.label)
+        format!("{} had no samples", lane.label())
     } else {
         String::new()
     };
@@ -1091,160 +1009,6 @@ impl TimelineSeconds for f64 {
     }
 }
 
-trait TimelineSignalLanes {
-    fn chart(&self, duration: f64) -> Chart;
-}
-
-impl TimelineSignalLanes for [TimelineSignalLane; 6] {
-    fn chart(&self, duration: f64) -> Chart {
-        let mut chart = Chart::new()
-            .animation(false)
-            .tooltip(StudioTooltip::numeric(3));
-
-        for (lane_index, lane) in self.iter().enumerate() {
-            let grid_index = lane_index as f64;
-            let (low, high) = lane.signal_bounds().unwrap_or((0.0, 1.0));
-            let padding = ((high - low) * 0.08).max(0.5);
-            chart = chart
-                .grid(
-                    Grid::new()
-                        .id(format!("timeline-grid-{lane_index}"))
-                        .left(0)
-                        .right(0)
-                        .top(lane_index as f64 * TRACE_LANE_HEIGHT)
-                        .height(TRACE_LANE_HEIGHT),
-                )
-                .x_axis(
-                    TimelineChartStyle::hidden_axis(AxisType::Value, grid_index)
-                        .min(0)
-                        .max(duration.max(0.001)),
-                )
-                .y_axis(
-                    TimelineChartStyle::hidden_axis(AxisType::Value, grid_index)
-                        .min(low - padding)
-                        .max(high + padding)
-                        .scale(true),
-                );
-
-            for (series_index, series) in lane.series.iter().enumerate() {
-                chart = chart.series(
-                    Line::new()
-                        .id(format!("{}-{}-{series_index}", lane.joint, series.arm))
-                        .name(format!("{} · {}", lane.label, series.arm))
-                        .x_axis_index(grid_index)
-                        .y_axis_index(grid_index)
-                        .show_symbol(false)
-                        .symbol(Symbol::None)
-                        .sampling(Sampling::Minmax)
-                        .connect_nulls(false)
-                        .line_style(
-                            LineStyle::new()
-                                .color(lane.color.clone())
-                                .width(if series_index == 0 { 1.5 } else { 1.2 })
-                                .opacity(if series_index == 0 { 0.95 } else { 0.52 }),
-                        )
-                        .emphasis(Emphasis::new().disabled(true))
-                        .data(series.chart_data(TRACE_POINT_BUDGET)),
-                );
-            }
-        }
-
-        chart
-    }
-}
-
-struct TimelineChartStyle;
-
-impl TimelineChartStyle {
-    fn hidden_axis(kind: AxisType, grid_index: f64) -> Axis {
-        Axis::new()
-            .type_(kind)
-            .grid_index(grid_index)
-            .show(false)
-            .axis_line(AxisLine::new().show(false))
-            .axis_tick(AxisTick::new().show(false))
-            .axis_label(AxisLabel::new().show(false))
-            .split_line(SplitLine::new().show(false))
-    }
-
-    fn point(x: f64, y: Option<f64>) -> DataPoint {
-        DataPoint::from(vec![CompositeValue::from(x), CompositeValue::from(y)])
-    }
-}
-
-/// Convert gaps to ECharts null points and retain extrema before crossing the
-/// Wasm boundary. Pathological intermittent signals keep their longest valid
-/// runs so the payload remains bounded instead of freezing the operator UI.
-impl TimelineSignalSeries {
-    fn chart_data(&self, budget: usize) -> DataFrame {
-        let mut runs = Vec::<Vec<(f64, f64)>>::new();
-        let mut current = Vec::<(f64, f64)>::new();
-
-        for point in &self.points {
-            match point.value.filter(|value| value.is_finite()) {
-                Some(value) if point.seconds.is_finite() => current.push((point.seconds, value)),
-                _ if !current.is_empty() => runs.push(std::mem::take(&mut current)),
-                _ => {}
-            }
-        }
-        if !current.is_empty() {
-            runs.push(current);
-        }
-        if runs.is_empty() {
-            return Vec::new();
-        }
-
-        let max_runs = (budget / 4).max(1);
-        if runs.len() > max_runs {
-            let mut selected = (0..runs.len()).collect::<Vec<_>>();
-            selected.sort_by_key(|index| std::cmp::Reverse(runs[*index].len()));
-            selected.truncate(max_runs);
-            selected.sort_unstable();
-            runs = selected
-                .into_iter()
-                .map(|index| std::mem::take(&mut runs[index]))
-                .collect();
-        }
-
-        let total_valid = runs.iter().map(Vec::len).sum::<usize>().max(1);
-        let point_budget = budget.saturating_sub(runs.len().saturating_sub(1));
-        let mut data = DataFrame::new();
-        let mut previous_end = None;
-
-        for run in runs {
-            let share =
-                ((run.len() as f64 / total_valid as f64) * point_budget as f64).round() as usize;
-            let share = share.max(4).min(run.len());
-            let reduced = run.downsample_extrema(share);
-            if let (Some(end), Some((start, _))) = (previous_end, reduced.first()) {
-                data.push(TimelineChartStyle::point((end + start) / 2.0, None));
-            }
-            previous_end = reduced.last().map(|(seconds, _)| *seconds);
-            data.extend(
-                reduced
-                    .into_iter()
-                    .map(|(seconds, value)| TimelineChartStyle::point(seconds, Some(value))),
-            );
-        }
-
-        data
-    }
-}
-
-impl TimelineSignalLane {
-    fn signal_bounds(&self) -> Option<(f64, f64)> {
-        let mut low = f64::INFINITY;
-        let mut high = f64::NEG_INFINITY;
-        for point in self.series.iter().flat_map(|series| &series.points) {
-            if let Some(value) = point.value.filter(|value| value.is_finite()) {
-                low = low.min(value);
-                high = high.max(value);
-            }
-        }
-        (low <= high).then_some((low, high))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1311,30 +1075,6 @@ mod tests {
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]
-    fn traces_break_at_missing_samples_and_preserve_a_peak() {
-        let mut points = (0..600)
-            .map(|index| TimelineSignalPoint {
-                seconds: index as f64 / 20.0,
-                value: Some(0.0),
-            })
-            .collect::<Vec<_>>();
-        points[250].value = Some(90.0);
-        points[400].value = None;
-
-        let data = TimelineSignalSeries {
-            arm: "test".to_owned(),
-            points,
-        }
-        .chart_data(TRACE_POINT_BUDGET);
-        let data = serde_json::to_value(data).expect("trace data should serialize");
-        let rows = data.as_array().expect("trace data should be an array");
-
-        assert!(rows.iter().any(|row| row[1].is_null()));
-        assert!(rows.iter().any(|row| row[1] == 90.0));
-        assert!(rows.len() <= TRACE_POINT_BUDGET + 4);
-    }
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
     fn timeline_chart_uses_one_grid_per_canonical_lane() {
         let chart = SignalStore::default().timeline_lanes().chart(12.0);
         let option = serde_json::to_value(chart).expect("timeline chart should serialize");
@@ -1349,8 +1089,8 @@ mod tests {
     fn canonical_lane_helper_always_returns_six_joint_slots() {
         let lanes = SignalStore::default().timeline_lanes();
         assert_eq!(lanes.len(), 6);
-        assert_eq!(lanes[0].joint, "shoulder_pan");
-        assert_eq!(lanes[5].joint, "gripper");
+        assert_eq!(lanes[0].id(), "shoulder_pan");
+        assert_eq!(lanes[5].id(), "gripper");
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]
@@ -1381,9 +1121,9 @@ mod tests {
 
         let lanes = response.signal_lanes();
         assert_eq!(lanes.len(), 6);
-        assert!(lanes[0].series.is_empty());
-        assert_eq!(lanes[5].joint, "gripper");
-        assert_eq!(lanes[5].series[0].arm, "follower");
-        assert_eq!(lanes[5].series[0].points[1].value, None);
+        assert!(lanes[0].series().is_empty());
+        assert_eq!(lanes[5].id(), "gripper");
+        assert_eq!(lanes[5].series()[0].name(), "follower");
+        assert_eq!(lanes[5].series()[0].points()[1].value(), None);
     }
 }

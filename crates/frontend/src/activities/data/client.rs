@@ -95,14 +95,6 @@ impl DatasetClient {
             .request(HttpRequest::new("GET", "/api/relations"))
     }
 
-    pub(crate) fn preview_episode_topic(
-        &self,
-        request: spiral_robotics_common::datasets::EpisodeTopicRequest,
-    ) -> impl Future<Output = Result<SpiralQuerySnapshot, CommandError>> + use<> {
-        self.project
-            .request(HttpRequest::new("POST", "/api/datasets/episode-topic").json(&request))
-    }
-
     pub(crate) fn episode_topics(
         &self,
         request: spiral_robotics_common::datasets::EpisodeSelection,
@@ -113,13 +105,13 @@ impl DatasetClient {
             .request(HttpRequest::new("POST", "/api/datasets/episode-topics").json(&request))
     }
 
-    pub(crate) fn episode_video(
+    pub(crate) fn episode_messages(
         &self,
-        request: spiral_robotics_common::datasets::EpisodeTopicRequest,
-    ) -> impl Future<Output = Result<spiral_robotics_common::datasets::EpisodeVideo, CommandError>> + use<>
-    {
-        self.project
-            .request(HttpRequest::new("POST", "/api/datasets/episode-video").json(&request))
+        request: spiral_robotics_common::datasets::MessageRead,
+    ) -> impl Future<Output = Result<Vec<u8>, CommandError>> + use<> {
+        self.project.request_bytes(
+            HttpRequest::new("POST", "/api/datasets/episode-messages").json(&request),
+        )
     }
 
     pub(crate) fn run_spiral_query(

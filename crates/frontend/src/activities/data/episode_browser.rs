@@ -170,8 +170,8 @@ impl EpisodeContext {
             self.recording.id.clone(),
         )
     }
-    pub(super) fn timeline(&self) -> Option<super::episode_playback::EpisodeTimeRange> {
-        Some(super::episode_playback::EpisodeTimeRange::new(
+    pub(super) fn timeline(&self) -> Option<super::episode_transport::EpisodeTimeRange> {
+        Some(super::episode_transport::EpisodeTimeRange::new(
             self.recording.message_start_time?,
             self.recording.message_end_time?,
         ))

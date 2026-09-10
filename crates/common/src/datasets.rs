@@ -1,10 +1,14 @@
 //! Dataset identity and import contracts.
 
 mod catalog;
+mod h264;
+mod messages;
 pub use catalog::{
     DatasetInspection, DatasetSelection, DatasetSummary, DatasetTopic, EpisodeSelection,
     EpisodeTopicRequest, EpisodeVideo, ProjectResource, RecordedCameraRequest, VideoPacket,
 };
+pub use h264::H264AccessUnit;
+pub use messages::{MessageCursor, MessageRead, MessageWindow, TopicRevision};
 
 use serde::{Deserialize, Serialize};
 
