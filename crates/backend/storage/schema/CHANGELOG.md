@@ -1,5 +1,16 @@
 # Storage schema changelog
 
+## Spiral schema 12
+
+- Replaced `workflow_runs` and its prefixed document keys with `workflows`: one
+  row per workflow, with name, graph JSON, conversation JSON, and ordering timestamp.
+- The picker reads metadata first and loads only the selected workflow's details.
+- Removed graph-history and project-wide Assistant collection compatibility.
+  Existing workflow state is intentionally reset; there is no migration or legacy
+  import path. Dataset, recording, training, and rollout relation shapes are unchanged.
+- Training workers support schemas 11–12 because this change only affects Studio
+  authoring storage; the worker's input, checkpoint, and metrics contracts are unchanged.
+
 ## Spiral schema 11
 
 - Recordings are immutable MCAP source blobs in `dataset_source`, selected by native Dataset source views. Removed the episode/joint/video registry tables and MP4 recording indexes.

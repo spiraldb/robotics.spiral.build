@@ -34,8 +34,7 @@ use spiral_robotics_storage::{StorageManager, StorageSchema};
 /// and edge relations yet, so its persisted form is one versioned payload.
 /// Bump this constant when the payload's shape or persisted relation naming
 /// changes. Unsupported versions are refused rather than rewritten.
-const WORKFLOW_DOCUMENT_VERSION: u32 = 2;
-const WORKFLOW_HISTORY_DOCUMENT_VERSION: u32 = 3;
+const WORKFLOW_ENCODING_VERSION: u32 = 2;
 
 /// Persistence is a backend implementation detail. The shared API exposes the
 /// graph and observation, while the manager decides that they commit together.
@@ -44,19 +43,13 @@ const WORKFLOW_HISTORY_DOCUMENT_VERSION: u32 = 3;
 struct SavedWorkflow {
     workflow: WorkflowSpec,
     snapshot: WorkflowRunSnapshot,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    history: Option<Vec<WorkflowSpec>>,
 }
 
 impl Default for SavedWorkflow {
     fn default() -> Self {
         let workflow = WorkflowSpec::default();
         let snapshot = WorkflowRunSnapshot::idle_for(&workflow);
-        Self {
-            workflow,
-            snapshot,
-            history: None,
-        }
+        Self { workflow, snapshot }
     }
 }
 
@@ -91,11 +84,7 @@ impl SavedWorkflow {
     }
 
     fn new(workflow: WorkflowSpec, snapshot: WorkflowRunSnapshot) -> Self {
-        Self {
-            workflow,
-            snapshot,
-            history: None,
-        }
+        Self { workflow, snapshot }
     }
 
     const fn workflow(&self) -> &WorkflowSpec {
@@ -117,28 +106,16 @@ impl SavedWorkflow {
 
     fn persisted(&self) -> Result<WorkflowJson, String> {
         serde_json::to_string(self)
-            .map(|payload| WorkflowJson::new(self.encoding_version(), payload))
+            .map(|payload| WorkflowJson::new(WORKFLOW_ENCODING_VERSION, payload))
             .map_err(|error| format!("encoding the saved Workflow: {error}"))
     }
 
-    fn encoding_version(&self) -> u32 {
-        if self.history.is_some() {
-            WORKFLOW_HISTORY_DOCUMENT_VERSION
-        } else {
-            WORKFLOW_DOCUMENT_VERSION
-        }
-    }
-
     fn revised(mut self, workflow: WorkflowSpec, snapshot: WorkflowRunSnapshot) -> Self {
-        // Existing history is retained for compatibility. New saves only replace
-        // the current definition; the revision counter guards stale writes.
         self.workflow = workflow;
         self.snapshot = snapshot;
         self
     }
 
-    /// V3 extends V2 with earlier graph revisions. Decode only a shape whose
-    /// supplied fields can all be preserved; loading never rewrites the record.
     fn for_id(id: &str, stored: &WorkflowJson) -> Result<Self, OperationError> {
         let saved = Self::restored(stored)?;
         if saved.workflow().id() != id {
@@ -150,10 +127,7 @@ impl SavedWorkflow {
     }
 
     fn restored(stored: &WorkflowJson) -> Result<Self, OperationError> {
-        if !matches!(
-            stored.version(),
-            WORKFLOW_DOCUMENT_VERSION | WORKFLOW_HISTORY_DOCUMENT_VERSION
-        ) {
+        if stored.version() != WORKFLOW_ENCODING_VERSION {
             return Err(OperationError::IncompatibleWorkflow(format!(
                 "The saved Workflow uses encoding version {}, which this Studio build cannot read. Update Studio to open this project.",
                 stored.version()
@@ -167,13 +141,10 @@ impl SavedWorkflow {
             })?;
         let saved: Self = serde_json::from_value(original.clone())
             .map_err(|error| OperationError::IncompatibleWorkflow(format!("The saved Workflow has an unsupported shape: {error}. The original has been preserved.")))?;
-        if saved.encoding_version() != stored.version() {
-            return Err(OperationError::IncompatibleWorkflow("The saved Workflow version does not match its revision history. The original has been preserved.".to_owned()));
-        }
         let canonical = serde_json::to_value(&saved)
             .map_err(|error| OperationError::Internal(error.to_string()))?;
         Self::validate_fields(&original, &canonical)?;
-        saved.validate_history()?;
+        saved.validate_snapshot()?;
         Ok(saved)
     }
 
@@ -211,31 +182,11 @@ impl SavedWorkflow {
         }
     }
 
-    fn validate_history(&self) -> Result<(), OperationError> {
+    fn validate_snapshot(&self) -> Result<(), OperationError> {
         if self.snapshot.workflow_id() != self.workflow.id()
             || self.snapshot.workflow_revision() != self.workflow.revision()
         {
             return Err(OperationError::IncompatibleWorkflow("The saved Workflow snapshot refers to a different graph revision. The original has been preserved.".to_owned()));
-        }
-        // V2 also stores the initial incomplete graph. V3 history must preserve
-        // a coherent sequence of revisions; draft validation is still shown by
-        // the editor and remains required before any graph can run.
-        let Some(history) = &self.history else {
-            return Ok(());
-        };
-        let mut previous_revision = None;
-        for workflow in history.iter().chain(std::iter::once(&self.workflow)) {
-            if workflow.id() != self.workflow.id()
-                || previous_revision.is_some_and(|previous| previous >= workflow.revision())
-            {
-                return Err(OperationError::IncompatibleWorkflow("The saved Workflow history has conflicting identities or revision order. The original has been preserved.".to_owned()));
-            }
-            workflow.topological_order().map_err(|error| {
-                OperationError::IncompatibleWorkflow(format!(
-                    "The saved Workflow graph is invalid: {error}. The original has been preserved."
-                ))
-            })?;
-            previous_revision = Some(workflow.revision());
         }
         Ok(())
     }
@@ -498,26 +449,31 @@ impl WorkflowManager {
     }
 
     async fn load_latest(&self) -> Result<SavedWorkflow, OperationError> {
-        let graphs = self
+        let workflows = self
             .inner
             .storage
-            .workflow_graphs()
+            .workflows()
             .await
             .map_err(OperationError::External)?;
-        let mut workflows = Vec::new();
-        let mut latest = None;
-        for (id, stored) in graphs {
-            let saved = SavedWorkflow::for_id(&id, &stored)?;
-            workflows.push(spiral_robotics_common::workflow::WorkflowSummary::new(
-                id,
-                saved.workflow().name(),
-            ));
-            if latest.is_none() {
-                latest = Some(saved);
-            }
-        }
+        let saved = match workflows.first() {
+            Some(workflow) => self.load_saved(workflow.id()).await?,
+            None => SavedWorkflow::fresh(),
+        };
         *self.inner.workflows.recover_lock() = workflows;
-        Ok(latest.unwrap_or_else(SavedWorkflow::fresh))
+        Ok(saved)
+    }
+
+    async fn load_saved(&self, id: &str) -> Result<SavedWorkflow, OperationError> {
+        let stored = self
+            .inner
+            .storage
+            .load_workflow_graph(id)
+            .await
+            .map_err(OperationError::External)?
+            .ok_or_else(|| {
+                OperationError::InvalidInput("That workflow no longer exists.".to_owned())
+            })?;
+        SavedWorkflow::for_id(id, &stored)
     }
 
     fn remember_workflow(&self, workflow: &WorkflowSpec) {
@@ -542,18 +498,7 @@ impl WorkflowManager {
             ));
         }
         let candidate = match workflow_id {
-            Some(id) => {
-                let stored = self
-                    .inner
-                    .storage
-                    .load_workflow_graph(id)
-                    .await
-                    .map_err(OperationError::External)?
-                    .ok_or_else(|| {
-                        OperationError::InvalidInput("That workflow no longer exists.".to_owned())
-                    })?;
-                SavedWorkflow::for_id(id, &stored)?
-            }
+            Some(id) => self.load_saved(id).await?,
             None => SavedWorkflow::fresh(),
         };
         // Persist the selected workflow last so reconnect opens the latest one.
@@ -760,7 +705,7 @@ impl WorkflowManager {
         self.inner
             .storage
             .save_workflow_graph(
-                candidate.workflow().id(),
+                candidate.workflow(),
                 &candidate.persisted().map_err(OperationError::External)?,
             )
             .await
@@ -809,7 +754,7 @@ impl WorkflowManager {
         self.inner
             .storage
             .save_workflow_graph(
-                candidate.workflow().id(),
+                candidate.workflow(),
                 &candidate.persisted().map_err(OperationError::External)?,
             )
             .await
@@ -1596,7 +1541,7 @@ impl WorkflowManager {
         }
         self.inner
             .storage
-            .save_workflow_graph(saved.workflow().id(), &saved.persisted()?)
+            .save_workflow_graph(saved.workflow(), &saved.persisted()?)
             .await
     }
 
@@ -1876,7 +1821,7 @@ mod tests {
         let stored = saved.persisted().unwrap();
         assert_eq!(stored.version(), 2);
         assert_eq!(SavedWorkflow::restored(&stored).unwrap(), saved);
-        for version in [1, 4] {
+        for version in [1, 3, 4] {
             let unsupported = WorkflowJson::new(version, stored.payload().to_owned());
             let original = unsupported.payload().to_owned();
             let error = SavedWorkflow::restored(&unsupported).unwrap_err();
@@ -1894,101 +1839,24 @@ mod tests {
     }
 
     #[test]
-    fn v3_history_survives_loading_execution_and_later_saves() {
-        let payload = include_str!("fixtures/workflow-history-v3.json");
-        let stored = WorkflowJson::new(3, payload.to_owned());
-        let original = SavedWorkflow::restored(&stored).unwrap();
-        assert_eq!(original.history.as_ref().unwrap().len(), 1);
-        assert!(original.workflow.validate().valid());
-        assert!(original.history.as_ref().unwrap()[0].validate().valid());
-        assert_eq!(original.persisted().unwrap().version(), 3);
-        assert_eq!(
-            SavedWorkflow::restored(&original.persisted().unwrap()).unwrap(),
-            original
-        );
-        let started = original.clone().revised(
-            original.workflow.clone(),
-            WorkflowRunSnapshot::started(&original.workflow, "test-run"),
-        );
-        assert_eq!(started.history, original.history);
-        let mut edited = original.workflow.clone();
-        edited.set_revision(edited.revision() + 1);
-        edited.set_name("Edited workflow");
-        let next_snapshot = WorkflowRunSnapshot::idle_for(&edited);
-        let updated = original.clone().revised(edited, next_snapshot);
-        assert_eq!(
-            updated.history.as_ref().unwrap()[0],
-            original.history.as_ref().unwrap()[0]
-        );
-        assert_eq!(
-            updated.history, original.history,
-            "new edits do not accumulate graph history"
-        );
-        assert_eq!(
-            SavedWorkflow::restored(&updated.persisted().unwrap()).unwrap(),
-            updated
-        );
-        assert_eq!(stored.payload(), payload);
-    }
-
-    #[test]
-    fn v3_rejects_lossy_decoding_and_inconsistent_history() {
-        let original: serde_json::Value =
-            serde_json::from_str(include_str!("fixtures/workflow-history-v3.json")).unwrap();
-        let mut unknown = original.clone();
-        unknown["workflow"]["nodes"][0]["future_behavior"] = serde_json::json!(true);
+    fn saved_workflow_rejects_graph_history_and_mismatched_snapshots() {
+        let saved = SavedWorkflow::fresh();
+        let original = serde_json::to_value(&saved).unwrap();
+        let mut history = original.clone();
+        history["history"] = serde_json::json!([]);
         let mut mismatched = original.clone();
         mismatched["snapshot"]["workflow_revision"] = serde_json::json!(99);
-        let mut unordered = original.clone();
-        unordered["history"][0]["revision"] = serde_json::json!(100);
-        let mut wrong_identity = original.clone();
-        wrong_identity["history"][0]["id"] = serde_json::json!("another-workflow");
-        let mut cyclic = original.clone();
-        cyclic["history"][0]["edges"]
-            .as_array_mut()
-            .unwrap()
-            .push(serde_json::json!({"source":"result", "target":"table"}));
-        let mut missing_history = original;
-        missing_history.as_object_mut().unwrap().remove("history");
-        for payload in [
-            unknown,
-            mismatched,
-            unordered,
-            wrong_identity,
-            cyclic,
-            missing_history,
-        ] {
-            let stored = WorkflowJson::new(3, payload.to_string());
-            assert!(matches!(
-                SavedWorkflow::restored(&stored),
-                Err(OperationError::IncompatibleWorkflow(_))
-            ));
-            assert_eq!(
-                serde_json::from_str::<serde_json::Value>(stored.payload()).unwrap(),
-                payload
+        let mut unknown = original;
+        unknown["workflow"]["future_field"] = serde_json::json!(true);
+        for payload in [history, mismatched, unknown] {
+            assert!(
+                SavedWorkflow::restored(&WorkflowJson::new(
+                    WORKFLOW_ENCODING_VERSION,
+                    payload.to_string()
+                ))
+                .is_err()
             );
         }
-    }
-
-    #[test]
-    #[ignore = "read-only check of a saved inspection; set STUDIO_WORKFLOW_INSPECTION"]
-    fn inspected_workflow_document_is_readable_without_data_loss() {
-        let path = std::env::var("STUDIO_WORKFLOW_INSPECTION").unwrap();
-        let inspection: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-        let stored = WorkflowJson::new(
-            inspection["version"].as_u64().unwrap() as u32,
-            inspection["payload"].as_str().unwrap().to_owned(),
-        );
-        let saved = SavedWorkflow::restored(&stored).unwrap();
-        assert!(saved.workflow.validate().valid());
-        for previous in saved.history.iter().flatten() {
-            assert!(previous.validate().valid());
-        }
-        assert_eq!(
-            SavedWorkflow::restored(&saved.persisted().unwrap()).unwrap(),
-            saved
-        );
     }
 
     #[test]
@@ -2349,12 +2217,12 @@ mod tests {
     ///
     /// ```text
     /// SPIRAL_PROJECT_ID=project-id cargo test -p spiral-robotics-backend \
-    ///   backend::workflow::manager::tests::spiral_sql_workflow_runs_persists_and_cancels \
+    ///   backend::workflow::manager::tests::spiral_sql_workflows_persist_and_cancel \
     ///   -- --ignored --exact
     /// ```
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore = "requires a real SpiralDB server and disposable project access"]
-    async fn spiral_sql_workflow_runs_persists_and_cancels() {
+    async fn spiral_sql_workflows_persist_and_cancel() {
         let stored = BackendStateStore::open_default().ok();
         let project = std::env::var("SPIRAL_PROJECT_ID")
             .ok()
@@ -2391,10 +2259,7 @@ mod tests {
         let seed_relation = format!("{table_prefix}_seed_values");
         let mut cleanup = WorkflowTestTables::new(
             project_store.clone(),
-            vec![
-                seed_relation.clone(),
-                format!("{table_prefix}_workflow_runs"),
-            ],
+            vec![seed_relation.clone(), format!("{table_prefix}_workflows")],
             table_prefix.clone(),
         );
         let schema = Arc::new(Schema::new(vec![Field::new(
@@ -2419,14 +2284,17 @@ mod tests {
         // The app provisions managed relations at project setup; this isolated
         // test namespace provisions only the workflow relation it exercises.
         let workflow_schema = Arc::new(Schema::new(vec![
-            Field::new("run_id", DataType::Utf8, false),
-            Field::new("document_version", DataType::UInt32, false),
-            Field::new("snapshot_json", DataType::Utf8, false),
+            Field::new("workflow_id", DataType::Utf8, false),
+            Field::new("name", DataType::Utf8, false),
+            Field::new("graph_version", DataType::UInt32, false),
+            Field::new("graph_json", DataType::Utf8, false),
+            Field::new("conversation_version", DataType::UInt32, true),
+            Field::new("conversation_json", DataType::Utf8, true),
             Field::new("updated_ms", DataType::Int64, false),
         ]));
         connection
             .replace_or_create_batches(
-                &format!("{table_prefix}_workflow_runs"),
+                &format!("{table_prefix}_workflows"),
                 vec![RecordBatch::new_empty(workflow_schema)],
             )
             .await

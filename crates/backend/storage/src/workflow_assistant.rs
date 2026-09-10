@@ -8,7 +8,7 @@ use spiral_robotics_common::workflow::{
 };
 use std::collections::BTreeSet;
 
-const CONVERSATION_VERSION: u32 = 3;
+const CONVERSATION_VERSION: u32 = 4;
 const MAX_CONVERSATION_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -94,9 +94,6 @@ impl WorkflowConversation {
     pub fn load(stored: &WorkflowJson, workflow_id: &str) -> Result<Self, String> {
         let conversation = match stored.version() {
             CONVERSATION_VERSION => Self::decode(stored.payload())?,
-            2 if workflow_id == "default" => {
-                LegacyAssistantHistory::decode(stored.payload())?.into_active()
-            }
             version => {
                 return Err(format!(
                     "Assistant history version {version} is unsupported; the saved history was preserved."
@@ -116,7 +113,6 @@ impl WorkflowConversation {
         self.provider_messages.remove_incomplete_tool_exchange();
         self.session.set_phase(WorkflowAgentPhase::Interrupted);
         self.session.set_active_turn_id(None);
-        self.session.set_deferred_run_id(None);
         self.session.set_error(Some(
             "Studio reconnected before this Assistant turn finished. Retry the turn.".to_owned(),
         ));
@@ -166,80 +162,6 @@ impl WorkflowConversation {
             );
         }
         Ok(())
-    }
-}
-
-/// Read-only compatibility for the former project-wide conversation collection.
-/// Its original storage row is retained, including inactive conversations.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct LegacyAssistantHistory {
-    schema_version: u32,
-    #[serde(rename = "revision")]
-    _revision: u64,
-    active_conversation_id: String,
-    conversations: Vec<LegacyConversation>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LegacyConversation {
-    conversation_id: String,
-    title: String,
-    #[serde(rename = "created_ms")]
-    _created_ms: u64,
-    #[serde(rename = "updated_ms")]
-    _updated_ms: u64,
-    session: WorkflowAgentSession,
-    provider_messages: Vec<ProviderMessage>,
-    #[serde(default, rename = "owned_run_id")]
-    _owned_run_id: Option<String>,
-}
-
-impl LegacyAssistantHistory {
-    pub(crate) fn decode(encoded: &str) -> Result<Self, String> {
-        if encoded.len() > MAX_CONVERSATION_BYTES {
-            return Err("Assistant history exceeds 16 MiB.".to_owned());
-        }
-        let history: Self = serde_json::from_str(encoded).map_err(|error| error.to_string())?;
-        if history.schema_version != 2
-            || history.conversations.is_empty()
-            || history.conversations.len() > 20
-        {
-            return Err("Unsupported legacy Assistant history.".to_owned());
-        }
-        let mut ids = BTreeSet::new();
-        for conversation in &history.conversations {
-            if !ids.insert(&conversation.conversation_id)
-                || conversation.conversation_id != conversation.session.conversation_id()
-                || conversation.title.trim().is_empty()
-                || conversation.title.chars().count() > 64
-                || conversation.session.workflow_id() != "default"
-            {
-                return Err("Invalid legacy Assistant conversation.".to_owned());
-            }
-            WorkflowConversation {
-                session: conversation.session.clone(),
-                provider_messages: conversation.provider_messages.clone(),
-            }
-            .validate()?;
-        }
-        if !ids.contains(&history.active_conversation_id) {
-            return Err("Legacy active conversation is missing.".to_owned());
-        }
-        Ok(history)
-    }
-
-    fn into_active(self) -> WorkflowConversation {
-        let conversation = self
-            .conversations
-            .into_iter()
-            .find(|conversation| conversation.conversation_id == self.active_conversation_id)
-            .expect("validated active conversation");
-        WorkflowConversation {
-            session: conversation.session,
-            provider_messages: conversation.provider_messages,
-        }
     }
 }
 
@@ -426,7 +348,7 @@ impl ProviderMessageHistory for Vec<ProviderMessage> {
                 self.drain(..boundary);
             } else {
                 // A valid retained conversation always has a user boundary. Drop
-                // malformed legacy history instead of emitting an invalid or
+                // malformed provider history instead of emitting an invalid or
                 // unbounded provider request.
                 self.clear();
             }
@@ -562,34 +484,6 @@ mod tests {
             MAX_WORKFLOW_AGENT_MESSAGES_PER_CONVERSATION + 1
         );
         assert!(WorkflowConversation::decode(&" ".repeat(MAX_CONVERSATION_BYTES + 1)).is_err());
-    }
-
-    #[test]
-    fn legacy_selection_preserves_the_original_collection() {
-        let first = WorkflowAgentSession::new("default", "first");
-        let second = WorkflowAgentSession::new("default", "second");
-        let legacy = json!({
-            "schema_version": 2, "revision": 4, "active_conversation_id": "second",
-            "conversations": [
-                {"conversation_id":"first", "title":"First", "created_ms":1, "updated_ms":1, "session":first, "provider_messages":[]},
-                {"conversation_id":"second", "title":"Second", "created_ms":2, "updated_ms":2, "session":second, "provider_messages":[{"role":"user", "content":"Keep this context"}]}
-            ]
-        });
-        let stored = WorkflowJson::new(2, legacy.to_string());
-        let loaded = WorkflowConversation::load(&stored, "default").unwrap();
-        assert_eq!(loaded.conversation_id(), "second");
-        assert_eq!(
-            loaded.provider_messages()[0].content(),
-            Some("Keep this context")
-        );
-        assert_eq!(stored.payload(), legacy.to_string());
-        assert_eq!(loaded.persisted().unwrap().version(), 3);
-        let mut invalid = legacy;
-        invalid["conversations"][0]["session"]["workflow_id"] = json!("foreign");
-        assert!(
-            LegacyAssistantHistory::decode(&invalid.to_string()).is_err(),
-            "inactive legacy history is validated too"
-        );
     }
 
     #[test]

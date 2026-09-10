@@ -738,9 +738,6 @@ impl<'a> ManagedRelationProvisioner<'a> {
                 schema.field_with_name(db::SNAPSHOT_JSON).is_ok()
                     && schema.field_with_name(db::SESSION_ID).is_err()
             }
-            Table::WorkflowRuns => {
-                schema.fields().len() == 3 && schema.field_with_name(db::DOCUMENT_VERSION).is_err()
-            }
             _ => false,
         }
     }
@@ -788,7 +785,6 @@ mod managed_relation_tests {
         let legacy_relations = [
             (Table::TrainingRuns, legacy_document()),
             (Table::RolloutRuns, legacy_document()),
-            (Table::WorkflowRuns, legacy_document()),
         ];
 
         for (table, schema) in legacy_relations {

@@ -24,7 +24,7 @@ pub(crate) enum Table {
     TrainingRunMetrics,
     TrainingRunCheckpoints,
     RolloutRuns,
-    WorkflowRuns,
+    Workflows,
     FeatureRegistry,
 }
 
@@ -43,7 +43,7 @@ impl Table {
         Self::TrainingRunMetrics,
         Self::TrainingRunCheckpoints,
         Self::RolloutRuns,
-        Self::WorkflowRuns,
+        Self::Workflows,
         Self::FeatureRegistry,
     ];
 
@@ -57,7 +57,7 @@ impl Table {
             Self::TrainingRunMetrics => "training_run_metrics",
             Self::TrainingRunCheckpoints => "training_run_checkpoints",
             Self::RolloutRuns => "rollout_runs",
-            Self::WorkflowRuns => "workflow_runs",
+            Self::Workflows => "workflows",
             Self::FeatureRegistry => "feature_registry",
         }
     }
@@ -250,7 +250,6 @@ pub(crate) mod column {
     pub(crate) const DEVICE: &str = "device";
     pub(crate) const DEVICE_COPY_MS: &str = "device_copy_ms";
     pub(crate) const DISCARDED: &str = "discarded";
-    pub(crate) const DOCUMENT_VERSION: &str = "document_version";
     pub(crate) const DURATION_NS: &str = "duration_ns";
     pub(crate) const DURATION_SECONDS: &str = "duration_seconds";
     pub(crate) const EFFORT: &str = "effort";
@@ -569,8 +568,16 @@ mod tests {
             ],
         },
         PublishedManagedRelation {
-            name: "workflow_runs",
-            columns: &["run_id", "document_version", "snapshot_json", "updated_ms"],
+            name: "workflows",
+            columns: &[
+                "workflow_id",
+                "name",
+                "graph_version",
+                "graph_json",
+                "conversation_version",
+                "conversation_json",
+                "updated_ms",
+            ],
         },
         PublishedManagedRelation {
             name: "feature_registry",

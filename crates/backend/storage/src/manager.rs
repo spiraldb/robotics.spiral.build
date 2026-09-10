@@ -125,8 +125,10 @@ impl StorageManager {
             .await
     }
 
-    pub async fn workflow_graphs(&self) -> Result<Vec<(String, WorkflowJson)>, String> {
-        WorkflowPersistence::new(&self.project_store).graphs().await
+    pub async fn workflows(
+        &self,
+    ) -> Result<Vec<spiral_robotics_common::workflow::WorkflowSummary>, String> {
+        WorkflowPersistence::new(&self.project_store).list().await
     }
 
     pub async fn load_workflow_graph(
@@ -140,11 +142,11 @@ impl StorageManager {
 
     pub async fn save_workflow_graph(
         &self,
-        workflow_id: &str,
+        workflow: &spiral_robotics_common::workflow::WorkflowSpec,
         graph: &WorkflowJson,
     ) -> Result<(), String> {
         WorkflowPersistence::new(&self.project_store)
-            .save_graph(workflow_id, graph)
+            .save_graph(workflow, graph)
             .await
     }
 

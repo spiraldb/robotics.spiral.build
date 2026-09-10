@@ -169,15 +169,15 @@ workflow, and return to either one with its own definition and conversation cont
 **Build:** add create/name/select behavior to the current workflow persistence and
 picker. Each workflow owns one Assistant conversation; there is no separate
 conversation picker. Open the latest workflow and carry its real identity through
-the manager, Assistant, and UI. Graph and conversation JSON are stored independently
-under that identity. Preserve legacy data without accumulating new graph history.
+the manager, Assistant, and UI. Each workflow is one row with independently saved graph and conversation JSON.
+Load the list first, then the selected workflow’s details. Saves replace the current
+definition.
 Keep current serialized execution; concurrent workflow scheduling is unnecessary.
 
 **Verify:** create two workflows, edit them independently, reconnect, and switch
 between them. Delayed responses and Assistant saves cannot change the wrong graph.
-The existing default workflow remains readable after the persistence change.
-The original legacy graph history and inactive conversations remain in storage and
-project exports; only its selected conversation enters the current authoring UI.
+An empty project starts with a fresh workflow. Legacy workflow state and import
+compatibility are removed.
 
 **Depends on:** 2.1.
 

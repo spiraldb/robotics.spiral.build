@@ -6,16 +6,20 @@ are arrays inside JSON, not separate database tables.
 
 ## Storage and ownership
 
-The existing Spiral `workflow_runs` relation stores independently versioned JSON
-payloads under `workflow:<id>` and `assistant:<id>`. The graph manager owns the
-current graph and its latest execution observation. The Assistant owns its visible
-messages and provider tool history. Each save replaces only its own key inside the
-existing transaction, preserving every other workflow and conversation.
+The Spiral `workflows` relation stores one row per workflow: `workflow_id`, `name`,
+`graph_version`, `graph_json`, `conversation_version`, `conversation_json`, and
+`updated_ms`. Graph nodes and edges remain inside the graph JSON. Conversation JSON
+contains the visible messages and provider history for one Assistant conversation.
 
-This split follows the independent write patterns: streaming and tool completions
-must not overwrite a graph. It does not introduce a relational message schema or a
-second graph representation. `WorkflowJson` describes the payload encoding version;
-it is distinct from the internal edit counter used to reject stale requests.
+Startup reads IDs and names, ordered latest first, selects the first workflow, and
+loads its graph and conversation. An empty list creates a fresh workflow. Switching
+loads the selected identity's details; other graphs are not decoded for the picker.
+
+The graph manager owns graph saves; the Assistant owns conversation saves. Each save
+updates its part of the row in a transaction, preserving the other part. Saving a
+graph also updates its name. Conversation saves require an existing workflow.
+`WorkflowJson` pairs each payload with its encoding version, independently of the
+internal edit counter used to reject stale requests.
 
 The graph counter advances only on definition edits. The conversation counter
 advances on conversation updates. Selecting a workflow changes neither counter.
@@ -43,20 +47,11 @@ current definition instead of collecting an edit history. M2 still needs native
 episode-filter semantics; M3 will pin the executed definition with prepared output.
 This simplification does not claim that native lighting preparation is implemented.
 
-## Existing projects
-
-The old `default` and `agent:default` rows are read as legacy data. The current graph
-and selected legacy conversation open normally. Subsequent saves use the new keys;
-the original legacy rows remain intact, including graph revisions and inactive
-conversations, and remain part of project exports. Inactive legacy conversations
-are not exposed as separate workflows because their exact associated graph was
-never recorded. Unsupported or malformed history is refused instead of reset.
-
 ## Verification
 
 Focused tests cover conversation identity, stale turns, restart repair of incomplete
-tool exchanges, malformed history, legacy selection, and rejection of old run tools.
-The hosted `spiral_sql_workflow_runs_persists_and_cancels` regression uses disposable
+tool exchanges, malformed history, workflow selection, and rejection of old run tools.
+The hosted `spiral_sql_workflows_persist_and_cancel` regression uses disposable
 relations to verify execution, named workflow saves and selection, separate
 conversations, stale commands, and reconnect to the latest workflow, then removes
 its test relations. Browser tests cover the shared frontend state boundaries.

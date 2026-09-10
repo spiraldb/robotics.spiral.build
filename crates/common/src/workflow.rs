@@ -933,22 +933,10 @@ pub enum WorkflowAgentToolPhase {
 
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum WorkflowAgentArtifactReceipt {
-    Graph {
-        label: String,
-        revision: u64,
-    },
-    Run {
-        label: String,
-        run_id: String,
-    },
-    Results {
-        label: String,
-        run_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        row_count: Option<usize>,
-    },
+#[serde(deny_unknown_fields)]
+pub struct WorkflowAgentArtifactReceipt {
+    label: String,
+    revision: u64,
 }
 
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
@@ -1082,7 +1070,6 @@ pub enum WorkflowAgentPhase {
     #[default]
     Idle,
     Responding,
-    WaitingForRun,
     Cancelling,
     Failed,
     Cancelled,
@@ -1091,10 +1078,7 @@ pub enum WorkflowAgentPhase {
 
 impl WorkflowAgentPhase {
     pub const fn active(self) -> bool {
-        matches!(
-            self,
-            Self::Responding | Self::WaitingForRun | Self::Cancelling
-        )
+        matches!(self, Self::Responding | Self::Cancelling)
     }
 }
 
@@ -1102,7 +1086,6 @@ impl WorkflowAgentPhase {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct SessionIdentity {
     workflow_id: String,
-    #[serde(default, alias = "session_id")]
     conversation_id: String,
     revision: u64,
     updated_ms: u64,
@@ -1115,8 +1098,6 @@ struct SessionActivity {
     messages: Vec<WorkflowAgentMessage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     active_turn_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    deferred_run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
@@ -1150,7 +1131,6 @@ impl WorkflowAgentSession {
                 phase: WorkflowAgentPhase::Idle,
                 messages: Vec::new(),
                 active_turn_id: None,
-                deferred_run_id: None,
                 error: None,
             },
         }
@@ -1178,9 +1158,6 @@ impl WorkflowAgentSession {
     pub fn active_turn_id(&self) -> Option<&str> {
         self.activity.active_turn_id.as_deref()
     }
-    pub fn deferred_run_id(&self) -> Option<&str> {
-        self.activity.deferred_run_id.as_deref()
-    }
     pub fn error(&self) -> Option<&str> {
         self.activity.error.as_deref()
     }
@@ -1195,9 +1172,6 @@ impl WorkflowAgentSession {
     }
     pub fn set_active_turn_id(&mut self, turn_id: Option<String>) {
         self.activity.active_turn_id = turn_id;
-    }
-    pub fn set_deferred_run_id(&mut self, run_id: Option<String>) {
-        self.activity.deferred_run_id = run_id;
     }
     pub fn set_error(&mut self, error: Option<String>) {
         self.activity.error = error;
@@ -1930,59 +1904,16 @@ impl WorkflowAgentReadiness {
 }
 impl WorkflowAgentArtifactReceipt {
     pub fn graph(label: impl Into<String>, revision: u64) -> Self {
-        Self::Graph {
+        Self {
             label: label.into(),
             revision,
         }
     }
-
-    pub fn run(label: impl Into<String>, run_id: impl Into<String>) -> Self {
-        Self::Run {
-            label: label.into(),
-            run_id: run_id.into(),
-        }
-    }
-
-    pub fn results(
-        label: impl Into<String>,
-        run_id: impl Into<String>,
-        row_count: Option<usize>,
-    ) -> Self {
-        Self::Results {
-            label: label.into(),
-            run_id: run_id.into(),
-            row_count,
-        }
-    }
-
     pub fn label(&self) -> &str {
-        match self {
-            Self::Graph { label, .. } | Self::Run { label, .. } | Self::Results { label, .. } => {
-                label
-            }
-        }
+        &self.label
     }
-
-    pub fn run_id(&self) -> Option<&str> {
-        match self {
-            Self::Run { run_id, .. } | Self::Results { run_id, .. } => Some(run_id),
-            Self::Graph { .. } => None,
-        }
-    }
-    #[cfg(any(test, feature = "test-support"))]
-    pub const fn revision(&self) -> Option<u64> {
-        match self {
-            Self::Graph { revision, .. } => Some(*revision),
-            Self::Run { .. } | Self::Results { .. } => None,
-        }
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    pub const fn row_count(&self) -> Option<usize> {
-        match self {
-            Self::Results { row_count, .. } => *row_count,
-            Self::Graph { .. } | Self::Run { .. } => None,
-        }
+    pub const fn revision(&self) -> u64 {
+        self.revision
     }
 }
 impl WorkflowAgentToolSummary {
@@ -2288,7 +2219,6 @@ mod tests {
     #[test]
     fn agent_phase_reports_only_real_active_work() {
         assert!(WorkflowAgentPhase::Responding.active());
-        assert!(WorkflowAgentPhase::WaitingForRun.active());
         assert!(WorkflowAgentPhase::Cancelling.active());
         assert!(!WorkflowAgentPhase::Idle.active());
         assert!(!WorkflowAgentPhase::Failed.active());

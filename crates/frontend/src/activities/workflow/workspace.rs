@@ -172,7 +172,6 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
     } else {
         match state.session().phase() {
             WorkflowAgentPhase::Responding => "Assistant is working…",
-            WorkflowAgentPhase::WaitingForRun => "Waiting for the Workflow run…",
             WorkflowAgentPhase::Cancelling => "Stopping Assistant turn…",
             WorkflowAgentPhase::Failed => "Assistant turn failed",
             WorkflowAgentPhase::Cancelled => "Assistant turn stopped",

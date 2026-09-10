@@ -1128,11 +1128,8 @@ impl WorkflowController {
     }
 
     fn accept_fetched_agent(mut self, state: WorkflowAgentSnapshot) {
-        if state.session().workflow_id() != self.document.server.peek().workflow().id() {
-            return;
-        }
         let current = self.assistant.agent.peek();
-        if !current.accepts_fetched(&state) {
+        if !current.accepts_fetched(&state, self.document.server.peek().workflow().id()) {
             return;
         }
         let changed = *current != state;
@@ -1208,37 +1205,24 @@ trait WorkflowArtifactNavigation {
 
 impl WorkflowArtifactNavigation for WorkflowAgentArtifactReceipt {
     fn panel_id(&self, state: &WorkflowSnapshot, dirty: bool) -> Option<&'static str> {
-        match self {
-            WorkflowAgentArtifactReceipt::Graph { revision, .. }
-                if !dirty && *revision == state.workflow().revision() =>
-            {
-                Some(CANVAS_PANEL_ID)
-            }
-            WorkflowAgentArtifactReceipt::Run { run_id, .. }
-                if Some(run_id.as_str()) == state.snapshot().run_id() =>
-            {
-                Some(CANVAS_PANEL_ID)
-            }
-            WorkflowAgentArtifactReceipt::Results { run_id, .. }
-                if Some(run_id.as_str()) == state.snapshot().run_id()
-                    && state.snapshot().phase() == WorkflowRunPhase::Completed
-                    && !state.snapshot().result_stale()
-                    && state.snapshot().result().is_some() =>
-            {
-                Some(RESULTS_PANEL_ID)
-            }
-            _ => None,
-        }
+        (!dirty && self.revision() == state.workflow().revision()).then_some(CANVAS_PANEL_ID)
     }
 }
 
 trait WorkflowAgentReconciliation {
-    fn accepts_fetched(&self, incoming: &WorkflowAgentSnapshot) -> bool;
+    fn accepts_fetched(&self, incoming: &WorkflowAgentSnapshot, selected_workflow_id: &str)
+    -> bool;
 }
 impl WorkflowAgentReconciliation for WorkflowAgentSnapshot {
-    fn accepts_fetched(&self, incoming: &WorkflowAgentSnapshot) -> bool {
-        incoming.session().workflow_id() == self.session().workflow_id()
-            && (incoming.scope_id() != self.scope_id() || incoming.revision() >= self.revision())
+    fn accepts_fetched(
+        &self,
+        incoming: &WorkflowAgentSnapshot,
+        selected_workflow_id: &str,
+    ) -> bool {
+        incoming.session().workflow_id() == selected_workflow_id
+            && (self.session().workflow_id() != selected_workflow_id
+                || incoming.scope_id() != self.scope_id()
+                || incoming.revision() >= self.revision())
     }
 }
 
@@ -2189,28 +2173,23 @@ mod tests {
         assert_eq!(graph.panel_id(&state, true), None);
         let old_graph = WorkflowAgentArtifactReceipt::graph("View graph", 3);
         assert_eq!(old_graph.panel_id(&state, false), None);
+    }
 
-        state.snapshot_mut().set_run_id(Some("run-4".to_owned()));
-        state.snapshot_mut().set_phase(WorkflowRunPhase::Completed);
-        state.snapshot_mut().set_result(Some(
-            spiral_robotics_common::relations::SpiralQuerySnapshot::new(
-                Vec::new(),
-                Vec::new(),
-                false,
-            )
-            .with_elapsed_ms(1),
-        ));
-        let results = WorkflowAgentArtifactReceipt::results("View results", "run-4", Some(0));
-        assert_eq!(
-            results.panel_id(&state, false),
-            Some(RESULTS_PANEL_ID),
-            "zero-row completed results remain authoritative"
-        );
-        state.snapshot_mut().set_result_stale(true);
-        assert_eq!(results.panel_id(&state, false), None);
-        state.snapshot_mut().set_result_stale(false);
-        let old_results = WorkflowAgentArtifactReceipt::results("View results", "run-3", Some(0));
-        assert_eq!(old_results.panel_id(&state, false), None);
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn assistant_loads_for_the_selected_workflow_and_rejects_late_previous_history() {
+        let initial = WorkflowAgentSnapshot::default();
+        let mut first = initial.clone();
+        first.session_mut().set_workflow_id("workflow-first");
+        first.set_scope_id("first-scope");
+        first.set_revision(8);
+        assert!(initial.accepts_fetched(&first, "workflow-first"));
+        let mut second = first.clone();
+        second.session_mut().set_workflow_id("workflow-second");
+        second.set_scope_id("second-scope");
+        second.set_revision(0);
+        assert!(first.accepts_fetched(&second, "workflow-second"));
+        assert!(!second.accepts_fetched(&first, "workflow-second"));
+        assert!(second.accepts_fetched(&first, "workflow-first"));
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]
@@ -2251,18 +2230,18 @@ mod tests {
         current.set_revision(8);
         let mut stale = current.clone();
         stale.set_revision(7);
-        assert!(!current.accepts_fetched(&stale));
+        assert!(!current.accepts_fetched(&stale, current.session().workflow_id()));
         let mut next = current.clone();
         next.set_revision(9);
-        assert!(current.accepts_fetched(&next));
+        assert!(current.accepts_fetched(&next, current.session().workflow_id()));
         next.session_mut().set_workflow_id("other");
-        assert!(!current.accepts_fetched(&next));
+        assert!(!current.accepts_fetched(&next, current.session().workflow_id()));
 
         let mut project_b = current.clone();
         project_b.set_scope_id("project-b-scope");
         project_b.set_revision(1);
         assert!(
-            current.accepts_fetched(&project_b),
+            current.accepts_fetched(&project_b, current.session().workflow_id()),
             "a new project scope owns an independent revision sequence"
         );
     }

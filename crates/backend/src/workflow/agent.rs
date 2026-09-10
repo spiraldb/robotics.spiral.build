@@ -143,11 +143,6 @@ impl ConversationUpdates for WorkflowConversation {
         conversation
             .provider_messages_mut()
             .trim_to_provider_bound();
-        if conversation.session().phase() == WorkflowAgentPhase::WaitingForRun {
-            conversation
-                .session_mut()
-                .set_phase(WorkflowAgentPhase::Responding);
-        }
         candidate.advance()?;
         Ok(candidate)
     }
@@ -731,7 +726,6 @@ impl WorkflowAgentManager {
             conversation
                 .session_mut()
                 .set_active_turn_id(Some(turn_id.clone()));
-            conversation.session_mut().set_deferred_run_id(None);
             conversation.session_mut().set_error(None);
             candidate.advance().map_err(OperationError::External)?;
             candidate.provider_messages_mut().trim_to_provider_bound();
@@ -1232,7 +1226,6 @@ impl WorkflowAgentManager {
         conversation.session_mut().set_phase(phase);
         conversation.session_mut().set_error(error);
         conversation.session_mut().set_active_turn_id(None);
-        conversation.session_mut().set_deferred_run_id(None);
         if let Some(message) = conversation.session_mut().current_assistant_mut() {
             message.set_phase(if cancelled {
                 WorkflowAgentMessagePhase::Cancelled
@@ -1591,8 +1584,6 @@ impl<'a> ToolPresentation<'a> {
             "describe_relations" => "Reading relation schemas".to_owned(),
             "list_model_capabilities" => "Checking model capabilities".to_owned(),
             "set_workflow" => "Validating graph".to_owned(),
-            "run_workflow" => "Running Workflow".to_owned(),
-            "wait_for_run" => "Waiting for Workflow".to_owned(),
             "run_query" => "Running bounded query".to_owned(),
             _ => "Using Workflow tool".to_owned(),
         }
@@ -1604,8 +1595,6 @@ impl<'a> ToolPresentation<'a> {
             "describe_relations" => "Schema inspection",
             "list_model_capabilities" => "Model discovery",
             "set_workflow" => "Graph save",
-            "run_workflow" => "Workflow run",
-            "wait_for_run" => "Workflow wait",
             "run_query" => "Bounded query",
             _ => "Workflow tool",
         }
@@ -1617,8 +1606,6 @@ impl<'a> ToolPresentation<'a> {
             "describe_relations" => "inspect relation fields",
             "list_model_capabilities" => "check model support",
             "set_workflow" => "save the workflow",
-            "run_workflow" => "run the workflow",
-            "wait_for_run" => "finish waiting for the run",
             "run_query" => "inspect query results",
             _ => "use the Workflow tool",
         }
@@ -1634,9 +1621,6 @@ impl ToolCompletion {
     fn for_tool(name: &str, ok: bool, detail: &str) -> Self {
         let value = serde_json::from_str::<Value>(detail).unwrap_or(Value::Null);
         if !ok {
-            if matches!(name, "run_workflow" | "wait_for_run") && value.get("run_id").is_some() {
-                return Self::wait(&value);
-            }
             return Self {
                 summary: format!(
                     "Couldn’t {}",
@@ -1672,7 +1656,6 @@ impl ToolCompletion {
                     }),
                 }
             }
-            "run_workflow" | "wait_for_run" => Self::wait(&value),
             "run_query" => {
                 let count = value
                     .get("row_count")
@@ -1716,68 +1699,11 @@ impl ToolCompletion {
             receipt: None,
         }
     }
-
-    fn wait(value: &Value) -> Self {
-        let run_id = ToolPublicText::optional_label(value.get("run_id").and_then(Value::as_str));
-        let phase = value
-            .get("phase")
-            .and_then(Value::as_str)
-            .unwrap_or("running");
-        let row_count = value
-            .get("result")
-            .and_then(|result| result.get("row_count"))
-            .and_then(Value::as_u64)
-            .and_then(|count| usize::try_from(count).ok());
-        let terminal_with_results = phase == "completed";
-        let summary = if terminal_with_results {
-            match (run_id.as_deref(), row_count) {
-                (Some(run_id), Some(rows)) => format!("Completed {run_id} · {rows} rows"),
-                (Some(run_id), None) => format!("Completed {run_id}"),
-                (None, Some(rows)) => format!("Workflow complete · {rows} rows"),
-                (None, None) => "Workflow complete".to_owned(),
-            }
-        } else {
-            let phase = WorkflowRunPresentation::phase(phase);
-            run_id.as_deref().map_or_else(
-                || format!("Workflow {phase}"),
-                |run_id| format!("{run_id} · {phase}"),
-            )
-        };
-        let receipt = run_id.map(|run_id| {
-            if terminal_with_results {
-                WorkflowAgentArtifactReceipt::results("View results", run_id, row_count)
-            } else {
-                WorkflowAgentArtifactReceipt::run("View run", run_id)
-            }
-        });
-        Self { summary, receipt }
-    }
-}
-
-struct WorkflowRunPresentation;
-
-impl WorkflowRunPresentation {
-    fn phase(phase: &str) -> &str {
-        match phase {
-            "validating" => "validating",
-            "running" => "running",
-            "cancelling" => "cancelling",
-            "completed" => "complete",
-            "failed" => "failed",
-            "cancelled" => "cancelled",
-            "interrupted" => "interrupted",
-            _ => "updated",
-        }
-    }
 }
 
 struct ToolPublicText;
 
 impl ToolPublicText {
-    fn optional_label(value: Option<&str>) -> Option<String> {
-        value.map(Self::label).filter(|value| !value.is_empty())
-    }
-
     fn label(value: &str) -> String {
         value
             .split_whitespace()
@@ -1987,32 +1913,8 @@ mod tests {
         );
         assert_eq!(saved.summary, "Saved Holding evidence · r7");
         let receipt = saved.receipt.expect("saved graph receipt");
-        assert!(matches!(
-            &receipt,
-            WorkflowAgentArtifactReceipt::Graph { .. }
-        ));
-        assert_eq!(receipt.revision(), Some(7));
+        assert_eq!(receipt.revision(), 7);
         assert!(!serde_json::to_string(&receipt).unwrap().contains("secret"));
-
-        let waited = ToolCompletion::for_tool(
-            "wait_for_run",
-            true,
-            &json!({
-                "ok": true,
-                "run_id": "run-42",
-                "phase": "completed",
-                "result": {"row_count": 0}
-            })
-            .to_string(),
-        );
-        assert_eq!(waited.summary, "Completed run-42 · 0 rows");
-        let receipt = waited.receipt.expect("terminal result receipt");
-        assert!(matches!(
-            &receipt,
-            WorkflowAgentArtifactReceipt::Results { .. }
-        ));
-        assert_eq!(receipt.run_id(), Some("run-42"));
-        assert_eq!(receipt.row_count(), Some(0));
 
         assert_eq!(
             ToolCompletion::for_tool(
@@ -2245,12 +2147,12 @@ mod tests {
     #[test]
     fn tool_completion_commits_public_receipt_and_provider_result_in_one_candidate() {
         for phase in [
-            WorkflowAgentPhase::WaitingForRun,
+            WorkflowAgentPhase::Responding,
             WorkflowAgentPhase::Cancelling,
         ] {
             let mut conversation = WorkflowConversation::new("default");
             let conversation_id = conversation.conversation_id().to_owned();
-            let call = ProviderToolCall::new("call-1", "run_workflow", "{}");
+            let call = ProviderToolCall::new("call-1", "set_workflow", "{}");
             conversation.session_mut().set_phase(phase);
             conversation
                 .session_mut()
@@ -2260,16 +2162,15 @@ mod tests {
                     .with_phase(WorkflowAgentMessagePhase::Streaming)
                     .with_tools(vec![WorkflowAgentToolSummary::new(
                         "call-1",
-                        "run_workflow",
-                        "Running",
+                        "set_workflow",
+                        "Saving",
                     )]),
             );
             conversation
                 .provider_messages_mut()
                 .push(ProviderMessage::assistant(None, vec![call.clone()]));
             let detail =
-                json!({"ok": true, "phase": "completed", "run_id": "run-1", "result": {"row_count": 3}})
-                    .to_string();
+                json!({"ok": true, "workflow": {"name": "Saved graph", "revision": 3}}).to_string();
             let candidate = conversation
                 .with_completed_tool(
                     TurnIdentity::new(&conversation_id, "turn-1"),
@@ -2292,21 +2193,14 @@ mod tests {
                 completed.session().messages()[0].tools()[0].phase(),
                 WorkflowAgentToolPhase::Complete
             );
-            assert!(matches!(
-                completed.session().messages()[0].tools()[0].receipt(),
-                Some(WorkflowAgentArtifactReceipt::Results {
-                    row_count: Some(3),
-                    ..
-                })
-            ));
             assert_eq!(
-                completed.session().phase(),
-                if phase == WorkflowAgentPhase::WaitingForRun {
-                    WorkflowAgentPhase::Responding
-                } else {
-                    phase
-                }
+                completed.session().messages()[0].tools()[0]
+                    .receipt()
+                    .unwrap()
+                    .revision(),
+                3
             );
+            assert_eq!(completed.session().phase(), phase);
             assert!(candidate.revision() > conversation.revision());
             assert!(candidate.persisted().is_ok());
             assert!(
