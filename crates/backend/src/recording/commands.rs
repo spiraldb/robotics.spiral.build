@@ -83,6 +83,9 @@ impl RecordingPort for RecordingAdapter<'_> {
     type RecordingDraft = RecordingDraft;
     type MediaCapture = VideoCapture;
     type MediaOutput = Vec<CameraRecording>;
+    type Finalization = crate::recording_session::RecordingOperation;
+
+    type CaptureChange = crate::recording_session::RecordingOperation;
 
     fn reserve_recording_start(&self) -> Result<Option<CatalogLeaseToken>, OperationError> {
         self.state.recording_session().reserve_start(|| {
@@ -93,19 +96,24 @@ impl RecordingPort for RecordingAdapter<'_> {
         })
     }
 
-    fn bind_recording_lease(&self, token: CatalogLeaseToken, episode: String) {
-        assert!(
-            self.state.recording_session().bind_episode(token, episode),
-            "the admitted recording must retain its exact catalog lease"
-        );
+    fn bind_recording_lease(&self, token: CatalogLeaseToken, take: (String, Option<VideoCapture>)) {
+        self.state.recording_session().begin(token, take);
     }
 
-    fn claim_recording_lease(&self) -> Result<Option<CatalogLeaseToken>, OperationError> {
+    fn claim_finalization(&self) -> Result<Option<Self::Finalization>, OperationError> {
         self.state.recording_session().claim_finalization()
     }
 
+    fn finalization_episode(&self, operation: &Self::Finalization) -> String {
+        operation.episode().to_owned()
+    }
+
+    fn complete_recording(&self, operation: Self::Finalization, media: Self::MediaOutput) {
+        operation.complete(media);
+    }
+
     fn release_recording_lease(&self, token: CatalogLeaseToken) {
-        self.state.recording_session().release(token);
+        self.state.recording_session().cancel_start(token);
     }
 
     fn recording_active(&self) -> bool {
@@ -139,8 +147,7 @@ impl RecordingPort for RecordingAdapter<'_> {
         } else {
             spiral_robotics_hardware::CONTROL_HZ as f64
         };
-        let media_finalizing = self.state.recording_session().media_finalizing();
-        RecordingContext::new(connected_arms, sample_hz, media_finalizing)
+        RecordingContext::new(connected_arms, sample_hz)
     }
 
     async fn enter_teleoperation(&self, pair: &TeleoperationPair) -> Result<(), OperationError> {
@@ -197,20 +204,8 @@ impl RecordingPort for RecordingAdapter<'_> {
         Ok(result)
     }
 
-    async fn retain_recording_media(&self, capture: Option<Self::MediaCapture>) {
-        self.state.recording_session().retain_media(capture).await;
-    }
-
     async fn abandon_recording_media(&self, capture: Self::MediaCapture) {
         let _ = capture.finish().await;
-    }
-
-    async fn take_recording_media(&self) -> Option<Self::MediaCapture> {
-        self.state.recording_session().take_media().await
-    }
-
-    fn media_episode(&self, capture: &Self::MediaCapture) -> String {
-        capture.episode_id().to_owned()
     }
 
     async fn stop_recording(
@@ -236,20 +231,21 @@ impl RecordingPort for RecordingAdapter<'_> {
         Ok(result)
     }
 
-    async fn finish_recording_media(&self, capture: Self::MediaCapture) -> Self::MediaOutput {
-        crate::recording::supervisor::RecordingSupervisor::new(self.state.clone())
-            .finish_video_capture(capture)
-            .await
-    }
-
-    fn empty_media_output(&self) -> Self::MediaOutput {
-        Vec::new()
+    async fn finish_recording_media(
+        &self,
+        operation: &mut Self::Finalization,
+    ) -> Self::MediaOutput {
+        let (videos, failures) = operation.finish_media().await;
+        for failure in failures {
+            self.state.cameras().note_issue(failure);
+        }
+        videos
     }
 
     async fn commit_recording(
         &self,
         episode: String,
-        media: Self::MediaOutput,
+        media: &Self::MediaOutput,
     ) -> Result<(), OperationError> {
         let full_episode = self
             .state
@@ -258,18 +254,18 @@ impl RecordingPort for RecordingAdapter<'_> {
             .map_err(OperationError::from)?;
         self.state
             .storage()
-            .commit_recording(&full_episode, &media)
+            .commit_recording(&full_episode, media)
             .await
             .map_err(OperationError::Internal)?;
-        self.state
-            .recording_session()
-            .retain_preview(episode, media)
-            .await;
         Ok(())
     }
 
-    async fn request_media_pause(&self) {
-        self.state.recording_session().request_media_pause().await;
+    fn claim_capture_change(&self) -> Result<Self::CaptureChange, OperationError> {
+        self.state.recording_session().claim_capture_change()
+    }
+
+    fn request_media_pause(&self, operation: &Self::CaptureChange) {
+        operation.request_pause();
     }
 
     async fn set_recording_paused(&self, paused: bool) -> Result<f64, OperationError> {
@@ -280,24 +276,21 @@ impl RecordingPort for RecordingAdapter<'_> {
             .map_err(OperationError::conflict)
     }
 
-    async fn finish_media_pause(&self) -> Result<(), OperationError> {
-        if let Some((_, _, failures)) = self.state.recording_session().finish_media_pause().await {
-            for failure in failures {
-                self.state.cameras().note_issue(failure);
-            }
+    async fn finish_media_pause(
+        &self,
+        operation: &mut Self::CaptureChange,
+    ) -> Result<(), OperationError> {
+        let (_, failures) = operation.finish_media().await;
+        for failure in failures {
+            self.state.cameras().note_issue(failure);
         }
         // The writer's pause checkpoint remains in this recording session.
         // Only Stop publishes the finalized MCAP as a Dataset member.
         Ok(())
     }
 
-    async fn resume_media(&self, active_seconds: f64) {
-        if let Err(error) = self
-            .state
-            .recording_session()
-            .resume_media(active_seconds)
-            .await
-        {
+    fn resume_media(&self, operation: &mut Self::CaptureChange, active_seconds: f64) {
+        if let Err(error) = operation.resume(active_seconds) {
             self.state
                 .cameras()
                 .note_issue(format!("episode video could not resume: {error}"));
@@ -405,10 +398,7 @@ impl EpisodeCatalogPort for EpisodeAdapter<'_> {
             .await
             .map_err(OperationError::Internal)?;
         self.state.recording_buffer().forget_completed(&episode);
-        self.state
-            .recording_session()
-            .forget_preview(&episode)
-            .await;
+        self.state.recording_session().forget_preview(&episode);
         Ok(())
     }
 }
@@ -649,7 +639,7 @@ impl RecordingCommands {
         self.require_storage_ready()?;
         spiral_robotics_storage::episodes::EpisodeId::try_from(id.as_str())
             .map_err(|error| OperationError::InvalidInput(error.to_string()))?;
-        self.state.recording_session().camera_preview(&id, request.stream()).await
+        self.state.recording_session().camera_preview(&id, request.stream())
             .ok_or_else(|| OperationError::NotFound("This take is not available in the current recording session. Open the published dataset in Data.".into()))?
             .map_err(|error| OperationError::InvalidInput(error).into())
     }
@@ -986,6 +976,6 @@ mod admission_tests {
                 .is_none(),
             "Assistant cannot pass an admitted recording"
         );
-        session.release(recording);
+        session.cancel_start(recording);
     }
 }

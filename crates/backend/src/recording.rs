@@ -35,7 +35,6 @@ pub(crate) struct TeleoperationPair {
 pub(crate) struct RecordingContext {
     connected_arms: Vec<String>,
     sample_hz: f64,
-    media_finalizing: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -90,11 +89,10 @@ impl TeleoperationPair {
 }
 
 impl RecordingContext {
-    pub(crate) fn new(connected_arms: Vec<String>, sample_hz: f64, media_finalizing: bool) -> Self {
+    pub(crate) fn new(connected_arms: Vec<String>, sample_hz: f64) -> Self {
         Self {
             connected_arms,
             sample_hz,
-            media_finalizing,
         }
     }
 }
@@ -157,11 +155,20 @@ pub(crate) trait RecordingPort {
     type RecordingDraft;
     type MediaCapture;
     type MediaOutput;
+    type Finalization;
+
+    type CaptureChange;
 
     /// Atomically claim the one recording-start transaction.
     fn reserve_recording_start(&self) -> Result<Option<CatalogLeaseToken>, OperationError>;
-    fn bind_recording_lease(&self, token: CatalogLeaseToken, episode: String);
-    fn claim_recording_lease(&self) -> Result<Option<CatalogLeaseToken>, OperationError>;
+    fn bind_recording_lease(
+        &self,
+        token: CatalogLeaseToken,
+        take: (String, Option<Self::MediaCapture>),
+    );
+    fn claim_finalization(&self) -> Result<Option<Self::Finalization>, OperationError>;
+    fn finalization_episode(&self, operation: &Self::Finalization) -> String;
+    fn complete_recording(&self, operation: Self::Finalization, media: Self::MediaOutput);
     fn release_recording_lease(&self, token: CatalogLeaseToken);
     fn recording_active(&self) -> bool;
     async fn default_teleoperation_pair(&self) -> Option<TeleoperationPair>;
@@ -183,27 +190,28 @@ pub(crate) trait RecordingPort {
         &self,
         draft: Self::RecordingDraft,
     ) -> Result<RecordingResult, OperationError>;
-    async fn retain_recording_media(&self, capture: Option<Self::MediaCapture>);
     async fn abandon_recording_media(&self, capture: Self::MediaCapture);
 
-    async fn take_recording_media(&self) -> Option<Self::MediaCapture>;
-    fn media_episode(&self, capture: &Self::MediaCapture) -> String;
     async fn stop_recording(
         &self,
         command: StopRecordingCommand,
     ) -> Result<RecordingResult, OperationError>;
-    async fn finish_recording_media(&self, capture: Self::MediaCapture) -> Self::MediaOutput;
-    fn empty_media_output(&self) -> Self::MediaOutput;
+    async fn finish_recording_media(&self, operation: &mut Self::Finalization)
+    -> Self::MediaOutput;
     async fn commit_recording(
         &self,
         episode: String,
-        media: Self::MediaOutput,
+        media: &Self::MediaOutput,
     ) -> Result<(), OperationError>;
 
-    async fn request_media_pause(&self);
+    fn claim_capture_change(&self) -> Result<Self::CaptureChange, OperationError>;
+    fn request_media_pause(&self, operation: &Self::CaptureChange);
     async fn set_recording_paused(&self, paused: bool) -> Result<f64, OperationError>;
-    async fn finish_media_pause(&self) -> Result<(), OperationError>;
-    async fn resume_media(&self, active_seconds: f64);
+    async fn finish_media_pause(
+        &self,
+        operation: &mut Self::CaptureChange,
+    ) -> Result<(), OperationError>;
+    fn resume_media(&self, operation: &mut Self::CaptureChange, active_seconds: f64);
 }
 
 struct RecordingStartReservation<'a, P: RecordingPort + ?Sized> {
@@ -221,26 +229,13 @@ impl<'a, P: RecordingPort + ?Sized> RecordingStartReservation<'a, P> {
 
     /// A successfully opened recording owns the shared catalog lease until its
     /// final episode and media rows have been committed.
-    fn retain_for_recording(&mut self, episode: String) {
+    fn retain_for_recording(&mut self, take: (String, Option<P::MediaCapture>)) {
         let token = self.token.take().expect("recording reservation is live");
-        self.port.bind_recording_lease(token, episode);
+        self.port.bind_recording_lease(token, take);
     }
 }
 
 impl<P: RecordingPort + ?Sized> Drop for RecordingStartReservation<'_, P> {
-    fn drop(&mut self) {
-        if let Some(token) = self.token {
-            self.port.release_recording_lease(token);
-        }
-    }
-}
-
-struct RecordingStopReservation<'a, P: RecordingPort + ?Sized> {
-    port: &'a P,
-    token: Option<CatalogLeaseToken>,
-}
-
-impl<P: RecordingPort + ?Sized> Drop for RecordingStopReservation<'_, P> {
     fn drop(&mut self) {
         if let Some(token) = self.token {
             self.port.release_recording_lease(token);
@@ -272,17 +267,15 @@ impl<'a, P: RecordingPort + ?Sized> RecordingActions<'a, P> {
             ));
         };
         let mut reservation = RecordingStartReservation::new(self.port, token);
-        let result = self.start_reserved(command).await;
-        if let Ok(recording) = &result {
-            reservation.retain_for_recording(recording.episode.clone());
-        }
-        result
+        let (recording, capture) = self.start_reserved(command).await?;
+        reservation.retain_for_recording((recording.episode.clone(), capture));
+        Ok(recording)
     }
 
     async fn start_reserved(
         &self,
         mut command: StartRecordingCommand,
-    ) -> Result<RecordingResult, OperationError> {
+    ) -> Result<(RecordingResult, Option<P::MediaCapture>), OperationError> {
         let port = self.port;
         if port.recording_active() {
             return Err(OperationError::Conflict(
@@ -305,12 +298,6 @@ impl<'a, P: RecordingPort + ?Sized> RecordingActions<'a, P> {
             )
         })?;
         let context = port.recording_context();
-        if context.media_finalizing {
-            return Err(OperationError::Conflict(
-                "the previous episode's video is still being finalized; try again shortly"
-                    .to_owned(),
-            ));
-        }
         if !context.sample_hz.is_finite() || context.sample_hz <= 0.0 {
             return Err(OperationError::Internal(
                 "the control loop reported an invalid sample rate".to_owned(),
@@ -348,10 +335,7 @@ impl<'a, P: RecordingPort + ?Sized> RecordingActions<'a, P> {
             let episode = port.draft_episode(&draft);
             let media = port.start_recording_media(&episode, &arms).await?;
             match port.begin_recording(draft).await {
-                Ok(recording) => {
-                    port.retain_recording_media(media).await;
-                    Ok(recording)
-                }
+                Ok(recording) => Ok((recording, media)),
                 Err(error) => {
                     if let Some(capture) = media {
                         port.abandon_recording_media(capture).await;
@@ -382,48 +366,29 @@ impl<'a, P: RecordingPort + ?Sized> RecordingActions<'a, P> {
         command: StopRecordingCommand,
     ) -> Result<RecordingResult, OperationError> {
         let port = self.port;
-        // The recording acquired this lease before allocating its episode ID. Hold
-        // it until the take and media manifest are both finalized, and release it
-        // on every success or failure path.
-        let _reservation = RecordingStopReservation {
-            port,
-            token: port.claim_recording_lease()?,
+        let Some(mut operation) = port.claim_finalization()? else {
+            return Err(OperationError::conflict(
+                "no recording is available to stop",
+            ));
         };
-        let capture = port.take_recording_media().await;
-        let capture_episode = capture.as_ref().map(|capture| port.media_episode(capture));
+        let episode = port.finalization_episode(&operation);
         let recording = port.stop_recording(command).await;
         let idle = port.enter_idle().await;
-        let media = match capture {
-            Some(capture) => port.finish_recording_media(capture).await,
-            None => port.empty_media_output(),
-        };
-
+        let media = port.finish_recording_media(&mut operation).await;
+        // The claim supplies identity even for camera-less takes if hardware stop
+        // reports an error. Retain review media on publication errors as well.
+        let committed = port.commit_recording(episode, &media).await;
+        port.complete_recording(operation, media);
+        committed?;
         match (recording, idle) {
-            (Ok(summary), Ok(())) => {
-                port.commit_recording(summary.episode.clone(), media)
-                    .await?;
-                Ok(summary)
-            }
-            (Ok(summary), Err(mode_error)) => {
-                port.commit_recording(summary.episode, media).await?;
-                Err(OperationError::Conflict(format!(
-                    "the recording ended, but teleoperation could not stop: {mode_error}"
-                )))
-            }
-            (Err(recording_error), Ok(())) => {
-                if let Some(episode) = capture_episode {
-                    port.commit_recording(episode, media).await?;
-                }
-                Err(recording_error)
-            }
-            (Err(recording_error), Err(mode_error)) => {
-                if let Some(episode) = capture_episode {
-                    port.commit_recording(episode, media).await?;
-                }
-                Err(OperationError::Conflict(format!(
-                    "{recording_error}; teleoperation also could not stop: {mode_error}"
-                )))
-            }
+            (Ok(summary), Ok(())) => Ok(summary),
+            (Ok(_), Err(mode_error)) => Err(OperationError::Conflict(format!(
+                "the recording ended, but teleoperation could not stop: {mode_error}"
+            ))),
+            (Err(recording_error), Ok(())) => Err(recording_error),
+            (Err(recording_error), Err(mode_error)) => Err(OperationError::Conflict(format!(
+                "{recording_error}; teleoperation also could not stop: {mode_error}"
+            ))),
         }
     }
 
@@ -432,15 +397,19 @@ impl<'a, P: RecordingPort + ?Sized> RecordingActions<'a, P> {
         &self,
         command: SetRecordingPausedCommand,
     ) -> Result<(), OperationError> {
+        let mut operation = self.port.claim_capture_change()?;
         if command.paused {
-            self.port.request_media_pause().await;
+            self.port.request_media_pause(&operation);
             let paused = self.port.set_recording_paused(true).await;
-            let media = self.port.finish_media_pause().await;
+            let media = self.port.finish_media_pause(&mut operation).await;
             paused?;
             media?;
         } else {
+            // A cancelled pause may have returned unfinished encoder work to the
+            // session. Drain it before hardware and camera clocks resume.
+            self.port.finish_media_pause(&mut operation).await?;
             let active_seconds = self.port.set_recording_paused(false).await?;
-            self.port.resume_media(active_seconds).await;
+            self.port.resume_media(&mut operation, active_seconds);
         }
         Ok(())
     }
@@ -663,15 +632,15 @@ impl<'a, P: ReplayPort + ?Sized> ReplayActions<'a, P> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::data::catalog_lease::{CatalogLeaseOwner, CatalogMutationLease};
+    use crate::data::catalog_lease::CatalogMutationLease;
+    use crate::recording_session::{RecordingOperation, RecordingSessionManager};
 
     struct FakePort {
         events: Mutex<Vec<String>>,
-        catalog: CatalogMutationLease,
-        recording_token: Mutex<Option<CatalogLeaseToken>>,
+        session: Arc<RecordingSessionManager>,
         start_available: bool,
         active: bool,
         pair: Option<TeleoperationPair>,
@@ -688,8 +657,9 @@ mod tests {
         fn default() -> Self {
             Self {
                 events: Mutex::new(Vec::new()),
-                catalog: CatalogMutationLease::default(),
-                recording_token: Mutex::new(None),
+                session: Arc::new(RecordingSessionManager::new(Arc::new(
+                    CatalogMutationLease::default(),
+                ))),
                 start_available: true,
                 active: false,
                 pair: Some(TeleoperationPair {
@@ -714,10 +684,11 @@ mod tests {
     impl FakePort {
         fn seed_recording_lease(&self) {
             let token = self
-                .catalog
-                .try_acquire(CatalogLeaseOwner::Recording)
-                .expect("test recording lease");
-            *self.recording_token.lock().unwrap() = Some(token);
+                .session
+                .reserve_start(|| (false, false))
+                .unwrap()
+                .unwrap();
+            self.session.begin(token, ("episode_000001".into(), None));
         }
     }
 
@@ -725,27 +696,46 @@ mod tests {
         type RecordingDraft = String;
         type MediaCapture = String;
         type MediaOutput = Vec<String>;
+        type Finalization = RecordingOperation;
+        type CaptureChange = RecordingOperation;
 
         fn reserve_recording_start(&self) -> Result<Option<CatalogLeaseToken>, OperationError> {
             self.events.lock().unwrap().push("reserve-start".to_owned());
-            Ok(self
-                .start_available
-                .then(|| self.catalog.try_acquire(CatalogLeaseOwner::Recording))
-                .flatten())
+            if self.start_available {
+                self.session.reserve_start(|| (false, false))
+            } else {
+                Ok(None)
+            }
         }
 
-        fn bind_recording_lease(&self, token: CatalogLeaseToken, _episode: String) {
-            *self.recording_token.lock().unwrap() = Some(token);
+        fn bind_recording_lease(&self, token: CatalogLeaseToken, take: (String, Option<String>)) {
+            self.events.lock().unwrap().push("retain-media".to_owned());
+            self.session.begin(token, (take.0, None));
         }
 
-        fn claim_recording_lease(&self) -> Result<Option<CatalogLeaseToken>, OperationError> {
-            Ok(self.recording_token.lock().unwrap().take())
+        fn claim_finalization(&self) -> Result<Option<Self::Finalization>, OperationError> {
+            let operation = self.session.claim_finalization()?;
+            if operation.is_some() {
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push("claim-finalization".to_owned());
+            }
+            Ok(operation)
+        }
+
+        fn finalization_episode(&self, operation: &Self::Finalization) -> String {
+            operation.episode().to_owned()
+        }
+
+        fn complete_recording(&self, operation: Self::Finalization, _media: Self::MediaOutput) {
+            operation.complete(Vec::new());
+            self.events.lock().unwrap().push("release-start".to_owned());
         }
 
         fn release_recording_lease(&self, token: CatalogLeaseToken) {
             self.events.lock().unwrap().push("release-start".to_owned());
-            assert!(self.catalog.release(token));
-            self.recording_token.lock().unwrap().take();
+            self.session.cancel_start(token);
         }
 
         fn recording_active(&self) -> bool {
@@ -757,11 +747,7 @@ mod tests {
         }
 
         fn recording_context(&self) -> RecordingContext {
-            RecordingContext::new(
-                vec!["leader".to_owned(), "follower".to_owned()],
-                60.0,
-                false,
-            )
+            RecordingContext::new(vec!["leader".to_owned(), "follower".to_owned()], 60.0)
         }
 
         async fn enter_teleoperation(
@@ -818,21 +804,8 @@ mod tests {
                 .map_or_else(|| Ok(RecordingResult { episode: draft }), Err)
         }
 
-        async fn retain_recording_media(&self, _capture: Option<Self::MediaCapture>) {
-            self.events.lock().unwrap().push("retain-media".to_owned());
-        }
-
         async fn abandon_recording_media(&self, _capture: Self::MediaCapture) {
             self.events.lock().unwrap().push("abandon-media".to_owned());
-        }
-
-        async fn take_recording_media(&self) -> Option<Self::MediaCapture> {
-            self.events.lock().unwrap().push("take-media".to_owned());
-            Some("episode_000001".to_owned())
-        }
-
-        fn media_episode(&self, capture: &Self::MediaCapture) -> String {
-            capture.clone()
         }
 
         async fn stop_recording(
@@ -850,25 +823,28 @@ mod tests {
             )
         }
 
-        async fn finish_recording_media(&self, _capture: Self::MediaCapture) -> Self::MediaOutput {
+        async fn finish_recording_media(
+            &self,
+            _operation: &mut Self::Finalization,
+        ) -> Self::MediaOutput {
             self.events.lock().unwrap().push("finish-media".to_owned());
             vec!["video".to_owned()]
-        }
-
-        fn empty_media_output(&self) -> Self::MediaOutput {
-            Vec::new()
         }
 
         async fn commit_recording(
             &self,
             _episode: String,
-            _media: Self::MediaOutput,
+            _media: &Self::MediaOutput,
         ) -> Result<(), OperationError> {
             self.events.lock().unwrap().push("commit".to_owned());
             self.commit_error.clone().map_or(Ok(()), Err)
         }
 
-        async fn request_media_pause(&self) {
+        fn claim_capture_change(&self) -> Result<Self::CaptureChange, OperationError> {
+            self.session.claim_capture_change()
+        }
+
+        fn request_media_pause(&self, _operation: &Self::CaptureChange) {
             self.events.lock().unwrap().push("request-pause".to_owned());
         }
 
@@ -880,12 +856,15 @@ mod tests {
             self.pause_error.clone().map_or(Ok(1.25), Err)
         }
 
-        async fn finish_media_pause(&self) -> Result<(), OperationError> {
+        async fn finish_media_pause(
+            &self,
+            _operation: &mut Self::CaptureChange,
+        ) -> Result<(), OperationError> {
             self.events.lock().unwrap().push("finish-pause".to_owned());
             self.commit_error.clone().map_or(Ok(()), Err)
         }
 
-        async fn resume_media(&self, active_seconds: f64) {
+        fn resume_media(&self, _operation: &mut Self::CaptureChange, active_seconds: f64) {
             self.events
                 .lock()
                 .unwrap()
@@ -1040,7 +1019,7 @@ mod tests {
         assert_eq!(
             *port.events.lock().unwrap(),
             [
-                "take-media",
+                "claim-finalization",
                 "stop",
                 "idle",
                 "finish-media",
@@ -1067,7 +1046,7 @@ mod tests {
         assert_eq!(
             *port.events.lock().unwrap(),
             [
-                "take-media",
+                "claim-finalization",
                 "stop",
                 "idle",
                 "finish-media",
@@ -1083,6 +1062,7 @@ mod tests {
             pause_error: Some(OperationError::Internal("flush failed".to_owned())),
             ..FakePort::default()
         };
+        port.seed_recording_lease();
         RecordingActions::new(&port)
             .set_paused(SetRecordingPausedCommand { paused: true })
             .await
@@ -1101,6 +1081,7 @@ mod tests {
             )),
             ..FakePort::default()
         };
+        port.seed_recording_lease();
         let error = RecordingActions::new(&port)
             .set_paused(SetRecordingPausedCommand { paused: true })
             .await
@@ -1115,13 +1096,57 @@ mod tests {
     #[tokio::test]
     async fn resume_restarts_hardware_before_media_at_the_active_clock() {
         let port = FakePort::default();
+        port.seed_recording_lease();
         RecordingActions::new(&port)
             .set_paused(SetRecordingPausedCommand { paused: false })
             .await
             .unwrap();
         assert_eq!(
             *port.events.lock().unwrap(),
-            ["hardware-pause:false", "resume-media:1.25"]
+            ["finish-pause", "hardware-pause:false", "resume-media:1.25"]
+        );
+    }
+
+    #[tokio::test]
+    async fn pause_resume_and_stop_require_ownership_before_hardware_calls() {
+        let port = FakePort::default();
+        let actions = RecordingActions::new(&port);
+        for paused in [true, false] {
+            assert!(matches!(
+                actions
+                    .set_paused(SetRecordingPausedCommand { paused })
+                    .await,
+                Err(OperationError::Conflict(_))
+            ));
+        }
+        assert!(port.events.lock().unwrap().is_empty());
+
+        port.seed_recording_lease();
+        let finalizing = port.session.claim_finalization().unwrap().unwrap();
+        for paused in [true, false] {
+            assert!(matches!(
+                actions
+                    .set_paused(SetRecordingPausedCommand { paused })
+                    .await,
+                Err(OperationError::Conflict(_))
+            ));
+        }
+        assert!(matches!(
+            actions.stop(StopRecordingCommand::new(true)).await,
+            Err(OperationError::Conflict(_))
+        ));
+        assert!(
+            port.events.lock().unwrap().is_empty(),
+            "rejected claims must not touch hardware"
+        );
+        drop(finalizing);
+        actions
+            .set_paused(SetRecordingPausedCommand { paused: true })
+            .await
+            .unwrap();
+        assert_eq!(
+            *port.events.lock().unwrap(),
+            ["request-pause", "hardware-pause:true", "finish-pause"]
         );
     }
 

@@ -1,5 +1,6 @@
 //! Camera capture into timestamped H.264 access units for the recording MCAP.
 
+use std::collections::VecDeque;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -93,7 +94,8 @@ impl VideoCaptureRequest {
 
 struct VideoCaptureRun {
     control: watch::Sender<CaptureState>,
-    tasks: Vec<tokio::task::JoinHandle<Result<CameraRecording, String>>>,
+    tasks: VecDeque<tokio::task::JoinHandle<Result<CameraRecording, String>>>,
+    failures: Vec<String>,
 }
 
 struct PreparedCameraSegment {
@@ -392,12 +394,16 @@ impl VideoCapture {
         }
 
         let (control, _) = watch::channel(CaptureState::Recording);
-        let mut tasks = Vec::with_capacity(prepared.len());
+        let mut tasks = VecDeque::with_capacity(prepared.len());
         for prepared in prepared {
-            tasks.push(tokio::spawn(prepared.record(control.subscribe())));
+            tasks.push_back(tokio::spawn(prepared.record(control.subscribe())));
         }
         self.progress.next_segment += 1;
-        self.progress.active = Some(VideoCaptureRun { control, tasks });
+        self.progress.active = Some(VideoCaptureRun {
+            control,
+            tasks,
+            failures: Vec::new(),
+        });
         Ok(())
     }
 
@@ -420,38 +426,43 @@ impl VideoCapture {
     }
 
     async fn finish_active(&mut self) -> Vec<String> {
-        let mut assets = Vec::new();
-        let mut failures = Vec::new();
-        let Some(active) = self.progress.active.take() else {
-            return failures;
+        let Some(active) = self.progress.active.as_mut() else {
+            return Vec::new();
         };
         active.control.send_replace(CaptureState::Finish);
-        for task in active.tasks {
-            match task.await {
-                Ok(Ok(asset)) => assets.push(asset),
-                Ok(Err(error)) => failures.push(error),
-                Err(error) => failures.push(format!("camera recording task failed: {error}")),
-            }
-        }
         let mut total = self
             .progress
             .completed
             .iter()
             .map(|asset| asset.encoded_bytes())
             .sum::<usize>();
-        for asset in assets {
-            let next = total.saturating_add(asset.encoded_bytes());
-            if next > MAX_VIDEO_TRANSACTION_BYTES {
-                failures.push(format!(
-                    "episode video exceeded the {} MiB in-memory transaction limit",
-                    MAX_VIDEO_TRANSACTION_BYTES / (1024 * 1024)
-                ));
-                continue;
+        while let Some(task) = active.tasks.front_mut() {
+            let result = task.await;
+            active.tasks.pop_front();
+            match result {
+                Ok(Ok(asset)) => {
+                    let next = total.saturating_add(asset.encoded_bytes());
+                    if next > MAX_VIDEO_TRANSACTION_BYTES {
+                        active.failures.push(format!(
+                            "episode video exceeded the {} MiB in-memory transaction limit",
+                            MAX_VIDEO_TRANSACTION_BYTES / (1024 * 1024)
+                        ));
+                    } else {
+                        total = next;
+                        self.progress.completed.push(asset);
+                    }
+                }
+                Ok(Err(error)) => active.failures.push(error),
+                Err(error) => active
+                    .failures
+                    .push(format!("camera recording task failed: {error}")),
             }
-            total = next;
-            self.progress.completed.push(asset);
         }
-        failures
+        self.progress
+            .active
+            .take()
+            .expect("completed capture run")
+            .failures
     }
 
     pub(crate) async fn finish(mut self) -> (Vec<CameraRecording>, Vec<String>) {
@@ -537,6 +548,80 @@ mod tests {
                 completed: Vec::new(),
             },
         }
+    }
+
+    #[tokio::test]
+    async fn cancelled_pause_preserves_finished_packets_errors_and_pending_encoders() {
+        use crate::data::catalog_lease::CatalogMutationLease;
+        use crate::recording_session::RecordingSessionManager;
+        use std::future::Future as _;
+        use std::task::{Context, Waker};
+
+        let camera = CameraRecording::from_annex_b(
+            "wrist".into(),
+            (32, 32, 30),
+            (
+                include_bytes!("../../../frontend/src/activities/data/fixtures/seek.h264").to_vec(),
+                (0..8).map(|index| index * 33_333_333).collect(),
+            ),
+        )
+        .unwrap();
+        let (ready, finished) = tokio::sync::oneshot::channel();
+        let encoded = tokio::spawn(async move {
+            ready.send(()).unwrap();
+            Ok(camera)
+        });
+        finished.await.unwrap();
+        let (ready, finished) = tokio::sync::oneshot::channel();
+        let failed = tokio::spawn(async move {
+            ready.send(()).unwrap();
+            Err("first encoder failed".to_owned())
+        });
+        finished.await.unwrap();
+        let (release, pending) = tokio::sync::oneshot::channel();
+        let waiting = tokio::spawn(async move {
+            pending.await.unwrap();
+            Err("last encoder failed".to_owned())
+        });
+        let (control, _) = watch::channel(CaptureState::Recording);
+        let mut capture = capture(Vec::new());
+        capture.progress.active = Some(VideoCaptureRun {
+            control,
+            tasks: VecDeque::from([encoded, failed, waiting]),
+            failures: Vec::new(),
+        });
+        let lease = Arc::new(CatalogMutationLease::default());
+        let session = Arc::new(RecordingSessionManager::new(lease.clone()));
+        let token = session.reserve_start(|| (false, false)).unwrap().unwrap();
+        session.begin(token, ("episode_000001".into(), Some(capture)));
+        let mut operation = session.claim_capture_change().unwrap();
+        let mut finish = Box::pin(operation.finish_media());
+        assert!(
+            finish
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        // Cancel after collecting two results but while the last encoder waits.
+        drop(finish);
+        drop(operation);
+        assert!(lease.is_held());
+        assert_eq!(
+            session
+                .camera_preview("episode_000001", "wrist")
+                .unwrap()
+                .unwrap()
+                .packets()
+                .len(),
+            8
+        );
+        release.send(()).unwrap();
+        let mut retry = session.claim_finalization().unwrap().unwrap();
+        let (cameras, failures) = retry.finish_media().await;
+        assert_eq!(failures, ["first encoder failed", "last encoder failed"]);
+        assert_eq!(cameras.len(), 1);
+        retry.complete(cameras);
+        assert!(!lease.is_held());
     }
 
     #[test]

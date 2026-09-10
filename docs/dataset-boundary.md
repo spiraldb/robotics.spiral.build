@@ -39,6 +39,14 @@ session's encoded packets after publication and releases them when a new capture
 starts. This preserves immediate pause/stop review without interpreting stored
 MCAP files in Studio.
 
+`RecordingSessionManager` protects one lifecycle enum with a standard mutex.
+Opening, recording, capture changes, finalization, and review each own their valid
+state. Pause/resume and finalization claim the capture before changing hardware
+state, then perform encoder waits outside the mutex. An unfinished operation
+returns its capture to the session on drop, including pending encoder tasks,
+completed packets, and errors. Finishing publication transitions to review and
+releases the catalog lease together, even when publication reports an error.
+
 These endpoints live under `/recording/takes/{id}`. Their IDs identify session
 captures; they are not dataset member UUIDs. After a session is replaced or Studio
 restarts, persisted content is inspected through Data's dataset/member/topic APIs.

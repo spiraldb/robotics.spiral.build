@@ -1,6 +1,5 @@
 //! Finalize automatically stopped recordings and retain catalog exclusion through media commit.
 use crate::project_session::context::ProjectContext;
-use crate::robotics::video::{CameraRecording, VideoCapture};
 use std::time::Duration;
 const VIDEO_RECORDING_MONITOR_INTERVAL: Duration = Duration::from_millis(200);
 const VIDEO_RECORDING_STOP_TICKS: u8 = 5;
@@ -57,60 +56,32 @@ impl RecordingSupervisor {
         // episode and finalized media have both been committed. This exists
         // independently of VideoCapture because camera-less recordings still
         // allocate catalog identities.
-        let token = match state.recording_session().claim_finalization() {
-            Ok(token) => token,
+        let mut operation = match state.recording_session().claim_finalization() {
+            Ok(Some(operation)) => operation,
+            Ok(None) => return,
             Err(error) => {
                 tracing::warn!("could not claim stale recording finalization: {error}");
                 return;
             }
         };
-        let capture = state.recording_session().take_media().await;
-        if token.is_none() && capture.is_none() {
-            return;
-        }
-        let episode_id = state.recording_session().episode().or_else(|| {
-            capture
-                .as_ref()
-                .map(|capture| capture.episode_id().to_owned())
-        });
-        let videos = match capture {
-            Some(capture) => self.finish_video_capture(capture).await,
-            None => Vec::new(),
-        };
-        if let Some(episode_id) = episode_id {
-            let committed = async {
-                let episode = state
-                    .recording_buffer()
-                    .completed_episode(&episode_id)
-                    .map_err(|error| error.to_string())?;
-                state.storage().commit_recording(&episode, &videos).await?;
-                state
-                    .recording_session()
-                    .retain_preview(episode_id.clone(), videos.clone())
-                    .await;
-                Ok::<_, String>(())
-            }
-            .await;
-            if let Err(error) = committed {
-                tracing::error!("could not commit automatically stopped episode media: {error}");
-                state.cameras().note_issue(format!(
-                    "episode media could not be committed to SpiralDB: {error}"
-                ));
-            }
-        }
-        if let Some(token) = token {
-            state.recording_session().release(token);
-        }
-    }
-
-    pub(crate) async fn finish_video_capture(&self, capture: VideoCapture) -> Vec<CameraRecording> {
-        let state = &self.project;
-        let (videos, failures) = capture.finish().await;
+        let (videos, failures) = operation.finish_media().await;
         for failure in failures {
-            state
-                .cameras()
-                .note_issue(format!("episode video was not saved: {failure}"));
+            state.cameras().note_issue(failure);
         }
-        videos
+        let committed = async {
+            let episode = state
+                .recording_buffer()
+                .completed_episode(operation.episode())
+                .map_err(|error| error.to_string())?;
+            state.storage().commit_recording(&episode, &videos).await
+        }
+        .await;
+        operation.complete(videos);
+        if let Err(error) = committed {
+            tracing::error!("could not commit automatically stopped episode media: {error}");
+            state.cameras().note_issue(format!(
+                "episode media could not be committed to SpiralDB: {error}"
+            ));
+        }
     }
 }
