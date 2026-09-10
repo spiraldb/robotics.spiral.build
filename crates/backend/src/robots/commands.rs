@@ -665,7 +665,7 @@ impl DeviceCommands {
                     }
                     ModeSelection::Replay { .. } => {
                         return Err(BackendCommandError::from(OperationError::invalid_input(
-                            "start a replay with POST /api/episodes/replay, which loads the take first"
+                            "start a replay with POST /api/replay, which loads the take first"
                                 .to_owned(),
                         )));
                     }

@@ -2,7 +2,7 @@
 
 use dioxus::prelude::*;
 
-use crate::activities::data::episode_cache::EpisodePreview;
+use crate::activities::live::recording_review::EpisodePreview;
 use crate::client::http::CameraApiPath;
 use crate::client::project::ProjectClient;
 use crate::format::ClockPresentation;
@@ -264,8 +264,8 @@ fn RecordedCameraFrame(recorded: RecordedCamera, element_id: String) -> Element 
         let episode = episode.clone();
         let stream = stream.clone();
         async move {
-            crate::activities::data::DatasetClient::current()
-                .recorded_camera(episode, stream)
+            crate::activities::live::RecordingClient::current()
+                .camera_preview(episode, stream)
                 .await
                 .map(std::rc::Rc::new)
         }

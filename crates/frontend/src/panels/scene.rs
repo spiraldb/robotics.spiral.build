@@ -28,7 +28,9 @@ use spiral_robotics_viewport::{
 use wasm_bindgen::JsCast;
 use web_sys::HtmlCanvasElement;
 
-use crate::activities::data::episode_cache::{EpisodePreview, TimelineArmSample, TimelineSample};
+use crate::activities::live::recording_review::{
+    EpisodePreview, TimelineArmSample, TimelineSample,
+};
 use crate::panels::recorded_source::{LoadState, RecordedSource};
 use crate::robots::Selection;
 use crate::robots::{HardwareViewState, RobotSelection};

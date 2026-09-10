@@ -662,7 +662,7 @@ impl<'a> ManagedRelationProvisioner<'a> {
     fn tables() -> Vec<Table> {
         ManagedRelationCatalog::tables()
             .into_iter()
-            .filter(|table| *table != Table::RecordingSources)
+            .filter(|table| *table != Table::DatasetSources)
             .collect()
     }
 
@@ -754,7 +754,7 @@ mod managed_relation_tests {
         assert_eq!(tables.len(), 9);
         assert!(tables.contains(&Table::Robots));
         assert!(tables.contains(&Table::TrainingRuns));
-        assert!(!tables.contains(&Table::RecordingSources));
+        assert!(!tables.contains(&Table::DatasetSources));
     }
 
     #[test]

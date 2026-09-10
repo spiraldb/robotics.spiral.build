@@ -13,7 +13,6 @@ use spiral_robotics_common::training::{TrainingRun, TrainingSnapshot};
 use crate::db::ProjectDatabasePersistence;
 use crate::db::ProjectQueries;
 use crate::db::ProjectStore;
-use crate::episodes::FullEpisode;
 use crate::rollout_runs::RolloutSessionPersistence;
 use crate::settings::{
     SpiralConnectionSettings, StoredStudioPreferences, StudioPreferencePersistence,
@@ -65,30 +64,6 @@ impl StorageManager {
 
     pub fn table_prefix(&self) -> &str {
         self.project_store.table_prefix()
-    }
-
-    /// Finalize one recording as MCAP and publish its source Blob and Dataset atomically.
-    pub async fn commit_recording(
-        &self,
-        episode: &FullEpisode,
-        cameras: &[crate::episodes::CameraRecording],
-    ) -> Result<(), String> {
-        let summary = episode.summary();
-        let bytes = crate::episodes::McapRecording::encode(episode, cameras)?;
-        let file = crate::episodes::RecordingFile::new(self.project_store(), episode)?;
-        file.save(&bytes)?;
-        self.import_recording(crate::datasets::RecordingImport::new(
-            summary.dataset_id(),
-            &format!("{}.mcap", summary.id()),
-            &bytes,
-        ))
-        .await
-        .map_err(|error| {
-            format!(
-                "{error}. The complete MCAP is saved at {}",
-                file.path().display()
-            )
-        })
     }
 
     /// Read the durable training history.

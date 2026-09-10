@@ -7,11 +7,8 @@
 
 use std::sync::Arc;
 
-use arrow_array::{
-    ArrayRef, BinaryViewArray, RecordBatch, StringArray, StringViewArray, StructArray, UInt64Array,
-};
-use arrow_schema::extension::EXTENSION_TYPE_NAME_KEY;
-use arrow_schema::{DataType, Field, Fields, Schema};
+use arrow_array::{ArrayRef, RecordBatch, StringArray};
+use arrow_schema::{DataType, Field, Schema};
 use reqwest::StatusCode;
 use reqwest::header::LINK;
 use serde::Deserialize;
@@ -22,6 +19,7 @@ use spiral_robotics_common::datasets::{
 };
 use url::Url;
 
+use crate::datasets::{McapDatasetDefinition, McapSourceBlob};
 use crate::db::ProjectConnection;
 use crate::db::SpiralSql;
 use crate::manager::StorageManager;
@@ -29,7 +27,6 @@ use crate::manager::StorageManager;
 const HUGGING_FACE_ORIGIN: &str = "https://huggingface.co";
 const MAX_TREE_PAGES: usize = 100;
 const MAX_REPOSITORY_FILES: usize = 50_000;
-const BLOB_EXTENSION_NAME: &str = "spql.io.Blob";
 #[derive(Debug, Deserialize)]
 struct RepositoryInfo {
     sha: String,
@@ -238,48 +235,6 @@ impl HuggingFaceResponse for reqwest::Response {
 }
 
 /// One dataset and the durable source relation it reads.
-#[derive(Clone, Debug)]
-pub(crate) struct ImportRelations {
-    dataset_name: String,
-    dataset: String,
-    source: String,
-}
-impl ImportRelations {
-    pub(crate) const SOURCE_TABLE: &str = "dataset_source";
-
-    pub(crate) fn new(dataset_id: &str) -> Self {
-        Self {
-            dataset_name: dataset_id.to_owned(),
-            dataset: format!("dataset_{dataset_id}"),
-            source: format!("dataset_source_{dataset_id}"),
-        }
-    }
-    pub(crate) fn quoted(name: &str) -> String {
-        name.split('.')
-            .map(|part| format!("\"{}\"", part.replace('"', "\"\"")))
-            .collect::<Vec<_>>()
-            .join(".")
-    }
-    pub(crate) fn planned(&self) -> Vec<String> {
-        vec![self.dataset.clone(), self.source.clone()]
-    }
-    pub(crate) fn create_sql(&self) -> String {
-        format!(
-            "CREATE DATASET {} USING spql.mcap.dataset FROM {} WITH (key = 'recording', blob = 'source', on_error = 'fail')",
-            Self::quoted(&self.dataset),
-            Self::quoted(&self.source)
-        )
-    }
-    pub(crate) fn source_view_sql(&self) -> String {
-        format!(
-            "CREATE VIEW {} AS SELECT recording, source FROM {} WHERE dataset_name = {}",
-            Self::quoted(&self.source),
-            Self::SOURCE_TABLE,
-            SpiralSql::string_literal(&self.dataset_name)
-        )
-    }
-}
-
 /// Storage-backed discovery behavior for the API inspection result type.
 #[allow(async_fn_in_trait)]
 pub trait HuggingFaceDatasetDiscovery: Sized {
@@ -329,7 +284,7 @@ impl HuggingFaceDatasetDiscovery for HuggingFaceDatasetInspection {
                 .checked_add(file.bytes())
                 .ok_or_else(|| "Hugging Face file sizes overflow u64".to_owned())
         })?;
-        let relations = ImportRelations::new(&dataset_id);
+        let relations = McapDatasetDefinition::new(&dataset_id);
         let mut warnings = Vec::new();
         if selected.iter().any(|file| file.bytes() == 0) {
             warnings.push(
@@ -352,7 +307,7 @@ impl StorageManager {
         &self,
         inspection: HuggingFaceDatasetInspection,
     ) -> Result<HuggingFaceDatasetImportSummary, String> {
-        let relations = ImportRelations::new(inspection.dataset_id());
+        let relations = McapDatasetDefinition::new(inspection.dataset_id());
         let resources = self.project_resources().await?;
         if resources
             .iter()
@@ -406,7 +361,7 @@ impl StorageManager {
         let created = relations.planned();
         let suggested_sql = format!(
             "SELECT * FROM spql.mcap.episodes({}) LIMIT 100",
-            SpiralSql::string_literal(&relations.dataset)
+            SpiralSql::string_literal(relations.dataset())
         );
         let source =
             HuggingFaceResolvedSource::new(inspection.dataset_id(), inspection.repository())
@@ -476,27 +431,26 @@ trait HuggingFaceInspectionStorage {
     async fn materialize(
         &self,
         connection: &mut ProjectConnection,
-        relations: &ImportRelations,
+        relations: &McapDatasetDefinition,
     ) -> Result<(), String>;
 }
 impl HuggingFaceInspectionStorage for HuggingFaceDatasetInspection {
     async fn materialize(
         &self,
         connection: &mut ProjectConnection,
-        relations: &ImportRelations,
+        relations: &McapDatasetDefinition,
     ) -> Result<(), String> {
-        let files = self.files().iter().collect::<Vec<_>>();
         // Orphaned source rows must not silently become a second import with
         // duplicate member keys after a Dataset or View was removed manually.
         if connection
-            .table_exists(ImportRelations::SOURCE_TABLE)
+            .table_exists(McapDatasetDefinition::SOURCE_TABLE)
             .await?
         {
             let rows = connection
                 .query_rows(
                     &format!(
                         "SELECT COUNT(*) AS sources FROM {} WHERE dataset_name = {}",
-                        ImportRelations::SOURCE_TABLE,
+                        McapDatasetDefinition::SOURCE_TABLE,
                         SpiralSql::string_literal(self.dataset_id())
                     ),
                     1,
@@ -517,42 +471,11 @@ impl HuggingFaceInspectionStorage for HuggingFaceDatasetInspection {
         }
         connection
             .create_or_append_batches(
-                ImportRelations::SOURCE_TABLE,
+                McapDatasetDefinition::SOURCE_TABLE,
                 vec![HuggingFaceSourceBatch::build(self)?],
             )
             .await?;
-        connection
-            .execute_update_sql(&relations.source_view_sql())
-            .await?;
-        connection
-            .execute_update_sql(&relations.create_sql())
-            .await?;
-        connection
-            .execute_update_sql(&format!(
-                "REFRESH DATASET {}",
-                ImportRelations::quoted(&relations.dataset)
-            ))
-            .await?;
-        let counts = connection
-            .query_rows(
-                &format!(
-                    "SELECT COUNT(*) AS episodes FROM spql.mcap.episodes({})",
-                    SpiralSql::string_literal(&relations.dataset)
-                ),
-                1,
-            )
-            .await?;
-        if counts
-            .rows()
-            .first()
-            .and_then(|row| row.get("episodes"))
-            .and_then(|value| value.as_u64())
-            != Some(files.len() as u64)
-        {
-            return Err(
-                "The dataset episode count does not match the imported MCAP files".to_owned(),
-            );
-        }
+        relations.publish(connection).await?;
         Ok(())
     }
 }
@@ -572,7 +495,7 @@ impl HuggingFaceSourceBatch {
         let schema = Arc::new(Schema::new(vec![
             Field::new("dataset_name", DataType::Utf8, false),
             Field::new("recording", DataType::Utf8, false),
-            ImportBlobStorage::field("source"),
+            McapSourceBlob::field("source"),
         ]));
         RecordBatch::try_new(
             schema,
@@ -583,80 +506,20 @@ impl HuggingFaceSourceBatch {
                 Arc::new(StringArray::from_iter_values(
                     files.iter().map(|file| file.path()),
                 )) as ArrayRef,
-                ImportBlobStorage::external_array(&uris, &files)?,
+                McapSourceBlob::external_array(
+                    &uris,
+                    &files.iter().map(|file| file.bytes()).collect::<Vec<_>>(),
+                )?,
             ],
         )
         .map_err(|error| format!("building Hugging Face source batch: {error}"))
     }
 }
 
-pub(crate) struct ImportBlobStorage;
-
-impl ImportBlobStorage {
-    pub(crate) fn fields() -> Fields {
-        vec![
-            Field::new("bytes", DataType::BinaryView, true),
-            Field::new("uri", DataType::Utf8View, true),
-            Field::new("offset", DataType::UInt64, true),
-            Field::new("size", DataType::UInt64, true),
-            Field::new("mime_type", DataType::Utf8View, true),
-            Field::new("etag", DataType::Utf8View, true),
-            Field::new("version_id", DataType::Utf8View, true),
-            Field::new("generation", DataType::Utf8View, true),
-            Field::new("md5", DataType::Utf8View, true),
-            Field::new("sha1", DataType::Utf8View, true),
-            Field::new("sha256", DataType::Utf8View, true),
-            Field::new("manifest_digest", DataType::Utf8View, true),
-        ]
-        .into()
-    }
-
-    pub(crate) fn field(name: &str) -> Field {
-        Field::new(name, DataType::Struct(Self::fields()), true).with_metadata(
-            [(
-                EXTENSION_TYPE_NAME_KEY.to_owned(),
-                BLOB_EXTENSION_NAME.to_owned(),
-            )]
-            .into(),
-        )
-    }
-
-    fn external_array(
-        uris: &[String],
-        files: &[&HuggingFaceDatasetFile],
-    ) -> Result<ArrayRef, String> {
-        let len = files.len();
-        let null_text = || Arc::new(StringViewArray::from(vec![None::<&str>; len])) as ArrayRef;
-        let null_u64 = || Arc::new(UInt64Array::from(vec![None::<u64>; len])) as ArrayRef;
-        let values = vec![
-            Arc::new(BinaryViewArray::from(vec![None::<&[u8]>; len])) as ArrayRef,
-            Arc::new(StringViewArray::from_iter_values(
-                uris.iter().map(String::as_str),
-            )) as ArrayRef,
-            null_u64(),
-            Arc::new(UInt64Array::from_iter_values(
-                files.iter().map(|file| file.bytes()),
-            )) as ArrayRef,
-            Arc::new(StringViewArray::from_iter_values(
-                files.iter().map(|_| "application/mcap"),
-            )) as ArrayRef,
-            null_text(),
-            null_text(),
-            null_text(),
-            null_text(),
-            null_text(),
-            null_text(),
-            null_text(),
-        ];
-        StructArray::try_new(Self::fields(), values, None)
-            .map(|array| Arc::new(array) as ArrayRef)
-            .map_err(|error| format!("building Spiral external Blob array: {error}"))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow_array::{StringViewArray, StructArray};
     #[test]
     fn imports_only_mcap_files() {
         let entries = vec![TreeEntry {
@@ -677,7 +540,7 @@ mod tests {
     }
     #[test]
     fn import_uses_native_producer_and_quoted_names() {
-        let target = ImportRelations::new("pick-place");
+        let target = McapDatasetDefinition::new("pick-place");
         assert!(
             target
                 .create_sql()
@@ -699,7 +562,7 @@ mod tests {
         let contents = HuggingFaceInspectionContents::new(
             vec![HuggingFaceDatasetFile::new("episode.mcap", 12)],
             12,
-            ImportRelations::new("pick-place").planned(),
+            McapDatasetDefinition::new("pick-place").planned(),
         );
         let inspection = HuggingFaceDatasetInspection::new(source, contents);
         let batch = HuggingFaceSourceBatch::build(&inspection).unwrap();

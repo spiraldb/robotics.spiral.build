@@ -1,26 +1,26 @@
 //! Publish one complete MCAP file through the Dataset's declared source view.
-use crate::{
-    StorageManager,
-    db::SpiralSql,
-    transfer::{ImportBlobStorage, ImportRelations},
-};
+use super::DatasetCatalogClient;
+use crate::ProjectConnection;
+use crate::{StorageManager, db::SpiralSql};
 use arrow_array::{
     ArrayRef, BinaryViewArray, RecordBatch, StringArray, StringViewArray, StructArray, UInt64Array,
 };
-use arrow_schema::Schema;
+use arrow_schema::extension::EXTENSION_TYPE_NAME_KEY;
+use arrow_schema::{DataType, Field, Fields, Schema};
+use serde_json::json;
 use sha2::{Digest as _, Sha256};
 use std::sync::Arc;
 
-pub(crate) struct RecordingImport<'a> {
+pub(crate) struct McapFile<'a> {
     dataset_name: &'a str,
-    recording: &'a str,
+    key: &'a str,
     bytes: &'a [u8],
 }
-impl<'a> RecordingImport<'a> {
-    pub(crate) fn new(dataset_name: &'a str, recording: &'a str, bytes: &'a [u8]) -> Self {
+impl<'a> McapFile<'a> {
+    pub(crate) fn new(dataset_name: &'a str, key: &'a str, bytes: &'a [u8]) -> Self {
         Self {
             dataset_name,
-            recording,
+            key,
             bytes,
         }
     }
@@ -29,11 +29,11 @@ impl<'a> RecordingImport<'a> {
         let schema = Arc::new(Schema::new(vec![
             arrow_schema::Field::new("dataset_name", arrow_schema::DataType::Utf8, false),
             arrow_schema::Field::new("recording", arrow_schema::DataType::Utf8, false),
-            ImportBlobStorage::field("source"),
+            McapSourceBlob::field("source"),
         ]));
         let hash = format!("{:x}", Sha256::digest(self.bytes));
         let blob = StructArray::try_new(
-            ImportBlobStorage::fields(),
+            McapSourceBlob::fields(),
             vec![
                 Arc::new(BinaryViewArray::from(vec![Some(self.bytes)])),
                 text(),
@@ -55,7 +55,7 @@ impl<'a> RecordingImport<'a> {
             schema,
             vec![
                 Arc::new(StringArray::from(vec![self.dataset_name])),
-                Arc::new(StringArray::from(vec![self.recording])),
+                Arc::new(StringArray::from(vec![self.key])),
                 Arc::new(blob),
             ],
         )
@@ -66,10 +66,10 @@ impl<'a> RecordingImport<'a> {
         connection: &mut crate::ProjectConnection,
         exists: bool,
     ) -> Result<(), String> {
-        let relations = ImportRelations::new(self.dataset_name);
+        let relations = McapDatasetDefinition::new(self.dataset_name);
         let mut already_imported = false;
         if connection
-            .table_exists(ImportRelations::SOURCE_TABLE)
+            .table_exists(McapDatasetDefinition::SOURCE_TABLE)
             .await?
         {
             if !exists {
@@ -83,32 +83,32 @@ impl<'a> RecordingImport<'a> {
                     )
                     .await?;
                 if !orphaned.rows().is_empty() {
-                    return Err("Recording sources already exist without their Dataset; repair the catalog before recording".into());
+                    return Err("MCAP sources already exist without their Dataset; repair the catalog before appending files".into());
                 }
             }
             let duplicate = connection.read_batches(&format!(
                 "SELECT spql.io.read_bytes(source) AS payload FROM dataset_source WHERE dataset_name = {} AND recording = {} LIMIT 2",
-                SpiralSql::string_literal(self.dataset_name), SpiralSql::string_literal(self.recording)
+                SpiralSql::string_literal(self.dataset_name), SpiralSql::string_literal(self.key)
             )).await?;
             let count = duplicate.iter().map(RecordBatch::num_rows).sum::<usize>();
             if count > 1 {
                 return Err(
-                    "Duplicate recording sources exist; repair the catalog before recording".into(),
+                    "Duplicate MCAP sources exist; repair the catalog before appending files"
+                        .into(),
                 );
             }
             if count == 1 {
                 let batch = duplicate
                     .iter()
                     .find(|batch| batch.num_rows() == 1)
-                    .ok_or("Recording source row is missing")?;
+                    .ok_or("MCAP source row is missing")?;
                 let data = batch
                     .column_by_name("payload")
-                    .ok_or("Recording source has no bytes")?;
+                    .ok_or("MCAP source has no bytes")?;
                 let previous = McapSources::bytes(data.as_ref(), 0)?;
                 if previous != self.bytes {
                     return Err(
-                        "Refusing to replace an immutable MCAP recording with different bytes"
-                            .into(),
+                        "Refusing to replace an immutable MCAP file with different bytes".into(),
                     );
                 }
                 already_imported = true;
@@ -116,95 +116,25 @@ impl<'a> RecordingImport<'a> {
         }
         if !already_imported {
             connection
-                .create_or_append_batches(ImportRelations::SOURCE_TABLE, vec![self.batch()?])
+                .create_or_append_batches(McapDatasetDefinition::SOURCE_TABLE, vec![self.batch()?])
                 .await?;
         }
         if !exists {
-            connection
-                .execute_update_sql(&relations.source_view_sql())
-                .await?;
-            connection
-                .execute_update_sql(&relations.create_sql())
-                .await?;
-        }
-        connection
-            .execute_update_sql(&format!(
-                "REFRESH DATASET {}",
-                ImportRelations::quoted(&format!("dataset_{}", self.dataset_name))
-            ))
-            .await?;
-        let episode = self
-            .recording
-            .strip_suffix(".mcap")
-            .ok_or("Recording filename must end in .mcap")?;
-        let visible = connection.query_rows(&format!("SELECT id FROM spql.mcap.read_topic({}, '/studio/episode') WHERE value.episode_id = {} LIMIT 2", SpiralSql::string_literal(&format!("dataset_{}", self.dataset_name)), SpiralSql::string_literal(episode)), 2).await?;
-        if visible.rows().len() != 1 {
-            return Err("MCAP import did not publish exactly one matching episode".into());
+            relations.publish(connection).await?;
+        } else {
+            relations.refresh(connection).await?;
         }
         Ok(())
     }
 }
 impl StorageManager {
-    pub async fn recorded_camera(
-        &self,
-        id: &str,
-        stream: &str,
-    ) -> Result<spiral_robotics_common::datasets::EpisodeVideo, String> {
-        let mut connection = self.project_store().connect().await?;
-        let sources = connection
-            .query_rows(
-                &format!(
-                    "SELECT dataset_name FROM dataset_source WHERE recording = {} LIMIT 2",
-                    SpiralSql::string_literal(&format!("{id}.mcap"))
-                ),
-                2,
-            )
-            .await?;
-        if sources.rows().len() != 1 {
-            return Err("Recording source is absent or ambiguous across datasets".into());
-        }
-        let name = sources.rows()[0]
-            .get("dataset_name")
-            .and_then(serde_json::Value::as_str)
-            .ok_or("Recording dataset name is missing")?;
-        let dataset = spiral_robotics_common::datasets::DatasetSelection::new(vec![format!(
-            "dataset_{name}"
-        )])?;
-        let headers = connection.query_rows(&format!("SELECT id, value.started_ms AS started_ms FROM spql.mcap.read_topic({}, '/studio/episode') WHERE value.episode_id = {} LIMIT 2", SpiralSql::string_literal(&dataset.sql_name()), SpiralSql::string_literal(id)), 2).await?;
-        if headers.rows().len() != 1 {
-            return Err("Recording header is absent or ambiguous in its Dataset".into());
-        }
-        let header = &headers.rows()[0];
-        let member = header
-            .get("id")
-            .and_then(serde_json::Value::as_str)
-            .ok_or("Recording member ID is missing")?;
-        let origin = header
-            .get("started_ms")
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|time| time.checked_mul(1_000_000))
-            .ok_or("Recording start time is invalid")?;
-        let request = spiral_robotics_common::datasets::EpisodeTopicRequest::new(
-            dataset,
-            format!("/camera/{stream}/video"),
-            member.to_owned(),
-        );
-        drop(connection);
-        self.episode_video(request).await?.relative_to(origin)
-    }
-
-    pub(crate) async fn import_recording(
-        &self,
-        recording: RecordingImport<'_>,
-    ) -> Result<(), String> {
-        let exists = self
-            .validate_recording_destination(recording.dataset_name)
-            .await?;
+    pub(crate) async fn append_mcap_file(&self, file: McapFile<'_>) -> Result<(), String> {
+        let exists = self.validate_mcap_destination(file.dataset_name).await?;
         let mut connection = self.project_store().connect_exclusive().await?;
         connection.begin_transaction().await?;
-        let result = recording.publish(&mut connection, exists).await;
+        let result = file.publish(&mut connection, exists).await;
         connection
-            .finish_transaction(result, "MCAP recording import")
+            .finish_transaction(result, "MCAP file append")
             .await
     }
 }
@@ -213,10 +143,10 @@ impl StorageManager {
 pub(crate) struct McapSources;
 impl crate::db::ManagedRelationSchema for McapSources {
     fn relations(&self) -> &'static [crate::db::Table] {
-        &[crate::db::Table::RecordingSources]
+        &[crate::db::Table::DatasetSources]
     }
     fn managed_relation_schema(&self, table: crate::db::Table) -> Option<Schema> {
-        (table == crate::db::Table::RecordingSources).then(|| {
+        (table == crate::db::Table::DatasetSources).then(|| {
             Schema::new(vec![
                 arrow_schema::Field::new("dataset_name", arrow_schema::DataType::Utf8, false),
                 arrow_schema::Field::new("recording", arrow_schema::DataType::Utf8, false),
@@ -249,7 +179,7 @@ impl McapSources {
         store: &crate::ProjectStore,
         connection: &mut crate::ProjectConnection,
     ) -> Result<Vec<String>, String> {
-        let owned = store.recording_dataset_names().await?;
+        let owned = store.managed_mcap_datasets().await?;
         if !connection.table_exists("dataset_source").await? {
             if !owned.is_empty() {
                 return Err("MCAP datasets have no source table".into());
@@ -267,7 +197,7 @@ impl McapSources {
                 .get("dataset_name")
                 .and_then(serde_json::Value::as_str)
                 .ok_or("MCAP source has no dataset name")?;
-            if !store.validate_recording_destination(name).await? {
+            if !store.validate_mcap_destination(name).await? {
                 return Err(format!(
                     "MCAP source {name} has no Dataset definition; repair the catalog before transferring the project"
                 ));
@@ -289,7 +219,7 @@ impl McapSources {
             }
             let bytes = Self::bytes(data.as_ref(), row)?;
             rows.push(
-                RecordingImport::new(
+                McapFile::new(
                     columns.text("dataset_name", row)?,
                     columns.text("recording", row)?,
                     bytes,
@@ -298,7 +228,7 @@ impl McapSources {
             );
         }
         if rows.is_empty() {
-            rows.push(RecordingImport::new("", "", &[]).batch()?.slice(0, 0));
+            rows.push(McapFile::new("", "", &[]).batch()?.slice(0, 0));
         }
         Ok(rows)
     }
@@ -319,7 +249,7 @@ impl McapSources {
             return Err("MCAP source names do not match the project manifest".into());
         }
         for name in names {
-            let relations = ImportRelations::new(name);
+            let relations = McapDatasetDefinition::new(name);
             // Restore into a new project requires the source view and dataset definition.
             connection
                 .execute_update_sql(&relations.source_view_sql())
@@ -330,7 +260,7 @@ impl McapSources {
             connection
                 .execute_update_sql(&format!(
                     "REFRESH DATASET {}",
-                    ImportRelations::quoted(&format!("dataset_{name}"))
+                    McapDatasetDefinition::quoted(&format!("dataset_{name}"))
                 ))
                 .await?;
         }
@@ -347,13 +277,13 @@ impl McapSources {
             connection
                 .execute_update_sql(&format!(
                     "DROP DATASET IF EXISTS {}",
-                    ImportRelations::quoted(&format!("dataset_{name}"))
+                    McapDatasetDefinition::quoted(&format!("dataset_{name}"))
                 ))
                 .await?;
             connection
                 .execute_update_sql(&format!(
                     "DROP VIEW IF EXISTS {}",
-                    ImportRelations::quoted(&format!("dataset_source_{name}"))
+                    McapDatasetDefinition::quoted(&format!("dataset_source_{name}"))
                 ))
                 .await?;
         }
@@ -362,23 +292,11 @@ impl McapSources {
 }
 
 impl StorageManager {
-    pub(crate) async fn delete_recording(&self, id: &str) -> Result<(), String> {
-        let key = SpiralSql::string_literal(&format!("{id}.mcap"));
+    pub async fn remove_mcap_file(&self, dataset: &str, key: &str) -> Result<(), String> {
+        self.validate_mcap_destination(dataset).await?;
+        let key = SpiralSql::string_literal(key);
+        let name = dataset;
         let mut connection = self.project_store().connect_exclusive().await?;
-        let rows = connection
-            .query_rows(
-                &format!("SELECT dataset_name FROM dataset_source WHERE recording = {key} LIMIT 2"),
-                2,
-            )
-            .await?;
-        if rows.rows().len() != 1 {
-            return Err("Recording source is absent or ambiguous across datasets".into());
-        }
-        let name = rows.rows()[0]
-            .get("dataset_name")
-            .and_then(serde_json::Value::as_str)
-            .ok_or("Recording source has no dataset")?;
-        self.validate_recording_destination(name).await?;
         connection.begin_transaction().await?;
         let mutation = async {
             connection
@@ -390,15 +308,237 @@ impl StorageManager {
             connection
                 .execute_update_sql(&format!(
                     "REFRESH DATASET {}",
-                    ImportRelations::quoted(&format!("dataset_{name}"))
+                    McapDatasetDefinition::quoted(&format!("dataset_{name}"))
                 ))
                 .await?;
             Ok(())
         }
         .await;
         connection
-            .finish_transaction(mutation, "recording deletion")
+            .finish_transaction(mutation, "MCAP source removal")
             .await
+    }
+}
+
+pub(crate) struct McapDatasetDefinition {
+    dataset_name: String,
+    dataset: String,
+    source: String,
+}
+impl McapDatasetDefinition {
+    pub(crate) const SOURCE_TABLE: &str = "dataset_source";
+
+    pub(crate) fn new(dataset_id: &str) -> Self {
+        Self {
+            dataset_name: dataset_id.to_owned(),
+            dataset: format!("dataset_{dataset_id}"),
+            source: format!("dataset_source_{dataset_id}"),
+        }
+    }
+    pub(crate) fn quoted(name: &str) -> String {
+        name.split('.')
+            .map(|part| format!("\"{}\"", part.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(".")
+    }
+    pub(crate) fn dataset(&self) -> &str {
+        &self.dataset
+    }
+
+    pub(crate) fn planned(&self) -> Vec<String> {
+        vec![self.dataset.clone(), self.source.clone()]
+    }
+    pub(crate) fn create_sql(&self) -> String {
+        format!(
+            "CREATE DATASET {} USING spql.mcap.dataset FROM {} WITH (key = 'recording', blob = 'source', on_error = 'fail')",
+            Self::quoted(&self.dataset),
+            Self::quoted(&self.source)
+        )
+    }
+    pub(crate) fn source_view_sql(&self) -> String {
+        format!(
+            "CREATE VIEW {} AS SELECT recording, source FROM {} WHERE dataset_name = {}",
+            Self::quoted(&self.source),
+            Self::SOURCE_TABLE,
+            SpiralSql::string_literal(&self.dataset_name)
+        )
+    }
+}
+
+pub(crate) struct McapSourceBlob;
+
+impl McapSourceBlob {
+    pub(crate) fn fields() -> Fields {
+        vec![
+            Field::new("bytes", DataType::BinaryView, true),
+            Field::new("uri", DataType::Utf8View, true),
+            Field::new("offset", DataType::UInt64, true),
+            Field::new("size", DataType::UInt64, true),
+            Field::new("mime_type", DataType::Utf8View, true),
+            Field::new("etag", DataType::Utf8View, true),
+            Field::new("version_id", DataType::Utf8View, true),
+            Field::new("generation", DataType::Utf8View, true),
+            Field::new("md5", DataType::Utf8View, true),
+            Field::new("sha1", DataType::Utf8View, true),
+            Field::new("sha256", DataType::Utf8View, true),
+            Field::new("manifest_digest", DataType::Utf8View, true),
+        ]
+        .into()
+    }
+
+    pub(crate) fn field(name: &str) -> Field {
+        Field::new(name, DataType::Struct(Self::fields()), true).with_metadata(
+            [(
+                EXTENSION_TYPE_NAME_KEY.to_owned(),
+                "spql.io.Blob".to_owned(),
+            )]
+            .into(),
+        )
+    }
+
+    pub(crate) fn external_array(uris: &[String], sizes: &[u64]) -> Result<ArrayRef, String> {
+        let len = sizes.len();
+        if uris.len() != len {
+            return Err("MCAP source URIs and sizes must have the same length".into());
+        }
+        let null_text = || Arc::new(StringViewArray::from(vec![None::<&str>; len])) as ArrayRef;
+        let null_u64 = || Arc::new(UInt64Array::from(vec![None::<u64>; len])) as ArrayRef;
+        let values = vec![
+            Arc::new(BinaryViewArray::from(vec![None::<&[u8]>; len])) as ArrayRef,
+            Arc::new(StringViewArray::from_iter_values(
+                uris.iter().map(String::as_str),
+            )) as ArrayRef,
+            null_u64(),
+            Arc::new(UInt64Array::from_iter_values(sizes.iter().copied())) as ArrayRef,
+            Arc::new(StringViewArray::from_iter_values(
+                sizes.iter().map(|_| "application/mcap"),
+            )) as ArrayRef,
+            null_text(),
+            null_text(),
+            null_text(),
+            null_text(),
+            null_text(),
+            null_text(),
+            null_text(),
+        ];
+        StructArray::try_new(Self::fields(), values, None)
+            .map(|array| Arc::new(array) as ArrayRef)
+            .map_err(|error| format!("building Spiral external Blob array: {error}"))
+    }
+}
+
+impl McapDatasetDefinition {
+    pub(crate) async fn publish(&self, connection: &mut ProjectConnection) -> Result<(), String> {
+        connection
+            .execute_update_sql(&self.source_view_sql())
+            .await?;
+        connection.execute_update_sql(&self.create_sql()).await?;
+        self.refresh(connection).await
+    }
+
+    async fn refresh(&self, connection: &mut ProjectConnection) -> Result<(), String> {
+        connection
+            .execute_update_sql(&format!("REFRESH DATASET {}", Self::quoted(&self.dataset)))
+            .await?;
+        let members = connection
+            .query_rows(
+                &format!(
+                    "SELECT COUNT(*) AS members FROM spql.mcap.episodes({})",
+                    SpiralSql::string_literal(&self.dataset)
+                ),
+                1,
+            )
+            .await?;
+        let sources = connection
+            .query_rows(
+                &format!(
+                    "SELECT COUNT(*) AS members FROM dataset_source WHERE dataset_name = {}",
+                    SpiralSql::string_literal(&self.dataset_name)
+                ),
+                1,
+            )
+            .await?;
+        if members.rows() != sources.rows() {
+            return Err("Dataset membership does not match its MCAP source files".into());
+        }
+        Ok(())
+    }
+}
+
+impl crate::ProjectStore {
+    pub(crate) async fn validate_mcap_destination(&self, name: &str) -> Result<bool, String> {
+        if !crate::db::StorageSchema::is_dataset_id(name) || name.contains('.') {
+            return Err("Dataset name must contain 1–96 letters, numbers, '_' or '-'".into());
+        }
+        let client = DatasetCatalogClient::connect(self.connection_settings()).await?;
+        let resources = client.resources().await?;
+        let dataset_name = format!("dataset_{name}");
+        let source_name = format!("dataset_source_{name}");
+        let Some(resource) = resources
+            .iter()
+            .find(|r| r.selection().label() == dataset_name)
+        else {
+            if resources
+                .iter()
+                .any(|r| r.selection().label() == source_name)
+            {
+                return Err("The MCAP source exists without its dataset; repair the catalog before appending files".into());
+            }
+            return Ok(false);
+        };
+        let dataset = resource
+            .dataset()
+            .ok_or("MCAP destination is not a Spiral dataset")?;
+        let response: serde_json::Value = client
+            .request(client.client.get(format!(
+                "{}/datasets/{}/versions/{}",
+                client.endpoint,
+                dataset.resource_id(),
+                dataset.version_id()
+            )))
+            .await?;
+        let definition = &response["version"]["definition"];
+        let payload: serde_json::Value = serde_json::from_str(
+            definition["canonicalPayload"]
+                .as_str()
+                .ok_or("Dataset has no source definition")?,
+        )
+        .map_err(|e| e.to_string())?;
+        if definition["producerId"] != "spql.mcap.dataset"
+            || payload["sourceRelation"] != json!([source_name])
+            || payload["options"]["key"] != "recording"
+            || payload["options"]["blob"] != "source"
+        {
+            return Err("This dataset does not use Studio's managed MCAP source; choose a MCAP append destination with the shared source view".into());
+        }
+        Ok(true)
+    }
+}
+
+impl crate::ProjectStore {
+    pub(crate) async fn managed_mcap_datasets(&self) -> Result<Vec<String>, String> {
+        let client = DatasetCatalogClient::connect(self.connection_settings()).await?;
+        let resources = client.resources().await?;
+        let mut names = Vec::new();
+        for resource in &resources {
+            if resource.dataset().is_none() {
+                continue;
+            }
+            let label = resource.selection().label();
+            let Some(name) = label.strip_prefix("dataset_") else {
+                continue;
+            };
+            let source_name = format!("dataset_source_{name}");
+            if resources
+                .iter()
+                .any(|resource| resource.selection().label() == source_name)
+                && self.validate_mcap_destination(name).await?
+            {
+                names.push(name.to_owned());
+            }
+        }
+        names.sort();
+        Ok(names)
     }
 }
 
@@ -412,7 +552,7 @@ mod tests {
         let batch = RecordBatch::try_new(
             Arc::new(
                 McapSources
-                    .managed_relation_schema(crate::db::Table::RecordingSources)
+                    .managed_relation_schema(crate::db::Table::DatasetSources)
                     .unwrap(),
             ),
             vec![
@@ -446,7 +586,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires SPIRAL_MCAP_TEST_CONFIG and Spiral access; creates and removes a uniquely named dataset"]
-    async fn native_recording_import_retry_playback_and_delete() {
+    async fn mcap_files_share_publication_and_dataset_reads() {
         use crate::episodes::{CameraRecording, EpisodeFixture, McapRecording};
         use crate::settings::{BackendStateStore, SpiralConnectionSettings};
         let config = BackendStateStore::open_for_test(
@@ -472,7 +612,8 @@ mod tests {
             .unwrap(),
         );
         let storage = StorageManager::new(store.clone());
-        let name = format!("recording_probe_{}", uuid::Uuid::new_v4().simple());
+        let name = format!("source_probe_{}", uuid::Uuid::new_v4().simple());
+        let other_name = format!("{name}_other");
         let cameras = ["wrist", "overhead"]
             .into_iter()
             .map(|stream| {
@@ -524,16 +665,11 @@ mod tests {
                 let bytes = McapRecording::encode(&episode, &cameras[..camera_count])?;
                 let key = format!("{id}.mcap");
                 storage
-                    .import_recording(RecordingImport::new(&name, &key, &bytes))
+                    .append_mcap_file(McapFile::new(&name, &key, &bytes))
                     .await?;
                 storage
-                    .import_recording(RecordingImport::new(&name, &key, &bytes))
+                    .append_mcap_file(McapFile::new(&name, &key, &bytes))
                     .await?;
-                if camera_count == 0 { continue; }
-                let video = storage.recorded_camera(&id, "wrist").await?;
-                assert_eq!(video.packets().len(), 8);
-                assert_eq!(video.packets()[0].timestamp_ns(), "0");
-                assert!(video.packets()[0].keyframe());
             }
             // All topics exist in the dataset now; availability must still be exact per episode.
             let dataset = spiral_robotics_common::datasets::DatasetSelection::new(vec![format!("dataset_{name}")])?;
@@ -604,7 +740,7 @@ mod tests {
             assert!(storage.episode_topics(
                 spiral_robotics_common::datasets::EpisodeSelection::new(dataset, uuid::Uuid::new_v4().to_string())
             ).await.unwrap_err().contains("no longer in the dataset"));
-            storage.delete_recording(&format!("{name}_first")).await?;
+            storage.remove_mcap_file(&name, &format!("{name}_first.mcap")).await?;
             let mut connection = store.connect().await?;
             let rows = connection
                 .query_rows(
@@ -616,10 +752,14 @@ mod tests {
             drop(connection);
             // A foreign producer needs no Studio DTO or topic-name convention.
             let bytes = SensorFixture::encode()?;
-            let mut connection = store.connect_exclusive().await?;
-            connection.create_or_append_batches(ImportRelations::SOURCE_TABLE, vec![RecordingImport::new(&name, "foreign-sensor.mcap", &bytes).batch()?]).await?;
-            connection.execute_update_sql(&format!("REFRESH DATASET dataset_{name}")).await?;
-            drop(connection);
+            storage.append_mcap_file(McapFile::new(&name, "arbitrary/nested-key", &bytes)).await?;
+            storage.append_mcap_file(McapFile::new(&name, "arbitrary/nested-key", &bytes)).await?;
+            // The same source key in another dataset is independent.
+            storage.append_mcap_file(McapFile::new(&other_name, "arbitrary/nested-key", &bytes)).await?;
+            storage.remove_mcap_file(&name, "arbitrary/nested-key").await?;
+            let other_members = store.connect().await?.query_rows(&format!("SELECT id FROM spql.mcap.episodes('dataset_{other_name}')"), 2).await?;
+            assert_eq!(other_members.rows().len(), 1);
+            storage.append_mcap_file(McapFile::new(&name, "arbitrary/nested-key", &bytes)).await?;
             let members = store.connect().await?.query_rows(&format!("SELECT id FROM spql.mcap.read_topic('dataset_{name}', '/environment') LIMIT 1"), 1).await?;
             let member = members.rows()[0]["id"].as_str().unwrap().to_owned();
             let dataset = spiral_robotics_common::datasets::DatasetSelection::new(vec![format!("dataset_{name}")])?;
@@ -648,6 +788,22 @@ mod tests {
         .await;
         let mut connection = store.connect_exclusive().await.unwrap();
         connection
+            .execute_update_sql(&format!("DROP DATASET IF EXISTS dataset_{other_name}"))
+            .await
+            .unwrap();
+        connection
+            .execute_update_sql(&format!("DROP VIEW IF EXISTS dataset_source_{other_name}"))
+            .await
+            .unwrap();
+        if connection.table_exists("dataset_source").await.unwrap() {
+            connection
+                .execute_update_sql(&format!(
+                    "DELETE FROM dataset_source WHERE dataset_name = '{other_name}'"
+                ))
+                .await
+                .unwrap();
+        }
+        connection
             .execute_update_sql(&format!("DROP DATASET IF EXISTS dataset_{name}"))
             .await
             .unwrap();
@@ -669,7 +825,7 @@ mod tests {
                     .unwrap();
             }
         }
-        outcome.expect("native MCAP recording pipeline");
+        outcome.expect("MCAP source boundary");
     }
     struct SensorFixture;
     impl SensorFixture {

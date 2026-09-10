@@ -16,7 +16,7 @@ include!(concat!(env!("OUT_DIR"), "/storage_schema_version.rs"));
 /// Stable persisted relations owned by Spiral Robotics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Table {
-    RecordingSources,
+    DatasetSources,
     TrainingCheckpoints,
     Robots,
     StudioSettings,
@@ -35,7 +35,7 @@ impl Table {
     /// reference it; bundle import walks this order and deletion walks its
     /// reverse.
     pub(crate) const ALL: [Self; 10] = [
-        Self::RecordingSources,
+        Self::DatasetSources,
         Self::TrainingCheckpoints,
         Self::Robots,
         Self::StudioSettings,
@@ -49,7 +49,7 @@ impl Table {
 
     pub(crate) const fn name(self) -> &'static str {
         match self {
-            Self::RecordingSources => "dataset_source",
+            Self::DatasetSources => "dataset_source",
             Self::TrainingCheckpoints => "training_checkpoints",
             Self::Robots => "robots",
             Self::StudioSettings => "studio_settings",
@@ -64,7 +64,7 @@ impl Table {
 
     /// Qualify this owned table using the configured Studio table prefix.
     pub(crate) fn qualified_name(self, table_prefix: &str) -> String {
-        if self == Self::RecordingSources {
+        if self == Self::DatasetSources {
             return "dataset_source".into();
         }
         let suffix = if self == Self::StudioSettings {

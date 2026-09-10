@@ -80,11 +80,14 @@ impl RecordingSupervisor {
         if let Some(episode_id) = episode_id {
             let committed = async {
                 let episode = state
-                    .episodes()
+                    .recording_buffer()
                     .completed_episode(&episode_id)
                     .map_err(|error| error.to_string())?;
                 state.storage().commit_recording(&episode, &videos).await?;
-                state.episodes().forget_completed(&episode_id);
+                state
+                    .recording_session()
+                    .retain_preview(episode_id.clone(), videos.clone())
+                    .await;
                 Ok::<_, String>(())
             }
             .await;

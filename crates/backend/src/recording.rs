@@ -15,7 +15,7 @@ use spiral_robotics_common::identity::DatasetId;
 
 use crate::OperationError;
 use crate::data::catalog_lease::CatalogLeaseToken;
-use crate::data::episode_arms::RecordedArms;
+use crate::recording::episode_arms::RecordedArms;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct StartRecordingCommand {
@@ -1197,3 +1197,8 @@ mod tests {
         assert_eq!(*port.events.lock().unwrap(), ["replay-pause:true"]);
     }
 }
+
+mod catalog;
+mod episode_arms;
+mod queries;
+mod seek;

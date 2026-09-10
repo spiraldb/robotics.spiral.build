@@ -153,20 +153,23 @@ schemas served by `/api/openapi.json`. `—` means no request body.
 | GET | `/training` | TrainingSelection (query) | TrainingSnapshot |
 | GET | `/rollout` | — | RolloutSnapshot |
 
-### Episodes
+### Recording sessions
 
 | Method | Path | Body or query | Response |
 | --- | --- | --- | --- |
-| GET | `/recording-datasets` | — | Vec<RecordingDatasetSummary> |
-| GET | `/recording-datasets/{dataset_id}/episodes` | — | EpisodeCatalog |
 | POST | `/recording` | RecordingStart | EpisodeInfo |
 | POST | `/recording/stop` | RecordingFinish | EpisodeInfo |
 | PATCH | `/recording` | PauseUpdate | `null` |
-| DELETE | `/episodes/{id}` | — | `null` |
-| GET | `/episodes/{id}` | — | EpisodeInspectionSnapshot |
-| POST | `/episodes/{id}/seek` | EpisodeSeek | `null` |
+| DELETE | `/recording/takes/{id}` | — | `null` |
+| GET | `/recording/takes/{id}` | — | EpisodeInspectionSnapshot |
+| POST | `/recording/takes/{id}/camera` | RecordingCameraRequest | EpisodeVideo |
+| POST | `/recording/takes/{id}/seek` | EpisodeSeek | `null` |
 | POST | `/replay` | ReplayStart | `null` |
 | PATCH | `/replay` | PauseUpdate | `null` |
+
+Take IDs above refer to the current recording session. Published dataset content
+uses `/datasets/episode-topics` and `/datasets/episode-messages` with explicit
+dataset/member identities; no recording-header fallback exists.
 
 ### Robots
 
@@ -255,10 +258,7 @@ separate Studio dataset registry. Project snapshot restore is a separate operati
   as the existing portable robot file.
 - `GET /cameras/stream.mjpeg?id=...`: backend-global camera stream. Camera IDs may
   contain device-path separators and must be percent-encoded.
-- `GET /episodes/{id}/videos/{stream}?session_id=...&segment=0`: MP4 video; supports
-  a single HTTP byte range with 206 and `Content-Range`. An unsatisfiable range
-  returns 416. Media/download project identity stays in the URL so browser-native
-  image, video, and download elements can request it.
+
 
 Existing media/download error responses can contain plain text; JSON commands,
 reads, and uploads consistently use the structured failure above. Camera/media

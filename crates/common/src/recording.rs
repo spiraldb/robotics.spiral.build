@@ -2,12 +2,12 @@
 
 use serde::{Deserialize, Serialize};
 
-/// One recorded episode, as summarised from SpiralDB.
+/// One take in the current Studio recording session.
 ///
 /// An episode is one take: the operator arms the recorder, performs the task
 /// once, and stops. Raw observations and actions are immutable; the operator's
-/// judgement may change, and normalized measured state may be re-derived from
-/// raw counts after the originating arm is recalibrated.
+/// judgement may change. Historical values are never recalculated using current
+/// calibration. Published dataset members use datasets::EpisodeSelection.
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct EpisodeInfo {
@@ -19,35 +19,12 @@ pub struct EpisodeInfo {
     assessment: EpisodeAssessment,
 }
 
-/// Episode-level fields shown in the dataset list. Arm and stream layout is
-/// intentionally absent and is loaded only through episode inspection.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct EpisodeListItem {
-    #[serde(flatten)]
-    identity: EpisodeListIdentity,
-    #[serde(flatten)]
-    timeline: EpisodeTimeline,
-    #[serde(flatten)]
-    assessment: EpisodeAssessment,
-}
-
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-struct EpisodeListIdentity {
-    id: String,
-    dataset_id: String,
-    source: String,
-}
-
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 struct EpisodeIdentity {
     /// Stable identifier for the episode and all of its related rows.
     id: String,
-    /// Dataset row this episode belongs to. Streams and samples reference the
-    /// episode; only the episode row carries dataset membership.
-    #[serde(default = "EpisodeIdentity::default_dataset_id")]
+    /// Explicit destination for publishing this take as an MCAP source.
     dataset_id: String,
     /// Arms sampled in this take, in the order their joints appear in a frame.
     arms: Vec<EpisodeArm>,
@@ -206,61 +183,7 @@ impl EpisodeInfo {
     }
 }
 
-impl From<&EpisodeInfo> for EpisodeListItem {
-    fn from(episode: &EpisodeInfo) -> Self {
-        Self {
-            identity: EpisodeListIdentity {
-                id: episode.identity.id.clone(),
-                dataset_id: episode.identity.dataset_id.clone(),
-                source: episode.identity.source.clone(),
-            },
-            timeline: episode.timeline.clone(),
-            assessment: episode.assessment.clone(),
-        }
-    }
-}
-
-impl EpisodeListItem {
-    pub fn id(&self) -> &str {
-        &self.identity.id
-    }
-    pub fn dataset_id(&self) -> &str {
-        &self.identity.dataset_id
-    }
-    pub fn source(&self) -> &str {
-        &self.identity.source
-    }
-    pub const fn frames(&self) -> u64 {
-        self.timeline.frames
-    }
-    pub const fn duration_seconds(&self) -> f64 {
-        self.timeline.duration_seconds
-    }
-    pub const fn sample_hz(&self) -> f64 {
-        self.timeline.sample_hz
-    }
-    pub const fn started_ms(&self) -> i64 {
-        self.timeline.started_ms
-    }
-    pub fn usable(&self) -> bool {
-        self.timeline.frames > 0 && self.assessment.problem.is_none()
-    }
-    pub const fn discarded(&self) -> bool {
-        self.assessment.discarded
-    }
-}
-
-impl EpisodeIdentity {
-    fn default_dataset_id() -> String {
-        "default".to_owned()
-    }
-}
-
-/// One immutable, browser-cacheable projection of a recorded episode.
-///
-/// The frame clock and arm tracks are columnar: arm and joint identities occur
-/// once, while every visual seek indexes the flat frame-major matrices in
-/// memory. Camera packets are fetched separately from MCAP.
+/// Current-session take review; published datasets use topic messages and member identities.
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct EpisodeInspectionSnapshot {
@@ -454,32 +377,6 @@ impl EpisodeArm {
 
     pub fn joints(&self) -> &[String] {
         &self.joints
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn episode_list_items_do_not_serialize_stream_layout() {
-        let episode = EpisodeInfo::new("episode_000001", "default")
-            .with_arms(vec![EpisodeArm::new(
-                "follower",
-                Some("so101_follower".to_owned()),
-                vec!["shoulder_pan".to_owned()],
-            )])
-            .with_source("teleoperation")
-            .with_timeline(120, 2.0)
-            .with_sample_hz(60.0);
-
-        let serialized = serde_json::to_value(EpisodeListItem::from(&episode)).unwrap();
-
-        assert_eq!(serialized["id"], "episode_000001");
-        assert_eq!(serialized["dataset_id"], "default");
-        assert!(serialized.get("arms").is_none());
-        assert!(serialized.get("robot_type").is_none());
-        assert!(serialized.get("joints").is_none());
     }
 }
 
@@ -843,5 +740,5 @@ mod progress_tests {
 
 mod requests;
 pub use requests::{
-    EpisodeCatalog, EpisodeSeek, PauseUpdate, RecordingFinish, RecordingStart, ReplayStart,
+    EpisodeSeek, PauseUpdate, RecordingCameraRequest, RecordingFinish, RecordingStart, ReplayStart,
 };

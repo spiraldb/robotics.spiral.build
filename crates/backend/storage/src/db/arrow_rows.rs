@@ -254,59 +254,6 @@ impl<'a> ArrowColumns<'a> {
             .ok_or_else(|| self.mismatch(name, "a list"))
     }
 
-    /// A per-item measurement list that may be absent as a whole, and may skip
-    /// an individual item without skipping its neighbours.
-    pub(crate) fn optional_float_list(
-        &self,
-        name: &str,
-        row: usize,
-    ) -> Result<Option<Vec<Option<f64>>>, String> {
-        let Some(items) = self.items(name, row)? else {
-            return Ok(None);
-        };
-        let read = |index: usize| -> Option<Option<f64>> {
-            if items.is_null(index) {
-                return Some(None);
-            }
-            if let Some(values) = items.as_any().downcast_ref::<Float64Array>() {
-                return Some(Some(values.value(index)));
-            }
-            items
-                .as_any()
-                .downcast_ref::<Float32Array>()
-                .map(|values| Some(f64::from(values.value(index))))
-        };
-        (0..items.len())
-            .map(|index| read(index).ok_or_else(|| self.mismatch(name, "a list of floats")))
-            .collect::<Result<Vec<_>, _>>()
-            .map(Some)
-    }
-
-    /// A list of counts. A null cell reads as the empty list, because storage
-    /// only ever writes a present, possibly empty, collection.
-    pub(crate) fn unsigned_list(&self, name: &str, row: usize) -> Result<Vec<u64>, String> {
-        let Some(items) = self.items(name, row)? else {
-            return Ok(Vec::new());
-        };
-        let read = |index: usize| -> Option<u64> {
-            if items.is_null(index) {
-                return None;
-            }
-            if let Some(values) = items.as_any().downcast_ref::<UInt64Array>() {
-                return Some(values.value(index));
-            }
-            items
-                .as_any()
-                .downcast_ref::<UInt32Array>()
-                .map(|values| u64::from(values.value(index)))
-        };
-        (0..items.len())
-            .map(|index| {
-                read(index).ok_or_else(|| self.mismatch(name, "a list of unsigned integers"))
-            })
-            .collect()
-    }
-
     pub(crate) fn text_list(&self, name: &str, row: usize) -> Result<Vec<String>, String> {
         let Some(items) = self.items(name, row)? else {
             return Ok(Vec::new());
@@ -345,19 +292,10 @@ mod tests {
     fn batch() -> RecordBatch {
         let mut names = StringListColumn::builder();
         names.append_optional_list(Some(&["left".to_owned(), "right".to_owned()]));
-        let mut readings = OptionalFloatListColumn::builder();
-        readings.append_optional_list(Some(&[Some(31.5), None]));
-        let mut unmeasured = OptionalFloatListColumn::builder();
-        unmeasured.append_optional_list(None);
-        let mut counts = UnsignedListColumn::builder();
-        counts.append_optional_list(Some(&[1_u64, 2]));
         let schema = Arc::new(Schema::new(vec![
             Field::new("label", DataType::Utf8, true),
             Field::new("count", DataType::UInt64, true),
             Field::new("names", StringListColumn::data_type(), false),
-            Field::new("readings", OptionalFloatListColumn::data_type(), true),
-            Field::new("unmeasured", OptionalFloatListColumn::data_type(), true),
-            Field::new("counts", UnsignedListColumn::data_type(), false),
         ]));
         RecordBatch::try_new(
             schema,
@@ -365,9 +303,6 @@ mod tests {
                 Arc::new(StringArray::from(vec![None::<&str>])) as ArrayRef,
                 Arc::new(UInt64Array::from(vec![Some(7_u64)])) as ArrayRef,
                 Arc::new(names.finish()) as ArrayRef,
-                Arc::new(readings.finish()) as ArrayRef,
-                Arc::new(unmeasured.finish()) as ArrayRef,
-                Arc::new(counts.finish()) as ArrayRef,
             ],
         )
         .unwrap()
@@ -399,19 +334,5 @@ mod tests {
         let columns = ArrowColumns::new(&batch, "example");
         assert_eq!(columns.unsigned("count", 0).unwrap(), 7);
         assert_eq!(columns.text_list("names", 0).unwrap(), ["left", "right"]);
-        assert_eq!(columns.unsigned_list("counts", 0).unwrap(), [1, 2]);
-    }
-
-    /// A measurement list distinguishes "not recorded at all" from "recorded,
-    /// and this one item had no reading".
-    #[test]
-    fn an_absent_measurement_list_is_not_a_list_of_absent_measurements() {
-        let batch = batch();
-        let columns = ArrowColumns::new(&batch, "example");
-        assert_eq!(
-            columns.optional_float_list("readings", 0).unwrap(),
-            Some(vec![Some(31.5), None])
-        );
-        assert_eq!(columns.optional_float_list("unmeasured", 0).unwrap(), None);
     }
 }

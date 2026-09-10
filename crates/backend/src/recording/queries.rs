@@ -1,4 +1,4 @@
-//! Episode catalog reads and inspection snapshots.
+//! Project the current recording buffer for Live take review.
 
 use crate::OperationError;
 use crate::project_session::context::ProjectContext;
@@ -17,15 +17,14 @@ impl<'a> EpisodeQueries<'a> {
         Self { state }
     }
 
-    pub(crate) async fn inspection(
+    pub(crate) fn inspection(
         &self,
         episode: String,
     ) -> Result<EpisodeInspectionSnapshot, OperationError> {
         let episode = Self::episode_id(&episode)?;
         self.state
-            .episodes()
+            .recording_buffer()
             .inspection(episode.as_str())
-            .await
             .map_err(OperationError::from)
             .map(InspectionProjection::into_snapshot)
     }

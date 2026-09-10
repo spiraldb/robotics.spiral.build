@@ -288,21 +288,6 @@ impl EpisodeVideo {
 }
 
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct RecordedCameraRequest {
-    stream: String,
-}
-impl RecordedCameraRequest {
-    pub fn new(stream: String) -> Self {
-        Self { stream }
-    }
-    pub fn stream(&self) -> &str {
-        &self.stream
-    }
-}
-
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct VideoPacket {
     timestamp_ns: String,

@@ -257,8 +257,8 @@ mod tests {
             "/api/project/export?session_id=session%20%2Fone"
         );
         assert_eq!(
-            client.scoped_url("/api/episodes/take/videos/wrist?segment=2"),
-            "/api/episodes/take/videos/wrist?segment=2&session_id=session%20%2Fone"
+            client.scoped_url("/api/project/export?format=bundle"),
+            "/api/project/export?format=bundle&session_id=session%20%2Fone"
         );
     }
 }

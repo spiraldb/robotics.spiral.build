@@ -10,7 +10,7 @@ use crate::training::manager::TrainingManager;
 use crate::workflow::agent::WorkflowAgentManager;
 use crate::workflow::manager::WorkflowManager;
 use spiral_robotics_hardware::HardwareHandle;
-use spiral_robotics_storage::{StorageManager, episodes::EpisodeStore};
+use spiral_robotics_storage::{StorageManager, episodes::RecordingBuffer};
 use std::sync::Arc;
 /// A request or task retains one project for its entire lifetime.
 #[derive(Clone)]
@@ -65,8 +65,8 @@ impl ProjectContext {
     pub(crate) fn workspace(&self) -> &Arc<RobotWorkspace> {
         self.project.workspace()
     }
-    pub(crate) fn episodes(&self) -> &Arc<EpisodeStore> {
-        self.project.episodes()
+    pub(crate) fn recording_buffer(&self) -> &Arc<RecordingBuffer> {
+        self.project.recording_buffer()
     }
     pub(crate) fn storage(&self) -> &Arc<StorageManager> {
         self.project.storage()

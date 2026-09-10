@@ -10,9 +10,9 @@ use spiral_robotics_common::recording::{
     RecordingStart, ReplayStart,
 };
 
-pub(crate) struct EpisodeEndpoints;
+pub(crate) struct RecordingEndpoints;
 
-impl EpisodeEndpoints {
+impl RecordingEndpoints {
     async fn fetch_recording_signals(
         ScopedProject(commands): ScopedProject<crate::recording::commands::RecordingCommands>,
         ApiQuery(cursor): ApiQuery<RecordingCursor>,
@@ -25,10 +25,10 @@ impl EpisodeEndpoints {
         routes.post("/recording", Self::start_recording);
         routes.patch("/recording", Self::set_recording_paused);
         routes.post("/recording/stop", Self::stop_recording);
-        routes.delete("/episodes/{id}", Self::delete_episode);
-        routes.get("/episodes/{id}", Self::inspect_episode);
-        routes.post("/episodes/{id}/camera", Self::camera_preview);
-        routes.post("/episodes/{id}/seek", Self::seek_episode);
+        routes.delete("/recording/takes/{id}", Self::delete_episode);
+        routes.get("/recording/takes/{id}", Self::inspect_episode);
+        routes.post("/recording/takes/{id}/camera", Self::camera_preview);
+        routes.post("/recording/takes/{id}/seek", Self::seek_episode);
         routes.post("/replay", Self::start_replay);
         routes.patch("/replay", Self::set_replay_paused);
     }
@@ -36,7 +36,7 @@ impl EpisodeEndpoints {
     async fn camera_preview(
         ScopedProject(commands): ScopedProject<crate::recording::commands::RecordingCommands>,
         ApiPath(id): ApiPath<String>,
-        ApiJson(request): ApiJson<spiral_robotics_common::datasets::RecordedCameraRequest>,
+        ApiJson(request): ApiJson<spiral_robotics_common::recording::RecordingCameraRequest>,
     ) -> Result<Json<spiral_robotics_common::datasets::EpisodeVideo>, HttpFailure> {
         Ok(Json(commands.camera_preview(id, request).await?))
     }

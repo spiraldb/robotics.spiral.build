@@ -4,7 +4,8 @@ use crate::client::project::ProjectClient;
 use crate::client::queries::QueryDomain::*;
 use crate::client::transport::{CommandError, HttpRequest};
 use spiral_robotics_common::recording::{
-    EpisodeInfo, EpisodeSeek, PauseUpdate, RecordingFinish, RecordingStart, ReplayStart,
+    EpisodeInfo, EpisodeInspectionSnapshot, EpisodeSeek, PauseUpdate, RecordingFinish,
+    RecordingStart, ReplayStart,
 };
 use std::future::Future;
 
@@ -12,6 +13,31 @@ pub(crate) struct RecordingClient {
     project: ProjectClient,
 }
 impl RecordingClient {
+    pub(crate) fn camera_preview(
+        &self,
+        episode: String,
+        stream: String,
+    ) -> impl Future<Output = Result<spiral_robotics_common::datasets::EpisodeVideo, CommandError>> + use<>
+    {
+        self.project.request(
+            HttpRequest::new(
+                "POST",
+                format!("/api/recording/takes/{}/camera", episode.url_component()),
+            )
+            .json(&spiral_robotics_common::recording::RecordingCameraRequest::new(stream)),
+        )
+    }
+
+    pub(crate) fn inspect_episode(
+        &self,
+        id: String,
+    ) -> impl Future<Output = Result<EpisodeInspectionSnapshot, CommandError>> + use<> {
+        self.project.request(HttpRequest::new(
+            "GET",
+            format!("/api/recording/takes/{id}", id = id.url_component()),
+        ))
+    }
+
     pub(crate) fn current() -> Self {
         Self {
             project: ProjectClient::current(),
@@ -66,7 +92,7 @@ impl RecordingClient {
             &[Telemetry, RobotSetup],
             HttpRequest::new(
                 "POST",
-                format!("/api/episodes/{id}/seek", id = id.url_component()),
+                format!("/api/recording/takes/{id}/seek", id = id.url_component()),
             )
             .json(&request),
         )

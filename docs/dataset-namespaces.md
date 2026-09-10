@@ -5,7 +5,7 @@ The selected Spiral project contains Studio resources at its root:
 | Resource | Kind | Purpose |
 | --- | --- | --- |
 | `studio_*` | Table | Robots, settings, feature registry, workflow, training, and rollout state |
-| `dataset_source` | Table | All recording sources, with `dataset_name`, `recording`, and `source` columns |
+| `dataset_source` | Table | All managed MCAP sources, with `dataset_name`, `recording`, and `source` columns |
 | `dataset_source_<name>` | Ordinary view | Selects `recording, source` where `dataset_name = '<name>'` |
 | `dataset_<name>` | Native Dataset | Uses the corresponding source view through `spql.mcap.dataset` |
 
@@ -16,10 +16,10 @@ The definition's `sourceRelation` records the association; ownership is not
 inferred from the naming convention.
 
 Studio imports create or append the shared table, create the filtered root view,
-create and refresh the Dataset, and verify its episode count in one transaction.
+create and refresh the Dataset, and verify its member count in one transaction.
 Hugging Face import refuses existing target resources or source rows with the same dataset name. Live recording appends to a validated matching Dataset; an identical recording key and byte payload is an idempotent retry.
-The source table does not declare a primary key. `recording` is the native
-producer's member key within each dataset's filtered input.
+The source table does not declare a primary key. `recording` is an opaque source key within each dataset’s filtered input; it is
+not a filename-derived dataset member identity.
 
 `spiral_robotics` and `spiral_dataset` were marker tables used as containers.
 They are no longer part of the catalog. Source views are at the root because the
@@ -40,3 +40,6 @@ receipts remain with their backups. Current project transfer uses the supported
 Live recording and project backup details are in
 [MCAP recording and playback](recording-mcap.md). There is no separate recording
 registry.
+
+Capture and external import share these resources. Dataset readers do not depend
+on this ingestion layout; see [Dataset and recording boundary](dataset-boundary.md).

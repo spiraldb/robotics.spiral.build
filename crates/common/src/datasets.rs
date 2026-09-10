@@ -5,7 +5,7 @@ mod h264;
 mod messages;
 pub use catalog::{
     DatasetInspection, DatasetSelection, DatasetSummary, DatasetTopic, EpisodeSelection,
-    EpisodeTopicRequest, EpisodeVideo, ProjectResource, RecordedCameraRequest, VideoPacket,
+    EpisodeTopicRequest, EpisodeVideo, ProjectResource, VideoPacket,
 };
 pub use h264::H264AccessUnit;
 pub use messages::{MessageCursor, MessageRead, MessageWindow, TopicRevision};

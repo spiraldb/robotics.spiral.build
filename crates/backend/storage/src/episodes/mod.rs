@@ -1,14 +1,13 @@
-//! Episode-owned capture, relational encoding, queries, and video values.
+//! Studio recording producer: capture buffer, MCAP encoding, and local file publication.
 
 mod capture;
 mod episode_schema;
 mod mcap_recording;
 mod mcap_schema;
 mod recording_file;
-pub(crate) use recording_file::RecordingFile;
-mod mcap_read;
 pub use mcap_recording::CameraRecording;
 pub(crate) use mcap_recording::McapRecording;
+pub(crate) use recording_file::RecordingFile;
 mod identity;
 pub(crate) mod video;
 

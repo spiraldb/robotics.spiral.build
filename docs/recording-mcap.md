@@ -22,21 +22,24 @@ It then imports the bytes as a native Blob in `dataset_source`, creates the
 filtered `dataset_source_<name>` view and `dataset_<name>` Dataset when needed,
 and refreshes the Dataset in one transaction. Reimporting identical bytes with
 the same recording key is idempotent; different bytes at that key are rejected.
-If import fails, the error includes the durable file path. There is currently no
+Publication uses the same MCAP dataset definition and membership validation as
+external-file import; it does not require Studio metadata. If import fails, the
+error includes the durable file path. There is currently no
 restart recovery/retry UI for these local files.
 
 Pausing ends the current encoder segment without publishing an incomplete
 Dataset member. Resuming preserves the episode's elapsed clock, excluding the
 pause. Frame timestamps use capture time, not nominal frame number. Every
 keyframe carries its decoder parameters; seeking starts from the preceding
-keyframe. Data plays a selected camera topic; Live's recorded cameras and joint
-plots use the same episode playhead. Decoding uses browser WebCodecs through
+keyframe. Data reads published members through dataset/topic APIs. Live’s camera and joint
+review uses its current-session capture buffer and one take playhead. It never
+reopens source files or looks up a published member through a recording header. Decoding uses browser WebCodecs through
 Rust/WASM bindings. There is no server-side MCAP-to-training decoder workaround.
 
 Saved files remain immutable. Calibration changes affect future recordings;
 inspection uses the normalized values recorded at capture time. Historical
-angles in degrees are unavailable without a calibration snapshot. Deleting an
-episode removes its Dataset source row and refreshes the native Dataset, but
+angles in degrees are unavailable without a calibration snapshot. Deleting the current take
+removes its source key from its explicit destination and refreshes that dataset, but
 does not erase the retained local MCAP file.
 
 Project bundle format 2 includes original MCAP bytes and Dataset names, including
@@ -54,7 +57,10 @@ subject to its existing exact checkpoint-schema compatibility check. Schema-10
 checkpoints remain inspectable/downloadable; this schema-11 migration does not
 make them compatible with rollout.
 
-Validation covers MCAP joint/null/action round trips, camera timestamps,
+Validation covers published MCAP joint/null/action values, camera timestamps,
 immutable file publication, pause timing, real FFmpeg keyframe packaging, and
 native Spiral import/retry/playback/delete. Hardware capture still needs a real
 robot/camera smoke test; automated validation does not move hardware.
+
+See [Dataset and recording boundary](dataset-boundary.md) for producer ownership,
+session-review lifetime, and the provenance-independent read contract.

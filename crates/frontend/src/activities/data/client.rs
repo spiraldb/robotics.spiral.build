@@ -1,9 +1,7 @@
 //! Dataset requests and their query invalidation policy.
-use crate::client::http::UrlComponent;
 use crate::client::project::ProjectClient;
 use crate::client::transport::{CommandError, HttpRequest};
 use spiral_robotics_common::datasets::{DatasetInspection, DatasetSelection, ProjectResource};
-use spiral_robotics_common::recording::EpisodeInspectionSnapshot;
 use spiral_robotics_common::relations::{QueryRequest, RelationCatalog, SpiralQuerySnapshot};
 use std::future::Future;
 
@@ -11,21 +9,6 @@ pub(crate) struct DatasetClient {
     project: ProjectClient,
 }
 impl DatasetClient {
-    pub(crate) fn recorded_camera(
-        &self,
-        episode: String,
-        stream: String,
-    ) -> impl Future<Output = Result<spiral_robotics_common::datasets::EpisodeVideo, CommandError>> + use<>
-    {
-        self.project.request(
-            HttpRequest::new(
-                "POST",
-                format!("/api/episodes/{}/camera", episode.url_component()),
-            )
-            .json(&spiral_robotics_common::datasets::RecordedCameraRequest::new(stream)),
-        )
-    }
-
     pub(crate) fn inspect_import(
         &self,
         source: spiral_robotics_common::datasets::HuggingFaceDatasetSource,
@@ -76,16 +59,6 @@ impl DatasetClient {
     > + use<> {
         self.project
             .request(HttpRequest::new("GET", "/api/datasets"))
-    }
-
-    pub(crate) fn inspect_episode(
-        &self,
-        id: String,
-    ) -> impl Future<Output = Result<EpisodeInspectionSnapshot, CommandError>> + use<> {
-        self.project.request(HttpRequest::new(
-            "GET",
-            format!("/api/episodes/{id}", id = id.url_component()),
-        ))
     }
 
     pub(crate) fn relation_catalog(

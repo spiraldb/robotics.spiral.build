@@ -5,18 +5,18 @@ use std::collections::BTreeSet;
 #[cfg(test)]
 use std::sync::Arc;
 
-use crate::data::catalog::{
-    DeleteEpisodeCommand, EpisodeActivity, EpisodeCatalogActions, EpisodeCatalogPort,
-};
 use crate::data::catalog_lease::CatalogLeaseToken;
 #[cfg(test)]
 use crate::data::catalog_lease::{CatalogLeaseOwner, CatalogMutationLease};
-use crate::data::queries::EpisodeQueries;
-use crate::data::seek::{
+use crate::project_session::context::ProjectContext;
+use crate::recording::catalog::{
+    DeleteEpisodeCommand, EpisodeActivity, EpisodeCatalogActions, EpisodeCatalogPort,
+};
+use crate::recording::queries::EpisodeQueries;
+use crate::recording::seek::{
     ActiveRecording, PhysicalSeekActions, PhysicalSeekPlan, PhysicalSeekPort, RecordedSample,
     SampledArm, SeekActivity, SeekControlMode, SeekEpisodeCommand, SeekTarget, SeekableEpisode,
 };
-use crate::project_session::context::ProjectContext;
 use crate::recording::{
     RecordingActions, RecordingContext, RecordingDraftRequest, RecordingPort, RecordingResult,
     ReplayActions, ReplayEpisode, ReplayPlan, ReplayPort, ReplayTrajectory,
@@ -225,7 +225,7 @@ impl RecordingPort for RecordingAdapter<'_> {
             .map_err(OperationError::conflict)?;
         let summary = self
             .state
-            .episodes()
+            .recording_buffer()
             .completed_episode(completion.episode())
             .map(|episode| episode.summary())
             .map_err(OperationError::from)?;
@@ -253,7 +253,7 @@ impl RecordingPort for RecordingAdapter<'_> {
     ) -> Result<(), OperationError> {
         let full_episode = self
             .state
-            .episodes()
+            .recording_buffer()
             .completed_episode(&episode)
             .map_err(OperationError::from)?;
         self.state
@@ -261,7 +261,10 @@ impl RecordingPort for RecordingAdapter<'_> {
             .commit_recording(&full_episode, &media)
             .await
             .map_err(OperationError::Internal)?;
-        self.state.episodes().forget_completed(&episode);
+        self.state
+            .recording_session()
+            .retain_preview(episode, media)
+            .await;
         Ok(())
     }
 
@@ -305,9 +308,8 @@ impl RecordingPort for RecordingAdapter<'_> {
 impl ReplayPort for RecordingAdapter<'_> {
     async fn replay_episode(&self, episode: &str) -> Result<ReplayEpisode, OperationError> {
         self.state
-            .episodes()
+            .recording_buffer()
             .get(episode)
-            .await
             .map(|summary| {
                 ReplayEpisode::new(
                     summary.id(),
@@ -330,12 +332,11 @@ impl ReplayPort for RecordingAdapter<'_> {
         let source_arm = request.source_arm().to_owned();
         let start_seconds = request.start_seconds();
         self.state
-            .episodes()
+            .recording_buffer()
             .trajectory_at(
                 &episode,
                 RobotPlaybackRequest::new(&source_arm, start_seconds),
             )
-            .await
             .map(|trajectory| {
                 let start_frame = trajectory.start_frame();
                 let resolved_start_seconds = trajectory.resolved_start_seconds();
@@ -397,12 +398,17 @@ impl EpisodeCatalogPort for EpisodeAdapter<'_> {
     }
 
     async fn delete_episode(&self, episode: String) -> Result<(), OperationError> {
+        let summary = self.state.recording_buffer().get(&episode)?;
         self.state
-            .episodes()
-            .delete(&episode)
+            .storage()
+            .remove_mcap_file(summary.dataset_id(), &format!("{}.mcap", summary.id()))
             .await
-            .map_err(OperationError::from)?;
-
+            .map_err(OperationError::Internal)?;
+        self.state.recording_buffer().forget_completed(&episode);
+        self.state
+            .recording_session()
+            .forget_preview(&episode)
+            .await;
         Ok(())
     }
 }
@@ -449,9 +455,8 @@ impl PhysicalSeekPort for SeekAdapter<'_> {
 
     async fn episode(&self, episode: &str) -> Result<SeekableEpisode, OperationError> {
         self.state
-            .episodes()
+            .recording_buffer()
             .get(episode)
-            .await
             .map(|summary| {
                 SeekableEpisode::new(
                     summary.id(),
@@ -468,7 +473,7 @@ impl PhysicalSeekPort for SeekAdapter<'_> {
     }
 
     fn reserve_seek(&self, robot: &str) -> u64 {
-        self.state.episodes().reserve_seek(robot)
+        self.state.recording_buffer().reserve_seek(robot)
     }
 
     async fn sample_at(
@@ -477,9 +482,8 @@ impl PhysicalSeekPort for SeekAdapter<'_> {
         seconds: f64,
     ) -> Result<RecordedSample, OperationError> {
         self.state
-            .episodes()
+            .recording_buffer()
             .sample_at(episode, seconds)
-            .await
             .map(|sample| {
                 let (frame, seconds, _, arms) = sample.into_parts();
                 RecordedSample::new(
@@ -498,8 +502,12 @@ impl PhysicalSeekPort for SeekAdapter<'_> {
 
     async fn commit_if_current(&self, plan: PhysicalSeekPlan) -> Result<bool, OperationError> {
         let (ticket, robot, episode, pose, sample_hz) = plan.into_parts();
-        let _gate = self.state.episodes().lock_seek().await;
-        if !self.state.episodes().seek_is_current(&robot, ticket) {
+        let _gate = self.state.recording_buffer().lock_seek().await;
+        if !self
+            .state
+            .recording_buffer()
+            .seek_is_current(&robot, ticket)
+        {
             return Ok(false);
         }
         let trajectory = spiral_robotics_hardware::ReplayTrajectory::single_pose(pose, sample_hz)
@@ -548,7 +556,7 @@ impl RecordingCommands {
                 commands
                     .state
                     .storage()
-                    .validate_recording_destination(&dataset_id)
+                    .validate_mcap_destination(&dataset_id)
                     .await?;
                 let adapter = RecordingAdapter::new(&commands.state);
                 let result = RecordingActions::new(&adapter)
@@ -627,7 +635,6 @@ impl RecordingCommands {
                 commands.require_storage_ready()?;
                 EpisodeQueries::new(&commands.state)
                     .inspection(id)
-                    .await
                     .map_err(Into::into)
             })
             .await?
@@ -636,27 +643,15 @@ impl RecordingCommands {
     pub(crate) async fn camera_preview(
         &self,
         id: String,
-        request: spiral_robotics_common::datasets::RecordedCameraRequest,
+        request: spiral_robotics_common::recording::RecordingCameraRequest,
     ) -> Result<spiral_robotics_common::datasets::EpisodeVideo, BackendCommandError> {
         let _activity = self.state.admit()?;
         self.require_storage_ready()?;
         spiral_robotics_storage::episodes::EpisodeId::try_from(id.as_str())
             .map_err(|error| OperationError::InvalidInput(error.to_string()))?;
-        let result = match self
-            .state
-            .recording_session()
-            .camera_preview(&id, request.stream())
-            .await
-        {
-            Some(result) => result,
-            None => {
-                self.state
-                    .storage()
-                    .recorded_camera(&id, request.stream())
-                    .await
-            }
-        };
-        result.map_err(|error| OperationError::InvalidInput(error).into())
+        self.state.recording_session().camera_preview(&id, request.stream()).await
+            .ok_or_else(|| OperationError::NotFound("This take is not available in the current recording session. Open the published dataset in Data.".into()))?
+            .map_err(|error| OperationError::InvalidInput(error).into())
     }
 
     /// Move a physical follower to one committed recorded sample.
@@ -843,13 +838,12 @@ impl RecordingAdapter<'_> {
 
         let writer = self
             .state
-            .episodes()
-            .begin_in_dataset(
+            .recording_buffer()
+            .begin(
                 EpisodeRecordingRequest::new(dataset_id.clone(), source.clone(), sample_hz)
                     .with_note(note)
                     .with_arms(arms.clone(), condition),
             )
-            .await
             .map_err(OperationError::from)?;
         *self
             .clock

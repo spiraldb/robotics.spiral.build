@@ -227,10 +227,10 @@ impl ProjectBundle {
         let mut queries = Vec::new();
         for table in ManagedRelationCatalog::tables() {
             let relation = table.qualified_name(table_prefix);
-            if table == Table::RecordingSources && !connection.table_exists(&relation).await? {
+            if table == Table::DatasetSources && !connection.table_exists(&relation).await? {
                 continue;
             }
-            let query = if table == Table::RecordingSources {
+            let query = if table == Table::DatasetSources {
                 ProjectBundle::portable_mcap_sources_query(&relation)
             } else {
                 format!("SELECT * FROM {relation}")
@@ -250,14 +250,14 @@ impl ProjectBundle {
         let mut entries = self.export_named_queries(connection, queries).await?;
         if !entries
             .iter()
-            .any(|(name, _)| name == Table::RecordingSources.name())
+            .any(|(name, _)| name == Table::DatasetSources.name())
         {
-            let schema = ManagedRelationCatalog::schema(Table::RecordingSources);
+            let schema = ManagedRelationCatalog::schema(Table::DatasetSources);
             let mut payload = Vec::new();
             let mut writer =
                 StreamWriter::try_new(&mut payload, &schema).map_err(|error| error.to_string())?;
             writer.finish().map_err(|error| error.to_string())?;
-            entries.push((Table::RecordingSources.name().to_owned(), payload));
+            entries.push((Table::DatasetSources.name().to_owned(), payload));
         }
         self.build(entries, datasets)
     }
@@ -426,7 +426,7 @@ impl ProjectBundle {
                     .batches
                     .into_iter()
                     .map(|batch| {
-                        if entry.relation == ProjectRelation::Managed(Table::RecordingSources) {
+                        if entry.relation == ProjectRelation::Managed(Table::DatasetSources) {
                             McapSources::restore(batch)
                         } else if entry.relation == ProjectRelation::Managed(Table::FeatureRegistry)
                         {
@@ -439,7 +439,7 @@ impl ProjectBundle {
                 summary.record_relation(
                     batches.iter().map(RecordBatch::num_rows).sum::<usize>() as u64
                 );
-                if matches!(entry.relation, ProjectRelation::Managed(table) if table != Table::RecordingSources) {
+                if matches!(entry.relation, ProjectRelation::Managed(table) if table != Table::DatasetSources) {
                     connection.replace_batches(&relation, batches).await?;
                 } else {
                     connection
@@ -2163,7 +2163,7 @@ mod tests {
 
     #[test]
     fn managed_schema_accepts_required_binary_view_for_portable_mcap_payload() {
-        let mut fields = ManagedRelationCatalog::schema(Table::RecordingSources)
+        let mut fields = ManagedRelationCatalog::schema(Table::DatasetSources)
             .fields()
             .iter()
             .map(|field| field.as_ref().clone())
@@ -2174,7 +2174,7 @@ mod tests {
             .expect("video assets contain a payload field");
         fields[payload] = Field::new("payload", DataType::BinaryView, false);
 
-        ManagedRelationCatalog::validate(Table::RecordingSources, &Schema::new(fields), "project")
+        ManagedRelationCatalog::validate(Table::DatasetSources, &Schema::new(fields), "project")
             .expect("a required portable payload safely satisfies the nullable binary contract");
     }
 
@@ -2882,7 +2882,7 @@ mod tests {
             );
             assert!(
                 project_store
-                    .recording_dataset_names()
+                    .managed_mcap_datasets()
                     .await
                     .unwrap()
                     .is_empty()

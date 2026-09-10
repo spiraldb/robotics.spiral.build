@@ -98,7 +98,7 @@ impl TimelineReplay for spiral_robotics_common::recording::ReplayProgress {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::activities::data::episode_cache::EpisodePlaybackTime;
+    use crate::activities::live::recording_review::EpisodePlaybackTime;
     use spiral_robotics_common::recording::{ReplayIdentity, ReplayTimeline, ReplayTransport};
     #[derive(Clone, Default)]
     struct ClockHarness(std::rc::Rc<std::cell::RefCell<Option<ClockObservation>>>);

@@ -1,7 +1,7 @@
 //! Live's recording shortcuts, action dispatch, and robot-synchronization policies.
 
 use super::recording_actions::{RecordingCompletion, TimelineSeekBody};
-use crate::activities::data::episode_cache::{
+use crate::activities::live::recording_review::{
     EpisodePlaybackTime, EpisodePreviewRequest, EpisodePreviewSignals,
 };
 use crate::activities::live::session::LiveSession;

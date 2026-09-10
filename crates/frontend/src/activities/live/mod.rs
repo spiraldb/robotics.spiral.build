@@ -16,3 +16,5 @@ mod timeline_actions;
 pub(crate) mod session;
 
 mod shortcuts;
+
+pub(crate) mod recording_review;

@@ -16,7 +16,7 @@ use spiral_robotics_common::settings::{
 use spiral_robotics_hardware::{
     HardwareHandle, HardwareState, ModeSelection as HardwareModeSelection,
 };
-use spiral_robotics_storage::episodes::EpisodeStore;
+use spiral_robotics_storage::episodes::RecordingBuffer;
 use spiral_robotics_storage::{
     BackendStateStore, ProjectStore, SpiralConnectionSettings, SpiralCredentials, StorageManager,
 };
@@ -116,7 +116,7 @@ pub(crate) struct ProjectSession {
 
 struct ProjectCatalog {
     workspace: Arc<RobotWorkspace>,
-    episodes: Arc<EpisodeStore>,
+    recording_buffer: Arc<RecordingBuffer>,
     storage: Arc<StorageManager>,
     lease: Arc<CatalogMutationLease>,
 }
@@ -187,7 +187,7 @@ impl ProjectSessionFactory {
         store: Arc<ProjectStore>,
     ) -> Arc<ProjectSession> {
         let workspace = Arc::new(RobotWorkspace::new(store.clone()));
-        let episodes = Arc::new(EpisodeStore::new(store.clone()));
+        let recording_buffer = Arc::new(RecordingBuffer::new());
         let storage = Arc::new(StorageManager::new(store));
         let lease = Arc::new(CatalogMutationLease::default());
         let preferences = Arc::new(crate::data::preferences::RuntimePreferences::new(
@@ -218,7 +218,7 @@ impl ProjectSessionFactory {
             info,
             catalog: ProjectCatalog {
                 workspace,
-                episodes,
+                recording_buffer,
                 storage,
                 lease,
             },
@@ -260,8 +260,8 @@ impl ProjectSession {
     pub(crate) fn workspace(&self) -> &Arc<RobotWorkspace> {
         &self.catalog.workspace
     }
-    pub(crate) fn episodes(&self) -> &Arc<EpisodeStore> {
-        &self.catalog.episodes
+    pub(crate) fn recording_buffer(&self) -> &Arc<RecordingBuffer> {
+        &self.catalog.recording_buffer
     }
     pub(crate) fn storage(&self) -> &Arc<StorageManager> {
         &self.catalog.storage

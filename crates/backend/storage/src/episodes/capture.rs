@@ -1,4 +1,4 @@
-//! Episode capture and inspection backed directly by SpiralDB.
+//! Current-session recording samples and physical replay; no persisted dataset reads.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -8,9 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::db::column as db;
 use serde::{Deserialize, Serialize};
-use serde_json::{Map as JsonMap, Value as JsonValue};
 use spiral_robotics_common::recording::{EpisodeArm, EpisodeInfo, RecordingGap};
 
 use super::EpisodeId;
@@ -21,7 +19,6 @@ use spiral_robotics_hardware::{
 pub use spiral_robotics_hardware::{EpisodeCheckpoint, Sample};
 
 use super::episode_schema::SpiralEpisodeEncoder;
-use crate::db::ProjectStore;
 
 const SAMPLE_QUEUE_DEPTH: usize = 2_048;
 /// Hard storage limit for a single recorded episode.
@@ -530,6 +527,7 @@ pub struct FullEpisode {
 }
 
 impl FullEpisode {
+    #[cfg(test)]
     pub(super) fn from_recording(
         start: EpisodeStart,
         samples: Vec<Sample>,
@@ -612,48 +610,38 @@ impl TimelineSample {
     }
 }
 
-pub struct EpisodeStore {
-    project_store: Arc<ProjectStore>,
-    completed: Arc<Mutex<BTreeMap<String, FullEpisode>>>,
-    /// What the last catalog read could not do.
+/// Current-session capture and review only. Persisted datasets are read through
+/// dataset/member/topic APIs, never through this buffer.
+#[derive(Default)]
+pub struct RecordingBuffer {
+    completed: Arc<Mutex<Option<FullEpisode>>>,
+    /// Serializes physical seek requests within the current recording session.
     seek_sequence: AtomicU64,
     latest_seek: Mutex<BTreeMap<String, u64>>,
     seek_gate: tokio::sync::Mutex<()>,
 }
 
-impl EpisodeStore {
-    pub fn new(project_store: Arc<ProjectStore>) -> Self {
+impl RecordingBuffer {
+    pub fn new() -> Self {
         Self {
-            project_store,
-            completed: Arc::new(Mutex::new(BTreeMap::new())),
+            completed: Arc::new(Mutex::new(None)),
             seek_sequence: AtomicU64::new(0),
             latest_seek: Mutex::new(BTreeMap::new()),
             seek_gate: tokio::sync::Mutex::new(()),
         }
     }
 
-    pub async fn get(&self, id: &str) -> Result<EpisodeInfo, EpisodeError> {
-        Ok(self.full_episode(id).await?.summary())
+    pub fn get(&self, id: &str) -> Result<EpisodeInfo, EpisodeError> {
+        Ok(self.completed_episode(id)?.summary())
     }
 
-    async fn full_episode(&self, id: &str) -> Result<FullEpisode, EpisodeError> {
-        if let Ok(episode) = self.completed_episode(id) {
-            return Ok(episode);
-        }
-        EpisodeId::try_from(id).map_err(|_| EpisodeError::InvalidId(id.into()))?;
-        super::mcap_read::McapRead::load(&self.project_store, id).await
-    }
-
-    pub async fn inspection(&self, id: &str) -> Result<EpisodeInspection, EpisodeError> {
-        let episode = self.full_episode(id).await?;
+    pub fn inspection(&self, id: &str) -> Result<EpisodeInspection, EpisodeError> {
+        let episode = self.completed_episode(id)?;
         let summary = episode.summary();
         Ok(EpisodeInspection { episode, summary })
     }
 
-    pub async fn begin_in_dataset(
-        &self,
-        request: EpisodeRecordingRequest,
-    ) -> Result<EpisodeWriter, EpisodeError> {
+    pub fn begin(&self, request: EpisodeRecordingRequest) -> Result<EpisodeWriter, EpisodeError> {
         if request.arms.is_empty() {
             return Err(EpisodeError::Invalid(
                 "a take needs at least one connected arm to sample".to_owned(),
@@ -667,15 +655,7 @@ impl EpisodeStore {
         EpisodeWriter::start(start, Arc::clone(&self.completed))
     }
 
-    pub async fn delete(&self, id: &str) -> Result<(), EpisodeError> {
-        EpisodeId::try_from(id).map_err(|_| EpisodeError::InvalidId(id.into()))?;
-        crate::StorageManager::new(self.project_store.clone())
-            .delete_recording(id)
-            .await
-            .map_err(EpisodeError::Invalid)
-    }
-
-    pub async fn trajectory_at(
+    pub fn trajectory_at(
         &self,
         id: &str,
         request: RobotPlaybackRequest<'_>,
@@ -687,7 +667,7 @@ impl EpisodeStore {
                 "replay start time must be finite and non-negative".to_owned(),
             ));
         }
-        let episode = self.full_episode(id).await?;
+        let episode = self.completed_episode(id)?;
         let arm_index = episode
             .start
             .arms
@@ -741,13 +721,13 @@ impl EpisodeStore {
         })
     }
 
-    pub async fn sample_at(&self, id: &str, seconds: f64) -> Result<TimelineSample, EpisodeError> {
+    pub fn sample_at(&self, id: &str, seconds: f64) -> Result<TimelineSample, EpisodeError> {
         if !seconds.is_finite() {
             return Err(EpisodeError::Invalid(
                 "timeline time must be finite".to_owned(),
             ));
         }
-        let episode = self.full_episode(id).await?;
+        let episode = self.completed_episode(id)?;
         let (frame, sample) = episode
             .samples
             .iter()
@@ -781,15 +761,23 @@ impl EpisodeStore {
 
     /// Read a completed capture before its MCAP publication finishes.
     pub fn completed_episode(&self, id: &str) -> Result<FullEpisode, EpisodeError> {
+        EpisodeId::try_from(id).map_err(|_| EpisodeError::InvalidId(id.into()))?;
         self.completed
             .lock_unpoisoned()
-            .get(id)
+            .as_ref()
+            .filter(|episode| episode.start.id() == id)
             .cloned()
             .ok_or_else(|| EpisodeError::NotFound(id.to_owned()))
     }
 
     pub fn forget_completed(&self, id: &str) {
-        self.completed.lock_unpoisoned().remove(id);
+        let mut completed = self.completed.lock_unpoisoned();
+        if completed
+            .as_ref()
+            .is_some_and(|episode| episode.start.id() == id)
+        {
+            *completed = None;
+        }
     }
 }
 
@@ -830,7 +818,7 @@ impl EpisodeWriter {
     }
     fn start(
         start: EpisodeStart,
-        completed: Arc<Mutex<BTreeMap<String, FullEpisode>>>,
+        completed: Arc<Mutex<Option<FullEpisode>>>,
     ) -> Result<Self, EpisodeError> {
         let (sender, receiver) = mpsc::sync_channel(SAMPLE_QUEUE_DEPTH);
         let shared = Arc::new(WriterShared {
@@ -948,7 +936,7 @@ struct SpiralEpisodeWriter {
     start: EpisodeStart,
     sender: Option<mpsc::SyncSender<WriterMessage>>,
     thread: Option<JoinHandle<Result<Vec<Sample>, String>>>,
-    completed: Arc<Mutex<BTreeMap<String, FullEpisode>>>,
+    completed: Arc<Mutex<Option<FullEpisode>>>,
     shared: Arc<WriterShared>,
     last_queued_seconds: AtomicU64,
 }
@@ -1022,9 +1010,7 @@ impl EpisodeWriteSession for SpiralEpisodeWriter {
             samples,
             completion,
         };
-        self.completed
-            .lock_unpoisoned()
-            .insert(full_episode.start.id().to_owned(), full_episode.clone());
+        *self.completed.lock_unpoisoned() = Some(full_episode.clone());
         Ok(full_episode
             .start
             .summary(&full_episode.completion, full_episode.samples.len() as u64))
@@ -1052,7 +1038,7 @@ impl Drop for SpiralEpisodeWriter {
 
 struct EpisodeDrain<'a> {
     start: &'a EpisodeStart,
-    completed: &'a Mutex<BTreeMap<String, FullEpisode>>,
+    completed: &'a Mutex<Option<FullEpisode>>,
     shared: &'a WriterShared,
 }
 
@@ -1088,9 +1074,7 @@ impl EpisodeDrain<'_> {
                         samples: samples.clone(),
                         completion,
                     };
-                    self.completed
-                        .lock_unpoisoned()
-                        .insert(self.start.id().to_owned(), full_episode);
+                    *self.completed.lock_unpoisoned() = Some(full_episode);
                     let _ = complete.send(Ok(()));
                 }
             }
@@ -1099,98 +1083,7 @@ impl EpisodeDrain<'_> {
     }
 }
 
-#[derive(Default)]
-struct SampleBuilder {
-    seconds: Option<f64>,
-    normalized: Vec<Option<Vec<Option<f64>>>>,
-    raw: Vec<Option<Vec<i64>>>,
-    velocity: Vec<Option<Vec<Option<f64>>>>,
-    effort: Vec<Option<Vec<Option<f64>>>>,
-    action: Vec<Option<Vec<Option<f64>>>>,
-    follow_error: Option<f64>,
-}
-
 impl EpisodeStart {
-    pub(super) fn decode_samples(
-        &self,
-        rows: Vec<JsonMap<String, JsonValue>>,
-    ) -> Result<Vec<Sample>, String> {
-        let start = self;
-        let mut frames = BTreeMap::<u64, SampleBuilder>::new();
-        for row in rows {
-            let index = row.u64(db::SAMPLE_INDEX)?;
-            let stream = row.string(db::STREAM_ID)?;
-            let arm = start
-                .arms
-                .iter()
-                .position(|arm| arm.id() == stream)
-                .ok_or_else(|| {
-                    format!(
-                        "episode {:?} has sample for unknown stream {stream:?}",
-                        start.id()
-                    )
-                })?;
-            let frame = frames.entry(index).or_insert_with(|| SampleBuilder {
-                normalized: vec![None; start.arms().len()],
-                raw: vec![None; start.arms().len()],
-                velocity: vec![None; start.arms().len()],
-                effort: vec![None; start.arms().len()],
-                action: vec![None; start.arms().len()],
-                ..SampleBuilder::default()
-            });
-            let seconds = row.u64(db::EPISODE_TIME_NS)? as f64 / 1_000_000_000.0;
-            if frame
-                .seconds
-                .is_some_and(|existing| existing.to_bits() != seconds.to_bits())
-            {
-                return Err(format!(
-                    "episode {:?} sample {index} has inconsistent clocks",
-                    start.id()
-                ));
-            }
-            frame.seconds = Some(seconds);
-            frame.normalized[arm] = Some(row.optional_f64s(db::STATE_POSITION)?);
-            frame.raw[arm] = Some(row.i64s(db::RAW_POSITION)?);
-            frame.velocity[arm] = row.optional_optional_f64s(db::VELOCITY)?;
-            frame.effort[arm] = row.optional_optional_f64s(db::EFFORT)?;
-            frame.action[arm] = row.optional_optional_f64s(db::ACTION_POSITION)?;
-            if let Some(error) = row
-                .get(db::FOLLOW_ERROR_DEGREES)
-                .and_then(JsonValue::as_f64)
-            {
-                frame.follow_error = Some(
-                    frame
-                        .follow_error
-                        .map_or(error, |current| current.max(error)),
-                );
-            }
-        }
-        frames
-            .into_iter()
-            .map(|(index, frame)| {
-                let location = SampleLocation {
-                    episode_id: start.id(),
-                    sample_index: index,
-                };
-                let normalized = location.require(frame.normalized, "state")?;
-                let raw = location.require(frame.raw, "raw state")?;
-                let velocity = location.all_or_none(frame.velocity, "velocity")?;
-                let effort = location.all_or_none(frame.effort, "effort")?;
-                Ok(Sample::new(
-                    frame.seconds.ok_or_else(|| {
-                        format!("episode {:?} sample {index} has no clock", start.id())
-                    })?,
-                    normalized,
-                    raw,
-                )
-                .with_velocity(velocity)
-                .with_effort(effort)
-                .with_action(frame.action)
-                .with_follow_error_degrees(frame.follow_error))
-            })
-            .collect()
-    }
-
     fn summary(&self, completion: &EpisodeCompletion, frames: u64) -> EpisodeInfo {
         let start = self;
         EpisodeInfo::new(start.id(), start.dataset_id())
@@ -1267,97 +1160,6 @@ impl EpisodeStart {
     }
 }
 
-#[derive(Clone, Copy)]
-struct SampleLocation<'a> {
-    episode_id: &'a str,
-    sample_index: u64,
-}
-
-impl SampleLocation<'_> {
-    fn require<T>(self, values: Vec<Option<T>>, label: &str) -> Result<Vec<T>, String> {
-        values
-            .into_iter()
-            .enumerate()
-            .map(|(arm, value)| {
-                value.ok_or_else(|| {
-                    format!(
-                        "episode {:?} sample {} arm {arm} has no {label}",
-                        self.episode_id, self.sample_index
-                    )
-                })
-            })
-            .collect()
-    }
-
-    fn all_or_none<T>(self, values: Vec<Option<T>>, label: &str) -> Result<Option<Vec<T>>, String> {
-        if values.iter().all(Option::is_none) {
-            return Ok(None);
-        }
-        self.require(values, label).map(Some)
-    }
-}
-
-/// Typed field access for decoded MCAP joint messages.
-trait EpisodeJsonRow {
-    fn string(&self, name: &str) -> Result<&str, String>;
-    fn u64(&self, name: &str) -> Result<u64, String>;
-    fn i64s(&self, name: &str) -> Result<Vec<i64>, String>;
-    fn optional_f64s(&self, name: &str) -> Result<Vec<Option<f64>>, String>;
-    fn optional_optional_f64s(&self, name: &str) -> Result<Option<Vec<Option<f64>>>, String>;
-}
-
-impl EpisodeJsonRow for JsonMap<String, JsonValue> {
-    fn string(&self, name: &str) -> Result<&str, String> {
-        self.get(name)
-            .and_then(JsonValue::as_str)
-            .ok_or_else(|| format!("row has no string {name}"))
-    }
-
-    fn u64(&self, name: &str) -> Result<u64, String> {
-        self.get(name)
-            .and_then(JsonValue::as_u64)
-            .ok_or_else(|| format!("row has no unsigned {name}"))
-    }
-
-    fn i64s(&self, name: &str) -> Result<Vec<i64>, String> {
-        self.get(name)
-            .and_then(JsonValue::as_array)
-            .ok_or_else(|| format!("row has no array {name}"))?
-            .iter()
-            .map(|value| {
-                value
-                    .as_i64()
-                    .ok_or_else(|| format!("{name} contains a non-integer"))
-            })
-            .collect()
-    }
-
-    fn optional_f64s(&self, name: &str) -> Result<Vec<Option<f64>>, String> {
-        self.get(name)
-            .and_then(JsonValue::as_array)
-            .ok_or_else(|| format!("row has no array {name}"))?
-            .iter()
-            .map(|value| {
-                if value.is_null() {
-                    Ok(None)
-                } else {
-                    value
-                        .as_f64()
-                        .map(Some)
-                        .ok_or_else(|| format!("{name} contains a non-number"))
-                }
-            })
-            .collect()
-    }
-
-    fn optional_optional_f64s(&self, name: &str) -> Result<Option<Vec<Option<f64>>>, String> {
-        match self.get(name) {
-            None | Some(JsonValue::Null) => Ok(None),
-            Some(_) => self.optional_f64s(name).map(Some),
-        }
-    }
-}
-
 pub trait EpisodeArmCollection: Sized {
     fn from_joint_lists(arms: &[(String, Vec<String>)]) -> Result<Vec<Self>, EpisodeError>;
 }
@@ -1388,5 +1190,57 @@ impl<T> UnpoisonedMutex<T> for Mutex<T> {
     fn lock_unpoisoned(&self) -> std::sync::MutexGuard<'_, T> {
         self.lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+#[cfg(test)]
+mod recording_buffer_tests {
+    use super::*;
+
+    #[test]
+    fn review_is_scoped_to_current_session_without_storage_fallback() {
+        let buffer = RecordingBuffer::new();
+        assert!(matches!(
+            buffer.get("unknown-take"),
+            Err(EpisodeError::NotFound(_))
+        ));
+        let arms = vec![EpisodeArm::new("arm", None, vec!["joint".into()])];
+        for id in ["first", "second"] {
+            let writer = EpisodeWriter::start(
+                EpisodeStart::new(id.into(), "destination".into()).with_arms(arms.clone(), vec![]),
+                buffer.completed.clone(),
+            )
+            .unwrap();
+            assert!(writer.push(Sample::new(0.0, vec![vec![Some(0.25)]], vec![vec![123]])));
+            writer
+                .finish(EpisodeCompletion::new(0.1, vec![], vec![]))
+                .unwrap();
+            assert_eq!(buffer.get(id).unwrap().id(), id);
+            assert_eq!(
+                buffer
+                    .inspection(id)
+                    .unwrap()
+                    .into_parts()
+                    .0
+                    .samples()
+                    .len(),
+                1
+            );
+        }
+        assert!(matches!(
+            buffer.get("first"),
+            Err(EpisodeError::NotFound(_))
+        ));
+        buffer.forget_completed("first");
+        assert!(buffer.get("second").is_ok());
+        buffer.forget_completed("second");
+        assert!(matches!(
+            buffer.get("second"),
+            Err(EpisodeError::NotFound(_))
+        ));
+        assert!(matches!(
+            RecordingBuffer::new().get("second"),
+            Err(EpisodeError::NotFound(_))
+        ));
     }
 }

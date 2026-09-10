@@ -108,27 +108,17 @@ impl ReplayStart {
     }
 }
 
-/// Named HTTP response fields for EpisodeCatalog.
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct EpisodeCatalog {
-    episodes: Vec<EpisodeListItem>,
-    warnings: Vec<String>,
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecordingCameraRequest {
+    stream: String,
 }
-impl From<(Vec<EpisodeListItem>, Vec<String>)> for EpisodeCatalog {
-    fn from(value: (Vec<EpisodeListItem>, Vec<String>)) -> Self {
-        let (episodes, warnings) = value;
-        Self { episodes, warnings }
+impl RecordingCameraRequest {
+    pub fn new(stream: String) -> Self {
+        Self { stream }
     }
-}
-impl EpisodeCatalog {
-    pub fn new(episodes: Vec<EpisodeListItem>, warnings: Vec<String>) -> Self {
-        Self { episodes, warnings }
-    }
-    pub fn episodes(&self) -> &[EpisodeListItem] {
-        &self.episodes
-    }
-    pub fn warnings(&self) -> &[String] {
-        &self.warnings
+    pub fn stream(&self) -> &str {
+        &self.stream
     }
 }

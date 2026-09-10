@@ -259,70 +259,28 @@ impl McapRecording {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::super::mcap_read::McapRead;
-    use super::*;
-    use crate::episodes::{EpisodeCompletion, EpisodeFixture, Sample};
-    use spiral_robotics_common::recording::EpisodeArm;
-
-    #[test]
-    fn one_mcap_preserves_joint_nulls_actions_and_camera_timestamps() {
-        let fixture = EpisodeFixture::new("take-1", "default")
-            .with_timing(1_700_000_000_000, 30.0)
-            .with_arms(vec![EpisodeArm::new(
-                "arm",
-                None,
-                vec!["shoulder".into(), "elbow".into()],
-            )])
-            .with_duration_seconds(0.3)
-            .into_episode();
-        let samples = vec![
-            Sample::new(0.025, vec![vec![Some(0.25), None]], vec![vec![100, 200]])
-                .with_action(vec![Some(vec![Some(0.5), None])]),
-        ];
-        let episode = FullEpisode::from_recording(
-            fixture.start().clone(),
-            samples,
-            EpisodeCompletion::new(0.3, vec![], vec![]),
-        );
-        let times = (0..8)
-            .map(|index| 10_000_000 + index * 33_333_333)
-            .collect::<Vec<_>>();
-        let camera = CameraRecording::from_annex_b(
-            "wrist".into(),
-            (32, 32, 30),
-            (
-                include_bytes!("../../../../frontend/src/activities/data/fixtures/seek.h264")
-                    .to_vec(),
-                times.clone(),
-            ),
-        )
-        .unwrap();
-        let bytes = McapRecording::encode(&episode, &[camera]).unwrap();
-        let decoded = McapRead::decode(&bytes).unwrap();
-        assert_eq!(decoded.summary(), episode.summary());
-        assert_eq!(
-            decoded.samples()[0].normalized(),
-            episode.samples()[0].normalized()
-        );
-        assert_eq!(decoded.samples()[0].action(), episode.samples()[0].action());
-        let video = mcap::MessageStream::new(&bytes)
-            .unwrap()
-            .map(Result::unwrap)
-            .filter(|message| message.channel.topic == "/camera/wrist/video")
-            .collect::<Vec<_>>();
-        assert_eq!(
-            video
-                .iter()
-                .map(|message| message.log_time - 1_700_000_000_000_000_000)
-                .collect::<Vec<_>>(),
-            times
-        );
-        assert!(
-            video
-                .iter()
-                .all(|message| message.log_time == message.publish_time)
-        );
+impl crate::StorageManager {
+    /// Finalize one recording as MCAP and publish its source Blob and Dataset atomically.
+    pub async fn commit_recording(
+        &self,
+        episode: &super::FullEpisode,
+        cameras: &[crate::episodes::CameraRecording],
+    ) -> Result<(), String> {
+        let summary = episode.summary();
+        let bytes = crate::episodes::McapRecording::encode(episode, cameras)?;
+        let file = crate::episodes::RecordingFile::new(self.project_store(), episode)?;
+        file.save(&bytes)?;
+        self.append_mcap_file(crate::datasets::McapFile::new(
+            summary.dataset_id(),
+            &format!("{}.mcap", summary.id()),
+            &bytes,
+        ))
+        .await
+        .map_err(|error| {
+            format!(
+                "{error}. The complete MCAP is saved at {}",
+                file.path().display()
+            )
+        })
     }
 }

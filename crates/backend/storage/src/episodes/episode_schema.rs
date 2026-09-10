@@ -16,16 +16,13 @@ use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use spiral_robotics_common::recording::{EpisodeArm, RecordingGap};
 
 use super::capture::{
-    ArmCondition, ArmConditionEffortExtremes, ArmConditionSummary, ArmConditionThermalExtremes,
-    EpisodeCompletion, EpisodeError, EpisodeStart, JointMotorLimits, JointVoltageRange, Sample,
+    ArmCondition, ArmConditionSummary, EpisodeCompletion, EpisodeError, EpisodeStart,
+    JointMotorLimits, Sample,
 };
 use super::video::VideoSize;
 use crate::db::{
-    ArrowColumns, ListColumnBuilder as _, OptionalFloatListColumn, StringListColumn,
-    UnsignedListColumn,
+    ListColumnBuilder as _, OptionalFloatListColumn, StringListColumn, UnsignedListColumn,
 };
-
-const NANOSECONDS_PER_SECOND: f64 = 1_000_000_000.0;
 
 /// Per-joint condition channels, in the order their columns are written.
 const CONDITION_COLUMNS: [&str; 10] = [
@@ -280,19 +277,6 @@ pub(super) struct StoredEpisodeRow {
 }
 
 impl StoredEpisodeRow {
-    #[cfg(test)]
-    fn start(&self) -> &EpisodeStart {
-        &self.start
-    }
-    #[cfg(test)]
-    fn completion(&self) -> &EpisodeCompletion {
-        &self.completion
-    }
-    #[cfg(test)]
-    fn frames(&self) -> u64 {
-        self.frames
-    }
-
     pub(super) const fn new(
         start: EpisodeStart,
         completion: EpisodeCompletion,
@@ -303,42 +287,6 @@ impl StoredEpisodeRow {
             completion,
             frames,
         }
-    }
-
-    pub(super) fn into_parts(self) -> (EpisodeStart, EpisodeCompletion, u64) {
-        (self.start, self.completion, self.frames)
-    }
-
-    pub(super) fn decode(
-        batch: &RecordBatch,
-        row: usize,
-        streams: &EpisodeStreamCatalog,
-    ) -> Result<Self, String> {
-        let columns = ArrowColumns::new(batch, "episode");
-        let id = columns.text(db::EPISODE_ID, row)?.to_owned();
-        let start = EpisodeStart::new(id.clone(), columns.text(db::DATASET_ID, row)?.to_owned())
-            .with_timing(
-                columns.timestamp(db::STARTED_MS, row)?,
-                columns.float(db::SAMPLE_HZ, row)?,
-            )
-            .with_source(
-                columns.text(db::SOURCE, row)?.to_owned(),
-                columns.optional_text(db::NOTE, row)?.map(str::to_owned),
-            )
-            .with_arms(streams.arms(&id), streams.start_condition(&id));
-        let gaps = RecordingGapColumns::decode(&columns, row)?;
-        let completion = EpisodeCompletion::new(
-            columns.unsigned(db::DURATION_NS, row)? as f64 / NANOSECONDS_PER_SECOND,
-            gaps,
-            streams.completion_condition(&id),
-        )
-        .with_max_follow_error_degrees(columns.optional_float(db::MAX_FOLLOW_ERROR_DEGREES, row)?)
-        .with_discarded(columns.boolean(db::DISCARDED, row)?);
-        Ok(Self {
-            start,
-            completion,
-            frames: columns.unsigned(db::FRAMES, row)?,
-        })
     }
 
     /// Encode whole episode rows stamped with the current [`SCHEMA_VERSION`].
@@ -427,28 +375,6 @@ impl RecordingGapColumns {
                 .collect::<Result<Vec<_>, _>>()?,
         })
     }
-
-    fn decode(columns: &ArrowColumns<'_>, row: usize) -> Result<Vec<RecordingGap>, String> {
-        let after = columns.unsigned_list(db::RECORDING_GAP_AFTER_NS, row)?;
-        let duration = columns.unsigned_list(db::RECORDING_GAP_DURATION_NS, row)?;
-        if after.len() != duration.len() {
-            return Err(format!(
-                "stored episode has {} recording gap starts but {} durations",
-                after.len(),
-                duration.len()
-            ));
-        }
-        Ok(after
-            .into_iter()
-            .zip(duration)
-            .map(|(after, duration)| {
-                RecordingGap::new(
-                    after as f64 / NANOSECONDS_PER_SECOND,
-                    duration as f64 / NANOSECONDS_PER_SECOND,
-                )
-            })
-            .collect())
-    }
 }
 
 /// Which kind of data one episode stream carries.
@@ -463,14 +389,6 @@ impl StreamModality {
         match self {
             Self::Joint => "joint",
             Self::Video => "video",
-        }
-    }
-
-    fn parse(value: &str) -> Result<Self, String> {
-        match value {
-            "joint" => Ok(Self::Joint),
-            "video" => Ok(Self::Video),
-            other => Err(format!("stored stream modality {other:?} is not known")),
         }
     }
 }
@@ -547,14 +465,6 @@ impl EpisodeStreamRow {
         self
     }
 
-    fn arm(&self) -> EpisodeArm {
-        EpisodeArm::new(
-            self.key.stream_id.clone(),
-            self.robot_type.clone(),
-            self.joints.clone().unwrap_or_default(),
-        )
-    }
-
     fn limit_column(&self, read: fn(JointMotorLimits) -> Option<f64>) -> Option<Vec<Option<f64>>> {
         self.start
             .as_ref()
@@ -580,116 +490,6 @@ impl EpisodeStreamRow {
             peak(ArmConditionSummary::peak_load),
             peak(ArmConditionSummary::peak_current_amps),
         ]
-    }
-
-    pub(super) fn decode(batch: &RecordBatch, row: usize) -> Result<Self, String> {
-        let columns = ArrowColumns::new(batch, "episode stream");
-        let modality = StreamModality::parse(columns.text(db::MODALITY, row)?)?;
-        let channel = |name: &str| columns.optional_float_list(name, row);
-        let start = StreamConditionColumns::start(
-            columns.text(db::STREAM_ID, row)?,
-            [
-                channel(CONDITION_COLUMNS[0])?,
-                channel(CONDITION_COLUMNS[1])?,
-                channel(CONDITION_COLUMNS[2])?,
-                channel(CONDITION_COLUMNS[3])?,
-                channel(CONDITION_COLUMNS[4])?,
-                channel(CONDITION_COLUMNS[5])?,
-            ],
-        );
-        let peak = StreamConditionColumns::peak(
-            columns.text(db::STREAM_ID, row)?,
-            [
-                channel(CONDITION_COLUMNS[6])?,
-                channel(CONDITION_COLUMNS[7])?,
-                channel(CONDITION_COLUMNS[8])?,
-                channel(CONDITION_COLUMNS[9])?,
-            ],
-        );
-        let video = match modality {
-            StreamModality::Joint => None,
-            StreamModality::Video => Some(VideoStreamProperties::new(
-                columns
-                    .optional_text(db::CAMERA_ID, row)?
-                    .unwrap_or_default()
-                    .to_owned(),
-                VideoSize::new(
-                    columns.optional_unsigned(db::WIDTH, row)?.unwrap_or(0) as u32,
-                    columns.optional_unsigned(db::HEIGHT, row)?.unwrap_or(0) as u32,
-                ),
-                columns.optional_unsigned(db::FPS, row)?.unwrap_or(0) as u32,
-            )),
-        };
-        Ok(Self {
-            key: EpisodeStreamKey::new(
-                columns.text(db::EPISODE_ID, row)?.to_owned(),
-                columns.text(db::STREAM_ID, row)?.to_owned(),
-                columns.ordinal(db::ORDINAL, row)?,
-            ),
-            modality,
-            robot_type: columns
-                .optional_text(db::ROBOT_TYPE, row)?
-                .map(str::to_owned),
-            joints: matches!(modality, StreamModality::Joint)
-                .then(|| columns.text_list(db::JOINT_NAMES, row))
-                .transpose()?,
-            start,
-            peak,
-            video,
-        })
-    }
-}
-
-/// Assemble the per-joint condition columns of one stream back into the arm
-/// observations they were written from.
-struct StreamConditionColumns;
-
-impl StreamConditionColumns {
-    fn start(arm: &str, channels: [Option<Vec<Option<f64>>>; 6]) -> Option<ArmCondition> {
-        let [
-            temperature,
-            voltage,
-            max_temperature,
-            min_voltage,
-            max_voltage,
-            max_load,
-        ] = channels;
-        let limits = [&max_temperature, &min_voltage, &max_voltage, &max_load]
-            .into_iter()
-            .flatten()
-            .map(Vec::len)
-            .max()
-            .unwrap_or(0);
-        let limits = (0..limits)
-            .map(|index| {
-                let read = |channel: &Option<Vec<Option<f64>>>| {
-                    channel
-                        .as_ref()
-                        .and_then(|values| values.get(index).copied().flatten())
-                };
-                JointMotorLimits::new(
-                    read(&max_temperature),
-                    JointVoltageRange::new(read(&min_voltage), read(&max_voltage)),
-                    read(&max_load),
-                )
-            })
-            .collect::<Vec<_>>();
-        let condition = ArmCondition::new(arm.to_owned())
-            .with_measurements(temperature.unwrap_or_default(), voltage.unwrap_or_default())
-            .with_limits(limits);
-        (!condition.is_empty()).then_some(condition)
-    }
-
-    fn peak(arm: &str, channels: [Option<Vec<Option<f64>>>; 4]) -> Option<ArmConditionSummary> {
-        let [temperature, voltage, load, current] = channels;
-        let summary = ArmConditionSummary::new(arm.to_owned()).with_extremes(
-            ArmConditionThermalExtremes::new(
-                temperature.unwrap_or_default(),
-                voltage.unwrap_or_default(),
-            ),
-            ArmConditionEffortExtremes::new(load.unwrap_or_default(), current.unwrap_or_default()),
-        );
-        (!summary.is_empty()).then_some(summary)
     }
 }
 
@@ -748,55 +548,6 @@ impl EpisodeStreamRows for [EpisodeStreamRow] {
         RecordBatch::try_new(EpisodeSchema::episode_streams(), columns).map_err(|error| {
             EpisodeError::invalid(format!("building Spiral stream batch: {error}"))
         })
-    }
-}
-
-/// Every stream row a read observed, indexed back to its episode.
-#[derive(Clone, Debug, Default)]
-pub(super) struct EpisodeStreamCatalog {
-    rows: Vec<EpisodeStreamRow>,
-}
-
-impl EpisodeStreamCatalog {
-    pub(super) const fn new(rows: Vec<EpisodeStreamRow>) -> Self {
-        Self { rows }
-    }
-
-    /// One episode's joint streams, in the order their values appear in a frame.
-    fn joint_streams(&self, episode_id: &str) -> Vec<&EpisodeStreamRow> {
-        let mut streams = self
-            .rows
-            .iter()
-            .filter(|row| row.key.episode_id == episode_id && row.modality == StreamModality::Joint)
-            .collect::<Vec<_>>();
-        streams.sort_by(|left, right| {
-            left.key
-                .ordinal
-                .cmp(&right.key.ordinal)
-                .then_with(|| left.key.stream_id.cmp(&right.key.stream_id))
-        });
-        streams
-    }
-
-    pub(super) fn arms(&self, episode_id: &str) -> Vec<EpisodeArm> {
-        self.joint_streams(episode_id)
-            .into_iter()
-            .map(EpisodeStreamRow::arm)
-            .collect()
-    }
-
-    pub(super) fn start_condition(&self, episode_id: &str) -> Vec<ArmCondition> {
-        self.joint_streams(episode_id)
-            .into_iter()
-            .filter_map(|row| row.start.clone())
-            .collect()
-    }
-
-    pub(super) fn completion_condition(&self, episode_id: &str) -> Vec<ArmConditionSummary> {
-        self.joint_streams(episode_id)
-            .into_iter()
-            .filter_map(|row| row.peak.clone())
-            .collect()
     }
 }
 
@@ -1247,98 +998,5 @@ mod tests {
             .downcast_ref::<StringArray>()
             .unwrap();
         assert_eq!(modality.value(0), "video");
-    }
-
-    fn condition() -> Vec<ArmCondition> {
-        vec![
-            ArmCondition::new("follower".to_owned())
-                .with_measurements(vec![Some(31.5), None], vec![Some(11.9), Some(12.0)])
-                .with_limits(vec![
-                    JointMotorLimits::new(
-                        Some(70.0),
-                        JointVoltageRange::new(Some(9.0), Some(14.0)),
-                        Some(0.8),
-                    ),
-                    JointMotorLimits::default(),
-                ]),
-        ]
-    }
-
-    fn condition_summary() -> Vec<ArmConditionSummary> {
-        vec![
-            ArmConditionSummary::new("follower".to_owned()).with_extremes(
-                ArmConditionThermalExtremes::new(
-                    vec![Some(36.0), Some(35.0)],
-                    vec![Some(11.5), Some(11.6)],
-                ),
-                ArmConditionEffortExtremes::new(vec![Some(0.4), None], vec![Some(1.1), Some(1.2)]),
-            ),
-        ]
-    }
-
-    fn populated() -> StoredEpisodeRow {
-        StoredEpisodeRow::new(
-            start().with_arms(start().arms().to_vec(), condition()),
-            EpisodeCompletion::new(2.5, vec![RecordingGap::new(1.0, 0.25)], condition_summary())
-                .with_max_follow_error_degrees(Some(1.25))
-                .with_discarded(true),
-            150,
-        )
-    }
-
-    /// Read one episode back out of the two relations that hold it.
-    fn reread(row: &StoredEpisodeRow) -> StoredEpisodeRow {
-        let streams = row.start().stream_rows(row.completion()).batch().unwrap();
-        let streams = EpisodeStreamCatalog::new(
-            (0..streams.num_rows())
-                .map(|index| EpisodeStreamRow::decode(&streams, index).unwrap())
-                .collect(),
-        );
-        let episodes = StoredEpisodeRow::batch(std::slice::from_ref(row)).unwrap();
-        StoredEpisodeRow::decode(&episodes, 0, &streams).unwrap()
-    }
-
-    /// Everything the metadata blob used to carry now survives as columns.
-    #[test]
-    fn a_populated_episode_round_trips_through_typed_columns() {
-        let original = populated();
-        let restored = reread(&original);
-
-        assert_eq!(restored.start().id(), "episode_000042");
-        assert_eq!(restored.start().dataset_id(), "default");
-        assert_eq!(restored.start().started_ms(), 1_700_000_000_000);
-        assert_eq!(restored.start().sample_hz(), 60.0);
-        assert_eq!(restored.start().source(), "teleoperation");
-        assert_eq!(restored.start().note(), Some("pick cube"));
-        assert_eq!(restored.frames(), 150);
-        assert_eq!(restored.start().arms(), original.start().arms());
-        assert_eq!(restored.start().condition(), condition());
-        assert_eq!(restored.completion().duration_seconds(), 2.5);
-        assert_eq!(
-            restored.completion().recording_gaps(),
-            [RecordingGap::new(1.0, 0.25)]
-        );
-        assert_eq!(restored.completion().max_follow_error_degrees(), Some(1.25));
-        assert!(restored.completion().discarded());
-        assert_eq!(restored.completion().condition(), condition_summary());
-    }
-
-    /// A take whose motors never answered writes null condition columns rather
-    /// than an all-empty observation, and reads back as no observation at all.
-    #[test]
-    fn an_episode_without_motor_telemetry_stores_null_condition_columns() {
-        let bare = StoredEpisodeRow::new(
-            start(),
-            EpisodeCompletion::new(0.0, Vec::new(), Vec::new()),
-            0,
-        );
-        let batch = bare.start().stream_rows(bare.completion()).batch().unwrap();
-        for name in CONDITION_COLUMNS {
-            assert!(batch.column_by_name(name).unwrap().is_null(0), "{name}");
-        }
-        let restored = reread(&bare);
-        assert_eq!(restored.start().condition(), []);
-        assert_eq!(restored.completion().condition(), []);
-        assert_eq!(restored.completion().recording_gaps(), []);
     }
 }

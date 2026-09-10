@@ -6,7 +6,6 @@ mod ingestion;
 pub(crate) use bundle::ManagedRelationCatalog;
 pub use bundle::ProjectBundle;
 pub use ingestion::HuggingFaceDatasetDiscovery;
-pub(crate) use ingestion::{ImportBlobStorage, ImportRelations};
 
 use spiral_robotics_common::datasets::ProjectImportSummary;
 
@@ -45,9 +44,7 @@ impl<'a> TransferPersistence<'a> {
             crate::datasets::McapSources::validate_ownership(self.project_store, &mut connection)
                 .await?;
         for name in ProjectBundle.dataset_names(bytes)? {
-            self.project_store
-                .validate_recording_destination(&name)
-                .await?;
+            self.project_store.validate_mcap_destination(&name).await?;
         }
         ProjectBundle
             .import(

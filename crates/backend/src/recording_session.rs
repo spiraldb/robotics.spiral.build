@@ -45,6 +45,7 @@ pub(crate) struct RecordingSessionManager {
     catalog_lease: Arc<CatalogMutationLease>,
     phase: Mutex<Option<RecordingSessionPhase>>,
     media: tokio::sync::Mutex<Option<VideoCapture>>,
+    preview: tokio::sync::Mutex<Option<(String, Vec<CameraRecording>)>>,
 }
 
 impl RecordingSessionManager {
@@ -53,6 +54,7 @@ impl RecordingSessionManager {
             catalog_lease,
             phase: Mutex::new(None),
             media: tokio::sync::Mutex::new(None),
+            preview: tokio::sync::Mutex::new(None),
         }
     }
 
@@ -138,6 +140,7 @@ impl RecordingSessionManager {
     }
 
     pub(crate) async fn retain_media(&self, capture: Option<VideoCapture>) {
+        *self.preview.lock().await = None;
         *self.media.lock().await = capture;
     }
 
@@ -151,13 +154,32 @@ impl RecordingSessionManager {
         stream: &str,
     ) -> Option<Result<spiral_robotics_common::datasets::EpisodeVideo, String>> {
         let media = self.media.lock().await;
-        let capture = media
+        if let Some(capture) = media
             .as_ref()
-            .filter(|capture| capture.episode_id() == episode)?;
-        Some(CameraRecording::preview(
-            &capture.completed_assets(),
-            stream,
-        ))
+            .filter(|capture| capture.episode_id() == episode)
+        {
+            return Some(CameraRecording::preview(
+                &capture.completed_assets(),
+                stream,
+            ));
+        }
+        drop(media);
+        let preview = self.preview.lock().await;
+        preview
+            .as_ref()
+            .filter(|(id, _)| id == episode)
+            .map(|(_, cameras)| CameraRecording::preview(cameras, stream))
+    }
+
+    pub(crate) async fn retain_preview(&self, episode: String, cameras: Vec<CameraRecording>) {
+        *self.preview.lock().await = Some((episode, cameras));
+    }
+
+    pub(crate) async fn forget_preview(&self, episode: &str) {
+        let mut preview = self.preview.lock().await;
+        if preview.as_ref().is_some_and(|(id, _)| id == episode) {
+            *preview = None;
+        }
     }
 
     pub(crate) async fn request_media_pause(&self) {
@@ -191,6 +213,38 @@ impl RecordingSessionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn completed_camera_preview_is_session_owned_and_cleared_for_the_next_take() {
+        let session = RecordingSessionManager::new(Arc::new(CatalogMutationLease::default()));
+        let camera = CameraRecording::from_annex_b(
+            "wrist".into(),
+            (32, 32, 30),
+            (
+                include_bytes!("../../frontend/src/activities/data/fixtures/seek.h264").to_vec(),
+                (0..8).map(|index| index * 33_333_333).collect(),
+            ),
+        )
+        .unwrap();
+        session
+            .retain_preview("take-one".into(), vec![camera])
+            .await;
+        assert!(session.camera_preview("another", "wrist").await.is_none());
+        assert_eq!(
+            session
+                .camera_preview("take-one", "wrist")
+                .await
+                .unwrap()
+                .unwrap()
+                .packets()
+                .len(),
+            8
+        );
+        session.forget_preview("another").await;
+        assert!(session.camera_preview("take-one", "wrist").await.is_some());
+        session.retain_media(None).await;
+        assert!(session.camera_preview("take-one", "wrist").await.is_none());
+    }
 
     #[test]
     fn recording_identity_and_catalog_exclusion_have_one_lifecycle() {
