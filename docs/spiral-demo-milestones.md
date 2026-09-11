@@ -1,6 +1,7 @@
 # Spiral demo feature milestones
 
-Status: **M1 and M2.1 implemented with the current local Spiral driver**, September 10, 2026.
+Status: **M1 implemented; M2 verified with the current local Spiral driver**, September 10, 2026.
+
 Tasks 1.1 and 1.2 share one clock in the Data inspector. The follow-up replaces
 joint-specific reads with native Arrow schema discovery, numeric field selection,
 and one paginated message transport. M2’s ownership simplification is implemented:
@@ -170,7 +171,7 @@ agent named it.
 
 ### 2.2 — Save and switch between named workflows
 
-- [ ] Done
+- [x] Done — two independently authored graphs/conversations, Save/Discard, stale requests, browser switching, and backend restart verified September 10, 2026.
 
 **After this lands:** the engineer can name the lighting workflow, create another
 workflow, and return to either one with its own definition and conversation context.

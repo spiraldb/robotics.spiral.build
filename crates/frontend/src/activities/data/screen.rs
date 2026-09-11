@@ -39,8 +39,10 @@ impl ResourceTabs {
             .iter_mut()
             .find(|tab| tab.resource.resource_id() == id)
         {
-            tab.resource = resource;
-            tab.revision = tab.revision.wrapping_add(1);
+            if tab.resource != resource {
+                tab.resource = resource;
+                tab.revision = tab.revision.wrapping_add(1);
+            }
         } else {
             opened.push(OpenResource {
                 resource,
@@ -234,7 +236,7 @@ fn ObjectSession(tab: OpenResource) -> Element {
         }
         div { class: "data-session-content", hidden: section() != ObjectSection::Inspect,
             if dataset { DatasetInspector { key: "{tab.revision}", selection: tab.resource.selection().clone() } }
-            else { TableInspector { resource: tab.resource.clone() } }
+            else { TableInspector { key: "{tab.revision}", resource: tab.resource.clone() } }
         }
         div { class: "data-session-content", hidden: section() != ObjectSection::Sql, QueryPanel { studio, controller } }
         div { class: "data-session-content", hidden: section() != ObjectSection::Results, QueryResultView { controller } }
@@ -300,6 +302,12 @@ mod tests {
             second.set_max_rows(25);
             tabs.open(SessionHarness::resource("first"));
             assert_eq!(tabs.opened.peek().len(), 2);
+            assert_eq!(tabs.opened.peek()[0].revision, 0);
+            tabs.open(ProjectResource::new(
+                DatasetSelection::new(vec!["first".into()]).unwrap(),
+                "dataset".into(),
+                ("first".into(), "v2".into()),
+            ));
             assert_eq!(tabs.opened.peek()[0].revision, 1);
             assert_eq!(first.sql(), "SELECT 7");
             assert_eq!(second.sql(), "SELECT 2");

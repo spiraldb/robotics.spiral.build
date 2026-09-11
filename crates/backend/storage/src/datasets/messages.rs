@@ -1,19 +1,19 @@
 //! Bounded Arrow IPC pages from native MCAP observations; no payload-specific DTOs.
-use super::{DatasetCatalogClient, EpisodeTopicQuery};
+use super::EpisodeTopicQuery;
 use crate::{
     StorageManager,
     db::{ArrowColumns, DatabaseSession},
 };
 use arrow_array::RecordBatch;
 use arrow_ipc::writer::StreamWriter;
-use arrow_schema::{DataType, Schema};
+use arrow_schema::Schema;
 use futures::StreamExt as _;
 use spiral_robotics_common::datasets::{MessageCursor, MessageRead};
 use std::{collections::HashMap, sync::Arc};
 
 impl StorageManager {
     pub async fn episode_messages(&self, request: MessageRead) -> Result<Vec<u8>, String> {
-        let catalog = DatasetCatalogClient::connect(self.connection_settings()).await?;
+        let catalog = self.project_store().dataset_catalog();
         let before = catalog.inspect(request.topic().dataset().clone()).await?;
         if before.dataset().version_id() != request.revision().version() {
             return Err("Dataset revision changed; reopen this episode".into());
@@ -25,32 +25,32 @@ impl StorageManager {
         }
         let query = MessageQuery { request: &request };
         let mut connection = self.project_store().connect().await?;
-        let schema = connection
-            .query_schema(query.statement(
-                "log_time, publish_time, channel_id, chunk_start_offset, sample_ordinal, value",
-                "",
-            )?)
-            .await
-            .map_err(|e| e.to_string())?;
-        let mut page = MessagePage::new(schema);
-        if let Some(window) = request.window() {
-            let projection = query.projection(&page.schema)?;
+        let page = if let Some(window) = request.window() {
             let mut stream = connection
-                .query(query.statement(&projection, &query.window_clause()?)?)
+                .query(query.statement(&query.projection()?, &query.window_clause()?)?)
                 .await
-                .map_err(|e| e.to_string())?;
-            page = MessagePage::new(stream.schema().clone());
+                .map_err(|error| error.to_string())?;
+            let mut page = MessagePage::new(stream.schema().clone());
             while let Some(batch) = stream.next().await {
-                if !page.append(batch.map_err(|e| e.to_string())?, window.limit())? {
+                if !page.append(batch.map_err(|error| error.to_string())?, window.limit())? {
                     break;
                 }
             }
-        }
+            page
+        } else {
+            let schema = connection
+                .query_schema(query.statement(
+                    "log_time, publish_time, channel_id, chunk_start_offset, sample_ordinal, value",
+                    "",
+                )?)
+                .await
+                .map_err(|error| error.to_string())?;
+            MessagePage::new(schema)
+        };
         // Do not deliver a page whose query raced with a dataset replacement.
         if catalog
-            .inspect(request.topic().dataset().clone())
+            .resolve(request.topic().dataset())
             .await?
-            .dataset()
             .version_id()
             != request.revision().version()
         {
@@ -73,7 +73,7 @@ impl MessageQuery<'_> {
         );
         Ok(EpisodeTopicQuery::for_sql(topic, sql)?.statement)
     }
-    fn projection(&self, schema: &Schema) -> Result<String, String> {
+    fn projection(&self) -> Result<String, String> {
         let mut fields = vec![
             "log_time".to_owned(),
             "publish_time".into(),
@@ -88,18 +88,6 @@ impl MessageQuery<'_> {
         for (index, path) in requested.iter().enumerate() {
             if path.first().map(String::as_str) != Some("value") || path.len() > 16 {
                 return Err("Fields must be paths in the message value".into());
-            }
-            let mut data_type = DataType::Struct(schema.fields().clone());
-            for name in path {
-                let DataType::Struct(children) = &data_type else {
-                    return Err("Project the containing list to inspect its elements".into());
-                };
-                data_type = children
-                    .iter()
-                    .find(|field| field.name() == name)
-                    .ok_or("Field is absent from the message schema")?
-                    .data_type()
-                    .clone();
             }
             fields.push(format!(
                 "{} AS field_{index}",
@@ -214,7 +202,6 @@ impl MessagePage {
 mod tests {
     use super::*;
     use arrow_array::{ArrayRef, UInt32Array, UInt64Array};
-    use arrow_schema::Field;
     use spiral_robotics_common::datasets::{
         DatasetSelection, EpisodeTopicRequest, MessageWindow, TopicRevision,
     };
@@ -275,12 +262,7 @@ mod tests {
     }
 
     #[test]
-    fn projections_validate_struct_paths_and_quote_literal_field_names() {
-        let schema = Schema::new(vec![Field::new(
-            "value",
-            DataType::Struct(vec![Arc::new(Field::new("a.b\"c", DataType::Float64, true))].into()),
-            false,
-        )]);
+    fn projections_quote_paths_and_leave_schema_validation_to_spiral() {
         let read = request().with_window(MessageWindow::new(
             (1, 10),
             vec![vec!["value".into(), "a.b\"c".into()]],
@@ -288,7 +270,7 @@ mod tests {
         let query = MessageQuery { request: &read };
         assert!(
             query
-                .projection(&schema)
+                .projection()
                 .unwrap()
                 .ends_with("\"value\".\"a.b\"\"c\" AS field_0")
         );
@@ -300,13 +282,9 @@ mod tests {
         );
         let invalid = request().with_window(MessageWindow::new(
             (1, 10),
-            vec![vec!["value".into(), "absent".into()]],
+            vec![vec!["other".into(), "field".into()]],
         ));
-        assert!(
-            MessageQuery { request: &invalid }
-                .projection(&schema)
-                .is_err()
-        );
+        assert!(MessageQuery { request: &invalid }.projection().is_err());
         assert!(MessageWindow::new((10, 1), vec![]).bounds().is_err());
     }
 }

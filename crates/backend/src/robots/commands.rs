@@ -68,15 +68,18 @@ impl<'a> RobotAdapter<'a> {
         robot: &str,
         connection: ConnectionStatus,
     ) -> Result<RobotSummary, WorkspaceError> {
-        let record = match &self.saved_records {
+        Ok(self.record(robot).await?.summary(connection))
+    }
+
+    async fn record(&self, robot: &str) -> Result<RobotRecord, WorkspaceError> {
+        match &self.saved_records {
             Some(records) => records
                 .iter()
                 .find(|record| record.id() == robot)
                 .cloned()
-                .ok_or_else(|| WorkspaceError::NotFound(robot.to_owned()))?,
-            None => self.state.workspace().get(robot).await?,
-        };
-        Ok(record.summary(connection))
+                .ok_or_else(|| WorkspaceError::NotFound(robot.to_owned())),
+            None => self.state.workspace().get(robot).await,
+        }
     }
 }
 
@@ -179,12 +182,7 @@ impl RobotStore for RobotAdapter<'_> {
     }
 
     async fn connection_spec(&self, robot: &str) -> Result<RobotConnectionSpec, OperationError> {
-        let record = self
-            .state
-            .workspace()
-            .get(robot)
-            .await
-            .map_err(OperationError::from)?;
+        let record = self.record(robot).await.map_err(OperationError::from)?;
         let port = record.port().ok_or_else(|| {
             OperationError::InvalidInput(format!(
                 "robot {:?} has no serial port assigned; set one before connecting",
@@ -280,7 +278,13 @@ impl DeviceCommands {
         let Ok(_activity) = self.state.admit() else {
             return;
         };
-        let adapter = RobotAdapter::new(&self.state);
+        let adapter = match RobotAdapter::prefetched(&self.state).await {
+            Ok(adapter) => adapter,
+            Err(error) => {
+                tracing::warn!(%error, "could not load saved robots for auto-connect");
+                return;
+            }
+        };
         for outcome in RobotActions::new(&adapter, &adapter).auto_connect().await {
             outcome.log();
         }

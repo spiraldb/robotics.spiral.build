@@ -52,6 +52,19 @@ pub(super) struct GraphExecution {
 }
 
 impl GraphExecution {
+    /// Authoring checks the same native SQL and Model schemas as Run, without
+    /// consuming source batches, loading model weights, or publishing run state.
+    pub(super) async fn validate_schema(
+        store: Arc<ProjectStore>,
+        workflow: &WorkflowSpec,
+    ) -> Result<(), String> {
+        let (events, _) = mpsc::unbounded_channel();
+        Self::new(store, CancellationToken::new(), events)
+            .plan(workflow)
+            .await
+            .map(|_| ())
+    }
+
     pub(super) fn new(
         store: Arc<ProjectStore>,
         cancel: CancellationToken,

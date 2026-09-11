@@ -12,7 +12,7 @@ impl WorkflowTool for SetWorkflow {
         "set_workflow"
     }
     fn description(&self) -> &'static str {
-        "Validate and update an Arrow workflow in memory. Only the user's Save button persists the graph and conversation. SQL sources have no incoming edges. SQL transforms reference connected inputs with {{node:id}}. A Model consumes one parent, reads image_column, and appends named SigLIP scores while preserving input columns. Connect the final output to Result. Query max_rows bounds the preview; use SQL filters or LIMIT to bound inference inputs. Run is separate; every run recomputes inference."
+        "Validate graph structure and native SQL/Model schemas, then update an Arrow workflow in memory. If schema planning fails, correct the reported error and submit again; the existing graph is preserved. Validation never reads source batches or runs inference. Only the user's Save button persists the graph and conversation. SQL sources have no incoming edges. SQL transforms reference connected inputs with {{node:id}}. A Model consumes one parent, reads image_column, and appends named SigLIP scores while preserving input columns. Connect the final output to Result. Query max_rows bounds the preview; use SQL filters or LIMIT to bound inference inputs. Run is separate; every run recomputes inference."
     }
     fn parameters(&self) -> Value {
         let feature_definition_schema = json!({

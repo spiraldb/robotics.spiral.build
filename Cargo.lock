@@ -5675,6 +5675,7 @@ dependencies = [
  "arrow-ipc",
  "arrow-json",
  "arrow-schema",
+ "axum",
  "base64 0.22.1",
  "dirs",
  "futures",

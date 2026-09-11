@@ -1,5 +1,5 @@
 use super::*;
-use arrow_array::RecordBatch;
+use arrow_array::{RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use futures::{FutureExt as _, StreamExt as _};
 use spiral_robotics_common::rollout::{RolloutConfig, RolloutPhase, RolloutSnapshot};
@@ -19,6 +19,7 @@ struct LoadingQueries {
     fail_rollout: bool,
     fail_preferences: bool,
     block_preferences: bool,
+    robots: Option<Vec<RecordBatch>>,
 }
 
 struct LoadingDatabase {
@@ -109,6 +110,19 @@ impl DatabaseSession for LoadingConnection {
                 self.0.rollout_started.notify_one();
                 self.0.rollout_release.acquire().await.unwrap().forget();
                 self.0.queries.lock().unwrap().rollout.clone()
+            } else if sql.as_str().contains("_robots") {
+                self.0
+                    .queries
+                    .lock()
+                    .unwrap()
+                    .robots
+                    .clone()
+                    .ok_or_else(|| {
+                        DatabaseError::new(
+                            DatabaseErrorKind::InvalidState,
+                            "robot configuration unavailable",
+                        )
+                    })?
             } else {
                 return Err(DatabaseError::new(
                     DatabaseErrorKind::InvalidState,
@@ -444,6 +458,42 @@ async fn cancelled_preference_loading_can_restart_and_saved_edits_win_over_an_in
     assert_eq!(saved.training().endpoint(), "http://runtime.example:5050");
     assert!(!saved.video().enabled());
     assert_eq!(fixture.database.queries.lock().unwrap().reads.len(), 2);
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn auto_connect_reads_saved_robots_once() {
+    let fixture = LoadingFixture::new();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("robot_id", DataType::Utf8, false),
+        Field::new("config_json", DataType::Utf8, false),
+    ]));
+    fixture.database.queries.lock().unwrap().robots = Some(vec![
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["left", "right"])),
+                Arc::new(StringArray::from(vec!["{}", "{}"])),
+            ],
+        )
+        .unwrap(),
+    ]);
+    fixture
+        .session
+        .prepare(ProjectPreparation::Resume)
+        .await
+        .unwrap();
+    fixture
+        .project
+        .projects
+        .active
+        .send_replace(fixture.session.clone());
+    let context =
+        crate::project_session::context::ProjectContext::new(fixture.project.projects.clone());
+    crate::robots::commands::DeviceCommands::from(context)
+        .auto_connect_saved_robots()
+        .await;
+    assert_eq!(fixture.database.queries.lock().unwrap().reads.len(), 1);
     fixture.shutdown().await;
 }
 

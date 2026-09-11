@@ -39,6 +39,7 @@ prost = "0.14"
 prost-reflect = "0.16"
 
 [dev-dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
 futures = { version = "0.3", features = ["async-await"] }
 tokio = { version = "1", features = ["macros", "time"] }
 spiral-robotics-common = { workspace = true, features = ["test-support"] }

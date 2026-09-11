@@ -269,6 +269,10 @@ mod tests {
             let storage = Arc::new(spiral_robotics_storage::StorageManager::new(Arc::new(
                 project,
             )));
+            Self::with_storage(storage)
+        }
+
+        fn with_storage(storage: Arc<spiral_robotics_storage::StorageManager>) -> Self {
             let workflow = Arc::new(WorkflowManager::new(storage.clone()));
             let saved = workflow.state();
             Self {
@@ -345,6 +349,62 @@ mod tests {
             assert_eq!(fixture.agent.inner.services.workflow.state(), before);
             assert!(!fixture.agent.inner.services.workflow.is_active());
         }
+    }
+
+    #[tokio::test]
+    async fn authored_sql_is_schema_checked_before_replacing_the_graph() {
+        let storage = Arc::new(spiral_robotics_storage::StorageManager::new(Arc::new(
+            spiral_robotics_storage::ProjectStore::workflow_test(),
+        )));
+        let mut fixture = ToolFixture::with_storage(storage);
+        let graph = |sql: &str| {
+            json!({"workflow": {
+                "name": "Schema checked",
+                "nodes": [
+                    {"id":"source", "name":"Source", "kind":"query", "sql":sql, "max_rows":10},
+                    {"id":"result", "name":"Result", "kind":"result"}
+                ],
+                "edges": [{"source":"source", "target":"result"}]
+            }})
+            .to_string()
+        };
+        fixture
+            .call("set_workflow", &graph("SELECT 1 AS value"))
+            .await
+            .unwrap();
+        let before = fixture.agent.inner.services.workflow.state();
+        let error = fixture
+            .call("set_workflow", &graph("SELECT missing_column"))
+            .await
+            .unwrap_err();
+        assert!(error.contains("Node source"), "{error}");
+        assert_eq!(fixture.agent.inner.services.workflow.state(), before);
+        assert!(!fixture.agent.inner.services.workflow.is_active());
+        assert!(before.snapshot().run_id().is_none());
+    }
+
+    #[tokio::test]
+    async fn dataset_discovery_accepts_omitted_and_empty_paths() {
+        let mut fixture = ToolFixture::new();
+        let before = fixture.agent.inner.services.workflow.state();
+        for arguments in ["{}", r#"{"path":null}"#, r#"{"path":[]}"#] {
+            // Each discovery form reaches the catalog's project admission,
+            // instead of trying to inspect an invalid zero-component path.
+            assert_eq!(
+                fixture
+                    .call("inspect_dataset", arguments)
+                    .await
+                    .unwrap_err(),
+                "Select a Spiral project"
+            );
+            assert_eq!(fixture.agent.inner.services.workflow.state(), before);
+        }
+        assert!(
+            fixture
+                .call("inspect_dataset", r#"{"path":[""]}"#)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

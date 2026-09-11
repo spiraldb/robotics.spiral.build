@@ -452,6 +452,7 @@ impl DatabaseSession for ProjectConnection {
 /// an existing request can never follow a later change to the active project.
 pub struct ProjectStore {
     connection_settings: SpiralConnectionSettings,
+    catalog: crate::datasets::DatasetCatalogClient,
     table_prefix: String,
     database: Arc<dyn Database>,
     async_operation_gate: Arc<tokio::sync::RwLock<()>>,
@@ -477,11 +478,16 @@ impl ProjectStore {
             return Err("Studio table prefix is not a safe SQL identifier".to_owned());
         }
         Ok(Self {
+            catalog: crate::datasets::DatasetCatalogClient::new(connection_settings.clone())?,
             connection_settings,
             table_prefix,
             database,
             async_operation_gate: Arc::new(tokio::sync::RwLock::new(())),
         })
+    }
+
+    pub(crate) fn dataset_catalog(&self) -> &crate::datasets::DatasetCatalogClient {
+        &self.catalog
     }
 
     pub(crate) fn project_id(&self) -> String {

@@ -14,32 +14,37 @@ impl StorageManager {
         &self,
         episode: EpisodeSelection,
     ) -> Result<Vec<DatasetTopic>, String> {
-        let statement = EpisodeTopicQuery::channels(&episode)?.statement;
-        let mut connection = self.project_store().connect().await?;
-        let mut stream = connection
-            .query(statement)
-            .await
-            .map_err(|error| error.to_string())?;
-        let mut found_episode = false;
-        let mut topics = BTreeMap::<String, TopicChannels>::new();
-        while let Some(batch) = stream.next().await {
-            let batch = batch.map_err(|error| error.to_string())?;
-            found_episode |= batch.num_rows() > 0;
-            let columns = ArrowColumns::new(&batch, "episode channels");
-            for row in 0..batch.num_rows() {
-                let Some(topic) = columns.optional_text("topic", row)? else {
-                    continue;
-                };
-                topics.entry(topic.to_owned()).or_default().include(
-                    columns.optional_text("schema_name", row)?,
-                    columns.optional_unsigned("message_count", row)?,
-                )?;
+        let channels = async {
+            let statement = EpisodeTopicQuery::channels(&episode)?.statement;
+            let mut connection = self.project_store().connect().await?;
+            let mut stream = connection
+                .query(statement)
+                .await
+                .map_err(|error| error.to_string())?;
+            let mut found_episode = false;
+            let mut topics = BTreeMap::<String, TopicChannels>::new();
+            while let Some(batch) = stream.next().await {
+                let batch = batch.map_err(|error| error.to_string())?;
+                found_episode |= batch.num_rows() > 0;
+                let columns = ArrowColumns::new(&batch, "episode channels");
+                for row in 0..batch.num_rows() {
+                    let Some(topic) = columns.optional_text("topic", row)? else {
+                        continue;
+                    };
+                    topics.entry(topic.to_owned()).or_default().include(
+                        columns.optional_text("schema_name", row)?,
+                        columns.optional_unsigned("message_count", row)?,
+                    )?;
+                }
             }
-        }
-        if !found_episode {
-            return Err("This episode is no longer in the dataset".into());
-        }
-        let catalog = self.inspect_dataset(episode.dataset().clone()).await?;
+            if !found_episode {
+                return Err("This episode is no longer in the dataset".into());
+            }
+            Ok::<_, String>(topics)
+        };
+        let (topics, catalog) =
+            futures::future::try_join(channels, self.inspect_dataset(episode.dataset().clone()))
+                .await?;
         Ok(catalog
             .topics()
             .iter()

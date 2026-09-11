@@ -35,7 +35,7 @@ impl WorkflowClient {
         command: WorkflowCommand,
     ) -> impl Future<Output = Result<WorkflowSnapshot, CommandError>> + use<> {
         self.project.mutate(
-            &[Workflow, Assistant, Catalog],
+            &[Workflow, Assistant],
             HttpRequest::new("POST", "/api/workflow/commands").json(&command),
         )
     }
@@ -45,7 +45,7 @@ impl WorkflowClient {
         command: WorkflowAgentCommand,
     ) -> impl Future<Output = Result<WorkflowAgentSnapshot, CommandError>> + use<> {
         self.project.mutate(
-            &[Assistant, Workflow, Catalog],
+            &[Assistant, Workflow],
             HttpRequest::new("POST", "/api/workflow/assistant/commands").json(&command),
         )
     }

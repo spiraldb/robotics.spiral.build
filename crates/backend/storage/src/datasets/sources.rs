@@ -1,5 +1,4 @@
 //! Publish one complete MCAP file through the Dataset's declared source view.
-use super::DatasetCatalogClient;
 use crate::ProjectConnection;
 use crate::{StorageManager, db::SpiralSql};
 use arrow_array::{
@@ -470,7 +469,7 @@ impl crate::ProjectStore {
         if !crate::db::StorageSchema::is_dataset_id(name) || name.contains('.') {
             return Err("Dataset name must contain 1–96 letters, numbers, '_' or '-'".into());
         }
-        let client = DatasetCatalogClient::connect(self.connection_settings()).await?;
+        let client = self.dataset_catalog();
         let resources = client.resources().await?;
         let dataset_name = format!("dataset_{name}");
         let source_name = format!("dataset_source_{name}");
@@ -517,7 +516,7 @@ impl crate::ProjectStore {
 
 impl crate::ProjectStore {
     pub(crate) async fn managed_mcap_datasets(&self) -> Result<Vec<String>, String> {
-        let client = DatasetCatalogClient::connect(self.connection_settings()).await?;
+        let client = self.dataset_catalog();
         let resources = client.resources().await?;
         let mut names = Vec::new();
         for resource in &resources {

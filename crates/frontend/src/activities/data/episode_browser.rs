@@ -60,7 +60,10 @@ impl EpisodePage {
 }
 
 #[component]
-pub(super) fn EpisodeBrowser(inspection: DatasetInspection) -> Element {
+pub(super) fn EpisodeBrowser(
+    dataset: DatasetSelection,
+    inspection: Option<DatasetInspection>,
+) -> Element {
     let mut offset = use_signal(|| 0_usize);
     let mut selected = use_signal(|| None::<(usize, DatasetEpisode)>);
     let heading_id = use_hook(|| {
@@ -69,7 +72,7 @@ pub(super) fn EpisodeBrowser(inspection: DatasetInspection) -> Element {
             dioxus::dioxus_core::current_scope_id().0
         )
     });
-    let dataset = inspection.dataset().selection().clone();
+
     let mut page = use_resource(use_reactive((&dataset,), move |(dataset,)| {
         let offset = offset();
         async move {
@@ -80,6 +83,25 @@ pub(super) fn EpisodeBrowser(inspection: DatasetInspection) -> Element {
             EpisodePage::from_preview(response)
         }
     }));
+    let version = inspection
+        .as_ref()
+        .map(|detail| detail.dataset().version_id().to_owned());
+    let mut inspected_version = use_signal(|| version.clone());
+    use_effect(use_reactive((&version,), move |(version,)| {
+        if let Some(version) = version {
+            if inspected_version
+                .peek()
+                .as_ref()
+                .is_some_and(|previous| previous != &version)
+            {
+                offset.set(0);
+                selected.set(None);
+                page.restart();
+            }
+            inspected_version.set(Some(version));
+        }
+    }));
+    let members = inspection.as_ref().and_then(DatasetInspection::members);
     let page_response = page.read();
     let pending = *page.state().read() == UseResourceState::Pending;
     let selection = selected.read().clone();
@@ -93,7 +115,7 @@ pub(super) fn EpisodeBrowser(inspection: DatasetInspection) -> Element {
         } else {
             header { class: "data-inspector-heading",
                 h2 { id: "{heading_id}", tabindex: "-1", "{dataset.label()}" }
-                p { "{inspection.members().unwrap_or_default()} episodes" }
+                p { if let Some(members) = members { "{members} episodes" } else { "Episodes" } }
             }
             header { class: "data-content-toolbar",
 
@@ -130,7 +152,8 @@ pub(super) fn EpisodeBrowser(inspection: DatasetInspection) -> Element {
                             }
                         }
                         footer { class: "data-pagination",
-                            span { class: "text-ink-soft tabular-nums", "{offset() + usize::from(!page.episodes.is_empty())}–{offset() + page.episodes.len()} of {inspection.members().unwrap_or_default()} episodes" }
+                            span { class: "text-ink-soft tabular-nums", "{offset() + usize::from(!page.episodes.is_empty())}–{offset() + page.episodes.len()}"
+                                if let Some(members) = members { " of {members} episodes" } }
                             div { class: "flex items-center gap-4",
                                 button { class: "data-text-action", disabled: offset() == 0, onclick: move |_| offset.set(offset().saturating_sub(50)), "Previous" }
                                 button { class: "data-text-action", disabled: !page.has_more, onclick: move |_| offset.set(offset() + 50), "Next" }

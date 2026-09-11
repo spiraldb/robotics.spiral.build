@@ -53,6 +53,11 @@ The graph has four node kinds:
   rows and columns, and appends named nullable Float32 SigLIP scores.
 - **Result:** converts one terminal Arrow output into a bounded browser preview.
 
+Before accepting an Assistant graph update, `set_workflow` runs the same native
+SQL and Model schema planning as Run. An invalid candidate returns its schema
+error to the Assistant and leaves the existing graph unchanged. This check does
+not consume source batches, load model weights, or start a workflow run.
+
 For example, a Model node is:
 
 ```json
@@ -74,7 +79,7 @@ Null images produce null scores; malformed images fail explicitly. SigLIP scores
 measure text/image matching, not measured brightness or calibrated probability.
 
 The dataset picker starts a graph with a SQL source reading `spql.mcap.episodes`.
-The Assistant's `inspect_dataset` tool lists datasets when no path is supplied,
+The Assistant's `inspect_dataset` tool lists datasets when no path is supplied or the path is empty,
 or inspects the requested path's actual topics, schema variants, and camera columns.
 Dataset recording/import origin does not affect workflow execution.
 

@@ -12,7 +12,7 @@ impl WorkflowTool for InspectDataset {
         "inspect_dataset"
     }
     fn description(&self) -> &'static str {
-        "List datasets when path is omitted, or inspect a dataset path and its camera topics, schema variants, and packet columns. No inference or media decoding."
+        "List datasets when path is omitted or empty, or inspect an actual listed dataset path and its camera topics, schema variants, and packet columns. No inference or media decoding."
     }
     fn parameters(&self) -> Value {
         json!({"type":"object", "properties":{"path":{"type":"array","items":{"type":"string"}}}, "additionalProperties":false})
@@ -30,7 +30,7 @@ impl WorkflowTool for InspectDataset {
     fn call<'a>(&'a self, invocation: ToolInvocation<'a>) -> BoxFuture<'a, Result<String, String>> {
         Box::pin(async move {
             let arguments: DatasetArguments = invocation.arguments()?;
-            let Some(path) = arguments.path else {
+            let Some(path) = arguments.path.filter(|path| !path.is_empty()) else {
                 return Ok(json!({"datasets": invocation.storage().datasets().await?}).to_string());
             };
             let selection = spiral_robotics_common::datasets::DatasetSelection::new(path)?;

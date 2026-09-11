@@ -1,4 +1,6 @@
 //! Native Dataset discovery through the same project journal used by the ADBC driver.
+#[cfg(test)]
+mod catalog_tests;
 mod messages;
 mod playback;
 mod topics;
@@ -6,8 +8,12 @@ pub(crate) use playback::CameraPackets;
 mod sources;
 pub(crate) use sources::{McapDatasetDefinition, McapFile, McapSourceBlob, McapSources};
 
-use crate::{StorageManager, settings::SpiralConnectionSettings};
-use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
+use crate::{
+    StorageManager,
+    settings::{SpiralConnectionSettings, SpiralCredentials},
+};
+use base64::Engine as _;
+use reqwest::header::{AUTHORIZATION, HeaderValue};
 use serde::Deserialize;
 use serde_json::json;
 use spiral_robotics_common::datasets::{
@@ -15,74 +21,111 @@ use spiral_robotics_common::datasets::{
     ProjectResource,
 };
 use std::collections::{BTreeSet, VecDeque};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::sync::Mutex;
 
-struct DatasetCatalogClient {
+pub(crate) struct DatasetCatalogClient {
     client: reqwest::Client,
     endpoint: String,
     project: String,
+    credentials: Option<SpiralCredentials>,
+    token: Mutex<Option<CatalogToken>>,
 }
+
+struct CatalogToken {
+    authorization: HeaderValue,
+    refresh_at: Option<Instant>,
+}
+
 impl DatasetCatalogClient {
-    async fn connect(settings: SpiralConnectionSettings) -> Result<Self, String> {
-        let project = settings
-            .project_id()
-            .ok_or("Select a Spiral project")?
-            .to_owned();
-        let endpoint = settings.endpoint().trim_end_matches('/').to_owned();
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|error| error.to_string())?;
-        let mut headers = HeaderMap::new();
-        if let Some(credentials) = settings.credentials() {
-            let response = client.post(format!("{endpoint}/v1/oauth2/token")).json(&json!({
-                "grant_type": "client_credentials", "client_id": credentials.client_id(), "client_secret": credentials.client_secret()
-            })).send().await.map_err(|error| format!("Authenticating the dataset catalog: {error}"))?;
-            if !response.status().is_success() {
-                return Err(format!(
-                    "Dataset catalog authentication failed ({})",
-                    response.status()
-                ));
-            }
-            let token: AccessToken = response
-                .json()
-                .await
-                .map_err(|error| format!("Reading dataset catalog authentication: {error}"))?;
-            let mut authorization =
-                HeaderValue::from_str(&format!("Bearer {}", token.access_token))
-                    .map_err(|_| "Invalid dataset catalog authentication header")?;
-            authorization.set_sensitive(true);
-            headers.insert(AUTHORIZATION, authorization);
-        }
-        let client = reqwest::Client::builder()
-            .default_headers(headers)
-            .timeout(Duration::from_secs(30))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|error| error.to_string())?;
+    pub(crate) fn new(settings: SpiralConnectionSettings) -> Result<Self, String> {
         Ok(Self {
-            client,
-            endpoint,
-            project,
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .map_err(|error| error.to_string())?,
+            endpoint: settings.endpoint().trim_end_matches('/').to_owned(),
+            project: settings.project_id().unwrap_or_default().to_owned(),
+            credentials: settings.credentials().cloned(),
+            token: Mutex::new(None),
         })
+    }
+
+    async fn authorization(
+        &self,
+        rejected: Option<&HeaderValue>,
+    ) -> Result<Option<HeaderValue>, String> {
+        let Some(credentials) = &self.credentials else {
+            return Ok(None);
+        };
+        let mut cached = self.token.lock().await;
+        if let Some(token) = cached.as_ref()
+            && token
+                .refresh_at
+                .is_none_or(|deadline| deadline > Instant::now())
+            && rejected != Some(&token.authorization)
+        {
+            return Ok(Some(token.authorization.clone()));
+        }
+        let started = Instant::now();
+        let response = self.client.post(format!("{}/v1/oauth2/token", self.endpoint)).json(&json!({
+            "grant_type": "client_credentials", "client_id": credentials.client_id(), "client_secret": credentials.client_secret()
+        })).send().await.map_err(|error| format!("Authenticating the dataset catalog: {error}"))?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "Dataset catalog authentication failed ({})",
+                response.status()
+            ));
+        }
+        let token: AccessToken = response
+            .json()
+            .await
+            .map_err(|error| format!("Reading dataset catalog authentication: {error}"))?;
+        let mut authorization = HeaderValue::from_str(&format!("Bearer {}", token.access_token))
+            .map_err(|_| "Invalid dataset catalog authentication header")?;
+        authorization.set_sensitive(true);
+        *cached = Some(CatalogToken {
+            authorization: authorization.clone(),
+            refresh_at: token
+                .refresh_after()
+                .and_then(|lifetime| started.checked_add(lifetime)),
+        });
+        Ok(Some(authorization))
     }
 
     async fn request<T: serde::de::DeserializeOwned>(
         &self,
         request: reqwest::RequestBuilder,
     ) -> Result<T, String> {
-        let response = request
-            .send()
+        let mut request = request.build().map_err(|error| error.to_string())?;
+        let authorization = self.authorization(None).await?;
+        if let Some(value) = &authorization {
+            request.headers_mut().insert(AUTHORIZATION, value.clone());
+        }
+        let retry = request.try_clone();
+        let mut response = self
+            .client
+            .execute(request)
             .await
             .map_err(|error| format!("Reading Spiral dataset metadata: {error}"))?;
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED && authorization.is_some() {
+            let mut retry = retry.ok_or("Dataset catalog request cannot be retried")?;
+            if let Some(value) = self.authorization(authorization.as_ref()).await? {
+                retry.headers_mut().insert(AUTHORIZATION, value);
+            }
+            response = self
+                .client
+                .execute(retry)
+                .await
+                .map_err(|error| format!("Reading Spiral dataset metadata: {error}"))?;
+        }
         if !response.status().is_success() {
             return Err(format!(
                 "Spiral dataset metadata request failed ({})",
                 response.status()
             ));
         }
-        let mut response = response;
         let mut bytes = Vec::new();
         while let Some(chunk) = response.chunk().await.map_err(|error| error.to_string())? {
             if bytes.len() + chunk.len() > 16 * 1024 * 1024 {
@@ -95,6 +138,9 @@ impl DatasetCatalogClient {
     }
 
     async fn resources(&self) -> Result<Vec<ProjectResource>, String> {
+        if self.project.is_empty() {
+            return Err("Select a Spiral project".into());
+        }
         let prefix = format!("{}/projects/{}/journal", self.endpoint, self.project);
         let branch: JournalBranch = self
             .request(self.client.get(format!("{prefix}/branches/main")))
@@ -121,14 +167,16 @@ impl DatasetCatalogClient {
             .collect())
     }
 
-    async fn inspect(&self, selection: DatasetSelection) -> Result<DatasetInspection, String> {
-        // Resolve membership in this project again; client-supplied IDs never select another project.
-        let dataset = self
-            .datasets()
+    async fn resolve(&self, selection: &DatasetSelection) -> Result<DatasetSummary, String> {
+        self.datasets()
             .await?
             .into_iter()
-            .find(|dataset| dataset.selection() == &selection)
-            .ok_or("Dataset no longer exists in this project; refresh the catalog")?;
+            .find(|dataset| dataset.selection() == selection)
+            .ok_or_else(|| "Dataset no longer exists in this project; refresh the catalog".into())
+    }
+
+    async fn inspect(&self, selection: DatasetSelection) -> Result<DatasetInspection, String> {
+        let dataset = self.resolve(&selection).await?;
         let response: DatasetVersionResponse = self
             .request(self.client.get(format!(
                 "{}/datasets/{}/versions/{}",
@@ -159,7 +207,32 @@ impl DatasetCatalogClient {
 #[derive(Deserialize)]
 struct AccessToken {
     access_token: String,
+    expires_in: Option<u64>,
 }
+impl AccessToken {
+    fn refresh_after(&self) -> Option<Duration> {
+        // Spiral also returns JWTs with a null OAuth lifetime. The claim only
+        // schedules renewal; the service still decides whether a token is valid.
+        let lifetime = match self.expires_in {
+            Some(seconds) => Duration::from_secs(seconds),
+            None => {
+                let payload = self.access_token.split('.').nth(1)?;
+                let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .decode(payload)
+                    .ok()?;
+                let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+                let expires = claims.get("exp")?.as_f64()?;
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .ok()?
+                    .as_secs_f64();
+                Duration::try_from_secs_f64((expires - now).max(0.0)).ok()?
+            }
+        };
+        Some(lifetime.saturating_sub(Duration::from_secs(30)))
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct JournalBranch {
@@ -369,28 +442,22 @@ impl EpisodeTopicQuery {
 
 impl StorageManager {
     pub async fn project_resources(&self) -> Result<Vec<ProjectResource>, String> {
-        DatasetCatalogClient::connect(self.connection_settings())
-            .await?
-            .resources()
-            .await
+        self.project_store().dataset_catalog().resources().await
     }
     pub async fn validate_mcap_destination(&self, name: &str) -> Result<bool, String> {
         self.project_store().validate_mcap_destination(name).await
     }
 
     pub async fn datasets(&self) -> Result<Vec<DatasetSummary>, String> {
-        DatasetCatalogClient::connect(self.connection_settings())
-            .await?
-            .datasets()
-            .await
+        self.project_store().dataset_catalog().datasets().await
     }
     pub async fn inspect_dataset(
         &self,
         selection: DatasetSelection,
     ) -> Result<DatasetInspection, String> {
         let selection = DatasetSelection::new(selection.path().to_vec())?;
-        DatasetCatalogClient::connect(self.connection_settings())
-            .await?
+        self.project_store()
+            .dataset_catalog()
             .inspect(selection)
             .await
     }
