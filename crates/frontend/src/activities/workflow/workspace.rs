@@ -1458,19 +1458,19 @@ fn WorkflowResults(controller: super::state::WorkflowController) -> Element {
 
     rsx! {
         section { class: "workflow-results", "aria-label": "Workflow results",
-            header { class: "workflow-results-meta",
-                span { "{snapshot.phase().run_label()}" }
-                if let Some(result) = &snapshot.result() {
+            if let Some(result) = snapshot.result() {
+                header { class: "workflow-results-meta",
+                    span { "{snapshot.phase().run_label()}" }
                     span { class: "font-mono tabular-nums", "{result.rows().len()} rows · {result.elapsed_ms()} ms" }
                     if result.truncated() { span { class: "chip chip-caution", "Truncated" } }
-                }
-                if can_run_again && snapshot.result().is_some() {
-                    Action {
-                        purpose: ActionPurpose::Retry,
-                        variant: ActionVariant::Link,
-                        class: "workflow-results-retry",
-                        onclick: move |_| controller.run(studio),
-                        "Run again"
+                    if can_run_again {
+                        Action {
+                            purpose: ActionPurpose::Retry,
+                            variant: ActionVariant::Link,
+                            class: "workflow-results-retry",
+                            onclick: move |_| controller.run(studio),
+                            "Run again"
+                        }
                     }
                 }
             }
@@ -1546,10 +1546,9 @@ impl WorkflowRunPresentation for WorkflowRunPhase {
             );
         }
         match self {
-            WorkflowRunPhase::Idle if configured => (
-                "Ready for a result",
-                "Run the graph to see results. Click Save to keep your work.",
-            ),
+            WorkflowRunPhase::Idle if configured => {
+                ("No results yet", "Run workflow to see results here.")
+            }
             WorkflowRunPhase::Idle => (
                 "Configure the workflow",
                 "Choose qualified Spiral relations and fix graph validation before running.",
