@@ -21,7 +21,6 @@ use crate::panels::scene::ScenePalette;
 use crate::robots::{HardwareCommands, HardwareViewState, RobotSelection, Selection};
 use crate::shell::project::ProjectSessionSignals;
 use crate::shell::state::StudioProjectState;
-use crate::tasks::SingleFlight;
 
 mod calibration;
 mod delete;
@@ -193,38 +192,29 @@ fn NewRobotForm(project: StudioProjectState, selection: RobotSelection) -> Eleme
     let mut open = use_signal(|| false);
     let mut id = use_signal(String::new);
     let mut robot_type = use_signal(|| ROBOT_TYPES[0].0.to_owned());
-    let creating = use_signal(|| false);
-
-    let create = move || {
-        if creating.peek().to_owned() {
-            return;
-        }
+    let mut create_robot = use_action(move |name: String, request: RobotDraft| async move {
+        project
+            .execute_utility(format!("Created {name}."), async move {
+                RobotClient::current()
+                    .save_document(request.save()?)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                // Keep the form intact until the server accepts the new robot.
+                id.set(String::new());
+                open.set(false);
+                chosen.set(Some(Selection::Robot(name)));
+                Ok(())
+            })
+            .await
+    });
+    let mut create = move || {
         let name = id.read().trim().to_owned();
         if name.is_empty() {
             project.report("Give the arm a name first.");
             return;
         }
         let request = RobotDraft::new(&name, &robot_type());
-        let selected_name = name.clone();
-        project.run_utility(format!("Created {name}."), async move {
-            let Some(result) = SingleFlight::run(creating, async move {
-                RobotClient::current()
-                    .save_document(request.save()?)
-                    .await
-                    .map_err(|error| error.to_string())
-            })
-            .await
-            else {
-                return Ok(());
-            };
-            result?;
-            // Only clear and close after the server accepts the new robot. A
-            // rejected name or configuration stays in place for correction.
-            id.set(String::new());
-            open.set(false);
-            chosen.set(Some(Selection::Robot(selected_name)));
-            Ok(())
-        });
+        create_robot.call(name, request);
     };
 
     if !open() {
@@ -246,7 +236,7 @@ fn NewRobotForm(project: StudioProjectState, selection: RobotSelection) -> Eleme
                 "aria-label": "New arm name",
                 placeholder: "left_follower",
                 autofocus: true,
-                disabled: creating(),
+                disabled: create_robot.pending(),
                 value: "{id}",
                 oninput: move |event| id.set(event.value()),
                 // Naming an arm and pressing Enter is the whole interaction;
@@ -262,7 +252,7 @@ fn NewRobotForm(project: StudioProjectState, selection: RobotSelection) -> Eleme
             select {
                 class: "field",
                 "aria-label": "New arm type",
-                disabled: creating(),
+                disabled: create_robot.pending(),
                 onchange: move |event| robot_type.set(event.value()),
                 for (value, label) in ROBOT_TYPES {
                     option { key: "{value}", value: "{value}", selected: robot_type() == value, "{label}" }
@@ -272,14 +262,14 @@ fn NewRobotForm(project: StudioProjectState, selection: RobotSelection) -> Eleme
                 Action {
                     purpose: ActionPurpose::Create,
                     variant: ActionVariant::Solid,
-                    disabled: creating(),
-                    aria_busy: creating(),
+                    disabled: create_robot.pending(),
+                    aria_busy: create_robot.pending(),
                     onclick: move |_| create(),
-                    if creating() { "Adding…" } else { "Add" }
+                    if create_robot.pending() { "Adding…" } else { "Add" }
                 }
                 Action {
                     purpose: ActionPurpose::Cancel,
-                    disabled: creating(),
+                    disabled: create_robot.pending(),
                     onclick: move |_| {
                         id.set(String::new());
                         open.set(false);
@@ -294,8 +284,34 @@ fn NewRobotForm(project: StudioProjectState, selection: RobotSelection) -> Eleme
 /// Import a complete robot JSON document as a new instance.
 #[component]
 fn ImportRobotConfiguration(project: StudioProjectState, selection: RobotSelection) -> Element {
-    let importing = use_signal(|| false);
     let mut chosen = selection.selected();
+    let mut import_robot = use_action(move |file: dioxus::html::FileData| async move {
+        project
+            .execute_utility("", async move {
+                let bytes = file
+                    .read_bytes()
+                    .await
+                    .map_err(|error| format!("Could not read {}: {error}", file.name()))?;
+                let robot = RobotClient::current()
+                    .save_document(RobotDraft::import(&bytes)?.save()?)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                chosen.set(Some(Selection::Robot(robot.id().to_owned())));
+                project.report_success(format!("Imported {}.", robot.id()));
+                if robot.port().is_some() {
+                    RobotClient::current()
+                        .connect_robot(robot.id().to_owned())
+                        .await
+                        .map_err(|error| {
+                            format!(
+                                "Configuration imported, but the robot could not connect: {error}"
+                            )
+                        })?;
+                }
+                Ok(())
+            })
+            .await
+    });
 
     rsx! {
         FileAction {
@@ -303,39 +319,13 @@ fn ImportRobotConfiguration(project: StudioProjectState, selection: RobotSelecti
             variant: ActionVariant::Row,
             class: "device-list-action",
             title: "Import a unified Spiral Robotics JSON configuration",
-            disabled: importing(),
-            aria_busy: importing(),
+            disabled: import_robot.pending(),
+            aria_busy: import_robot.pending(),
             input: FileInput::new(".json,application/json", move |event: Event<FormData>| {
                 let Some(file) = event.files().first().cloned() else { return };
-                project.run_utility("", async move {
-                    let Some(result) = SingleFlight::run(importing, async {
-                            let bytes = file
-                                .read_bytes()
-                                .await
-                                .map_err(|error| format!("Could not read {}: {error}", file.name()))?;
-                            RobotClient::current().save_document(RobotDraft::import(&bytes)?.save()?)
-                                .await
-                                .map_err(|error| error.to_string())
-                        })
-                        .await
-                    else {
-                        return Ok(());
-                    };
-                    match result {
-                        Ok(robot) => {
-                            chosen.set(Some(Selection::Robot(robot.id().to_owned())));
-                            project.report_success(format!("Imported {}.", robot.id()));
-                            if robot.port().is_some() {
-                                RobotClient::current().connect_robot(robot.id().to_owned()).await
-                                    .map_err(|error| format!("Configuration imported, but the robot could not connect: {error}"))?;
-                            }
-                            Ok(())
-                        }
-                        Err(error) => Err(error),
-                    }
-                });
+                import_robot.call(file);
             }),
-            if importing() { "Importing…" } else { "Import configuration" }
+            if import_robot.pending() { "Importing…" } else { "Import configuration" }
         }
     }
 }
@@ -466,8 +456,19 @@ fn ConnectionAction(
     sweeping: bool,
 ) -> Element {
     let connected = robot.connection().connected();
-    let pending = use_signal(|| false);
     let id = robot.id().to_owned();
+    let mut change_connection = use_action(move |id: String| async move {
+        HardwareCommands::new(project, telemetry)
+            .execute("", async move {
+                let result = if connected {
+                    RobotClient::current().disconnect_robot(id).await
+                } else {
+                    RobotClient::current().connect_robot(id).await
+                };
+                result.map_err(|error| error.to_string())
+            })
+            .await
+    });
     // Disconnecting mid-sweep throws the sweep away, so make the operator
     // finish or cancel deliberately rather than lose it to one click.
     let blocked = robot.port().is_none() || robot.problem().is_some() || (connected && sweeping);
@@ -485,28 +486,11 @@ fn ConnectionAction(
         Action {
             purpose: if connected { ActionPurpose::Disconnect } else { ActionPurpose::Connect },
             variant: if connected { ActionVariant::Outline } else { ActionVariant::Solid },
-            disabled: blocked || pending(),
-            aria_busy: pending(),
+            disabled: blocked || change_connection.pending(),
+            aria_busy: change_connection.pending(),
             title: "{reason}",
-            onclick: move |_| {
-                if pending.peek().to_owned() {
-                    return;
-                }
-                let id = id.clone();
-                HardwareCommands::new(project, telemetry).run("", async move {
-                    SingleFlight::run(pending, async move {
-                        let result = if connected {
-                            RobotClient::current().disconnect_robot(id).await
-                        } else {
-                            RobotClient::current().connect_robot(id).await
-                        };
-                        result.map_err(|error| error.to_string())
-                    })
-                        .await
-                        .unwrap_or(Ok(()))
-                });
-            },
-            {if pending() { if connected { "Disconnecting…" } else { "Connecting…" } } else if connected { "Disconnect" } else { "Connect" }}
+            onclick: move |_| { change_connection.call(id.clone()); },
+            {if change_connection.pending() { if connected { "Disconnecting…" } else { "Connecting…" } } else if connected { "Disconnect" } else { "Connect" }}
         }
     }
 }
@@ -541,7 +525,23 @@ fn PortSection(
         on_rescan,
     } = state;
     let mut identify_step = use_signal(|| IdentifyStep::Idle);
-    let starting_identify = use_signal(|| false);
+    let mut start_identify = use_action(move || async move {
+        identify_step.set(IdentifyStep::Idle);
+        HardwareCommands::new(project, telemetry)
+            .execute("", async move {
+                let list = RobotClient::current()
+                    .list_serial_ports()
+                    .await
+                    .map_err(|error| error.to_string())?;
+                identify_step.set(IdentifyStep::AwaitingUnplug(
+                    list.into_iter()
+                        .map(|port| port.path().to_owned())
+                        .collect(),
+                ));
+                Ok(())
+            })
+            .await
+    });
     let current = robot
         .port()
         .map(|port| port.path().to_owned())
@@ -578,40 +578,14 @@ fn PortSection(
                 Action {
                     purpose: ActionPurpose::Start,
                     variant: ActionVariant::Link,
-                    disabled: locked || scanning || starting_identify(),
-                    aria_busy: starting_identify(),
+                    disabled: locked || scanning || start_identify.pending(),
+                    aria_busy: start_identify.pending(),
                     // Names the action the button performs. Borrowing the port
                     // field's wording told an operator hovering "Identify" why
                     // some other control was unavailable.
                     title: if locked { "Disconnect this arm before identifying its port" } else { "Find the port by unplugging the cable" },
-                    onclick: move |_| {
-                        identify_step.set(IdentifyStep::Idle);
-                        if !telemetry.controls_available() {
-                            project.report("Controls are paused because telemetry is unavailable or delayed.");
-                            return;
-                        }
-                        spawn(async move {
-                            let Some(result) = SingleFlight::run(
-                                starting_identify,
-                                async move {
-                                    RobotClient::current().list_serial_ports()
-                                        .await
-                                        .map_err(|error| error.to_string())
-                                },
-                            )
-                            .await
-                            else {
-                                return;
-                            };
-                            match result {
-                                Ok(list) => identify_step.set(IdentifyStep::AwaitingUnplug(
-                                    list.into_iter().map(|port| port.path().to_owned()).collect(),
-                                )),
-                                Err(error) => project.report(error),
-                            }
-                        });
-                    },
-                    if starting_identify() { "Starting…" } else { "Identify" }
+                    onclick: move |_| { start_identify.call(); },
+                    if start_identify.pending() { "Starting…" } else { "Identify" }
                 }
             }
             // The port and the button that opens it share a line: choosing one
@@ -748,7 +722,31 @@ fn IdentifyPort(
     on_found: EventHandler<String>,
 ) -> Element {
     let mut step = step;
-    let checking = use_signal(|| false);
+    let mut identify_port = use_action(move |before: Vec<String>| async move {
+        HardwareCommands::new(project, telemetry)
+            .execute("", async move {
+                let after = RobotClient::current()
+                    .list_serial_ports()
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let identification = IdentifiedSerialPort::between(
+                    before,
+                    after
+                        .into_iter()
+                        .map(|port| port.path().to_owned())
+                        .collect(),
+                );
+                match identification.port() {
+                    Some(port) => {
+                        on_found.call(port.to_owned());
+                        step.set(IdentifyStep::Finished(identification.message().to_owned()));
+                        Ok(())
+                    }
+                    None => Err(identification.message().to_owned()),
+                }
+            })
+            .await
+    });
 
     match step().clone() {
         IdentifyStep::Idle => rsx! {},
@@ -763,45 +761,14 @@ fn IdentifyPort(
                     Action {
                         purpose: ActionPurpose::Apply,
                         variant: ActionVariant::Solid,
-                        disabled: checking(),
-                        aria_busy: checking(),
-                        onclick: move |_| {
-                            if !telemetry.controls_available() {
-                                project.report("Controls are paused because telemetry is unavailable or delayed.");
-                                return;
-                            }
-                            let before = before.clone();
-                            spawn(async move {
-                                let Some(result) = SingleFlight::run(
-                                    checking,
-                                    async move {
-                                        let after = RobotClient::current().list_serial_ports().await
-                                            .map_err(|error| error.to_string())?;
-                                        Ok::<_, String>(IdentifiedSerialPort::between(before,
-                                            after.into_iter().map(|port| port.path().to_owned()).collect()))
-                                    },
-                                )
-                                .await
-                                else {
-                                    return;
-                                };
-                                match result {
-                                    Ok(identification) => match identification.port() {
-                                        Some(port) => {
-                                            on_found.call(port.to_owned());
-                                            step.set(IdentifyStep::Finished(identification.message().to_owned()));
-                                        }
-                                        None => project.report(identification.message()),
-                                    },
-                                    Err(error) => project.report(error),
-                                }
-                            });
-                        },
-                        if checking() { "Checking…" } else { "I unplugged it" }
+                        disabled: identify_port.pending(),
+                        aria_busy: identify_port.pending(),
+                        onclick: move |_| { identify_port.call(before.clone()); },
+                        if identify_port.pending() { "Checking…" } else { "I unplugged it" }
                     }
                     Action {
                         purpose: ActionPurpose::Cancel,
-                        disabled: checking(),
+                        disabled: identify_port.pending(),
                         onclick: move |_| step.set(IdentifyStep::Idle),
                         "Cancel"
                     }
@@ -831,13 +798,27 @@ fn CameraSection(
     let available = telemetry.snapshot().read().cameras().to_owned();
     let mut role = use_signal(|| "wrist".to_owned());
     let mut device = use_signal(String::new);
-    let saving_cameras = use_signal(|| false);
+    let mut save_cameras = use_action(move |assignments: CameraAssignments| async move {
+        HardwareCommands::new(project, telemetry)
+            .execute("", assignments.save())
+            .await
+    });
     let chosen = available
         .iter()
         .find(|camera| camera.id() == device())
         .cloned();
 
-    let scanning = use_signal(|| false);
+    let mut scan_cameras = use_action(move || async move {
+        HardwareCommands::new(project, telemetry)
+            .execute("", async move {
+                RobotClient::current()
+                    .refresh_cameras()
+                    .await
+                    .map_err(|error| error.to_string())
+                    .map(|_| ())
+            })
+            .await
+    });
     let taken = robot
         .cameras()
         .iter()
@@ -858,31 +839,11 @@ fn CameraSection(
                 Action {
                     purpose: ActionPurpose::Refresh,
                     variant: ActionVariant::Link,
-                    disabled: scanning(),
-                    aria_busy: scanning(),
+                    disabled: scan_cameras.pending(),
+                    aria_busy: scan_cameras.pending(),
                     title: "Look for cameras that have been plugged in or moved",
-                    onclick: move |_| {
-                        if !telemetry.controls_available() {
-                            project.report("Controls are paused because telemetry is unavailable or delayed.");
-                            return;
-                        }
-                        spawn(async move {
-                            if let Some(Err(error)) = SingleFlight::run(
-                                scanning,
-                                async move {
-                                    RobotClient::current().refresh_cameras()
-                                        .await
-                                        .map_err(|error| error.to_string())
-                                        .map(|_| ())
-                                },
-                            )
-                            .await
-                            {
-                                project.report(error)
-                            }
-                        });
-                    },
-                    {if scanning() { "Scanning…" } else { "Rescan" }}
+                    onclick: move |_| { scan_cameras.call(); },
+                    {if scan_cameras.pending() { "Scanning…" } else { "Rescan" }}
                 }
             }
             // Unassigning a camera is rare and reversible in one click, so it
@@ -899,8 +860,8 @@ fn CameraSection(
                             purpose: ActionPurpose::Remove,
                             variant: ActionVariant::Icon,
                             class: "device-camera-remove ui-hover-action",
-                            disabled: saving_cameras(),
-                            aria_busy: saving_cameras(),
+                            disabled: save_cameras.pending(),
+                            aria_busy: save_cameras.pending(),
                             aria_label: "Unassign the {binding.name()} camera",
                             title: "Unassign the {binding.name()} camera",
                             onclick: {
@@ -911,11 +872,10 @@ fn CameraSection(
                                     .cloned()
                                     .collect::<Vec<_>>();
                                 move |_| {
-                                    HardwareCommands::new(project, telemetry).save_cameras(CameraAssignments::new(
+                                    save_cameras.call(CameraAssignments::new(
                                         robot.clone(),
                                         remaining.clone(),
-                                        saving_cameras,
-                                    ).with_discovered(discovered.clone()))
+                                    ).with_discovered(discovered.clone()));
                                 }
                             },
                             UnassignIcon {}
@@ -929,7 +889,7 @@ fn CameraSection(
                 select {
                     class: "field",
                     "aria-label": "Camera device",
-                    disabled: saving_cameras(),
+                    disabled: save_cameras.pending(),
                     onchange: move |event| device.set(event.value()),
                     option { value: "", selected: device().is_empty(), "Add a camera…" }
                     for camera in available.clone() {
@@ -963,7 +923,7 @@ fn CameraSection(
                             class: "field",
                             "aria-label": "Camera role",
                             placeholder: "role, such as wrist",
-                            disabled: saving_cameras(),
+                            disabled: save_cameras.pending(),
                             value: "{role}",
                             oninput: move |event| role.set(event.value()),
                         }
@@ -971,8 +931,8 @@ fn CameraSection(
                             purpose: ActionPurpose::Assign,
                             variant: ActionVariant::Solid,
                             class: "shrink-0",
-                            disabled: saving_cameras(),
-                            aria_busy: saving_cameras(),
+                            disabled: save_cameras.pending(),
+                            aria_busy: save_cameras.pending(),
                             // A role names one viewpoint on the arm, so reusing
                             // one takes the camera off whatever held it. That is
                             // often what is wanted — but the button has to say
@@ -993,14 +953,13 @@ fn CameraSection(
                                         .cloned()
                                         .collect::<Vec<_>>();
                                     bindings.push(CameraBinding::new(name, device_id, None));
-                                    HardwareCommands::new(project, telemetry).save_cameras(CameraAssignments::new(
+                                    save_cameras.call(CameraAssignments::new(
                                         robot.clone(),
                                         bindings,
-                                        saving_cameras,
                                     ).with_discovered(discovered.clone()));
                                 }
                             },
-                            {if saving_cameras() { "Saving…" } else if taken { "Reassign" } else { "Assign" }}
+                            {if save_cameras.pending() { "Saving…" } else if taken { "Reassign" } else { "Assign" }}
                         }
                     }
                 }
@@ -1009,45 +968,31 @@ fn CameraSection(
     }
 }
 
-/// Replace a robot's camera assignments.
-impl HardwareCommands {
-    fn save_cameras(self, assignments: CameraAssignments) {
-        if assignments.saving.peek().to_owned() {
-            return;
-        }
-        let request = RobotDraft::from_robot(&assignments.robot)
-            .and_then(|draft| draft.with_cameras(&assignments.bindings, &assignments.discovered))
-            .and_then(RobotDraft::save);
-        self.run("", async move {
-            SingleFlight::run(assignments.saving, async move {
-                RobotClient::current()
-                    .save_document(request?)
-                    .await
-                    .map_err(|error| error.to_string())
-                    .map(|_| ())
-            })
-            .await
-            .unwrap_or(Ok(()))
-        });
-    }
-}
-
 struct CameraAssignments {
     robot: RobotSummary,
     bindings: Vec<CameraBinding>,
-    saving: Signal<bool>,
     discovered: Vec<spiral_robotics_common::robots::CameraStatus>,
 }
 
 impl CameraAssignments {
-    fn new(robot: RobotSummary, bindings: Vec<CameraBinding>, saving: Signal<bool>) -> Self {
+    fn new(robot: RobotSummary, bindings: Vec<CameraBinding>) -> Self {
         Self {
             robot,
             bindings,
-            saving,
             discovered: Vec::new(),
         }
     }
+    async fn save(self) -> Result<(), String> {
+        let request = RobotDraft::from_robot(&self.robot)?
+            .with_cameras(&self.bindings, &self.discovered)?
+            .save()?;
+        RobotClient::current()
+            .save_document(request)
+            .await
+            .map_err(|error| error.to_string())
+            .map(|_| ())
+    }
+
     fn with_discovered(
         mut self,
         discovered: Vec<spiral_robotics_common::robots::CameraStatus>,

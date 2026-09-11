@@ -5,6 +5,7 @@ use crate::components::interaction::{
     Action, ActionLink, ActionPurpose, ActionVariant, BlockingConfirmation, BrowserFocus,
     ConfirmationCopy, ConfirmationDismissal, ConfirmationResponse, FileAction, FileInput, Toggle,
 };
+use dioxus::dioxus_core::CapturedError;
 use dioxus::prelude::*;
 use spiral_robotics_common::settings::{DataSettings, SpiralConnectionUpdate};
 
@@ -12,7 +13,6 @@ use crate::activities::settings::robots::RobotPanel;
 use crate::robots::{HardwareViewState, RobotSelection};
 use crate::shell::notifications::MessageSource;
 use crate::shell::{project::ProjectSessionSignals, state::StudioProjectState};
-use crate::tasks::SingleFlight;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SettingsSection {
@@ -41,7 +41,6 @@ struct SettingsDraftSignals {
 struct SettingsOperationSignals {
     saving: Signal<bool>,
     testing: Signal<bool>,
-    transferring_project: Signal<bool>,
     test_result: Signal<Option<spiral_robotics_common::settings::ConnectionTest>>,
     save_error: Signal<Option<crate::client::CommandError>>,
     project_transfer: ProjectTransferSignals,
@@ -66,7 +65,6 @@ impl SettingsPanelState {
             operations: SettingsOperationSignals {
                 saving: Signal::new(false),
                 testing: Signal::new(false),
-                transferring_project: Signal::new(false),
                 test_result: Signal::new(None),
                 save_error: Signal::new(None),
                 project_transfer: ProjectTransferSignals {
@@ -111,7 +109,6 @@ pub(crate) fn SettingsPanel(
             SettingsOperationSignals {
                 mut saving,
                 mut testing,
-                transferring_project,
                 mut test_result,
                 mut save_error,
                 project_transfer:
@@ -125,6 +122,34 @@ pub(crate) fn SettingsPanel(
         settings.refresh();
     };
 
+    let mut import_project = use_action(move |file: dioxus::html::FileData| async move {
+        project_transfer_error.set(None);
+        match SettingsClient::current().import_project(file).await {
+            Ok(result) => {
+                on_saved();
+                pending_project_file.set(None);
+                project_transfer_error.set(None);
+                project.report_success_from(
+                    MessageSource::Settings,
+                    format!(
+                        "Project restored from {} relations ({} rows).{}",
+                        result.relations(),
+                        result.rows(),
+                        result.warnings().import_warning_suffix(),
+                    ),
+                );
+                Ok(())
+            }
+            Err(error) => {
+                pending_project_file.set(None);
+                project_transfer_error.set(Some(error.to_string()));
+                project.report_from(MessageSource::Settings, error.to_string());
+                BrowserFocus::after_render("project-import-input".to_owned());
+                Err(CapturedError::from_display(error))
+            }
+        }
+    });
+
     use_effect(move || {
         if telemetry.is_active() {
             BrowserFocus::after_render("data-settings-panel".to_owned());
@@ -133,7 +158,7 @@ pub(crate) fn SettingsPanel(
 
     use_effect(use_reactive((&initial,), move |(initial,)| {
         let acknowledged = saved();
-        let busy = saving() || transferring_project();
+        let busy = saving() || import_project.pending();
         if let Some(settings) = initial
             && !busy
             && *base.peek() != settings
@@ -155,7 +180,7 @@ pub(crate) fn SettingsPanel(
     }));
 
     let mut save = move |connection_test: Option<SettingsSection>| {
-        if saving() || transferring_project() || !settings_loaded {
+        if saving() || import_project.pending() || !settings_loaded {
             return;
         }
         save_error.set(None);
@@ -337,7 +362,7 @@ pub(crate) fn SettingsPanel(
                                 Action {
                                     purpose: ActionPurpose::Apply,
                                     variant: ActionVariant::Outline,
-                                    disabled: saving() || testing() || transferring_project() || current().spiral().project_id().trim().is_empty(),
+                                    disabled: saving() || testing() || import_project.pending() || current().spiral().project_id().trim().is_empty(),
                                     aria_busy: testing(),
                                     onclick: move |_| save(Some(SettingsSection::Spiral)),
                                     if testing() { "Testing…" } else { "Save and test connection" }
@@ -355,8 +380,8 @@ pub(crate) fn SettingsPanel(
                                             purpose: ActionPurpose::Import,
                                             variant: ActionVariant::Outline,
                                             title: if project_transfer_ready { "Replace all Studio-managed relations in the active SpiralDB project" } else { "Save the Spiral destination before transferring a project" },
-                                            disabled: saving() || transferring_project() || !project_transfer_ready,
-                                            aria_busy: transferring_project(),
+                                            disabled: saving() || import_project.pending() || !project_transfer_ready,
+                                            aria_busy: import_project.pending(),
                                             input: FileInput::new(
                                                 ".spiral-project,application/vnd.spiral-robotics.project",
                                                 move |event: Event<FormData>| {
@@ -367,7 +392,7 @@ pub(crate) fn SettingsPanel(
                                             ).with_id("project-import-input"),
                                             "Import project"
                                         }
-                                        if transferring_project() || !project_transfer_ready {
+                                        if import_project.pending() || !project_transfer_ready {
                                             Action { purpose: ActionPurpose::Export, variant: ActionVariant::Outline, title: if project_transfer_ready { "Project transfer is in progress" } else { "Save the Spiral destination before transferring a project" }, disabled: true, "Export project" }
                                         } else {
                                             ActionLink {
@@ -402,7 +427,7 @@ pub(crate) fn SettingsPanel(
                                 p { class: "settings-help",
                                     "Studio uses Arrow IPC over HTTP. The selected endpoint applies to new training and rollout sessions; an active session keeps its current connection."
                                 }
-                                Action { purpose: ActionPurpose::Apply, variant: ActionVariant::Outline, disabled: saving() || testing() || transferring_project(), aria_busy: testing(), onclick: move |_| save(Some(SettingsSection::Training)), if testing() { "Connecting…" } else { "Save and connect" } }
+                                Action { purpose: ActionPurpose::Apply, variant: ActionVariant::Outline, disabled: saving() || testing() || import_project.pending(), aria_busy: testing(), onclick: move |_| save(Some(SettingsSection::Training)), if testing() { "Connecting…" } else { "Save and connect" } }
                             },
                             SettingsSection::Video => rsx! {
                                 ProviderHeading { title: "Video", description: "Include assigned cameras in new episodes." }
@@ -445,8 +470,8 @@ pub(crate) fn SettingsPanel(
                         "Applies to this Studio."
                     }
                     div {
-                        Action { purpose: ActionPurpose::Cancel, disabled: saving() || transferring_project(), onclick: move |_| { current.set(base()); client_secret.set(String::new()); save_error.set(None); test_result.set(None); }, "Discard changes" }
-                        Action { purpose: ActionPurpose::Apply, variant: ActionVariant::Solid, disabled: saving() || transferring_project() || current().spiral().project_id().trim().is_empty(), aria_busy: saving(), onclick: move |_| save(None), if saving() { "Saving…" } else { "Save settings" } }
+                        Action { purpose: ActionPurpose::Cancel, disabled: saving() || import_project.pending(), onclick: move |_| { current.set(base()); client_secret.set(String::new()); save_error.set(None); test_result.set(None); }, "Discard changes" }
+                        Action { purpose: ActionPurpose::Apply, variant: ActionVariant::Solid, disabled: saving() || import_project.pending() || current().spiral().project_id().trim().is_empty(), aria_busy: saving(), onclick: move |_| save(None), if saving() { "Saving…" } else { "Save settings" } }
                     }
                 }
             }
@@ -458,52 +483,14 @@ pub(crate) fn SettingsPanel(
                 consequence: "Every Studio-managed relation in this project will be replaced, including robots, episodes, media, settings, training history, checkpoints, and rollouts. Connected robots will disconnect first; imported robots will then connect automatically.".to_owned(),
                 copy: ConfirmationCopy::new(
                     format!("Import {} into the active SpiralDB project.", file.name()),
-                    if transferring_project() { "Restoring…" } else { "Import and replace project" },
+                    if import_project.pending() { "Restoring…" } else { "Import and replace project" },
                     "Keep current project",
                 ),
                 response: ConfirmationResponse::new(ActionPurpose::Replace, move |_| {
-                    if transferring_project() {
-                        return;
-                    }
-                    let file = file.clone();
-                    project_transfer_error.set(None);
-                    crate::client::project::ProjectClient::current().spawn(async move {
-                        let Some(outcome) = SingleFlight::run(transferring_project, async {
-                                let result = SettingsClient::current().import_project(file)
-                                    .await
-                                    .map_err(|error| error.to_string())?;
-                                                        Ok::<_, String>(result)
-                            })
-                            .await
-                        else {
-                            return;
-                        };
-                        match outcome {
-                            Ok(result) => {
-                                on_saved();
-                                pending_project_file.set(None);
-                                project_transfer_error.set(None);
-                                project.report_success_from(
-                                    MessageSource::Settings,
-                                    format!(
-                                        "Project restored from {} relations ({} rows).{}",
-                                        result.relations(),
-                                        result.rows(),
-                                        result.warnings().import_warning_suffix(),
-                                    ),
-                                );
-                            }
-                            Err(error) => {
-                                pending_project_file.set(None);
-                                project_transfer_error.set(Some(error.clone()));
-                                project.report_from(MessageSource::Settings, error);
-                                BrowserFocus::after_render("project-import-input".to_owned());
-                            }
-                        }
-                    });
+                    import_project.call(file.clone());
                 }, move |_| pending_project_file.set(None)),
                 dismissal: ConfirmationDismissal::new("project-import-input")
-                    .with_pending(transferring_project()),
+                    .with_pending(import_project.pending()),
             }
         }
     }

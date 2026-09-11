@@ -19,6 +19,5 @@ pub(crate) mod format;
 pub(crate) mod panels;
 mod robots;
 pub(crate) mod shell;
-pub(crate) mod tasks;
 
 pub use shell::App;

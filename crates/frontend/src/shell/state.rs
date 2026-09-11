@@ -3,6 +3,7 @@ use crate::shell::notifications::{
     MessageNotice, MessageSeverity, MessageSource, NotificationCenterState,
 };
 use crate::shell::project::ProjectSessionSignals;
+use dioxus::dioxus_core::CapturedError;
 use dioxus::prelude::*;
 use std::future::Future;
 /// Project lifetime for connection status and notifications shared by routes.
@@ -53,12 +54,28 @@ impl StudioProjectState {
         let success = success.into();
         // Accepted commands belong to the project and report through its notifications.
         crate::client::project::ProjectClient::current().spawn(async move {
-            match future.await {
-                Ok(()) if success.is_empty() => {}
-                Ok(()) => self.report_success(success),
-                Err(error) => self.report(error),
-            }
+            let _ = self.execute_utility(success, future).await;
         });
+    }
+    /// Report an operation's outcome while its caller owns the task lifecycle.
+    pub(crate) async fn execute_utility(
+        self,
+        success: impl Into<String>,
+        future: impl Future<Output = Result<(), String>>,
+    ) -> Result<(), CapturedError> {
+        let success = success.into();
+        match future.await {
+            Ok(()) => {
+                if !success.is_empty() {
+                    self.report_success(success);
+                }
+                Ok(())
+            }
+            Err(error) => {
+                self.report(&error);
+                Err(CapturedError::from_display(error))
+            }
+        }
     }
     pub(crate) fn report(&self, message: impl Into<String>) {
         self.report_from(MessageSource::Studio, message);
