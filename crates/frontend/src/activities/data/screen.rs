@@ -14,6 +14,37 @@ use spiral_robotics_common::datasets::ProjectResource;
 pub(super) struct OpenResource {
     resource: ProjectResource,
     revision: u64,
+    topic: Option<String>,
+}
+impl OpenResource {
+    fn new(resource: ProjectResource, topic: Option<String>) -> Self {
+        Self {
+            resource,
+            revision: 0,
+            topic,
+        }
+    }
+    fn id(&self) -> String {
+        self.topic.as_ref().map_or_else(
+            || self.resource.resource_id().to_owned(),
+            |topic| Self::topic_id(&self.resource, topic),
+        )
+    }
+    pub(super) fn topic_id(resource: &ProjectResource, topic: &str) -> String {
+        format!("dataset-output:{}:{topic}", resource.resource_id())
+    }
+    fn title(&self) -> String {
+        self.topic
+            .clone()
+            .unwrap_or_else(|| self.resource.selection().path().last().unwrap().clone())
+    }
+    fn sql(&self) -> String {
+        match &self.topic {
+            Some(topic) => self.resource.selection().topic_sql(topic),
+            None if self.resource.kind() == "dataset" => self.resource.selection().episodes_sql(),
+            None => self.resource.table_sql(),
+        }
+    }
 }
 #[derive(Clone, Copy, PartialEq)]
 pub(super) struct ResourceTabs {
@@ -32,22 +63,22 @@ impl ResourceTabs {
             importing,
         }
     }
-    pub(super) fn open(mut self, resource: ProjectResource) {
-        let id = resource.resource_id().to_owned();
+    pub(super) fn open(self, resource: ProjectResource) {
+        self.open_session(OpenResource::new(resource, None));
+    }
+    pub(super) fn open_topic(self, resource: ProjectResource, topic: String) {
+        self.open_session(OpenResource::new(resource, Some(topic)));
+    }
+    fn open_session(mut self, session: OpenResource) {
+        let id = session.id();
         let mut opened = self.opened.write();
-        if let Some(tab) = opened
-            .iter_mut()
-            .find(|tab| tab.resource.resource_id() == id)
-        {
-            if tab.resource != resource {
-                tab.resource = resource;
+        if let Some(tab) = opened.iter_mut().find(|tab| tab.id() == id) {
+            if tab.resource != session.resource {
+                tab.resource = session.resource;
                 tab.revision = tab.revision.wrapping_add(1);
             }
         } else {
-            opened.push(OpenResource {
-                resource,
-                revision: 0,
-            });
+            opened.push(session);
         }
         drop(opened);
         self.active.set(Some(id));
@@ -57,9 +88,7 @@ impl ResourceTabs {
         if id == "data-import" {
             self.importing.set(false);
         } else {
-            self.opened
-                .write()
-                .retain(|tab| tab.resource.resource_id() != id);
+            self.opened.write().retain(|tab| tab.id() != id);
         }
         if self.active.peek().as_deref() == Some(id) {
             self.active.set(None);
@@ -127,8 +156,8 @@ fn DataPanels() -> Element {
     for tab in tabs.opened.read().iter() {
         panels.push(
             Panel::new(
-                tab.resource.resource_id(),
-                tab.resource.selection().path().last().unwrap().clone(),
+                tab.id(),
+                tab.title(),
                 "datasets",
                 rsx! { ObjectSession { tab: tab.clone() } },
             )
@@ -154,14 +183,14 @@ fn DataPanels() -> Element {
     let initial_layout = PanelLayout::new(LayoutNode::split(
         "data-columns",
         SplitAxis::Horizontal,
-        0.25,
+        0.18,
         LayoutNode::tile("tables", ["tables".to_owned()]),
         LayoutNode::empty_tile("datasets"),
     ));
     let active_panel = tabs.active_id().map(PanelId::new);
     rsx! { div { class: "data-workspace min-h-0 min-w-0 overflow-hidden",
         PanelWorkspace { panels, initial_layout, active_panel,
-            layout_scope: Some("spiral_robotics.panel-layout.v10.data".to_owned()),
+            layout_scope: Some("spiral_robotics.panel-layout.v11.data".to_owned()),
             on_panel_activate: move |id: PanelId| tabs.active.set(Some(id.as_str().to_owned())),
             on_panel_close: move |panel: PanelId| tabs.close(panel.as_str()),
             group_toolbar: move |group: GroupContext| {
@@ -210,13 +239,8 @@ enum ObjectSection {
 #[component]
 fn ObjectSession(tab: OpenResource) -> Element {
     let studio = crate::shell::state::StudioProjectState::current();
-    let dataset = tab.resource.kind() == "dataset";
-    let initial_sql = if dataset {
-        tab.resource.selection().episodes_sql()
-    } else {
-        tab.resource.table_sql()
-    };
-    let controller = QueryController::use_controller(initial_sql);
+    let dataset = tab.resource.kind() == "dataset" && tab.topic.is_none();
+    let controller = QueryController::use_controller(tab.sql());
     let mut section = use_signal(|| ObjectSection::Inspect);
     let revision = tab.revision;
     use_effect(use_reactive((&revision,), move |_| {
@@ -236,7 +260,7 @@ fn ObjectSession(tab: OpenResource) -> Element {
         }
         div { class: "data-session-content", hidden: section() != ObjectSection::Inspect,
             if dataset { DatasetInspector { key: "{tab.revision}", selection: tab.resource.selection().clone() } }
-            else { TableInspector { key: "{tab.revision}", resource: tab.resource.clone() } }
+            else { RelationPreview { key: "{tab.revision}", statement: tab.sql() } }
         }
         div { class: "data-session-content", hidden: section() != ObjectSection::Sql, QueryPanel { studio, controller } }
         div { class: "data-session-content", hidden: section() != ObjectSection::Results, QueryResultView { controller } }
@@ -244,8 +268,7 @@ fn ObjectSession(tab: OpenResource) -> Element {
 }
 
 #[component]
-fn TableInspector(resource: ProjectResource) -> Element {
-    let statement = resource.table_sql();
+fn RelationPreview(statement: String) -> Element {
     let query = statement.clone();
     let mut preview = use_resource(move || {
         let query = query.clone();
@@ -313,6 +336,20 @@ mod tests {
             assert_eq!(second.sql(), "SELECT 2");
             assert_eq!(first.max_rows(), 100);
             assert_eq!(second.max_rows(), 25);
+            let resource = SessionHarness::resource("first");
+            let topic = "/camera/front";
+            let topic_id = OpenResource::topic_id(&resource, topic);
+            tabs.open_topic(resource.clone(), topic.into());
+            tabs.open_topic(resource.clone(), topic.into());
+            assert_eq!(tabs.opened.peek().len(), 3);
+            assert_eq!(tabs.active_id().as_deref(), Some(topic_id.as_str()));
+            assert_eq!(
+                tabs.opened.peek()[2].sql(),
+                resource.selection().topic_sql(topic)
+            );
+            tabs.close(&topic_id);
+            assert_eq!(tabs.opened.peek().len(), 2);
+            tabs.open(resource);
             tabs.importing.set(true);
             tabs.close("data-import");
             assert_eq!(tabs.active_id().as_deref(), Some("first"));

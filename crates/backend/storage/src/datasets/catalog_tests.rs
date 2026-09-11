@@ -12,6 +12,29 @@ use tokio::{net::TcpListener, task::JoinHandle};
 use super::*;
 use crate::{AdbcDatabase, ProjectStore};
 
+#[test]
+fn studio_grouping_respects_configured_tables_and_keeps_user_data_visible() {
+    let grouping = StudioCatalogGrouping::new("bench");
+    for (path, kind, expected) in [
+        (vec!["bench_robots"], "table", true),
+        (vec!["bench_settings"], "table", true),
+        (vec!["dataset_source"], "table", true),
+        (vec!["dataset_source_default"], "view", true),
+        (vec!["dataset_default"], "dataset", false),
+        (vec!["bench_experiment"], "table", false),
+        (vec!["studio_robots"], "table", false),
+        (vec!["dataset_source_custom"], "dataset", false),
+        (vec!["user", "bench_robots"], "table", false),
+    ] {
+        let resource = ProjectResource::new(
+            DatasetSelection::new(path.iter().map(|name| (*name).into()).collect()).unwrap(),
+            kind.into(),
+            ("resource".into(), "version".into()),
+        );
+        assert_eq!(grouping.contains(&resource), expected, "{path:?}");
+    }
+}
+
 #[derive(Default)]
 struct CatalogState {
     tokens: usize,

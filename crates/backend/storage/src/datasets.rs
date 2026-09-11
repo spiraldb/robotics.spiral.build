@@ -442,7 +442,15 @@ impl EpisodeTopicQuery {
 
 impl StorageManager {
     pub async fn project_resources(&self) -> Result<Vec<ProjectResource>, String> {
-        self.project_store().dataset_catalog().resources().await
+        let store = self.project_store();
+        let resources = store.dataset_catalog().resources().await?;
+        Ok(resources
+            .into_iter()
+            .map(|resource| {
+                let internal = StudioCatalogGrouping::new(store.table_prefix()).contains(&resource);
+                resource.with_studio_internal(internal)
+            })
+            .collect())
     }
     pub async fn validate_mcap_destination(&self, name: &str) -> Result<bool, String> {
         self.project_store().validate_mcap_destination(name).await
@@ -460,6 +468,28 @@ impl StorageManager {
             .dataset_catalog()
             .inspect(selection)
             .await
+    }
+}
+
+/// Presentation grouping only; this does not establish ownership for writes.
+struct StudioCatalogGrouping<'a> {
+    table_prefix: &'a str,
+}
+impl<'a> StudioCatalogGrouping<'a> {
+    fn new(table_prefix: &'a str) -> Self {
+        Self { table_prefix }
+    }
+    fn contains(&self, resource: &ProjectResource) -> bool {
+        let [name] = resource.selection().path() else {
+            return false;
+        };
+        match resource.kind() {
+            "table" => crate::db::Table::ALL
+                .iter()
+                .any(|table| table.qualified_name(self.table_prefix) == *name),
+            "view" => name.starts_with("dataset_source_"),
+            _ => false,
+        }
     }
 }
 
