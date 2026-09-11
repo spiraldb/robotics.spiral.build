@@ -137,7 +137,7 @@ impl StudioServer {
             .filter(|path| path.join("index.html").is_file())
         else {
             eprintln!(
-                "error: the Dioxus client bundle is missing; run `dx serve --fullstack` for development or launch the server produced by `dx bundle --fullstack`"
+                "error: the Dioxus client bundle is missing; from the workspace root, run `dx serve --fullstack --debug-symbols false @client --package spiral-robotics-frontend @server --package spiral-robotics-backend`, or use `dx bundle` with the same options and launch the bundled server"
             );
             return ExitCode::FAILURE;
         };

@@ -36,19 +36,28 @@ The MCAP dataset inspector currently requires the `local-driver` shell;
 the pinned release driver predates its query functions. See
 [MCAP import design](docs/mcap-import-design.md).
 
-Start the studio with:
+Start the studio from the workspace root with:
 
 ```console
-cd crates/studio
-dx serve --fullstack --release --debug-symbols false
+dx serve --fullstack --release --debug-symbols false \
+  @client --package spiral-robotics-frontend \
+  @server --package spiral-robotics-backend
 ```
 
 Studio renders entirely in the browser. The native server serves the built HTML,
 JavaScript, WASM, and assets alongside `/api`; it does not compile or render the
 frontend. `--fullstack` tells DX to build and watch both processes, without enabling
-Dioxus SSR or hydration. Build a distributable server and browser bundle with
-`dx bundle --fullstack --release --debug-symbols false` from `crates/studio`; keep its `public` directory
-beside the server binary.
+Dioxus SSR or hydration. The frontend and backend each own their executable;
+DX builds them together using the `@client` and `@server` package selections.
+Build a distributable server and browser bundle from the workspace root with:
+
+```console
+dx bundle --fullstack --release --debug-symbols false \
+  @client --package spiral-robotics-frontend \
+  @server --package spiral-robotics-backend
+```
+
+Keep the bundle's `public` directory beside the server binary.
 
 Keep `--debug-symbols false` on browser builds: DX enables WASM debug symbols by
 default, and the bundled Binaryen currently fails when processing that DWARF.
@@ -111,7 +120,9 @@ To connect Studio to a local SpiralDB stack:
 
 ```console
 SPIRAL__DEV=1 \
-dx serve --fullstack
+dx serve --fullstack --debug-symbols false \
+  @client --package spiral-robotics-frontend \
+  @server --package spiral-robotics-backend
 ```
 
 On first launch, Studio opens **Settings → SpiralDB** so you can enter the

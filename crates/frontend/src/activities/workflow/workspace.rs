@@ -47,10 +47,6 @@ enum AssistantInline {
 
 #[component]
 fn WorkflowPanels(controller: super::state::WorkflowController) -> Element {
-    let studio = StudioProjectState::current();
-    let workflows = controller.workflows();
-    let selected = controller.spec().id().to_owned();
-    let reason = controller.workflow_selection_reason();
     let panels = vec![
         Panel::new(
             ASSISTANT_PANEL_ID,
@@ -84,27 +80,7 @@ fn WorkflowPanels(controller: super::state::WorkflowController) -> Element {
 
     rsx! {
         div { class: "workflow-workspace",
-            header { class: "workflow-picker",
-                label { r#for: "workflow-picker", "Workflow" }
-                select {
-                    id: "workflow-picker",
-                    value: "{selected}",
-                    disabled: reason.is_some(),
-                    onchange: move |event| controller.select_workflow(Some(event.value()), studio),
-                    for workflow in workflows {
-                        option { value: "{workflow.id()}", selected: workflow.id() == selected, "{workflow.name()}" }
-                    }
-                }
-                Action {
-                    purpose: ActionPurpose::Create,
-                    variant: ActionVariant::Outline,
-                    disabled: reason.is_some(),
-                    onclick: move |_| controller.select_workflow(None, studio),
-                    "New workflow"
-                }
-                WorkflowDatasetPicker { controller }
-                if let Some(reason) = reason.as_ref() { span { role: "status", "{reason}" } }
-            }
+            super::document_controls::WorkflowDocumentControls { controller }
             div { class: "workflow-panels",
         PanelWorkspace {
             panels,
@@ -115,46 +91,6 @@ fn WorkflowPanels(controller: super::state::WorkflowController) -> Element {
         }
             }
         }
-    }
-}
-
-#[component]
-fn WorkflowDatasetPicker(controller: super::state::WorkflowController) -> Element {
-    use crate::activities::data::DatasetClient;
-    use crate::client::queries::{QueryDomain, QueryPolicy};
-    let sessions = crate::shell::project::ProjectSessionSignals::current();
-    let datasets = QueryPolicy::on_demand(QueryDomain::Catalog).use_when(
-        move || sessions.catalog_available(),
-        || DatasetClient::current().list_datasets(),
-    );
-    let studio = StudioProjectState::current();
-    let selected = String::new();
-    let response = datasets.read();
-    match response.as_ref() {
-        Some(Ok(items)) => {
-            let items = items.clone();
-            let choices = items.clone();
-            let empty = items.is_empty();
-            rsx! {
-                label { r#for: "workflow-dataset", "Start from dataset" }
-                select {
-                    id: "workflow-dataset", value: "{selected}",
-                    disabled: controller.workflow_selection_reason().is_some() || empty,
-                    title: "Start a workflow from this dataset. Replaces the current graph.",
-                    onchange: move |event| {
-                        if let Some(source) = choices.iter().find(|source| source.resource_id() == event.value()) {
-                            controller.select_dataset(source.clone(), studio);
-                        }
-                    },
-                    option { value: "", disabled: true, if empty { "No datasets available" } else { "Choose a dataset" } }
-                    for source in items {
-                        option { value: "{source.resource_id()}", selected: source.resource_id() == selected, "{source.selection().label()}" }
-                    }
-                }
-            }
-        }
-        Some(Err(error)) => rsx! { span { role: "alert", "Could not load datasets: {error}" } },
-        None => rsx! { span { role: "status", "Loading datasets…" } },
     }
 }
 
@@ -275,7 +211,7 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
         section { class: "workflow-assistant", "aria-label": "Workflow assistant",
             header { class: "workflow-assistant-intro",
                 div { class: "workflow-assistant-heading",
-                    h2 { "Assistant" }
+                    h2 { class: "sr-only", "Assistant" }
                     span {
                         class: if active { "workflow-assistant-presence is-active" } else if configured { "workflow-assistant-presence is-ready" } else { "workflow-assistant-presence" },
                         role: "status",
@@ -343,7 +279,7 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
                                 if !message.tools().is_empty() {
                                     details {
                                         class: "workflow-agent-tools-disclosure",
-                                        open: message.phase() == WorkflowAgentMessagePhase::Failed,
+                                        "data-failed": message.phase() != WorkflowAgentMessagePhase::Complete && message.tools().iter().any(|tool| tool.phase() == WorkflowAgentToolPhase::Failed),
                                         summary { "{message.tools().trace_summary(message.phase())}" }
                                         ul { class: "workflow-agent-tools", "aria-label": "Assistant execution trace",
                                         for tool in message.tools().to_owned() {
@@ -1060,7 +996,7 @@ fn WorkflowCanvas(controller: super::state::WorkflowController) -> Element {
     let edit_label = if dirty {
         "Unsaved changes".to_owned()
     } else {
-        "No pending changes".to_owned()
+        "No unsaved changes".to_owned()
     };
     let complete_with_warnings = snapshot.phase() == WorkflowRunPhase::Completed
         && snapshot.nodes().iter().any(|node| {
@@ -1098,7 +1034,7 @@ fn WorkflowCanvas(controller: super::state::WorkflowController) -> Element {
             // terminal nodes off-screen.
             gloo_timers::future::TimeoutFuture::new(80).await;
             if *canvas_resize_revision.peek() == revision {
-                flow.fit_workflow_view(160);
+                flow.fit_workflow_view();
             }
         });
     });
@@ -1113,7 +1049,7 @@ fn WorkflowCanvas(controller: super::state::WorkflowController) -> Element {
             // Give a new card one rendered frame so dioxus-flow includes its
             // measured bounds in layered layout and the accompanying fit.
             gloo_timers::future::TimeoutFuture::new(48).await;
-            flow.auto_layout(&WorkflowCanvasLayout::options());
+            WorkflowCanvasLayout::apply(nodes, flow);
         });
     });
 
@@ -1135,9 +1071,9 @@ fn WorkflowCanvas(controller: super::state::WorkflowController) -> Element {
                 // canvas rather than its former hidden bounds.
                 gloo_timers::future::TimeoutFuture::new(48).await;
                 if needs_layout {
-                    flow.auto_layout(&WorkflowCanvasLayout::options());
+                    WorkflowCanvasLayout::apply(nodes, flow);
                 } else {
-                    flow.fit_view(300);
+                    flow.fit_workflow_view();
                 }
             });
         }
@@ -1146,13 +1082,6 @@ fn WorkflowCanvas(controller: super::state::WorkflowController) -> Element {
     rsx! {
         section { class: "workflow-canvas", "aria-label": "Workflow graph",
             header { class: "workflow-canvas-toolbar",
-                input {
-                    class: "workflow-name-input",
-                    "aria-label": "Workflow name",
-                    value: "{spec.name()}",
-                    disabled: topology_blocked || controller.agent_state().session().phase().active(),
-                    oninput: move |event| controller.set_name(event.value()),
-                }
                 div {
                     strong { class: if dirty { "workflow-edit-badge is-modified" } else { "workflow-edit-badge" }, "{edit_label}" }
                     if snapshot.phase() != WorkflowRunPhase::Idle {
@@ -1176,7 +1105,7 @@ fn WorkflowCanvas(controller: super::state::WorkflowController) -> Element {
                     class: "workflow-fit-action",
                     disabled: empty,
                     title: if empty { "The workflow canvas is empty" } else { "Fit the workflow graph in the canvas" },
-                    onclick: move |_| flow.fit_workflow_view(300),
+                    onclick: move |_| flow.fit_workflow_view(),
                     FitViewIcon {}
                     "Fit"
                 }
@@ -1248,7 +1177,7 @@ fn WorkflowCanvas(controller: super::state::WorkflowController) -> Element {
                     nodes,
                     edges,
                     handle: flow,
-                    fit_view: true,
+                    fit_view: false,
                     fit_view_padding: 0.10,
                     min_zoom: WORKFLOW_MIN_ZOOM,
                     max_zoom: WORKFLOW_MAX_ZOOM,
@@ -1258,9 +1187,13 @@ fn WorkflowCanvas(controller: super::state::WorkflowController) -> Element {
                     on_node_click: move |id: String| controller.select_node(id),
                     on_pane_click: move |_| controller.clear_selection(),
                     node_view: move |ctx: NodeViewCtx<WorkflowNodeData>| rsx! {
-                        WorkflowNodeCard { ctx }
+                        WorkflowNodeCard {
+                            has_input: edges.read().iter().any(|edge| edge.target == ctx.node.id),
+                            has_output: edges.read().iter().any(|edge| edge.source == ctx.node.id),
+                            ctx,
+                        }
                     },
-                    Background { variant: BackgroundVariant::Dots, gap: 20.0, size: 0.7 }
+                    Background { variant: BackgroundVariant::Dots, gap: 24.0, size: 0.6 }
                 }
                 if empty {
                     div { class: "workflow-flow-empty", role: "status", "aria-live": "polite",
@@ -1283,6 +1216,38 @@ fn WorkflowCanvas(controller: super::state::WorkflowController) -> Element {
 struct WorkflowCanvasLayout;
 
 impl WorkflowCanvasLayout {
+    fn apply(
+        mut nodes: Signal<Vec<dioxus_flow::Node<WorkflowNodeData>>>,
+        flow: FlowHandle<WorkflowNodeData>,
+    ) {
+        let Some(core) = flow.core() else { return };
+        let geometry = nodes
+            .peek()
+            .iter()
+            .map(|node| dioxus_flow::LayoutNode {
+                id: node.id.clone(),
+                size: node.rect().size(),
+            })
+            .collect::<Vec<_>>();
+        let edges = core
+            .edges
+            .peek()
+            .iter()
+            .map(|edge| (edge.source.clone(), edge.target.clone()))
+            .collect::<Vec<_>>();
+        let positions = dioxus_flow::compute_layout(&geometry, &edges, &Self::options());
+        // Commit the native layout atomically. A resize/Fit must never leave
+        // nodes halfway through a layout animation with overlapping edge stubs.
+        nodes.with_mut(|nodes| {
+            for node in nodes {
+                if let Some(position) = positions.get(&node.id) {
+                    node.position = *position;
+                }
+            }
+        });
+        flow.fit_workflow_view();
+    }
+
     fn options() -> LayoutOptions {
         LayoutOptions::default()
             .direction(LayoutDirection::LeftToRight)
@@ -1294,40 +1259,37 @@ impl WorkflowCanvasLayout {
 }
 
 trait WorkflowFlowPresentation {
-    fn fit_workflow_view(self, duration_ms: u64);
+    fn fit_workflow_view(self);
 }
 
 impl WorkflowFlowPresentation for FlowHandle<WorkflowNodeData> {
-    fn fit_workflow_view(self, duration_ms: u64) {
-        self.fit_view(duration_ms);
-        spawn(async move {
-            gloo_timers::future::TimeoutFuture::new(duration_ms.saturating_add(16) as u32).await;
-            let Some(viewport) = self.viewport() else {
-                return;
-            };
-            if viewport.zoom >= WORKFLOW_MIN_ZOOM {
-                return;
-            }
-            let Some(core) = self.core() else {
-                return;
-            };
-            let rect = *core.container.peek();
-            let center = Point::new(rect.width / 2.0, rect.height / 2.0);
-            self.set_viewport(
-                viewport.zoom_about(
-                    WORKFLOW_MIN_ZOOM,
-                    center,
-                    WORKFLOW_MIN_ZOOM,
-                    WORKFLOW_MAX_ZOOM,
-                ),
-                0,
-            );
-        });
+    fn fit_workflow_view(self) {
+        // Fit using the native viewport math, without enlarging text beyond its
+        // authored size. Integer translation keeps the resting canvas crisp.
+        self.fit_view(0);
+        let (Some(viewport), Some(core)) = (self.viewport(), self.core()) else {
+            return;
+        };
+        let rect = *core.container.peek();
+        let center = Point::new(rect.width / 2.0, rect.height / 2.0);
+        let mut resting = viewport.zoom_about(
+            viewport.zoom.min(1.0),
+            center,
+            WORKFLOW_MIN_ZOOM,
+            WORKFLOW_MAX_ZOOM,
+        );
+        resting.x = resting.x.round();
+        resting.y = resting.y.round();
+        self.set_viewport(resting, 0);
     }
 }
 
 #[component]
-fn WorkflowNodeCard(ctx: NodeViewCtx<WorkflowNodeData>) -> Element {
+fn WorkflowNodeCard(
+    ctx: NodeViewCtx<WorkflowNodeData>,
+    has_input: bool,
+    has_output: bool,
+) -> Element {
     let node = &ctx.node;
     let data = &node.data;
     let fields = if data.fields().is_empty() {
@@ -1356,7 +1318,7 @@ fn WorkflowNodeCard(ctx: NodeViewCtx<WorkflowNodeData>) -> Element {
             class: "workflow-node-card {data.kind_class()} {data.phase_class()} {selected_class} {dragging_class}",
             title: data.error().unwrap_or_default(),
             "aria-current": if node.selected { "true" } else { "false" },
-            if !matches!(data.kind(), WorkflowNodeKind::Table) {
+            if has_input {
                 Handle { kind: HandleKind::Target, position: node.target_side }
             }
             header { class: "workflow-node-heading",
@@ -1369,14 +1331,13 @@ fn WorkflowNodeCard(ctx: NodeViewCtx<WorkflowNodeData>) -> Element {
                 if let Some(relation) = &data.relation() {
                     p { class: "workflow-node-relation", "reads ", code { "{relation}" } }
                 }
-                if let Some(sql) = &data.sql() {
-                    code { class: "workflow-node-sql", "{sql}" }
-                }
             }
             footer { class: "workflow-node-footer",
                 span { class: "workflow-node-status-dot {data.phase_class()}", "aria-hidden": "true" }
                 if let Some(progress) = &data.progress() {
                     span { "{data.phase_label()} · {progress.completed()}/{progress.total()} {progress.unit()}" }
+                } else if data.phase() == WorkflowNodePhase::Pending {
+                    span { "Not run" }
                 } else {
                     span { "{data.phase_label()} · {data.detail()}" }
                 }
@@ -1389,7 +1350,7 @@ fn WorkflowNodeCard(ctx: NodeViewCtx<WorkflowNodeData>) -> Element {
                     "aria-label": "{data.phase_label()}: {progress.completed()} of {progress.total()} {progress.unit()}"
                 }
             }
-            if data.kind() != WorkflowNodeKind::Result {
+            if has_output {
                 Handle { kind: HandleKind::Source, position: node.source_side }
             }
         }
@@ -1672,8 +1633,6 @@ mod tests {
         assert!(source.contains("ActionPurpose::Remove"));
         assert!(source.contains("LayoutDirection::LeftToRight"));
         assert!(source.contains("min_zoom: WORKFLOW_MIN_ZOOM"));
-        assert!(source.contains("viewport.zoom >= WORKFLOW_MIN_ZOOM"));
-        assert!(source.contains(".gaps(32.0, 56.0)"));
         assert!(source.contains("let mut canvas_topology = use_signal(String::new)"));
         assert!(source.contains("workflow-edit-badge"));
         assert!(source.contains("workflow-run-badge"));
@@ -1681,6 +1640,40 @@ mod tests {
         assert!(source.contains("Choose a qualified relation"));
         assert!(!source.contains("Hugging Face"));
         assert!(!source.contains("MCAP"));
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn graph_layout_aligns_ports_and_leaves_clearance_for_connector_stubs() {
+        let nodes = [
+            dioxus_flow::LayoutNode {
+                id: "source".into(),
+                size: dioxus_flow::Size::new(168.0, 160.0),
+            },
+            dioxus_flow::LayoutNode {
+                id: "model".into(),
+                size: dioxus_flow::Size::new(168.0, 136.0),
+            },
+            dioxus_flow::LayoutNode {
+                id: "result".into(),
+                size: dioxus_flow::Size::new(168.0, 144.0),
+            },
+        ];
+        let edges = [
+            ("source".into(), "model".into()),
+            ("model".into(), "result".into()),
+        ];
+        let positions =
+            dioxus_flow::compute_layout(&nodes, &edges, &WorkflowCanvasLayout::options());
+        for pair in nodes.windows(2) {
+            let source = positions[&pair[0].id];
+            let target = positions[&pair[1].id];
+            // Two 20-unit stubs plus the library's 5-unit handle rims.
+            assert!(target.x - source.x - pair[0].size.width > 50.0);
+            assert!(
+                (source.y + pair[0].size.height / 2.0 - target.y - pair[1].size.height / 2.0).abs()
+                    < 0.01
+            );
+        }
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]

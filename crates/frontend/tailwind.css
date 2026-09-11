@@ -1340,7 +1340,7 @@
   }
 
   .workflow-assistant-intro {
-    @apply shrink-0 border-b border-line bg-surface px-4 py-3;
+    @apply shrink-0 bg-surface px-3 py-1.5;
   }
 
   .workflow-assistant-intro h2,
@@ -1353,7 +1353,7 @@
   }
 
   .workflow-assistant-heading {
-    @apply flex items-center justify-between gap-3;
+    @apply flex items-center justify-end gap-3;
   }
 
   .workflow-assistant-presence {
@@ -1375,17 +1375,25 @@
 
   .workflow-workspace { @apply flex h-full min-h-0 min-w-0 flex-col; }
   .workflow-panels { @apply min-h-0 min-w-0 flex-1; }
-  .workflow-picker { @apply flex flex-wrap shrink-0 items-center gap-2 border-b border-line px-3 py-2; }
+  .workflow-picker { @apply relative z-10 flex flex-wrap shrink-0 items-center gap-1.5 border-b border-line bg-surface px-2 py-1; }
   .workflow-picker label { @apply text-xs font-medium text-ink-soft; }
   .workflow-picker select, .workflow-name-input {
-    @apply min-h-8 min-w-0 rounded border border-line bg-surface px-2 py-1 text-xs text-ink outline-none focus-visible:border-accent focus-visible:ring-2 focus-visible:ring-accent/15 disabled:text-ink-faint;
+    @apply h-6 min-w-0 rounded border border-line bg-surface px-1.5 text-xs text-ink outline-none focus-visible:border-accent focus-visible:ring-2 focus-visible:ring-accent/15 disabled:text-ink-faint;
   }
-  .workflow-picker select { @apply w-48; }
+  .workflow-picker select { @apply w-56 max-w-full; }
   .workflow-filter-summary { @apply min-h-0 overflow-auto p-3 text-xs leading-relaxed; }
   .workflow-filter-summary p { @apply mb-3; }
   .workflow-filter-summary ul { @apply my-2 list-disc pl-4; }
   .workflow-filter-note { @apply text-ink-soft; }
-  .workflow-name-input { @apply w-44; }
+  .workflow-name-input { @apply w-56; }
+  .workflow-rename { @apply flex min-w-0 items-center gap-1; }
+  .workflow-create { @apply relative; }
+  .workflow-create > summary { @apply cursor-pointer rounded border border-line px-2 py-0.5 text-xs text-ink hover:bg-hover focus-visible:outline-accent; }
+  .workflow-create > summary[aria-disabled="true"] { @apply cursor-default text-ink-faint; }
+  .workflow-create-options { @apply absolute left-0 top-full z-20 mt-1 grid w-64 gap-2 rounded border border-line bg-surface p-3; box-shadow: 0 6px 18px rgb(0 0 0 / 0.1); }
+  .workflow-create-options label { @apply mt-1; }
+  .workflow-create-options select { @apply w-full; }
+  .workflow-create-options p { @apply text-xs text-ink-soft; }
   .workflow-picker > span { @apply text-xs text-ink-soft; }
 
   .workflow-assistant-empty {
@@ -1409,15 +1417,15 @@
   }
 
   .workflow-assistant-thread {
-    @apply grid gap-0;
+    @apply grid gap-4 px-3 py-2;
   }
 
   .workflow-agent-message {
-    @apply border-b border-line px-4 py-3;
+    @apply min-w-0;
   }
 
   .workflow-agent-message.is-user {
-    @apply bg-sunken;
+    @apply ml-5 justify-self-end rounded-md bg-sunken px-2.5 py-2;
   }
 
   .workflow-agent-message.is-system {
@@ -1425,19 +1433,19 @@
   }
 
   .workflow-agent-message-meta {
-    @apply mb-1.5 flex items-center justify-between gap-3 text-[10px];
+    @apply flex items-center gap-2 text-[10px];
   }
 
   .workflow-agent-message-meta strong {
-    @apply font-semibold text-ink;
+    @apply sr-only;
   }
 
   .workflow-agent-message-meta span {
-    @apply text-ink-faint;
+    @apply mb-1 text-ink-faint;
   }
 
   .workflow-agent-message-body {
-    @apply grid gap-2 text-[12px] leading-[1.55] text-ink-soft;
+    @apply grid gap-2 text-[12px] leading-[1.6] text-ink;
   }
 
   .workflow-agent-message-body p {
@@ -1475,6 +1483,10 @@
 
   .workflow-agent-tools-disclosure > summary {
     @apply cursor-pointer select-none py-0.5 font-medium text-ink-soft outline-none hover:text-ink focus-visible:text-accent;
+  }
+
+  .workflow-agent-tools-disclosure[data-failed="true"] > summary {
+    @apply text-danger;
   }
 
   .workflow-agent-tools-disclosure[open] > summary {
@@ -1534,7 +1546,7 @@
   }
 
   .workflow-assistant-composer {
-    @apply shrink-0 border-t border-line bg-sunken px-3 py-3;
+    @apply shrink-0 bg-surface px-3 pb-2 pt-3;
   }
 
   .workflow-assistant-composer > label {
@@ -1555,11 +1567,11 @@
   }
 
   .workflow-assistant-composer-actions > span {
-    @apply max-w-[28ch] text-[11px] leading-4 text-ink-faint;
+    @apply text-[10px] leading-4 text-ink-faint;
   }
 
   .workflow-assistant-send-action {
-    @apply min-h-8 min-w-16 justify-center border border-line-strong disabled:border-line disabled:bg-surface disabled:text-ink-faint disabled:opacity-100;
+    @apply min-h-6 min-w-10 justify-center disabled:bg-surface disabled:text-ink-faint disabled:opacity-100;
   }
 
   .workflow-assistant-thread-tail {
@@ -1723,7 +1735,7 @@
   }
 
   .workflow-canvas-toolbar {
-    @apply flex min-h-10 shrink-0 items-center gap-2 border-b border-line bg-surface px-3;
+    @apply flex min-h-8 shrink-0 flex-wrap items-center gap-2 border-b border-line bg-surface px-2 py-1;
   }
 
   .workflow-canvas-toolbar > div {
@@ -1827,47 +1839,6 @@
     animation: none;
   }
 
-  .workflow-flow .df-node .workflow-node-card {
-    animation: workflow-node-arrive 420ms cubic-bezier(0.16, 1, 0.3, 1) both;
-  }
-
-  .workflow-flow .df-nodes > .df-node:nth-child(2) .workflow-node-card {
-    animation-delay: 40ms;
-  }
-
-  .workflow-flow .df-nodes > .df-node:nth-child(3) .workflow-node-card {
-    animation-delay: 80ms;
-  }
-
-  .workflow-flow .df-nodes > .df-node:nth-child(4) .workflow-node-card {
-    animation-delay: 120ms;
-  }
-
-  .workflow-flow .df-nodes > .df-node:nth-child(5) .workflow-node-card {
-    animation-delay: 160ms;
-  }
-
-  .workflow-flow .df-nodes > .df-node:nth-child(6) .workflow-node-card {
-    animation-delay: 200ms;
-  }
-
-  .workflow-flow .df-nodes > .df-node:nth-child(n + 7) .workflow-node-card {
-    animation-delay: 240ms;
-  }
-
-  @keyframes workflow-node-arrive {
-    from {
-      opacity: 0.62;
-      clip-path: inset(0 14% 0 0);
-      filter: blur(1px);
-    }
-    to {
-      opacity: 1;
-      clip-path: inset(0);
-      filter: blur(0);
-    }
-  }
-
   .workflow-flow .df-node:focus-visible {
     border-radius: 4px;
     outline-width: 1px;
@@ -1888,7 +1859,7 @@
 
   .workflow-node-card {
     @apply relative flex w-[10.5rem] flex-col overflow-visible border border-line bg-surface text-ink;
-    min-height: 7.75rem;
+    min-height: 8.5rem;
     border-radius: 4px;
     transition: border-color 120ms ease-out, box-shadow 120ms ease-out;
   }
@@ -1924,7 +1895,8 @@
   }
 
   .workflow-node-body h3 {
-    @apply truncate text-[12px] font-semibold tracking-[-0.01em];
+    @apply min-h-12 text-[12px] font-semibold leading-4 tracking-[-0.01em];
+    overflow-wrap: anywhere;
   }
 
   .workflow-node-fields,
@@ -1934,14 +1906,6 @@
 
   .workflow-node-relation code {
     @apply font-mono text-ink-soft;
-  }
-
-  .workflow-node-sql {
-    @apply mt-1.5 block overflow-hidden font-mono text-[10px] leading-3.5 text-ink-soft;
-    display: -webkit-box;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
-    white-space: pre-line;
   }
 
   .workflow-node-footer {
@@ -2043,7 +2007,6 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .workflow-flow .df-node .workflow-node-card,
     .workflow-node-card.workflow-node-state-running .workflow-node-footer,
     .workflow-node-status-dot.workflow-node-state-running {
       animation: none;

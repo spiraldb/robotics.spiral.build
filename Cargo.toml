@@ -9,7 +9,6 @@ members = [
     "crates/backend",
     "crates/frontend/viewport",
     "crates/frontend",
-    "crates/studio",
 ]
 
 [workspace.package]
@@ -31,8 +30,6 @@ candle-transformers = "=0.11.0"
 spiral-robotics-common = { path = "crates/common" }
 spiral-robotics-inference = { path = "crates/backend/inference", default-features = false }
 spiral-robotics-hardware = { path = "crates/backend/hardware" }
-spiral-robotics-backend = { path = "crates/backend" }
-spiral-robotics-frontend = { path = "crates/frontend" }
 spiral-robotics-storage = { path = "crates/backend/storage" }
 spiral-robotics-training = { path = "crates/backend/training" }
 spiral-robotics-viewport = { path = "crates/frontend/viewport" }

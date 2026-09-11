@@ -92,7 +92,10 @@ filter node. Episode decisions are ordinary SQL over scores and source identifie
 Null images produce null scores; malformed images fail explicitly. SigLIP scores
 measure text/image matching, not measured brightness or calibrated probability.
 
-The dataset picker starts a graph with a SQL source reading `spql.mcap.episodes`.
+New workflow offers a blank draft or a draft from a dataset. Dataset creation
+starts a fresh workflow and conversation with a SQL source reading
+`spql.mcap.episodes`; it does not replace the saved workflow currently open.
+Rename lives beside the workflow selector and changes the draft until Save.
 The Assistant's `inspect_dataset` tool lists datasets when no path is supplied or the path is empty,
 or inspects the requested path's actual topics, schema variants, and camera columns.
 Dataset recording/import origin does not affect workflow execution.

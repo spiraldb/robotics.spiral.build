@@ -1,7 +1,7 @@
 //! Trusted backend for Spiral Robotics Studio.
 //!
-//! This crate is deliberately independent of the frontend crate. The thin Studio
-//! launcher starts [`StudioServer::run`], which serves the built browser assets
+//! This crate is deliberately independent of the frontend crate. Its binary
+//! starts [`StudioServer::run`], which serves the built browser assets
 //! alongside the HTTP API. Browser rendering stays in the frontend crate.
 
 #![allow(async_fn_in_trait)]

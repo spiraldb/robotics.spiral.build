@@ -3,11 +3,11 @@
 # The app also sets it at runtime; this is what the tab says before the bundle
 # has loaded.
 [application]
-name = "spiral-robotics-studio"
+name = "spiral-robotics-frontend"
 # Let DX own the stylesheet pipeline too. Both `dx serve --fullstack` and `dx bundle --fullstack`
 # compile it before the client is built, with no checked-in generated CSS.
-tailwind_input = "../frontend/tailwind.css"
-tailwind_output = "../frontend/assets/tailwind.css"
+tailwind_input = "tailwind.css"
+tailwind_output = "assets/tailwind.css"
 
 [web.app]
 title = "Spiral Robotics Studio"

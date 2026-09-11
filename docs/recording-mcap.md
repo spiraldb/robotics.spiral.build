@@ -6,8 +6,9 @@ pinned wheel predates the MCAP query API; the existing local-driver shell loads
 
 ```sh
 nix develop .#local-driver
-cd crates/studio
-dx serve --release --fullstack --debug-symbols false
+dx serve --release --fullstack --debug-symbols false \
+  @client --package spiral-robotics-frontend \
+  @server --package spiral-robotics-backend
 ```
 
 A completed Live recording becomes one immutable `.mcap` file containing the

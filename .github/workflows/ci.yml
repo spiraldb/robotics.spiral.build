@@ -23,7 +23,6 @@ jobs:
         -p spiral-robotics-frontend
         -p spiral-robotics-hardware
         -p spiral-robotics-inference
-        -p spiral-robotics-studio
         -p spiral-robotics-training
         -p spiral-robotics-viewport
 
@@ -84,10 +83,10 @@ jobs:
           nix develop .#ci --command ruff format --check training
 
       - name: Check native server without the frontend
-        run: nix develop .#ci --command cargo check -p spiral-robotics-studio --features server --locked
+        run: nix develop .#ci --command cargo check -p spiral-robotics-backend --bin spiral-robotics-backend --locked
 
       - name: Check web target
-        run: nix develop .#ci --command cargo check -p spiral-robotics-studio --features web --target wasm32-unknown-unknown --locked
+        run: nix develop .#ci --command cargo check -p spiral-robotics-frontend --bin spiral-robotics-frontend --target wasm32-unknown-unknown --locked
 
       - name: Lint browser frontend
         run: |

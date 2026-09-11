@@ -7,7 +7,7 @@
 // this lint reports the macro's generated code rather than an avoidable call.
 #![allow(clippy::useless_format)]
 // Keep this crate visible to native-target rust-analyzer. Browser APIs can be
-// type-checked on the host; the Studio launcher only runs this code as WASM.
+// type-checked on the host; DX builds the frontend executable as WASM.
 
 #[cfg(all(test, target_arch = "wasm32"))]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);

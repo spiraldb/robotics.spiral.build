@@ -5698,15 +5698,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "spiral-robotics-studio"
-version = "0.1.0"
-dependencies = [
- "dioxus",
- "spiral-robotics-backend",
- "spiral-robotics-frontend",
-]
-
-[[package]]
 name = "spiral-robotics-training"
 version = "0.1.0"
 dependencies = [

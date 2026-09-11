@@ -25,6 +25,7 @@ dioxus = { workspace = true, features = [
     "document",
     "hooks",
     "html",
+    "launch",
     "logger",
     "macro",
     "router",

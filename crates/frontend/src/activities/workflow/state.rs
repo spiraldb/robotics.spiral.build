@@ -75,6 +75,10 @@ struct WorkflowNodeModel {
 }
 
 impl WorkflowNodeData {
+    pub(crate) const fn phase(&self) -> WorkflowNodePhase {
+        self.execution.phase
+    }
+
     pub(crate) const fn kind(&self) -> WorkflowNodeKind {
         self.kind
     }
@@ -475,17 +479,16 @@ impl WorkflowController {
         None
     }
 
-    pub(crate) fn select_dataset(
+    pub(crate) fn create_from_dataset(
         mut self,
         source: spiral_robotics_common::datasets::DatasetSummary,
-        _studio: StudioProjectState,
     ) {
         if self.workflow_selection_reason().is_some() {
             return;
         }
+        self.install(Self::fresh_document());
         let mut draft = self.document.draft.write();
-        draft.nodes_mut().clear();
-        draft.edges_mut().clear();
+        draft.set_name(source.selection().label());
         draft
             .nodes_mut()
             .push(spiral_robotics_common::workflow::WorkflowNodeSpec::new(
