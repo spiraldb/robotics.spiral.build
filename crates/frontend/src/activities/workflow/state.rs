@@ -20,8 +20,8 @@ use spiral_robotics_common::workflow::document::{WorkflowDocument, WorkflowRun};
 
 pub(crate) const ASSISTANT_PANEL_ID: &str = "workflow-assistant";
 pub(crate) const NODE_PANEL_ID: &str = "workflow-node";
-pub(crate) const CANVAS_PANEL_ID: &str = "workflow-canvas";
 pub(crate) const RESULTS_PANEL_ID: &str = "workflow-results";
+pub(crate) const CANVAS_PANEL_ID: &str = "workflow-canvas";
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum WorkflowNodeKind {

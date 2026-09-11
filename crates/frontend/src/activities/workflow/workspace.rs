@@ -1,4 +1,4 @@
-//! Four-panel relation Workflow editor, execution canvas, and real results.
+//! Workflow conversation, execution canvas, and dedicated node inspector.
 
 use std::rc::Rc;
 
@@ -24,7 +24,7 @@ use crate::components::icons::{
 };
 use crate::shell::state::StudioProjectState;
 
-const WORKFLOW_LAYOUT_SCOPE: &str = "workflow-relation-canvas-v3";
+const WORKFLOW_LAYOUT_SCOPE: &str = "workflow-node-results-split-v5";
 const WORKFLOW_MIN_ZOOM: f64 = 0.70;
 const WORKFLOW_MAX_ZOOM: f64 = 1.8;
 
@@ -56,19 +56,19 @@ fn WorkflowPanels(controller: super::state::WorkflowController) -> Element {
         )
         .with_class("workflow-assistant-editor"),
         Panel::new(
-            NODE_PANEL_ID,
-            "Node",
-            "workflow-left",
-            rsx! { WorkflowNodeInspector { controller } },
-        )
-        .with_class("workflow-node-editor"),
-        Panel::new(
             CANVAS_PANEL_ID,
             "Workflow",
             "workflow-canvas",
             rsx! { WorkflowCanvas { controller } },
         )
         .with_class("workflow-canvas-editor"),
+        Panel::new(
+            NODE_PANEL_ID,
+            "Node",
+            "workflow-inspector",
+            rsx! { WorkflowNodeInspector { controller } },
+        )
+        .with_class("workflow-node-editor"),
         Panel::new(
             RESULTS_PANEL_ID,
             "Results",
@@ -101,15 +101,21 @@ impl WorkflowWorkspaceLayout {
         let right = LayoutNode::split(
             "workflow-right-rows",
             SplitAxis::Vertical,
-            0.66,
+            0.60,
             LayoutNode::tile("workflow-canvas", [CANVAS_PANEL_ID]),
-            LayoutNode::tile("workflow-results", [RESULTS_PANEL_ID]),
+            LayoutNode::split(
+                "workflow-details-columns",
+                SplitAxis::Horizontal,
+                0.50,
+                LayoutNode::tile("workflow-inspector", [NODE_PANEL_ID]),
+                LayoutNode::tile("workflow-results", [RESULTS_PANEL_ID]),
+            ),
         );
         PanelLayout::new(LayoutNode::split(
             "workflow-columns",
             SplitAxis::Horizontal,
             0.30,
-            LayoutNode::tile("workflow-left", [ASSISTANT_PANEL_ID, NODE_PANEL_ID]),
+            LayoutNode::tile("workflow-left", [ASSISTANT_PANEL_ID]),
             right,
         ))
     }
@@ -702,13 +708,13 @@ fn WorkflowNodeInspector(controller: super::state::WorkflowController) -> Elemen
         section { class: "workflow-inspector", "aria-label": "Selected workflow node",
             if let Some((node_id, title, data)) = selected {
                 header { class: "workflow-inspector-heading",
-                    div { class: "workflow-inspector-kind",
-                        {node_kind_icon(data.kind())}
-                        span { "{data.kind_label()}" }
-                    }
                     h2 { "{title}" }
-                    p { "{data.description()}" }
+                    span { class: "workflow-inspector-kind",
+                        {node_kind_icon(data.kind())}
+                        "{data.kind_label()}"
+                    }
                 }
+                WorkflowNodeInputs { controller, node_id: node_id.clone() }
                 if let Some(error) = &data.error() {
                     div { class: "workflow-inspector-error", role: "alert",
                         strong { "{data.phase_label()}" }
@@ -719,38 +725,6 @@ fn WorkflowNodeInspector(controller: super::state::WorkflowController) -> Elemen
                     div { class: "workflow-inspector-warning", role: "status",
                         strong { "Completed with warnings" }
                         for warning in &data.warnings() { p { "{warning}" } }
-                    }
-                }
-                dl { class: "workflow-inspector-facts",
-                    div {
-                        dt { "State" }
-                        dd { class: "{data.phase_class()}", "{data.phase_label()} · {data.detail()}" }
-                    }
-                    if let Some(relation) = &data.relation() {
-                        div {
-                            dt { "Relation" }
-                            dd { code { "{relation}" } }
-                        }
-                    }
-                    if !data.fields().is_empty() {
-                        div {
-                            dt { "Fields" }
-                            dd { class: "workflow-inspector-fields",
-                                for field in &data.fields() { code { "{field}" } }
-                            }
-                        }
-                    }
-                    if let Some(progress) = &data.progress() {
-                        div {
-                            dt { "Progress" }
-                            dd { class: "font-mono tabular-nums", "{progress.completed()} / {progress.total()} {progress.unit()}" }
-                        }
-                    }
-                    if data.quarantine().count() > 0 {
-                        div {
-                            dt { "Quarantine" }
-                            dd { "{data.quarantine().count()} rows" }
-                        }
                     }
                 }
                 if data.kind() == WorkflowNodeKind::Table {
@@ -804,7 +778,7 @@ fn WorkflowNodeInspector(controller: super::state::WorkflowController) -> Elemen
                         }
                         p { class: "workflow-inspector-help",
                             "Reference each connected input with an exact placeholder such as "
-                            code { "{{node:table}}" }
+                            code { {"{{node:table}}"} }
                             "."
                         }
                     }
@@ -935,12 +909,78 @@ fn WorkflowNodeInspector(controller: super::state::WorkflowController) -> Elemen
                         }
                     }
                 }
+                details { class: "workflow-inspector-diagnostics",
+                    summary { "Runtime details" }
+                    p { class: "workflow-inspector-description", "{data.description()}" }
+                    dl { class: "workflow-inspector-facts",
+                        div {
+                            dt { "State" }
+                            dd { class: "{data.phase_class()}", "{data.phase_label()} · {data.detail()}" }
+                        }
+                        if let Some(relation) = &data.relation() {
+                            div {
+                                dt { "Relation" }
+                                dd { code { "{relation}" } }
+                            }
+                        }
+                        if !data.fields().is_empty() {
+                            div {
+                                dt { "Fields" }
+                                dd { class: "workflow-inspector-fields",
+                                    for field in &data.fields() { code { "{field}" } }
+                                }
+                            }
+                        }
+                        if let Some(progress) = &data.progress() {
+                            div {
+                                dt { "Progress" }
+                                dd { class: "font-mono tabular-nums", "{progress.completed()} / {progress.total()} {progress.unit()}" }
+                            }
+                        }
+                        if data.quarantine().count() > 0 {
+                            div {
+                                dt { "Quarantine" }
+                                dd { "{data.quarantine().count()} rows" }
+                            }
+                        }
+                    }
+                }
                 {node_validation_issues(controller, &node_id)}
             } else {
                 div { class: "workflow-panel-empty",
                     strong { "No node selected" }
                     p { "Choose a node on the canvas to inspect or edit its relation contract." }
                     span { "Keyboard: Tab, then Enter or Space" }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn WorkflowNodeInputs(controller: super::state::WorkflowController, node_id: String) -> Element {
+    let spec = controller.spec();
+    let inputs = spec
+        .edges()
+        .iter()
+        .filter(|edge| edge.target() == node_id)
+        .filter_map(|edge| spec.nodes().iter().find(|node| node.id() == edge.source()))
+        .collect::<Vec<_>>();
+    rsx! {
+        div { class: "workflow-inspector-inputs",
+            span { "Inputs" }
+            if inputs.is_empty() {
+                span { class: "workflow-inspector-input-empty", "No connected inputs" }
+            } else {
+                for input in inputs {
+                    Action {
+                        key: "{input.id()}",
+                        purpose: ActionPurpose::Navigate,
+                        variant: ActionVariant::Link,
+                        title: "Inspect {input.name()}",
+                        onclick: { let id = input.id().to_owned(); move |_| controller.select_node(id.clone()) },
+                        "{input.name()}"
+                    }
                 }
             }
         }
@@ -1588,15 +1628,16 @@ mod tests {
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]
-    fn workflow_registers_the_approved_four_panel_composition() {
+    fn workflow_keeps_node_and_results_side_by_side_below_graph() {
         let layout = WorkflowWorkspaceLayout::initial();
         let mut tiles = Vec::new();
         collect_tiles(&layout.root, &mut tiles);
         assert_eq!(
             tiles,
             vec![
-                ("workflow-left", vec![ASSISTANT_PANEL_ID, NODE_PANEL_ID]),
+                ("workflow-left", vec![ASSISTANT_PANEL_ID]),
                 ("workflow-canvas", vec![CANVAS_PANEL_ID]),
+                ("workflow-inspector", vec![NODE_PANEL_ID]),
                 ("workflow-results", vec![RESULTS_PANEL_ID]),
             ]
         );
@@ -1609,11 +1650,22 @@ mod tests {
             } => {
                 assert_eq!(*axis, SplitAxis::Horizontal);
                 assert!((*ratio - 0.30).abs() < f64::EPSILON);
-                let LayoutNode::Split { axis, ratio, .. } = second.as_ref() else {
-                    panic!("workflow right side must split canvas and Results");
+                let LayoutNode::Split {
+                    axis,
+                    ratio,
+                    second,
+                    ..
+                } = second.as_ref()
+                else {
+                    panic!("workflow right side must split graph and details");
                 };
                 assert_eq!(*axis, SplitAxis::Vertical);
-                assert!((*ratio - 0.66).abs() < f64::EPSILON);
+                assert!((*ratio - 0.60).abs() < f64::EPSILON);
+                let LayoutNode::Split { axis, ratio, .. } = second.as_ref() else {
+                    panic!("workflow details must split Node and Results");
+                };
+                assert_eq!(*axis, SplitAxis::Horizontal);
+                assert!((*ratio - 0.50).abs() < f64::EPSILON);
             }
             LayoutNode::Tile(_) => panic!("workflow root must be a split"),
         }

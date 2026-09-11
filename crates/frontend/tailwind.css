@@ -1313,8 +1313,8 @@
 @layer components {
   /* Workflow -----------------------------------------------------------
      A relation lineage bench, not an external-source builder. The canvas is
-     the working surface; Assistant and Node share the narrow reading rail and
-     Results keeps a reserved evidence lane without pretending a run exists. */
+     the working surface; conversation stays visible while Node and Results
+     share the area below the graph in equally sized, resizable panes. */
   .workflow-assistant-editor,
   .workflow-node-editor,
   .workflow-canvas-editor,
@@ -1348,8 +1348,8 @@
     @apply text-xs font-semibold tracking-[-0.01em];
   }
 
-  .workflow-inspector-heading p {
-    @apply mt-1.5 text-[11px] leading-[1.55] text-ink-soft;
+  .workflow-inspector-description {
+    @apply px-4 pb-2 text-[11px] leading-relaxed text-ink-soft;
   }
 
   .workflow-assistant-heading {
@@ -1583,7 +1583,33 @@
   }
 
   .workflow-inspector-heading {
-    @apply border-b border-line px-4 py-4;
+    @apply flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-line px-4 py-2;
+  }
+
+  .workflow-inspector-inputs {
+    @apply flex flex-wrap items-baseline gap-x-3 gap-y-1 px-4 py-2 text-[11px] text-ink-soft;
+  }
+
+  .workflow-inspector-inputs .ui-action {
+    @apply min-h-0 p-0 text-[11px] text-accent underline decoration-transparent underline-offset-2 hover:decoration-current;
+    overflow-wrap: anywhere;
+  }
+
+  .workflow-inspector-input-empty {
+    @apply text-ink-faint;
+  }
+
+  .workflow-inspector-diagnostics {
+    @apply border-t border-line;
+  }
+
+  .workflow-inspector-diagnostics > summary {
+    @apply cursor-pointer px-4 py-2 text-[11px] text-ink-soft;
+  }
+
+  .workflow-inspector-diagnostics > summary:focus-visible {
+    outline: 2px solid var(--tone-accent);
+    outline-offset: -2px;
   }
 
   .workflow-inspector-error,
@@ -1615,7 +1641,7 @@
   }
 
   .workflow-inspector-kind {
-    @apply mb-2 flex items-center gap-1.5 text-[10px] font-medium text-ink-faint;
+    @apply inline-flex items-center gap-1.5 text-[10px] font-medium text-ink-faint;
   }
 
   .workflow-inspector-kind .ui-icon {
@@ -1695,11 +1721,11 @@
   }
 
   .workflow-inspector-query-editor {
-    @apply min-h-48;
+    @apply min-h-0;
   }
 
-  .workflow-query-input {
-    @apply min-h-36 w-full resize-y font-mono text-[11px] leading-4;
+  .workflow-inspector .workflow-query-input {
+    @apply h-24 min-h-24 w-full resize-y font-mono text-[11px] leading-4;
   }
 
   .workflow-inspector-help {

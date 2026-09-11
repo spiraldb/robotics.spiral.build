@@ -1683,8 +1683,9 @@ dependencies = [
 
 [[package]]
 name = "dioxus-flow"
-version = "0.1.0"
-source = "git+https://github.com/XiangpengHao/dioxus-flow?rev=a85262445c1707a397511d63a049e3c6d59ab927#a85262445c1707a397511d63a049e3c6d59ab927"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "955fd934a84cfef83bd34f5ed5e304e6e632213030d397ae7d3db07e96a2bb17"
 dependencies = [
  "dioxus",
  "futures-timer",

@@ -54,6 +54,13 @@ Unsent chat text is local to its workflow and is not part of a saved conversatio
 
 ## Authoring and execution
 
+Within Workflow, the Assistant stays beside the graph. Below the graph, Node and
+Results share an equal-width horizontal split, with Node on the left. Selecting a
+node shows its connected inputs and editable configuration; input names navigate
+to their source nodes. Runtime fields and provenance remain available under
+Runtime details. All four panes remain resizable and dockable.
+The layout scope is versioned so existing browser layouts adopt this arrangement.
+
 There is one intent graph and one Run action. The Assistant can inspect datasets,
 relations, model capabilities, and bounded read-only results, then update the graph in memory.
 It cannot start or wait for a workflow run. Run and Cancel own computation.

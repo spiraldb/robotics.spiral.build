@@ -71,6 +71,28 @@ published; a source fix alone does not update the downloaded library.
 
 ## Current local driver refresh
 
+The local driver was rebuilt on September 11, 2026 from upstream
+`0435bb5b0fdff2aec21b537fc702333769e49215` (the production Dataset repair).
+The SHA-256 of `target/release/libadbc_driver_spiraldb.dylib` is
+`82ee25be993d13ab88261651563d83f1b43c7a7ce94692857f6870d3ee438e2b`.
+Studio on port 8080 was restarted and confirmed to load this library.
+
+The old driver rejected the production Dataset response's `extent` field.
+The new driver passed the live viewer API checks: all 52 episodes across
+pagination, ten topics for the first episode, joint and camera schemas,
+16-message pages, and the camera's projected format/data fields.
+The episode page took 1.10 seconds; sampled message reads took 2.61–3.42 seconds.
+These checks cover the backend API and Arrow payloads; browser rendering and
+WebCodecs playback were not tested. Details are recorded in
+`exports/driver-refresh-2026-09-11/validation.json`.
+
+The source build used an isolated checkout at
+`/private/tmp/spiral-driver-prod-20260911` and the existing `adbc-build` shell.
+The upstream development checkout was left unchanged. The public archive pin
+in the default Nix shell is unchanged; use `nix develop .#local-driver`.
+
+### Previous packet-filter driver refresh
+
 The workflow verification preview on port 8080 uses local `xiangpeng/dev` commit
 `fe0726b14c8256626060e3caf48681b169a48390`, rebuilt in release mode on September 10,
 2026 with the `adbc-build` command above. The library SHA-256 is
