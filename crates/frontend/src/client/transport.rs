@@ -157,6 +157,44 @@ impl HttpRequest {
         response.binary().await.map_err(CommandError::transport)
     }
 
+    /// Decode complete NDJSON records; byte buffering preserves split UTF-8 characters.
+    pub(crate) async fn stream_json<T: serde::de::DeserializeOwned>(
+        self,
+        mut on_event: impl FnMut(T) -> Result<(), CommandError>,
+    ) -> Result<(), CommandError> {
+        use futures_util::StreamExt as _;
+        let (response, _abort) = self.response("application/x-ndjson").await?;
+        if !(200..300).contains(&response.status()) {
+            let status = response.status();
+            return CommandError::decode_response(
+                status,
+                &response.text().await.map_err(CommandError::transport)?,
+            );
+        }
+        let body = response
+            .body()
+            .ok_or_else(|| CommandError::transport("Missing model response body"))?;
+        let mut stream = wasm_streams::ReadableStream::from_raw(body).into_stream();
+        let mut pending = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|error| {
+                CommandError::transport(format!("Model stream failed: {error:?}"))
+            })?;
+            pending.extend(js_sys::Uint8Array::new(&chunk).to_vec());
+            while let Some(end) = pending.iter().position(|byte| *byte == b'\n') {
+                let line = pending.drain(..=end).collect::<Vec<_>>();
+                on_event(serde_json::from_slice(&line).map_err(CommandError::transport)?)?;
+            }
+            if pending.len() > 2 * 1024 * 1024 {
+                return Err(CommandError::transport("Model event exceeds 2 MiB"));
+            }
+        }
+        if !pending.is_empty() {
+            return Err(CommandError::transport("Incomplete model event"));
+        }
+        Ok(())
+    }
+
     async fn response(
         self,
         accept: &str,

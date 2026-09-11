@@ -34,10 +34,18 @@ impl WorkflowTool for ListRelations {
     fn completion(&self, output: &Value) -> ToolCompletion {
         ToolCompletion::count(output, "relations", "Spiral relations")
     }
-    fn call<'a>(&'a self, invocation: ToolInvocation<'a>) -> BoxFuture<'a, Result<String, String>> {
+    fn call<'a>(
+        &'a self,
+        invocation: ToolInvocation<'a>,
+    ) -> LocalBoxFuture<'a, Result<String, String>> {
         Box::pin(async move {
             let _: NoArguments = invocation.arguments()?;
-            let response = invocation.storage().relation_catalog().await?;
+            let response = WorkflowClient::current()
+                .query::<spiral_robotics_common::relations::RelationCatalog>(HttpRequest::new(
+                    "GET",
+                    "/api/relations",
+                ))
+                .await?;
             Ok(json!({
                 "relations": response.relations().iter().map(|relation| relation.name()).collect::<Vec<_>>(),
                 "complete": response.complete(),
@@ -68,13 +76,21 @@ impl WorkflowTool for DescribeRelations {
     fn completion(&self, output: &Value) -> ToolCompletion {
         ToolCompletion::count(output, "relations", "relation schemas")
     }
-    fn call<'a>(&'a self, invocation: ToolInvocation<'a>) -> BoxFuture<'a, Result<String, String>> {
+    fn call<'a>(
+        &'a self,
+        invocation: ToolInvocation<'a>,
+    ) -> LocalBoxFuture<'a, Result<String, String>> {
         Box::pin(async move {
             let arguments: DescribeRelationsArguments = invocation.arguments()?;
             if arguments.relations.len() > 20 {
                 return Err("Describe at most 20 relations per tool call.".into());
             }
-            let discovered = invocation.storage().relation_catalog().await?;
+            let discovered = WorkflowClient::current()
+                .query::<spiral_robotics_common::relations::RelationCatalog>(HttpRequest::new(
+                    "GET",
+                    "/api/relations",
+                ))
+                .await?;
             let relations = discovered
                 .relations()
                 .iter()
@@ -111,7 +127,10 @@ impl WorkflowTool for RunQuery {
     fn completion(&self, output: &Value) -> ToolCompletion {
         ToolCompletion::query_preview(output)
     }
-    fn call<'a>(&'a self, invocation: ToolInvocation<'a>) -> BoxFuture<'a, Result<String, String>> {
+    fn call<'a>(
+        &'a self,
+        invocation: ToolInvocation<'a>,
+    ) -> LocalBoxFuture<'a, Result<String, String>> {
         Box::pin(async move {
             let arguments: RunQueryArguments = invocation.arguments()?;
             let max_rows = arguments.max_rows.unwrap_or(20);
@@ -120,10 +139,13 @@ impl WorkflowTool for RunQuery {
                     "run_query max_rows must be between 1 and {MAX_WORKFLOW_AGENT_QUERY_ROWS}."
                 ));
             }
-            let response = invocation
-                .storage()
-                .query(&arguments.sql, max_rows as usize)
-                .await?;
+            let response: spiral_robotics_common::relations::SpiralQuerySnapshot =
+                WorkflowClient::current()
+                    .query(
+                        HttpRequest::new("POST", "/api/queries")
+                            .json(&json!({"statement":arguments.sql, "max_rows":max_rows})),
+                    )
+                    .await?;
             Ok(response.serialize_for_agent_prompt())
         })
     }

@@ -1,49 +1,93 @@
-//! HTTP endpoints for workflow.
-
-use crate::http::contract::ApiRoutes;
-use crate::http::delivery::{ApiJson, HttpFailure, ScopedProject};
-
-use axum::Json;
-use spiral_robotics_common::workflow::{
-    WorkflowAgentCommand, WorkflowAgentSnapshot, WorkflowCommand, WorkflowSnapshot,
+//! Documents, planning, runs, and model transport; no remote editor session.
+use super::{commands::WorkflowCommands, provider::ModelStream};
+use crate::http::{
+    contract::ApiRoutes,
+    delivery::{ApiJson, ApiPath, HttpFailure, ScopedProject},
 };
-
+use axum::Json;
+use spiral_robotics_common::{
+    datasets::DatasetSelection,
+    workflow::{
+        WorkflowAgentReadiness, WorkflowSpec, WorkflowSummary,
+        document::{ModelRequest, WorkflowDocument, WorkflowPlan, WorkflowRun},
+    },
+};
 pub(crate) struct WorkflowEndpoints;
-
 impl WorkflowEndpoints {
     pub(crate) fn register(routes: &mut ApiRoutes) {
-        routes.get("/workflow", Self::workflow_snapshot);
-        routes.post("/workflow/commands", Self::run_workflow_command);
-        routes.get("/workflow/assistant", Self::workflow_agent_snapshot);
-        routes.post(
-            "/workflow/assistant/commands",
-            Self::run_workflow_agent_command,
-        );
+        routes.get("/workflows", Self::list);
+        routes.get("/workflows/{id}", Self::load);
+        routes.post("/workflows/save", Self::save);
+        routes.post("/workflows/plan", Self::plan);
+        routes.get("/workflow-runs", Self::runs);
+        routes.post("/workflow-runs", Self::start);
+        routes.get("/workflow-runs/{id}", Self::run);
+        routes.post("/workflow-runs/{id}/cancel", Self::cancel);
+        routes.post("/datasets/cameras", Self::cameras);
+        routes.get("/models/status", Self::model_status);
+        routes.post("/models/complete", Self::complete);
     }
-    async fn workflow_snapshot(
-        ScopedProject(commands): ScopedProject<crate::workflow::commands::WorkflowCommands>,
-    ) -> Result<Json<WorkflowSnapshot>, HttpFailure> {
-        let result = commands.snapshot().await?;
-        Ok(Json(result))
+    async fn list(
+        ScopedProject(commands): ScopedProject<WorkflowCommands>,
+    ) -> Result<Json<Vec<WorkflowSummary>>, HttpFailure> {
+        Ok(Json(commands.list().await?))
     }
-    async fn run_workflow_command(
-        ScopedProject(commands): ScopedProject<crate::workflow::commands::WorkflowCommands>,
-        ApiJson(command): ApiJson<WorkflowCommand>,
-    ) -> Result<Json<WorkflowSnapshot>, HttpFailure> {
-        let result = commands.command(command).await?;
-        Ok(Json(result))
+    async fn load(
+        ScopedProject(commands): ScopedProject<WorkflowCommands>,
+        ApiPath(id): ApiPath<String>,
+    ) -> Result<Json<WorkflowDocument>, HttpFailure> {
+        Ok(Json(commands.load(&id).await?))
     }
-    async fn workflow_agent_snapshot(
-        ScopedProject(commands): ScopedProject<crate::workflow::commands::WorkflowCommands>,
-    ) -> Result<Json<WorkflowAgentSnapshot>, HttpFailure> {
-        let result = commands.agent_snapshot().await?;
-        Ok(Json(result))
+    async fn save(
+        ScopedProject(commands): ScopedProject<WorkflowCommands>,
+        ApiJson(document): ApiJson<WorkflowDocument>,
+    ) -> Result<Json<WorkflowDocument>, HttpFailure> {
+        Ok(Json(commands.save(document).await?))
     }
-    async fn run_workflow_agent_command(
-        ScopedProject(commands): ScopedProject<crate::workflow::commands::WorkflowCommands>,
-        ApiJson(command): ApiJson<WorkflowAgentCommand>,
-    ) -> Result<Json<WorkflowAgentSnapshot>, HttpFailure> {
-        let result = commands.agent_command(command).await?;
-        Ok(Json(result))
+    async fn plan(
+        ScopedProject(commands): ScopedProject<WorkflowCommands>,
+        ApiJson(workflow): ApiJson<WorkflowSpec>,
+    ) -> Result<Json<WorkflowPlan>, HttpFailure> {
+        Ok(Json(commands.plan(workflow).await?))
+    }
+    async fn runs(
+        ScopedProject(commands): ScopedProject<WorkflowCommands>,
+    ) -> Result<Json<Vec<WorkflowRun>>, HttpFailure> {
+        Ok(Json(commands.runs()?))
+    }
+    async fn start(
+        ScopedProject(commands): ScopedProject<WorkflowCommands>,
+        ApiJson(workflow): ApiJson<WorkflowSpec>,
+    ) -> Result<Json<WorkflowRun>, HttpFailure> {
+        Ok(Json(commands.start(workflow)?))
+    }
+    async fn run(
+        ScopedProject(commands): ScopedProject<WorkflowCommands>,
+        ApiPath(id): ApiPath<String>,
+    ) -> Result<Json<WorkflowRun>, HttpFailure> {
+        Ok(Json(commands.run(&id)?))
+    }
+    async fn cancel(
+        ScopedProject(commands): ScopedProject<WorkflowCommands>,
+        ApiPath(id): ApiPath<String>,
+    ) -> Result<Json<WorkflowRun>, HttpFailure> {
+        Ok(Json(commands.cancel(&id)?))
+    }
+    async fn cameras(
+        ScopedProject(commands): ScopedProject<WorkflowCommands>,
+        ApiJson(selection): ApiJson<DatasetSelection>,
+    ) -> Result<Json<serde_json::Value>, HttpFailure> {
+        Ok(Json(commands.cameras(selection).await?))
+    }
+    async fn model_status(
+        ScopedProject(commands): ScopedProject<WorkflowCommands>,
+    ) -> Result<Json<WorkflowAgentReadiness>, HttpFailure> {
+        Ok(Json(commands.model_status()?))
+    }
+    async fn complete(
+        ScopedProject(commands): ScopedProject<WorkflowCommands>,
+        ApiJson(request): ApiJson<ModelRequest>,
+    ) -> Result<ModelStream, HttpFailure> {
+        Ok(commands.complete(request)?)
     }
 }

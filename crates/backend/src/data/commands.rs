@@ -281,7 +281,11 @@ impl DataCommands {
             lease: self.state.catalog_lease().clone(),
             token,
         };
-        self.state.workflow().relations().await.map_err(Into::into)
+        self.state
+            .storage()
+            .relation_catalog()
+            .await
+            .map_err(Into::into)
     }
 
     pub(crate) async fn query(
@@ -462,7 +466,6 @@ impl DataCommands {
                 .any(|run| run.phase().active())
             || self.state.rollout().snapshot().phase().active()
             || self.state.workflow().is_active()
-            || self.state.workflow_agent().is_active()
     }
 
     fn spawn_auto_connect_saved_robots(&self) {

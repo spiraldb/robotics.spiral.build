@@ -11,8 +11,6 @@ use spiral_robotics_common::workflow::{WorkflowSpec, WorkflowSummary};
 
 use crate::db::{ArrowColumns, ManagedRelationSchema, ProjectStore, StorageClock, Table};
 
-pub const MAX_WORKFLOW_AGENT_MESSAGES_PER_CONVERSATION: usize = 80;
-
 pub(crate) struct WorkflowBundleSection;
 
 impl ManagedRelationSchema for WorkflowBundleSection {
@@ -111,8 +109,18 @@ impl<'a> WorkflowPersistence<'a> {
         &self,
         workflow: &WorkflowSpec,
         contents: (&WorkflowJson, &WorkflowJson),
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         self.update(|rows| {
+            let stored_revision = rows
+                .iter()
+                .find(|row| row.id == workflow.id())
+                .map(WorkflowRow::revision)
+                .transpose()?
+                .unwrap_or(0);
+            if stored_revision.checked_add(1) != Some(workflow.revision()) {
+                return Ok(false);
+            }
+
             let updated_ms = StorageClock::unix_millis().max(
                 rows.iter()
                     .map(|row| row.updated_ms)
@@ -125,23 +133,27 @@ impl<'a> WorkflowPersistence<'a> {
             row.conversation = Some(contents.1.clone());
             rows.retain(|row| row.id != workflow.id());
             rows.push(row);
-            Ok(())
+            Ok(true)
         })
         .await
     }
 
     async fn update(
         &self,
-        change: impl FnOnce(&mut Vec<WorkflowRow>) -> Result<(), String>,
-    ) -> Result<(), String> {
+        change: impl FnOnce(&mut Vec<WorkflowRow>) -> Result<bool, String>,
+    ) -> Result<bool, String> {
         let relation = Table::Workflows.qualified_name(self.project_store.table_prefix());
         let mut connection = self.project_store.connect_exclusive().await?;
         connection.begin_transaction().await?;
+        let mut saved = false;
         let mutation = async {
             let mut rows = connection
                 .relation_rows(&relation, WorkflowSchema::decode)
                 .await?;
-            change(&mut rows)?;
+            saved = change(&mut rows)?;
+            if !saved {
+                return Ok(());
+            }
             connection
                 .replace_batches(&relation, vec![WorkflowSchema::batch(&rows)?])
                 .await
@@ -149,28 +161,12 @@ impl<'a> WorkflowPersistence<'a> {
         .await;
         connection
             .finish_transaction(mutation, "Workflow save")
-            .await
+            .await?;
+        Ok(saved)
     }
 }
 
-/// Encoding version and payload of one graph or conversation.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct WorkflowJson {
-    version: u32,
-    payload: String,
-}
-
-impl WorkflowJson {
-    pub const fn new(version: u32, payload: String) -> Self {
-        Self { version, payload }
-    }
-    pub const fn version(&self) -> u32 {
-        self.version
-    }
-    pub fn payload(&self) -> &str {
-        &self.payload
-    }
-}
+pub use spiral_robotics_common::workflow::document::WorkflowJson;
 
 struct WorkflowRow {
     id: String,
@@ -181,6 +177,20 @@ struct WorkflowRow {
 }
 
 impl WorkflowRow {
+    fn revision(&self) -> Result<u64, String> {
+        let envelope: serde_json::Value =
+            serde_json::from_str(self.graph.payload()).map_err(|error| error.to_string())?;
+        let graph = envelope
+            .get("workflow")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| "Saved workflow graph is missing.".to_owned())?;
+        match graph.get("revision") {
+            None => Err("Saved workflow revision is missing.".into()),
+            Some(value) => value
+                .as_u64()
+                .ok_or_else(|| "Saved workflow revision is invalid.".into()),
+        }
+    }
     fn new(workflow: &WorkflowSpec, graph: WorkflowJson, updated_ms: i64) -> Self {
         Self {
             id: workflow.id().to_owned(),
@@ -318,5 +328,27 @@ mod tests {
                     .is_err()
             );
         }
+    }
+    #[test]
+    fn transactional_version_check_reads_the_saved_graph_envelope() {
+        let workflow = WorkflowSpec::new("one", "Document");
+        let stored = |revision: serde_json::Value| {
+            WorkflowRow::new(
+                &workflow,
+                WorkflowJson::new(
+                    3,
+                    serde_json::json!({"workflow":{"revision":revision}}).to_string(),
+                ),
+                0,
+            )
+        };
+        assert_eq!(stored(serde_json::json!(7)).revision().unwrap(), 7);
+        assert!(stored(serde_json::json!("7")).revision().is_err());
+        let legacy = WorkflowRow::new(
+            &workflow,
+            WorkflowJson::new(2, "{\"workflow\":{}}".into()),
+            0,
+        );
+        assert!(legacy.revision().is_err());
     }
 }

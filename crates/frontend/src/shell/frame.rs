@@ -1,9 +1,10 @@
 //! Low-frequency Studio chrome around the activity workspaces.
 
+use crate::activities::workflow::state::WorkflowEditorStatus;
 use crate::components::interaction::{Action, ActionPurpose, ActionVariant, BrowserFocus};
 use dioxus::prelude::*;
 use spiral_robotics_common::status::BackendReadinessState;
-use spiral_robotics_common::workflow::{WorkflowRunPhase, WorkflowSnapshot};
+use spiral_robotics_common::workflow::WorkflowRunPhase;
 
 use crate::components::icons::{
     DataIcon, NotificationIcon, RobotPanelIcon, RolloutIcon, SettingsIcon, TrainingIcon,
@@ -84,7 +85,7 @@ pub(crate) enum WorkspaceStatus {
     General,
     Hardware(crate::robots::HardwareViewState),
     Training(crate::activities::training::history::TrainingHistory),
-    Workflow(Memo<Option<WorkflowSnapshot>>),
+    Workflow(Memo<Option<WorkflowEditorStatus>>),
 }
 
 /// Workspace content stays mounted; only the active workspace supplies shell chrome.
@@ -436,8 +437,8 @@ pub(crate) struct WorkflowStatusProjection {
     graph: String,
 }
 
-impl From<&WorkflowSnapshot> for WorkflowStatusProjection {
-    fn from(state: &WorkflowSnapshot) -> Self {
+impl From<&WorkflowEditorStatus> for WorkflowStatusProjection {
+    fn from(state: &WorkflowEditorStatus) -> Self {
         WorkflowStatusContext {
             state: Some(state),
             backend_connected: true,
@@ -468,7 +469,7 @@ impl From<&spiral_robotics_common::training::TrainingSnapshot> for TrainingStatu
 }
 
 struct WorkflowStatusContext<'a> {
-    state: Option<&'a WorkflowSnapshot>,
+    state: Option<&'a WorkflowEditorStatus>,
     backend_connected: bool,
     readiness: BackendReadinessState,
     catalog_available: bool,
@@ -535,9 +536,10 @@ mod tests {
 
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn workflow_status_projects_authoritative_graph_and_run_phase() {
-        let mut state = WorkflowSnapshot::default();
-        state.workflow_mut().set_revision(7);
-        state.snapshot_mut().set_phase(WorkflowRunPhase::Running);
+        let graph = spiral_robotics_common::workflow::WorkflowSpec::default().with_revision(7);
+        let mut run = spiral_robotics_common::workflow::WorkflowRunSnapshot::idle_for(&graph);
+        run.set_phase(WorkflowRunPhase::Running);
+        let state = WorkflowEditorStatus::new(graph, run);
 
         let status = WorkflowStatusContext {
             state: Some(&state),
@@ -564,7 +566,11 @@ mod tests {
         assert_eq!(loading.phase, "Loading saved workflow…");
         assert_eq!(loading.graph, "Loading graph…");
 
-        let state = WorkflowSnapshot::default();
+        let graph = spiral_robotics_common::workflow::WorkflowSpec::default();
+        let state = WorkflowEditorStatus::new(
+            graph.clone(),
+            spiral_robotics_common::workflow::WorkflowRunSnapshot::idle_for(&graph),
+        );
         let unavailable = WorkflowStatusContext {
             state: Some(&state),
             backend_connected: false,

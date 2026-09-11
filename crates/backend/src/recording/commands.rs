@@ -88,12 +88,9 @@ impl RecordingPort for RecordingAdapter<'_> {
     type CaptureChange = crate::recording_session::RecordingOperation;
 
     fn reserve_recording_start(&self) -> Result<Option<CatalogLeaseToken>, OperationError> {
-        self.state.recording_session().reserve_start(|| {
-            (
-                self.state.workflow().is_active(),
-                self.state.workflow_agent().is_active(),
-            )
-        })
+        self.state
+            .recording_session()
+            .reserve_start(|| self.state.workflow().is_active())
     }
 
     fn bind_recording_lease(&self, token: CatalogLeaseToken, take: (String, Option<VideoCapture>)) {
@@ -928,53 +925,17 @@ mod admission_tests {
     use super::*;
 
     #[test]
-    fn active_workflow_or_assistant_blocks_recording_and_releases_admission() {
-        for (activity, expected, next_owner) in [
-            (
-                (true, false),
-                "active Workflow run",
-                CatalogLeaseOwner::WorkflowStart,
-            ),
-            (
-                (false, true),
-                "active Workflow Assistant turn",
-                CatalogLeaseOwner::WorkflowAgentStart,
-            ),
-        ] {
-            let lease = Arc::new(CatalogMutationLease::default());
-            let session = crate::recording_session::RecordingSessionManager::new(lease.clone());
-            let error = session
-                .reserve_start(|| activity)
-                .expect_err("published activity must block a later recording");
-            assert!(error.to_string().contains(expected));
-
-            let next = lease
-                .try_acquire(next_owner)
-                .expect("a rejected recording must release its admission lease");
-            assert!(lease.release(next));
-        }
-    }
-
-    #[test]
-    fn admitted_recording_blocks_later_workflow_and_assistant_admission() {
+    fn workflow_execution_and_recording_exclude_each_other() {
         let lease = Arc::new(CatalogMutationLease::default());
         let session = crate::recording_session::RecordingSessionManager::new(lease.clone());
-        let recording = session
-            .reserve_start(|| (false, false))
-            .expect("idle activity check")
-            .expect("recording admission");
-
+        assert!(session.reserve_start(|| true).is_err());
+        let token = lease.try_acquire(CatalogLeaseOwner::WorkflowStart).unwrap();
+        assert!(lease.release(token));
+        let recording = session.reserve_start(|| false).unwrap().unwrap();
         assert!(
             lease
                 .try_acquire(CatalogLeaseOwner::WorkflowStart)
-                .is_none(),
-            "manual Workflow cannot pass an admitted recording"
-        );
-        assert!(
-            lease
-                .try_acquire(CatalogLeaseOwner::WorkflowAgentStart)
-                .is_none(),
-            "Assistant cannot pass an admitted recording"
+                .is_none()
         );
         session.cancel_start(recording);
     }

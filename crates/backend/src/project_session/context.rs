@@ -7,7 +7,6 @@ use crate::robotics::video::VideoEncoderSettings;
 use crate::robots::workspace::RobotWorkspace;
 use crate::rollout::manager::RolloutManager;
 use crate::training::manager::TrainingManager;
-use crate::workflow::agent::WorkflowAgentManager;
 use crate::workflow::manager::WorkflowManager;
 use spiral_robotics_hardware::HardwareHandle;
 use spiral_robotics_storage::{StorageManager, episodes::RecordingBuffer};
@@ -91,9 +90,6 @@ impl ProjectContext {
     }
     pub(crate) fn workflow(&self) -> &Arc<WorkflowManager> {
         self.project.workflow()
-    }
-    pub(crate) fn workflow_agent(&self) -> &Arc<WorkflowAgentManager> {
-        self.project.workflow_agent()
     }
     pub(crate) fn rollout(&self) -> &Arc<RolloutManager> {
         self.project.rollout()

@@ -11,32 +11,44 @@ The Spiral `workflows` relation stores one row per workflow: `workflow_id`, `nam
 `updated_ms`. Graph nodes and edges remain inside the graph JSON. Conversation JSON
 contains the visible messages and provider history for one Assistant conversation.
 
-Startup reads IDs and names ordered by the last explicit Save, selects the first
-workflow, and loads its graph and conversation. An empty list opens a new in-memory
-workflow. Creating or selecting a workflow does not write storage.
+The frontend reads IDs and names ordered by the last explicit Save and opens the
+first document. An empty list creates a browser-owned draft. New, selection,
+editing, and Discard do not mutate a backend editing session; no such session exists.
 
-**Save is the only persistence action.** It atomically stores the current graph,
-run snapshot, and Assistant conversation in one workflow row. Graph edits,
-Assistant messages and tool results, Run, Stop, and completion stay in session
-memory until Save. Editor edits remain in the browser until Run, Send, or Save
-submits them. A browser refresh can reconnect to backend session state, but loses
-unsubmitted editor edits. A backend restart or project close loses unsaved work.
+**Save is the only authoring persistence action.** It atomically stores the graph
+and Assistant conversation in one row. The graph revision is the saved document
+version, checked again within the storage transaction before replacement. A stale
+save fails rather than overwriting another save. Invalid or incomplete drafts may
+be saved; execution still requires a valid graph.
 
-Run and Send use the graph currently visible in the editor, including unsaved
-edits. The Assistant's `set_workflow` tool updates the in-memory graph and reports
-“Updated”; it cannot save or run it. Save is available when authoring and execution
-are idle. A failed Save preserves the draft and leaves its revision retryable.
+The browser owns the current graph, its last saved baseline, conversation, and
+agent loop. Manual edits and `set_workflow` update the same draft. The loop sends
+one completion request at a time to `/models/complete`; that backend endpoint owns
+credentials and provider streaming, but no conversation or tools. Read-only tool
+calls use ordinary dataset/query capabilities. Graph changes first call
+`/workflows/plan`, then compare the local draft against the input used to author
+the change. Intervening user edits are preserved and reported as a conflict.
 
-The UI marks unsaved changes. Save or Discard before switching workflows. Discard
-restores the last saved graph, conversation, and results; for a never-saved
-workflow it returns to an empty draft. Selection does not change saved timestamps.
+Run submits the complete visible graph once to `/workflow-runs`. The backend owns
+an immutable copy and returns a run ID. Run observations are separate from saved
+documents and remain available for the backend project session. They include the
+submitted graph, including for never-saved workflows. Editing, saving, or selecting
+another graph cannot alter an existing run. Only one execution is admitted at a
+time; recording and execution remain mutually exclusive. The authoring assistant
+does not reserve hardware or execution admission.
 
-`WorkflowJson` carries an encoding version independently of the edit counter used
-to reject stale requests. New graphs use encoding version 3. Compatible version-2
-SQL graphs can still open; retired episode/cache node shapes are refused.
+Save and Discard affect the graph and conversation, not running jobs or results.
+The saved graph envelope remains version 3 (with an idle snapshot for compatibility).
+Compatible version-2 SQL graphs still open; unsupported documents are refused
+without rewriting them. Encoding version and saved document revision are separate.
 
-Canvas selection and layout remain frontend concerns. Unsent chat text belongs to
-its workflow in the frontend and is not part of a saved conversation.
+Save or Discard before switching documents. The frontend retains workspaces during
+navigation. Closing/reloading the page loses unsaved drafts and conversation
+changes and stops its agent loop. Submitted backend runs continue until completion,
+cancellation, or backend/project shutdown. Closing the model response body cancels
+the request; it never leaves a server-owned agent loop behind.
+
+Unsent chat text is local to its workflow and is not part of a saved conversation.
 
 ## Authoring and execution
 
@@ -103,7 +115,8 @@ browser payload; use SQL filters, frame selection, or LIMIT to bound model work.
 The runner drains the remaining output so inference finishes and
 late failures are not hidden. Progress and cancellation are live observations during
 execution. Run admission, progress, cancellation, and terminal snapshots make no
-storage writes. An explicit Save after the run includes the result preview.
+storage writes. Save persists the graph and conversation; run results remain in the
+backend project session and are not written into the saved document.
 
 Every Run computes inference again. The old candidate/cache preflight, second
 image-producing query, feature backfill, and cache publication are removed from the
@@ -141,7 +154,7 @@ lineage, invalidation, and missing-value semantics belong to that milestone.
 
 ## Assistant tools
 
-Each implementation under `workflow/agent/tools` owns its description, parameter
+Each frontend implementation under `activities/workflow/agent/tools` owns its description, parameter
 schema, argument parsing, execution, and receipt. The single registry advertises and
 dispatches `inspect_dataset`, `list_relations`, `describe_relations`,
 `list_model_capabilities`, `set_workflow`, and `run_query`. There are no preparation,

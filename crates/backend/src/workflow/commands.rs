@@ -1,162 +1,127 @@
-//! Workflow application operations.
-
+//! Resource capabilities; authoring and the agent loop belong to the caller.
+use super::provider::{ModelStream, OpenAiProvider, ProviderConfig};
+use crate::data::catalog_lease::CatalogLeaseOwner;
+use crate::project_session::context::ProjectContext;
+use crate::{BackendCommandError, OperationError};
+use spiral_robotics_common::datasets::DatasetSelection;
 use spiral_robotics_common::workflow::{
-    WorkflowAgentCommand, WorkflowAgentSnapshot, WorkflowCommand, WorkflowSnapshot,
+    WorkflowAgentReadiness, WorkflowSpec, WorkflowSummary,
+    document::{ModelRequest, WorkflowDocument, WorkflowPlan, WorkflowRun},
 };
 
-use crate::BackendCommandError;
-use crate::data::catalog_lease::CatalogLeaseOwner;
-
-/// Project-bound operations; the context owns admission and backend task lifetime.
 #[derive(Clone)]
 pub(crate) struct WorkflowCommands {
-    state: crate::project_session::context::ProjectContext,
+    state: ProjectContext,
 }
-
 impl WorkflowCommands {
-    pub(crate) async fn snapshot(&self) -> Result<WorkflowSnapshot, BackendCommandError> {
-        let commands = self.clone();
-        let activity = commands.state.admit()?;
-        self.state
-            .tasks()
-            .execute(async move {
-                let _activity = activity;
-                commands.require_catalog_ready()?;
-                commands.state.workflow_agent().ensure_loaded().await?;
-                Ok(commands.state.workflow().state())
-            })
-            .await?
-    }
-
-    pub(crate) async fn command(
-        &self,
-        command: WorkflowCommand,
-    ) -> Result<WorkflowSnapshot, BackendCommandError> {
-        let commands = self.clone();
-        let activity = commands.state.admit()?;
-        self.state.tasks()
-            .execute(async move {
-                let _activity = activity;
-                commands.require_catalog_ready()?;
-                commands.state.workflow_agent().ensure_loaded().await?;
-                if matches!(&command, WorkflowCommand::Cancel { .. }) {
-                    return commands.state.workflow().command(command).await.map_err(Into::into);
-                }
-                let token = commands.state.catalog_lease()
-                    .try_acquire(CatalogLeaseOwner::WorkflowStart)
-                    .ok_or_else(|| {
-                        BackendCommandError::conflict(
-                            "Wait for the current recording or catalog change before changing Workflow",
-                        )
-                    })?;
-                if commands.state.workflow_agent().is_active() {
-                    let released = commands.state.catalog_lease().release(token);
-                    debug_assert!(
-                        released,
-                        "Workflow command releases its admission lease once"
-                    );
-                    return Err(BackendCommandError::conflict(
-                        "Wait for the active Assistant turn before changing Workflow manually",
-                    ));
-                }
-                let result = async {
-                    // Resolve the conversation before changing the graph. A failed
-                    // read leaves the selected graph and chat together.
-                    if matches!(&command, WorkflowCommand::Create { .. } | WorkflowCommand::Select { .. })
-                        && (commands.state.workflow().state().unsaved_changes()
-                            || commands.state.workflow_agent().state().unsaved_changes())
-                    {
-                        return Err(BackendCommandError::conflict("Save or discard your changes before switching workflows."));
-                    }
-                    if let WorkflowCommand::Save { scope_id, expected_revision, workflow } = command {
-                        commands.state.workflow().save(
-                            super::manager::GraphEdit::new(scope_id, expected_revision, workflow),
-                            &commands.state.workflow_agent().conversation(),
-                        ).await?;
-                        commands.state.workflow_agent().mark_saved();
-                        return Ok(commands.state.workflow().state());
-                    }
-                    let conversation = match &command {
-                        WorkflowCommand::Select { workflow_id, .. } => Some(commands.state.workflow_agent().conversation_for(workflow_id).await?),
-                        WorkflowCommand::Discard { .. } => Some(commands.state.workflow_agent().conversation_for(commands.state.workflow().state().workflow().id()).await?),
-                        _ => None,
-                    };
-                    let creating = matches!(&command, WorkflowCommand::Create { .. });
-                    let state = commands.state.workflow().command(command).await?;
-                    if let Some(conversation) = conversation {
-                        commands.state.workflow_agent().select_conversation(conversation);
-                    } else if creating {
-                        commands.state.workflow_agent().select_conversation(
-                            spiral_robotics_storage::workflow_assistant::WorkflowConversation::new(state.workflow().id())
-                        );
-                    }
-                    Ok::<_, BackendCommandError>(commands.state.workflow().state())
-                }.await;
-                let released = commands.state.catalog_lease().release(token);
-                debug_assert!(
-                    released,
-                    "Workflow command releases its admission lease once"
-                );
-                result
-            })
-            .await?
-    }
-
-    pub(crate) async fn agent_snapshot(
-        &self,
-    ) -> Result<WorkflowAgentSnapshot, BackendCommandError> {
-        let commands = self.clone();
-        let activity = commands.state.admit()?;
-        self.state
-            .tasks()
-            .execute(async move {
-                let _activity = activity;
-                commands.require_catalog_ready()?;
-                commands.state.workflow_agent().ensure_loaded().await?;
-                Ok(commands.state.workflow_agent().state())
-            })
-            .await?
-    }
-
-    pub(crate) async fn agent_command(
-        &self,
-        command: WorkflowAgentCommand,
-    ) -> Result<WorkflowAgentSnapshot, BackendCommandError> {
-        let commands = self.clone();
-        let activity = commands.state.admit()?;
-        self.state
-            .tasks()
-            .execute(async move {
-                let _activity = activity;
-                commands.require_catalog_ready()?;
-                commands.state.workflow_agent().ensure_loaded().await?;
-                if !matches!(&command, WorkflowAgentCommand::Cancel { .. })
-                    && !commands.state.bootstrap().current().catalog_available()
-                {
-                    return Err(BackendCommandError::conflict(
-                        "Configure or reconnect Spiral before changing Assistant conversations.",
-                    ));
-                }
-                commands
-                    .state
-                    .workflow_agent()
-                    .command(command)
-                    .await
-                    .map_err(Into::into)
-            })
-            .await?
-    }
-
-    fn require_catalog_ready(&self) -> Result<(), BackendCommandError> {
-        match self.state.bootstrap().catalog_unavailable() {
-            Some(error) => Err(error.into()),
-            None => Ok(()),
+    fn admit(&self) -> Result<crate::project_admission::ProjectActivity, BackendCommandError> {
+        let activity = self.state.admit()?;
+        if let Some(error) = self.state.bootstrap().catalog_unavailable() {
+            return Err(error.into());
         }
+        Ok(activity)
+    }
+    pub(crate) async fn list(&self) -> Result<Vec<WorkflowSummary>, BackendCommandError> {
+        let _activity = self.admit()?;
+        self.state.workflow().list().await.map_err(Into::into)
+    }
+    pub(crate) async fn load(&self, id: &str) -> Result<WorkflowDocument, BackendCommandError> {
+        let _activity = self.admit()?;
+        self.state.workflow().load(id).await.map_err(Into::into)
+    }
+    pub(crate) async fn save(
+        &self,
+        document: WorkflowDocument,
+    ) -> Result<WorkflowDocument, BackendCommandError> {
+        let activity = self.admit()?;
+        let manager = self.state.workflow().clone();
+        self.state
+            .tasks()
+            .execute(async move {
+                let _activity = activity;
+                manager.save(document).await.map_err(Into::into)
+            })
+            .await?
+    }
+    pub(crate) async fn plan(
+        &self,
+        workflow: WorkflowSpec,
+    ) -> Result<WorkflowPlan, BackendCommandError> {
+        let _activity = self.admit()?;
+        Ok(self.state.workflow().plan(&workflow).await)
+    }
+    pub(crate) fn runs(&self) -> Result<Vec<WorkflowRun>, BackendCommandError> {
+        let _activity = self.admit()?;
+        Ok(self.state.workflow().runs())
+    }
+    pub(crate) fn run(&self, id: &str) -> Result<WorkflowRun, BackendCommandError> {
+        let _activity = self.admit()?;
+        self.state.workflow().run(id).map_err(Into::into)
+    }
+    pub(crate) fn start(&self, workflow: WorkflowSpec) -> Result<WorkflowRun, BackendCommandError> {
+        let _activity = self.admit()?;
+        let lease = self.state.catalog_lease();
+        let token = lease
+            .try_acquire(CatalogLeaseOwner::WorkflowStart)
+            .ok_or_else(|| {
+                BackendCommandError::conflict(
+                    "Wait for recording or catalog changes before running a workflow.",
+                )
+            })?;
+        let result = self.state.workflow().start(workflow);
+        let released = lease.release(token);
+        debug_assert!(released);
+        result.map_err(Into::into)
+    }
+    pub(crate) fn cancel(&self, id: &str) -> Result<WorkflowRun, BackendCommandError> {
+        let _activity = self.state.admit()?;
+        self.state.workflow().cancel(id).map_err(Into::into)
+    }
+    pub(crate) async fn cameras(
+        &self,
+        selection: DatasetSelection,
+    ) -> Result<serde_json::Value, BackendCommandError> {
+        let _activity = self.admit()?;
+        let inspection = self
+            .state
+            .storage()
+            .inspect_dataset(selection)
+            .await
+            .map_err(OperationError::External)?;
+        let cameras = self
+            .state
+            .storage()
+            .workflow_cameras(&inspection)
+            .await
+            .map_err(OperationError::External)?;
+        Ok(serde_json::json!({"dataset": inspection, "cameras": cameras}))
+    }
+    pub(crate) fn model_status(&self) -> Result<WorkflowAgentReadiness, BackendCommandError> {
+        let _activity = self.state.admit()?;
+        Ok(match ProviderConfig::from_env() {
+            Ok(Some(_)) => WorkflowAgentReadiness::ready("Ready to help author this workflow."),
+            Ok(None) => WorkflowAgentReadiness::error(
+                "Configure LLM_API_KEY on the backend to enable the assistant.",
+            ),
+            Err(error) => WorkflowAgentReadiness::error(error),
+        })
+    }
+    pub(crate) fn complete(
+        &self,
+        request: ModelRequest,
+    ) -> Result<ModelStream, BackendCommandError> {
+        let _activity = self.state.admit()?;
+        let config = ProviderConfig::from_env()
+            .map_err(OperationError::External)?
+            .ok_or_else(|| {
+                OperationError::InvalidInput("Assistant provider is not configured.".into())
+            })?;
+        let provider = OpenAiProvider::new(config).map_err(OperationError::External)?;
+        Ok(ModelStream::new(provider, request))
     }
 }
-
-impl From<crate::project_session::context::ProjectContext> for WorkflowCommands {
-    fn from(state: crate::project_session::context::ProjectContext) -> Self {
+impl From<ProjectContext> for WorkflowCommands {
+    fn from(state: ProjectContext) -> Self {
         Self { state }
     }
 }

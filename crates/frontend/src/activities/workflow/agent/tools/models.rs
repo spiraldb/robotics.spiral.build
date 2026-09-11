@@ -24,7 +24,10 @@ impl WorkflowTool for ListModelCapabilities {
     fn completion(&self, output: &Value) -> ToolCompletion {
         ToolCompletion::count(output, "models", "model capabilities")
     }
-    fn call<'a>(&'a self, invocation: ToolInvocation<'a>) -> BoxFuture<'a, Result<String, String>> {
+    fn call<'a>(
+        &'a self,
+        invocation: ToolInvocation<'a>,
+    ) -> LocalBoxFuture<'a, Result<String, String>> {
         Box::pin(async move {
             let _: NoArguments = invocation.arguments()?;
             Ok(json!({

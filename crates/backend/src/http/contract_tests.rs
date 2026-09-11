@@ -92,7 +92,9 @@ async fn every_documented_scoped_endpoint_is_registered_and_rejects_missing_or_s
             }
         }
     }
-    assert_eq!(count, 57);
+    assert_eq!(count, 64);
+    assert!(contract["paths"].get("/workflow/commands").is_none());
+    assert!(contract["paths"].get("/workflow/assistant").is_none());
     assert!(contract["paths"]["/robots/setup"]["get"].is_object());
     assert!(contract["paths"].get("/project/setup").is_none());
     fixture.shutdown().await;

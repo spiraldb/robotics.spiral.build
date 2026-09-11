@@ -683,11 +683,7 @@ mod tests {
 
     impl FakePort {
         fn seed_recording_lease(&self) {
-            let token = self
-                .session
-                .reserve_start(|| (false, false))
-                .unwrap()
-                .unwrap();
+            let token = self.session.reserve_start(|| false).unwrap().unwrap();
             self.session.begin(token, ("episode_000001".into(), None));
         }
     }
@@ -702,7 +698,7 @@ mod tests {
         fn reserve_recording_start(&self) -> Result<Option<CatalogLeaseToken>, OperationError> {
             self.events.lock().unwrap().push("reserve-start".to_owned());
             if self.start_available {
-                self.session.reserve_start(|| (false, false))
+                self.session.reserve_start(|| false)
             } else {
                 Ok(None)
             }

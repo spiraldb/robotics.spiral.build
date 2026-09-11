@@ -1,9 +1,4 @@
-//! Shell-owned Workflow editor state and backend commands.
-//!
-//! Canvas geometry and inspector selection are browser interaction state. The
-//! current graph, validation, execution phases, and result payload are backend
-//! truth, refreshed exclusively by the project-scoped queries.
-
+//! Browser-owned workflow document, authoring state, and run observations.
 use crate::activities::workflow::WorkflowClient;
 use crate::client::queries::{QueryDomain, QueryPolicy, QueryRefresh};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -13,15 +8,15 @@ use dioxus_flow::{Edge, EdgeKind, Node, Side};
 use dioxus_workbench::PanelId;
 use spiral_robotics_common::relations::{CatalogRelation, RelationCatalog};
 use spiral_robotics_common::workflow::{
-    WorkflowAgentArtifactReceipt, WorkflowAgentCommand as AgentRequest, WorkflowAgentSnapshot,
-    WorkflowCommand as WorkflowRequest, WorkflowEdgeSpec, WorkflowModelFeature, WorkflowNodeConfig,
+    WorkflowAgentArtifactReceipt, WorkflowEdgeSpec, WorkflowModelFeature, WorkflowNodeConfig,
     WorkflowNodePhase, WorkflowNodeProgress, WorkflowNodeSnapshot, WorkflowQuarantineSummary,
-    WorkflowRunPhase, WorkflowRunSnapshot, WorkflowSnapshot, WorkflowSpec, WorkflowSummary,
-    WorkflowValidationReport,
+    WorkflowRunPhase, WorkflowRunSnapshot, WorkflowSpec, WorkflowSummary, WorkflowValidationReport,
 };
 
+use super::agent::{WorkflowAgentState, WorkflowAssistant};
 use crate::shell::notifications::MessageSource;
 use crate::shell::state::StudioProjectState;
+use spiral_robotics_common::workflow::document::{WorkflowDocument, WorkflowRun};
 
 pub(crate) const ASSISTANT_PANEL_ID: &str = "workflow-assistant";
 pub(crate) const NODE_PANEL_ID: &str = "workflow-node";
@@ -210,9 +205,7 @@ impl WorkflowUiState {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WorkflowPendingCommand {
-    Applying,
     Saving,
-    Discarding,
     Selecting,
     Starting,
     Cancelling,
@@ -261,7 +254,8 @@ pub(crate) struct WorkflowController {
     graph: WorkflowGraphSignals,
     document: WorkflowDefinitionSignals,
     lifecycle: WorkflowLifecycleSignals,
-    assistant: WorkflowAssistantSignals,
+    assistant: WorkflowAssistant,
+    agent_drafts: Signal<BTreeMap<AgentDraftKey, String>>,
     relation_catalog: ReadSignal<Option<Result<RelationCatalog, String>>>,
 }
 
@@ -274,69 +268,47 @@ struct WorkflowGraphSignals {
 
 #[derive(Clone, Copy, PartialEq)]
 struct WorkflowDefinitionSignals {
-    server: Signal<WorkflowSnapshot>,
+    baseline: Signal<WorkflowDocument>,
     draft: Signal<WorkflowSpec>,
-    acknowledged: Signal<Option<GraphEditReceipt>>,
+    runs: Signal<Vec<WorkflowRun>>,
+    conflict: Signal<bool>,
 }
-
-/// Acknowledges the submitted graph while preserving edits made during a request.
-#[derive(Clone)]
-struct GraphEditReceipt {
-    submitted: WorkflowSpec,
-    revision: u64,
-}
-impl GraphEditReceipt {
-    fn acknowledges(&self, draft: &WorkflowSpec, fetched: &WorkflowSpec) -> bool {
-        draft == &self.submitted && fetched.revision() >= self.revision
-    }
-}
-
 #[derive(Clone, Copy, PartialEq)]
 struct WorkflowLifecycleSignals {
     loaded: Signal<bool>,
     command: Signal<Option<WorkflowPendingCommand>>,
     load_error: Signal<Option<String>>,
-}
-
-#[derive(Clone, Copy, PartialEq)]
-struct WorkflowAssistantSignals {
-    agent: Signal<WorkflowAgentSnapshot>,
-    agent_loaded: Signal<bool>,
-    agent_command: Signal<Option<AgentPendingCommand>>,
-    agent_error: Signal<Option<String>>,
-    agent_drafts: Signal<BTreeMap<AgentDraftKey, String>>,
+    workflows: Signal<Vec<WorkflowSummary>>,
 }
 
 impl WorkflowController {
     pub(crate) fn use_controller(
         relation_catalog: ReadSignal<Option<Result<RelationCatalog, String>>>,
     ) -> Self {
-        let initial = WorkflowSnapshot::from_workflow("", WorkflowSpec::default());
-        let initial_spec = initial.workflow().to_owned();
-        let initial_nodes = initial_spec.graph_nodes(initial.snapshot(), &[]);
-        let initial_edges = initial_spec.graph_edges(initial.snapshot());
+        let initial = use_hook(Self::fresh_document);
+        let initial_spec = initial.workflow().clone();
+        let snapshot = WorkflowRunSnapshot::idle_for(&initial_spec);
+        let initial_nodes = initial_spec.graph_nodes(&snapshot, &[]);
+        let initial_edges = initial_spec.graph_edges(&snapshot);
         let controller = use_hook(|| Self {
             graph: WorkflowGraphSignals {
                 nodes: Signal::new(initial_nodes),
                 edges: Signal::new(initial_edges),
                 ui: Signal::new(WorkflowUiState::default()),
             },
+            assistant: WorkflowAssistant::new(initial_spec.id()),
+            agent_drafts: Signal::new(BTreeMap::new()),
             document: WorkflowDefinitionSignals {
-                server: Signal::new(initial),
+                baseline: Signal::new(initial),
                 draft: Signal::new(initial_spec),
-                acknowledged: Signal::new(None),
+                runs: Signal::new(Vec::new()),
+                conflict: Signal::new(false),
             },
             lifecycle: WorkflowLifecycleSignals {
                 loaded: Signal::new(false),
                 command: Signal::new(None),
                 load_error: Signal::new(None),
-            },
-            assistant: WorkflowAssistantSignals {
-                agent: Signal::new(WorkflowAgentSnapshot::default()),
-                agent_loaded: Signal::new(false),
-                agent_command: Signal::new(None),
-                agent_error: Signal::new(None),
-                agent_drafts: Signal::new(BTreeMap::new()),
+                workflows: Signal::new(Vec::new()),
             },
             relation_catalog,
         });
@@ -360,14 +332,35 @@ impl WorkflowController {
     }
 
     pub(crate) fn snapshot(&self) -> WorkflowRunSnapshot {
-        self.document.server.read().snapshot().to_owned()
+        Self::project_run(&self.document.draft.read(), &self.document.runs.read())
     }
-
-    pub(crate) fn accepted_state(&self) -> Option<WorkflowSnapshot> {
-        self.lifecycle
-            .loaded
+    fn project_run(draft: &WorkflowSpec, runs: &[WorkflowRun]) -> WorkflowRunSnapshot {
+        let Some(run) = runs
+            .iter()
+            .filter(|run| run.workflow().id() == draft.id())
+            .max_by_key(|run| run.snapshot().started_ms())
+        else {
+            return WorkflowRunSnapshot::idle_for(draft);
+        };
+        let mut snapshot = run.snapshot().clone();
+        let mut submitted = run.workflow().clone();
+        submitted.set_revision(draft.revision());
+        snapshot.set_result_stale(&submitted != draft);
+        snapshot
+    }
+    pub(crate) fn executed_graph(&self) -> Option<WorkflowSpec> {
+        let id = self.document.draft.read().id().to_owned();
+        self.document
+            .runs
             .read()
-            .then(|| self.document.server.read().to_owned())
+            .iter()
+            .filter(|run| run.workflow().id() == id)
+            .max_by_key(|run| run.snapshot().started_ms())
+            .map(|run| run.workflow().clone())
+    }
+    pub(crate) fn editor_status(&self) -> Option<WorkflowEditorStatus> {
+        self.loaded()
+            .then(|| WorkflowEditorStatus::new(self.spec(), self.snapshot()))
     }
 
     pub(crate) fn relations(&self) -> Vec<CatalogRelation> {
@@ -428,29 +421,39 @@ impl WorkflowController {
         *self.lifecycle.command.read()
     }
 
-    pub(crate) fn agent_state(&self) -> WorkflowAgentSnapshot {
-        self.assistant.agent.read().to_owned()
+    pub(crate) fn agent_state(&self) -> WorkflowAgentState {
+        self.assistant.snapshot(self.loaded())
     }
-
     pub(crate) fn agent_loaded(&self) -> bool {
-        *self.assistant.agent_loaded.read()
+        self.assistant.loaded()
     }
-
     pub(crate) fn agent_command(&self) -> Option<AgentPendingCommand> {
-        *self.assistant.agent_command.read()
+        self.agent_state()
+            .session()
+            .phase()
+            .active()
+            .then_some(AgentPendingCommand::Sending)
     }
-
     pub(crate) fn agent_error(&self) -> Option<String> {
-        self.assistant.agent_error.read().to_owned()
+        self.agent_state().session().error().map(str::to_owned)
     }
-
-    /// Unsent text belongs to this Workflow workspace, keyed by conversation.
     pub(crate) const fn agent_drafts(self) -> Signal<BTreeMap<AgentDraftKey, String>> {
-        self.assistant.agent_drafts
+        self.agent_drafts
     }
-
     pub(crate) fn workflows(&self) -> Vec<WorkflowSummary> {
-        self.document.server.read().workflows().to_owned()
+        let mut workflows = self.lifecycle.workflows.read().clone();
+        for run in self.document.runs.read().iter() {
+            if !workflows
+                .iter()
+                .any(|workflow| workflow.id() == run.workflow().id())
+            {
+                workflows.push(WorkflowSummary::new(
+                    run.workflow().id(),
+                    format!("{} (run)", run.workflow().name()),
+                ));
+            }
+        }
+        workflows
     }
 
     pub(crate) fn workflow_selection_reason(&self) -> Option<String> {
@@ -460,7 +463,7 @@ impl WorkflowController {
         if self.command().is_some() || self.agent_command().is_some() {
             return Some("Wait for the current action to finish.".to_owned());
         }
-        if self.snapshot().phase().active() || self.agent_state().session().phase().active() {
+        if self.agent_state().session().phase().active() {
             return Some("Stop the active work before switching workflows.".to_owned());
         }
         if self.unsaved_changes() {
@@ -475,7 +478,7 @@ impl WorkflowController {
     pub(crate) fn select_dataset(
         mut self,
         source: spiral_robotics_common::datasets::DatasetSummary,
-        studio: StudioProjectState,
+        _studio: StudioProjectState,
     ) {
         if self.workflow_selection_reason().is_some() {
             return;
@@ -508,7 +511,6 @@ impl WorkflowController {
             .push(WorkflowEdgeSpec::new("source", "result"));
         drop(draft);
         self.sync_graph();
-        self.apply(studio);
     }
 
     pub(crate) fn set_name(mut self, name: String) {
@@ -516,14 +518,11 @@ impl WorkflowController {
     }
 
     pub(crate) fn dirty(&self) -> bool {
-        *self.document.draft.read() != *self.document.server.read().workflow()
+        *self.document.draft.read() != *self.document.baseline.read().workflow()
     }
 
     pub(crate) fn revision_conflict(&self) -> bool {
-        self.document
-            .draft
-            .read()
-            .revision_conflicts_with(self.document.server.read().workflow())
+        *self.document.conflict.read()
     }
 
     pub(crate) fn selected_node(&self) -> Option<String> {
@@ -557,13 +556,15 @@ impl WorkflowController {
         if self.agent_state().session().phase().active() || self.agent_command().is_some() {
             return Some("The Workflow Assistant is using this graph.".to_owned());
         }
-        if self.snapshot().phase().active() {
-            return Some("This Workflow is already running.".to_owned());
-        }
-        if self.revision_conflict() {
+        if self
+            .document
+            .runs
+            .read()
+            .iter()
+            .any(|run| run.snapshot().phase().active())
+        {
             return Some(
-                "The workflow changed in another session. Reload the current graph before editing again."
-                    .to_owned(),
+                "A workflow is already running. Open its graph to inspect or cancel it.".to_owned(),
             );
         }
         let draft = self.document.draft.read();
@@ -590,21 +591,13 @@ impl WorkflowController {
                     .to_owned(),
             );
         }
-        if self.command().is_some() || self.snapshot().phase().active() {
-            return Some("Cancel the active run before saving.".to_owned());
+        if self.command().is_some() {
+            return Some("Wait for the current document operation.".to_owned());
         }
         if self.agent_state().session().phase().active() || self.agent_command().is_some() {
             return Some("Wait for the active Assistant turn before saving.".to_owned());
         }
-        let draft = self.document.draft.read();
-        if draft.nodes().is_empty() && draft.edges().is_empty() {
-            return None;
-        }
-        drop(draft);
-        self.validation()
-            .errors()
-            .first()
-            .map(|issue| issue.message().to_owned())
+        None
     }
 
     pub(crate) fn select_node(mut self, id: String) {
@@ -648,9 +641,7 @@ impl WorkflowController {
     }
 
     pub(crate) fn receipt_panel(&self, receipt: &WorkflowAgentArtifactReceipt) -> Option<PanelId> {
-        let dirty = self.dirty();
-        let server = self.document.server.read();
-        receipt.panel_id(&server, dirty).map(PanelId::from)
+        (receipt.revision() == self.spec().revision()).then(|| PanelId::from(CANVAS_PANEL_ID))
     }
 
     pub(crate) fn open_agent_receipt(mut self, receipt: WorkflowAgentArtifactReceipt) {
@@ -666,11 +657,16 @@ impl WorkflowController {
     }
 
     pub(crate) fn reload_current(mut self) {
-        self.document
-            .draft
-            .set(self.document.server.peek().workflow().to_owned());
         self.lifecycle.load_error.set(None);
-        self.sync_graph();
+        let id = self.spec().id().to_owned();
+        let known = self.workflows().iter().any(|workflow| workflow.id() == id);
+        if !self.loaded() {
+            self.load_initial();
+        } else if known {
+            self.open_document(Some(id));
+        } else {
+            self.install(Self::fresh_document());
+        }
     }
 
     pub(crate) fn set_table_relation(mut self, node_id: &str, relation: String) {
@@ -806,421 +802,301 @@ impl WorkflowController {
 
     pub(crate) fn unsaved_changes(&self) -> bool {
         self.dirty()
-            || self.document.server.read().unsaved_changes()
-            || self.assistant.agent.read().unsaved_changes()
+            || self.assistant.conversation() != *self.document.baseline.read().conversation()
     }
-
-    pub(crate) fn save(self, studio: StudioProjectState) {
-        self.submit_graph(studio, true);
+    fn spawn(&self, task: impl std::future::Future<Output = ()> + 'static) {
+        dioxus::dioxus_core::Runtime::current().spawn(self.document.draft.origin_scope(), task);
     }
-
-    pub(crate) fn apply(self, studio: StudioProjectState) {
-        self.submit_graph(studio, false);
+    fn fresh_document() -> WorkflowDocument {
+        WorkflowDocument::new(WorkflowSpec::new(
+            format!(
+                "workflow-{}-{:x}",
+                js_sys::Date::now() as u64,
+                (js_sys::Math::random() * u64::MAX as f64) as u64
+            ),
+            "Untitled workflow",
+        ))
     }
-
-    fn submit_graph(mut self, studio: StudioProjectState, persist: bool) {
+    fn install(mut self, document: WorkflowDocument) {
+        self.assistant.install(document.conversation().clone());
+        self.document.draft.set(document.workflow().clone());
+        self.document.baseline.set(document);
+        self.document.conflict.set(false);
+        self.graph.ui.set(WorkflowUiState::default());
+        self.lifecycle.loaded.set(true);
+        self.lifecycle.load_error.set(None);
+        self.sync_graph();
+    }
+    pub(super) fn replace_authored_graph(
+        mut self,
+        expected: &WorkflowSpec,
+        workflow: WorkflowSpec,
+    ) -> Result<(), String> {
+        self.document
+            .draft
+            .write()
+            .replace_authored(expected, workflow)?;
+        self.sync_graph();
+        Ok(())
+    }
+    pub(crate) fn save(mut self, studio: StudioProjectState) {
         if self.save_disabled_reason().is_some() {
             return;
         }
-        self.lifecycle.command.set(Some(if persist {
-            WorkflowPendingCommand::Saving
-        } else {
-            WorkflowPendingCommand::Applying
-        }));
-        let scope = self.document.server.peek().scope_id().to_owned();
-        dioxus::dioxus_core::Runtime::current().spawn(
-            self.document.draft.origin_scope(),
-            async move {
-                let result = self.send_graph(persist).await;
-                self.finish_command(&scope);
-                if let Err(error) = result {
-                    studio.report_from(MessageSource::Workflow, error);
-                }
-            },
-        );
-    }
-
-    async fn send_graph(mut self, persist: bool) -> Result<WorkflowSnapshot, String> {
-        let submitted = self.document.draft.peek().to_owned();
-        let scope_id = self.document.server.peek().scope_id().to_owned();
-        let expected_revision = submitted.revision();
-        let request = if persist {
-            WorkflowRequest::Save {
-                scope_id,
-                expected_revision,
-                workflow: submitted.clone(),
-            }
-        } else {
-            WorkflowRequest::apply(scope_id, expected_revision, submitted.clone())
-        };
-        let response = WorkflowClient::current()
-            .run_workflow_command(request)
-            .await
-            .map_err(|e| e.to_string())?;
-        self.document.acknowledged.set(Some(GraphEditReceipt {
-            submitted,
-            revision: response.workflow().revision(),
-        }));
-        self.accept_fetched_state(response.clone());
-        QueryRefresh::current().invalidate(&[QueryDomain::Workflow, QueryDomain::Assistant]);
-        Ok(response)
-    }
-
-    pub(crate) fn discard(mut self, studio: StudioProjectState) {
-        if self.command().is_some()
-            || self.agent_command().is_some()
-            || self.snapshot().phase().active()
-            || self.agent_state().session().phase().active()
-        {
-            return;
-        }
-        let scope = self.document.server.peek().scope_id().to_owned();
+        let submitted =
+            WorkflowDocument::new(self.spec()).with_conversation(self.assistant.conversation());
         self.lifecycle
             .command
-            .set(Some(WorkflowPendingCommand::Discarding));
-        dioxus::dioxus_core::Runtime::current().spawn(
-            self.document.draft.origin_scope(),
-            async move {
-                let result = WorkflowClient::current()
-                    .run_workflow_command(WorkflowRequest::Discard {
-                        scope_id: scope.clone(),
-                    })
-                    .await;
-                self.finish_command(&scope);
-                match result {
-                    Ok(response) => {
-                        self.accept_fetched_state(response);
+            .set(Some(WorkflowPendingCommand::Saving));
+        self.spawn(async move {
+            let client = WorkflowClient::current();
+            match client.save(&submitted).await {
+                Ok(saved) => {
+                    // A save acknowledges its input. Edits made while it was in flight stay local.
+                    if self.spec().id() == saved.workflow().id() {
+                        self.document
+                            .draft
+                            .write()
+                            .acknowledge_save(saved.workflow());
+                        self.document.baseline.set(saved);
+                        self.document.conflict.set(false);
                     }
-                    Err(error) => studio.report_from(MessageSource::Workflow, error.to_string()),
+                    if let Ok(workflows) = client.list().await {
+                        self.lifecycle.workflows.set(workflows);
+                    }
                 }
-            },
-        );
+                Err(error) => {
+                    self.document.conflict.set(error.code() == spiral_robotics_common::command_failure::CommandFailureCode::Conflict);
+                    studio.report_from(MessageSource::Workflow, error.to_string());
+                }
+            }
+            self.lifecycle.command.set(None);
+        });
     }
-
+    pub(crate) fn discard(self, _studio: StudioProjectState) {
+        if self.command().is_some() {
+            return;
+        }
+        let baseline = self.document.baseline.peek().clone();
+        self.install(baseline);
+    }
     pub(crate) fn run(mut self, studio: StudioProjectState) {
         if let Some(reason) = self.run_disabled_reason() {
             studio.report_warning_from(MessageSource::Workflow, reason);
             return;
         }
+        let workflow = self.spec();
         self.lifecycle
             .command
             .set(Some(WorkflowPendingCommand::Starting));
-        let requested_scope_id = self.document.server.peek().scope_id().to_owned();
-        dioxus::dioxus_core::Runtime::current().spawn(
-            self.document.draft.origin_scope(),
-            async move {
-                let response = async {
-                    let current = if self.dirty() {
-                        self.send_graph(false).await?
-                    } else {
-                        self.document.server.peek().clone()
-                    };
-                    WorkflowClient::current()
-                        .run_workflow_command(WorkflowRequest::run(
-                            current.scope_id(),
-                            current.workflow().revision(),
-                        ))
-                        .await
-                        .map_err(|error| error.to_string())
-                }
-                .await;
-                self.finish_command(&requested_scope_id);
-                match response {
-                    Ok(_) => {}
-                    Err(error) => studio.report_from(MessageSource::Workflow, error),
-                }
-            },
-        );
+        self.spawn(async move {
+            match WorkflowClient::current().start(&workflow).await {
+                Ok(run) => self.accept_runs(vec![run]),
+                Err(error) => studio.report_from(MessageSource::Workflow, error.to_string()),
+            }
+            self.lifecycle.command.set(None);
+            QueryRefresh::current().invalidate(&[QueryDomain::Workflow]);
+        });
     }
-
     pub(crate) fn cancel(mut self, studio: StudioProjectState) {
-        if !self.snapshot().phase().active() || self.command().is_some() {
+        let Some(id) = self.snapshot().run_id().map(str::to_owned) else {
             return;
-        }
+        };
         self.lifecycle
             .command
             .set(Some(WorkflowPendingCommand::Cancelling));
-        let requested_scope_id = self.document.server.peek().scope_id().to_owned();
-        let request = WorkflowRequest::cancel(requested_scope_id.clone());
-        dioxus::dioxus_core::Runtime::current().spawn(
-            self.document.draft.origin_scope(),
-            async move {
-                let response = WorkflowClient::current()
-                    .run_workflow_command(request)
-                    .await
-                    .map_err(|error| error.to_string());
-                self.finish_command(&requested_scope_id);
-                match response {
-                    Ok(_) => {}
-                    Err(error) => studio.report_from(MessageSource::Workflow, error),
-                }
-            },
-        );
+        self.spawn(async move {
+            match WorkflowClient::current().cancel(&id).await {
+                Ok(run) => self.accept_runs(vec![run]),
+                Err(error) => studio.report_from(MessageSource::Workflow, error.to_string()),
+            }
+            self.lifecycle.command.set(None);
+        });
     }
-
-    pub(crate) fn select_workflow(
-        mut self,
-        workflow_id: Option<String>,
-        studio: StudioProjectState,
-    ) {
-        if self.workflow_selection_reason().is_some() {
-            return;
+    pub(crate) fn select_workflow(self, workflow_id: Option<String>, _studio: StudioProjectState) {
+        if self.workflow_selection_reason().is_none() {
+            self.open_document(workflow_id);
         }
-        let scope_id = self.document.server.peek().scope_id().to_owned();
-        let request = match workflow_id {
-            Some(id) => WorkflowRequest::select(&scope_id, id),
-            None => WorkflowRequest::create(&scope_id),
+    }
+    fn open_document(mut self, id: Option<String>) {
+        let Some(id) = id else {
+            self.install(Self::fresh_document());
+            return;
         };
+        if !self
+            .lifecycle
+            .workflows
+            .peek()
+            .iter()
+            .any(|workflow| workflow.id() == id)
+        {
+            let run = self
+                .document
+                .runs
+                .peek()
+                .iter()
+                .filter(|run| run.workflow().id() == id)
+                .max_by_key(|run| run.snapshot().started_ms())
+                .cloned();
+            if let Some(run) = run {
+                let mut document = WorkflowDocument::new(run.workflow().clone());
+                document.workflow_mut().set_revision(0);
+                self.install(document);
+                return;
+            }
+        }
         self.lifecycle
             .command
             .set(Some(WorkflowPendingCommand::Selecting));
-        dioxus::dioxus_core::Runtime::current().spawn(
-            self.document.draft.origin_scope(),
-            async move {
-                let result = WorkflowClient::current()
-                    .run_workflow_command(request)
-                    .await;
-                self.finish_command(&scope_id);
-                match result {
-                    Ok(state) => {
-                        self.accept_fetched_state(state);
-                    }
-                    Err(error) => studio.report_from(MessageSource::Workflow, error.to_string()),
-                }
-            },
-        );
+        self.spawn(async move {
+            match WorkflowClient::current().load(&id).await {
+                Ok(document) => self.install(document),
+                Err(error) => self.lifecycle.load_error.set(Some(error.to_string())),
+            }
+            self.lifecycle.command.set(None);
+        });
     }
-
-    pub(crate) fn send_agent(mut self, text: String, studio: StudioProjectState) {
-        let text = text.trim().to_owned();
-        let state = self.assistant.agent.peek().to_owned();
-        if text.is_empty()
-            || !self.loaded()
-            || !self.agent_loaded()
-            || state.session().workflow_id() != self.document.server.peek().workflow().id()
-            || !state.readiness().configured()
-            || state.session().phase().active()
+    pub(crate) fn send_agent(mut self, text: String, _studio: StudioProjectState) {
+        if !self.agent_state().readiness().configured()
             || self.command().is_some()
-            || self.assistant.agent_command.peek().is_some()
-            || self.document.server.peek().snapshot().phase().active()
+            || self.agent_command().is_some()
         {
             return;
         }
-        self.assistant
-            .agent_command
-            .set(Some(AgentPendingCommand::Sending));
-        self.assistant.agent_error.set(None);
-        let draft_key = AgentDraftKey::new(state.session().workflow_id());
-        let request = AgentRequest::Turn {
-            scope_id: state.scope_id().to_owned(),
-            conversation_id: state.session().conversation_id().to_owned(),
-            text: text.clone(),
-            expected_revision: state.revision(),
-        };
-        dioxus::dioxus_core::Runtime::current().spawn(
-            self.document.draft.origin_scope(),
-            async move {
-                let response = async {
-                    if self.dirty() {
-                        self.send_graph(false).await?;
-                    }
-                    WorkflowClient::current()
-                        .run_workflow_agent_command(request.clone())
-                        .await
-                        .map_err(|error| error.to_string())
+        let text = text.trim().to_owned();
+        if text.is_empty() {
+            return;
+        }
+        self.assistant.send(self, text.clone());
+        AgentDraftKey::new(self.spec().id())
+            .clear_if_unchanged(&mut self.agent_drafts.write(), &text);
+    }
+    pub(crate) fn cancel_agent(self, _studio: StudioProjectState) {
+        self.assistant.cancel();
+    }
+    pub(crate) fn retry_agent(self, studio: StudioProjectState) {
+        if let Some(message) =
+            self.agent_state()
+                .session()
+                .messages()
+                .iter()
+                .rev()
+                .find(|message| {
+                    message.role() == spiral_robotics_common::workflow::WorkflowAgentRole::User
+                })
+        {
+            self.send_agent(message.text().to_owned(), studio);
+        }
+    }
+    fn load_initial(mut self) {
+        self.lifecycle
+            .command
+            .set(Some(WorkflowPendingCommand::Selecting));
+        self.spawn(async move {
+            let client = WorkflowClient::current();
+            let result = async {
+                let workflows = client.list().await?;
+                let document = match workflows.first() {
+                    Some(workflow) => client.load(workflow.id()).await?,
+                    None => Self::fresh_document(),
+                };
+                Ok::<_, crate::client::transport::CommandError>((workflows, document))
+            }
+            .await;
+            match result {
+                Ok((workflows, document)) => {
+                    self.lifecycle.workflows.set(workflows);
+                    self.install(document);
                 }
-                .await;
-                self.assistant.agent_command.set(None);
-                match response {
-                    Ok(_) => {
-                        if self.assistant.agent.peek().scope_id() == request.scope_id() {
-                            draft_key.clear_if_unchanged(
-                                &mut self.assistant.agent_drafts.write(),
-                                &text,
-                            );
+                Err(error) => self.lifecycle.load_error.set(Some(error.to_string())),
+            }
+            self.lifecycle.command.set(None);
+        });
+    }
+    pub(crate) fn use_polling(self, is_active: ReadSignal<bool>) {
+        let sessions = crate::shell::project::ProjectSessionSignals::current();
+        use_effect(move || {
+            if sessions.catalog_available()
+                && !self.loaded()
+                && self.command().is_none()
+                && self.load_error().is_none()
+            {
+                self.load_initial();
+            }
+        });
+        use_hook(move || {
+            self.spawn(async move {
+                self.assistant.connect().await;
+            });
+        });
+        let active = use_memo(move || {
+            self.document
+                .runs
+                .read()
+                .iter()
+                .any(|run| run.snapshot().phase().active())
+                || self.command().is_some()
+        });
+        let runs = QueryPolicy::new(QueryDomain::Workflow, 500)
+            .with_activity(active.into())
+            .use_when(
+                move || is_active() && sessions.catalog_available(),
+                move || {
+                    let active = self
+                        .document
+                        .runs
+                        .peek()
+                        .iter()
+                        .find(|run| run.snapshot().phase().active())
+                        .and_then(|run| run.snapshot().run_id())
+                        .map(str::to_owned);
+                    async move {
+                        let client = WorkflowClient::current();
+                        match active {
+                            Some(id) => client.run(&id).await.map(|run| vec![run]),
+                            None => client.runs().await,
                         }
                     }
-                    Err(error) => {
-                        self.assistant.agent_error.set(Some(error.clone()));
-                        studio.report_from(MessageSource::Workflow, error);
-                    }
-                }
-            },
-        );
-    }
-
-    pub(crate) fn cancel_agent(mut self, studio: StudioProjectState) {
-        let current = self.assistant.agent.peek().to_owned();
-        if !current.session().phase().active() || self.assistant.agent_command.peek().is_some() {
-            return;
-        }
-        self.assistant
-            .agent_command
-            .set(Some(AgentPendingCommand::Cancelling));
-        dioxus::dioxus_core::Runtime::current().spawn(
-            self.document.draft.origin_scope(),
-            async move {
-                let Some(turn_id) = current.session().active_turn_id().to_owned() else {
-                    self.assistant.agent_command.set(None);
-                    return;
-                };
-                let request = AgentRequest::cancel(
-                    current.scope_id(),
-                    current.session().conversation_id(),
-                    turn_id,
-                );
-                let response = WorkflowClient::current()
-                    .run_workflow_agent_command(request.clone())
-                    .await
-                    .map_err(|error| error.to_string());
-                self.assistant.agent_command.set(None);
-                match response {
-                    Ok(_) => {}
-                    Err(error) => {
-                        self.assistant.agent_error.set(Some(error.clone()));
-                        studio.report_from(MessageSource::Workflow, error);
-                    }
-                }
-            },
-        );
-    }
-
-    pub(crate) fn retry_agent(self, studio: StudioProjectState) {
-        let text = self
-            .assistant
-            .agent
-            .peek()
-            .session()
-            .messages()
-            .iter()
-            .rev()
-            .find(|message| {
-                message.role() == spiral_robotics_common::workflow::WorkflowAgentRole::User
-            })
-            .map(|message| message.text().to_owned());
-        if let Some(text) = text {
-            self.send_agent(text, studio);
-        }
-    }
-
-    pub(crate) fn use_polling(mut self, is_active: ReadSignal<bool>) {
-        let sessions = crate::shell::project::ProjectSessionSignals::current();
-        let workflow_active = use_memo(move || {
-            !self.loaded() || self.snapshot().phase().active() || self.command().is_some()
-        });
-        let workflow = QueryPolicy::new(QueryDomain::Workflow, 500)
-            .with_activity(workflow_active.into())
-            .use_when(
-                move || is_active() && sessions.catalog_available(),
-                || WorkflowClient::current().workflow_snapshot(),
+                },
             );
         use_effect(move || {
-            let result = workflow.read();
-            if !workflow.finished() {
-                return;
-            }
-            match result.as_ref() {
-                Some(Ok(state)) => {
-                    if self.accept_fetched_state(state.clone()) {
-                        crate::activities::data::relations::RelationCatalogState::refresh();
-                    }
-                }
-                Some(Err(error)) => self.lifecycle.load_error.set(Some(error.to_string())),
-                None => {}
-            }
-        });
-        let assistant_active = use_memo(move || {
-            !self.agent_loaded()
-                || self.assistant.agent.read().session().phase().active()
-                || self.agent_command().is_some()
-        });
-        let agent = QueryPolicy::new(QueryDomain::Assistant, 500)
-            .with_activity(assistant_active.into())
-            .use_when(
-                move || is_active() && sessions.catalog_available(),
-                || WorkflowClient::current().workflow_agent_snapshot(),
-            );
-        use_effect(move || {
-            let result = agent.read();
-            if !agent.finished() {
-                return;
-            }
-            match result.as_ref() {
-                Some(Ok(state)) => self.accept_fetched_agent(state.clone()),
-                Some(Err(error)) => self.assistant.agent_error.set(Some(error.to_string())),
-                None => {}
+            if runs.finished()
+                && let Some(Ok(records)) = runs.read().as_ref()
+            {
+                self.accept_runs(records.clone());
             }
         });
     }
-
-    fn accept_fetched_state(mut self, state: WorkflowSnapshot) -> bool {
-        if !self.document.server.peek().accepts(&state) {
-            return false;
-        }
-        if *self.document.server.peek() == state && self.document.acknowledged.peek().is_none() {
-            self.lifecycle.load_error.set(None);
-            self.lifecycle.loaded.set(true);
-            return false;
-        }
-        let scope_changed = state.scope_id() != self.document.server.peek().scope_id();
-        let saved = self.document.acknowledged.peek().clone();
-        let acknowledged = saved.as_ref().is_some_and(|receipt| {
-            receipt.acknowledges(&self.document.draft.peek(), state.workflow())
+    fn accept_runs(mut self, incoming: Vec<WorkflowRun>) {
+        let changed = incoming.iter().any(|run| {
+            self.document
+                .runs
+                .peek()
+                .iter()
+                .find(|current| current.snapshot().run_id() == run.snapshot().run_id())
+                .is_none_or(|current| current != run && current.snapshot().accepts(run.snapshot()))
         });
-        let keep_local_draft = !scope_changed
-            && !acknowledged
-            && *self.document.draft.peek() != *self.document.server.peek().workflow();
-        if scope_changed
-            || saved
-                .as_ref()
-                .is_some_and(|receipt| state.workflow().revision() >= receipt.revision)
-        {
-            self.document.acknowledged.set(None);
-        }
-        if scope_changed {
-            self.graph.nodes.set(Vec::new());
-            self.graph.edges.set(Vec::new());
-            self.assistant.agent_loaded.set(false);
-            QueryRefresh::current().invalidate(&[QueryDomain::Assistant]);
-            self.graph.ui.set(WorkflowUiState::default());
-            self.lifecycle.command.set(None);
-        }
-        self.document.server.set(state.clone());
-        if !keep_local_draft {
-            self.document.draft.set(state.workflow().to_owned());
-        }
-        self.lifecycle.loaded.set(true);
-        self.lifecycle.load_error.set(None);
-        self.sync_graph();
-        scope_changed
-    }
-
-    fn finish_command(mut self, requested_scope_id: &str) {
-        if self.document.server.peek().scope_id() == requested_scope_id {
-            self.lifecycle.command.set(None);
-        }
-    }
-
-    fn accept_fetched_agent(mut self, state: WorkflowAgentSnapshot) {
-        let current = self.assistant.agent.peek();
-        if !current.accepts_fetched(&state, self.document.server.peek().workflow().id()) {
-            return;
-        }
-        let changed = *current != state;
-        drop(current);
         if !changed {
-            self.assistant.agent_loaded.set(true);
-            self.assistant.agent_error.set(None);
             return;
         }
-        self.assistant.agent.set(state);
-        self.assistant.agent_loaded.set(true);
-        self.assistant.agent_error.set(None);
+        let mut runs = self.document.runs.write();
+        for run in incoming {
+            match runs
+                .iter_mut()
+                .find(|current| current.snapshot().run_id() == run.snapshot().run_id())
+            {
+                Some(current) if current.snapshot().accepts(run.snapshot()) => *current = run,
+                Some(_) => {}
+                None => runs.push(run),
+            }
+        }
+        drop(runs);
+        self.sync_graph();
     }
 
     fn sync_graph(mut self) {
         let spec = self.document.draft.peek().to_owned();
-        let snapshot = self.document.server.peek().snapshot().to_owned();
+        let snapshot = Self::project_run(&spec, &self.document.runs.peek());
         let relations = self.relations();
         let mut next = spec.graph_nodes(&snapshot, &relations);
         let next_edges = spec.graph_edges(&snapshot);
@@ -1263,74 +1139,11 @@ impl WorkflowController {
     }
 
     fn scoped_relation_catalog(&self) -> Option<RelationCatalog> {
-        let current_scope_id = self.document.server.peek().scope_id().to_owned();
         self.relation_catalog
             .read_unchecked()
             .as_ref()
             .and_then(|result| result.as_ref().ok())
             .cloned()
-            .filter(|catalog| catalog.matches_scope(&current_scope_id, &current_scope_id))
-    }
-}
-
-trait WorkflowArtifactNavigation {
-    fn panel_id(&self, state: &WorkflowSnapshot, dirty: bool) -> Option<&'static str>;
-}
-
-impl WorkflowArtifactNavigation for WorkflowAgentArtifactReceipt {
-    fn panel_id(&self, state: &WorkflowSnapshot, dirty: bool) -> Option<&'static str> {
-        (!dirty && self.revision() == state.workflow().revision()).then_some(CANVAS_PANEL_ID)
-    }
-}
-
-trait WorkflowAgentReconciliation {
-    fn accepts_fetched(&self, incoming: &WorkflowAgentSnapshot, selected_workflow_id: &str)
-    -> bool;
-}
-impl WorkflowAgentReconciliation for WorkflowAgentSnapshot {
-    fn accepts_fetched(
-        &self,
-        incoming: &WorkflowAgentSnapshot,
-        selected_workflow_id: &str,
-    ) -> bool {
-        incoming.session().workflow_id() == selected_workflow_id
-            && (self.session().workflow_id() != selected_workflow_id
-                || incoming.scope_id() != self.scope_id()
-                || incoming.revision() >= self.revision())
-    }
-}
-
-trait WorkflowStateReconciliation {
-    fn accepts(&self, incoming: &WorkflowSnapshot) -> bool;
-}
-
-impl WorkflowStateReconciliation for WorkflowSnapshot {
-    fn accepts(&self, incoming: &WorkflowSnapshot) -> bool {
-        if incoming.snapshot().workflow_id() != incoming.workflow().id()
-            || incoming.snapshot().workflow_revision() != incoming.workflow().revision()
-        {
-            return false;
-        }
-        if incoming.scope_id() != self.scope_id() {
-            return true;
-        }
-        if incoming.workflow().id() != self.workflow().id()
-            || incoming.workflow().revision() < self.workflow().revision()
-        {
-            return false;
-        }
-        incoming.workflow().revision() > self.workflow().revision()
-            || self.snapshot().accepts(incoming.snapshot())
-    }
-}
-
-trait RelationCatalogReconciliation {
-    fn matches_scope(&self, current_scope_id: &str, requested_scope_id: &str) -> bool;
-}
-
-impl RelationCatalogReconciliation for RelationCatalog {
-    fn matches_scope(&self, current_scope_id: &str, requested_scope_id: &str) -> bool {
-        current_scope_id == requested_scope_id && self.scope_id() == requested_scope_id
     }
 }
 
@@ -1382,6 +1195,13 @@ impl WorkflowRunPhaseReconciliation for WorkflowRunPhase {
 }
 
 trait WorkflowDraft {
+    fn replace_authored(
+        &mut self,
+        expected: &WorkflowSpec,
+        workflow: WorkflowSpec,
+    ) -> Result<(), String>;
+    fn acknowledge_save(&mut self, saved: &WorkflowSpec);
+
     fn edit_node(
         &mut self,
         node_id: &str,
@@ -1389,10 +1209,26 @@ trait WorkflowDraft {
     ) -> bool;
     fn insert_siglip_model(&mut self) -> Option<String>;
     fn remove_siglip_model(&mut self, node_id: &str) -> Option<String>;
-    fn revision_conflicts_with(&self, server: &WorkflowSpec) -> bool;
 }
 
 impl WorkflowDraft for WorkflowSpec {
+    fn replace_authored(
+        &mut self,
+        expected: &WorkflowSpec,
+        workflow: WorkflowSpec,
+    ) -> Result<(), String> {
+        if self != expected || workflow.id() != expected.id() {
+            return Err("The draft changed during authoring. Your edits were preserved.".into());
+        }
+        *self = workflow;
+        Ok(())
+    }
+    fn acknowledge_save(&mut self, saved: &WorkflowSpec) {
+        if self.id() == saved.id() {
+            self.set_revision(saved.revision());
+        }
+    }
+
     fn edit_node(
         &mut self,
         node_id: &str,
@@ -1466,10 +1302,6 @@ impl WorkflowDraft for WorkflowSpec {
         }
         Some(parent)
     }
-
-    fn revision_conflicts_with(&self, server: &WorkflowSpec) -> bool {
-        self != server && self.revision() != server.revision()
-    }
 }
 
 trait WorkflowRunPhaseEditing {
@@ -1478,7 +1310,7 @@ trait WorkflowRunPhaseEditing {
 
 impl WorkflowRunPhaseEditing for WorkflowRunPhase {
     fn topology_mutation_blocked(self, command: Option<WorkflowPendingCommand>) -> bool {
-        self.active() || command.is_some()
+        command.is_some()
     }
 }
 
@@ -1730,6 +1562,24 @@ impl NodeProjection<'_> {
     }
 }
 
+/// Local projection for the shell; it is never transported over HTTP.
+#[derive(Clone, PartialEq)]
+pub(crate) struct WorkflowEditorStatus {
+    workflow: WorkflowSpec,
+    snapshot: WorkflowRunSnapshot,
+}
+impl WorkflowEditorStatus {
+    pub(crate) fn new(workflow: WorkflowSpec, snapshot: WorkflowRunSnapshot) -> Self {
+        Self { workflow, snapshot }
+    }
+    pub(crate) fn workflow(&self) -> &WorkflowSpec {
+        &self.workflow
+    }
+    pub(crate) fn snapshot(&self) -> &WorkflowRunSnapshot {
+        &self.snapshot
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1744,7 +1594,8 @@ mod tests {
 
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn default_editor_is_table_query_result_without_a_fake_model() {
-        let state = WorkflowSnapshot::from_workflow("", WorkflowSpec::default());
+        let graph = WorkflowSpec::default();
+        let state = WorkflowEditorStatus::new(graph.clone(), WorkflowRunSnapshot::idle_for(&graph));
         let kinds = state
             .workflow()
             .nodes()
@@ -1815,169 +1666,31 @@ mod tests {
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]
-    fn dirty_draft_keeps_its_base_revision_for_conflict_detection() {
+    fn an_inflight_save_updates_the_baseline_version_without_losing_new_edits() {
         let mut draft = WorkflowSpec::default();
-        let mut server = draft.clone();
-        draft.set_name("Local edit");
-        assert!(!draft.revision_conflicts_with(&server));
-        server.set_revision(1);
-        server.set_name("Remote edit");
-        assert!(draft.revision_conflicts_with(&server));
-        assert_eq!(
-            draft.revision(),
-            0,
-            "Apply must send the draft base revision"
-        );
-    }
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn assistant_receipt_navigation_never_opens_stale_artifacts() {
-        let mut state = WorkflowSnapshot::default();
-        state.workflow_mut().set_revision(4);
-        state.snapshot_mut().set_workflow_revision(4);
-        let graph = WorkflowAgentArtifactReceipt::graph("View graph", 4);
-        assert_eq!(graph.panel_id(&state, false), Some(CANVAS_PANEL_ID));
-        assert_eq!(graph.panel_id(&state, true), None);
-        let old_graph = WorkflowAgentArtifactReceipt::graph("View graph", 3);
-        assert_eq!(old_graph.panel_id(&state, false), None);
-    }
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn assistant_loads_for_the_selected_workflow_and_rejects_late_previous_history() {
-        let initial = WorkflowAgentSnapshot::default();
-        let mut first = initial.clone();
-        first.session_mut().set_workflow_id("workflow-first");
-        first.set_scope_id("first-scope");
-        first.set_revision(8);
-        assert!(initial.accepts_fetched(&first, "workflow-first"));
-        let mut second = first.clone();
-        second.session_mut().set_workflow_id("workflow-second");
-        second.set_scope_id("second-scope");
-        second.set_revision(0);
-        assert!(first.accepts_fetched(&second, "workflow-second"));
-        assert!(!second.accepts_fetched(&first, "workflow-second"));
-        assert!(second.accepts_fetched(&first, "workflow-first"));
-    }
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn fetched_workflow_revisions_do_not_regress() {
-        let mut current = WorkflowSnapshot::default();
-        current.set_scope_id("project-a-scope");
-        current.workflow_mut().set_revision(2);
-        current.snapshot_mut().set_workflow_revision(2);
-        let mut stale_bootstrap = current.clone();
-        stale_bootstrap.workflow_mut().set_revision(1);
-        stale_bootstrap.snapshot_mut().set_workflow_revision(1);
-        assert!(!current.accepts(&stale_bootstrap));
-
-        let mut newer = current.clone();
-        newer.workflow_mut().set_revision(3);
-        newer.snapshot_mut().set_workflow_revision(3);
-        assert!(current.accepts(&newer));
-
-        let mut project_b = WorkflowSnapshot::default();
-        project_b.set_scope_id("project-b-scope");
-        assert!(
-            current.accepts(&project_b),
-            "a new project scope owns an independent revision sequence"
-        );
-
-        let project_a_relations =
-            RelationCatalog::new(Vec::new(), false).with_scope("project-a-scope");
-        let project_b_relations =
-            RelationCatalog::new(Vec::new(), false).with_scope("project-b-scope");
-        assert!(!project_a_relations.matches_scope("project-b-scope", "project-a-scope"));
-        assert!(project_b_relations.matches_scope("project-b-scope", "project-b-scope"));
-    }
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn fetched_agent_history_rejects_revision_regression() {
-        let mut current = WorkflowAgentSnapshot::default();
-        current.set_scope_id("project-a-scope");
-        current.set_revision(8);
-        let mut stale = current.clone();
-        stale.set_revision(7);
-        assert!(!current.accepts_fetched(&stale, current.session().workflow_id()));
-        let mut next = current.clone();
-        next.set_revision(9);
-        assert!(current.accepts_fetched(&next, current.session().workflow_id()));
-        next.session_mut().set_workflow_id("other");
-        assert!(!current.accepts_fetched(&next, current.session().workflow_id()));
-
-        let mut project_b = current.clone();
-        project_b.set_scope_id("project-b-scope");
-        project_b.set_revision(1);
-        assert!(
-            current.accepts_fetched(&project_b, current.session().workflow_id()),
-            "a new project scope owns an independent revision sequence"
-        );
-    }
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn late_run_response_cannot_regress_a_completed_sse_snapshot() {
-        let mut current = WorkflowSnapshot::default();
-        current
-            .snapshot_mut()
-            .set_run_id(Some("workflow-run-1".to_owned()));
-        current
-            .snapshot_mut()
-            .set_phase(WorkflowRunPhase::Completed);
-        current.snapshot_mut().set_started_ms(10);
-        current.snapshot_mut().set_updated_ms(12);
-        current.snapshot_mut().set_finished_ms(12);
-
-        let mut late_start = current.clone();
-        late_start
-            .snapshot_mut()
-            .set_phase(WorkflowRunPhase::Validating);
-        late_start.snapshot_mut().set_finished_ms(0);
-        late_start.snapshot_mut().set_updated_ms(10);
-        assert!(!current.accepts(&late_start));
-
-        // Millisecond clock ties still cannot move a terminal run backwards.
-        late_start
-            .snapshot_mut()
-            .set_updated_ms(current.snapshot().updated_ms());
-        assert!(!current.accepts(&late_start));
-    }
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn late_cancel_response_cannot_regress_a_cancelled_sse_snapshot() {
-        let mut current = WorkflowSnapshot::default();
-        current
-            .snapshot_mut()
-            .set_run_id(Some("workflow-run-1".to_owned()));
-        current
-            .snapshot_mut()
-            .set_phase(WorkflowRunPhase::Cancelled);
-        current.snapshot_mut().set_started_ms(10);
-        current.snapshot_mut().set_updated_ms(13);
-        current.snapshot_mut().set_finished_ms(13);
-
-        let mut late_cancel = current.clone();
-        late_cancel
-            .snapshot_mut()
-            .set_phase(WorkflowRunPhase::Cancelling);
-        late_cancel.snapshot_mut().set_finished_ms(0);
-        late_cancel.snapshot_mut().set_updated_ms(12);
-        assert!(!current.snapshot().accepts(late_cancel.snapshot()));
-
-        late_cancel
-            .snapshot_mut()
-            .set_updated_ms(current.snapshot().updated_ms());
-        assert!(!current.snapshot().accepts(late_cancel.snapshot()));
+        let mut saved = draft.clone();
+        saved.set_revision(1);
+        draft.set_name("Typed during Save");
+        draft.acknowledge_save(&saved);
+        assert_eq!(draft.name(), "Typed during Save");
+        assert_eq!(draft.revision(), 1);
+        assert_ne!(draft, saved);
+        let other = WorkflowSpec::new("other", "Another document").with_revision(20);
+        draft.acknowledge_save(&other);
+        assert_eq!(draft.revision(), 1);
     }
     #[wasm_bindgen_test::wasm_bindgen_test]
-    fn a_save_receipt_waits_for_the_fetched_revision_and_preserves_later_edits() {
-        let submitted = WorkflowSpec::new("workflow", "submitted").with_revision(2);
-        let receipt = GraphEditReceipt {
-            submitted: submitted.clone(),
-            revision: 3,
-        };
-        assert!(!receipt.acknowledges(&submitted, &submitted));
-        let fetched = submitted.clone().with_revision(3);
-        assert!(receipt.acknowledges(&submitted, &fetched));
-        let edited = WorkflowSpec::new("workflow", "edited during save").with_revision(2);
-        assert!(!receipt.acknowledges(&edited, &fetched));
+    fn a_late_assistant_proposal_preserves_manual_edits() {
+        let expected = WorkflowSpec::default();
+        let mut draft = expected.clone();
+        let mut proposed = expected.clone();
+        proposed.set_name("Assistant proposal");
+        draft.set_name("User edit while planning");
+        assert!(draft.replace_authored(&expected, proposed.clone()).is_err());
+        assert_eq!(draft.name(), "User edit while planning");
+        let latest = draft.clone();
+        draft.replace_authored(&latest, proposed.clone()).unwrap();
+        assert_eq!(draft, proposed);
+        assert!(!WorkflowRunPhase::Running.topology_mutation_blocked(None));
     }
 }

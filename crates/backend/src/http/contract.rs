@@ -222,7 +222,7 @@ impl<T: Serialize> IntoResponse for Created<T> {
         (StatusCode::CREATED, Json(self.0)).into_response()
     }
 }
-trait ResponseSchema {
+pub(crate) trait ResponseSchema {
     fn responses(schemas: &mut SchemaGenerator) -> Value;
 }
 struct JsonResponses<T>(std::marker::PhantomData<T>);

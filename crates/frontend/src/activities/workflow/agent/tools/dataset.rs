@@ -27,18 +27,22 @@ impl WorkflowTool for InspectDataset {
     fn available(&self, _workflow: &WorkflowSpec) -> bool {
         true
     }
-    fn call<'a>(&'a self, invocation: ToolInvocation<'a>) -> BoxFuture<'a, Result<String, String>> {
+    fn call<'a>(
+        &'a self,
+        invocation: ToolInvocation<'a>,
+    ) -> LocalBoxFuture<'a, Result<String, String>> {
         Box::pin(async move {
             let arguments: DatasetArguments = invocation.arguments()?;
             let Some(path) = arguments.path.filter(|path| !path.is_empty()) else {
-                return Ok(json!({"datasets": invocation.storage().datasets().await?}).to_string());
+                return Ok(json!({"datasets": WorkflowClient::current().query::<Vec<spiral_robotics_common::datasets::DatasetSummary>>(HttpRequest::new("GET", "/api/datasets")).await?}).to_string());
             };
             let selection = spiral_robotics_common::datasets::DatasetSelection::new(path)?;
-            let inspection = invocation.storage().inspect_dataset(selection).await?;
-            let cameras = invocation.storage().workflow_cameras(&inspection).await?;
+            let inspection: Value = WorkflowClient::current()
+                .query(HttpRequest::new("POST", "/api/datasets/cameras").json(&selection))
+                .await?;
             Ok(json!({
-                "dataset": inspection,
-                "cameras": cameras,
+                "dataset": inspection["dataset"],
+                "cameras": inspection["cameras"],
                 "camera_input": "foxglove.CompressedVideo value.data and value.format. Spiral supports packet video through spql.video.from_packets, spql.video.frames, and spql.video.decode.",
             }).to_string())
         })

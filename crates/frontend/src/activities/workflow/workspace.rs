@@ -194,7 +194,6 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
     let draft = drafts.read().get(&draft_key).cloned().unwrap_or_default();
     let catalog_available =
         crate::shell::project::ProjectSessionSignals::current().catalog_available();
-    let workflow_active = controller.snapshot().phase().active();
     let can_send = configured
         && controller.loaded()
         && state.history_available()
@@ -202,7 +201,6 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
         && !active
         && command.is_none()
         && catalog_available
-        && !workflow_active
         && !draft.trim().is_empty();
     let status = if !state.history_available() {
         "Assistant history needs attention"
@@ -263,7 +261,6 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
         activity: AssistantActivity {
             active,
             command,
-            workflow_active,
             draft_empty: draft.trim().is_empty(),
         },
     }
@@ -476,7 +473,7 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
                             class: "workflow-assistant-send-action",
                             disabled: !can_send,
                             aria_busy: command == Some(AgentPendingCommand::Sending),
-                            title: if !catalog_available { "Reconnect Spiral before sending a message" } else if !configured { "Assistant is temporarily unavailable" } else if workflow_active { "Wait for the active Workflow run to finish before sending a message" } else { "Send this message to the Workflow Assistant" },
+                            title: if !catalog_available { "Reconnect Spiral before sending a message" } else if !configured { "Assistant is temporarily unavailable" } else { "Send this message to the Workflow Assistant" },
                             onclick: move |_| {
                                 if can_send {
                                     let text = drafts.peek().get(&send_key).cloned().unwrap_or_default();
@@ -536,7 +533,6 @@ struct AssistantAvailability {
 struct AssistantActivity {
     active: bool,
     command: Option<AgentPendingCommand>,
-    workflow_active: bool,
     draft_empty: bool,
 }
 
@@ -567,9 +563,6 @@ impl AssistantComposerState {
         }
         if self.activity.command.is_some() {
             return "Finishing the current Assistant action…";
-        }
-        if self.activity.workflow_active {
-            return "Waiting for the active Workflow run to finish.";
         }
         if self.activity.draft_empty {
             return "Enter to send · Shift+Enter for a new line.";
@@ -767,9 +760,8 @@ impl AssistantMarkdownLine for str {
 fn WorkflowNodeInspector(controller: super::state::WorkflowController) -> Element {
     let selected = controller.selected_node_data();
     let relations = controller.relations();
-    let snapshot_active = controller.snapshot().phase().active();
     let command_pending = controller.command().is_some();
-    let active = snapshot_active || command_pending;
+    let active = command_pending;
     rsx! {
         section { class: "workflow-inspector", "aria-label": "Selected workflow node",
             if let Some((node_id, title, data)) = selected {
@@ -991,7 +983,7 @@ fn WorkflowNodeInspector(controller: super::state::WorkflowController) -> Elemen
                                 purpose: ActionPurpose::Remove,
                                 variant: ActionVariant::Outline,
                                 disabled: active,
-                                title: if snapshot_active { "Cancel the active run before removing this Model node" } else if command_pending { "Wait for the current Workflow command before removing this Model node" } else { "Remove this Model and reconnect its input to the downstream nodes" },
+                                title: if command_pending { "Wait for the current Workflow command before removing this Model node" } else { "Remove this Model and reconnect its input to the downstream nodes" },
                                 onclick: {
                                     let node_id = node_id.clone();
                                     move |_| controller.remove_siglip_model(&node_id)
@@ -1058,10 +1050,10 @@ fn WorkflowCanvas(controller: super::state::WorkflowController) -> Element {
     let spec = controller.spec();
     let snapshot = controller.snapshot();
     let run_reason = controller.run_disabled_reason();
-    let apply_reason = controller.save_disabled_reason();
+    let save_reason = controller.save_disabled_reason();
     let command = controller.command();
     let active = snapshot.phase().active();
-    let topology_blocked = active || command.is_some();
+    let topology_blocked = command.is_some();
     let state_load_failed = controller.load_error().is_some();
     let dirty = controller.unsaved_changes();
     let empty = spec.nodes().is_empty() && spec.edges().is_empty();
@@ -1173,7 +1165,7 @@ fn WorkflowCanvas(controller: super::state::WorkflowController) -> Element {
                         purpose: ActionPurpose::Create,
                         variant: ActionVariant::Outline,
                         disabled: topology_blocked,
-                        title: if snapshot.phase().active() { "Cancel the active run before adding a Model node" } else if command.is_some() { "Wait for the current Workflow command before adding a Model node" } else { "Insert SigLIP between the first Table and Query" },
+                        title: if command.is_some() { "Wait for the current Workflow command before adding a Model node" } else { "Insert SigLIP between the first Table and Query" },
                         onclick: move |_| controller.add_siglip_model(),
                         "Add model"
                     }
@@ -1200,8 +1192,8 @@ fn WorkflowCanvas(controller: super::state::WorkflowController) -> Element {
                     Action {
                         purpose: ActionPurpose::Sync,
                         variant: ActionVariant::Outline,
-                        title: "Discard unsaved graph, conversation, and run changes",
-                        disabled: command.is_some() || active || controller.agent_state().session().phase().active() || controller.agent_command().is_some(),
+                        title: "Discard unsaved graph and conversation changes",
+                        disabled: command.is_some() || controller.agent_state().session().phase().active() || controller.agent_command().is_some(),
                         onclick: move |_| controller.discard(studio),
                         "Discard changes"
                     }
@@ -1209,9 +1201,9 @@ fn WorkflowCanvas(controller: super::state::WorkflowController) -> Element {
                 Action {
                     purpose: ActionPurpose::Apply,
                     variant: ActionVariant::Outline,
-                    disabled: apply_reason.is_some(),
+                    disabled: save_reason.is_some(),
                     aria_busy: command == Some(WorkflowPendingCommand::Saving),
-                    title: apply_reason.clone().unwrap_or_else(|| "Save the graph and Assistant conversation".to_owned()),
+                    title: save_reason.clone().unwrap_or_else(|| "Save the graph and Assistant conversation".to_owned()),
                     onclick: move |_| controller.save(studio),
                     if command == Some(WorkflowPendingCommand::Saving) { "Saving…" } else { "Save" }
                 }
@@ -1425,7 +1417,8 @@ fn WorkflowResults(controller: super::state::WorkflowController) -> Element {
     let spec = controller.spec();
 
     let empty_workflow = spec.nodes().is_empty() && spec.edges().is_empty();
-    let query = spec.nodes().iter().find_map(|node| {
+    let executed = controller.executed_graph().unwrap_or_else(|| spec.clone());
+    let query = executed.nodes().iter().find_map(|node| {
         let WorkflowNodeConfig::Query { sql, max_rows } = node.config() else {
             return None;
         };
@@ -1777,6 +1770,6 @@ pub(crate) fn WorkflowWorkspace(is_active: ReadSignal<bool>) -> Element {
     let catalog = crate::activities::data::relations::RelationCatalogState::use_catalog();
     let controller = super::state::WorkflowController::use_controller(catalog.signal());
     controller.use_polling(is_active);
-    let status = use_memo(move || controller.accepted_state());
+    let status = use_memo(move || controller.editor_status());
     rsx! { crate::shell::frame::WorkspaceFrame { workspace, status: crate::shell::frame::WorkspaceStatus::Workflow(status), WorkflowPanels { controller } } }
 }

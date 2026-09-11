@@ -132,7 +132,7 @@ impl RecordingSessionManager {
 
     pub(crate) fn reserve_start(
         &self,
-        activity: impl FnOnce() -> (bool, bool),
+        activity: impl FnOnce() -> bool,
     ) -> Result<Option<CatalogLeaseToken>, OperationError> {
         let mut state = self.state.recover_lock();
         if !matches!(
@@ -144,13 +144,9 @@ impl RecordingSessionManager {
         let Some(token) = self.catalog_lease.try_acquire(CatalogLeaseOwner::Recording) else {
             return Ok(None);
         };
-        let (workflow_active, assistant_active) = activity();
+        let workflow_active = activity();
         let conflict = if workflow_active {
             Some("Wait for the active Workflow run to finish before recording a new take.")
-        } else if assistant_active {
-            Some(
-                "Wait for the active Workflow Assistant turn to finish before recording a new take.",
-            )
         } else {
             None
         };
@@ -282,7 +278,7 @@ mod tests {
     fn finalization_excludes_other_operations_and_drop_restores_the_take() {
         let lease = Arc::new(CatalogMutationLease::default());
         let session = Arc::new(RecordingSessionManager::new(lease.clone()));
-        let token = session.reserve_start(|| (false, false)).unwrap().unwrap();
+        let token = session.reserve_start(|| false).unwrap().unwrap();
         assert!(session.claim_finalization().is_err());
         session.begin(token, ("take-one".into(), None));
         let operation = session.claim_finalization().unwrap().unwrap();
@@ -293,7 +289,7 @@ mod tests {
         );
         assert!(session.claim_finalization().unwrap().is_none());
         assert!(session.claim_capture_change().is_err());
-        assert!(session.reserve_start(|| (false, false)).unwrap().is_none());
+        assert!(session.reserve_start(|| false).unwrap().is_none());
         // A stale opening cleanup cannot release a recording's lease.
         session.cancel_start(token);
         assert!(lease.is_held());
@@ -313,7 +309,7 @@ mod tests {
     async fn cancelling_a_capture_change_restores_the_session_for_stop() {
         let lease = Arc::new(CatalogMutationLease::default());
         let session = Arc::new(RecordingSessionManager::new(lease.clone()));
-        let token = session.reserve_start(|| (false, false)).unwrap().unwrap();
+        let token = session.reserve_start(|| false).unwrap().unwrap();
         session.begin(token, ("take-one".into(), None));
         let (claimed, ready) = tokio::sync::oneshot::channel();
         let task = tokio::spawn({
@@ -342,7 +338,7 @@ mod tests {
     fn completed_preview_belongs_to_the_take_and_is_replaced_on_next_start() {
         let lease = Arc::new(CatalogMutationLease::default());
         let session = Arc::new(RecordingSessionManager::new(lease.clone()));
-        let token = session.reserve_start(|| (false, false)).unwrap().unwrap();
+        let token = session.reserve_start(|| false).unwrap().unwrap();
         session.begin(token, ("take-one".into(), None));
         let camera = CameraRecording::from_annex_b(
             "wrist".into(),
@@ -371,9 +367,9 @@ mod tests {
             8
         );
         // Rejected admission preserves the review.
-        assert!(session.reserve_start(|| (true, false)).is_err());
+        assert!(session.reserve_start(|| true).is_err());
         assert!(session.camera_preview("take-one", "wrist").is_some());
-        let next = session.reserve_start(|| (false, false)).unwrap().unwrap();
+        let next = session.reserve_start(|| false).unwrap().unwrap();
         assert!(session.camera_preview("take-one", "wrist").is_none());
         session.cancel_start(token);
         assert!(lease.is_held(), "old token cannot cancel a new session");

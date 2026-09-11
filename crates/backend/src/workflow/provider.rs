@@ -11,7 +11,7 @@ use futures_util::StreamExt;
 use reqwest::{Client, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use spiral_robotics_storage::workflow_assistant::{ProviderMessage, ProviderToolCall};
+use spiral_robotics_common::workflow::conversation::{ProviderMessage, ProviderToolCall};
 
 const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 const DEFAULT_OPENROUTER_MODEL: &str = "openai/gpt-5.6-terra";
@@ -252,17 +252,6 @@ pub(crate) struct ProviderResponse {
 }
 
 impl ProviderResponse {
-    #[cfg(test)]
-    pub(crate) fn test_response(
-        content: impl Into<String>,
-        tool_calls: Vec<ProviderToolCall>,
-    ) -> Self {
-        Self {
-            content: content.into(),
-            tool_calls,
-        }
-    }
-
     pub(crate) fn content(&self) -> &str {
         &self.content
     }
@@ -577,6 +566,75 @@ impl ProviderErrorBody for str {
     fn public_error_summary(&self) -> String {
         let compact = self.split_whitespace().collect::<Vec<_>>().join(" ");
         compact.chars().take(512).collect()
+    }
+}
+
+/// One request-scoped completion stream. Dropping its body cancels provider I/O.
+pub(crate) struct ModelStream {
+    receiver: tokio::sync::mpsc::UnboundedReceiver<
+        spiral_robotics_common::workflow::document::ModelEvent,
+    >,
+    cancel: tokio_util::sync::DropGuard,
+}
+impl ModelStream {
+    pub(crate) fn new(
+        provider: OpenAiProvider,
+        request: spiral_robotics_common::workflow::document::ModelRequest,
+    ) -> Self {
+        use spiral_robotics_common::workflow::{
+            conversation::ProviderMessage, document::ModelEvent,
+        };
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let cancel = CancellationToken::new();
+        let guard = cancel.clone().drop_guard();
+        tokio::spawn(async move {
+            let result = provider
+                .complete(
+                    ProviderCompletion::new(request.messages(), request.tools(), cancel),
+                    |text| {
+                        let _ = sender.send(ModelEvent::Text(text.into()));
+                    },
+                )
+                .await;
+            let event = match result {
+                Ok(response) => ModelEvent::Complete(ProviderMessage::assistant(
+                    Some(response.content().into()),
+                    response.tool_calls().to_vec(),
+                )),
+                Err(error) => ModelEvent::Error(error),
+            };
+            let _ = sender.send(event);
+        });
+        Self {
+            receiver,
+            cancel: guard,
+        }
+    }
+}
+impl axum::response::IntoResponse for ModelStream {
+    fn into_response(self) -> axum::response::Response {
+        let stream = futures_util::stream::unfold(self, |mut state| async move {
+            let event = state.receiver.recv().await?;
+            let _guard = &state.cancel;
+            let line = serde_json::to_string(&event).expect("model event serializes") + "\n";
+            Some((Ok::<_, std::convert::Infallible>(line), state))
+        });
+        (
+            [(axum::http::header::CONTENT_TYPE, "application/x-ndjson")],
+            axum::body::Body::from_stream(stream),
+        )
+            .into_response()
+    }
+}
+impl crate::http::contract::ResponseSchema
+    for Result<ModelStream, crate::http::delivery::HttpFailure>
+{
+    fn responses(schemas: &mut schemars::SchemaGenerator) -> Value {
+        let event =
+            schemas.subschema_for::<spiral_robotics_common::workflow::document::ModelEvent>();
+        let failure =
+            schemas.subschema_for::<spiral_robotics_common::command_failure::CommandFailure>();
+        serde_json::json!({"200": {"description": "Newline-delimited model events; body disposal cancels completion.", "content": {"application/x-ndjson": {"schema": event}}}, "default": {"description": "Request failure", "content": {"application/json": {"schema": failure}}}})
     }
 }
 

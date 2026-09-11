@@ -1,4 +1,3 @@
-pub(crate) mod agent;
 pub(crate) mod commands;
 mod execution;
 pub(crate) mod http;

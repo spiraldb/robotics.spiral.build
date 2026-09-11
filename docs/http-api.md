@@ -125,8 +125,13 @@ to backend readiness, hardware, and activity validation.
 
 Training polling accepts `?selected=<run-id>` to include bounded full history for
 one run. Omit it when only the run catalog and current metrics are needed.
-Workflow and Assistant commands use the tagged enum shapes in OpenAPI; reads of
-`/workflow` and `/workflow/assistant` remain the authoritative state observations.
+Workflow authoring is local to the browser. Save sends a `WorkflowDocument` whose
+graph revision is the expected saved version. Run sends a complete `WorkflowSpec`
+and returns a `WorkflowRun` containing that exact graph and a run snapshot.
+Read and cancel executions by their run IDs. `/models/complete` accepts one
+`ModelRequest` and streams newline-delimited `ModelEvent` values (`text`, `complete`,
+`error`). The caller owns conversation history and tool execution; disconnecting
+cancels that model request.
 
 ## Endpoint inventory
 
@@ -241,10 +246,17 @@ separate Studio dataset registry. Project snapshot restore is a separate operati
 
 | Method | Path | Body or query | Response |
 | --- | --- | --- | --- |
-| GET | `/workflow` | — | WorkflowSnapshot |
-| POST | `/workflow/commands` | WorkflowCommand | WorkflowSnapshot |
-| GET | `/workflow/assistant` | — | WorkflowAgentSnapshot |
-| POST | `/workflow/assistant/commands` | WorkflowAgentCommand | WorkflowAgentSnapshot |
+| GET | `/workflows` | — | WorkflowSummary[] |
+| GET | `/workflows/{id}` | — | WorkflowDocument |
+| POST | `/workflows/save` | WorkflowDocument | WorkflowDocument (new saved revision) |
+| POST | `/workflows/plan` | WorkflowSpec | WorkflowPlan |
+| GET | `/workflow-runs` | — | WorkflowRun[] |
+| POST | `/workflow-runs` | WorkflowSpec | WorkflowRun |
+| GET | `/workflow-runs/{id}` | — | WorkflowRun |
+| POST | `/workflow-runs/{id}/cancel` | — | WorkflowRun |
+| POST | `/datasets/cameras` | DatasetSelection | Dataset and camera inspection |
+| GET | `/models/status` | — | WorkflowAgentReadiness |
+| POST | `/models/complete` | ModelRequest | ModelEvent NDJSON stream |
 
 ## Files and media
 

@@ -33,7 +33,6 @@ use crate::robots::workspace::RobotWorkspace;
 use crate::rollout::manager::{RolloutHardwareResources, RolloutManager};
 use crate::training::manager::TrainingManager;
 use crate::training::remote::ConfiguredHttpTrainingBackend;
-use crate::workflow::agent::WorkflowAgentManager;
 use crate::workflow::manager::WorkflowManager;
 use spiral_robotics_common::status::{BackendReadiness, BackendReadinessState};
 
@@ -125,7 +124,6 @@ struct ProjectActivities {
     training: Arc<TrainingManager>,
     rollout: Arc<RolloutManager>,
     workflow: Arc<WorkflowManager>,
-    assistant: Arc<WorkflowAgentManager>,
 }
 
 pub(crate) struct ProjectHardware {
@@ -199,11 +197,6 @@ impl ProjectSessionFactory {
             self.admission.clone(),
         ));
         let workflow = Arc::new(WorkflowManager::new(storage.clone()));
-        let assistant = Arc::new(WorkflowAgentManager::new(
-            storage.clone(),
-            workflow.clone(),
-            lease.clone(),
-        ));
         let rollout = RolloutManager::new(
             storage.clone(),
             RolloutHardwareResources::new(
@@ -226,7 +219,6 @@ impl ProjectSessionFactory {
                 training,
                 rollout,
                 workflow,
-                assistant,
             },
             preferences,
             recording,
@@ -287,9 +279,6 @@ impl ProjectSession {
     pub(crate) fn workflow(&self) -> &Arc<WorkflowManager> {
         &self.activities.workflow
     }
-    pub(crate) fn workflow_agent(&self) -> &Arc<WorkflowAgentManager> {
-        &self.activities.assistant
-    }
 
     pub(crate) async fn settings(&self) -> Result<DataSettings, OperationError> {
         let preferences = self
@@ -348,11 +337,9 @@ impl ProjectSession {
                 .any(|run| run.phase().active())
             || self.rollout().is_active()
             || self.workflow().is_active()
-            || self.workflow_agent().is_active()
     }
 
     pub(crate) async fn shutdown(&self) {
-        self.workflow_agent().shutdown().await;
         self.workflow().shutdown().await;
         self.training().shutdown().await;
         self.rollout().shutdown().await;

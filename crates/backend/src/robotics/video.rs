@@ -592,7 +592,7 @@ mod tests {
         });
         let lease = Arc::new(CatalogMutationLease::default());
         let session = Arc::new(RecordingSessionManager::new(lease.clone()));
-        let token = session.reserve_start(|| (false, false)).unwrap().unwrap();
+        let token = session.reserve_start(|| false).unwrap().unwrap();
         session.begin(token, ("episode_000001".into(), Some(capture)));
         let mut operation = session.claim_capture_change().unwrap();
         let mut finish = Box::pin(operation.finish_media());

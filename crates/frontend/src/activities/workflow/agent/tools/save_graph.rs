@@ -124,19 +124,19 @@ impl WorkflowTool for SetWorkflow {
     fn completion(&self, output: &Value) -> ToolCompletion {
         ToolCompletion::graph_updated(output)
     }
-    fn call<'a>(&'a self, invocation: ToolInvocation<'a>) -> BoxFuture<'a, Result<String, String>> {
+    fn call<'a>(
+        &'a self,
+        invocation: ToolInvocation<'a>,
+    ) -> LocalBoxFuture<'a, Result<String, String>> {
         Box::pin(async move {
             let arguments: SetWorkflowArguments = invocation.arguments()?;
             let mut value = arguments.workflow;
             let object = value
                 .as_object_mut()
                 .ok_or("set_workflow requires a workflow object.")?;
-            // Identity and revision stay server-owned, outside the provider schema.
-            object.insert("id".into(), json!(invocation.context.workflow_id));
-            object.insert(
-                "revision".into(),
-                json!(invocation.context.workflow_revision),
-            );
+            // The editor owns identity and saved version; the model authors content only.
+            object.insert("id".into(), json!(invocation.expected.id()));
+            object.insert("revision".into(), json!(invocation.expected.revision()));
             let workflow: WorkflowSpec = serde_json::from_value(value)
                 .map_err(|error| format!("Workflow shape is invalid: {error}"))?;
             invocation.update_graph(workflow).await

@@ -15,7 +15,6 @@ pub(crate) enum CatalogLeaseOwner {
     DatasetImport,
     WorkflowStart,
     StudioCatalogRead,
-    WorkflowAgentStart,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -138,8 +137,8 @@ mod tests {
     fn assistant_admission_linearizes_with_manual_workflow_and_catalog_changes() {
         let lease = CatalogMutationLease::default();
         let agent = lease
-            .try_acquire(CatalogLeaseOwner::WorkflowAgentStart)
-            .expect("Assistant claims the empty handshake slot");
+            .try_acquire(CatalogLeaseOwner::StudioCatalogRead)
+            .expect("Catalog read claims the empty handshake slot");
         assert!(
             lease
                 .try_acquire(CatalogLeaseOwner::WorkflowStart)
@@ -154,17 +153,17 @@ mod tests {
 
         let manual = lease
             .try_acquire(CatalogLeaseOwner::WorkflowStart)
-            .expect("manual Apply or Run claims the handshake slot");
+            .expect("Workflow Run claims the handshake slot");
         assert!(
             lease
-                .try_acquire(CatalogLeaseOwner::WorkflowAgentStart)
+                .try_acquire(CatalogLeaseOwner::StudioCatalogRead)
                 .is_none()
         );
         assert!(lease.release(manual));
 
         let history = lease
-            .try_acquire(CatalogLeaseOwner::WorkflowAgentStart)
-            .expect("Assistant conversation persistence claims the handshake slot");
+            .try_acquire(CatalogLeaseOwner::StudioCatalogRead)
+            .expect("Catalog read conversation persistence claims the handshake slot");
         assert!(
             lease
                 .try_acquire(CatalogLeaseOwner::DatasetImport)

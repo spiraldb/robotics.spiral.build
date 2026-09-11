@@ -120,7 +120,7 @@ impl StorageManager {
         &self,
         workflow: &spiral_robotics_common::workflow::WorkflowSpec,
         contents: (&WorkflowJson, &WorkflowJson),
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         WorkflowPersistence::new(&self.project_store)
             .save(workflow, contents)
             .await

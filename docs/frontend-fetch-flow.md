@@ -2,8 +2,8 @@
 
 The browser uses the backend-owned [HTTP API](http-api.md): fetched snapshots
 and explicit JSON commands. Feature clients invalidate affected query domains
-after mutations. A command response acknowledges the operation; subsequent reads
-supply authoritative state. The browser owns drafts, selections, panel layout,
+after mutations. Resource reads supply authoritative backend state; document
+Save responses acknowledge the submitted version directly. The browser owns drafts, selections, panel layout,
 and cached results.
 
 ## Project and activity lifetime
@@ -46,13 +46,15 @@ Data, Training, and Workflow do not poll hardware telemetry.
 
 ## Drafts and background work
 
-Workflow refreshes preserve dirty drafts. Apply records the submitted draft and
-accepted revision; a later fetch confirms the save. Edits made during that save
-remain local. Settings similarly distinguishes fetched values from its draft.
+Workflow owns its entire draft and Assistant loop locally. It fetches documents
+by ID and submits a complete graph once when starting a run. Save acknowledges
+the submitted document's saved version while preserving subsequent local edits.
+Only execution records are polled; graph drafts and conversations are never
+reconciled from backend editor snapshots. Settings similarly distinguishes fetched values from its draft.
 
 Training history loads bounded details for the selected run. Recording charts
 use cursor-based pages and a bounded retained sample window. Admitted backend
 jobs and recovery own their lifetime independently of the browser activity.
 
 There is no frontend event inbox or event reducer. Camera/media transfers and
-the backend's provider SSE stream retain their own transport behavior.
+the request-scoped model completion stream retain their own transport behavior.
