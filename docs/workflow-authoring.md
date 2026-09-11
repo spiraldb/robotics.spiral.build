@@ -14,6 +14,8 @@ contains the visible messages and provider history for one Assistant conversatio
 The frontend reads IDs and names ordered by the last explicit Save and opens the
 first document. An empty list creates a browser-owned draft. New, selection,
 editing, and Discard do not mutate a backend editing session; no such session exists.
+Loading a document reads its graph and conversation together in one SQL query,
+so both come from the same saved row without a second database round trip.
 
 **Save is the only authoring persistence action.** It atomically stores the graph
 and Assistant conversation in one row. The graph revision is the saved document

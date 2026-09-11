@@ -19,7 +19,7 @@ use crate::settings::{
 };
 use crate::training::TrainingHistoryPersistence;
 use crate::transfer::TransferPersistence;
-use crate::workflows::{WorkflowJson, WorkflowPersistence};
+use crate::workflows::{StoredWorkflowDocument, WorkflowJson, WorkflowPersistence};
 
 pub struct StorageManager {
     project_store: Arc<ProjectStore>,
@@ -106,12 +106,12 @@ impl StorageManager {
         WorkflowPersistence::new(&self.project_store).list().await
     }
 
-    pub async fn load_workflow_graph(
+    pub async fn load_workflow(
         &self,
         workflow_id: &str,
-    ) -> Result<Option<WorkflowJson>, String> {
+    ) -> Result<Option<StoredWorkflowDocument>, String> {
         WorkflowPersistence::new(&self.project_store)
-            .load_graph(workflow_id)
+            .load(workflow_id)
             .await
     }
 
@@ -123,15 +123,6 @@ impl StorageManager {
     ) -> Result<bool, String> {
         WorkflowPersistence::new(&self.project_store)
             .save(workflow, contents)
-            .await
-    }
-
-    pub async fn load_workflow_conversation(
-        &self,
-        workflow_id: &str,
-    ) -> Result<Option<WorkflowJson>, String> {
-        WorkflowPersistence::new(&self.project_store)
-            .load_assistant(workflow_id)
             .await
     }
 

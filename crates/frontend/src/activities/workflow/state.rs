@@ -1059,9 +1059,18 @@ impl WorkflowController {
                     }
                 },
             );
+        self.use_run_observations(runs);
+    }
+
+    fn use_run_observations(
+        self,
+        runs: Resource<Result<Vec<WorkflowRun>, crate::client::CommandError>>,
+    ) {
         use_effect(move || {
+            // Subscribe even while the first request is pending; finished() is nonreactive.
+            let records = runs.read();
             if runs.finished()
-                && let Some(Ok(records)) = runs.read().as_ref()
+                && let Some(Ok(records)) = records.as_ref()
             {
                 self.accept_runs(records.clone());
             }
@@ -1579,6 +1588,9 @@ impl WorkflowEditorStatus {
         &self.snapshot
     }
 }
+
+#[cfg(test)]
+mod run_observation_tests;
 
 #[cfg(test)]
 mod tests {

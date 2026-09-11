@@ -58,25 +58,10 @@ impl<'a> WorkflowPersistence<'a> {
         Ok(workflows)
     }
 
-    pub(crate) async fn load_graph(
+    pub(crate) async fn load(
         &self,
         workflow_id: &str,
-    ) -> Result<Option<WorkflowJson>, String> {
-        self.load_json(workflow_id, "graph").await
-    }
-
-    pub(crate) async fn load_assistant(
-        &self,
-        workflow_id: &str,
-    ) -> Result<Option<WorkflowJson>, String> {
-        self.load_json(workflow_id, "conversation").await
-    }
-
-    async fn load_json(
-        &self,
-        workflow_id: &str,
-        field: &str,
-    ) -> Result<Option<WorkflowJson>, String> {
+    ) -> Result<Option<StoredWorkflowDocument>, String> {
         if !self.project_store.is_configured() {
             return Ok(None);
         }
@@ -87,18 +72,17 @@ impl<'a> WorkflowPersistence<'a> {
             .connect()
             .await?
             .read_batches(&format!(
-                "SELECT {field}_version, {field}_json FROM {relation} WHERE workflow_id = '{id}'"
+                "SELECT graph_version, graph_json, conversation_version, conversation_json \
+                 FROM {relation} WHERE workflow_id = '{id}'"
             ))
             .await?;
         let mut found = None;
-        let mut count = 0;
         for batch in batches {
             for row in 0..batch.num_rows() {
-                count += 1;
-                if count > 1 {
+                if found.is_some() {
                     return Err("Duplicate workflow identity.".to_owned());
                 }
-                found = WorkflowSchema::json(&ArrowColumns::new(&batch, "Workflow"), row, field)?;
+                found = Some(StoredWorkflowDocument::decode(&batch, row)?);
             }
         }
         Ok(found)
@@ -167,6 +151,32 @@ impl<'a> WorkflowPersistence<'a> {
 }
 
 pub use spiral_robotics_common::workflow::document::WorkflowJson;
+
+/// Encoded graph and conversation read together from one saved workflow row.
+#[derive(Debug, Eq, PartialEq)]
+pub struct StoredWorkflowDocument {
+    graph: WorkflowJson,
+    conversation: Option<WorkflowJson>,
+}
+
+impl StoredWorkflowDocument {
+    fn decode(batch: &RecordBatch, row: usize) -> Result<Self, String> {
+        let columns = ArrowColumns::new(batch, "Workflow");
+        Ok(Self {
+            graph: WorkflowSchema::json(&columns, row, "graph")?
+                .ok_or_else(|| "Workflow graph is missing.".to_owned())?,
+            conversation: WorkflowSchema::json(&columns, row, "conversation")?,
+        })
+    }
+
+    pub fn graph(&self) -> &WorkflowJson {
+        &self.graph
+    }
+
+    pub fn conversation(&self) -> Option<&WorkflowJson> {
+        self.conversation.as_ref()
+    }
+}
 
 struct WorkflowRow {
     id: String,
@@ -296,6 +306,10 @@ mod tests {
         let empty = WorkflowSchema::batch(&[row]).unwrap();
         row = WorkflowSchema::decode(&empty, 0).unwrap();
         assert!(row.conversation.is_none());
+        let document =
+            StoredWorkflowDocument::decode(&empty.project(&[2, 3, 4, 5]).unwrap(), 0).unwrap();
+        assert_eq!(document.graph(), &graph);
+        assert!(document.conversation().is_none());
         let conversation = WorkflowConversation::new(workflow.id())
             .persisted()
             .unwrap();
@@ -307,6 +321,10 @@ mod tests {
         assert_eq!(decoded.graph, graph);
         assert_eq!(decoded.conversation, Some(conversation));
         assert_eq!(decoded.updated_ms, 42);
+        let document =
+            StoredWorkflowDocument::decode(&batch.project(&[2, 3, 4, 5]).unwrap(), 0).unwrap();
+        assert_eq!(document.graph(), &decoded.graph);
+        assert_eq!(document.conversation(), decoded.conversation.as_ref());
     }
 
     #[test]

@@ -156,21 +156,15 @@ impl WorkflowManager {
         let stored = self
             .inner
             .storage
-            .load_workflow_graph(id)
+            .load_workflow(id)
             .await
             .map_err(OperationError::External)?
             .ok_or_else(|| {
                 OperationError::InvalidInput("That workflow no longer exists.".into())
             })?;
-        let saved = SavedWorkflow::for_id(id, &stored)?;
-        let conversation = match self
-            .inner
-            .storage
-            .load_workflow_conversation(id)
-            .await
-            .map_err(OperationError::External)?
-        {
-            Some(stored) => WorkflowConversation::load(&stored, id)
+        let saved = SavedWorkflow::for_id(id, stored.graph())?;
+        let conversation = match stored.conversation() {
+            Some(stored) => WorkflowConversation::load(stored, id)
                 .map_err(OperationError::IncompatibleWorkflow)?,
             None => WorkflowConversation::new(id),
         };
@@ -186,12 +180,12 @@ impl WorkflowManager {
         let previous = self
             .inner
             .storage
-            .load_workflow_graph(id)
+            .load_workflow(id)
             .await
             .map_err(OperationError::External)?;
         let revision = previous
             .as_ref()
-            .map(|stored| SavedWorkflow::for_id(id, stored))
+            .map(|stored| SavedWorkflow::for_id(id, stored.graph()))
             .transpose()?
             .map_or(0, |saved| saved.workflow.revision());
         if revision != document.workflow().revision() {
