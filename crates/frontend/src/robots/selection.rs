@@ -1,6 +1,6 @@
 //! Selection belongs to a mounted view; it does not own hardware or project state.
+use crate::robots::RobotSetupSnapshot;
 use dioxus::prelude::*;
-use spiral_robotics_common::robots::RobotSetupSnapshot;
 use spiral_robotics_common::robots::RobotSummary;
 /// The one selection shared by the hierarchy, viewport, cameras, and inspector.
 #[derive(Clone, Debug, PartialEq, Eq)]

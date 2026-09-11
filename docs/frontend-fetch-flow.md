@@ -52,9 +52,22 @@ the submitted document's saved version while preserving subsequent local edits.
 Only execution records are polled; graph drafts and conversations are never
 reconciled from backend editor snapshots. Settings similarly distinguishes fetched values from its draft.
 
-Training history loads bounded details for the selected run. Recording charts
+Robot setup joins saved robot documents and native hardware observations locally.
+Port identification compares two ordinary scans in the browser. Port/camera edits
+preserve unknown configuration fields locally and submit the complete document
+with its baseline. `RobotDraft` owns creation, import, edits, and validation;
+`RobotClient` only transports resources and invalidates queries. The backend
+performs transactional comparison and persistence.
+Recording requests include the frontend-selected leader/follower identities.
+
+Training reads the run catalog and fetches bounded details by ID; selected tabs
+never appear in backend requests. Rollout observes and stops executions by ID.
+Configuration drafts remain independent of submitted jobs. Recording charts
 use cursor-based pages and a bounded retained sample window. Admitted backend
 jobs and recovery own their lifetime independently of the browser activity.
+`ProjectContext::execute` owns admission and completion for robot, recording,
+training, rollout, and workflow-save commands. It retains the project even when
+the HTTP caller disconnects or the command transfers its activity to a worker.
 
 There is no frontend event inbox or event reducer. Camera/media transfers and
 the request-scoped model completion stream retain their own transport behavior.

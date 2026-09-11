@@ -324,6 +324,10 @@ pub struct RobotSpec {
 }
 
 impl RobotSpec {
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
     pub fn new(
         id: String,
         port: PortSettings,

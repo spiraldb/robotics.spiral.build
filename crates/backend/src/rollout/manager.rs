@@ -146,12 +146,18 @@ impl ActiveRollout {
 }
 
 struct WatchRolloutEvents {
+    runs: Arc<Mutex<std::collections::BTreeMap<String, RolloutSnapshot>>>,
     state: watch::Sender<RolloutSnapshot>,
     persistence: watch::Sender<RolloutSnapshot>,
 }
 
 impl RolloutEventPort for WatchRolloutEvents {
     fn publish(&self, snapshot: &RolloutSnapshot) {
+        if let Some(id) = snapshot.session_id() {
+            self.runs
+                .recover_lock()
+                .insert(id.to_owned(), snapshot.clone());
+        }
         self.state.send_replace(snapshot.clone());
         self.persistence.send_replace(snapshot.clone());
     }
@@ -518,6 +524,7 @@ impl RolloutPersistence {
 }
 
 struct RolloutLifecycle {
+    runs: Arc<Mutex<std::collections::BTreeMap<String, RolloutSnapshot>>>,
     loaded: tokio::sync::OnceCell<()>,
     state: watch::Sender<RolloutSnapshot>,
     coordinator: Mutex<RolloutCoordinator>,
@@ -553,7 +560,9 @@ impl RolloutManager {
         let persistence_worker = RolloutPersistence::new(changes);
         let (state, receiver) = watch::channel(initial);
         drop(receiver);
+        let runs = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
         let events = Arc::new(WatchRolloutEvents {
+            runs: runs.clone(),
             state: state.clone(),
             persistence,
         });
@@ -563,6 +572,7 @@ impl RolloutManager {
             preferences,
             clock: Arc::new(SystemClock),
             lifecycle: RolloutLifecycle {
+                runs,
                 loaded: tokio::sync::OnceCell::new(),
                 state,
                 coordinator: Mutex::new(RolloutCoordinator::new(events)),
@@ -601,9 +611,14 @@ impl RolloutManager {
                     .load_rollout_session()
                     .await?
                     .unwrap_or_default();
-                self.lifecycle
-                    .state
-                    .send_replace(snapshot.restored_after_restart());
+                let snapshot = snapshot.restored_after_restart();
+                if let Some(id) = snapshot.session_id() {
+                    self.lifecycle
+                        .runs
+                        .recover_lock()
+                        .insert(id.to_owned(), snapshot.clone());
+                }
+                self.lifecycle.state.send_replace(snapshot);
                 self.activate();
                 Ok::<(), String>(())
             })
@@ -611,9 +626,27 @@ impl RolloutManager {
             .map(|_| ())
     }
 
-    pub(crate) async fn load_snapshot(&self) -> Result<RolloutSnapshot, String> {
+    pub(crate) async fn runs(&self) -> Result<Vec<RolloutSnapshot>, String> {
         self.ensure_loaded().await?;
-        Ok(self.snapshot())
+        Ok(self
+            .lifecycle
+            .runs
+            .recover_lock()
+            .values()
+            .cloned()
+            .collect())
+    }
+
+    pub(crate) async fn run(&self, id: &str) -> Result<RolloutSnapshot, crate::OperationError> {
+        self.ensure_loaded()
+            .await
+            .map_err(crate::OperationError::Internal)?;
+        self.lifecycle
+            .runs
+            .recover_lock()
+            .get(id)
+            .cloned()
+            .ok_or_else(|| crate::OperationError::NotFound(format!("Rollout {id:?} was not found")))
     }
 
     pub(crate) fn snapshot(&self) -> RolloutSnapshot {
@@ -655,12 +688,15 @@ impl RolloutManager {
         Ok(self.snapshot())
     }
 
-    pub(crate) async fn stop(&self) -> Result<(), String> {
+    pub(crate) async fn stop(&self, id: &str) -> Result<(), String> {
         let active = self.lifecycle.active.recover_lock();
         let Some(active) = active.as_ref() else {
             return Err("no policy rollout is active".to_owned());
         };
-        self.lifecycle.coordinator.recover_lock().request_stop()?;
+        if active.session != id {
+            return Err(format!("Rollout {id:?} is not the active execution"));
+        }
+        self.lifecycle.coordinator.recover_lock().request_stop(id)?;
         active
             .stop
             .send(true)
@@ -669,7 +705,11 @@ impl RolloutManager {
 
     pub(crate) async fn shutdown(&self) {
         if let Some(active) = self.lifecycle.take_active() {
-            let _ = self.lifecycle.coordinator.recover_lock().request_stop();
+            let _ = self
+                .lifecycle
+                .coordinator
+                .recover_lock()
+                .request_stop(&active.session);
             active.stop_and_join().await;
         }
         self.lifecycle.persistence.shutdown().await;
@@ -2129,5 +2169,28 @@ mod persistence_tests {
             harness.durable.lock().unwrap().session_id(),
             Some("imported-run")
         );
+    }
+}
+
+#[cfg(test)]
+mod observation_tests {
+    use super::*;
+    #[test]
+    fn new_execution_observations_do_not_replace_earlier_run_records() {
+        let (state, _) = watch::channel(RolloutSnapshot::default());
+        let (persistence, _) = watch::channel(RolloutSnapshot::default());
+        let runs = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
+        let events = WatchRolloutEvents {
+            state,
+            persistence,
+            runs: runs.clone(),
+        };
+        let first = RolloutSnapshot::new(Some("first".into()), Some("training".into()));
+        let second = RolloutSnapshot::new(Some("second".into()), Some("training".into()));
+        events.publish(&first);
+        events.publish(&second);
+        assert_eq!(runs.recover_lock().get("first"), Some(&first));
+        assert_eq!(runs.recover_lock().get("second"), Some(&second));
+        assert_eq!(*events.state.borrow(), second);
     }
 }

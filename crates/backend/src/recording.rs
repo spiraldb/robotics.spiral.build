@@ -19,9 +19,8 @@ use crate::recording::episode_arms::RecordedArms;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct StartRecordingCommand {
+    pair: TeleoperationPair,
     dataset_id: String,
-    arms: Vec<String>,
-    note: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -37,16 +36,6 @@ pub(crate) struct RecordingContext {
     sample_hz: f64,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct StopRecordingCommand {
-    keep: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct SetRecordingPausedCommand {
-    paused: bool,
-}
-
 /// Consequences needed by the recording-session use cases.
 ///
 /// `MediaCapture` and `MediaOutput` remain opaque so video libraries and media
@@ -57,19 +46,11 @@ pub(crate) struct RecordingResult {
 }
 
 impl StartRecordingCommand {
-    pub(crate) fn new(
-        dataset_id: impl Into<String>,
-        arms: Vec<String>,
-        note: Option<String>,
-    ) -> Self {
+    pub(crate) fn new(dataset_id: impl Into<String>, pair: TeleoperationPair) -> Self {
         Self {
             dataset_id: dataset_id.into(),
-            arms,
-            note,
+            pair,
         }
-    }
-    pub(crate) fn into_parts(self) -> (String, Vec<String>, Option<String>) {
-        (self.dataset_id, self.arms, self.note)
     }
 }
 
@@ -97,21 +78,6 @@ impl RecordingContext {
     }
 }
 
-impl StopRecordingCommand {
-    pub(crate) const fn new(keep: bool) -> Self {
-        Self { keep }
-    }
-    pub(crate) const fn keep(self) -> bool {
-        self.keep
-    }
-}
-
-impl SetRecordingPausedCommand {
-    pub(crate) const fn new(paused: bool) -> Self {
-        Self { paused }
-    }
-}
-
 impl RecordingResult {
     pub(crate) fn new(episode: impl Into<String>) -> Self {
         Self {
@@ -124,16 +90,16 @@ impl RecordingResult {
 }
 
 pub(crate) struct RecordingDraftRequest {
-    command: StartRecordingCommand,
+    dataset_id: String,
     source: String,
     arms: Vec<String>,
     sample_hz: f64,
 }
 
 impl RecordingDraftRequest {
-    fn new(command: StartRecordingCommand, source: String) -> Self {
+    fn new(dataset_id: String, source: String) -> Self {
         Self {
-            command,
+            dataset_id,
             source,
             arms: Vec::new(),
             sample_hz: 0.0,
@@ -146,8 +112,8 @@ impl RecordingDraftRequest {
         self
     }
 
-    pub(crate) fn into_parts(self) -> (StartRecordingCommand, String, Vec<String>, f64) {
-        (self.command, self.source, self.arms, self.sample_hz)
+    pub(crate) fn into_parts(self) -> (String, String, Vec<String>, f64) {
+        (self.dataset_id, self.source, self.arms, self.sample_hz)
     }
 }
 
@@ -171,7 +137,6 @@ pub(crate) trait RecordingPort {
     fn complete_recording(&self, operation: Self::Finalization, media: Self::MediaOutput);
     fn release_recording_lease(&self, token: CatalogLeaseToken);
     fn recording_active(&self) -> bool;
-    async fn default_teleoperation_pair(&self) -> Option<TeleoperationPair>;
     fn recording_context(&self) -> RecordingContext;
 
     async fn enter_teleoperation(&self, pair: &TeleoperationPair) -> Result<(), OperationError>;
@@ -192,10 +157,7 @@ pub(crate) trait RecordingPort {
     ) -> Result<RecordingResult, OperationError>;
     async fn abandon_recording_media(&self, capture: Self::MediaCapture);
 
-    async fn stop_recording(
-        &self,
-        command: StopRecordingCommand,
-    ) -> Result<RecordingResult, OperationError>;
+    async fn stop_recording(&self, keep: bool) -> Result<RecordingResult, OperationError>;
     async fn finish_recording_media(&self, operation: &mut Self::Finalization)
     -> Self::MediaOutput;
     async fn commit_recording(
@@ -285,34 +247,19 @@ impl<'a, P: RecordingPort + ?Sized> RecordingActions<'a, P> {
         command.dataset_id = DatasetId::try_from(command.dataset_id.as_str())
             .map(String::from)
             .map_err(|error| OperationError::invalid_input(error.to_string()))?;
-        command.note = command
-            .note
-            .as_deref()
-            .map(str::trim)
-            .filter(|note| !note.is_empty())
-            .map(str::to_owned);
-
-        let pair = port.default_teleoperation_pair().await.ok_or_else(|| {
-            OperationError::InvalidInput(
-                "connect and calibrate two compatible arms before recording".to_owned(),
-            )
-        })?;
+        let pair = command.pair.clone();
+        if pair.leader.is_empty() || pair.follower.is_empty() || pair.leader == pair.follower {
+            return Err(OperationError::invalid_input(
+                "Recording needs distinct leader and follower identities",
+            ));
+        }
         let context = port.recording_context();
         if !context.sample_hz.is_finite() || context.sample_hz <= 0.0 {
             return Err(OperationError::Internal(
                 "the control loop reported an invalid sample rate".to_owned(),
             ));
         }
-        let arms = if command.arms.is_empty() {
-            vec![pair.leader.clone(), pair.follower.clone()]
-        } else {
-            command.arms.clone()
-        };
-        if arms.is_empty() {
-            return Err(OperationError::InvalidInput(
-                "connect at least one arm before recording a take".to_owned(),
-            ));
-        }
+        let arms = vec![pair.leader.clone(), pair.follower.clone()];
         for arm in &arms {
             if !context
                 .connected_arms
@@ -324,12 +271,11 @@ impl<'a, P: RecordingPort + ?Sized> RecordingActions<'a, P> {
                 )));
             }
         }
-        command.arms = arms.clone();
         let source = format!("Teleoperation — {} → {}", pair.leader, pair.follower);
 
         port.enter_teleoperation(&pair).await?;
         let open = async {
-            let request = RecordingDraftRequest::new(command, source)
+            let request = RecordingDraftRequest::new(command.dataset_id, source)
                 .with_capture(arms.clone(), context.sample_hz);
             let draft = port.create_recording_draft(request).await?;
             let episode = port.draft_episode(&draft);
@@ -361,10 +307,7 @@ impl<'a, P: RecordingPort + ?Sized> RecordingActions<'a, P> {
     /// Media is claimed before the hardware stop so an automatic-stop observer
     /// cannot race this explicit action. The idle transition is attempted even if
     /// finalizing the recording fails.
-    pub(crate) async fn stop(
-        &self,
-        command: StopRecordingCommand,
-    ) -> Result<RecordingResult, OperationError> {
+    pub(crate) async fn stop(&self, keep: bool) -> Result<RecordingResult, OperationError> {
         let port = self.port;
         let Some(mut operation) = port.claim_finalization()? else {
             return Err(OperationError::conflict(
@@ -372,7 +315,7 @@ impl<'a, P: RecordingPort + ?Sized> RecordingActions<'a, P> {
             ));
         };
         let episode = port.finalization_episode(&operation);
-        let recording = port.stop_recording(command).await;
+        let recording = port.stop_recording(keep).await;
         let idle = port.enter_idle().await;
         let media = port.finish_recording_media(&mut operation).await;
         // The claim supplies identity even for camera-less takes if hardware stop
@@ -393,12 +336,9 @@ impl<'a, P: RecordingPort + ?Sized> RecordingActions<'a, P> {
     }
 
     /// Pause/resume joint and media capture in a fail-safe order.
-    pub(crate) async fn set_paused(
-        &self,
-        command: SetRecordingPausedCommand,
-    ) -> Result<(), OperationError> {
+    pub(crate) async fn set_paused(&self, paused: bool) -> Result<(), OperationError> {
         let mut operation = self.port.claim_capture_change()?;
-        if command.paused {
+        if paused {
             self.port.request_media_pause(&operation);
             let paused = self.port.set_recording_paused(true).await;
             let media = self.port.finish_media_pause(&mut operation).await;
@@ -421,11 +361,6 @@ pub(crate) struct StartReplayCommand {
     robot: String,
     source_arm: Option<String>,
     start_seconds: f64,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct SetReplayPausedCommand {
-    paused: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -468,12 +403,6 @@ impl StartReplayCommand {
     pub(crate) fn starting_at(mut self, start_seconds: f64) -> Self {
         self.start_seconds = start_seconds;
         self
-    }
-}
-
-impl SetReplayPausedCommand {
-    pub(crate) const fn new(paused: bool) -> Self {
-        Self { paused }
     }
 }
 
@@ -622,11 +551,8 @@ impl<'a, P: ReplayPort + ?Sized> ReplayActions<'a, P> {
             .await
     }
 
-    pub(crate) async fn set_paused(
-        &self,
-        command: SetReplayPausedCommand,
-    ) -> Result<(), OperationError> {
-        self.port.set_replay_paused(command.paused).await
+    pub(crate) async fn set_paused(&self, paused: bool) -> Result<(), OperationError> {
+        self.port.set_replay_paused(paused).await
     }
 }
 
@@ -643,7 +569,6 @@ mod tests {
         session: Arc<RecordingSessionManager>,
         start_available: bool,
         active: bool,
-        pair: Option<TeleoperationPair>,
         open_error: Option<OperationError>,
         begin_error: Option<OperationError>,
         stop_error: Option<OperationError>,
@@ -662,10 +587,7 @@ mod tests {
                 ))),
                 start_available: true,
                 active: false,
-                pair: Some(TeleoperationPair {
-                    leader: "leader".to_owned(),
-                    follower: "follower".to_owned(),
-                }),
+
                 open_error: None,
                 begin_error: None,
                 stop_error: None,
@@ -738,10 +660,6 @@ mod tests {
             self.active
         }
 
-        async fn default_teleoperation_pair(&self) -> Option<TeleoperationPair> {
-            self.pair.clone()
-        }
-
         fn recording_context(&self) -> RecordingContext {
             RecordingContext::new(vec!["leader".to_owned(), "follower".to_owned()], 60.0)
         }
@@ -763,10 +681,10 @@ mod tests {
             &self,
             request: RecordingDraftRequest,
         ) -> Result<Self::RecordingDraft, OperationError> {
-            let (command, _source, arms, sample_hz) = request.into_parts();
+            let (dataset_id, _source, arms, sample_hz) = request.into_parts();
             self.events.lock().unwrap().push(format!(
                 "draft:{}:{}:{sample_hz}",
-                command.arms.join("+"),
+                dataset_id,
                 arms.join("+")
             ));
             self.open_error
@@ -804,10 +722,7 @@ mod tests {
             self.events.lock().unwrap().push("abandon-media".to_owned());
         }
 
-        async fn stop_recording(
-            &self,
-            _command: StopRecordingCommand,
-        ) -> Result<RecordingResult, OperationError> {
+        async fn stop_recording(&self, _keep: bool) -> Result<RecordingResult, OperationError> {
             self.events.lock().unwrap().push("stop".to_owned());
             self.stop_error.clone().map_or_else(
                 || {
@@ -912,9 +827,8 @@ mod tests {
 
     fn start_command() -> StartRecordingCommand {
         StartRecordingCommand {
+            pair: TeleoperationPair::new("leader", "follower"),
             dataset_id: " default ".to_owned(),
-            arms: Vec::new(),
-            note: Some("  useful take  ".to_owned()),
         }
     }
 
@@ -930,7 +844,7 @@ mod tests {
             [
                 "reserve-start",
                 "teleoperate",
-                "draft:leader+follower:leader+follower:60",
+                "draft:default:leader+follower:60",
                 "start-media:episode_000001",
                 "begin",
                 "retain-media"
@@ -956,7 +870,7 @@ mod tests {
             [
                 "reserve-start",
                 "teleoperate",
-                "draft:leader+follower:leader+follower:60",
+                "draft:default:leader+follower:60",
                 "idle",
                 "release-start"
             ]
@@ -991,7 +905,7 @@ mod tests {
             [
                 "reserve-start",
                 "teleoperate",
-                "draft:leader+follower:leader+follower:60",
+                "draft:default:leader+follower:60",
                 "start-media:episode_000001",
                 "begin",
                 "abandon-media",
@@ -1008,10 +922,7 @@ mod tests {
             ..FakePort::default()
         };
         port.seed_recording_lease();
-        RecordingActions::new(&port)
-            .stop(StopRecordingCommand { keep: true })
-            .await
-            .unwrap_err();
+        RecordingActions::new(&port).stop(true).await.unwrap_err();
         assert_eq!(
             *port.events.lock().unwrap(),
             [
@@ -1034,10 +945,7 @@ mod tests {
             ..FakePort::default()
         };
         port.seed_recording_lease();
-        let error = RecordingActions::new(&port)
-            .stop(StopRecordingCommand { keep: true })
-            .await
-            .unwrap_err();
+        let error = RecordingActions::new(&port).stop(true).await.unwrap_err();
         assert!(error.message().contains("committed"));
         assert_eq!(
             *port.events.lock().unwrap(),
@@ -1060,7 +968,7 @@ mod tests {
         };
         port.seed_recording_lease();
         RecordingActions::new(&port)
-            .set_paused(SetRecordingPausedCommand { paused: true })
+            .set_paused(true)
             .await
             .unwrap_err();
         assert_eq!(
@@ -1079,7 +987,7 @@ mod tests {
         };
         port.seed_recording_lease();
         let error = RecordingActions::new(&port)
-            .set_paused(SetRecordingPausedCommand { paused: true })
+            .set_paused(true)
             .await
             .unwrap_err();
         assert!(error.message().contains("could not be committed"));
@@ -1094,7 +1002,7 @@ mod tests {
         let port = FakePort::default();
         port.seed_recording_lease();
         RecordingActions::new(&port)
-            .set_paused(SetRecordingPausedCommand { paused: false })
+            .set_paused(false)
             .await
             .unwrap();
         assert_eq!(
@@ -1109,9 +1017,7 @@ mod tests {
         let actions = RecordingActions::new(&port);
         for paused in [true, false] {
             assert!(matches!(
-                actions
-                    .set_paused(SetRecordingPausedCommand { paused })
-                    .await,
+                actions.set_paused(paused).await,
                 Err(OperationError::Conflict(_))
             ));
         }
@@ -1121,14 +1027,12 @@ mod tests {
         let finalizing = port.session.claim_finalization().unwrap().unwrap();
         for paused in [true, false] {
             assert!(matches!(
-                actions
-                    .set_paused(SetRecordingPausedCommand { paused })
-                    .await,
+                actions.set_paused(paused).await,
                 Err(OperationError::Conflict(_))
             ));
         }
         assert!(matches!(
-            actions.stop(StopRecordingCommand::new(true)).await,
+            actions.stop(true).await,
             Err(OperationError::Conflict(_))
         ));
         assert!(
@@ -1136,10 +1040,7 @@ mod tests {
             "rejected claims must not touch hardware"
         );
         drop(finalizing);
-        actions
-            .set_paused(SetRecordingPausedCommand { paused: true })
-            .await
-            .unwrap();
+        actions.set_paused(true).await.unwrap();
         assert_eq!(
             *port.events.lock().unwrap(),
             ["request-pause", "hardware-pause:true", "finish-pause"]
@@ -1211,10 +1112,7 @@ mod tests {
     #[tokio::test]
     async fn replay_pause_is_one_transport_neutral_action() {
         let port = FakePort::default();
-        ReplayActions::new(&port)
-            .set_paused(SetReplayPausedCommand { paused: true })
-            .await
-            .unwrap();
+        ReplayActions::new(&port).set_paused(true).await.unwrap();
         assert_eq!(*port.events.lock().unwrap(), ["replay-pause:true"]);
     }
 }

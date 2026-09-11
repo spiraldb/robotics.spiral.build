@@ -30,7 +30,23 @@ impl RolloutController {
         .with_activity(active.into())
         .use_when(
             move || *is_active.read() && sessions.catalog_available(),
-            || super::RolloutClient::current().rollout_snapshot(),
+            move || {
+                let current = controller.snapshot.peek().clone();
+                async move {
+                    let client = super::RolloutClient::current();
+                    if current.phase().active()
+                        && let Some(id) = current.session_id()
+                    {
+                        return client.run(id).await;
+                    }
+                    Ok(client
+                        .runs()
+                        .await?
+                        .into_iter()
+                        .max_by_key(|run| (run.started_ms(), run.session_id().map(str::to_owned)))
+                        .unwrap_or_default())
+                }
+            },
         );
         controller.use_response(request);
         controller

@@ -55,6 +55,34 @@ impl ProjectContext {
         self.projects.admit(self.project.info().id())
     }
 
+    /// Admit once and retain this project until the command completes, even if
+    /// its HTTP caller disconnects. Long-lived work may retain the activity too.
+    pub(crate) async fn execute<Output, Work>(
+        &self,
+        command: impl FnOnce(Self, crate::project_admission::ProjectActivity) -> Work + Send + 'static,
+    ) -> Result<Output, crate::BackendCommandError>
+    where
+        Output: Send + 'static,
+        Work: std::future::Future<Output = Result<Output, crate::BackendCommandError>> + Send,
+    {
+        let activity = self.admit()?;
+        let state = self.clone();
+        self.tasks
+            .execute(async move {
+                let result = command(state, activity.clone()).await;
+                drop(activity);
+                result
+            })
+            .await?
+    }
+
+    pub(crate) fn require_catalog_ready(&self) -> Result<(), crate::BackendCommandError> {
+        match self.bootstrap().catalog_unavailable() {
+            Some(error) => Err(error.into()),
+            None => Ok(()),
+        }
+    }
+
     pub(crate) fn project(&self) -> &Arc<crate::project_session::ProjectSession> {
         &self.project
     }

@@ -1,9 +1,9 @@
 //! Robot setup queries live only in hardware views, beneath the immutable project scope.
 use crate::client::queries::{QueryDomain, QueryPolicy, QueryRefresh};
 use crate::robots::RobotClient;
+use crate::robots::RobotSetupSnapshot;
 use crate::shell::project::ProjectSessionSignals;
 use dioxus::prelude::*;
-use spiral_robotics_common::robots::RobotSetupSnapshot;
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct RobotSetupState {
@@ -27,7 +27,10 @@ impl RobotSetupState {
         use_context_provider(|| state);
         let request = QueryPolicy::new(QueryDomain::RobotSetup, 2_000).use_when(
             move || active() && sessions.connected(),
-            || RobotClient::current().setup_snapshot(),
+            move || {
+                let available = sessions.catalog_available();
+                async move { RobotSetupSnapshot::load(available).await }
+            },
         );
         state.use_response(request);
         state
@@ -105,6 +108,26 @@ impl RobotSetupState {
     }
     pub(crate) fn retry(self) {
         QueryRefresh::current().invalidate(&[QueryDomain::RobotSetup]);
+    }
+}
+
+impl RobotSetupSnapshot {
+    async fn load(catalog_available: bool) -> Result<Self, crate::client::CommandError> {
+        let client = RobotClient::current();
+        let robots = async {
+            if catalog_available {
+                client.robots().await
+            } else {
+                Ok(Vec::new())
+            }
+        };
+        let (robots, status) =
+            futures_util::future::try_join(robots, client.hardware_status()).await?;
+        let (mode, cameras, issues) = status.into_parts();
+        Ok(Self::new(mode)
+            .with_robots(robots)
+            .with_cameras(cameras)
+            .with_issues(issues))
     }
 }
 

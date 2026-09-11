@@ -55,11 +55,11 @@ impl RecordingClient {
 
     pub(crate) fn start_recording(
         &self,
-        dataset_id: String,
+        request: RecordingStart,
     ) -> impl Future<Output = Result<EpisodeInfo, CommandError>> + use<> {
         self.project.mutate(
             &[Telemetry, Recording, RobotSetup],
-            HttpRequest::new("POST", "/api/recording").json(&RecordingStart::new(dataset_id)),
+            HttpRequest::new("POST", "/api/recording").json(&request),
         )
     }
 

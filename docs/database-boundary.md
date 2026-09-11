@@ -198,7 +198,7 @@ persistence remain owned by the backend after navigating away. Stop does not wai
 for history I/O.
 
 The shell owns only project identity/readiness, connection status, its clock, and
-notifications. `/robots/setup` and hardware telemetry are polled by the active
+notifications. `/robots`, `/hardware/status`, and hardware telemetry are polled by the active
 Live, Rollout, or Settings view; each view retains its own last successful
 configuration, loading state, and errors until the project scope is disposed.
 Reactivating a hardware view requires fresh setup and telemetry before controls

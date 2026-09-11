@@ -58,13 +58,13 @@ mod tests {
         );
         assert!(
             crate::training::commands::TrainingCommands::from(scoped.state.clone())
-                .snapshot(None)
+                .snapshot()
                 .await
                 .is_err()
         );
         assert!(
             crate::rollout::commands::RolloutCommands::from(scoped.state.clone())
-                .snapshot()
+                .runs()
                 .await
                 .is_err()
         );

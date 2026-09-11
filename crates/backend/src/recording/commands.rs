@@ -20,8 +20,7 @@ use crate::recording::seek::{
 use crate::recording::{
     RecordingActions, RecordingContext, RecordingDraftRequest, RecordingPort, RecordingResult,
     ReplayActions, ReplayEpisode, ReplayPlan, ReplayPort, ReplayTrajectory,
-    ReplayTrajectoryRequest, SetRecordingPausedCommand, SetReplayPausedCommand,
-    StartRecordingCommand, StartReplayCommand, StopRecordingCommand, TeleoperationPair,
+    ReplayTrajectoryRequest, StartRecordingCommand, StartReplayCommand, TeleoperationPair,
 };
 use crate::robotics::video::{
     CameraCaptureSpec, CameraRecording, VideoCapture, VideoCaptureRequest,
@@ -117,15 +116,6 @@ impl RecordingPort for RecordingAdapter<'_> {
         self.state.hardware().state().recording().is_some()
     }
 
-    async fn default_teleoperation_pair(&self) -> Option<TeleoperationPair> {
-        crate::robots::setup::RobotSetup::new(self.state)
-            .snapshot()
-            .await
-            .ok()?
-            .default_teleoperation_pair()
-            .map(|(leader, follower)| TeleoperationPair::new(leader, follower))
-    }
-
     fn recording_context(&self) -> RecordingContext {
         let hardware = self.state.hardware().state();
         let connected_arms = hardware
@@ -205,14 +195,11 @@ impl RecordingPort for RecordingAdapter<'_> {
         let _ = capture.finish().await;
     }
 
-    async fn stop_recording(
-        &self,
-        command: StopRecordingCommand,
-    ) -> Result<RecordingResult, OperationError> {
+    async fn stop_recording(&self, keep: bool) -> Result<RecordingResult, OperationError> {
         let completion = self
             .state
             .hardware()
-            .stop_recording(command.keep())
+            .stop_recording(keep)
             .await
             .map_err(OperationError::conflict)?;
         let summary = self
@@ -424,20 +411,28 @@ impl PhysicalSeekPort for SeekAdapter<'_> {
     }
 
     async fn target(&self, robot: &str) -> Result<Option<SeekTarget>, OperationError> {
-        Ok(crate::robots::setup::RobotSetup::new(self.state)
-            .snapshot()
-            .await?
-            .robots()
-            .iter()
-            .find(|candidate| candidate.id() == robot)
-            .map(|target| {
-                SeekTarget::new(
-                    target.id(),
-                    target.robot_type().map(str::to_owned),
-                    target.connection().connected(),
-                )
-                .with_readiness(target.calibrated(), target.problem().map(str::to_owned))
-            }))
+        let record = match self.state.workspace().get(robot).await {
+            Ok(record) => record,
+            Err(crate::robots::workspace::WorkspaceError::NotFound(_)) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let connection = self
+            .state
+            .hardware()
+            .state()
+            .connections()
+            .get(robot)
+            .cloned()
+            .unwrap_or_default();
+        let target = record.summary(connection);
+        Ok(Some(
+            SeekTarget::new(
+                target.id(),
+                target.robot_type().map(str::to_owned),
+                target.connection().connected(),
+            )
+            .with_readiness(target.calibrated(), target.problem().map(str::to_owned)),
+        ))
     }
 
     async fn episode(&self, episode: &str) -> Result<SeekableEpisode, OperationError> {
@@ -530,101 +525,82 @@ impl RecordingCommands {
     /// Begin a take using the configured teleoperation pair.
     pub(crate) async fn start_recording(
         &self,
-        dataset_id: String,
+        request: spiral_robotics_common::recording::RecordingStart,
     ) -> Result<EpisodeInfo, BackendCommandError> {
-        let commands = self.clone();
-        let activity = commands.state.admit()?;
+        let (dataset_id, (leader, follower)) = request.into_parts();
         self.state
-            .tasks()
-            .execute(async move {
-                let _activity = activity;
-                commands.require_catalog_ready()?;
-                commands.state.preferences().load().await?;
-                commands
-                    .state
+            .execute(move |state, _activity| async move {
+                state.require_catalog_ready()?;
+                state.preferences().load().await?;
+                state
                     .storage()
                     .validate_mcap_destination(&dataset_id)
                     .await?;
-                let adapter = RecordingAdapter::new(&commands.state);
+                let adapter = RecordingAdapter::new(&state);
                 let result = RecordingActions::new(&adapter)
-                    .start(StartRecordingCommand::new(dataset_id, Vec::new(), None))
+                    .start(StartRecordingCommand::new(
+                        dataset_id,
+                        TeleoperationPair::new(leader, follower),
+                    ))
                     .await?;
                 adapter.present_recording(result).map_err(Into::into)
             })
-            .await?
+            .await
     }
 
     pub(crate) async fn stop_recording(
         &self,
         keep: bool,
     ) -> Result<EpisodeInfo, BackendCommandError> {
-        let commands = self.clone();
-        let activity = commands.state.admit()?;
         self.state
-            .tasks()
-            .execute(async move {
-                let _activity = activity;
-                commands.require_catalog_ready()?;
-                let adapter = RecordingAdapter::new(&commands.state);
-                let result = RecordingActions::new(&adapter)
-                    .stop(StopRecordingCommand::new(keep))
-                    .await?;
+            .execute(move |state, _activity| async move {
+                state.require_catalog_ready()?;
+                let adapter = RecordingAdapter::new(&state);
+                let result = RecordingActions::new(&adapter).stop(keep).await?;
                 adapter.present_recording(result).map_err(Into::into)
             })
-            .await?
+            .await
     }
 
     pub(crate) async fn set_recording_paused(
         &self,
         paused: bool,
     ) -> Result<(), BackendCommandError> {
-        let commands = self.clone();
-        let activity = commands.state.admit()?;
         self.state
-            .tasks()
-            .execute(async move {
-                let _activity = activity;
-                commands.require_catalog_ready()?;
-                RecordingActions::new(&RecordingAdapter::new(&commands.state))
-                    .set_paused(SetRecordingPausedCommand::new(paused))
+            .execute(move |state, _activity| async move {
+                state.require_catalog_ready()?;
+                RecordingActions::new(&RecordingAdapter::new(&state))
+                    .set_paused(paused)
                     .await
                     .map_err(Into::into)
             })
-            .await?
+            .await
     }
 
     pub(crate) async fn delete_episode(&self, id: String) -> Result<(), BackendCommandError> {
-        let commands = self.clone();
-        let activity = commands.state.admit()?;
         self.state
-            .tasks()
-            .execute(async move {
-                let _activity = activity;
-                commands.require_catalog_ready()?;
-                EpisodeCatalogActions::new(&EpisodeAdapter::new(&commands.state))
+            .execute(move |state, _activity| async move {
+                state.require_catalog_ready()?;
+                EpisodeCatalogActions::new(&EpisodeAdapter::new(&state))
                     .delete(DeleteEpisodeCommand::new(id))
                     .await
                     .map_err(Into::into)
             })
-            .await?
+            .await
     }
 
     pub(crate) async fn inspection(
         &self,
         id: String,
     ) -> Result<EpisodeInspectionSnapshot, BackendCommandError> {
-        let commands = self.clone();
-        let activity = commands.state.admit()?;
         self.state
-            .tasks()
-            .execute(async move {
-                let _activity = activity;
-                commands.require_storage_ready()?;
-                EpisodeQueries::new(&commands.state)
+            .execute(move |state, _activity| async move {
+                state.require_catalog_ready()?;
+                EpisodeQueries::new(&state)
                     .inspection(id)
                     .map_err(Into::into)
             })
-            .await?
+            .await
     }
 
     pub(crate) async fn camera_preview(
@@ -633,7 +609,7 @@ impl RecordingCommands {
         request: spiral_robotics_common::recording::RecordingCameraRequest,
     ) -> Result<spiral_robotics_common::datasets::EpisodeVideo, BackendCommandError> {
         let _activity = self.state.admit()?;
-        self.require_storage_ready()?;
+        self.state.require_catalog_ready()?;
         spiral_robotics_storage::episodes::EpisodeId::try_from(id.as_str())
             .map_err(|error| OperationError::InvalidInput(error.to_string()))?;
         self.state.recording_session().camera_preview(&id, request.stream())
@@ -649,21 +625,15 @@ impl RecordingCommands {
         source_arm: Option<String>,
         seconds: f64,
     ) -> Result<(), BackendCommandError> {
-        let commands = self.clone();
-        let activity = commands.state.admit()?;
         self.state
-            .tasks()
-            .execute(async move {
-                let _activity = activity;
-                commands.require_catalog_ready()?;
-                PhysicalSeekActions::new(&SeekAdapter {
-                    state: &commands.state,
-                })
-                .seek(SeekEpisodeCommand::new(id, robot, seconds).with_source_arm(source_arm))
-                .await?;
+            .execute(move |state, _activity| async move {
+                state.require_catalog_ready()?;
+                PhysicalSeekActions::new(&SeekAdapter { state: &state })
+                    .seek(SeekEpisodeCommand::new(id, robot, seconds).with_source_arm(source_arm))
+                    .await?;
                 Ok(())
             })
-            .await?
+            .await
     }
 
     pub(crate) async fn start_replay(
@@ -673,14 +643,10 @@ impl RecordingCommands {
         source_arm: Option<String>,
         start_seconds: f64,
     ) -> Result<(), BackendCommandError> {
-        let commands = self.clone();
-        let activity = commands.state.admit()?;
         self.state
-            .tasks()
-            .execute(async move {
-                let _activity = activity;
-                commands.require_catalog_ready()?;
-                ReplayActions::new(&RecordingAdapter::new(&commands.state))
+            .execute(move |state, _activity| async move {
+                state.require_catalog_ready()?;
+                ReplayActions::new(&RecordingAdapter::new(&state))
                     .start(
                         StartReplayCommand::new(episode, robot, source_arm)
                             .starting_at(start_seconds),
@@ -688,37 +654,19 @@ impl RecordingCommands {
                     .await
                     .map_err(Into::into)
             })
-            .await?
+            .await
     }
 
     pub(crate) async fn set_replay_paused(&self, paused: bool) -> Result<(), BackendCommandError> {
-        let commands = self.clone();
-        let activity = commands.state.admit()?;
         self.state
-            .tasks()
-            .execute(async move {
-                let _activity = activity;
-                commands.require_catalog_ready()?;
-                ReplayActions::new(&RecordingAdapter::new(&commands.state))
-                    .set_paused(SetReplayPausedCommand::new(paused))
+            .execute(move |state, _activity| async move {
+                state.require_catalog_ready()?;
+                ReplayActions::new(&RecordingAdapter::new(&state))
+                    .set_paused(paused)
                     .await
                     .map_err(Into::into)
             })
-            .await?
-    }
-
-    fn require_storage_ready(&self) -> Result<(), BackendCommandError> {
-        match self.state.bootstrap().catalog_unavailable() {
-            Some(error) => Err(error.into()),
-            None => Ok(()),
-        }
-    }
-
-    fn require_catalog_ready(&self) -> Result<(), BackendCommandError> {
-        match self.state.bootstrap().catalog_unavailable() {
-            Some(error) => Err(error.into()),
-            None => Ok(()),
-        }
+            .await
     }
 }
 
@@ -732,8 +680,7 @@ impl RecordingAdapter<'_> {
         &self,
         request: RecordingDraftRequest,
     ) -> Result<RecordingDraft, OperationError> {
-        let (command, source, wanted, sample_hz) = request.into_parts();
-        let (dataset_id, _requested_arms, note) = command.into_parts();
+        let (dataset_id, source, wanted, sample_hz) = request.into_parts();
         let hardware = self.state.hardware().state();
         let connected = hardware
             .robots()
@@ -828,7 +775,6 @@ impl RecordingAdapter<'_> {
             .recording_buffer()
             .begin(
                 EpisodeRecordingRequest::new(dataset_id.clone(), source.clone(), sample_hz)
-                    .with_note(note)
                     .with_arms(arms.clone(), condition),
             )
             .map_err(OperationError::from)?;
@@ -866,18 +812,20 @@ impl RecordingAdapter<'_> {
             .video()
             .enabled()
         {
-            let snapshot = crate::robots::setup::RobotSetup::new(self.state)
-                .snapshot()
-                .await?;
-            let camera_status = snapshot
-                .cameras()
+            let records = self
+                .state
+                .workspace()
+                .try_list()
+                .await
+                .map_err(OperationError::from)?;
+            let statuses = self.state.cameras().statuses();
+            let camera_status = statuses
                 .iter()
                 .map(|camera| (camera.id(), camera))
                 .collect::<std::collections::BTreeMap<_, _>>();
             let mut seen = BTreeSet::new();
             let mut cameras = Vec::new();
-            for robot in snapshot
-                .robots()
+            for robot in records
                 .iter()
                 .filter(|robot| wanted.iter().any(|id| id == robot.id()))
             {

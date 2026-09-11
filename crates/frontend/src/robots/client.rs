@@ -3,9 +3,9 @@ use crate::client::http::UrlComponent;
 use crate::client::project::ProjectClient;
 use crate::client::queries::QueryDomain::*;
 use crate::client::transport::{CommandError, HttpRequest};
+use spiral_robotics_common::robots::document::RobotDocumentSave;
 use spiral_robotics_common::robots::{
-    CameraBinding, CameraStatus, ModeSelection, NewRobot, RobotGoal, RobotSummary, RobotUpdate,
-    SerialPortIdentification, SerialPortScan, SerialPortSummary,
+    CameraStatus, ModeSelection, RobotGoal, RobotSummary, SerialPortSummary,
 };
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -27,13 +27,17 @@ impl RobotClient {
             .request(HttpRequest::new("GET", "/api/robots/telemetry"))
     }
 
-    pub(crate) fn setup_snapshot(
+    pub(crate) fn robots(
         &self,
-    ) -> impl Future<
-        Output = Result<spiral_robotics_common::robots::RobotSetupSnapshot, CommandError>,
-    > + use<> {
+    ) -> impl Future<Output = Result<Vec<RobotSummary>, CommandError>> + use<> {
+        self.project.request(HttpRequest::new("GET", "/api/robots"))
+    }
+    pub(crate) fn hardware_status(
+        &self,
+    ) -> impl Future<Output = Result<spiral_robotics_common::robots::HardwareStatus, CommandError>> + use<>
+    {
         self.project
-            .request(HttpRequest::new("GET", "/api/robots/setup"))
+            .request(HttpRequest::new("GET", "/api/hardware/status"))
     }
 
     pub(crate) fn list_serial_ports(
@@ -41,16 +45,6 @@ impl RobotClient {
     ) -> impl Future<Output = Result<Vec<SerialPortSummary>, CommandError>> + use<> {
         self.project
             .request(HttpRequest::new("GET", "/api/serial-ports"))
-    }
-
-    pub(crate) fn identify_serial_port(
-        &self,
-        before: Vec<String>,
-    ) -> impl Future<Output = Result<SerialPortIdentification, CommandError>> + use<> {
-        self.project.request(
-            HttpRequest::new("POST", "/api/serial-ports/identify")
-                .json(&SerialPortScan::new(before)),
-        )
     }
 
     pub(crate) fn refresh_cameras(
@@ -62,33 +56,13 @@ impl RobotClient {
         )
     }
 
-    pub(crate) fn create_robot(
+    pub(crate) fn save_document(
         &self,
-        request: NewRobot,
+        request: RobotDocumentSave,
     ) -> impl Future<Output = Result<RobotSummary, CommandError>> + use<> {
         self.project.mutate(
             &[RobotSetup, Catalog],
-            HttpRequest::new("POST", "/api/robots").json(&request),
-        )
-    }
-
-    pub(crate) fn import_robot_configuration(
-        &self,
-        document: Vec<u8>,
-    ) -> impl Future<Output = Result<RobotSummary, CommandError>> + use<> {
-        self.project.mutate(
-            &[RobotSetup, Catalog],
-            HttpRequest::new("POST", "/api/robots/import").raw_json(document),
-        )
-    }
-
-    pub(crate) fn update_robot(
-        &self,
-        request: RobotUpdate<Vec<CameraBinding>>,
-    ) -> impl Future<Output = Result<RobotSummary, CommandError>> + use<> {
-        self.project.mutate(
-            &[RobotSetup],
-            HttpRequest::new("PATCH", "/api/robots").json(&request),
+            HttpRequest::new("POST", "/api/robots/save").json(&request),
         )
     }
 

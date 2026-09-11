@@ -114,7 +114,7 @@ fn TrainingPanels(
                     "training-runs",
                     rsx! {
                         TrainingRunDetail {
-                            details_loaded: snapshot.detailed_run_id() == Some(run.id()),
+                            details_loaded: training_history.details_loaded(run.id()),
                             run,
                         }
                     },

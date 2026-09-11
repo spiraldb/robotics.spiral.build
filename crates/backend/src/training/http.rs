@@ -1,12 +1,10 @@
 //! HTTP endpoints for training.
 
 use crate::http::contract::{ApiRoutes, Created};
-use crate::http::delivery::{ApiJson, ApiPath, ApiQuery, HttpFailure, ScopedProject};
+use crate::http::delivery::{ApiJson, ApiPath, HttpFailure, ScopedProject};
 
 use axum::Json;
-use spiral_robotics_common::training::{
-    TrainingConfig, TrainingRun, TrainingSelection, TrainingSnapshot,
-};
+use spiral_robotics_common::training::{TrainingConfig, TrainingRun, TrainingSnapshot};
 
 pub(crate) struct TrainingEndpoints;
 
@@ -15,7 +13,8 @@ impl TrainingEndpoints {
         routes.post("/training/runs", Self::start_training_run);
         routes.post("/training/runs/{id}/stop", Self::stop_training_run);
         routes.delete("/training/runs/{id}", Self::delete_training_run);
-        routes.get("/training", Self::fetch_training);
+        routes.get("/training/runs", Self::fetch_training);
+        routes.get("/training/runs/{id}", Self::fetch_run);
     }
     async fn start_training_run(
         ScopedProject(commands): ScopedProject<crate::training::commands::TrainingCommands>,
@@ -41,10 +40,14 @@ impl TrainingEndpoints {
 
     async fn fetch_training(
         ScopedProject(commands): ScopedProject<crate::training::commands::TrainingCommands>,
-        ApiQuery(selection): ApiQuery<TrainingSelection>,
     ) -> Result<Json<TrainingSnapshot>, HttpFailure> {
-        let selected = selection.into_selected();
-        let result = commands.snapshot(selected).await?;
+        let result = commands.snapshot().await?;
         Ok(Json(result))
+    }
+    async fn fetch_run(
+        ScopedProject(commands): ScopedProject<crate::training::commands::TrainingCommands>,
+        ApiPath(id): ApiPath<String>,
+    ) -> Result<Json<TrainingRun>, HttpFailure> {
+        Ok(Json(commands.run(id).await?))
     }
 }

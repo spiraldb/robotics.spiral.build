@@ -45,21 +45,13 @@ pub struct MotorSpec {
 impl MotorSpec {
     /// Build the default motor map for a new SO-101 robot instance.
     pub fn so101_arm() -> BTreeMap<String, Self> {
-        const SO101_MOTOR_MODEL: &str = "sts3215";
-        const SO101_MOTORS: [(&str, u32); 6] = [
-            ("shoulder_pan", 1),
-            ("shoulder_lift", 2),
-            ("elbow_flex", 3),
-            ("wrist_flex", 4),
-            ("wrist_roll", 5),
-            ("gripper", 6),
-        ];
-        SO101_MOTORS
+        spiral_robotics_common::robots::document::So101::motors()
             .into_iter()
             .map(|(name, id)| {
                 (
                     name.to_owned(),
-                    Self::new(id, MotorDirection::Normal).with_model(SO101_MOTOR_MODEL),
+                    Self::new(id, MotorDirection::Normal)
+                        .with_model(spiral_robotics_common::robots::document::So101::motor_model()),
                 )
             })
             .collect()

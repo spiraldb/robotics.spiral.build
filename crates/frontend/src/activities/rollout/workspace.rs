@@ -124,6 +124,7 @@ pub(crate) fn RolloutWorkbench(
         controls_available: telemetry.controls_available(),
     }
     .blocker();
+    let stop_id = rollout.session_id().map(str::to_owned);
     let active = rollout.phase().active();
     let stopping = rollout.phase() == RolloutPhase::Stopping;
     let pending = *pending_action.read();
@@ -352,10 +353,11 @@ pub(crate) fn RolloutWorkbench(
                             if pending_action.peek().is_some() || !active || stopping {
                                 return;
                             }
+                            let Some(id) = stop_id.clone() else { return; };
                             pending_action.set(Some(PendingRolloutAction::Stop));
                             let mut pending_action = pending_action;
                             spawn(async move {
-                                if let Err(error) = RolloutClient::current().stop_rollout()
+                                if let Err(error) = RolloutClient::current().stop_rollout(id)
                                     .await
                                     .map_err(|error| error.to_string())
                                 {

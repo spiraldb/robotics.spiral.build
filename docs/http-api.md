@@ -36,8 +36,8 @@ objects themselves; there is no Dioxus envelope or outer `config`, `request`, or
 the query string, never in a request body. All API responses have
 `Cache-Control: no-store`.
 
-Successful JSON calls return 200, except creating a training run, starting a
-recording, and creating a robot return 201. Commands with no result return JSON
+Successful JSON calls return 200, except creating a training run and starting a
+recording return 201. Commands with no result return JSON
 `null`. A successful start/stop request describes acceptance or the state reached
 by that command; clients fetch state to observe background work reaching its
 terminal phase. Jobs are not kept alive by the polling connection.
@@ -153,10 +153,17 @@ schemas served by `/api/openapi.json`. `—` means no request body.
 | POST | `/training/runs` | TrainingConfig | TrainingRun |
 | POST | `/training/runs/{id}/stop` | — | `null` |
 | DELETE | `/training/runs/{id}` | — | `null` |
-| POST | `/rollout` | RolloutConfig | RolloutSnapshot |
-| POST | `/rollout/stop` | — | `null` |
-| GET | `/training` | TrainingSelection (query) | TrainingSnapshot |
-| GET | `/rollout` | — | RolloutSnapshot |
+| POST | `/rollout-runs` | RolloutConfig | RolloutSnapshot |
+| POST | `/rollout-runs/{id}/stop` | — | `null` |
+| GET | `/training/runs` | — | TrainingSnapshot (bounded catalog) |
+| GET | `/training/runs/{id}` | — | TrainingRun (full bounded history) |
+| GET | `/rollout-runs` | — | Vec<RolloutSnapshot> |
+| GET | `/rollout-runs/{id}` | — | RolloutSnapshot |
+
+Training selection and assembly of catalog/detail responses are frontend state.
+Rollout IDs are execution `session_id` values, distinct from their training `run_id`.
+The rollout collection retains observations for this backend project session;
+only the latest rollout is persisted and restored after restart. Stop targets an exact ID.
 
 ### Recording sessions
 
@@ -181,15 +188,12 @@ dataset/member identities; no recording-header fallback exists.
 | Method | Path | Body or query | Response |
 | --- | --- | --- | --- |
 | GET | `/serial-ports` | — | Vec<SerialPortSummary> |
-| POST | `/serial-ports/identify` | SerialPortScan | SerialPortIdentification |
 | POST | `/cameras/refresh` | — | Vec<CameraStatus> |
 | GET | `/robots/telemetry` | — | TelemetryFrame |
-| GET | `/robots/setup` | — | RobotSetupSnapshot |
+| GET | `/hardware/status` | — | HardwareStatus (mode, cameras, issues) |
 | GET | `/robots` | — | Vec<RobotSummary> |
-| POST | `/robots` | NewRobot | RobotSummary |
-| POST | `/robots/import` | Robot configuration JSON object | RobotSummary |
+| POST | `/robots/save` | RobotDocumentSave | RobotSummary (includes complete document) |
 | GET | `/robots/{id}` | — | RobotSummary |
-| PATCH | `/robots` | RobotUpdate<Vec<CameraBinding>> | RobotSummary |
 | DELETE | `/robots/{id}` | — | `null` |
 | POST | `/robots/{id}/connect` | — | `null` |
 | POST | `/robots/{id}/disconnect` | — | `null` |
@@ -201,6 +205,9 @@ dataset/member identities; no recording-header fallback exists.
 | POST | `/robots/{id}/calibration/cancel` | — | `null` |
 | POST | `/robots/{id}/calibration/reapply` | — | CalibrationApplication |
 | PUT | `/mode` | ModeSelection | `null` |
+
+RecordingStart contains `dataset_id`, `leader`, and `follower`. The browser picks
+the pair; the backend revalidates hardware admission before recording begins.
 
 ### Settings
 
@@ -266,8 +273,10 @@ separate Studio dataset registry. Project snapshot restore is a separate operati
   actual streamed bytes. The browser sends its native File without making a
   project-sized WebAssembly copy. Import returns `ProjectImportSummary`.
 - `GET /project/export?session_id=...`: project bundle download.
-- `POST /robots/import`: the robot configuration JSON object, in the same format
-  as the existing portable robot file.
+- `POST /robots/save`: `{document, expected}`. `document` is the complete portable
+  robot JSON object. `expected: null` creates a new robot; otherwise it is the
+  editor baseline, compared inside the save transaction. Conflicts return 409.
+  Save does not connect hardware; the frontend invokes Connect explicitly.
 - `GET /cameras/stream.mjpeg?id=...`: backend-global camera stream. Camera IDs may
   contain device-path separators and must be percent-encoded.
 

@@ -3,7 +3,7 @@ use crate::client::http::UrlComponent;
 use crate::client::project::ProjectClient;
 use crate::client::queries::QueryDomain::*;
 use crate::client::transport::{CommandError, HttpRequest};
-use spiral_robotics_common::training::{TrainingConfig, TrainingRun, TrainingSelection};
+use spiral_robotics_common::training::{TrainingConfig, TrainingRun, TrainingSnapshot};
 use std::future::Future;
 
 pub(crate) struct TrainingClient {
@@ -15,15 +15,19 @@ impl TrainingClient {
             project: ProjectClient::current(),
         }
     }
-    pub(crate) fn training_snapshot(
-        &self,
-        selected: Option<String>,
-    ) -> impl Future<
-        Output = Result<spiral_robotics_common::training::TrainingSnapshot, CommandError>,
-    > + use<> {
-        self.project.request(
-            HttpRequest::new("GET", "/api/training").query(&TrainingSelection::new(selected)),
-        )
+    pub(crate) async fn catalog(&self) -> Result<TrainingSnapshot, CommandError> {
+        self.project
+            .request(HttpRequest::new("GET", "/api/training/runs"))
+            .await
+    }
+
+    pub(crate) async fn run(&self, id: &str) -> Result<TrainingRun, CommandError> {
+        self.project
+            .request(HttpRequest::new(
+                "GET",
+                format!("/api/training/runs/{}", id.url_component()),
+            ))
+            .await
     }
 
     pub(crate) fn start_training_run(

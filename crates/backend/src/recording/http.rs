@@ -45,8 +45,7 @@ impl RecordingEndpoints {
         ScopedProject(commands): ScopedProject<crate::recording::commands::RecordingCommands>,
         ApiJson(request): ApiJson<RecordingStart>,
     ) -> Result<Created<EpisodeInfo>, HttpFailure> {
-        let (dataset_id,) = request.into_parts();
-        let result = commands.start_recording(dataset_id).await?;
+        let result = commands.start_recording(request).await?;
         Ok(Created(result))
     }
     async fn stop_recording(

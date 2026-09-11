@@ -58,26 +58,6 @@ pub(crate) trait CalibrationControlPort {
     ) -> Result<(), OperationError>;
 }
 
-pub(crate) struct CalibrationControlActions<'a, C: CalibrationControlPort + ?Sized> {
-    control: &'a C,
-}
-
-impl<'a, C: CalibrationControlPort + ?Sized> CalibrationControlActions<'a, C> {
-    pub(crate) const fn new(control: &'a C) -> Self {
-        Self { control }
-    }
-
-    /// Begin a hand-guided calibration sweep.
-    pub(crate) async fn start(&self, robot: &str) -> Result<(), OperationError> {
-        self.control.start_calibration(robot).await
-    }
-
-    /// Abandon a calibration sweep and return the robot to normal operation.
-    pub(crate) async fn cancel(&self, robot: &str) -> Result<(), OperationError> {
-        self.control.cancel_calibration(robot).await
-    }
-}
-
 /// A calibration was durably saved. Any warning concerns only its live refresh.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct FinishCalibrationOutput {
@@ -265,27 +245,6 @@ mod tests {
                 fail_apply: false,
             },
         )
-    }
-
-    #[tokio::test]
-    async fn begin_and_cancel_are_transport_neutral_actions() {
-        let (_repository, control) = setup(false, Ok(input()));
-        let actions = CalibrationControlActions::new(&control);
-        actions.start("arm").await.unwrap();
-        actions.cancel("arm").await.unwrap();
-        assert_eq!(*control.events.lock().unwrap(), ["start", "cancel"]);
-    }
-
-    #[tokio::test]
-    async fn begin_refusal_propagates_without_compensation() {
-        let (_repository, mut control) = setup(false, Ok(input()));
-        control.fail_start = true;
-        let error = CalibrationControlActions::new(&control)
-            .start("arm")
-            .await
-            .unwrap_err();
-        assert_eq!(error, OperationError::Conflict("robot is busy".to_owned()));
-        assert_eq!(*control.events.lock().unwrap(), ["start"]);
     }
 
     #[tokio::test]

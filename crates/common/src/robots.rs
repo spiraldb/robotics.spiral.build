@@ -15,6 +15,8 @@ pub struct RobotSummary {
     cameras: Vec<CameraBinding>,
     #[serde(flatten)]
     availability: RobotAvailability,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    document: Option<document::RobotDocument>,
 }
 
 /// Whether a robot is calibrated, structurally valid, and connected.
@@ -49,7 +51,16 @@ impl RobotSummary {
             motors: Vec::new(),
             cameras: Vec::new(),
             availability,
+            document: None,
         }
+    }
+
+    pub fn with_document(mut self, document: document::RobotDocument) -> Self {
+        self.document = Some(document);
+        self
+    }
+    pub fn document(&self) -> Option<&document::RobotDocument> {
+        self.document.as_ref()
     }
 
     pub fn with_port(mut self, port: Option<PortSettings>) -> Self {
@@ -1100,91 +1111,6 @@ impl CalibrationJointProgress {
     }
 }
 
-/// A new robot instance admitted for creation in SpiralDB.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct NewRobot {
-    id: String,
-    /// Defaults to `so101_follower` when omitted.
-    #[serde(default)]
-    robot_type: Option<String>,
-    #[serde(default)]
-    port: Option<PortSettings>,
-}
-
-/// Change a robot's port or camera assignments.
-///
-/// Omitted fields are left exactly as they are in the stored configuration,
-/// including fields this build does not understand.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct RobotUpdate<C = Vec<CameraBinding>> {
-    id: String,
-    #[serde(default)]
-    robot_type: Option<String>,
-    #[serde(default)]
-    port: Option<PortSettings>,
-    #[serde(default)]
-    cameras: Option<C>,
-}
-
-impl NewRobot {
-    pub fn new(id: impl Into<String>, robot_type: Option<String>) -> Self {
-        Self {
-            id: id.into(),
-            robot_type,
-            port: None,
-        }
-    }
-
-    pub fn with_port(mut self, port: Option<PortSettings>) -> Self {
-        self.port = port;
-        self
-    }
-
-    pub fn into_parts(self) -> (String, Option<String>, Option<PortSettings>) {
-        (self.id, self.robot_type, self.port)
-    }
-}
-
-impl RobotUpdate<Vec<CameraBinding>> {
-    pub fn with_port(id: impl Into<String>, port: PortSettings) -> Self {
-        Self {
-            id: id.into(),
-            port: Some(port),
-            ..Self::default()
-        }
-    }
-
-    pub fn with_cameras(id: impl Into<String>, cameras: Vec<CameraBinding>) -> Self {
-        Self {
-            id: id.into(),
-            cameras: Some(cameras),
-            ..Self::default()
-        }
-    }
-}
-
-impl<C> RobotUpdate<C> {
-    pub fn new(
-        id: impl Into<String>,
-        robot_type: Option<String>,
-        port: Option<PortSettings>,
-        cameras: Option<C>,
-    ) -> Self {
-        Self {
-            id: id.into(),
-            robot_type,
-            port,
-            cameras,
-        }
-    }
-
-    pub fn into_parts(self) -> (String, Option<String>, Option<PortSettings>, Option<C>) {
-        (self.id, self.robot_type, self.port, self.cameras)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1353,7 +1279,29 @@ mod tests {
 }
 
 mod requests;
-pub use requests::{RobotGoal, SerialPortIdentification, SerialPortScan};
+pub use requests::RobotGoal;
 
-mod setup;
-pub use setup::RobotSetupSnapshot;
+pub mod document;
+
+pub mod strict_json;
+
+/// Current native hardware observations, independent of saved robot configuration.
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HardwareStatus {
+    mode: ModeStatus,
+    cameras: Vec<CameraStatus>,
+    issues: Vec<String>,
+}
+impl HardwareStatus {
+    pub fn new(mode: ModeStatus, cameras: Vec<CameraStatus>, issues: Vec<String>) -> Self {
+        Self {
+            mode,
+            cameras,
+            issues,
+        }
+    }
+    pub fn into_parts(self) -> (ModeStatus, Vec<CameraStatus>, Vec<String>) {
+        (self.mode, self.cameras, self.issues)
+    }
+}

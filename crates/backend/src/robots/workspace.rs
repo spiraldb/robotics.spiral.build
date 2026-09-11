@@ -2,14 +2,13 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use crate::sync::MutexRecovery;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::OperationError;
 use arrow_array::{LargeStringArray, StringArray, StringViewArray};
-use futures::StreamExt as _;
+use futures::{StreamExt as _, TryStreamExt as _};
 use serde_json::{Map, Value};
 use spiral_robotics_common::robots::{
     CameraBinding, ConnectionStatus, MotorLimits, MotorSummary, PortSettings, RobotSummary,
@@ -24,10 +23,8 @@ use super::calibration_codec;
 use super::robot_config::{ConfigError, RobotConfig, RobotConfigUpdate};
 use spiral_robotics_storage::SpiralSql;
 
-pub(crate) const DEFAULT_ROBOT_TYPE: &str = "so101_follower";
 pub(crate) const DEFAULT_BAUD_RATE: u32 = 1_000_000;
 const MAX_ROBOT_ID_LENGTH: usize = 64;
-const MAX_LABEL_LENGTH: usize = 64;
 
 struct RobotId(String);
 
@@ -54,83 +51,11 @@ impl TryFrom<&str> for RobotId {
     }
 }
 
-struct RobotLabel(String);
-
-impl RobotLabel {
-    fn parse(field: &str, value: &str) -> Result<Self, WorkspaceError> {
-        let trimmed = value.trim();
-        if trimmed.is_empty()
-            || trimmed.len() > MAX_LABEL_LENGTH
-            || trimmed.chars().any(char::is_control)
-        {
-            return Err(WorkspaceError::Invalid(format!(
-                "{field} must be 1 to {MAX_LABEL_LENGTH} characters and contain no control characters"
-            )));
-        }
-        Ok(Self(trimmed.to_owned()))
-    }
-}
-
-impl From<RobotLabel> for String {
-    fn from(label: RobotLabel) -> Self {
-        label.0
-    }
-}
-
-pub(crate) struct RobotWorkspaceCreate {
-    id: String,
-    robot_type: Option<String>,
-    port: Option<PortSettings>,
-}
-
-impl RobotWorkspaceCreate {
-    pub(crate) fn new(id: String, robot_type: Option<String>) -> Self {
-        Self {
-            id,
-            robot_type,
-            port: None,
-        }
-    }
-
-    pub(crate) fn with_port(mut self, port: Option<PortSettings>) -> Self {
-        self.port = port;
-        self
-    }
-}
-
-pub(crate) struct RobotWorkspaceUpdate {
-    id: String,
-    robot_type: Option<String>,
-    port: Option<PortSettings>,
-    cameras: Option<Map<String, Value>>,
-}
-
-impl RobotWorkspaceUpdate {
-    pub(crate) fn new(id: String, robot_type: Option<String>) -> Self {
-        Self {
-            id,
-            robot_type,
-            port: None,
-            cameras: None,
-        }
-    }
-
-    pub(crate) fn with_port(mut self, port: Option<PortSettings>) -> Self {
-        self.port = port;
-        self
-    }
-
-    pub(crate) fn with_cameras(mut self, cameras: Option<Map<String, Value>>) -> Self {
-        self.cameras = cameras;
-        self
-    }
-}
-
 #[derive(Debug)]
 pub(crate) enum WorkspaceError {
     InvalidId(String),
     NotFound(String),
-    AlreadyExists(String),
+    Conflict(String),
     Invalid(String),
     Config(ConfigError),
 }
@@ -143,7 +68,7 @@ impl From<WorkspaceError> for OperationError {
                 Self::InvalidInput(message)
             }
             WorkspaceError::NotFound(_) => Self::NotFound(message),
-            WorkspaceError::AlreadyExists(_) => Self::Conflict(message),
+            WorkspaceError::Conflict(_) => Self::Conflict(message),
             WorkspaceError::Config(_) => Self::Internal(message),
         }
     }
@@ -157,7 +82,7 @@ impl fmt::Display for WorkspaceError {
                 "robot id {id:?} must be 1 to {MAX_ROBOT_ID_LENGTH} characters of letters, digits, '-', or '_'"
             ),
             Self::NotFound(id) => write!(formatter, "no robot named {id:?}"),
-            Self::AlreadyExists(id) => write!(formatter, "a robot named {id:?} already exists"),
+            Self::Conflict(message) => formatter.write_str(message),
             Self::Invalid(detail) => formatter.write_str(detail),
             Self::Config(source) => source.fmt(formatter),
         }
@@ -185,6 +110,57 @@ impl RobotRecord {
 }
 
 impl RobotRecord {
+    pub(super) fn live_summary(
+        &self,
+        hardware: &spiral_robotics_hardware::HardwareState,
+    ) -> RobotSummary {
+        let connection = hardware
+            .connections()
+            .get(self.id())
+            .cloned()
+            .unwrap_or_default();
+        let mut summary = self.summary(connection);
+        if let Some(limits) = hardware.limits().get(self.id()) {
+            let motors = summary
+                .motors()
+                .iter()
+                .cloned()
+                .map(|mut motor| {
+                    if let Some(limit) = limits.get(motor.name()) {
+                        motor.set_limits(*limit);
+                    }
+                    motor
+                })
+                .collect();
+            summary = summary.with_motors(motors);
+        }
+        summary
+    }
+    pub(super) fn connection_spec(
+        &self,
+    ) -> Result<spiral_robotics_hardware::RobotSpec, OperationError> {
+        let port = self.port().ok_or_else(|| {
+            OperationError::invalid_input(format!(
+                "robot {:?} has no serial port assigned; set one before connecting",
+                self.id()
+            ))
+        })?;
+        let port = spiral_robotics_hardware::PortSettings::try_new(port.path(), port.baud_rate())
+            .map_err(|error| OperationError::invalid_input(error.to_string()))?;
+        let specification = spiral_robotics_hardware::RobotSpec::new(
+            self.id().to_owned(),
+            port,
+            self.motors().map_err(OperationError::from)?,
+        )
+        .map_err(|error| OperationError::invalid_input(error.to_string()))?;
+        match self.calibration().map_err(OperationError::from)? {
+            Some(calibration) => specification
+                .with_calibration(calibration)
+                .map_err(|error| OperationError::invalid_input(error.to_string())),
+            None => Ok(specification),
+        }
+    }
+
     pub(crate) fn robot_type(&self) -> Option<String> {
         self.config
             .root()
@@ -303,37 +279,28 @@ impl RobotRecord {
         .with_port(self.port())
         .with_motors(motors)
         .with_cameras(self.cameras())
+        .with_document(
+            spiral_robotics_common::robots::document::RobotDocument::from_object(
+                self.config.root().clone(),
+            ),
+        )
     }
 }
 
 pub(crate) struct RobotWorkspace {
     project_store: Arc<ProjectStore>,
-    last_issue: Mutex<Option<String>>,
 }
 
 impl RobotWorkspace {
     pub(crate) fn new(project_store: Arc<ProjectStore>) -> Self {
-        Self {
-            project_store,
-            last_issue: Mutex::new(None),
-        }
+        Self { project_store }
     }
 
     pub(crate) async fn list(&self) -> Vec<RobotRecord> {
-        match self.try_list().await {
-            Ok(records) => {
-                *self.last_issue.recover_lock() = None;
-                records
-            }
-            Err(error) => {
-                *self.last_issue.recover_lock() = Some(error.to_string());
-                Vec::new()
-            }
-        }
-    }
-
-    pub(crate) fn issues(&self) -> Vec<String> {
-        self.last_issue.recover_lock().iter().cloned().collect()
+        self.try_list().await.unwrap_or_else(|error| {
+            tracing::warn!(%error, "Could not load robot configurations");
+            Vec::new()
+        })
     }
 
     pub(crate) async fn get(&self, id: &str) -> Result<RobotRecord, WorkspaceError> {
@@ -345,102 +312,30 @@ impl RobotWorkspace {
             .ok_or(WorkspaceError::NotFound(id.0))
     }
 
-    pub(crate) async fn create(
+    pub(crate) async fn save_document(
         &self,
-        request: RobotWorkspaceCreate,
+        request: &spiral_robotics_common::robots::document::RobotDocumentSave,
     ) -> Result<RobotRecord, WorkspaceError> {
-        let RobotWorkspaceCreate {
-            id,
-            robot_type,
-            port,
-        } = request;
-        let id = RobotId::try_from(id.as_str())?;
-        let id = id.as_str();
-        match self.get(id).await {
-            Ok(_) => return Err(WorkspaceError::AlreadyExists(id.to_owned())),
-            Err(WorkspaceError::NotFound(_)) => {}
-            Err(error) => return Err(error),
-        }
-        let robot_type = String::from(RobotLabel::parse(
-            "robot_type",
-            robot_type.as_deref().unwrap_or(DEFAULT_ROBOT_TYPE),
-        )?);
-        let mut root = Map::new();
-        root.insert("robot_id".to_owned(), Value::String(id.to_owned()));
-        root.insert("robot_type".to_owned(), Value::String(robot_type));
-        if let Some(port) = port.filter(|port| !port.path().trim().is_empty()) {
-            root.insert("port".to_owned(), port.configuration_value());
-        }
-        root.insert(
-            "motors".to_owned(),
-            RobotConfig::default()
-                .encode_motor_specs(&spiral_robotics_hardware::MotorSpec::so101_arm())
-                .expect("stock motor specs encode"),
-        );
-        self.persist(id, RobotConfig::from_value(Value::Object(root))?)
-            .await
-    }
-
-    pub(crate) async fn import_configuration(
-        &self,
-        bytes: &[u8],
-    ) -> Result<RobotRecord, WorkspaceError> {
-        let config = RobotConfig::from_slice(bytes).map_err(|source| {
-            WorkspaceError::Invalid(format!("the configuration is not valid JSON: {source}"))
-        })?;
-        let id = config
-            .root()
-            .get("robot_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                WorkspaceError::Invalid(
-                    "the configuration needs a string `robot_id` field".to_owned(),
-                )
-            })?
+        request
+            .document()
+            .validate()
+            .map_err(WorkspaceError::Invalid)?;
+        let id = request
+            .document()
+            .id()
+            .map_err(WorkspaceError::Invalid)?
             .to_owned();
-        let id = RobotId::try_from(id.as_str())?.0;
-        match self.get(&id).await {
-            Ok(_) => return Err(WorkspaceError::AlreadyExists(id)),
-            Err(WorkspaceError::NotFound(_)) => {}
-            Err(error) => return Err(error),
+        let config = RobotConfig::from_value(Value::Object(request.document().object().clone()))?;
+        let expected = request
+            .expected()
+            .map(|document| RobotConfig::from_value(Value::Object(document.object().clone())))
+            .transpose()?;
+        let record = RobotRecord { id, config };
+        // Decode native motor/calibration types before saving a configuration that hardware will consume.
+        if let Some(problem) = record.summary(ConnectionStatus::default()).problem() {
+            return Err(WorkspaceError::Invalid(problem.to_owned()));
         }
-        self.persist(&id, config).await
-    }
-
-    pub(crate) async fn update(
-        &self,
-        request: RobotWorkspaceUpdate,
-    ) -> Result<RobotRecord, WorkspaceError> {
-        let RobotWorkspaceUpdate {
-            id,
-            robot_type,
-            port,
-            cameras,
-        } = request;
-        let id = id.as_str();
-        let record = self.get(id).await?;
-        let mut root = record.config.root().clone();
-        if let Some(robot_type) = robot_type.as_deref() {
-            root.insert(
-                "robot_type".to_owned(),
-                Value::String(RobotLabel::parse("robot_type", robot_type)?.into()),
-            );
-        }
-        if let Some(port) = port {
-            let mut fields = root
-                .get("port")
-                .and_then(Value::as_object)
-                .cloned()
-                .unwrap_or_default();
-            fields.insert("path".to_owned(), Value::String(port.path().to_owned()));
-            fields.insert("baud_rate".to_owned(), Value::from(port.baud_rate()));
-            root.insert("port".to_owned(), Value::Object(fields));
-        }
-        if let Some(cameras) = cameras {
-            root.insert("cameras".to_owned(), Value::Object(cameras));
-        }
-        self.persist(id, RobotConfig::from_value(Value::Object(root))?)
-            .await
+        self.persist(record, expected.as_ref()).await
     }
 
     pub(crate) async fn save_calibration(
@@ -462,7 +357,14 @@ impl RobotWorkspace {
                 WorkspaceError::Invalid(format!("calibration could not be serialized: {source}"))
             })?,
         ))?;
-        self.persist(id, merged).await
+        self.persist(
+            RobotRecord {
+                id: id.to_owned(),
+                config: merged,
+            },
+            Some(&record.config),
+        )
+        .await
     }
 
     pub(crate) async fn delete(&self, id: &str) -> Result<(), WorkspaceError> {
@@ -528,59 +430,67 @@ impl RobotWorkspace {
         Ok(records)
     }
 
-    async fn persist(&self, id: &str, config: RobotConfig) -> Result<RobotRecord, WorkspaceError> {
-        let table_prefix = self.project_store.table_prefix().to_owned();
-        let relation = StorageSchema::robot_configuration_relation(&table_prefix);
-        let config_json = config.to_pretty_json()?;
-        let id_sql = SpiralSql::string_literal(id);
+    async fn persist(
+        &self,
+        record: RobotRecord,
+        expected: Option<&RobotConfig>,
+    ) -> Result<RobotRecord, WorkspaceError> {
+        let relation =
+            StorageSchema::robot_configuration_relation(self.project_store.table_prefix());
+        let id_sql = SpiralSql::string_literal(&record.id);
+        let batch = StorageSchema::robot_configuration_batch(
+            record.id.clone(),
+            record.config.to_pretty_json()?,
+            SystemTime::now().unix_millis(),
+        )
+        .map_err(WorkspaceError::Invalid)?;
         let mut connection = self
             .project_store
             .connect_exclusive()
             .await
             .map_err(WorkspaceError::Invalid)?;
         connection
-            .execute_update_sql(&format!(
-                "DELETE FROM {relation} WHERE {ROBOT_IDENTIFIER_COLUMN} = {id_sql}"
-            ))
+            .begin_transaction()
             .await
             .map_err(WorkspaceError::Invalid)?;
-        let batch = StorageSchema::robot_configuration_batch(
-            id.to_owned(),
-            config_json,
-            SystemTime::now().unix_millis(),
-        )
-        .map_err(WorkspaceError::Invalid)?;
-        connection
-            .ingest_batch(&relation, batch)
-            .await
-            .map_err(WorkspaceError::Invalid)?;
-        Ok(RobotRecord {
-            id: id.to_owned(),
-            config,
-        })
-    }
-}
-
-trait PortConfigurationValue {
-    fn configuration_value(&self) -> Value;
-}
-
-impl PortConfigurationValue for PortSettings {
-    fn configuration_value(&self) -> Value {
-        let mut fields = Map::new();
-        fields.insert(
-            "path".to_owned(),
-            Value::String(self.path().trim().to_owned()),
-        );
-        fields.insert(
-            "baud_rate".to_owned(),
-            Value::from(if self.baud_rate() == 0 {
-                DEFAULT_BAUD_RATE
-            } else {
-                self.baud_rate()
-            }),
-        );
-        Value::Object(fields)
+        let result = async {
+            let sql = format!(
+                "SELECT {ROBOT_CONFIGURATION_COLUMN} FROM {relation} WHERE {ROBOT_IDENTIFIER_COLUMN} = {id_sql}"
+            );
+            let batches = connection.execute_query(sql).await
+                .map_err(WorkspaceError::Invalid)?
+                .try_collect::<Vec<_>>().await
+                .map_err(|error| WorkspaceError::Invalid(error.to_string()))?;
+            let mut saved = None;
+            for batch in batches {
+                for row in 0..batch.num_rows() {
+                    if saved.is_some() {
+                        return Err(WorkspaceError::Invalid("Duplicate robot identity".into()));
+                    }
+                    let json = batch.column(0).as_ref().text_at(row)
+                        .map_err(WorkspaceError::Invalid)?;
+                    saved = Some(RobotConfig::from_slice(json.as_bytes())?);
+                }
+            }
+            if saved.as_ref() != expected {
+                return Err(WorkspaceError::Conflict(
+                    "Robot configuration changed; reload it before saving".into(),
+                ));
+            }
+            let delete = format!("DELETE FROM {relation} WHERE {ROBOT_IDENTIFIER_COLUMN} = {id_sql}");
+            connection.execute_update_sql(&delete).await.map_err(WorkspaceError::Invalid)?;
+            connection.ingest_batch(&relation, batch).await.map_err(WorkspaceError::Invalid)?;
+            Ok(())
+        }.await;
+        if let Err(error) = result {
+            connection
+                .rollback()
+                .await
+                .map_err(WorkspaceError::Invalid)?;
+            return Err(error);
+        }
+        connection.commit().await.map_err(WorkspaceError::Invalid)?;
+        Ok(record)
     }
 }
 
@@ -617,3 +527,6 @@ impl UnixMillis for SystemTime {
             .unwrap_or(0)
     }
 }
+
+#[cfg(test)]
+mod tests;

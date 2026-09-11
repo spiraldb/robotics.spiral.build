@@ -92,10 +92,23 @@ async fn every_documented_scoped_endpoint_is_registered_and_rejects_missing_or_s
             }
         }
     }
-    assert_eq!(count, 64);
+    assert_eq!(count, 63);
+    for retired in [
+        "/robots/setup",
+        "/serial-ports/identify",
+        "/robots/import",
+        "/training",
+        "/rollout",
+        "/rollout/stop",
+    ] {
+        assert!(contract["paths"].get(retired).is_none(), "{retired}");
+    }
+    assert!(contract["paths"]["/robots"].get("patch").is_none());
+    assert!(contract["paths"]["/training/runs/{id}"]["get"].is_object());
+    assert!(contract["paths"]["/rollout-runs/{id}/stop"]["post"].is_object());
     assert!(contract["paths"].get("/workflow/commands").is_none());
     assert!(contract["paths"].get("/workflow/assistant").is_none());
-    assert!(contract["paths"]["/robots/setup"]["get"].is_object());
+    assert!(contract["paths"]["/hardware/status"]["get"].is_object());
     assert!(contract["paths"].get("/project/setup").is_none());
     fixture.shutdown().await;
 }
@@ -117,8 +130,8 @@ async fn snapshots_are_plain_gets_and_old_sessions_cannot_read_the_replacement()
     for path in [
         "/robots/telemetry",
         "/recording/signals?generation=0&offset=0",
-        "/training",
-        "/rollout",
+        "/training/runs",
+        "/rollout-runs",
     ] {
         let (status, value) = fixture
             .send(
@@ -130,7 +143,7 @@ async fn snapshots_are_plain_gets_and_old_sessions_cannot_read_the_replacement()
             )
             .await;
         assert_eq!(status, StatusCode::OK, "{path}: {value}");
-        assert!(value.is_object());
+        assert!(value.is_object() || value.is_array());
     }
     fixture.project.replace("http_replacement");
     let (status, failure) = fixture
@@ -318,7 +331,7 @@ async fn openapi_is_available_without_a_ready_project_and_all_references_resolve
     }
     assert_eq!(
         contract["components"]["schemas"]["RecordingStart"]["required"],
-        json!(["dataset_id"])
+        json!(["dataset_id", "leader", "follower"])
     );
     assert_eq!(
         contract["paths"]["/robots/telemetry"]["get"]["requestBody"],

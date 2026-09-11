@@ -45,101 +45,50 @@ impl ActTrainingResourceEstimate {
     }
 }
 
-/// Other live work that can still depend on a completed run's artifacts.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct TrainingRunActivity {
-    rollout: Option<String>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct DeleteTrainingRunCommand {
-    run_id: String,
-}
-
-impl TrainingRunActivity {
-    pub(crate) fn new(rollout: Option<String>) -> Self {
-        Self { rollout }
-    }
-}
-
-impl DeleteTrainingRunCommand {
-    pub(crate) fn new(run_id: impl Into<String>) -> Self {
-        Self {
-            run_id: run_id.into(),
-        }
-    }
-
-    fn validated_run_id(self) -> Result<String, OperationError> {
-        let run_id = self.run_id.trim().to_owned();
-        if run_id.is_empty()
-            || run_id.len() > 128
-            || !run_id
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
-        {
-            return Err(OperationError::InvalidInput(
-                "Training run ID is invalid.".to_owned(),
-            ));
-        }
-        Ok(run_id)
-    }
-}
-
-pub(crate) struct TrainingActions<'a> {
-    training: &'a TrainingManager,
-}
-
-impl<'a> TrainingActions<'a> {
-    pub(crate) fn new(training: &'a TrainingManager) -> Self {
-        Self { training }
-    }
-
-    pub(crate) async fn start(
+impl TrainingManager {
+    pub(crate) async fn start_validated(
         &self,
         command: TrainingConfig,
     ) -> Result<TrainingRun, OperationError> {
         if let Some(reason) = command.policy().mcap_training_blocker() {
             return Err(OperationError::Conflict(reason.into()));
         }
-        self.training
-            .start(command.validated()?)
+        self.start(command.validated()?)
             .await
             .map_err(OperationError::conflict)
     }
 
-    pub(crate) async fn stop(&self, run_id: &str) -> Result<(), OperationError> {
-        self.training
-            .stop(run_id)
-            .await
-            .map_err(OperationError::conflict)
-    }
-
-    pub(crate) async fn delete(
+    pub(crate) async fn delete_inactive(
         &self,
-        activity: TrainingRunActivity,
-        command: DeleteTrainingRunCommand,
+        run_id: &str,
+        active_rollout: Option<&str>,
     ) -> Result<(), OperationError> {
-        let snapshot = self.training.snapshot();
-        let run_id = Self::admitted_deletion(&snapshot, activity, command)?;
-        self.training
-            .delete(&run_id)
-            .await
-            .map_err(OperationError::External)
+        let snapshot = self.snapshot();
+        let run_id = Self::admitted_deletion(&snapshot, active_rollout, run_id)?;
+        self.delete(&run_id).await.map_err(OperationError::External)
     }
 
     pub(crate) fn admit_rollout(
         &self,
         command: RolloutConfig,
     ) -> Result<RolloutConfig, OperationError> {
-        Self::admitted_rollout(&self.training.snapshot(), command)
+        Self::admitted_rollout(&self.snapshot(), command)
     }
 
     fn admitted_deletion(
         snapshot: &TrainingSnapshot,
-        activity: TrainingRunActivity,
-        command: DeleteTrainingRunCommand,
+        active_rollout: Option<&str>,
+        run_id: &str,
     ) -> Result<String, OperationError> {
-        let run_id = command.validated_run_id()?;
+        let run_id = run_id.trim().to_owned();
+        if run_id.is_empty()
+            || run_id.len() > 128
+            || !run_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        {
+            return Err(OperationError::invalid_input("Training run ID is invalid."));
+        }
         let Some(run) = snapshot.runs().iter().find(|run| run.id() == run_id) else {
             return Err(OperationError::NotFound(format!(
                 "training run {run_id:?} is no longer available"
@@ -150,7 +99,7 @@ impl<'a> TrainingActions<'a> {
                 "training run {run_id:?} is still active; stop it before deleting it"
             )));
         }
-        if activity.rollout.as_deref() == Some(run_id.as_str()) {
+        if active_rollout == Some(run_id.as_str()) {
             return Err(OperationError::Conflict(format!(
                 "training run {run_id:?} is in use by Rollout; stop Rollout before deleting it"
             )));
@@ -654,7 +603,7 @@ mod tests {
                 .with_duration(MAX_ROLLOUT_DURATION_SECONDS + 1),
         ] {
             assert!(matches!(
-                TrainingActions::admitted_rollout(&snapshot, command),
+                TrainingManager::admitted_rollout(&snapshot, command),
                 Err(OperationError::InvalidInput(_))
             ));
         }
@@ -691,7 +640,7 @@ mod tests {
             ),
         ] {
             let error =
-                TrainingActions::admitted_rollout(&snapshot(run), rollout_command()).unwrap_err();
+                TrainingManager::admitted_rollout(&snapshot(run), rollout_command()).unwrap_err();
             assert!(error.message().contains(expected));
         }
     }
@@ -701,26 +650,22 @@ mod tests {
         let command = rollout_command();
 
         assert_eq!(
-            TrainingActions::admitted_rollout(&snapshot(run(false, 20_000, true)), command.clone(),),
+            TrainingManager::admitted_rollout(&snapshot(run(false, 20_000, true)), command.clone(),),
             Ok(command)
         );
     }
 
     #[test]
     fn deleting_a_run_rejects_training_and_rollout_activity() {
-        let command = || DeleteTrainingRunCommand::new("run-1");
-        let error = TrainingActions::admitted_deletion(
-            &snapshot(run(true, 20_000, true)),
-            TrainingRunActivity::default(),
-            command(),
-        )
-        .unwrap_err();
+        let error =
+            TrainingManager::admitted_deletion(&snapshot(run(true, 20_000, true)), None, "run-1")
+                .unwrap_err();
         assert!(matches!(error, OperationError::Conflict(_)));
 
-        let error = TrainingActions::admitted_deletion(
+        let error = TrainingManager::admitted_deletion(
             &snapshot(run(false, 20_000, true)),
-            TrainingRunActivity::new(Some("run-1".to_owned())),
-            command(),
+            Some("run-1"),
+            "run-1",
         )
         .unwrap_err();
         assert!(matches!(error, OperationError::Conflict(_)));
@@ -728,20 +673,12 @@ mod tests {
 
     #[test]
     fn deleting_a_missing_run_is_not_found_and_an_idle_run_is_admitted() {
-        let error = TrainingActions::admitted_deletion(
-            &snapshot(None),
-            TrainingRunActivity::default(),
-            DeleteTrainingRunCommand::new("run-1"),
-        )
-        .unwrap_err();
+        let error = TrainingManager::admitted_deletion(&snapshot(None), None, "run-1").unwrap_err();
         assert!(matches!(error, OperationError::NotFound(_)));
 
-        let run_id = TrainingActions::admitted_deletion(
-            &snapshot(run(false, 20_000, true)),
-            TrainingRunActivity::default(),
-            DeleteTrainingRunCommand::new("run-1"),
-        )
-        .unwrap();
+        let run_id =
+            TrainingManager::admitted_deletion(&snapshot(run(false, 20_000, true)), None, "run-1")
+                .unwrap();
         assert_eq!(run_id, "run-1");
     }
 }

@@ -253,11 +253,14 @@ impl RolloutCoordinator {
         Ok(self.snapshot.clone())
     }
 
-    pub(crate) fn request_stop(&mut self) -> Result<(), String> {
+    pub(crate) fn request_stop(&mut self, session: &str) -> Result<(), String> {
         let active = self
             .active
             .as_mut()
             .ok_or_else(|| "no policy rollout is active".to_owned())?;
+        if active.session != session {
+            return Err(format!("Rollout {session:?} is not the active execution"));
+        }
         active.stop_stage.get_or_insert(match active.phase {
             SessionPhase::Loading => StopStage::BeforeModel,
             SessionPhase::WarmingUp | SessionPhase::AwaitingControl => StopStage::BeforeControl,
@@ -670,6 +673,20 @@ mod tests {
     }
 
     #[test]
+    fn stale_stop_cannot_affect_a_new_execution() {
+        let (events, mut coordinator) = coordinator();
+        coordinator
+            .admit(RolloutAdmission::new("new-session".into(), 100, config()))
+            .unwrap();
+        let before = events.0.lock().unwrap().len();
+        assert!(coordinator.request_stop("old-session").is_err());
+        assert_eq!(coordinator.snapshot.phase(), RolloutPhase::Loading);
+        assert_eq!(events.0.lock().unwrap().len(), before);
+        coordinator.request_stop("new-session").unwrap();
+        assert_eq!(coordinator.snapshot.phase(), RolloutPhase::Stopping);
+    }
+
+    #[test]
     fn stop_before_control_admission_never_becomes_running() {
         let (_events, mut coordinator) = coordinator();
         coordinator
@@ -677,7 +694,7 @@ mod tests {
             .unwrap();
         coordinator.warming_up("session-1").unwrap();
         coordinator.awaiting_control("session-1").unwrap();
-        coordinator.request_stop().unwrap();
+        coordinator.request_stop("session-1").unwrap();
         assert!(
             !coordinator
                 .running("session-1", PolicyCadence::new(60.0, 10))
@@ -696,7 +713,7 @@ mod tests {
             .admit(RolloutAdmission::new("session-1".to_owned(), 100, config()))
             .unwrap();
 
-        coordinator.request_stop().unwrap();
+        coordinator.request_stop("session-1").unwrap();
 
         assert_eq!(
             coordinator.stopped_outcome("session-1").unwrap(),

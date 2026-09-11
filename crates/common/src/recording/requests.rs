@@ -7,13 +7,19 @@ use super::*;
 #[serde(deny_unknown_fields)]
 pub struct RecordingStart {
     dataset_id: String,
+    leader: String,
+    follower: String,
 }
 impl RecordingStart {
-    pub fn new(dataset_id: String) -> Self {
-        Self { dataset_id }
+    pub fn new(dataset_id: String, pair: (String, String)) -> Self {
+        Self {
+            dataset_id,
+            leader: pair.0,
+            follower: pair.1,
+        }
     }
-    pub fn into_parts(self) -> (String,) {
-        (self.dataset_id,)
+    pub fn into_parts(self) -> (String, (String, String)) {
+        (self.dataset_id, (self.leader, self.follower))
     }
 }
 

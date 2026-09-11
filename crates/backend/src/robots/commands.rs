@@ -4,31 +4,25 @@ use std::collections::BTreeMap;
 
 use crate::project_session::context::ProjectContext;
 use crate::robots::calibration::{
-    CalibrationActions, CalibrationControlActions, CalibrationUpdate, RobotCalibrationStore,
+    CalibrationActions, CalibrationControlPort, CalibrationUpdate, RobotCalibrationStore,
 };
 use crate::robots::control::{RobotControlActions, RobotControlCommand};
 use crate::robots::discovery::SerialPortDiscovery;
 use crate::robots::mode::{ModeActions, OperatorMode};
 use crate::robots::service::{
-    AutoConnectOutcome, AutoConnectStatus, CameraAssignment, RobotActions, RobotCatalogActions,
-    RobotConnectionActions, RobotConnectionPort, RobotConnectionSpec, RobotStore, SavedRobot,
+    AutoConnectOutcome, AutoConnectStatus, RobotActions, RobotConnectionPort, RobotStore,
 };
 use crate::robots::workspace::{RobotRecord, RobotWorkspace, WorkspaceError};
 use crate::{BackendCommandError, OperationError};
-use bytes::Bytes;
-use serde_json::{Map, Value};
 use spiral_robotics_common::robots::{
-    CameraBinding, CameraStatus, ConnectionStatus, ModeSelection, NewRobot, PortSettings,
-    RobotSummary, RobotUpdate, SerialPortSummary,
+    CameraStatus, ModeSelection, RobotSummary, SerialPortSummary,
 };
 use spiral_robotics_hardware::{MotorSpec, RobotSpec};
 
-/// Adapts cached JSON robot documents and the live control thread to plain
-/// capability commands. JSON preservation, wire summaries, and concrete
-/// hardware specifications remain at this outer edge.
+/// Loads saved configurations for hardware lifecycle actions. Startup prefetches
+/// the catalog once so unavailable arms can be reported independently.
 pub(crate) struct RobotAdapter<'a> {
     state: &'a ProjectContext,
-    import_document: Option<Bytes>,
     saved_records: Option<Vec<RobotRecord>>,
 }
 
@@ -36,7 +30,6 @@ impl<'a> RobotAdapter<'a> {
     pub(super) fn new(state: &'a ProjectContext) -> Self {
         Self {
             state,
-            import_document: None,
             saved_records: None,
         }
     }
@@ -44,7 +37,6 @@ impl<'a> RobotAdapter<'a> {
     pub(crate) async fn prefetched(state: &'a ProjectContext) -> Result<Self, OperationError> {
         Ok(Self {
             state,
-            import_document: None,
             saved_records: Some(
                 state
                     .workspace()
@@ -53,22 +45,6 @@ impl<'a> RobotAdapter<'a> {
                     .map_err(OperationError::from)?,
             ),
         })
-    }
-
-    fn import(state: &'a ProjectContext, document: Bytes) -> Self {
-        Self {
-            state,
-            import_document: Some(document),
-            saved_records: None,
-        }
-    }
-
-    pub(crate) async fn summary(
-        &self,
-        robot: &str,
-        connection: ConnectionStatus,
-    ) -> Result<RobotSummary, WorkspaceError> {
-        Ok(self.record(robot).await?.summary(connection))
     }
 
     async fn record(&self, robot: &str) -> Result<RobotRecord, WorkspaceError> {
@@ -84,69 +60,6 @@ impl<'a> RobotAdapter<'a> {
 }
 
 impl RobotStore for RobotAdapter<'_> {
-    type CameraConfiguration = Map<String, Value>;
-
-    async fn create(&self, robot: NewRobot) -> Result<SavedRobot, OperationError> {
-        let (id, robot_type, port) = robot.into_parts();
-        let record = self
-            .state
-            .workspace()
-            .create(
-                crate::robots::workspace::RobotWorkspaceCreate::new(id, robot_type).with_port(port),
-            )
-            .await
-            .map_err(OperationError::from)?;
-        Ok(SavedRobot::new(record.id()))
-    }
-
-    async fn import_configuration(&self) -> Result<SavedRobot, OperationError> {
-        let configuration = self
-            .import_document
-            .as_ref()
-            .ok_or_else(|| OperationError::Internal("missing robot import document".to_owned()))?;
-        let record = self
-            .state
-            .workspace()
-            .import_configuration(configuration)
-            .await
-            .map_err(OperationError::from)?;
-        Ok(SavedRobot::new(record.id()))
-    }
-
-    async fn camera_configuration(
-        &self,
-        robot: &str,
-        assignments: &[CameraAssignment],
-    ) -> Result<Self::CameraConfiguration, OperationError> {
-        let record = self
-            .state
-            .workspace()
-            .get(robot)
-            .await
-            .map_err(OperationError::from)?;
-        Ok(record
-            .camera_object()
-            .with_camera_assignments(assignments, &self.state.cameras().statuses()))
-    }
-
-    async fn update(
-        &self,
-        command: RobotUpdate<Map<String, Value>>,
-    ) -> Result<SavedRobot, OperationError> {
-        let (id, robot_type, port, cameras) = command.into_parts();
-        let record = self
-            .state
-            .workspace()
-            .update(
-                crate::robots::workspace::RobotWorkspaceUpdate::new(id, robot_type)
-                    .with_port(port)
-                    .with_cameras(cameras),
-            )
-            .await
-            .map_err(OperationError::from)?;
-        Ok(SavedRobot::new(record.id()))
-    }
-
     async fn ensure_exists(&self, robot: &str) -> Result<(), OperationError> {
         self.state
             .workspace()
@@ -181,58 +94,19 @@ impl RobotStore for RobotAdapter<'_> {
         }
     }
 
-    async fn connection_spec(&self, robot: &str) -> Result<RobotConnectionSpec, OperationError> {
-        let record = self.record(robot).await.map_err(OperationError::from)?;
-        let port = record.port().ok_or_else(|| {
-            OperationError::InvalidInput(format!(
-                "robot {:?} has no serial port assigned; set one before connecting",
-                record.id()
-            ))
-        })?;
-        let motors = record.motors().map_err(OperationError::from)?;
-        let calibration = record.calibration().map_err(OperationError::from)?;
-        Ok(RobotConnectionSpec::new(
-            record.id(),
-            PortSettings::new(port.path(), port.baud_rate()),
-            motors,
-        )
-        .with_calibration(calibration))
+    async fn connection_spec(&self, robot: &str) -> Result<RobotSpec, OperationError> {
+        self.record(robot)
+            .await
+            .map_err(OperationError::from)?
+            .connection_spec()
     }
 }
 
 impl RobotConnectionPort for RobotAdapter<'_> {
-    fn is_connected(&self, robot: &str) -> bool {
-        self.state
-            .hardware()
-            .state()
-            .connections()
-            .get(robot)
-            .is_some_and(|connection| connection.connected())
-    }
-
-    async fn connect(&self, specification: RobotConnectionSpec) -> Result<(), OperationError> {
-        let (id, port, motors, calibration) = specification.into_parts();
-        let port = spiral_robotics_hardware::PortSettings::try_new(port.path(), port.baud_rate())
-            .map_err(|error| OperationError::invalid_input(error.to_string()))?;
-        let specification = RobotSpec::new(id, port, motors)
-            .map_err(|error| OperationError::invalid_input(error.to_string()))?;
-        let specification = match calibration {
-            Some(calibration) => specification
-                .with_calibration(calibration)
-                .map_err(|error| OperationError::invalid_input(error.to_string()))?,
-            None => specification,
-        };
+    async fn connect(&self, specification: RobotSpec) -> Result<(), OperationError> {
         self.state
             .hardware()
             .connect(specification)
-            .await
-            .map_err(OperationError::conflict)
-    }
-
-    async fn disconnect(&self, robot: &str) -> Result<(), OperationError> {
-        self.state
-            .hardware()
-            .disconnect(robot)
             .await
             .map_err(OperationError::conflict)
     }
@@ -299,50 +173,20 @@ pub(crate) struct DeviceCommands {
 
 impl DeviceCommands {
     pub(crate) async fn list_ports(&self) -> Result<Vec<SerialPortSummary>, BackendCommandError> {
-        let commands = self.clone();
-        let activity = commands.state.admit()?;
         self.state
-            .tasks()
-            .execute(async move {
-                let _activity = activity;
-                commands.require_catalog_ready()?;
-                SerialPortDiscovery::list(&commands.state)
-                    .await
-                    .map_err(Into::into)
+            .execute(move |state, _activity| async move {
+                state.require_catalog_ready()?;
+                SerialPortDiscovery::list(&state).await.map_err(Into::into)
             })
-            .await?
-    }
-
-    pub(crate) async fn identify_port(
-        &self,
-        before: Vec<String>,
-    ) -> Result<spiral_robotics_common::robots::SerialPortIdentification, BackendCommandError> {
-        let commands = self.clone();
-        let activity = commands.state.admit()?;
-        self.state
-            .tasks()
-            .execute(async move {
-                let _activity = activity;
-                commands.require_catalog_ready()?;
-                Ok(
-                    spiral_robotics_common::robots::SerialPortIdentification::from(
-                        SerialPortDiscovery::identify(before).await?.into_parts(),
-                    ),
-                )
-            })
-            .await?
+            .await
     }
 
     pub(crate) async fn refresh_cameras(&self) -> Result<Vec<CameraStatus>, BackendCommandError> {
-        let commands = self.clone();
-        let activity = commands.state.admit()?;
         self.state
-            .tasks()
-            .execute(async move {
-                let _activity = activity;
-                commands.state.cameras().refresh().await.map_err(Into::into)
+            .execute(move |state, _activity| async move {
+                state.cameras().refresh().await.map_err(Into::into)
             })
-            .await?
+            .await
     }
 
     pub(crate) fn telemetry(
@@ -351,224 +195,147 @@ impl DeviceCommands {
         let _activity = self.state.admit()?;
         Ok(self.state.hardware().state().telemetry().clone())
     }
-    pub(crate) async fn setup(
+    pub(crate) fn hardware_status(
         &self,
-    ) -> Result<spiral_robotics_common::robots::RobotSetupSnapshot, BackendCommandError> {
-        let state = self.state.clone();
-        let activity = state.admit()?;
-        self.state
-            .tasks()
-            .read(async move {
-                let _activity = activity;
-                crate::robots::setup::RobotSetup::new(&state)
-                    .snapshot()
-                    .await
-            })
-            .await?
-            .map_err(Into::into)
+    ) -> Result<spiral_robotics_common::robots::HardwareStatus, BackendCommandError> {
+        let _activity = self.state.admit()?;
+        let hardware = self.state.hardware().state();
+        let mut issues = self.state.cameras().issues();
+        if let Some(issue) = hardware.recording_issue() {
+            issues.push(issue.to_owned());
+        }
+        Ok(spiral_robotics_common::robots::HardwareStatus::new(
+            hardware.mode_status().clone(),
+            self.state.cameras().statuses(),
+            issues,
+        ))
     }
     pub(crate) async fn list_robots(&self) -> Result<Vec<RobotSummary>, BackendCommandError> {
-        let commands = self.clone();
-        let activity = commands.state.admit()?;
         self.state
-            .tasks()
-            .execute(async move {
-                let _activity = activity;
-                commands.require_catalog_ready()?;
-                let adapter = RobotAdapter::prefetched(&commands.state).await?;
-                let hardware = commands.state.hardware().state();
-                let mut summaries = Vec::new();
-                for robot in RobotCatalogActions::new(&adapter).list().await {
-                    let connection = hardware
-                        .connections()
-                        .get(robot.id())
-                        .cloned()
-                        .unwrap_or_default();
-                    if let Ok(summary) = adapter.summary(robot.id(), connection).await {
-                        summaries.push(summary);
-                    }
-                }
-                Ok(summaries)
+            .execute(move |state, _activity| async move {
+                state.require_catalog_ready()?;
+                let records = state
+                    .workspace()
+                    .try_list()
+                    .await
+                    .map_err(OperationError::from)?;
+                let hardware = state.hardware().state();
+                Ok(records
+                    .iter()
+                    .map(|record| record.live_summary(&hardware))
+                    .collect())
             })
-            .await?
+            .await
     }
 
-    pub(crate) async fn create_robot(
+    pub(crate) async fn save_document(
         &self,
-        request: NewRobot,
+        request: spiral_robotics_common::robots::document::RobotDocumentSave,
     ) -> Result<RobotSummary, BackendCommandError> {
-        let commands = self.clone();
-        let activity = commands.state.admit()?;
         self.state
-            .tasks()
-            .execute(async move {
-                let _activity = activity;
-                commands.require_catalog_ready()?;
-                let adapter = RobotAdapter::new(&commands.state);
-                let robot = RobotCatalogActions::new(&adapter).create(request).await?;
-                RobotActions::new(&adapter, &adapter)
-                    .auto_connect_robot(robot.id().to_owned())
-                    .await
-                    .log();
-                commands.present_saved_robot(robot).await
-            })
-            .await?
-    }
-
-    /// Add a complete unified robot JSON document as a new workspace instance.
-    pub(crate) async fn import_robot_configuration(
-        &self,
-        document: Vec<u8>,
-    ) -> Result<RobotSummary, BackendCommandError> {
-        let commands = self.clone();
-        let activity = commands.state.admit()?;
-        self.state
-            .tasks()
-            .execute(async move {
-                let _activity = activity;
-                commands.require_catalog_ready()?;
-                if document.is_empty() {
-                    return Err(BackendCommandError::from(OperationError::invalid_input(
-                        "choose a robot configuration JSON file to import".to_owned(),
-                    )));
+            .execute(move |state, _activity| async move {
+                state.require_catalog_ready()?;
+                request
+                    .document()
+                    .validate()
+                    .map_err(OperationError::InvalidInput)?;
+                let id = request
+                    .document()
+                    .id()
+                    .map_err(OperationError::InvalidInput)?;
+                let connected = state
+                    .hardware()
+                    .state()
+                    .connections()
+                    .get(id)
+                    .is_some_and(|status| status.connected());
+                if connected && request.changes_control_configuration() {
+                    return Err(OperationError::Conflict(
+                        "Disconnect the robot before changing its port, motors, or calibration"
+                            .into(),
+                    )
+                    .into());
                 }
-                let adapter = RobotAdapter::import(&commands.state, Bytes::from(document));
-                let robot = RobotCatalogActions::new(&adapter)
-                    .import_configuration()
-                    .await?;
-                RobotActions::new(&adapter, &adapter)
-                    .auto_connect_robot(robot.id().to_owned())
+                let record = state
+                    .workspace()
+                    .save_document(&request)
                     .await
-                    .log();
-                commands.present_saved_robot(robot).await
+                    .map_err(OperationError::from)?;
+                Ok(record.live_summary(&state.hardware().state()))
             })
-            .await?
+            .await
     }
 
     pub(crate) async fn get_robot(&self, id: String) -> Result<RobotSummary, BackendCommandError> {
-        let commands = self.clone();
-        let activity = commands.state.admit()?;
         self.state
-            .tasks()
-            .execute(async move {
-                let _activity = activity;
-                commands.require_catalog_ready()?;
-                let robot = RobotCatalogActions::new(&RobotAdapter::new(&commands.state))
-                    .get(id)
-                    .await?;
-                commands.present_saved_robot(robot).await
+            .execute(move |state, _activity| async move {
+                state.require_catalog_ready()?;
+                Self::from(state).present_robot(&id).await
             })
-            .await?
-    }
-
-    pub(crate) async fn update_robot(
-        &self,
-        request: RobotUpdate<Vec<CameraBinding>>,
-    ) -> Result<RobotSummary, BackendCommandError> {
-        let commands = self.clone();
-        let activity = commands.state.admit()?;
-        self.state
-            .tasks()
-            .execute(async move {
-                let _activity = activity;
-                commands.require_catalog_ready()?;
-                let (id, robot_type, port, camera_bindings) = request.into_parts();
-                let adapter = RobotAdapter::new(&commands.state);
-                let should_auto_connect = port.is_some();
-                let robot = RobotActions::new(&adapter, &adapter)
-                    .update(RobotUpdate::new(id, robot_type, port, camera_bindings))
-                    .await?;
-                if should_auto_connect {
-                    RobotActions::new(&adapter, &adapter)
-                        .auto_connect_robot(robot.id().to_owned())
-                        .await
-                        .log();
-                }
-                commands.present_saved_robot(robot).await
-            })
-            .await?
+            .await
     }
 
     pub(crate) async fn delete_robot(&self, id: String) -> Result<(), BackendCommandError> {
-        let commands = self.clone();
-        let activity = commands.state.admit()?;
         self.state
-            .tasks()
-            .execute(async move {
-                let _activity = activity;
-                commands.require_catalog_ready()?;
-                let adapter = RobotAdapter::new(&commands.state);
+            .execute(move |state, _activity| async move {
+                state.require_catalog_ready()?;
+                let adapter = RobotAdapter::new(&state);
                 RobotActions::new(&adapter, &adapter)
                     .delete(&id)
                     .await
                     .map_err(Into::into)
             })
-            .await?
+            .await
     }
 
     pub(crate) async fn connect_robot(&self, id: String) -> Result<(), BackendCommandError> {
-        let commands = self.clone();
-        let activity = commands.state.admit()?;
         self.state
-            .tasks()
-            .execute(async move {
-                let _activity = activity;
-                commands.require_catalog_ready()?;
-                let adapter = RobotAdapter::new(&commands.state);
+            .execute(move |state, _activity| async move {
+                state.require_catalog_ready()?;
+                let adapter = RobotAdapter::new(&state);
                 RobotActions::new(&adapter, &adapter)
                     .connect(&id)
                     .await
                     .map_err(Into::into)
             })
-            .await?
+            .await
     }
 
     pub(crate) async fn disconnect_robot(&self, id: String) -> Result<(), BackendCommandError> {
-        let commands = self.clone();
-        let activity = commands.state.admit()?;
         self.state
-            .tasks()
-            .execute(async move {
-                let _activity = activity;
-                commands.require_catalog_ready()?;
-                RobotConnectionActions::new(&RobotAdapter::new(&commands.state))
+            .execute(move |state, _activity| async move {
+                state.require_catalog_ready()?;
+                state
+                    .hardware()
                     .disconnect(&id)
                     .await
-                    .map_err(Into::into)
+                    .map_err(|error| OperationError::conflict(error).into())
             })
-            .await?
+            .await
     }
 
     pub(crate) async fn hold_robot(&self, id: String) -> Result<(), BackendCommandError> {
-        let commands = self.clone();
-        let activity = commands.state.admit()?;
         self.state
-            .tasks()
-            .execute(async move {
-                let _activity = activity;
-                commands.require_catalog_ready()?;
-                RobotControlActions::new(commands.state.hardware().as_ref())
+            .execute(move |state, _activity| async move {
+                state.require_catalog_ready()?;
+                RobotControlActions::new(state.hardware().as_ref())
                     .execute(RobotControlCommand::Hold { robot: id })
                     .await
                     .map_err(Into::into)
             })
-            .await?
+            .await
     }
 
     pub(crate) async fn release_robot(&self, id: String) -> Result<(), BackendCommandError> {
-        let commands = self.clone();
-        let activity = commands.state.admit()?;
         self.state
-            .tasks()
-            .execute(async move {
-                let _activity = activity;
-                commands.require_catalog_ready()?;
-                RobotControlActions::new(commands.state.hardware().as_ref())
+            .execute(move |state, _activity| async move {
+                state.require_catalog_ready()?;
+                RobotControlActions::new(state.hardware().as_ref())
                     .execute(RobotControlCommand::Release { robot: id })
                     .await
                     .map_err(Into::into)
             })
-            .await?
+            .await
     }
 
     pub(crate) async fn set_robot_goal(
@@ -576,14 +343,10 @@ impl DeviceCommands {
         id: String,
         normalized: BTreeMap<String, f64>,
     ) -> Result<(), BackendCommandError> {
-        let commands = self.clone();
-        let activity = commands.state.admit()?;
         self.state
-            .tasks()
-            .execute(async move {
-                let _activity = activity;
-                commands.require_catalog_ready()?;
-                RobotControlActions::new(commands.state.hardware().as_ref())
+            .execute(move |state, _activity| async move {
+                state.require_catalog_ready()?;
+                RobotControlActions::new(state.hardware().as_ref())
                     .execute(RobotControlCommand::MoveJoints {
                         robot: id,
                         normalized,
@@ -591,75 +354,57 @@ impl DeviceCommands {
                     .await
                     .map_err(Into::into)
             })
-            .await?
+            .await
     }
 
     pub(crate) async fn start_calibration(&self, id: String) -> Result<(), BackendCommandError> {
-        let commands = self.clone();
-        let activity = commands.state.admit()?;
         self.state
-            .tasks()
-            .execute(async move {
-                let _activity = activity;
-                commands.require_catalog_ready()?;
-                CalibrationControlActions::new(commands.state.hardware().as_ref())
-                    .start(&id)
+            .execute(move |state, _activity| async move {
+                state.require_catalog_ready()?;
+                CalibrationControlPort::start_calibration(state.hardware().as_ref(), &id)
                     .await
                     .map_err(Into::into)
             })
-            .await?
+            .await
     }
 
     pub(crate) async fn finish_calibration(
         &self,
         id: String,
     ) -> Result<RobotSummary, BackendCommandError> {
-        let commands = self.clone();
-        let activity = commands.state.admit()?;
-        self.state.tasks()
-            .execute(async move {
-                let _activity = activity;
-                commands.require_catalog_ready()?;
+        self.state.execute(move |state, _activity| async move {
+                state.require_catalog_ready()?;
                 let output = CalibrationActions::new(
-                    commands.state.workspace().as_ref(),
-                    commands.state.hardware().as_ref(),
+                    state.workspace().as_ref(),
+                    state.hardware().as_ref(),
                 )
                 .finish(&id)
                 .await?;
                 if let Some(warning) = output.live_warning() {
                     tracing::warn!(robot = %id, "saved calibration but live refresh was incomplete: {warning}");
                 }
-                commands.present_robot(&id).await
+                Self::from(state).present_robot(&id).await
             })
-            .await?
+            .await
     }
 
     pub(crate) async fn cancel_calibration(&self, id: String) -> Result<(), BackendCommandError> {
-        let commands = self.clone();
-        let activity = commands.state.admit()?;
         self.state
-            .tasks()
-            .execute(async move {
-                let _activity = activity;
-                commands.require_catalog_ready()?;
-                CalibrationControlActions::new(commands.state.hardware().as_ref())
-                    .cancel(&id)
+            .execute(move |state, _activity| async move {
+                state.require_catalog_ready()?;
+                CalibrationControlPort::cancel_calibration(state.hardware().as_ref(), &id)
                     .await
                     .map_err(Into::into)
             })
-            .await?
+            .await
     }
 
     pub(crate) async fn set_mode(
         &self,
         selection: ModeSelection,
     ) -> Result<(), BackendCommandError> {
-        let commands = self.clone();
-        let activity = commands.state.admit()?;
-        self.state.tasks()
-            .execute(async move {
-                let _activity = activity;
-                commands.require_catalog_ready()?;
+        self.state.execute(move |state, _activity| async move {
+                state.require_catalog_ready()?;
                 // Replay and policy need their own admission and resource-loading paths.
                 let mode = match selection {
                     ModeSelection::Idle => OperatorMode::Idle,
@@ -675,97 +420,27 @@ impl DeviceCommands {
                     }
                     ModeSelection::Policy { .. } => {
                         return Err(BackendCommandError::from(OperationError::invalid_input(
-                            "start policy control with POST /api/rollout, which validates and warms the checkpoint first"
+                            "start policy control with POST /api/rollout-runs, which validates and warms the checkpoint first"
                                 .to_owned(),
                         )));
                     }
                 };
-                ModeActions::new(commands.state.hardware().as_ref())
+                ModeActions::new(state.hardware().as_ref())
                     .set(mode)
                     .await
                     .map_err(Into::into)
             })
-            .await?
-    }
-
-    async fn present_saved_robot(
-        &self,
-        robot: SavedRobot,
-    ) -> Result<RobotSummary, BackendCommandError> {
-        self.present_robot(robot.id()).await
+            .await
     }
 
     async fn present_robot(&self, id: &str) -> Result<RobotSummary, BackendCommandError> {
-        let connection = self
+        let record = self
             .state
-            .hardware()
-            .state()
-            .connections()
-            .get(id)
-            .cloned()
-            .unwrap_or_default();
-        self.state
             .workspace()
             .get(id)
             .await
-            .map(|record| record.summary(connection))
-            .map_err(|error| BackendCommandError::from(OperationError::from(error)))
-    }
-
-    fn require_catalog_ready(&self) -> Result<(), BackendCommandError> {
-        match self.state.bootstrap().catalog_unavailable() {
-            Some(error) => Err(error.into()),
-            None => Ok(()),
-        }
-    }
-}
-
-/// Merge camera assignments into the robot's stored `cameras` object.
-///
-/// Fields this build does not understand are kept for cameras that keep their
-/// role name, and the resolution of a known device is refreshed so the file
-/// records what will actually be captured.
-pub(crate) trait CameraConfigurationObject {
-    fn with_camera_assignments(
-        &self,
-        assignments: &[CameraAssignment],
-        discovered: &[CameraStatus],
-    ) -> Map<String, Value>;
-}
-
-impl CameraConfigurationObject for Map<String, Value> {
-    fn with_camera_assignments(
-        &self,
-        assignments: &[CameraAssignment],
-        discovered: &[CameraStatus],
-    ) -> Map<String, Value> {
-        let existing = self;
-        let mut cameras = Self::new();
-
-        for assignment in assignments {
-            let mut fields = match existing.get(assignment.role()) {
-                Some(Value::Object(fields)) => fields.clone(),
-                _ => Map::new(),
-            };
-            fields
-                .entry("type".to_owned())
-                .or_insert_with(|| Value::String("opencv".to_owned()));
-            fields.insert(
-                "id".to_owned(),
-                Value::String(assignment.device_id().to_owned()),
-            );
-            if let Some(camera) = discovered
-                .iter()
-                .find(|camera| camera.id() == assignment.device_id())
-            {
-                fields.insert("width".to_owned(), Value::from(camera.width()));
-                fields.insert("height".to_owned(), Value::from(camera.height()));
-                fields.insert("fps".to_owned(), Value::from(camera.fps()));
-            }
-            cameras.insert(assignment.role().to_owned(), Value::Object(fields));
-        }
-
-        cameras
+            .map_err(OperationError::from)?;
+        Ok(record.live_summary(&self.state.hardware().state()))
     }
 }
 

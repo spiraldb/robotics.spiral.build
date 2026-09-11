@@ -1,5 +1,4 @@
 //! Rollout execution and snapshots for one project.
-use crate::training::service::TrainingActions;
 use crate::{BackendCommandError, project_session::context::ProjectContext};
 use spiral_robotics_common::rollout::{RolloutConfig, RolloutSnapshot};
 #[derive(Clone)]
@@ -12,59 +11,41 @@ impl From<ProjectContext> for RolloutCommands {
     }
 }
 impl RolloutCommands {
-    pub(crate) async fn snapshot(&self) -> Result<RolloutSnapshot, BackendCommandError> {
+    pub(crate) async fn runs(&self) -> Result<Vec<RolloutSnapshot>, BackendCommandError> {
         let commands = self.clone();
         let activity = commands.state.admit()?;
         self.state
             .tasks()
             .read(async move {
                 let _activity = activity;
-                commands
-                    .state
-                    .rollout()
-                    .load_snapshot()
-                    .await
-                    .map_err(Into::into)
+                commands.state.rollout().runs().await.map_err(Into::into)
             })
             .await?
     }
+    pub(crate) async fn run(&self, id: String) -> Result<RolloutSnapshot, BackendCommandError> {
+        let _activity = self.state.admit()?;
+        self.state.rollout().run(&id).await.map_err(Into::into)
+    }
+
     pub(crate) async fn start_rollout(
         &self,
         config: RolloutConfig,
     ) -> Result<RolloutSnapshot, BackendCommandError> {
-        let commands = self.clone();
-        let activity = commands.state.admit()?;
         self.state
-            .tasks()
-            .execute(async move {
-                let _activity = activity;
-                commands.state.preferences().load().await?;
-                commands
-                    .state
-                    .training()
-                    .ensure_loaded(_activity.clone())
-                    .await?;
-                let config = TrainingActions::new(commands.state.training().as_ref())
-                    .admit_rollout(config)?;
-                commands
-                    .state
-                    .rollout()
-                    .start(config)
-                    .await
-                    .map_err(Into::into)
+            .execute(move |state, activity| async move {
+                state.preferences().load().await?;
+                state.training().ensure_loaded(activity).await?;
+                let config = state.training().admit_rollout(config)?;
+                state.rollout().start(config).await.map_err(Into::into)
             })
-            .await?
+            .await
     }
 
-    pub(crate) async fn stop_rollout(&self) -> Result<(), BackendCommandError> {
-        let commands = self.clone();
-        let activity = commands.state.admit()?;
+    pub(crate) async fn stop_rollout(&self, id: String) -> Result<(), BackendCommandError> {
         self.state
-            .tasks()
-            .execute(async move {
-                let _activity = activity;
-                commands.state.rollout().stop().await.map_err(Into::into)
+            .execute(move |state, _activity| async move {
+                state.rollout().stop(&id).await.map_err(Into::into)
             })
-            .await?
+            .await
     }
 }

@@ -50,18 +50,6 @@ impl SerialPortDiscovery {
                 OperationError::Internal(format!("could not list serial ports: {error}"))
             })
     }
-
-    pub(crate) async fn identify(
-        before: Vec<String>,
-    ) -> Result<IdentifiedSerialPort, OperationError> {
-        let after = Self::scan()
-            .await?
-            .into_ports()
-            .into_iter()
-            .map(|port| port.port_name)
-            .collect();
-        Ok(IdentifiedSerialPort::between(before, after))
-    }
 }
 
 impl SerialPortDiscovery {
@@ -95,75 +83,5 @@ impl SerialPortDiscovery {
                 .with_owner(in_use.get(&port.port_name).cloned())
             })
             .collect())
-    }
-}
-
-pub(crate) struct IdentifiedSerialPort {
-    port: Option<String>,
-    message: String,
-}
-
-impl IdentifiedSerialPort {
-    pub(crate) fn into_parts(self) -> (Option<String>, String) {
-        (self.port, self.message)
-    }
-
-    fn between(before: Vec<String>, after: Vec<String>) -> Self {
-        let mut removed = before
-            .into_iter()
-            .filter(|port| !after.contains(port))
-            .collect::<Vec<_>>();
-        removed.sort();
-        removed.dedup();
-        let (port, message) = match removed.as_slice() {
-            [port] => (
-                Some(port.clone()),
-                format!("Found the motor bus on {port}. Plug the cable back in."),
-            ),
-            [] => (
-                None,
-                "No port disappeared. Make sure you unplugged the arm, then try again.".to_owned(),
-            ),
-            ports => (
-                None,
-                format!(
-                    "{} ports disappeared ({}). Unplug only the arm you are setting up.",
-                    ports.len(),
-                    ports.join(", ")
-                ),
-            ),
-        };
-        Self { port, message }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn identification_explains_zero_one_and_multiple_disconnections() {
-        for (before, after, port, guidance) in [
-            (vec!["/dev/a"], vec!["/dev/a"], None, "No port disappeared"),
-            (
-                vec!["/dev/a", "/dev/b"],
-                vec!["/dev/b"],
-                Some("/dev/a"),
-                "Found the motor bus on /dev/a",
-            ),
-            (
-                vec!["/dev/b", "/dev/a", "/dev/a"],
-                vec![],
-                None,
-                "2 ports disappeared (/dev/a, /dev/b)",
-            ),
-        ] {
-            let result = IdentifiedSerialPort::between(
-                before.into_iter().map(str::to_owned).collect(),
-                after.into_iter().map(str::to_owned).collect(),
-            );
-            assert_eq!(result.port.as_deref(), port);
-            assert!(result.message.contains(guidance));
-        }
     }
 }

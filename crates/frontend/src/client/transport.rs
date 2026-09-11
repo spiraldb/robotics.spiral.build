@@ -106,19 +106,6 @@ impl HttpRequest {
         self
     }
 
-    /// Upload a robot configuration in its native JSON format.
-    pub(crate) fn raw_json(mut self, document: Vec<u8>) -> Self {
-        self.body = String::from_utf8(document)
-            .map(|body| Some(RequestBody::Json(body)))
-            .map_err(|_| {
-                CommandError::new(
-                    CommandFailureCode::InvalidInput,
-                    "Robot configuration must be UTF-8 JSON.",
-                )
-            });
-        self
-    }
-
     pub(crate) fn query(mut self, value: &impl Serialize) -> Self {
         self.url = self.url.and_then(|url| {
             serde_urlencoded::to_string(value)

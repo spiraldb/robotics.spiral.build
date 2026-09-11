@@ -10,9 +10,11 @@
 use crate::components::interaction::{
     Action, ActionPurpose, ActionVariant, ChevronIcon, FileAction, FileInput, UnassignIcon,
 };
+use crate::robots::IdentifiedSerialPort;
+use crate::robots::document::RobotDraft;
 use dioxus::prelude::*;
 use spiral_robotics_common::robots::{
-    CameraBinding, NewRobot, PortSettings, RobotSummary, RobotUpdate, SerialPortSummary,
+    CameraBinding, PortSettings, RobotSummary, SerialPortSummary,
 };
 
 use crate::panels::scene::ScenePalette;
@@ -202,12 +204,12 @@ fn NewRobotForm(project: StudioProjectState, selection: RobotSelection) -> Eleme
             project.report("Give the arm a name first.");
             return;
         }
-        let request = NewRobot::new(name.clone(), Some(robot_type()));
+        let request = RobotDraft::new(&name, &robot_type());
         let selected_name = name.clone();
         project.run_utility(format!("Created {name}."), async move {
             let Some(result) = SingleFlight::run(creating, async move {
                 RobotClient::current()
-                    .create_robot(request)
+                    .save_document(request.save()?)
                     .await
                     .map_err(|error| error.to_string())
             })
@@ -311,7 +313,7 @@ fn ImportRobotConfiguration(project: StudioProjectState, selection: RobotSelecti
                                 .read_bytes()
                                 .await
                                 .map_err(|error| format!("Could not read {}: {error}", file.name()))?;
-                            RobotClient::current().import_robot_configuration(bytes.to_vec())
+                            RobotClient::current().save_document(RobotDraft::import(&bytes)?.save()?)
                                 .await
                                 .map_err(|error| error.to_string())
                         })
@@ -323,6 +325,10 @@ fn ImportRobotConfiguration(project: StudioProjectState, selection: RobotSelecti
                         Ok(robot) => {
                             chosen.set(Some(Selection::Robot(robot.id().to_owned())));
                             project.report_success(format!("Imported {}.", robot.id()));
+                            if robot.port().is_some() {
+                                RobotClient::current().connect_robot(robot.id().to_owned()).await
+                                    .map_err(|error| format!("Configuration imported, but the robot could not connect: {error}"))?;
+                            }
                             Ok(())
                         }
                         Err(error) => Err(error),
@@ -544,7 +550,6 @@ fn PortSection(
         .port()
         .as_ref()
         .map_or(1_000_000, |port| port.baud_rate());
-    let id = robot.id().to_owned();
     // The port belongs to the open bus once connected; changing it would make
     // the durable configuration disagree with the hardware, so the server refuses it too.
     let locked = robot.connection().connected();
@@ -619,11 +624,11 @@ fn PortSection(
                     "aria-label": "Serial port",
                     disabled: locked,
                     onchange: {
-                        let id = id.clone();
+                        let robot = robot.clone();
                         move |event: Event<FormData>| {
                             let value = event.value();
                             if !value.is_empty() {
-                                HardwareCommands::new(project, telemetry).assign_port(PortAssignment::new(id.clone(), value, baud));
+                                HardwareCommands::new(project, telemetry).assign_port(PortAssignment::new(robot.clone(), value, baud));
                             }
                         }
                     },
@@ -653,12 +658,12 @@ fn PortSection(
             }
 
             IdentifyPort { project, telemetry,
-                robot,
+                robot: robot.clone(),
                 step: identify_step,
                 on_found: {
-                    let id = id.clone();
+                    let robot = robot.clone();
                     move |path: String| {
-                        HardwareCommands::new(project, telemetry).assign_port(PortAssignment::new(id.clone(), path, baud))
+                        HardwareCommands::new(project, telemetry).assign_port(PortAssignment::new(robot.clone(), path, baud))
                     }
                 },
             }
@@ -690,30 +695,36 @@ fn PortOption(port: SerialPortSummary, owner: String, selected: bool) -> Element
 /// Record a serial port on a robot, keeping its existing baud rate.
 impl HardwareCommands {
     fn assign_port(self, assignment: PortAssignment) {
-        let request = RobotUpdate::with_port(
-            assignment.robot_id,
-            PortSettings::new(assignment.path.clone(), assignment.baud_rate),
-        );
+        let request = RobotDraft::from_robot(&assignment.robot).map(|draft| {
+            draft.with_port(PortSettings::new(
+                assignment.path.clone(),
+                assignment.baud_rate,
+            ))
+        });
         self.run(format!("Assigned {}.", assignment.path), async move {
-            RobotClient::current()
-                .update_robot(request)
+            let client = RobotClient::current();
+            let saved = client
+                .save_document(request?.save()?)
                 .await
-                .map_err(|error| error.to_string())
-                .map(|_| ())
+                .map_err(|error| error.to_string())?;
+            client
+                .connect_robot(saved.id().to_owned())
+                .await
+                .map_err(|error| format!("Port saved, but the robot could not connect: {error}"))
         });
     }
 }
 
 struct PortAssignment {
-    robot_id: String,
+    robot: RobotSummary,
     path: String,
     baud_rate: u32,
 }
 
 impl PortAssignment {
-    fn new(robot_id: String, path: String, baud_rate: u32) -> Self {
+    fn new(robot: RobotSummary, path: String, baud_rate: u32) -> Self {
         Self {
-            robot_id,
+            robot,
             path,
             baud_rate,
         }
@@ -764,9 +775,10 @@ fn IdentifyPort(
                                 let Some(result) = SingleFlight::run(
                                     checking,
                                     async move {
-                                        RobotClient::current().identify_serial_port(before)
-                                            .await
-                                            .map_err(|error| error.to_string())
+                                        let after = RobotClient::current().list_serial_ports().await
+                                            .map_err(|error| error.to_string())?;
+                                        Ok::<_, String>(IdentifiedSerialPort::between(before,
+                                            after.into_iter().map(|port| port.path().to_owned()).collect()))
                                     },
                                 )
                                 .await
@@ -820,7 +832,6 @@ fn CameraSection(
     let mut role = use_signal(|| "wrist".to_owned());
     let mut device = use_signal(String::new);
     let saving_cameras = use_signal(|| false);
-    let id = robot.id().to_owned();
     let chosen = available
         .iter()
         .find(|camera| camera.id() == device())
@@ -893,17 +904,18 @@ fn CameraSection(
                             aria_label: "Unassign the {binding.name()} camera",
                             title: "Unassign the {binding.name()} camera",
                             onclick: {
-                                let id = id.clone();
+                                let robot = robot.clone();
+                                let discovered = available.clone();
                                 let remaining = robot.cameras().iter()
                                     .filter(|camera| camera.name() != binding.name())
                                     .cloned()
                                     .collect::<Vec<_>>();
                                 move |_| {
                                     HardwareCommands::new(project, telemetry).save_cameras(CameraAssignments::new(
-                                        id.clone(),
+                                        robot.clone(),
                                         remaining.clone(),
                                         saving_cameras,
-                                    ))
+                                    ).with_discovered(discovered.clone()))
                                 }
                             },
                             UnassignIcon {}
@@ -967,7 +979,8 @@ fn CameraSection(
                             // so rather than quietly doing it.
                             title: "{replaces}",
                             onclick: {
-                                let id = id.clone();
+                                let robot = robot.clone();
+                                let discovered = available.clone();
                                 let existing = robot.cameras().to_owned();
                                 move |_| {
                                     let (name, device_id) = (role.read().trim().to_owned(), device());
@@ -981,10 +994,10 @@ fn CameraSection(
                                         .collect::<Vec<_>>();
                                     bindings.push(CameraBinding::new(name, device_id, None));
                                     HardwareCommands::new(project, telemetry).save_cameras(CameraAssignments::new(
-                                        id.clone(),
+                                        robot.clone(),
                                         bindings,
                                         saving_cameras,
-                                    ));
+                                    ).with_discovered(discovered.clone()));
                                 }
                             },
                             {if saving_cameras() { "Saving…" } else if taken { "Reassign" } else { "Assign" }}
@@ -1002,11 +1015,13 @@ impl HardwareCommands {
         if assignments.saving.peek().to_owned() {
             return;
         }
-        let request = RobotUpdate::with_cameras(assignments.robot_id, assignments.bindings);
+        let request = RobotDraft::from_robot(&assignments.robot)
+            .and_then(|draft| draft.with_cameras(&assignments.bindings, &assignments.discovered))
+            .and_then(RobotDraft::save);
         self.run("", async move {
             SingleFlight::run(assignments.saving, async move {
                 RobotClient::current()
-                    .update_robot(request)
+                    .save_document(request?)
                     .await
                     .map_err(|error| error.to_string())
                     .map(|_| ())
@@ -1018,18 +1033,27 @@ impl HardwareCommands {
 }
 
 struct CameraAssignments {
-    robot_id: String,
+    robot: RobotSummary,
     bindings: Vec<CameraBinding>,
     saving: Signal<bool>,
+    discovered: Vec<spiral_robotics_common::robots::CameraStatus>,
 }
 
 impl CameraAssignments {
-    fn new(robot_id: String, bindings: Vec<CameraBinding>, saving: Signal<bool>) -> Self {
+    fn new(robot: RobotSummary, bindings: Vec<CameraBinding>, saving: Signal<bool>) -> Self {
         Self {
-            robot_id,
+            robot,
             bindings,
             saving,
+            discovered: Vec::new(),
         }
+    }
+    fn with_discovered(
+        mut self,
+        discovered: Vec<spiral_robotics_common::robots::CameraStatus>,
+    ) -> Self {
+        self.discovered = discovered;
+        self
     }
 }
 

@@ -259,8 +259,19 @@ impl TrainingManager {
         self.inner.snapshot.recover_lock().clone()
     }
 
-    pub(crate) fn display_snapshot(&self, selected: Option<&str>) -> TrainingSnapshot {
-        self.inner.snapshot.recover_lock().for_display(selected)
+    pub(crate) fn catalog(&self) -> TrainingSnapshot {
+        self.inner.snapshot.recover_lock().catalog()
+    }
+
+    pub(crate) fn run(&self, id: &str) -> Result<TrainingRun, OperationError> {
+        self.inner
+            .snapshot
+            .recover_lock()
+            .runs()
+            .iter()
+            .find(|run| run.id() == id)
+            .cloned()
+            .ok_or_else(|| OperationError::NotFound(format!("Training run {id:?} was not found")))
     }
 
     async fn restored_snapshot(&self) -> Result<TrainingSnapshot, String> {
@@ -294,7 +305,7 @@ impl TrainingManager {
         }
     }
 
-    pub(crate) async fn start(&self, config: TrainingConfig) -> Result<TrainingRun, String> {
+    pub(super) async fn start(&self, config: TrainingConfig) -> Result<TrainingRun, String> {
         self.coordinate_training_start(config)
             .await
             .map_err(|error| error.to_string())
@@ -312,7 +323,7 @@ impl TrainingManager {
     /// Remove checkpoint rows before saving the run-history
     /// removal. A failed checkpoint deletion therefore leaves the complete run
     /// visible and retryable instead of hiding orphaned model artifacts.
-    pub(crate) async fn delete(&self, run_id: &str) -> Result<(), String> {
+    pub(super) async fn delete(&self, run_id: &str) -> Result<(), String> {
         let _activity = self
             .admit_project_activity()
             .map_err(|error| error.to_string())?;

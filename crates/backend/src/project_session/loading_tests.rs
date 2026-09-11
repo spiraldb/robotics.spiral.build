@@ -222,6 +222,23 @@ impl LoadingFixture {
         }
     }
 
+    fn seed_robots(&self) {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("robot_id", DataType::Utf8, false),
+            Field::new("config_json", DataType::Utf8, false),
+        ]));
+        self.database.queries.lock().unwrap().robots = Some(vec![
+            RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(StringArray::from(vec!["left", "right"])),
+                    Arc::new(StringArray::from(vec!["{}", "{}"])),
+                ],
+            )
+            .unwrap(),
+        ]);
+    }
+
     async fn seed_interrupted_rollout(&self) {
         self.session
             .storage()
@@ -312,22 +329,19 @@ async fn concurrent_rollout_reads_restore_once_and_never_resume_interrupted_moti
     fixture.database.rollout_release.add_permits(1);
     let (first, second) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         tokio::try_join!(
-            fixture.session.rollout().load_snapshot(),
-            fixture.session.rollout().load_snapshot()
+            fixture.session.rollout().runs(),
+            fixture.session.rollout().runs()
         )
     })
     .await
     .unwrap()
     .unwrap();
     assert_eq!(first, second);
-    assert_eq!(first.session_id(), Some("interrupted-session"));
-    assert_eq!(first.phase(), RolloutPhase::Failed);
+    assert_eq!(first[0].session_id(), Some("interrupted-session"));
+    assert_eq!(first[0].phase(), RolloutPhase::Failed);
     assert!(!fixture.session.rollout().is_active());
     assert_eq!(fixture.database.rollout_reads(), 1);
-    assert_eq!(
-        fixture.session.rollout().load_snapshot().await.unwrap(),
-        first
-    );
+    assert_eq!(fixture.session.rollout().runs().await.unwrap(), first);
     assert_eq!(fixture.database.rollout_reads(), 1);
     fixture.shutdown().await;
 }
@@ -341,14 +355,14 @@ async fn rollout_failure_is_scoped_and_can_be_retried_by_a_later_request() {
         .await
         .unwrap();
     fixture.database.queries.lock().unwrap().fail_rollout = true;
-    assert!(fixture.session.rollout().load_snapshot().await.is_err());
+    assert!(fixture.session.rollout().runs().await.is_err());
     assert_eq!(fixture.database.rollout_reads(), 1);
     assert!(fixture.session.readiness().current().catalog_available());
     fixture.database.queries.lock().unwrap().fail_rollout = false;
     fixture.database.rollout_release.add_permits(1);
     assert_eq!(
-        fixture.session.rollout().load_snapshot().await.unwrap(),
-        RolloutSnapshot::default()
+        fixture.session.rollout().runs().await.unwrap(),
+        Vec::<RolloutSnapshot>::new()
     );
     assert_eq!(fixture.database.rollout_reads(), 2);
     fixture.shutdown().await;
@@ -358,12 +372,12 @@ async fn rollout_failure_is_scoped_and_can_be_retried_by_a_later_request() {
 async fn cancelled_rollout_loading_does_not_poison_the_project_scoped_state() {
     let fixture = LoadingFixture::new();
     let rollout = fixture.session.rollout().clone();
-    let loading = tokio::spawn(async move { rollout.load_snapshot().await });
+    let loading = tokio::spawn(async move { rollout.runs().await });
     fixture.database.rollout_started.notified().await;
     loading.abort();
     assert!(loading.await.unwrap_err().is_cancelled());
     fixture.database.rollout_release.add_permits(1);
-    fixture.session.rollout().load_snapshot().await.unwrap();
+    fixture.session.rollout().runs().await.unwrap();
     assert_eq!(fixture.database.rollout_reads(), 2);
     fixture.shutdown().await;
 }
@@ -464,20 +478,7 @@ async fn cancelled_preference_loading_can_restart_and_saved_edits_win_over_an_in
 #[tokio::test]
 async fn auto_connect_reads_saved_robots_once() {
     let fixture = LoadingFixture::new();
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("robot_id", DataType::Utf8, false),
-        Field::new("config_json", DataType::Utf8, false),
-    ]));
-    fixture.database.queries.lock().unwrap().robots = Some(vec![
-        RecordBatch::try_new(
-            schema,
-            vec![
-                Arc::new(StringArray::from(vec!["left", "right"])),
-                Arc::new(StringArray::from(vec!["{}", "{}"])),
-            ],
-        )
-        .unwrap(),
-    ]);
+    fixture.seed_robots();
     fixture
         .session
         .prepare(ProjectPreparation::Resume)
@@ -515,7 +516,7 @@ async fn robot_setup_errors_do_not_change_project_readiness_or_leak_to_a_new_ses
     let devices = crate::robots::commands::DeviceCommands::from(context);
     assert!(
         devices
-            .setup()
+            .list_robots()
             .await
             .unwrap_err()
             .to_string()
@@ -523,7 +524,7 @@ async fn robot_setup_errors_do_not_change_project_readiness_or_leak_to_a_new_ses
     );
     assert!(fixture.session.readiness().current().catalog_available());
     let next = fixture.project.replace("another_project");
-    assert!(devices.setup().await.is_err());
+    assert!(devices.list_robots().await.is_err());
     assert!(next.preferences().loaded().is_err());
     fixture.shutdown().await;
 }
@@ -547,7 +548,10 @@ async fn direct_training_and_recording_requests_fail_before_starting_with_unload
     let recording = crate::recording::commands::RecordingCommands::from(context.clone());
     assert!(
         recording
-            .start_recording("test_dataset".to_owned())
+            .start_recording(spiral_robotics_common::recording::RecordingStart::new(
+                "test_dataset".to_owned(),
+                ("leader".into(), "follower".into())
+            ))
             .await
             .unwrap_err()
             .to_string()
@@ -556,7 +560,7 @@ async fn direct_training_and_recording_requests_fail_before_starting_with_unload
     let training = crate::training::commands::TrainingCommands::from(context);
     assert!(
         training
-            .snapshot(None)
+            .snapshot()
             .await
             .unwrap_err()
             .to_string()
@@ -586,4 +590,82 @@ async fn direct_training_and_recording_requests_fail_before_starting_with_unload
     );
     assert!(spiral_robotics_training::TrainingBackend::health(&runtime).is_err());
     fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn robot_reads_present_each_saved_record_without_reloading_it() {
+    let fixture = LoadingFixture::new();
+    fixture.seed_robots();
+    fixture
+        .session
+        .prepare(ProjectPreparation::Resume)
+        .await
+        .unwrap();
+    fixture
+        .project
+        .projects
+        .active
+        .send_replace(fixture.session.clone());
+    let context = context::ProjectContext::new(fixture.project.projects.clone());
+    let commands = crate::robots::commands::DeviceCommands::from(context);
+    let robots = commands.list_robots().await.unwrap();
+    assert_eq!(robots.len(), 2);
+    assert_eq!(fixture.database.queries.lock().unwrap().reads.len(), 1);
+    let robot = commands.get_robot("left".into()).await.unwrap();
+    assert_eq!(robot, robots[0]);
+    assert_eq!(fixture.database.queries.lock().unwrap().reads.len(), 2);
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn admitted_commands_retain_the_project_after_the_caller_disconnects() {
+    let fixture = tests::ProjectFixture::new();
+    let context = context::ProjectContext::new(fixture.projects.clone());
+    let (started, started_receiver) = tokio::sync::oneshot::channel();
+    let (release, released) = tokio::sync::oneshot::channel();
+    let (finished, completion) = tokio::sync::oneshot::channel();
+    let caller = tokio::spawn(async move {
+        context
+            .execute(move |_state, activity| async move {
+                // Command authors may drop their copy; the context owns the guard.
+                drop(activity);
+                started.send(()).unwrap();
+                released.await.unwrap();
+                finished.send(()).unwrap();
+                Ok(())
+            })
+            .await
+    });
+    started_receiver.await.unwrap();
+    caller.abort();
+    let _ = caller.await;
+    assert!(
+        fixture
+            .projects
+            .factory
+            .admission
+            .begin_transition()
+            .is_err()
+    );
+    release.send(()).unwrap();
+    completion.await.unwrap();
+    let transition = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            if let Ok(transition) = fixture.projects.factory.admission.begin_transition() {
+                break transition;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let context = context::ProjectContext::new(fixture.projects.clone());
+    let result = context
+        .execute::<(), _>(|_, _| async {
+            panic!("a transition must reject the command before it runs")
+        })
+        .await;
+    assert!(result.is_err());
+    drop(transition);
+    fixture.projects.hardware().shutdown().await.unwrap();
 }

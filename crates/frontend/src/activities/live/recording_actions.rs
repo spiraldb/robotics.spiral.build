@@ -41,10 +41,20 @@ impl LiveSession {
             self.project().report(reason);
             return;
         }
+        let Some(pair) = self
+            .telemetry()
+            .snapshot()
+            .read()
+            .default_teleoperation_pair()
+        else {
+            return;
+        };
         let dataset_id = self.datasets().selected().read().trim().to_owned();
         self.commands().run("", async move {
             RecordingClient::current()
-                .start_recording(dataset_id)
+                .start_recording(spiral_robotics_common::recording::RecordingStart::new(
+                    dataset_id, pair,
+                ))
                 .await
                 .map_err(|error| error.to_string())
                 .map(|_| ())

@@ -1,14 +1,12 @@
 //! Robot configuration and observed hardware for hardware feature views.
-use super::{CameraStatus, ModeStatus, RobotSummary};
-use serde::{Deserialize, Serialize};
+use spiral_robotics_common::robots::{CameraStatus, ModeStatus, RobotSummary};
 
 /// Everything the UI needs to draw the setup screens.
 ///
 /// This changes only when a robot, camera, or mode changes, so it is sent on
 /// connect and then whenever it actually differs.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct RobotSetupSnapshot {
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct RobotSetupSnapshot {
     /// Every robot configuration found in SpiralDB, by ID.
     robots: Vec<RobotSummary>,
     /// Cameras the server has discovered.
@@ -21,7 +19,7 @@ pub struct RobotSetupSnapshot {
 }
 
 impl RobotSetupSnapshot {
-    pub fn new(mode: ModeStatus) -> Self {
+    pub(crate) fn new(mode: ModeStatus) -> Self {
         Self {
             robots: Vec::new(),
             cameras: Vec::new(),
@@ -29,37 +27,36 @@ impl RobotSetupSnapshot {
             issues: Vec::new(),
         }
     }
-    pub fn with_robots(mut self, robots: Vec<RobotSummary>) -> Self {
+    pub(crate) fn with_robots(mut self, robots: Vec<RobotSummary>) -> Self {
         self.robots = robots;
         self
     }
-    pub fn with_cameras(mut self, cameras: Vec<CameraStatus>) -> Self {
+    pub(crate) fn with_cameras(mut self, cameras: Vec<CameraStatus>) -> Self {
         self.cameras = cameras;
         self
     }
-    pub fn with_issues(mut self, issues: Vec<String>) -> Self {
+    pub(crate) fn with_issues(mut self, issues: Vec<String>) -> Self {
         self.issues = issues;
         self
     }
-    pub fn robots(&self) -> &[RobotSummary] {
+    pub(crate) fn robots(&self) -> &[RobotSummary] {
         &self.robots
     }
-    pub fn cameras(&self) -> &[CameraStatus] {
+    pub(crate) fn cameras(&self) -> &[CameraStatus] {
         &self.cameras
     }
-    pub const fn mode(&self) -> &ModeStatus {
+    pub(crate) const fn mode(&self) -> &ModeStatus {
         &self.mode
     }
-    pub fn issues(&self) -> &[String] {
+    pub(crate) fn issues(&self) -> &[String] {
         &self.issues
     }
     /// Pick the best connected pair for a recording-led teleoperation session.
     ///
     /// Robot type is a preference rather than a requirement: a configured leader
     /// and follower win, while two otherwise ready compatible arms still work.
-    /// Compatibility is checked here so the Record button and the server make the
-    /// same decision instead of offering a pair the control thread must reject.
-    pub fn default_teleoperation_pair(&self) -> Option<(String, String)> {
+    /// The selected identities are submitted explicitly; hardware revalidates admission.
+    pub(crate) fn default_teleoperation_pair(&self) -> Option<(String, String)> {
         let ready = self
             .robots
             .iter()
@@ -108,7 +105,7 @@ impl RobotSetupSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::robots::{ConnectionStatus, MotorSummary, RobotAvailability};
+    use spiral_robotics_common::robots::{ConnectionStatus, MotorSummary, RobotAvailability};
 
     struct RobotSetupSnapshotTest;
 
@@ -123,7 +120,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn teleoperation_pair_prefers_configured_roles_over_list_order() {
         let studio = RobotSetupSnapshot {
             robots: vec![
@@ -140,7 +137,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn teleoperation_pair_falls_back_to_the_first_compatible_ready_arms() {
         let studio = RobotSetupSnapshot {
             robots: vec![
@@ -156,7 +153,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn teleoperation_pair_ignores_unready_and_incompatible_arms() {
         let disconnected = RobotSummary::new(
             "disconnected-leader",

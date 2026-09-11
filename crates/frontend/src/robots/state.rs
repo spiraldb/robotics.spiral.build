@@ -40,10 +40,7 @@ impl HardwareViewState {
     }
     pub(crate) fn snapshot(
         self,
-    ) -> MappedSignal<
-        spiral_robotics_common::robots::RobotSetupSnapshot,
-        Signal<super::setup::RobotSetupLoad>,
-    > {
+    ) -> MappedSignal<crate::robots::RobotSetupSnapshot, Signal<super::setup::RobotSetupLoad>> {
         self.setup.snapshot()
     }
     pub(crate) fn connected_robots(&self) -> Vec<RobotSummary> {

@@ -1,12 +1,11 @@
 //! HTTP endpoints for robots.
 
-use crate::http::contract::{ApiRoutes, Created};
+use crate::http::contract::ApiRoutes;
 use crate::http::delivery::{ApiJson, ApiPath, HttpFailure, ScopedProject};
 
 use axum::Json;
 use spiral_robotics_common::robots::{
-    CameraBinding, CameraStatus, ModeSelection, NewRobot, RobotGoal, RobotSummary, RobotUpdate,
-    SerialPortIdentification, SerialPortScan, SerialPortSummary,
+    CameraStatus, ModeSelection, RobotGoal, RobotSummary, SerialPortSummary,
 };
 
 pub(crate) struct RobotEndpoints;
@@ -14,14 +13,11 @@ pub(crate) struct RobotEndpoints;
 impl RobotEndpoints {
     pub(crate) fn register(routes: &mut ApiRoutes) {
         routes.get("/serial-ports", Self::list_serial_ports);
-        routes.post("/serial-ports/identify", Self::identify_serial_port);
         routes.post("/cameras/refresh", Self::refresh_cameras);
-        routes.get("/robots/setup", Self::fetch_setup);
+        routes.get("/hardware/status", Self::fetch_hardware_status);
         routes.get("/robots/telemetry", Self::fetch_telemetry);
         routes.get("/robots", Self::list_robots);
-        routes.post("/robots", Self::create_robot);
-        routes.patch("/robots", Self::update_robot);
-        routes.post("/robots/import", Self::import_robot_configuration);
+        routes.post("/robots/save", Self::save_document);
         routes.get("/robots/{id}", Self::get_robot);
         routes.delete("/robots/{id}", Self::delete_robot);
         routes.post("/robots/{id}/connect", Self::connect_robot);
@@ -40,14 +36,6 @@ impl RobotEndpoints {
         let result = commands.list_ports().await?;
         Ok(Json(result))
     }
-    async fn identify_serial_port(
-        ScopedProject(commands): ScopedProject<crate::robots::commands::DeviceCommands>,
-        ApiJson(request): ApiJson<SerialPortScan>,
-    ) -> Result<Json<SerialPortIdentification>, HttpFailure> {
-        let (before,) = request.into_parts();
-        let result = commands.identify_port(before).await?;
-        Ok(Json(result))
-    }
     async fn refresh_cameras(
         ScopedProject(commands): ScopedProject<crate::robots::commands::DeviceCommands>,
     ) -> Result<Json<Vec<CameraStatus>>, HttpFailure> {
@@ -60,10 +48,10 @@ impl RobotEndpoints {
         let result = commands.telemetry()?;
         Ok(Json(result))
     }
-    async fn fetch_setup(
+    async fn fetch_hardware_status(
         ScopedProject(commands): ScopedProject<crate::robots::commands::DeviceCommands>,
-    ) -> Result<Json<spiral_robotics_common::robots::RobotSetupSnapshot>, HttpFailure> {
-        let result = commands.setup().await?;
+    ) -> Result<Json<spiral_robotics_common::robots::HardwareStatus>, HttpFailure> {
+        let result = commands.hardware_status()?;
         Ok(Json(result))
     }
     async fn list_robots(
@@ -72,37 +60,17 @@ impl RobotEndpoints {
         let result = commands.list_robots().await?;
         Ok(Json(result))
     }
-    async fn create_robot(
+    async fn save_document(
         ScopedProject(commands): ScopedProject<crate::robots::commands::DeviceCommands>,
-        ApiJson(request): ApiJson<NewRobot>,
-    ) -> Result<Created<RobotSummary>, HttpFailure> {
-        let result = commands.create_robot(request).await?;
-        Ok(Created(result))
-    }
-    async fn import_robot_configuration(
-        ScopedProject(commands): ScopedProject<crate::robots::commands::DeviceCommands>,
-        ApiJson(document): ApiJson<serde_json::Map<String, serde_json::Value>>,
+        ApiJson(request): ApiJson<spiral_robotics_common::robots::document::RobotDocumentSave>,
     ) -> Result<Json<RobotSummary>, HttpFailure> {
-        let result = commands
-            .import_robot_configuration(
-                serde_json::to_vec(&document)
-                    .map_err(|error| HttpFailure::invalid(error.to_string()))?,
-            )
-            .await?;
-        Ok(Json(result))
+        Ok(Json(commands.save_document(request).await?))
     }
     async fn get_robot(
         ScopedProject(commands): ScopedProject<crate::robots::commands::DeviceCommands>,
         ApiPath(id): ApiPath<String>,
     ) -> Result<Json<RobotSummary>, HttpFailure> {
         let result = commands.get_robot(id).await?;
-        Ok(Json(result))
-    }
-    async fn update_robot(
-        ScopedProject(commands): ScopedProject<crate::robots::commands::DeviceCommands>,
-        ApiJson(request): ApiJson<RobotUpdate<Vec<CameraBinding>>>,
-    ) -> Result<Json<RobotSummary>, HttpFailure> {
-        let result = commands.update_robot(request).await?;
         Ok(Json(result))
     }
     async fn delete_robot(

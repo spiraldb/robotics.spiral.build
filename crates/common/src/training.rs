@@ -1074,53 +1074,32 @@ pub struct TrainingSnapshot {
     #[serde(default)]
     readiness: TrainingReadiness,
     runs: Vec<TrainingRun>,
-    /// Present on query projections, identifying the run with complete details.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    detailed_run_id: Option<String>,
 }
 
 impl TrainingSnapshot {
     pub fn new(readiness: TrainingReadiness, runs: Vec<TrainingRun>) -> Self {
-        Self {
-            readiness,
-            runs,
-            detailed_run_id: None,
-        }
+        Self { readiness, runs }
     }
     pub const fn readiness(&self) -> &TrainingReadiness {
         &self.readiness
     }
-    /// The run catalog includes the latest metric and checkpoints; only the
-    /// selected run carries chart history and logs. Never clone every history
-    /// just to answer a polling request.
-    pub fn for_display(&self, selected: Option<&str>) -> Self {
-        let mut result = Self::new(
+    /// Bounded run catalog; full metrics and logs are fetched by run identity.
+    pub fn catalog(&self) -> Self {
+        Self::new(
             self.readiness.clone(),
             self.runs
                 .iter()
-                .map(|run| {
-                    if Some(run.id()) == selected {
-                        return run.clone();
-                    }
-                    TrainingRun {
-                        identity: run.identity.clone(),
-                        lifecycle: run.lifecycle.clone(),
-                        history: TrainingRunHistory {
-                            metrics: run.metrics().last().cloned().into_iter().collect(),
-                            checkpoints: run.checkpoints().to_vec(),
-                            logs: Vec::new(),
-                        },
-                    }
+                .map(|run| TrainingRun {
+                    identity: run.identity.clone(),
+                    lifecycle: run.lifecycle.clone(),
+                    history: TrainingRunHistory {
+                        metrics: run.metrics().last().cloned().into_iter().collect(),
+                        checkpoints: run.checkpoints().to_vec(),
+                        logs: Vec::new(),
+                    },
                 })
                 .collect(),
-        );
-        result.detailed_run_id = selected
-            .filter(|id| self.runs.iter().any(|run| run.id() == *id))
-            .map(str::to_owned);
-        result
-    }
-    pub fn detailed_run_id(&self) -> Option<&str> {
-        self.detailed_run_id.as_deref()
+        )
     }
 
     pub fn runs(&self) -> &[TrainingRun] {
@@ -1551,7 +1530,7 @@ mod tests {
         assert_eq!(snapshot, restored);
     }
     #[test]
-    fn polling_sends_full_history_only_for_the_selected_run() {
+    fn catalog_omits_detailed_history_without_modifying_runs() {
         let runs = ["a", "b"]
             .into_iter()
             .map(|id| {
@@ -1565,29 +1544,15 @@ mod tests {
             })
             .collect();
         let history = TrainingSnapshot::new(TrainingReadiness::default(), runs);
-        let display = history.for_display(Some("b"));
+        let display = history.catalog();
         assert_eq!(display.runs()[0].metrics().len(), 1);
         assert!(display.runs()[0].logs().is_empty());
         assert_eq!(
             display.runs()[0].checkpoints(),
             history.runs()[0].checkpoints()
         );
-        assert_eq!(display.runs()[1], history.runs()[1]);
+        assert_eq!(display.runs()[1].metrics().len(), 1);
+        assert!(display.runs()[1].logs().is_empty());
         assert_eq!(history.runs()[0].metrics().len(), 2);
-    }
-}
-
-/// Selects the one run whose bounded full history should be returned.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
-pub struct TrainingSelection {
-    selected: Option<String>,
-}
-impl TrainingSelection {
-    pub fn new(selected: Option<String>) -> Self {
-        Self { selected }
-    }
-    pub fn into_selected(self) -> Option<String> {
-        self.selected
     }
 }

@@ -3,8 +3,6 @@ use spiral_robotics_common::training::{TrainingConfig, TrainingRun, TrainingSnap
 
 use crate::BackendCommandError;
 use crate::project_session::context::ProjectContext;
-use crate::rollout::manager::RolloutManager;
-use crate::training::service::{DeleteTrainingRunCommand, TrainingActions, TrainingRunActivity};
 
 /// Project-bound operations; the context owns admission and backend task lifetime.
 #[derive(Clone)]
@@ -13,104 +11,72 @@ pub(crate) struct TrainingCommands {
 }
 
 impl TrainingCommands {
-    pub(crate) async fn snapshot(
-        &self,
-        selected: Option<String>,
-    ) -> Result<TrainingSnapshot, BackendCommandError> {
-        let commands = self.clone();
-        let activity = commands.state.admit()?;
+    pub(crate) async fn snapshot(&self) -> Result<TrainingSnapshot, BackendCommandError> {
         self.state
-            .tasks()
-            .execute(async move {
-                commands.state.preferences().load().await?;
-                commands
-                    .state
-                    .training()
-                    .ensure_loaded(activity.clone())
-                    .await?;
-                Ok(commands
-                    .state
-                    .training()
-                    .display_snapshot(selected.as_deref()))
+            .execute(move |state, activity| async move {
+                state.preferences().load().await?;
+                state.training().ensure_loaded(activity).await?;
+                Ok(state.training().catalog())
             })
-            .await?
+            .await
     }
+    pub(crate) async fn run(&self, id: String) -> Result<TrainingRun, BackendCommandError> {
+        let activity = self.state.admit()?;
+        self.state.preferences().load().await?;
+        self.state.training().ensure_loaded(activity).await?;
+        self.state.training().run(&id).map_err(Into::into)
+    }
+
     pub(crate) async fn start_training_run(
         &self,
         config: TrainingConfig,
     ) -> Result<TrainingRun, BackendCommandError> {
-        let commands = self.clone();
-        let activity = commands.state.admit()?;
         self.state
-            .tasks()
-            .execute(async move {
-                let _activity = activity;
-                commands.state.preferences().load().await?;
-                commands
-                    .state
+            .execute(move |state, activity| async move {
+                state.preferences().load().await?;
+                state.training().ensure_loaded(activity).await?;
+                state.require_catalog_ready()?;
+                state
                     .training()
-                    .ensure_loaded(_activity.clone())
-                    .await?;
-                if let Some(detail) = commands.state.bootstrap().catalog_unavailable() {
-                    return Err(BackendCommandError::from(detail));
-                }
-                TrainingActions::new(commands.state.training().as_ref())
-                    .start(config)
+                    .start_validated(config)
                     .await
                     .map_err(Into::into)
             })
-            .await?
+            .await
     }
 
     pub(crate) async fn stop_training_run(&self, id: String) -> Result<(), BackendCommandError> {
-        let commands = self.clone();
-        let activity = commands.state.admit()?;
         self.state
-            .tasks()
-            .execute(async move {
-                let _activity = activity;
-                commands.state.preferences().load().await?;
-                commands
-                    .state
+            .execute(move |state, activity| async move {
+                state.preferences().load().await?;
+                state.training().ensure_loaded(activity).await?;
+                state
                     .training()
-                    .ensure_loaded(_activity.clone())
-                    .await?;
-                TrainingActions::new(commands.state.training().as_ref())
                     .stop(&id)
                     .await
-                    .map_err(Into::into)
+                    .map_err(|error| crate::OperationError::conflict(error).into())
             })
-            .await?
+            .await
     }
 
     pub(crate) async fn delete_training_run(&self, id: String) -> Result<(), BackendCommandError> {
-        let commands = self.clone();
-        let activity = commands.state.admit()?;
         self.state
-            .tasks()
-            .execute(async move {
-                let _activity = activity;
-                commands.state.preferences().load().await?;
-                commands
-                    .state
+            .execute(move |state, activity| async move {
+                state.preferences().load().await?;
+                state.training().ensure_loaded(activity).await?;
+                let rollout = state.rollout().snapshot();
+                let active_rollout = rollout
+                    .phase()
+                    .active()
+                    .then_some(rollout.run_id())
+                    .flatten();
+                state
                     .training()
-                    .ensure_loaded(_activity.clone())
-                    .await?;
-                let rollout = RolloutManager::snapshot(commands.state.rollout().as_ref());
-                let activity = TrainingRunActivity::new(
-                    rollout
-                        .phase()
-                        .active()
-                        .then_some(rollout.run_id())
-                        .flatten()
-                        .map(str::to_owned),
-                );
-                TrainingActions::new(commands.state.training().as_ref())
-                    .delete(activity, DeleteTrainingRunCommand::new(id))
+                    .delete_inactive(&id, active_rollout)
                     .await
                     .map_err(Into::into)
             })
-            .await?
+            .await
     }
 }
 
