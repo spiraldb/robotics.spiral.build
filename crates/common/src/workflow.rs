@@ -1,154 +1,81 @@
-//! Shared workflow graph, validation, and execution observations.
-//!
-//! A workflow is an intent DAG. SQL sources and transforms exchange Arrow
-//! batches with Model operators, which preserve inputs and append scores.
-//! Execution observations are separate from the graph's saved definition.
-
+//! SQL workflow documents and independent query execution observations.
 pub mod camera;
 pub mod conversation;
 pub mod document;
-
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
-
-use crate::sql::workflow::{WorkflowNodeId, WorkflowSql};
-use crate::sql::{QualifiedRelation, ReadOnlyQuery, ReadOnlyQueryMode, UnquotedSqlIdentifier};
-use serde::{Deserialize, Serialize};
+pub mod plan;
 
 use crate::relations::SpiralQuerySnapshot;
+use crate::sql::{ReadOnlyQuery, ReadOnlyQueryMode, UnquotedSqlIdentifier};
+use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_WORKFLOW_ID: &str = "default";
-const MAX_WORKFLOW_QUERY_ROWS: usize = 1_000;
-const MAX_SIGLIP_FEATURES: usize = 32;
-pub const MAX_SIGLIP_CONCEPT_LENGTH: usize = 80;
 const MAX_WORKFLOW_FEATURE_NAME_LENGTH: usize = 96;
 pub const MAX_WORKFLOW_FEATURE_DESCRIPTION_LENGTH: usize = 240;
 pub const MAX_WORKFLOW_FEATURE_STREAMS: usize = 8;
+pub const MAX_SIGLIP_CONCEPT_LENGTH: usize = 80;
 
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkflowSpec {
     id: String,
     name: String,
     revision: u64,
-    #[serde(default)]
-    nodes: Vec<WorkflowNodeSpec>,
-    #[serde(default)]
-    edges: Vec<WorkflowEdgeSpec>,
+    sql: String,
 }
-
 impl Default for WorkflowSpec {
     fn default() -> Self {
-        Self {
-            id: DEFAULT_WORKFLOW_ID.to_owned(),
-            name: "Relation query".to_owned(),
-            revision: 0,
-            nodes: vec![
-                WorkflowNodeSpec {
-                    id: "table".to_owned(),
-                    name: "Choose a Spiral table".to_owned(),
-                    config: WorkflowNodeConfig::Table {
-                        relation: String::new(),
-                    },
-                },
-                WorkflowNodeSpec {
-                    id: "query".to_owned(),
-                    name: "Read relation".to_owned(),
-                    config: WorkflowNodeConfig::Query {
-                        sql: "SELECT * FROM {{node:table}} LIMIT 100".to_owned(),
-                        max_rows: 100,
-                    },
-                },
-                WorkflowNodeSpec {
-                    id: "result".to_owned(),
-                    name: "Results".to_owned(),
-                    config: WorkflowNodeConfig::Result,
-                },
-            ],
-            edges: vec![
-                WorkflowEdgeSpec {
-                    source: "table".to_owned(),
-                    target: "query".to_owned(),
-                },
-                WorkflowEdgeSpec {
-                    source: "query".to_owned(),
-                    target: "result".to_owned(),
-                },
-            ],
-        }
+        Self::new(DEFAULT_WORKFLOW_ID, "Untitled workflow")
     }
 }
-
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct WorkflowNodeSpec {
-    id: String,
-    name: String,
-    #[serde(flatten)]
-    config: WorkflowNodeConfig,
-}
-
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum WorkflowNodeConfig {
-    Table {
-        relation: String,
-    },
-    Model {
-        image_column: String,
-        features: Vec<WorkflowModelFeature>,
-    },
-    Query {
-        sql: String,
-        #[serde(default = "WorkflowNodeConfig::default_query_rows")]
-        max_rows: usize,
-    },
-    Result,
-}
-
-/// A model output is a nullable score appended to its input batch.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WorkflowModelFeature {
-    name: String,
-    description: String,
-    concept: String,
-}
-
-impl WorkflowModelFeature {
-    pub fn new(
-        name: impl Into<String>,
-        description: impl Into<String>,
-        concept: impl Into<String>,
-    ) -> Self {
+impl WorkflowSpec {
+    pub fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
+            id: id.into(),
             name: name.into(),
-            description: description.into(),
-            concept: concept.into(),
+            revision: 0,
+            sql: String::new(),
         }
+    }
+    pub fn with_sql(mut self, sql: impl Into<String>) -> Self {
+        self.sql = sql.into();
+        self
+    }
+    pub fn with_revision(mut self, revision: u64) -> Self {
+        self.revision = revision;
+        self
+    }
+    pub fn id(&self) -> &str {
+        &self.id
     }
     pub fn name(&self) -> &str {
         &self.name
     }
-    pub fn description(&self) -> &str {
-        &self.description
+    pub const fn revision(&self) -> u64 {
+        self.revision
     }
-    pub fn concept(&self) -> &str {
-        &self.concept
+    pub fn sql(&self) -> &str {
+        &self.sql
     }
-    pub fn set_name(&mut self, value: impl Into<String>) {
-        self.name = value.into();
+    pub fn set_name(&mut self, name: impl Into<String>) {
+        self.name = name.into();
     }
-    pub fn set_description(&mut self, value: impl Into<String>) {
-        self.description = value.into();
+    pub fn set_sql(&mut self, sql: impl Into<String>) {
+        self.sql = sql.into();
     }
-    pub fn set_concept(&mut self, value: impl Into<String>) {
-        self.concept = value.into();
+    pub fn set_revision(&mut self, revision: u64) {
+        self.revision = revision;
     }
-    pub fn has_valid_name(&self) -> bool {
-        self.name.len() <= MAX_WORKFLOW_FEATURE_NAME_LENGTH
-            && UnquotedSqlIdentifier::try_from(self.name.as_str()).is_ok()
+    pub fn validate(&self) -> WorkflowValidationReport {
+        let mut report = WorkflowValidationReport::default();
+        if let Err(error) = ReadOnlyQuery::new(&self.sql, ReadOnlyQueryMode::Workflow).authorize() {
+            report.errors.push(WorkflowValidationIssue::new(
+                "invalid_query",
+                &error.to_string(),
+                "Write one SELECT or WITH query.",
+            ));
+        }
+        report
     }
 }
 
@@ -262,38 +189,6 @@ pub struct WorkflowFeatureApplicability {
     stream_ids: Vec<String>,
 }
 
-impl WorkflowNodeConfig {
-    const fn default_query_rows() -> usize {
-        100
-    }
-
-    const fn label(&self) -> &'static str {
-        match self {
-            Self::Table { .. } => "Table",
-            Self::Model { .. } => "Model",
-            Self::Query { .. } => "Query",
-            Self::Result => "Result",
-        }
-    }
-
-    const fn allows_transition_to(&self, target: &Self) -> bool {
-        matches!(
-            (self, target),
-            (
-                Self::Table { .. } | Self::Query { .. } | Self::Model { .. },
-                Self::Query { .. } | Self::Model { .. } | Self::Result
-            )
-        )
-    }
-}
-
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct WorkflowEdgeSpec {
-    source: String,
-    target: String,
-}
-
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkflowValidationReport {
@@ -315,9 +210,6 @@ impl WorkflowValidationIssue {
     pub fn recovery(&self) -> &str {
         &self.recovery
     }
-    pub fn node_id(&self) -> Option<&str> {
-        self.node_id.as_deref()
-    }
     #[cfg(any(test, feature = "test-support"))]
     pub fn code(&self) -> &str {
         &self.code
@@ -328,8 +220,6 @@ impl WorkflowValidationIssue {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkflowValidationIssue {
     code: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    node_id: Option<String>,
     message: String,
     recovery: String,
 }
@@ -338,15 +228,9 @@ impl WorkflowValidationIssue {
     fn new(code: &str, message: &str, recovery: &str) -> Self {
         Self {
             code: code.to_owned(),
-            node_id: None,
             message: message.to_owned(),
             recovery: recovery.to_owned(),
         }
-    }
-
-    fn with_node_id(mut self, node_id: &str) -> Self {
-        self.node_id = Some(node_id.to_owned());
-        self
     }
 }
 
@@ -363,8 +247,6 @@ struct RunIdentity {
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 struct RunExecution {
     phase: WorkflowRunPhase,
-    #[serde(default)]
-    nodes: Vec<WorkflowNodeSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     result: Option<SpiralQuerySnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -403,15 +285,6 @@ impl WorkflowRunSnapshot {
                 workflow_revision: workflow.revision,
                 run_id: None,
             },
-            execution: RunExecution {
-                phase: WorkflowRunPhase::Idle,
-                nodes: workflow
-                    .nodes
-                    .iter()
-                    .map(|node| WorkflowNodeSnapshot::pending(node.id.clone(), "Not run"))
-                    .collect(),
-                ..RunExecution::default()
-            },
             ..Self::default()
         }
     }
@@ -424,11 +297,6 @@ impl WorkflowRunSnapshot {
         snapshot.identity.run_id = Some(run_id.into());
         snapshot.execution.phase = WorkflowRunPhase::Validating;
         snapshot
-    }
-
-    pub fn with_nodes(mut self, nodes: Vec<WorkflowNodeSnapshot>) -> Self {
-        self.execution.nodes = nodes;
-        self
     }
 
     pub const fn with_started_ms(mut self, started_ms: u64) -> Self {
@@ -448,9 +316,6 @@ impl WorkflowRunSnapshot {
     }
     pub const fn phase(&self) -> WorkflowRunPhase {
         self.execution.phase
-    }
-    pub fn nodes(&self) -> &[WorkflowNodeSnapshot] {
-        &self.execution.nodes
     }
     pub const fn result(&self) -> Option<&SpiralQuerySnapshot> {
         self.execution.result.as_ref()
@@ -472,9 +337,6 @@ impl WorkflowRunSnapshot {
     }
     pub const fn set_phase(&mut self, phase: WorkflowRunPhase) {
         self.execution.phase = phase;
-    }
-    pub fn nodes_mut(&mut self) -> &mut Vec<WorkflowNodeSnapshot> {
-        &mut self.execution.nodes
     }
     pub fn set_result(&mut self, result: Option<SpiralQuerySnapshot>) {
         self.execution.result = result;
@@ -509,322 +371,21 @@ pub enum WorkflowRunPhase {
     Idle,
     Validating,
     Running,
-    Cancelling,
     Completed,
     Failed,
-    Cancelled,
     Interrupted,
 }
 
 impl WorkflowRunPhase {
     pub const fn active(self) -> bool {
-        matches!(self, Self::Validating | Self::Running | Self::Cancelling)
+        matches!(self, Self::Validating | Self::Running)
     }
 
     pub const fn terminal(self) -> bool {
-        matches!(
-            self,
-            Self::Completed | Self::Failed | Self::Cancelled | Self::Interrupted
-        )
+        matches!(self, Self::Completed | Self::Failed | Self::Interrupted)
     }
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-struct NodeOutcome {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    rows: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    progress: Option<WorkflowNodeProgress>,
-    #[serde(default)]
-    quarantine: WorkflowQuarantineSummary,
-}
-
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-struct NodeArtifacts {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    output_relation: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    model: Option<WorkflowModelRunMetadata>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    warnings: Vec<String>,
-}
-
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct WorkflowNodeSnapshot {
-    node_id: String,
-    phase: WorkflowNodePhase,
-    detail: String,
-    #[serde(default)]
-    elapsed_ms: u64,
-    #[serde(flatten)]
-    outcome: NodeOutcome,
-    #[serde(flatten)]
-    artifacts: NodeArtifacts,
-}
-
-impl WorkflowNodeSnapshot {
-    pub fn new(
-        node_id: impl Into<String>,
-        phase: WorkflowNodePhase,
-        detail: impl Into<String>,
-    ) -> Self {
-        Self {
-            node_id: node_id.into(),
-            phase,
-            detail: detail.into(),
-            elapsed_ms: 0,
-            outcome: NodeOutcome::default(),
-            artifacts: NodeArtifacts::default(),
-        }
-    }
-
-    pub fn with_quarantine(mut self, quarantine: WorkflowQuarantineSummary) -> Self {
-        self.outcome.quarantine = quarantine;
-        self
-    }
-
-    pub fn with_artifacts(
-        mut self,
-        model: Option<WorkflowModelRunMetadata>,
-        warnings: Vec<String>,
-    ) -> Self {
-        self.artifacts.model = model;
-        self.artifacts.warnings = warnings;
-        self
-    }
-
-    pub(crate) fn pending(node_id: impl Into<String>, detail: impl Into<String>) -> Self {
-        Self::new(node_id, WorkflowNodePhase::Pending, detail)
-    }
-    pub fn node_id(&self) -> &str {
-        &self.node_id
-    }
-    pub const fn phase(&self) -> WorkflowNodePhase {
-        self.phase
-    }
-    pub fn detail(&self) -> &str {
-        &self.detail
-    }
-    pub fn error(&self) -> Option<&str> {
-        self.outcome.error.as_deref()
-    }
-    pub const fn progress(&self) -> Option<&WorkflowNodeProgress> {
-        self.outcome.progress.as_ref()
-    }
-    pub const fn quarantine(&self) -> &WorkflowQuarantineSummary {
-        &self.outcome.quarantine
-    }
-    pub const fn model(&self) -> Option<&WorkflowModelRunMetadata> {
-        self.artifacts.model.as_ref()
-    }
-    pub fn output_relation(&self) -> Option<&str> {
-        self.artifacts.output_relation.as_deref()
-    }
-    pub fn warnings(&self) -> &[String] {
-        &self.artifacts.warnings
-    }
-    pub const fn set_phase(&mut self, phase: WorkflowNodePhase) {
-        self.phase = phase;
-    }
-    pub fn set_detail(&mut self, detail: impl Into<String>) {
-        self.detail = detail.into();
-    }
-    pub const fn set_elapsed_ms(&mut self, elapsed_ms: u64) {
-        self.elapsed_ms = elapsed_ms;
-    }
-    pub const fn set_rows(&mut self, rows: Option<usize>) {
-        self.outcome.rows = rows;
-    }
-    pub fn set_error(&mut self, error: Option<String>) {
-        self.outcome.error = error;
-    }
-    pub fn set_progress(&mut self, progress: Option<WorkflowNodeProgress>) {
-        self.outcome.progress = progress;
-    }
-    pub fn set_quarantine(&mut self, quarantine: WorkflowQuarantineSummary) {
-        self.outcome.quarantine = quarantine;
-    }
-    pub fn set_model(&mut self, model: Option<WorkflowModelRunMetadata>) {
-        self.artifacts.model = model;
-    }
-    pub fn set_output_relation(&mut self, relation: Option<String>) {
-        self.artifacts.output_relation = relation;
-    }
-    pub fn warnings_mut(&mut self) -> &mut Vec<String> {
-        &mut self.artifacts.warnings
-    }
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn with_progress(mut self, progress: WorkflowNodeProgress) -> Self {
-        self.outcome.progress = Some(progress);
-        self
-    }
-}
-
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct WorkflowNodeProgress {
-    completed: u64,
-    total: u64,
-    unit: String,
-}
-
-impl WorkflowNodeProgress {
-    pub fn new(completed: u64, total: u64, unit: impl Into<String>) -> Self {
-        Self {
-            completed,
-            total,
-            unit: unit.into(),
-        }
-    }
-}
-
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-struct ModelIdentity {
-    model_id: String,
-    artifact_revision: String,
-    feature_cache_relation: String,
-    fingerprint: String,
-}
-
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-struct ModelExecution {
-    #[serde(default)]
-    features: Vec<WorkflowFeatureDefinition>,
-    reused: bool,
-    device: String,
-}
-
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-struct ModelMetrics {
-    #[serde(default)]
-    input_rows: u64,
-    #[serde(default)]
-    output_rows: u64,
-    #[serde(default)]
-    decode_ms: u64,
-    #[serde(default)]
-    inference_ms: u64,
-}
-
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct WorkflowModelRunMetadata {
-    #[serde(flatten)]
-    identity: ModelIdentity,
-    #[serde(flatten)]
-    execution: ModelExecution,
-    #[serde(flatten)]
-    metrics: ModelMetrics,
-}
-
-impl WorkflowModelRunMetadata {
-    pub fn new(model_id: impl Into<String>, artifact_revision: impl Into<String>) -> Self {
-        Self {
-            identity: ModelIdentity {
-                model_id: model_id.into(),
-                artifact_revision: artifact_revision.into(),
-                feature_cache_relation: String::new(),
-                fingerprint: String::new(),
-            },
-            execution: ModelExecution {
-                features: Vec::new(),
-                reused: false,
-                device: String::new(),
-            },
-            metrics: ModelMetrics::default(),
-        }
-    }
-
-    pub fn with_cache_relation(mut self, relation: impl Into<String>) -> Self {
-        self.identity.feature_cache_relation = relation.into();
-        self
-    }
-
-    pub fn with_features(mut self, features: Vec<WorkflowFeatureDefinition>) -> Self {
-        self.execution.features = features;
-        self
-    }
-
-    pub fn with_device(mut self, device: impl Into<String>) -> Self {
-        self.execution.device = device.into();
-        self
-    }
-
-    pub fn with_fingerprint(mut self, fingerprint: impl Into<String>) -> Self {
-        self.identity.fingerprint = fingerprint.into();
-        self
-    }
-
-    pub const fn with_reused(mut self, reused: bool) -> Self {
-        self.execution.reused = reused;
-        self
-    }
-
-    pub const fn with_row_counts(mut self, input_rows: u64, output_rows: u64) -> Self {
-        self.metrics.input_rows = input_rows;
-        self.metrics.output_rows = output_rows;
-        self
-    }
-
-    pub const fn with_timings(mut self, decode_ms: u64, inference_ms: u64) -> Self {
-        self.metrics.decode_ms = decode_ms;
-        self.metrics.inference_ms = inference_ms;
-        self
-    }
-
-    pub fn fingerprint(&self) -> &str {
-        &self.identity.fingerprint
-    }
-    pub const fn reused(&self) -> bool {
-        self.execution.reused
-    }
-    pub fn device(&self) -> &str {
-        &self.execution.device
-    }
-    pub const fn decode_ms(&self) -> u64 {
-        self.metrics.decode_ms
-    }
-    pub const fn inference_ms(&self) -> u64 {
-        self.metrics.inference_ms
-    }
-    #[cfg(any(test, feature = "test-support"))]
-    pub const fn input_rows(&self) -> u64 {
-        self.metrics.input_rows
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    pub const fn output_rows(&self) -> u64 {
-        self.metrics.output_rows
-    }
-}
-
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkflowNodePhase {
-    #[default]
-    Pending,
-    Validating,
-    Loading,
-    Running,
-    Complete,
-    CompleteWithWarnings,
-    Failed,
-    Stale,
-    Cancelling,
-    Cancelled,
-    Unsupported,
-}
-
-/// Public readiness of the backend model transport.
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
@@ -1161,511 +722,6 @@ impl WorkflowSummary {
 }
 
 /// Reserved bounded diagnostic shape for later decode/model phases.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct WorkflowQuarantineSummary {
-    count: u64,
-    #[serde(default)]
-    examples: Vec<String>,
-}
-
-impl WorkflowSpec {
-    pub fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
-        Self {
-            id: id.into(),
-            name: name.into(),
-            revision: 0,
-            nodes: Vec::new(),
-            edges: Vec::new(),
-        }
-    }
-
-    pub const fn with_revision(mut self, revision: u64) -> Self {
-        self.revision = revision;
-        self
-    }
-
-    pub fn validate(&self) -> WorkflowValidationReport {
-        let spec = self;
-        let mut report = WorkflowValidationReport::default();
-        if WorkflowNodeId::try_from(spec.id.as_str()).is_err() {
-            report.errors.push(WorkflowValidationIssue::new("invalid_workflow_id", "Workflow ID must start with a letter or '_' and contain only letters, numbers, '_' or '-'.", "Use a stable identifier such as relation-query."));
-        }
-        if spec.name.trim().is_empty() {
-            report.errors.push(WorkflowValidationIssue::new(
-                "missing_workflow_name",
-                "Workflow name cannot be empty.",
-                "Name the saved workflow before applying it.",
-            ));
-        }
-
-        let mut nodes = BTreeMap::new();
-        for node in &spec.nodes {
-            if WorkflowNodeId::try_from(node.id.as_str()).is_err() {
-                report.errors.push(
-                    WorkflowValidationIssue::new(
-                        "invalid_node_id",
-                        "Node IDs may contain letters, numbers, '_' and '-' only.",
-                        "Choose a stable node ID without SQL punctuation.",
-                    )
-                    .with_node_id(&node.id),
-                );
-            }
-            if nodes.insert(node.id.as_str(), node).is_some() {
-                report.errors.push(
-                    WorkflowValidationIssue::new(
-                        "duplicate_node_id",
-                        "Node IDs must be unique within a workflow.",
-                        "Rename one of the duplicate nodes.",
-                    )
-                    .with_node_id(&node.id),
-                );
-            }
-            match &node.config {
-                WorkflowNodeConfig::Table { relation } => {
-                    if relation.is_empty() {
-                        report.errors.push(WorkflowValidationIssue::new("table_relation_required", "Choose an existing Spiral relation for this Table node.", "Select a qualified relation discovered from the active Spiral project.").with_node_id(&node.id));
-                    } else if let Err(error) = QualifiedRelation::try_from(relation.as_str()) {
-                        report.errors.push(
-                            WorkflowValidationIssue::new(
-                                "invalid_relation",
-                                &error.to_string(),
-                                "Choose a relation returned by Workflow relation discovery.",
-                            )
-                            .with_node_id(&node.id),
-                        );
-                    }
-                }
-                WorkflowNodeConfig::Model {
-                    image_column,
-                    features,
-                } => {
-                    if UnquotedSqlIdentifier::try_from(image_column.as_str()).is_err() {
-                        report.errors.push(
-                            WorkflowValidationIssue::new(
-                                "invalid_image_column",
-                                "Choose the input image column.",
-                                "Use a column returned by the parent node.",
-                            )
-                            .with_node_id(&node.id),
-                        );
-                    }
-                    if features.is_empty() {
-                        report.errors.push(
-                            WorkflowValidationIssue::new(
-                                "model_features_required",
-                                "SigLIP needs at least one typed feature definition.",
-                                "Add a descriptive feature such as is_gripper_open_feature.",
-                            )
-                            .with_node_id(&node.id),
-                        );
-                    }
-                    if features.len() > MAX_SIGLIP_FEATURES {
-                        report.errors.push(WorkflowValidationIssue::new("too_many_model_features", &format!(
-                            "SigLIP supports at most {MAX_SIGLIP_FEATURES} features per Model node."
-                        ), "Remove features or split the work into sequential Model nodes.").with_node_id(&node.id));
-                    }
-                    let mut feature_names = BTreeSet::new();
-                    for (feature_index, feature) in features.iter().enumerate() {
-                        let untouched = feature.name.trim().is_empty()
-                            && feature.description.trim().is_empty()
-                            && feature.concept.trim().is_empty();
-                        if untouched {
-                            report.errors.push(
-                                WorkflowValidationIssue::new(
-                                    "incomplete_feature_definition",
-                                    &format!("Complete Feature {}.", feature_index + 1),
-                                    "Enter a feature name, description, and model concept.",
-                                )
-                                .with_node_id(&node.id),
-                            );
-                        } else {
-                            if !feature.has_valid_name() {
-                                report.errors.push(WorkflowValidationIssue::new("invalid_feature_name", "Output names must be unique SQL identifiers.", "Use a name such as is_raining_feature or is_gripper_open_feature.").with_node_id(&node.id));
-                            } else if !feature_names.insert(feature.name.as_str()) {
-                                report.errors.push(
-                                    WorkflowValidationIssue::new(
-                                        "duplicate_feature_name",
-                                        "Feature names must be unique within one Model node.",
-                                        "Remove the duplicate feature definition.",
-                                    )
-                                    .with_node_id(&node.id),
-                                );
-                            }
-                            if feature.description.trim().is_empty()
-                                || feature.description.chars().count()
-                                    > MAX_WORKFLOW_FEATURE_DESCRIPTION_LENGTH
-                            {
-                                report.errors.push(WorkflowValidationIssue::new("invalid_feature_description", "Feature descriptions must be present and bounded.", "Describe what the score measures in 240 characters or fewer.").with_node_id(&node.id));
-                            }
-                            if feature.concept.trim().is_empty()
-                                || feature.concept.chars().count() > MAX_SIGLIP_CONCEPT_LENGTH
-                            {
-                                report.errors.push(
-                                    WorkflowValidationIssue::new(
-                                        "invalid_feature_concept",
-                                        "Feature model text must be present and bounded.",
-                                        "Use a short visual phrase of 80 characters or fewer.",
-                                    )
-                                    .with_node_id(&node.id),
-                                );
-                            }
-                        }
-                    }
-                }
-                WorkflowNodeConfig::Query { sql, max_rows } => {
-                    if let Err(error) =
-                        ReadOnlyQuery::new(sql, ReadOnlyQueryMode::Training).authorize()
-                    {
-                        report.errors.push(
-                            WorkflowValidationIssue::new(
-                                "query_not_read_only",
-                                &error.to_string().replace("Training SQL", "Workflow SQL"),
-                                "Use one read-only SELECT or WITH query.",
-                            )
-                            .with_node_id(&node.id),
-                        );
-                    }
-                    if !(1..=MAX_WORKFLOW_QUERY_ROWS).contains(max_rows) {
-                        report.errors.push(WorkflowValidationIssue::new("query_row_limit", &format!(
-                            "Workflow query row limit must be between 1 and {MAX_WORKFLOW_QUERY_ROWS}."
-                        ), "Choose a bounded row limit.").with_node_id(&node.id));
-                    }
-                    if let Err(error) = WorkflowSql::from(sql.as_str()).node_placeholders() {
-                        report.errors.push(
-                            WorkflowValidationIssue::new(
-                                "malformed_placeholder",
-                                &error.to_string(),
-                                "Use exact placeholders such as {{node:table}}.",
-                            )
-                            .with_node_id(&node.id),
-                        );
-                    }
-                }
-                WorkflowNodeConfig::Result => {}
-            }
-        }
-
-        if spec.nodes.is_empty() {
-            report.errors.push(WorkflowValidationIssue::new(
-                "empty_workflow",
-                "A workflow needs a source and a Result node.",
-                "Add a SQL or Table source and connect it to a terminal Result.",
-            ));
-            return report;
-        }
-
-        let mut outgoing: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-        let mut incoming: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-        let mut unique_edges = BTreeSet::new();
-        for edge in &spec.edges {
-            if !unique_edges.insert((edge.source.as_str(), edge.target.as_str())) {
-                report.errors.push(
-                    WorkflowValidationIssue::new(
-                        "duplicate_edge",
-                        "Workflow edges must be unique.",
-                        "Remove the repeated connection.",
-                    )
-                    .with_node_id(&edge.target),
-                );
-            }
-            let Some(source) = nodes.get(edge.source.as_str()) else {
-                report.errors.push(
-                    WorkflowValidationIssue::new(
-                        "unknown_edge_source",
-                        "A workflow edge references an unknown source node.",
-                        "Reconnect the edge to an existing node.",
-                    )
-                    .with_node_id(&edge.source),
-                );
-                continue;
-            };
-            let Some(target) = nodes.get(edge.target.as_str()) else {
-                report.errors.push(
-                    WorkflowValidationIssue::new(
-                        "unknown_edge_target",
-                        "A workflow edge references an unknown target node.",
-                        "Reconnect the edge to an existing node.",
-                    )
-                    .with_node_id(&edge.target),
-                );
-                continue;
-            };
-            if !source.config.allows_transition_to(&target.config) {
-                report.errors.push(
-                    WorkflowValidationIssue::new(
-                        "invalid_transition",
-                        &format!(
-                            "{} cannot feed {} in a workflow.",
-                            source.config.label(),
-                            target.config.label(),
-                        ),
-                        "Connect sources, SQL, and Models to a terminal Result.",
-                    )
-                    .with_node_id(&edge.target),
-                );
-            }
-            outgoing
-                .entry(edge.source.as_str())
-                .or_default()
-                .push(edge.target.as_str());
-            incoming
-                .entry(edge.target.as_str())
-                .or_default()
-                .push(edge.source.as_str());
-        }
-
-        let topology = WorkflowTopology {
-            nodes,
-            incoming,
-            outgoing,
-        };
-        let nodes = &topology.nodes;
-        let incoming = &topology.incoming;
-        let outgoing = &topology.outgoing;
-        let source_count = spec
-            .nodes
-            .iter()
-            .filter(|node| {
-                matches!(
-                    node.config,
-                    WorkflowNodeConfig::Table { .. } | WorkflowNodeConfig::Query { .. }
-                ) && incoming.get(node.id.as_str()).is_none_or(Vec::is_empty)
-            })
-            .count();
-        if source_count == 0 {
-            report.errors.push(WorkflowValidationIssue::new(
-                "missing_source",
-                "A workflow needs at least one SQL or Table source.",
-                "Read a dataset or table with a SQL source, or choose a Table source.",
-            ));
-        }
-
-        let result_count = spec
-            .nodes
-            .iter()
-            .filter(|node| matches!(node.config, WorkflowNodeConfig::Result))
-            .count();
-        if result_count == 0 {
-            report.errors.push(WorkflowValidationIssue::new(
-                "missing_result",
-                "A Workflow needs exactly one terminal Result node.",
-                "Connect the final Query to one Result node.",
-            ));
-        } else if result_count > 1 {
-            report.errors.push(WorkflowValidationIssue::new(
-                "multiple_results",
-                "A Workflow supports exactly one terminal Result node.",
-                "Keep one Result node so the run owns one unambiguous payload.",
-            ));
-        }
-
-        for node in &spec.nodes {
-            let in_degree = incoming.get(node.id.as_str()).map_or(0, Vec::len);
-            let out_degree = outgoing.get(node.id.as_str()).map_or(0, Vec::len);
-            if out_degree == 0 && !matches!(node.config, WorkflowNodeConfig::Result) {
-                report.errors.push(
-                    WorkflowValidationIssue::new(
-                        "orphan_terminal",
-                        "Every non-Result node must contribute to the terminal Result.",
-                        "Connect this node downstream or remove the orphan branch.",
-                    )
-                    .with_node_id(&node.id),
-                );
-            }
-            match &node.config {
-                WorkflowNodeConfig::Table { .. } if in_degree != 0 => report.errors.push(
-                    WorkflowValidationIssue::new(
-                        "table_not_root",
-                        "Table nodes must be roots.",
-                        "Remove incoming edges from this Table node.",
-                    )
-                    .with_node_id(&node.id),
-                ),
-                WorkflowNodeConfig::Result if out_degree != 0 => report.errors.push(
-                    WorkflowValidationIssue::new(
-                        "result_not_terminal",
-                        "Result nodes must be terminal.",
-                        "Remove outgoing edges from this Result node.",
-                    )
-                    .with_node_id(&node.id),
-                ),
-                WorkflowNodeConfig::Result if in_degree != 1 => report.errors.push(
-                    WorkflowValidationIssue::new(
-                        "result_input_count",
-                        "A Result node must have exactly one input.",
-                        "Connect one Query node to this Result.",
-                    )
-                    .with_node_id(&node.id),
-                ),
-                WorkflowNodeConfig::Model { .. } if in_degree != 1 => report.errors.push(
-                    WorkflowValidationIssue::new(
-                        "model_input_count",
-                        "A Model node needs exactly one input.",
-                        "Connect a node that returns the configured image column.",
-                    )
-                    .with_node_id(&node.id),
-                ),
-                WorkflowNodeConfig::Query { sql, .. } => {
-                    if let Ok(placeholders) = WorkflowSql::from(sql.as_str()).node_placeholders() {
-                        let upstream = incoming
-                            .get(node.id.as_str())
-                            .into_iter()
-                            .flatten()
-                            .copied()
-                            .collect::<BTreeSet<_>>();
-                        if placeholders.is_empty() && !upstream.is_empty() {
-                            report.errors.push(
-                                WorkflowValidationIssue::new(
-                                    "query_placeholder_required",
-                                    "Workflow SQL must reference an upstream node placeholder.",
-                                    "Use a placeholder such as {{node:table}} in FROM or JOIN.",
-                                )
-                                .with_node_id(&node.id),
-                            );
-                        }
-                        for placeholder in &placeholders {
-                            if !nodes.contains_key(placeholder.as_str()) {
-                                report.errors.push(WorkflowValidationIssue::new("unknown_placeholder", &format!("Workflow SQL references unknown node {placeholder:?}."), "Reference an existing connected upstream Table, Query, or Model node.").with_node_id(&node.id));
-                            } else if !upstream.contains(placeholder.as_str()) {
-                                report.errors.push(WorkflowValidationIssue::new("non_upstream_placeholder", &format!(
-                                    "Workflow SQL references {placeholder:?}, which is not connected upstream."
-                                ), "Connect that node to this Query or remove the placeholder.").with_node_id(&node.id));
-                            }
-                        }
-                        for upstream_id in upstream {
-                            if !placeholders.iter().any(|id| id == upstream_id) {
-                                report.errors.push(WorkflowValidationIssue::new("unused_upstream_edge", &format!(
-                                    "Upstream node {upstream_id:?} is connected but not referenced by Workflow SQL."
-                                ), "Use its {{node:<id>}} placeholder or remove the edge.").with_node_id(&node.id));
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        if topology.ordered_nodes().is_err() {
-            report.errors.push(WorkflowValidationIssue::new(
-                "workflow_cycle",
-                "Workflow lineage must be acyclic.",
-                "Remove the connection that feeds a downstream node back upstream.",
-            ));
-        }
-        report
-    }
-
-    pub fn topological_order(&self) -> Result<Vec<String>, String> {
-        let topology = WorkflowTopology::from(self);
-        if topology.nodes.len() != self.nodes.len() {
-            return Err("Workflow node identities must be unique.".to_owned());
-        }
-        topology.ordered_nodes()
-    }
-
-    pub fn has_model(&self) -> bool {
-        self.nodes
-            .iter()
-            .any(|node| matches!(node.config, WorkflowNodeConfig::Model { .. }))
-    }
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub fn set_name(&mut self, name: impl Into<String>) {
-        self.name = name.into();
-    }
-}
-
-impl WorkflowSpec {
-    pub fn id(&self) -> &str {
-        &self.id
-    }
-    pub const fn revision(&self) -> u64 {
-        self.revision
-    }
-    pub fn nodes(&self) -> &[WorkflowNodeSpec] {
-        &self.nodes
-    }
-    pub fn edges(&self) -> &[WorkflowEdgeSpec] {
-        &self.edges
-    }
-    pub fn nodes_mut(&mut self) -> &mut Vec<WorkflowNodeSpec> {
-        &mut self.nodes
-    }
-    pub fn edges_mut(&mut self) -> &mut Vec<WorkflowEdgeSpec> {
-        &mut self.edges
-    }
-    pub const fn set_revision(&mut self, revision: u64) {
-        self.revision = revision;
-    }
-}
-impl WorkflowNodeSpec {
-    pub fn new(id: impl Into<String>, name: impl Into<String>, config: WorkflowNodeConfig) -> Self {
-        Self {
-            id: id.into(),
-            name: name.into(),
-            config,
-        }
-    }
-    pub fn id(&self) -> &str {
-        &self.id
-    }
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-    pub const fn config(&self) -> &WorkflowNodeConfig {
-        &self.config
-    }
-    pub fn config_mut(&mut self) -> &mut WorkflowNodeConfig {
-        &mut self.config
-    }
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn set_config(&mut self, config: WorkflowNodeConfig) {
-        self.config = config;
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn set_id(&mut self, id: impl Into<String>) {
-        self.id = id.into();
-    }
-
-    pub fn set_name(&mut self, name: impl Into<String>) {
-        self.name = name.into();
-    }
-}
-impl WorkflowEdgeSpec {
-    pub fn new(source: impl Into<String>, target: impl Into<String>) -> Self {
-        Self {
-            source: source.into(),
-            target: target.into(),
-        }
-    }
-    pub fn source(&self) -> &str {
-        &self.source
-    }
-    pub fn target(&self) -> &str {
-        &self.target
-    }
-}
-impl WorkflowValidationReport {
-    pub fn errors(&self) -> &[WorkflowValidationIssue] {
-        &self.errors
-    }
-}
-
-impl WorkflowNodeProgress {
-    pub const fn completed(&self) -> u64 {
-        self.completed
-    }
-    pub const fn total(&self) -> u64 {
-        self.total
-    }
-    pub fn unit(&self) -> &str {
-        &self.unit
-    }
-}
 impl WorkflowAgentReadiness {
     pub fn ready(detail: impl Into<String>) -> Self {
         Self::Ready {
@@ -1692,7 +748,7 @@ impl WorkflowAgentReadiness {
     }
 }
 impl WorkflowAgentArtifactReceipt {
-    pub fn graph(label: impl Into<String>, revision: u64) -> Self {
+    pub fn authored(label: impl Into<String>, revision: u64) -> Self {
         Self {
             label: label.into(),
             revision,
@@ -1751,426 +807,32 @@ impl WorkflowAgentToolSummary {
         self.receipt.as_ref()
     }
 }
-impl WorkflowQuarantineSummary {
-    pub const fn count(&self) -> u64 {
-        self.count
-    }
-    pub fn examples(&self) -> &[String] {
-        &self.examples
-    }
-    pub const fn set_count(&mut self, count: u64) {
-        self.count = count;
-    }
-    pub fn examples_mut(&mut self) -> &mut Vec<String> {
-        &mut self.examples
-    }
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn new(count: u64, examples: Vec<String>) -> Self {
-        Self { count, examples }
-    }
-}
 
-/// One indexed representation of lineage, shared by validation and normalization.
-struct WorkflowTopology<'a> {
-    nodes: BTreeMap<&'a str, &'a WorkflowNodeSpec>,
-    incoming: BTreeMap<&'a str, Vec<&'a str>>,
-    outgoing: BTreeMap<&'a str, Vec<&'a str>>,
-}
-
-impl<'a> From<&'a WorkflowSpec> for WorkflowTopology<'a> {
-    fn from(spec: &'a WorkflowSpec) -> Self {
-        let mut topology = Self {
-            nodes: spec
-                .nodes
-                .iter()
-                .map(|node| (node.id.as_str(), node))
-                .collect(),
-            incoming: BTreeMap::new(),
-            outgoing: BTreeMap::new(),
-        };
-        for edge in &spec.edges {
-            topology
-                .incoming
-                .entry(&edge.target)
-                .or_default()
-                .push(&edge.source);
-            topology
-                .outgoing
-                .entry(&edge.source)
-                .or_default()
-                .push(&edge.target);
-        }
-        topology
-    }
-}
-
-impl<'a> WorkflowTopology<'a> {
-    fn ordered_nodes(&self) -> Result<Vec<String>, String> {
-        for source in self.outgoing.keys() {
-            if !self.nodes.contains_key(source) {
-                return Err(format!("unknown source {source:?}"));
-            }
-        }
-        for target in self.incoming.keys() {
-            if !self.nodes.contains_key(target) {
-                return Err(format!("unknown target {target:?}"));
-            }
-        }
-        let mut degrees = self
-            .nodes
-            .keys()
-            .map(|id| (*id, self.incoming.get(id).map_or(0, Vec::len)))
-            .collect::<BTreeMap<_, _>>();
-        let mut ready = degrees
-            .iter()
-            .filter_map(|(id, degree)| (*degree == 0).then_some(*id))
-            .collect::<VecDeque<_>>();
-        let mut ordered = Vec::with_capacity(self.nodes.len());
-        while let Some(id) = ready.pop_front() {
-            ordered.push(id.to_owned());
-            for target in self.outgoing.get(id).into_iter().flatten() {
-                let degree = degrees.get_mut(target).expect("edges were checked");
-                *degree -= 1;
-                if *degree == 0 {
-                    ready.push_back(target);
-                }
-            }
-        }
-        if ordered.len() == self.nodes.len() {
-            Ok(ordered)
-        } else {
-            Err("workflow contains a cycle".to_owned())
-        }
+impl WorkflowValidationReport {
+    pub fn errors(&self) -> &[WorkflowValidationIssue] {
+        &self.errors
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
-    fn sql_sources_join_without_table_nodes_and_require_matching_connections() {
-        let mut workflow = WorkflowSpec::new("sql-sources", "Join SQL sources");
-        for (id, sql) in [
-            ("left", "SELECT 1 AS id"),
-            ("right", "SELECT 1 AS id"),
-            (
-                "joined",
-                "SELECT l.id FROM {{node:left}} l JOIN {{node:right}} r ON l.id = r.id",
-            ),
-        ] {
-            workflow.nodes_mut().push(WorkflowNodeSpec::new(
-                id,
-                id,
-                WorkflowNodeConfig::Query {
-                    sql: sql.into(),
-                    max_rows: 100,
-                },
-            ));
-        }
-        workflow.nodes_mut().push(WorkflowNodeSpec::new(
-            "result",
-            "Result",
-            WorkflowNodeConfig::Result,
-        ));
-        *workflow.edges_mut() = vec![
-            WorkflowEdgeSpec::new("left", "joined"),
-            WorkflowEdgeSpec::new("right", "joined"),
-            WorkflowEdgeSpec::new("joined", "result"),
-        ];
-        assert!(workflow.validate().valid(), "{:?}", workflow.validate());
-        workflow.edges_mut().remove(1);
-        assert!(
-            workflow
-                .validate()
-                .errors()
-                .iter()
-                .any(|issue| issue.code() == "non_upstream_placeholder")
-        );
-    }
-
-    fn runnable_spec() -> WorkflowSpec {
-        WorkflowSpec {
-            nodes: vec![
-                WorkflowNodeSpec {
-                    id: "frames".to_owned(),
-                    name: "Frames".to_owned(),
-                    config: WorkflowNodeConfig::Table {
-                        relation: "pick_place.camera_frames".to_owned(),
-                    },
-                },
-                WorkflowNodeSpec {
-                    id: "query".to_owned(),
-                    name: "Read frames".to_owned(),
-                    config: WorkflowNodeConfig::Query {
-                        sql: "SELECT * FROM {{node:frames}} LIMIT 10".to_owned(),
-                        max_rows: 10,
-                    },
-                },
-                WorkflowNodeSpec {
-                    id: "result".to_owned(),
-                    name: "Results".to_owned(),
-                    config: WorkflowNodeConfig::Result,
-                },
-            ],
-            edges: vec![
-                WorkflowEdgeSpec {
-                    source: "frames".to_owned(),
-                    target: "query".to_owned(),
-                },
-                WorkflowEdgeSpec {
-                    source: "query".to_owned(),
-                    target: "result".to_owned(),
-                },
-            ],
-            ..WorkflowSpec::default()
-        }
-    }
-
-    #[test]
-    fn serde_shape_is_tagged_and_stable() {
-        let json = serde_json::to_value(runnable_spec()).unwrap();
-        assert_eq!(json["nodes"][0]["kind"], "table");
-        assert_eq!(json["nodes"][1]["kind"], "query");
-        assert_eq!(json["nodes"][2]["kind"], "result");
-        let decoded: WorkflowSpec = serde_json::from_value(json).unwrap();
-        assert!(decoded.validate().valid());
-    }
-
-    #[test]
-    fn agent_phase_reports_only_real_active_work() {
-        assert!(WorkflowAgentPhase::Responding.active());
-        assert!(WorkflowAgentPhase::Cancelling.active());
-        assert!(!WorkflowAgentPhase::Idle.active());
-        assert!(!WorkflowAgentPhase::Failed.active());
-    }
-
-    #[test]
-    fn runnable_table_query_result_is_valid() {
-        let spec = runnable_spec();
-        assert!(spec.validate().valid());
+    fn sql_is_the_only_executable_definition() {
+        let workflow = WorkflowSpec::new("query", "Query").with_sql("SELECT 1");
+        assert!(workflow.validate().valid());
+        let mut json = serde_json::to_value(&workflow).unwrap();
         assert_eq!(
-            spec.topological_order().unwrap(),
-            ["frames", "query", "result"]
+            serde_json::from_value::<WorkflowSpec>(json.clone()).unwrap(),
+            workflow
         );
-    }
-
-    #[test]
-    fn graph_validation_rejects_duplicates_cycles_and_nonterminal_results() {
-        let mut duplicate = runnable_spec();
-        duplicate.nodes.push(duplicate.nodes[0].clone());
-        assert!(duplicate.topological_order().is_err());
+        json["nodes"] = serde_json::json!([]);
+        assert!(serde_json::from_value::<WorkflowSpec>(json).is_err());
         assert!(
-            duplicate
+            !WorkflowSpec::new("query", "Query")
+                .with_sql("DELETE FROM episodes")
                 .validate()
-                .errors
-                .iter()
-                .any(|issue| issue.code == "duplicate_node_id")
+                .valid()
         );
-
-        let mut cycle = runnable_spec();
-        cycle.edges.push(WorkflowEdgeSpec {
-            source: "result".to_owned(),
-            target: "query".to_owned(),
-        });
-        let report = cycle.validate();
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|issue| issue.code == "result_not_terminal")
-        );
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|issue| issue.code == "workflow_cycle")
-        );
-    }
-
-    #[test]
-    fn placeholders_must_be_known_connected_and_exact() {
-        let mut unknown = runnable_spec();
-        let WorkflowNodeConfig::Query { sql, .. } = &mut unknown.nodes[1].config else {
-            unreachable!()
-        };
-        *sql = "SELECT * FROM {{node:missing}}".to_owned();
-        assert!(
-            unknown
-                .validate()
-                .errors
-                .iter()
-                .any(|issue| issue.code == "unknown_placeholder")
-        );
-
-        let mut non_upstream = runnable_spec();
-        non_upstream.nodes.insert(
-            1,
-            WorkflowNodeSpec {
-                id: "other".to_owned(),
-                name: "Other".to_owned(),
-                config: WorkflowNodeConfig::Table {
-                    relation: "pick_place.joint_state".to_owned(),
-                },
-            },
-        );
-        let WorkflowNodeConfig::Query { sql, .. } = &mut non_upstream.nodes[2].config else {
-            unreachable!()
-        };
-        *sql = "SELECT * FROM {{node:other}}".to_owned();
-        assert!(
-            non_upstream
-                .validate()
-                .errors
-                .iter()
-                .any(|issue| issue.code == "non_upstream_placeholder")
-        );
-
-        let mut malformed = runnable_spec();
-        let WorkflowNodeConfig::Query { sql, .. } = &mut malformed.nodes[1].config else {
-            unreachable!()
-        };
-        *sql = "SELECT * FROM {{node:frames}".to_owned();
-        assert!(
-            malformed
-                .validate()
-                .errors
-                .iter()
-                .any(|issue| issue.code == "malformed_placeholder")
-        );
-    }
-
-    #[test]
-    fn model_columns_use_ordinary_sql_names() {
-        assert!(WorkflowModelFeature::new("weather", "Weather match", "rain").has_valid_name());
-        assert!(!WorkflowModelFeature::new("bad-name", "Bad", "rain").has_valid_name());
-        let mut graph = WorkflowSpec::new("generic", "Generic model");
-        graph.nodes_mut().extend([
-            WorkflowNodeSpec::new(
-                "source",
-                "Images",
-                WorkflowNodeConfig::Query {
-                    sql: "SELECT 1 AS image".into(),
-                    max_rows: 10,
-                },
-            ),
-            WorkflowNodeSpec::new(
-                "model",
-                "Weather",
-                WorkflowNodeConfig::Model {
-                    image_column: "image".into(),
-                    features: vec![WorkflowModelFeature::new(
-                        "weather",
-                        "Weather match",
-                        "rain",
-                    )],
-                },
-            ),
-            WorkflowNodeSpec::new("result", "Results", WorkflowNodeConfig::Result),
-        ]);
-        graph.edges_mut().extend([
-            WorkflowEdgeSpec::new("source", "model"),
-            WorkflowEdgeSpec::new("model", "result"),
-        ]);
-        // Arrow types are checked by the backend planner, independently of structure.
-        assert!(graph.validate().valid());
-        let wire = serde_json::to_value(&graph).unwrap();
-        assert!(
-            wire["nodes"][1]["features"][0]
-                .get("applicability")
-                .is_none()
-        );
-        assert_eq!(serde_json::from_value::<WorkflowSpec>(wire).unwrap(), graph);
-    }
-
-    #[test]
-    fn mutating_sql_and_relation_injection_are_rejected() {
-        let mut spec = runnable_spec();
-        let WorkflowNodeConfig::Table { relation } = &mut spec.nodes[0].config else {
-            unreachable!()
-        };
-        *relation = "pick_place.frames;DROP".to_owned();
-        let WorkflowNodeConfig::Query { sql, .. } = &mut spec.nodes[1].config else {
-            unreachable!()
-        };
-        *sql = "DELETE FROM {{node:frames}}".to_owned();
-        let report = spec.validate();
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|issue| issue.code == "invalid_relation")
-        );
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|issue| issue.code == "query_not_read_only")
-        );
-    }
-
-    #[test]
-    fn exactly_one_result_owns_the_terminal_payload() {
-        let mut missing = runnable_spec();
-        missing.nodes.pop();
-        missing.edges.pop();
-        let report = missing.validate();
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|issue| issue.code == "missing_result")
-        );
-
-        let mut multiple = runnable_spec();
-        multiple.nodes.push(WorkflowNodeSpec {
-            id: "other_result".to_owned(),
-            name: "Other result".to_owned(),
-            config: WorkflowNodeConfig::Result,
-        });
-        multiple.edges.push(WorkflowEdgeSpec {
-            source: "query".to_owned(),
-            target: "other_result".to_owned(),
-        });
-        let report = multiple.validate();
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|issue| issue.code == "multiple_results")
-        );
-    }
-
-    #[test]
-    fn orphan_branches_cannot_make_execution_order_define_the_result() {
-        let mut table_only = runnable_spec();
-        table_only.nodes.truncate(1);
-        table_only.edges.clear();
-        let report = table_only.validate();
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|issue| issue.code == "missing_result")
-        );
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|issue| issue.code == "orphan_terminal")
-        );
-
-        let mut orphan = runnable_spec();
-        orphan.nodes.push(WorkflowNodeSpec {
-            id: "orphan".to_owned(),
-            name: "Orphan table".to_owned(),
-            config: WorkflowNodeConfig::Table {
-                relation: "pick_place.joint_state".to_owned(),
-            },
-        });
-        let report = orphan.validate();
-        assert!(report.errors.iter().any(|issue| {
-            issue.code == "orphan_terminal" && issue.node_id.as_deref() == Some("orphan")
-        }));
     }
 }

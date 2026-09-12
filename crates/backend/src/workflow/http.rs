@@ -22,7 +22,7 @@ impl WorkflowEndpoints {
         routes.get("/workflow-runs", Self::runs);
         routes.post("/workflow-runs", Self::start);
         routes.get("/workflow-runs/{id}", Self::run);
-        routes.post("/workflow-runs/{id}/cancel", Self::cancel);
+        routes.get("/models/capabilities", Self::capabilities);
         routes.post("/datasets/cameras", Self::cameras);
         routes.get("/models/status", Self::model_status);
         routes.post("/models/complete", Self::complete);
@@ -67,11 +67,10 @@ impl WorkflowEndpoints {
     ) -> Result<Json<WorkflowRun>, HttpFailure> {
         Ok(Json(commands.run(&id)?))
     }
-    async fn cancel(
+    async fn capabilities(
         ScopedProject(commands): ScopedProject<WorkflowCommands>,
-        ApiPath(id): ApiPath<String>,
-    ) -> Result<Json<WorkflowRun>, HttpFailure> {
-        Ok(Json(commands.cancel(&id)?))
+    ) -> Result<Json<spiral_robotics_common::relations::SpiralQuerySnapshot>, HttpFailure> {
+        Ok(Json(commands.capabilities().await?))
     }
     async fn cameras(
         ScopedProject(commands): ScopedProject<WorkflowCommands>,

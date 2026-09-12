@@ -168,7 +168,7 @@ fn DataPanels() -> Element {
     if (tabs.importing)() {
         panels.push(Panel::new("data-import", "Import", "datasets", rsx! {
             super::import_dataset::ImportDataset {
-                on_done: move |name| { imported_dataset.set(Some(name)); super::relations::RelationCatalogState::refresh(); },
+                on_done: move |name| { imported_dataset.set(Some(name)); super::relations::CatalogRefresh::request(); },
             }
         }).with_closable(true).with_class("data-object-panel"));
     }

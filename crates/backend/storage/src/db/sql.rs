@@ -278,6 +278,26 @@ impl<'a> ProjectQueries<'a> {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn a_preview_limit_does_not_hide_a_late_query_failure() {
+        use crate::db::database::DatabaseError;
+        use arrow_array::Int64Array;
+        let batch = RecordBatch::try_from_iter([(
+            "value",
+            Arc::new(Int64Array::from(vec![1, 2, 3])) as arrow_array::ArrayRef,
+        )])
+        .unwrap();
+        let records = RecordBatchStream::new(
+            batch.schema(),
+            Box::pin(futures::stream::iter([
+                Ok(batch),
+                Err(DatabaseError::invalid_input("late inference failure")),
+            ])),
+        );
+        let error = records.into_preview_drained(1).await.unwrap_err();
+        assert!(error.contains("late inference failure"), "{error}");
+    }
+
     #[test]
     fn generated_values_are_escaped_in_one_place() {
         fn assert_single_literal(sql: &str, value: &str) {
@@ -386,14 +406,13 @@ impl QueryExecution<'_> {
 }
 
 impl RecordBatchStream {
-    /// Convert only the terminal output to a bounded browser preview. Graph
-    /// operators exchange Arrow values without a JSON round trip.
+    /// Convert query output to a bounded browser preview.
     pub async fn into_preview(self, max_rows: usize) -> Result<SpiralQuerySnapshot, String> {
         QueryLimits::new(max_rows.clamp(1, MAX_QUERY_ROWS), MAX_QUERY_RESPONSE_BYTES)
             .collect(self)
             .await
     }
-    /// A preview limit bounds the browser payload, not graph execution. Drain
+    /// A preview limit bounds the browser payload, not query execution. Drain
     /// the remaining batches to finish inference and surface late errors.
     pub async fn into_preview_drained(
         mut self,

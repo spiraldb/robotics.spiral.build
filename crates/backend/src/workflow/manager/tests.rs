@@ -1,5 +1,4 @@
 use super::*;
-use spiral_robotics_common::workflow::{WorkflowEdgeSpec, WorkflowNodeConfig, WorkflowNodeSpec};
 use spiral_robotics_storage::ProjectStore;
 use std::time::Duration;
 struct WorkflowFixture {
@@ -14,30 +13,12 @@ impl WorkflowFixture {
             store,
         }
     }
-    fn graph() -> WorkflowSpec {
-        let mut graph = WorkflowSpec::new("draft", "Unsaved query");
-        graph.nodes_mut().extend([
-            WorkflowNodeSpec::new(
-                "source",
-                "Source",
-                WorkflowNodeConfig::Query {
-                    sql: "SELECT 42 AS answer".into(),
-                    max_rows: 10,
-                },
-            ),
-            WorkflowNodeSpec::new("result", "Result", WorkflowNodeConfig::Result),
-        ]);
-        graph
-            .edges_mut()
-            .push(WorkflowEdgeSpec::new("source", "result"));
-        graph
+    fn query() -> WorkflowSpec {
+        WorkflowSpec::new("draft", "Unsaved query").with_sql("SELECT 42 AS answer")
     }
     fn saved() -> SavedWorkflow {
-        let workflow = Self::graph();
-        SavedWorkflow {
-            snapshot: WorkflowRunSnapshot::idle_for(&workflow),
-            workflow,
-        }
+        let workflow = Self::query();
+        SavedWorkflow { workflow }
     }
     async fn finished(&self, id: &str) -> WorkflowRun {
         tokio::time::timeout(Duration::from_secs(15), async {
@@ -50,20 +31,16 @@ impl WorkflowFixture {
             }
         })
         .await
-        .expect("graph terminates")
+        .expect("query terminates")
     }
 }
 #[test]
 fn stored_workflow_versions_are_explicit_and_unsupported_documents_are_preserved() {
     let saved = WorkflowFixture::saved();
     let stored = saved.persisted().unwrap();
-    assert_eq!(stored.version(), 3);
-    assert_eq!(
-        SavedWorkflow::restored(&WorkflowJson::new(2, stored.payload().to_owned())).unwrap(),
-        saved
-    );
+    assert_eq!(stored.version(), 4);
     assert_eq!(SavedWorkflow::restored(&stored).unwrap(), saved);
-    for version in [1, 4] {
+    for version in [1, 2, 3, 5] {
         let unsupported = WorkflowJson::new(version, stored.payload().to_owned());
         let original = unsupported.payload().to_owned();
         let error = SavedWorkflow::restored(&unsupported).unwrap_err();
@@ -81,7 +58,7 @@ fn stored_workflow_versions_are_explicit_and_unsupported_documents_are_preserved
 }
 
 #[test]
-fn saved_workflow_rejects_graph_history_and_mismatched_snapshots() {
+fn saved_workflow_rejects_extra_fields_and_legacy_snapshots() {
     let saved = WorkflowFixture::saved();
     let original = serde_json::to_value(&saved).unwrap();
     let mut history = original.clone();
@@ -102,9 +79,9 @@ fn saved_workflow_rejects_graph_history_and_mismatched_snapshots() {
 }
 
 #[tokio::test]
-async fn execute_accepts_an_unsaved_graph_and_keeps_its_exact_input() {
+async fn execute_accepts_unsaved_sql_and_keeps_its_exact_input() {
     let fixture = WorkflowFixture::new();
-    let mut graph = WorkflowFixture::graph();
+    let mut graph = WorkflowFixture::query();
     let submitted = graph.clone();
     let run = fixture.manager.start(graph.clone()).unwrap();
     graph.set_name("Next draft");
@@ -155,53 +132,36 @@ async fn execute_accepts_an_unsaved_graph_and_keeps_its_exact_input() {
 #[tokio::test]
 async fn planning_checks_native_sql_without_creating_a_run() {
     let fixture = WorkflowFixture::new();
-    let mut graph = WorkflowFixture::graph();
-    assert!(fixture.manager.plan(&graph).await.error().is_none());
-    graph.nodes_mut()[0].set_config(WorkflowNodeConfig::Query {
-        sql: "SELECT missing_column".into(),
-        max_rows: 10,
-    });
-    assert!(
-        fixture
-            .manager
-            .plan(&graph)
-            .await
-            .error()
-            .unwrap()
-            .contains("source")
-    );
+    let mut graph = WorkflowFixture::query();
+    let plan = fixture.manager.plan(&graph).await;
+    assert!(plan.error().is_none(), "{:?}", plan.error());
+    graph.set_sql("SELECT missing_column");
+    assert!(fixture.manager.plan(&graph).await.error().is_some());
     assert!(fixture.manager.runs().is_empty());
 }
 
 #[tokio::test]
-async fn cancel_is_run_scoped_and_wins_before_terminal_publication() {
+async fn native_capabilities_and_plan_do_not_execute_inference() {
     let fixture = WorkflowFixture::new();
-    let graph = WorkflowFixture::graph();
-    let run = fixture.manager.start(graph).unwrap();
-    let id = run.snapshot().run_id().unwrap();
-    assert!(fixture.manager.cancel("another-run").is_err());
-    assert_eq!(
-        fixture.manager.cancel(id).unwrap().snapshot().phase(),
-        WorkflowRunPhase::Cancelling
+    let query = WorkflowQuery::new(fixture.store.clone());
+    let capabilities = query.capabilities().await.unwrap();
+    assert!(
+        capabilities
+            .rows()
+            .iter()
+            .any(|row| row["function_set"] == "spql.ai.score"),
+        "{:?}",
+        capabilities.rows()
     );
-    let finished = fixture.finished(id).await;
-    assert_eq!(finished.snapshot().phase(), WorkflowRunPhase::Cancelled);
-    assert!(finished.snapshot().result().is_none());
-    assert!(!fixture.manager.is_active());
-    assert_eq!(fixture.manager.cancel(id).unwrap(), finished);
-}
-
-#[tokio::test]
-async fn progress_and_cancel_do_not_wait_for_an_arrow_read_lease() {
-    let fixture = WorkflowFixture::new();
-    let graph = WorkflowFixture::graph();
-    let run = fixture.manager.start(graph).unwrap();
-    let id = run.snapshot().run_id().unwrap();
-    let _input = fixture.store.connect().await.unwrap();
-    fixture
-        .manager
-        .node_event(id, NodeEvent::Started("source".into()));
-    fixture.manager.cancel(id).unwrap();
-    fixture.manager.shutdown().await;
-    assert!(!fixture.manager.is_active());
+    let workflow = WorkflowSpec::new("ai", "Native AI")
+        .with_sql("SELECT spql.ai.score(NULL, 'a dimly lit scene') AS score");
+    let plan = fixture.manager.plan(&workflow).await;
+    assert!(plan.error().is_none(), "{:?}", plan.error());
+    let report = plan.report().unwrap();
+    assert!(!report.logical().nodes().is_empty());
+    assert!(report.logical().node(report.logical().root()).is_some());
+    assert!(report.physical().is_some());
+    let result = query.run(&workflow).await.unwrap();
+    assert!(result.rows()[0]["score"].is_null());
+    assert!(fixture.manager.runs().is_empty());
 }

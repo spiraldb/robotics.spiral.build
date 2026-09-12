@@ -57,7 +57,9 @@ dx bundle --fullstack --release --debug-symbols false \
   @server --package spiral-robotics-backend
 ```
 
-Keep the bundle's `public` directory beside the server binary.
+Keep the bundle's `public` directory beside the server binary. Workflow displays
+Spiral’s structured query plans using Dioxus Flow in the browser. See
+[SQL workflow authoring](docs/workflow-authoring.md).
 
 Keep `--debug-symbols false` on browser builds: DX enables WASM debug symbols by
 default, and the bundled Binaryen currently fails when processing that DWARF.

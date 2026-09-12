@@ -2,7 +2,7 @@
 use crate::client::project::ProjectClient;
 use crate::client::transport::{CommandError, HttpRequest};
 use spiral_robotics_common::datasets::{DatasetInspection, DatasetSelection, ProjectResource};
-use spiral_robotics_common::relations::{QueryRequest, RelationCatalog, SpiralQuerySnapshot};
+use spiral_robotics_common::relations::{QueryRequest, SpiralQuerySnapshot};
 use std::future::Future;
 
 pub(crate) struct DatasetClient {
@@ -59,13 +59,6 @@ impl DatasetClient {
     > + use<> {
         self.project
             .request(HttpRequest::new("GET", "/api/datasets"))
-    }
-
-    pub(crate) fn relation_catalog(
-        &self,
-    ) -> impl Future<Output = Result<RelationCatalog, CommandError>> + use<> {
-        self.project
-            .request(HttpRequest::new("GET", "/api/relations"))
     }
 
     pub(crate) fn episode_topics(

@@ -14,7 +14,7 @@ pub(super) fn ResourceTree(resources: ResourceCatalog, tabs: ResourceTabs) -> El
     rsx! { section { class: "data-resource-tree", "aria-label": "SpiralDB catalog",
         div { class: "data-catalog-toolbar",
             input { class: "field", r#type: "search", placeholder: "Find tables or datasets…", "aria-label": "Find tables or datasets", value: search(), oninput: move |event| search.set(event.value()) }
-            button { class: "data-tree-refresh", "aria-label": "Refresh catalog", title: "Refresh catalog", onclick: move |_| super::relations::RelationCatalogState::refresh(),
+            button { class: "data-tree-refresh", "aria-label": "Refresh catalog", title: "Refresh catalog", onclick: move |_| super::relations::CatalogRefresh::request(),
                 crate::components::interaction::RefreshIcon {}
             }
         }

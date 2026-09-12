@@ -4,29 +4,21 @@ use std::rc::Rc;
 
 use crate::components::interaction::{Action, ActionPurpose, ActionVariant};
 use dioxus::prelude::*;
-use dioxus_flow::{
-    Background, BackgroundVariant, Flow, FlowHandle, Handle, HandleKind, LayoutDirection,
-    LayoutOptions, NodeViewCtx, Point, use_flow_handle,
-};
 use dioxus_workbench::{LayoutNode, Panel, PanelId, PanelLayout, PanelWorkspace, SplitAxis};
 use spiral_robotics_common::workflow::{
     WorkflowAgentMessagePhase, WorkflowAgentPhase, WorkflowAgentRole, WorkflowAgentToolPhase,
-    WorkflowAgentToolSummary, WorkflowNodeConfig, WorkflowNodePhase, WorkflowRunPhase,
+    WorkflowAgentToolSummary, WorkflowRunPhase,
 };
 
 use crate::activities::data::query_result::{QueryExecutionPresentation, QueryState};
 use crate::activities::workflow::state::{
-    ASSISTANT_PANEL_ID, AgentDraftKey, AgentPendingCommand, CANVAS_PANEL_ID, ModelFeatureTarget,
-    NODE_PANEL_ID, RESULTS_PANEL_ID, WorkflowNodeData, WorkflowNodeKind, WorkflowPendingCommand,
+    ASSISTANT_PANEL_ID, AgentDraftKey, AgentPendingCommand, CANVAS_PANEL_ID, NODE_PANEL_ID,
+    RESULTS_PANEL_ID, WorkflowPendingCommand,
 };
-use crate::components::icons::{
-    FitViewIcon, ModelNodeIcon, QueryNodeIcon, ResultNodeIcon, TableNodeIcon, WorkflowIcon,
-};
+use crate::components::icons::{ResultNodeIcon, WorkflowIcon};
 use crate::shell::state::StudioProjectState;
 
-const WORKFLOW_LAYOUT_SCOPE: &str = "workflow-node-results-split-v5";
-const WORKFLOW_MIN_ZOOM: f64 = 0.70;
-const WORKFLOW_MAX_ZOOM: f64 = 1.8;
+const WORKFLOW_LAYOUT_SCOPE: &str = "workflow-sql-plan-v6";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum AssistantBlock {
@@ -57,16 +49,16 @@ fn WorkflowPanels(controller: super::state::WorkflowController) -> Element {
         .with_class("workflow-assistant-editor"),
         Panel::new(
             CANVAS_PANEL_ID,
-            "Workflow",
+            "Query plan",
             "workflow-canvas",
             rsx! { WorkflowCanvas { controller } },
         )
         .with_class("workflow-canvas-editor"),
         Panel::new(
             NODE_PANEL_ID,
-            "Node",
+            "SQL",
             "workflow-inspector",
-            rsx! { WorkflowNodeInspector { controller } },
+            rsx! { WorkflowSqlEditor { controller } },
         )
         .with_class("workflow-node-editor"),
         Panel::new(
@@ -699,309 +691,20 @@ impl AssistantMarkdownLine for str {
 }
 
 #[component]
-fn WorkflowNodeInspector(controller: super::state::WorkflowController) -> Element {
-    let selected = controller.selected_node_data();
-    let relations = controller.relations();
-    let command_pending = controller.command().is_some();
-    let active = command_pending;
-    rsx! {
-        section { class: "workflow-inspector", "aria-label": "Selected workflow node",
-            if let Some((node_id, title, data)) = selected {
-                header { class: "workflow-inspector-heading",
-                    h2 { "{title}" }
-                    span { class: "workflow-inspector-kind",
-                        {node_kind_icon(data.kind())}
-                        "{data.kind_label()}"
-                    }
-                }
-                WorkflowNodeInputs { controller, node_id: node_id.clone() }
-                if let Some(error) = &data.error() {
-                    div { class: "workflow-inspector-error", role: "alert",
-                        strong { "{data.phase_label()}" }
-                        p { "{error}" }
-                    }
-                }
-                if !data.warnings().is_empty() {
-                    div { class: "workflow-inspector-warning", role: "status",
-                        strong { "Completed with warnings" }
-                        for warning in &data.warnings() { p { "{warning}" } }
-                    }
-                }
-                if data.kind() == WorkflowNodeKind::Table {
-                    section { class: "workflow-inspector-editor",
-                        label {
-                            span { class: "label", "Spiral relation" }
-                            select {
-                                class: "field",
-                                disabled: active,
-                                value: data.relation().unwrap_or_default(),
-                                onchange: {
-                                    let node_id = node_id.clone();
-                                    move |event| controller.set_table_relation(&node_id, event.value())
-                                },
-                                option { value: "", "Choose a qualified relation…" }
-                                for relation in &relations {
-                                    option {
-                                        value: "{relation.name()}",
-                                        selected: data.relation() == Some(relation.name()),
-                                        "{relation.name()}"
-                                    }
-                                }
-                            }
-                        }
-                        if relations.is_empty() {
-                            p { class: "workflow-inspector-help", role: "status",
-                                "No catalog relations are available. Configure an active Spiral project or materialize data in Data first."
-                            }
-                        }
-                        if let Some(limitation) = controller.relation_limitation() {
-                            p { class: "workflow-inspector-help", "{limitation}" }
-                        }
-                    }
-                    p { class: "workflow-inspector-boundary",
-                        "Import provenance belongs in Data. Workflow always begins from qualified Spiral relations."
-                    }
-                } else if data.kind() == WorkflowNodeKind::Query {
-                    section { class: "workflow-inspector-editor workflow-inspector-query-editor",
-                        label {
-                            span { class: "label", "Read-only SQL" }
-                            textarea {
-                                class: "query-input workflow-query-input",
-                                spellcheck: "false",
-                                disabled: active,
-                                value: data.sql().unwrap_or_default(),
-                                oninput: {
-                                    let node_id = node_id.clone();
-                                    move |event| controller.set_query_sql(&node_id, event.value())
-                                },
-                            }
-                        }
-                        p { class: "workflow-inspector-help",
-                            "Reference each connected input with an exact placeholder such as "
-                            code { {"{{node:table}}"} }
-                            "."
-                        }
-                    }
-                } else if data.kind() == WorkflowNodeKind::Model {
-                    section { class: "workflow-inspector-editor workflow-inspector-model-editor",
-                        label {
-                            span { class: "label", "Model" }
-                            select {
-                                class: "field",
-                                disabled: true,
-                                value: "siglip-base",
-                                option { value: "siglip-base", "SigLIP base" }
-                            }
-                        }
-                        p { class: "workflow-inspector-help",
-                            "Choose a decoded image column from the parent node. SigLIP appends one score per concept and preserves the input rows. Every Run computes the scores again."
-                        }
-                        div { class: "workflow-feature-definitions",
-                            label {
-                                span { class: "label", "Input image column" }
-                                input {
-                                    class: "field font-mono", disabled: active, value: data.image_column(),
-                                    oninput: { let node_id = node_id.clone(); move |event| controller.set_model_image(&node_id, event.value()) },
-                                }
-                            }
-                            for (index, feature) in data.features().iter().enumerate() {
-                                section { class: "workflow-feature-definition",
-                                    header {
-                                        strong { "Feature {index + 1}" }
-                                        if data.features().len() > 1 {
-                                            Action {
-                                                purpose: ActionPurpose::Remove,
-                                                disabled: active,
-                                                title: "Remove this feature definition",
-                                                onclick: {
-                                                    let node_id = node_id.clone();
-                                                    move |_| controller.remove_model_feature(&node_id, index)
-                                                },
-                                                "Remove"
-                                            }
-                                        }
-                                    }
-                                    label {
-                                        span { class: "label", "Feature name" }
-                                        input {
-                                            class: "field font-mono",
-                                            r#type: "text",
-                                            spellcheck: "false",
-                                            disabled: active,
-                                            placeholder: "is_gripper_open_feature",
-                                            value: feature.name().to_owned(),
-                                            oninput: {
-                                                let node_id = node_id.clone();
-                                                move |event| {
-                                                    let value = event.value();
-                                                    controller.set_model_feature(ModelFeatureTarget::new(&node_id, index), move |feature| feature.set_name(value));
-                                                }
-                                            },
-                                        }
-                                    }
-                                    label {
-                                        span { class: "label", "Description" }
-                                        input {
-                                            class: "field",
-                                            r#type: "text",
-                                            disabled: active,
-                                            placeholder: "Probability that the gripper is open",
-                                            value: feature.description().to_owned(),
-                                            oninput: {
-                                                let node_id = node_id.clone();
-                                                move |event| {
-                                                    let value = event.value();
-                                                    controller.set_model_feature(ModelFeatureTarget::new(&node_id, index), move |feature| feature.set_description(value));
-                                                }
-                                            },
-                                        }
-                                    }
-                                    label {
-                                        span { class: "label", "Model concept" }
-                                        input {
-                                            class: "field",
-                                            r#type: "text",
-                                            disabled: active,
-                                            placeholder: "gripper open",
-                                            value: feature.concept().to_owned(),
-                                            oninput: {
-                                                let node_id = node_id.clone();
-                                                move |event| {
-                                                    let value = event.value();
-                                                    controller.set_model_feature(ModelFeatureTarget::new(&node_id, index), move |feature| feature.set_concept(value));
-                                                }
-                                            },
-                                        }
-                                    }
-
-                                }
-                            }
-                        }
-                        div { class: "workflow-inspector-actions",
-                            Action {
-                                purpose: ActionPurpose::Create,
-                                variant: ActionVariant::Outline,
-                                disabled: active,
-                                title: "Add another output score",
-                                onclick: {
-                                    let node_id = node_id.clone();
-                                    move |_| controller.add_model_feature(&node_id)
-                                },
-                                "Add feature"
-                            }
-                            Action {
-                                purpose: ActionPurpose::Remove,
-                                variant: ActionVariant::Outline,
-                                disabled: active,
-                                title: if command_pending { "Wait for the current Workflow command before removing this Model node" } else { "Remove this Model and reconnect its input to the downstream nodes" },
-                                onclick: {
-                                    let node_id = node_id.clone();
-                                    move |_| controller.remove_siglip_model(&node_id)
-                                },
-                                "Remove model"
-                            }
-                        }
-                    }
-                    if !data.quarantine().examples().is_empty() {
-                        section { class: "workflow-inspector-boundary workflow-quarantine-examples",
-                            strong { "Quarantine examples" }
-                            for example in &data.quarantine().examples() { code { "{example}" } }
-                        }
-                    }
-                }
-                details { class: "workflow-inspector-diagnostics",
-                    summary { "Runtime details" }
-                    p { class: "workflow-inspector-description", "{data.description()}" }
-                    dl { class: "workflow-inspector-facts",
-                        div {
-                            dt { "State" }
-                            dd { class: "{data.phase_class()}", "{data.phase_label()} · {data.detail()}" }
-                        }
-                        if let Some(relation) = &data.relation() {
-                            div {
-                                dt { "Relation" }
-                                dd { code { "{relation}" } }
-                            }
-                        }
-                        if !data.fields().is_empty() {
-                            div {
-                                dt { "Fields" }
-                                dd { class: "workflow-inspector-fields",
-                                    for field in &data.fields() { code { "{field}" } }
-                                }
-                            }
-                        }
-                        if let Some(progress) = &data.progress() {
-                            div {
-                                dt { "Progress" }
-                                dd { class: "font-mono tabular-nums", "{progress.completed()} / {progress.total()} {progress.unit()}" }
-                            }
-                        }
-                        if data.quarantine().count() > 0 {
-                            div {
-                                dt { "Quarantine" }
-                                dd { "{data.quarantine().count()} rows" }
-                            }
-                        }
-                    }
-                }
-                {node_validation_issues(controller, &node_id)}
-            } else {
-                div { class: "workflow-panel-empty",
-                    strong { "No node selected" }
-                    p { "Choose a node on the canvas to inspect or edit its relation contract." }
-                    span { "Keyboard: Tab, then Enter or Space" }
-                }
-            }
-        }
-    }
-}
-
-#[component]
-fn WorkflowNodeInputs(controller: super::state::WorkflowController, node_id: String) -> Element {
+fn WorkflowSqlEditor(controller: super::state::WorkflowController) -> Element {
     let spec = controller.spec();
-    let inputs = spec
-        .edges()
-        .iter()
-        .filter(|edge| edge.target() == node_id)
-        .filter_map(|edge| spec.nodes().iter().find(|node| node.id() == edge.source()))
-        .collect::<Vec<_>>();
-    rsx! {
-        div { class: "workflow-inspector-inputs",
-            span { "Inputs" }
-            if inputs.is_empty() {
-                span { class: "workflow-inspector-input-empty", "No connected inputs" }
-            } else {
-                for input in inputs {
-                    Action {
-                        key: "{input.id()}",
-                        purpose: ActionPurpose::Navigate,
-                        variant: ActionVariant::Link,
-                        title: "Inspect {input.name()}",
-                        onclick: { let id = input.id().to_owned(); move |_| controller.select_node(id.clone()) },
-                        "{input.name()}"
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn node_validation_issues(controller: super::state::WorkflowController, node_id: &str) -> Element {
     let validation = controller.validation();
-    let issues = validation
-        .errors()
-        .iter()
-        .filter(|issue| issue.node_id().is_none_or(|id| id == node_id))
-        .collect::<Vec<_>>();
     rsx! {
-        if !issues.is_empty() {
-            section { class: "workflow-validation", role: "alert",
-                for issue in issues {
-                    div {
-                        strong { "{issue.message()}" }
-                        p { "{issue.recovery()}" }
-                    }
+        section { class: "workflow-sql-editor",
+            label { r#for: "workflow-sql", class: "label", "Query" }
+            textarea {
+                id: "workflow-sql", class: "field workflow-sql-input", spellcheck: "false",
+                value: spec.sql(), placeholder: "SELECT …",
+                oninput: move |event| controller.set_sql(event.value()),
+            }
+            if !spec.sql().trim().is_empty() {
+                for issue in validation.errors() {
+                    p { class: "workflow-results-error", "{issue.message()}" }
                 }
             }
         }
@@ -1011,398 +714,85 @@ fn node_validation_issues(controller: super::state::WorkflowController, node_id:
 #[component]
 fn WorkflowCanvas(controller: super::state::WorkflowController) -> Element {
     let studio = StudioProjectState::current();
-    let nodes = controller.nodes();
-    let edges = controller.edges();
-    let flow = use_flow_handle::<WorkflowNodeData>();
-    let mut canvas_was_active = use_signal(|| false);
-    let initial_topology = controller.topology_signature();
-    let observed_initial_topology = initial_topology.clone();
-    let mut observed_topology = use_signal(move || observed_initial_topology);
-    // A persisted graph can mount with old/default positions even when its
-    // topology is already authoritative. Treat first visibility as pending a
-    // compact layout; later activations fit only when the topology is stable.
-    let mut canvas_topology = use_signal(String::new);
-    let mut canvas_resize_revision = use_signal(|| 0u64);
     let spec = controller.spec();
     let snapshot = controller.snapshot();
+    let dirty = controller.unsaved_changes();
+    let command = controller.command();
     let run_reason = controller.run_disabled_reason();
     let save_reason = controller.save_disabled_reason();
-    let command = controller.command();
-    let active = snapshot.phase().active();
-    let topology_blocked = command.is_some();
-    let state_load_failed = controller.load_error().is_some();
-    let dirty = controller.unsaved_changes();
-    let empty = spec.nodes().is_empty() && spec.edges().is_empty();
-    let edit_label = if dirty {
-        "Unsaved changes".to_owned()
-    } else {
-        "No unsaved changes".to_owned()
-    };
-    let complete_with_warnings = snapshot.phase() == WorkflowRunPhase::Completed
-        && snapshot.nodes().iter().any(|node| {
-            node.phase() == WorkflowNodePhase::CompleteWithWarnings || !node.warnings().is_empty()
-        });
-    let run_label = if complete_with_warnings {
-        "Complete with warnings"
-    } else {
-        snapshot.phase().run_label()
-    };
-
-    use_effect(move || {
-        let selected = nodes
-            .read()
-            .iter()
-            .find(|node| node.selected)
-            .map(|node| node.id.clone());
-        match (selected, controller.selected_node()) {
-            (Some(next), current) if current.as_deref() != Some(next.as_str()) => {
-                controller.select_node(next);
+    let plan = use_resource(move || {
+        let expected = controller.spec();
+        async move {
+            if expected.sql().trim().is_empty() {
+                return (expected, Ok(None));
             }
-            (None, Some(_)) => controller.clear_selection(),
-            _ => {}
+            gloo_timers::future::TimeoutFuture::new(350).await;
+            let result = super::WorkflowClient::current()
+                .plan(&expected)
+                .await
+                .map(Some)
+                .map_err(|error| error.to_string());
+            (expected, result)
         }
     });
-
-    use_effect(move || {
-        let revision = canvas_resize_revision();
-        if revision == 0 {
-            return;
-        }
-        spawn(async move {
-            // Panel and window resizes can arrive in a burst. Fit once after
-            // the final measured size so a narrower canvas never clips the
-            // terminal nodes off-screen.
-            gloo_timers::future::TimeoutFuture::new(80).await;
-            if *canvas_resize_revision.peek() == revision {
-                flow.fit_workflow_view();
-            }
-        });
-    });
-
-    use_effect(move || {
-        let topology = controller.topology_signature();
-        if topology == *observed_topology.peek() {
-            return;
-        }
-        observed_topology.set(topology);
-        spawn(async move {
-            // Give a new card one rendered frame so dioxus-flow includes its
-            // measured bounds in layered layout and the accompanying fit.
-            gloo_timers::future::TimeoutFuture::new(48).await;
-            WorkflowCanvasLayout::apply(nodes, flow);
-        });
-    });
-
-    use_effect(move || {
-        let canvas_active = controller
-            .active_panel()
-            .as_ref()
-            .is_some_and(|panel| panel.as_str() == CANVAS_PANEL_ID);
-        let was_active = *canvas_was_active.peek();
-        if canvas_active != was_active {
-            canvas_was_active.set(canvas_active);
-        }
-        if canvas_active && !was_active {
-            let topology = controller.topology_signature();
-            let needs_layout = topology != *canvas_topology.peek();
-            canvas_topology.set(topology);
-            spawn(async move {
-                // Wait one frame so dioxus-flow measures the newly active
-                // canvas rather than its former hidden bounds.
-                gloo_timers::future::TimeoutFuture::new(48).await;
-                if needs_layout {
-                    WorkflowCanvasLayout::apply(nodes, flow);
-                } else {
-                    flow.fit_workflow_view();
-                }
-            });
-        }
-    });
-
+    let current = plan
+        .read()
+        .as_ref()
+        .filter(|(expected, _)| expected == &spec)
+        .map(|(_, result)| result.clone());
     rsx! {
-        section { class: "workflow-canvas", "aria-label": "Workflow graph",
+        section { class: "workflow-canvas", "aria-label": "Native query plan",
             header { class: "workflow-canvas-toolbar",
                 div {
-                    strong { class: if dirty { "workflow-edit-badge is-modified" } else { "workflow-edit-badge" }, "{edit_label}" }
+                    strong { class: if dirty { "workflow-edit-badge is-modified" } else { "workflow-edit-badge" },
+                        if dirty { "Unsaved changes" } else { "Saved" }
+                    }
                     if snapshot.phase() != WorkflowRunPhase::Idle {
-                        strong { class: snapshot.phase().badge_class(complete_with_warnings), "{run_label}" }
+                        strong { class: snapshot.phase().badge_class(false), "{snapshot.phase().run_label()}" }
                     }
-                    span { "{spec.nodes().len()} nodes · {spec.edges().len()} connections" }
-                }
-                if !spec.nodes().is_empty() && !controller.has_model() {
-                    Action {
-                        purpose: ActionPurpose::Create,
-                        variant: ActionVariant::Outline,
-                        disabled: topology_blocked,
-                        title: if command.is_some() { "Wait for the current Workflow command before adding a Model node" } else { "Insert SigLIP between the first Table and Query" },
-                        onclick: move |_| controller.add_siglip_model(),
-                        "Add model"
-                    }
-                }
-                Action {
-                    purpose: ActionPurpose::Fit,
-                    variant: ActionVariant::Outline,
-                    class: "workflow-fit-action",
-                    disabled: empty,
-                    title: if empty { "The workflow canvas is empty" } else { "Fit the workflow graph in the canvas" },
-                    onclick: move |_| flow.fit_workflow_view(),
-                    FitViewIcon {}
-                    "Fit"
                 }
                 if controller.revision_conflict() {
-                    Action {
-                        purpose: ActionPurpose::Sync,
-                        variant: ActionVariant::Outline,
-                        title: "Discard local edits and reload the current workflow",
-                        onclick: move |_| controller.reload_current(),
-                        "Reload current"
-                    }
+                    Action { purpose: ActionPurpose::Sync, variant: ActionVariant::Outline,
+                        onclick: move |_| controller.reload_current(), "Reload current" }
                 } else if dirty {
-                    Action {
-                        purpose: ActionPurpose::Sync,
-                        variant: ActionVariant::Outline,
-                        title: "Discard unsaved graph and conversation changes",
-                        disabled: command.is_some() || controller.agent_state().session().phase().active() || controller.agent_command().is_some(),
-                        onclick: move |_| controller.discard(studio),
-                        "Discard changes"
-                    }
+                    Action { purpose: ActionPurpose::Sync, variant: ActionVariant::Outline,
+                        disabled: command.is_some() || controller.agent_state().session().phase().active(),
+                        onclick: move |_| controller.discard(studio), "Discard changes" }
                 }
-                Action {
-                    purpose: ActionPurpose::Apply,
-                    variant: ActionVariant::Outline,
-                    disabled: save_reason.is_some(),
-                    aria_busy: command == Some(WorkflowPendingCommand::Saving),
-                    title: save_reason.clone().unwrap_or_else(|| "Save the graph and Assistant conversation".to_owned()),
+                Action { purpose: ActionPurpose::Apply, variant: ActionVariant::Outline,
+                    disabled: save_reason.is_some(), title: save_reason.unwrap_or_else(|| "Save SQL and conversation".into()),
                     onclick: move |_| controller.save(studio),
                     if command == Some(WorkflowPendingCommand::Saving) { "Saving…" } else { "Save" }
                 }
-                if active {
-                    Action {
-                        purpose: ActionPurpose::Cancel,
-                        variant: ActionVariant::Outline,
-                        disabled: command.is_some() || snapshot.phase() == WorkflowRunPhase::Cancelling,
-                        aria_busy: command == Some(WorkflowPendingCommand::Cancelling),
-                        title: "Cancel after the current Spiral operation",
-                        onclick: move |_| controller.cancel(studio),
-                        if snapshot.phase() == WorkflowRunPhase::Cancelling || command == Some(WorkflowPendingCommand::Cancelling) { "Cancelling…" } else { "Cancel" }
-                    }
-                } else {
-                    Action {
-                        purpose: ActionPurpose::Start,
-                        variant: ActionVariant::Solid,
-                        disabled: run_reason.is_some(),
-                        aria_busy: command == Some(WorkflowPendingCommand::Starting),
-                        title: run_reason.clone().unwrap_or_else(|| "Run this workflow without saving".to_owned()),
-                        onclick: move |_| controller.run(studio),
-                        if command == Some(WorkflowPendingCommand::Starting) { "Starting…" } else { "Run workflow" }
-                    }
+                Action { purpose: ActionPurpose::Start, variant: ActionVariant::Solid,
+                    disabled: run_reason.is_some(), title: run_reason.unwrap_or_else(|| "Run this SQL in Spiral".into()),
+                    onclick: move |_| controller.run(studio),
+                    if snapshot.phase().active() { "Running…" } else { "Run" }
                 }
             }
-            if let Some(reason) = run_reason {
-                p {
-                    class: if state_load_failed { "workflow-canvas-status workflow-canvas-status-error" } else { "workflow-canvas-status" },
-                    role: if state_load_failed { "alert" } else { "status" },
-                    "{reason}"
-                }
+            if let Some(error) = controller.load_error() {
+                div { class: "workflow-results-error", role: "alert", "{error}" }
             }
-            div {
-                class: "workflow-flow-wrap",
-                onresize: move |_| {
-                    let next = canvas_resize_revision.peek().wrapping_add(1);
-                    canvas_resize_revision.set(next);
-                },
-                Flow {
-                    id: "workflow-relation-graph",
-                    class: "workflow-flow",
-                    nodes,
-                    edges,
-                    handle: flow,
-                    fit_view: false,
-                    fit_view_padding: 0.10,
-                    min_zoom: WORKFLOW_MIN_ZOOM,
-                    max_zoom: WORKFLOW_MAX_ZOOM,
-                    drag_threshold: 4.0,
-                    delete_key: false,
-                    is_valid_connection: move |_| false,
-                    on_node_click: move |id: String| controller.select_node(id),
-                    on_pane_click: move |_| controller.clear_selection(),
-                    node_view: move |ctx: NodeViewCtx<WorkflowNodeData>| rsx! {
-                        WorkflowNodeCard {
-                            has_input: edges.read().iter().any(|edge| edge.target == ctx.node.id),
-                            has_output: edges.read().iter().any(|edge| edge.source == ctx.node.id),
-                            ctx,
+            if spec.sql().trim().is_empty() {
+                div { class: "workflow-panel-empty", WorkflowIcon {}, strong { "Describe a query" }
+                    p { "Ask the Assistant or write SQL. Spiral’s query plan will appear here." }
+                }
+            } else {
+                match current {
+                    None => rsx! { div { class: "workflow-panel-empty", role: "status", "Planning SQL…" } },
+                    Some(Err(error)) => rsx! { div { class: "workflow-results-error", role: "alert", "{error}" } },
+                    Some(Ok(Some(plan))) => rsx! {
+                        if let Some(error) = plan.error() {
+                            div { class: "workflow-results-error", role: "alert", "{error}" }
+                        }
+                        if let Some(report) = plan.report() {
+                            super::plan_display::NativePlanDisplay { key: "{spec.id()}:{spec.sql()}", report: report.clone() }
                         }
                     },
-                    Background { variant: BackgroundVariant::Dots, gap: 24.0, size: 0.6 }
-                }
-                if empty {
-                    div { class: "workflow-flow-empty", role: "status", "aria-live": "polite",
-                        WorkflowIcon {}
-                        strong { "Empty workflow" }
-                        p {
-                            if dirty {
-                                "Ask the Assistant to build from your Spiral relations. Changes stay in memory until Save."
-                            } else {
-                                "Ask the Assistant a question. Its nodes and connections will appear here."
-                            }
-                        }
-                    }
+                    Some(Ok(None)) => rsx! {},
                 }
             }
         }
-    }
-}
-
-struct WorkflowCanvasLayout;
-
-impl WorkflowCanvasLayout {
-    fn apply(
-        mut nodes: Signal<Vec<dioxus_flow::Node<WorkflowNodeData>>>,
-        flow: FlowHandle<WorkflowNodeData>,
-    ) {
-        let Some(core) = flow.core() else { return };
-        let geometry = nodes
-            .peek()
-            .iter()
-            .map(|node| dioxus_flow::LayoutNode {
-                id: node.id.clone(),
-                size: node.rect().size(),
-            })
-            .collect::<Vec<_>>();
-        let edges = core
-            .edges
-            .peek()
-            .iter()
-            .map(|edge| (edge.source.clone(), edge.target.clone()))
-            .collect::<Vec<_>>();
-        let positions = dioxus_flow::compute_layout(&geometry, &edges, &Self::options());
-        // Commit the native layout atomically. A resize/Fit must never leave
-        // nodes halfway through a layout animation with overlapping edge stubs.
-        nodes.with_mut(|nodes| {
-            for node in nodes {
-                if let Some(position) = positions.get(&node.id) {
-                    node.position = *position;
-                }
-            }
-        });
-        flow.fit_workflow_view();
-    }
-
-    fn options() -> LayoutOptions {
-        LayoutOptions::default()
-            .direction(LayoutDirection::LeftToRight)
-            // Smooth-step edges reserve a 20 px stub at both ends. Keep the rank
-            // gap safely above 40 px so those stubs never overlap and detour into
-            // the visibly twisted paths seen in the prototype.
-            .gaps(32.0, 56.0)
-    }
-}
-
-trait WorkflowFlowPresentation {
-    fn fit_workflow_view(self);
-}
-
-impl WorkflowFlowPresentation for FlowHandle<WorkflowNodeData> {
-    fn fit_workflow_view(self) {
-        // Fit using the native viewport math, without enlarging text beyond its
-        // authored size. Integer translation keeps the resting canvas crisp.
-        self.fit_view(0);
-        let (Some(viewport), Some(core)) = (self.viewport(), self.core()) else {
-            return;
-        };
-        let rect = *core.container.peek();
-        let center = Point::new(rect.width / 2.0, rect.height / 2.0);
-        let mut resting = viewport.zoom_about(
-            viewport.zoom.min(1.0),
-            center,
-            WORKFLOW_MIN_ZOOM,
-            WORKFLOW_MAX_ZOOM,
-        );
-        resting.x = resting.x.round();
-        resting.y = resting.y.round();
-        self.set_viewport(resting, 0);
-    }
-}
-
-#[component]
-fn WorkflowNodeCard(
-    ctx: NodeViewCtx<WorkflowNodeData>,
-    has_input: bool,
-    has_output: bool,
-) -> Element {
-    let node = &ctx.node;
-    let data = &node.data;
-    let fields = if data.fields().is_empty() {
-        match data.kind() {
-            WorkflowNodeKind::Table => "Choose a relation".to_owned(),
-            WorkflowNodeKind::Model => "Define a feature".to_owned(),
-            WorkflowNodeKind::Query => "Read-only SQL".to_owned(),
-            WorkflowNodeKind::Result => "Terminal payload".to_owned(),
-        }
-    } else {
-        data.fields().join(" · ")
-    };
-    let selected_class = if node.selected {
-        "workflow-node-selected"
-    } else {
-        ""
-    };
-    let dragging_class = if ctx.dragging {
-        "workflow-node-dragging"
-    } else {
-        ""
-    };
-
-    rsx! {
-        article {
-            class: "workflow-node-card {data.kind_class()} {data.phase_class()} {selected_class} {dragging_class}",
-            title: data.error().unwrap_or_default(),
-            "aria-current": if node.selected { "true" } else { "false" },
-            if has_input {
-                Handle { kind: HandleKind::Target, position: node.target_side }
-            }
-            header { class: "workflow-node-heading",
-                {node_kind_icon(data.kind())}
-                span { "{data.kind_label()}" }
-            }
-            div { class: "workflow-node-body",
-                h3 { title: "{node.label}", "{node.label}" }
-                p { class: "workflow-node-fields", title: "{fields}", "{fields}" }
-                if let Some(relation) = &data.relation() {
-                    p { class: "workflow-node-relation", "reads ", code { "{relation}" } }
-                }
-            }
-            footer { class: "workflow-node-footer",
-                span { class: "workflow-node-status-dot {data.phase_class()}", "aria-hidden": "true" }
-                if let Some(progress) = &data.progress() {
-                    span { "{data.phase_label()} · {progress.completed()}/{progress.total()} {progress.unit()}" }
-                } else if data.phase() == WorkflowNodePhase::Pending {
-                    span { "Not run" }
-                } else {
-                    span { "{data.phase_label()} · {data.detail()}" }
-                }
-            }
-            if let Some(progress) = &data.progress() {
-                progress {
-                    class: "workflow-node-progress",
-                    value: "{progress.completed()}",
-                    max: "{progress.total().max(1)}",
-                    "aria-label": "{data.phase_label()}: {progress.completed()} of {progress.total()} {progress.unit()}"
-                }
-            }
-            if has_output {
-                Handle { kind: HandleKind::Source, position: node.source_side }
-            }
-        }
-    }
-}
-
-fn node_kind_icon(kind: WorkflowNodeKind) -> Element {
-    match kind {
-        WorkflowNodeKind::Table => rsx! { TableNodeIcon {} },
-        WorkflowNodeKind::Model => rsx! { ModelNodeIcon {} },
-        WorkflowNodeKind::Query => rsx! { QueryNodeIcon {} },
-        WorkflowNodeKind::Result => rsx! { ResultNodeIcon {} },
     }
 }
 
@@ -1413,31 +803,22 @@ fn WorkflowResults(controller: super::state::WorkflowController) -> Element {
     let run_reason = controller.run_disabled_reason();
     let can_run_again = matches!(
         snapshot.phase(),
-        WorkflowRunPhase::Cancelled | WorkflowRunPhase::Interrupted | WorkflowRunPhase::Failed
+        WorkflowRunPhase::Interrupted | WorkflowRunPhase::Failed
     ) && run_reason.is_none();
     let spec = controller.spec();
 
-    let empty_workflow = spec.nodes().is_empty() && spec.edges().is_empty();
-    let executed = controller.executed_graph().unwrap_or_else(|| spec.clone());
-    let query = executed.nodes().iter().find_map(|node| {
-        let WorkflowNodeConfig::Query { sql, max_rows } = node.config() else {
-            return None;
-        };
-        Some((sql.to_owned(), *max_rows))
-    });
-    let (sql, max_rows) = query.unwrap_or_else(|| ("Read-only Workflow query".to_owned(), 100));
+    let empty_workflow = spec.sql().trim().is_empty();
+    let executed = controller.executed_query().unwrap_or_else(|| spec.clone());
+    let sql = executed.sql().to_owned();
+    let max_rows = 100;
     let result_model = snapshot.result().cloned().map(|result| {
         QueryExecutionPresentation::new(sql.clone(), max_rows, QueryState::Ready(result))
     });
     let transient_model = if result_model.is_none() {
         match snapshot.phase() {
-            WorkflowRunPhase::Validating
-            | WorkflowRunPhase::Running
-            | WorkflowRunPhase::Cancelling => Some(QueryExecutionPresentation::new(
-                sql.clone(),
-                max_rows,
-                QueryState::Running,
-            )),
+            WorkflowRunPhase::Validating | WorkflowRunPhase::Running => Some(
+                QueryExecutionPresentation::new(sql.clone(), max_rows, QueryState::Running),
+            ),
             WorkflowRunPhase::Failed | WorkflowRunPhase::Interrupted => {
                 snapshot.error().map(str::to_owned).map(|error| {
                     QueryExecutionPresentation::new(
@@ -1523,14 +904,12 @@ impl WorkflowRunPresentation for WorkflowRunPhase {
             return "workflow-run-badge is-warning";
         }
         match self {
-            WorkflowRunPhase::Validating
-            | WorkflowRunPhase::Running
-            | WorkflowRunPhase::Cancelling => "workflow-run-badge is-active",
+            WorkflowRunPhase::Validating | WorkflowRunPhase::Running => {
+                "workflow-run-badge is-active"
+            }
             WorkflowRunPhase::Completed => "workflow-run-badge is-complete",
             WorkflowRunPhase::Failed => "workflow-run-badge is-failed",
-            WorkflowRunPhase::Idle
-            | WorkflowRunPhase::Cancelled
-            | WorkflowRunPhase::Interrupted => "workflow-run-badge",
+            WorkflowRunPhase::Idle | WorkflowRunPhase::Interrupted => "workflow-run-badge",
         }
     }
 
@@ -1551,27 +930,21 @@ impl WorkflowRunPresentation for WorkflowRunPhase {
             }
             WorkflowRunPhase::Idle => (
                 "Configure the workflow",
-                "Choose qualified Spiral relations and fix graph validation before running.",
-            ),
-            WorkflowRunPhase::Cancelled => (
-                "Run cancelled",
-                "No new result was published. Run again to recompute the workflow.",
+                "Choose qualified Spiral relations and fix SQL validation before running.",
             ),
             WorkflowRunPhase::Interrupted => (
                 "Run interrupted",
-                "Studio recovered an unfinished run without pretending it completed. The graph is unchanged.",
+                "Studio recovered an unfinished run without pretending it completed. The submitted SQL is unchanged.",
             ),
             WorkflowRunPhase::Failed => (
                 "Run failed",
-                "Review the affected node, then run the unchanged graph again.",
+                "Review the SQL error, then run the query again.",
             ),
             WorkflowRunPhase::Completed => (
                 "No terminal payload",
                 "The run completed without publishing a Result payload.",
             ),
-            WorkflowRunPhase::Validating
-            | WorkflowRunPhase::Running
-            | WorkflowRunPhase::Cancelling => (
+            WorkflowRunPhase::Validating | WorkflowRunPhase::Running => (
                 "Workflow in progress",
                 "Results will appear when the backend publishes the terminal payload.",
             ),
@@ -1580,16 +953,13 @@ impl WorkflowRunPresentation for WorkflowRunPhase {
 
     fn stale_result_copy(self) -> &'static str {
         match self {
-            WorkflowRunPhase::Cancelled => {
-                "The latest run was cancelled. These rows remain evidence from the previous completed run."
-            }
             WorkflowRunPhase::Interrupted => {
                 "The latest run was interrupted. These rows remain evidence from the previous completed run."
             }
             WorkflowRunPhase::Failed => {
                 "The latest run failed. These rows remain evidence from the previous completed run."
             }
-            _ => "These rows remain stale until the current graph completes.",
+            _ => "These rows remain stale until the current query completes.",
         }
     }
 
@@ -1598,10 +968,8 @@ impl WorkflowRunPresentation for WorkflowRunPhase {
             WorkflowRunPhase::Idle => "Ready",
             WorkflowRunPhase::Validating => "Validating",
             WorkflowRunPhase::Running => "Running",
-            WorkflowRunPhase::Cancelling => "Cancelling",
             WorkflowRunPhase::Completed => "Complete",
             WorkflowRunPhase::Failed => "Failed",
-            WorkflowRunPhase::Cancelled => "Cancelled",
             WorkflowRunPhase::Interrupted => "Interrupted",
         }
     }
@@ -1612,120 +980,6 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-
-    fn collect_tiles<'a>(node: &'a LayoutNode, out: &mut Vec<(&'a str, Vec<&'a str>)>) {
-        match node {
-            LayoutNode::Tile(tile) => out.push((
-                tile.id.as_str(),
-                tile.panels.iter().map(PanelId::as_str).collect(),
-            )),
-            LayoutNode::Split { first, second, .. } => {
-                collect_tiles(first, out);
-                collect_tiles(second, out);
-            }
-        }
-    }
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn workflow_keeps_node_and_results_side_by_side_below_graph() {
-        let layout = WorkflowWorkspaceLayout::initial();
-        let mut tiles = Vec::new();
-        collect_tiles(&layout.root, &mut tiles);
-        assert_eq!(
-            tiles,
-            vec![
-                ("workflow-left", vec![ASSISTANT_PANEL_ID]),
-                ("workflow-canvas", vec![CANVAS_PANEL_ID]),
-                ("workflow-inspector", vec![NODE_PANEL_ID]),
-                ("workflow-results", vec![RESULTS_PANEL_ID]),
-            ]
-        );
-        match &layout.root {
-            LayoutNode::Split {
-                axis,
-                ratio,
-                second,
-                ..
-            } => {
-                assert_eq!(*axis, SplitAxis::Horizontal);
-                assert!((*ratio - 0.30).abs() < f64::EPSILON);
-                let LayoutNode::Split {
-                    axis,
-                    ratio,
-                    second,
-                    ..
-                } = second.as_ref()
-                else {
-                    panic!("workflow right side must split graph and details");
-                };
-                assert_eq!(*axis, SplitAxis::Vertical);
-                assert!((*ratio - 0.60).abs() < f64::EPSILON);
-                let LayoutNode::Split { axis, ratio, .. } = second.as_ref() else {
-                    panic!("workflow details must split Node and Results");
-                };
-                assert_eq!(*axis, SplitAxis::Horizontal);
-                assert!((*ratio - 0.50).abs() < f64::EPSILON);
-            }
-            LayoutNode::Tile(_) => panic!("workflow root must be a split"),
-        }
-    }
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn interaction_language_keeps_run_authority_out_of_assistant() {
-        let source = include_str!("workspace.rs");
-        let source = source.split("#[cfg(test)]").next().unwrap();
-        assert!(source.contains("Workflow Assistant"));
-        assert!(source.contains("Enter to send · Shift+Enter for a new line."));
-        assert!(source.contains("Jump to latest"));
-        assert!(source.contains("ActionPurpose::Stop"));
-        assert!(source.contains("Retry last turn"));
-        assert_eq!(source.matches("Run workflow").count(), 1);
-        assert_eq!(source.matches("Remove model").count(), 1);
-        assert!(source.contains("ActionPurpose::Remove"));
-        assert!(source.contains("LayoutDirection::LeftToRight"));
-        assert!(source.contains("min_zoom: WORKFLOW_MIN_ZOOM"));
-        assert!(source.contains("let mut canvas_topology = use_signal(String::new)"));
-        assert!(source.contains("workflow-edit-badge"));
-        assert!(source.contains("workflow-run-badge"));
-        assert!(source.contains("Run again"));
-        assert!(source.contains("Choose a qualified relation"));
-        assert!(!source.contains("Hugging Face"));
-        assert!(!source.contains("MCAP"));
-    }
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn graph_layout_aligns_ports_and_leaves_clearance_for_connector_stubs() {
-        let nodes = [
-            dioxus_flow::LayoutNode {
-                id: "source".into(),
-                size: dioxus_flow::Size::new(168.0, 160.0),
-            },
-            dioxus_flow::LayoutNode {
-                id: "model".into(),
-                size: dioxus_flow::Size::new(168.0, 136.0),
-            },
-            dioxus_flow::LayoutNode {
-                id: "result".into(),
-                size: dioxus_flow::Size::new(168.0, 144.0),
-            },
-        ];
-        let edges = [
-            ("source".into(), "model".into()),
-            ("model".into(), "result".into()),
-        ];
-        let positions =
-            dioxus_flow::compute_layout(&nodes, &edges, &WorkflowCanvasLayout::options());
-        for pair in nodes.windows(2) {
-            let source = positions[&pair[0].id];
-            let target = positions[&pair[1].id];
-            // Two 20-unit stubs plus the library's 5-unit handle rims.
-            assert!(target.x - source.x - pair[0].size.width > 50.0);
-            assert!(
-                (source.y + pair[0].size.height / 2.0 - target.y - pair[1].size.height / 2.0).abs()
-                    < 0.01
-            );
-        }
-    }
 
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn assistant_parser_handles_safe_structure_and_incomplete_streams() {
@@ -1785,11 +1039,7 @@ mod tests {
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]
-    fn run_badges_never_color_cancelled_or_interrupted_as_success() {
-        assert_eq!(
-            WorkflowRunPhase::Cancelled.badge_class(false),
-            "workflow-run-badge"
-        );
+    fn run_badges_never_color_interrupted_as_success() {
         assert_eq!(
             WorkflowRunPhase::Interrupted.badge_class(false),
             "workflow-run-badge"
@@ -1811,8 +1061,7 @@ pub(crate) fn WorkflowWorkspace(is_active: ReadSignal<bool>) -> Element {
         crate::shell::activity::Activity::Workflow,
         is_active,
     );
-    let catalog = crate::activities::data::relations::RelationCatalogState::use_catalog();
-    let controller = super::state::WorkflowController::use_controller(catalog.signal());
+    let controller = super::state::WorkflowController::use_controller();
     controller.use_polling(is_active);
     let status = use_memo(move || controller.editor_status());
     rsx! { crate::shell::frame::WorkspaceFrame { workspace, status: crate::shell::frame::WorkspaceStatus::Workflow(status), WorkflowPanels { controller } } }

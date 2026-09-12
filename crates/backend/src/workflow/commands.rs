@@ -68,9 +68,15 @@ impl WorkflowCommands {
         debug_assert!(released);
         result.map_err(Into::into)
     }
-    pub(crate) fn cancel(&self, id: &str) -> Result<WorkflowRun, BackendCommandError> {
-        let _activity = self.state.admit()?;
-        self.state.workflow().cancel(id).map_err(Into::into)
+    pub(crate) async fn capabilities(
+        &self,
+    ) -> Result<spiral_robotics_common::relations::SpiralQuerySnapshot, BackendCommandError> {
+        let _activity = self.admit()?;
+        super::query::WorkflowQuery::new(self.state.storage().workflow_store())
+            .capabilities()
+            .await
+            .map_err(OperationError::External)
+            .map_err(Into::into)
     }
     pub(crate) async fn cameras(
         &self,

@@ -483,7 +483,7 @@ impl WorkflowStatusContext<'_> {
             return WorkflowStatusProjection {
                 domain: "Workflow unavailable".to_owned(),
                 phase: "State unavailable".to_owned(),
-                graph: "Graph unavailable".to_owned(),
+                graph: "SQL unavailable".to_owned(),
             };
         }
 
@@ -494,7 +494,7 @@ impl WorkflowStatusContext<'_> {
             return WorkflowStatusProjection {
                 domain: "Spiral relations".to_owned(),
                 phase: "Loading saved workflow…".to_owned(),
-                graph: "Loading graph…".to_owned(),
+                graph: "Loading SQL…".to_owned(),
             };
         };
 
@@ -502,30 +502,14 @@ impl WorkflowStatusContext<'_> {
             WorkflowRunPhase::Idle => "Idle",
             WorkflowRunPhase::Validating => "Validating",
             WorkflowRunPhase::Running => "Running",
-            WorkflowRunPhase::Cancelling => "Cancelling",
             WorkflowRunPhase::Completed => "Complete",
             WorkflowRunPhase::Failed => "Failed",
-            WorkflowRunPhase::Cancelled => "Cancelled",
             WorkflowRunPhase::Interrupted => "Interrupted",
-        };
-        let node_label = if state.workflow().nodes().len() == 1 {
-            "node"
-        } else {
-            "nodes"
-        };
-        let connection_label = if state.workflow().edges().len() == 1 {
-            "connection"
-        } else {
-            "connections"
         };
         WorkflowStatusProjection {
             domain: "Spiral relations".to_owned(),
             phase: phase.to_owned(),
-            graph: format!(
-                "{} {node_label} · {} {connection_label}",
-                state.workflow().nodes().len(),
-                state.workflow().edges().len(),
-            ),
+            graph: format!("{} · SQL", state.workflow().name()),
         }
     }
 }
@@ -551,7 +535,7 @@ mod tests {
 
         assert_eq!(status.domain, "Spiral relations");
         assert_eq!(status.phase, "Running");
-        assert_eq!(status.graph, "3 nodes · 2 connections");
+        assert_eq!(status.graph, "Untitled workflow · SQL");
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]
@@ -564,7 +548,7 @@ mod tests {
         }
         .project();
         assert_eq!(loading.phase, "Loading saved workflow…");
-        assert_eq!(loading.graph, "Loading graph…");
+        assert_eq!(loading.graph, "Loading SQL…");
 
         let graph = spiral_robotics_common::workflow::WorkflowSpec::default();
         let state = WorkflowEditorStatus::new(
@@ -580,6 +564,6 @@ mod tests {
         .project();
         assert_eq!(unavailable.domain, "Workflow unavailable");
         assert_eq!(unavailable.phase, "State unavailable");
-        assert_eq!(unavailable.graph, "Graph unavailable");
+        assert_eq!(unavailable.graph, "SQL unavailable");
     }
 }

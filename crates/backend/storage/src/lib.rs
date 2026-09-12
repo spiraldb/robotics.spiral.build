@@ -10,7 +10,6 @@ mod training;
 mod transfer;
 pub mod workflow_assistant;
 pub mod workflow_features;
-pub mod workflow_sql;
 pub mod workflows;
 
 pub mod bundle {

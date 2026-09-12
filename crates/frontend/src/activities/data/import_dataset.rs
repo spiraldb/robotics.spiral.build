@@ -74,7 +74,7 @@ pub(super) fn ImportDataset(on_done: EventHandler<String>) -> Element {
                         busy.set(true); problem.set(None);
                         spawn(async move {
                             match DatasetClient::current().import_dataset(source).await {
-                                Ok(summary) => { receipt.set(Some(ImportReceipt::from(summary))); super::relations::RelationCatalogState::refresh(); },
+                                Ok(summary) => { receipt.set(Some(ImportReceipt::from(summary))); super::relations::CatalogRefresh::request(); },
                                 Err(error) => {
                                     let message = error.to_string();
                                     let uncertain = error.code() == spiral_robotics_common::command_failure::CommandFailureCode::Transport || message.contains("uncertain");

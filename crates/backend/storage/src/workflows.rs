@@ -293,6 +293,25 @@ impl WorkflowSchema {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
+impl ProjectStore {
+    pub fn workflow_test() -> Self {
+        let settings = crate::SpiralConnectionSettings::new(
+            "http://localhost:1".into(),
+            "http://localhost:2".into(),
+        )
+        .unwrap()
+        .with_project("contract")
+        .unwrap();
+        Self::new(
+            settings,
+            "contract".into(),
+            std::sync::Arc::new(crate::AdbcDatabase::memory()),
+        )
+        .unwrap()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

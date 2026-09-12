@@ -126,9 +126,16 @@ to backend readiness, hardware, and activity validation.
 Training polling accepts `?selected=<run-id>` to include bounded full history for
 one run. Omit it when only the run catalog and current metrics are needed.
 Workflow authoring is local to the browser. Save sends a `WorkflowDocument` whose
-graph revision is the expected saved version. Run sends a complete `WorkflowSpec`
-and returns a `WorkflowRun` containing that exact graph and a run snapshot.
-Read and cancel executions by their run IDs. `/models/complete` accepts one
+document revision is the expected saved version. Run sends a complete `WorkflowSpec`
+and returns a `WorkflowRun` containing that exact SQL definition and a run snapshot.
+`WorkflowSpec` contains `id`, `name`, `revision`, and `sql`. `/workflows/plan`
+returns a native JSON `report` (EXPLAIN schema version 2) and optional `error`.
+The report contains logical, optimized logical, and physical diagnostic graphs,
+plus the native report metadata. Logical graphs remain available if physical
+lowering fails. Studio displays these with Dioxus Flow.
+`/models/capabilities` returns the installed native AI function catalog.
+Read executions by their run IDs. Workflow cancellation is not exposed.
+`/models/complete` accepts one
 `ModelRequest` and streams newline-delimited `ModelEvent` values (`text`, `complete`,
 `error`). The caller owns conversation history and tool execution; disconnecting
 cancels that model request.
@@ -260,9 +267,9 @@ separate Studio dataset registry. Project snapshot restore is a separate operati
 | GET | `/workflow-runs` | — | WorkflowRun[] |
 | POST | `/workflow-runs` | WorkflowSpec | WorkflowRun |
 | GET | `/workflow-runs/{id}` | — | WorkflowRun |
-| POST | `/workflow-runs/{id}/cancel` | — | WorkflowRun |
 | POST | `/datasets/cameras` | DatasetSelection | Dataset and camera inspection |
 | GET | `/models/status` | — | WorkflowAgentReadiness |
+| GET | `/models/capabilities` | — | SpiralQuerySnapshot (native AI catalog) |
 | POST | `/models/complete` | ModelRequest | ModelEvent NDJSON stream |
 
 ## Files and media

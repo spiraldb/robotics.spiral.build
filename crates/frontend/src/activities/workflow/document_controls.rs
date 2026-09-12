@@ -59,6 +59,9 @@ pub(super) fn WorkflowDocumentControls(controller: WorkflowController) -> Elemen
                     id: "workflow-picker", value: "{workflow.id()}",
                     disabled: reason.is_some(),
                     onchange: move |event| controller.select_workflow(Some(event.value()), studio),
+                    if !controller.workflows().iter().any(|item| item.id() == workflow.id()) {
+                        option { value: "{workflow.id()}", selected: true, "{workflow.name()}" }
+                    }
                     for item in controller.workflows() {
                         option {
                             value: "{item.id()}", selected: item.id() == workflow.id(),

@@ -15,6 +15,8 @@ pub enum ReadOnlyQueryMode {
     Preview,
     /// Training input selection, which must directly produce rows.
     Training,
+    /// A workflow submits one native query that directly produces rows.
+    Workflow,
 }
 
 impl ReadOnlyQueryMode {
@@ -22,6 +24,7 @@ impl ReadOnlyQueryMode {
         match self {
             Self::Preview => "Spiral preview",
             Self::Training => "Training SQL",
+            Self::Workflow => "Workflow SQL",
         }
     }
 }
@@ -85,7 +88,9 @@ impl<'a> ReadOnlyQuery<'a> {
         let first = tokens.first().map(String::as_str).unwrap_or_default();
         let allowed = match self.mode {
             ReadOnlyQueryMode::Preview => matches!(first, "SELECT" | "WITH" | "EXPLAIN"),
-            ReadOnlyQueryMode::Training => matches!(first, "SELECT" | "WITH"),
+            ReadOnlyQueryMode::Training | ReadOnlyQueryMode::Workflow => {
+                matches!(first, "SELECT" | "WITH")
+            }
         };
         if !allowed {
             return Err(QueryPolicyError::new(match self.mode {
@@ -94,6 +99,9 @@ impl<'a> ReadOnlyQuery<'a> {
                 }
                 ReadOnlyQueryMode::Training => {
                     "Training SQL must be a read-only SELECT or WITH query"
+                }
+                ReadOnlyQueryMode::Workflow => {
+                    "Workflow SQL must be a read-only SELECT or WITH query"
                 }
             }));
         }

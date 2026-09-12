@@ -1,27 +1,31 @@
 # Spiral demo feature milestones
 
-Status: **M1 implemented; M2 verified with the current local Spiral driver**, September 10, 2026.
+Status: **M1 implemented; SQL workflow cutover implemented, adapter and browser checks passing**,
+September 11, 2026.
 
-Tasks 1.1 and 1.2 share one clock in the Data inspector. The follow-up replaces
-joint-specific reads with native Arrow schema discovery, numeric field selection,
-and one paginated message transport. M2’s ownership simplification is implemented:
-named workflows each own one graph and one Assistant conversation; authoring cannot
-start computation. M2.1's special episode draft has now been replaced by a
-single Arrow graph with SQL sources/transforms, Model enrichment, and Result.
-The no-reuse executor is implemented and the native H.264 → SigLIP → SQL path has
-been verified twice. Native scan pruning is verified with the updated local driver.
-Dataset-level reuse is the immediate next milestone; the full bright/dark episode
-demo remains to verify.
-Workflow changes now stay in memory until the user clicks **Save**. The graph,
-conversation, and current result are saved together; Send, Stop, Run, and selection
-never autosave. Save or Discard before switching workflows.
-See
-[workflow-authoring.md](workflow-authoring.md) for the simplified ownership model.
+M2's document ownership, Assistant conversation, Save/Discard, and explicit Run
+are preserved. Studio's Arrow graph executor and external Model operator have
+been removed. The agent authors SQL using Spiral's native AI catalog, and Spiral
+plans and executes it. The current local upstream driver includes native scoring and EXPLAIN.
 
-**Driver requirement:** local `xiangpeng/dev` commit `fe0726b14` includes the
-nested-projection optimizer fix, packet video decoding, and scan pruning across
-streaming exchanges. Rebuild with `adbc-build` and run Studio with `local-driver`;
-the default shell's public archive predates these fixes.
+**Current: verify 3.1b against native inference.** Use structured JSON plans
+with Dioxus Flow; default to the logical view and inspect native operator details.
+Workflow cancellation is not required. The first SQL document stores SQL literals;
+a separate bound-parameter interface is future work. Native reuse remains 3.2.
+
+Save persists the current definition and conversation atomically. Run captures an
+immutable submitted definition and has separate observations/results; it does not
+save authoring changes. Current previews are session-owned, not saved training
+outputs. Durable completed outputs arrive in 3.3. Save or Discard before switching
+workflows. [workflow-authoring.md](workflow-authoring.md) documents the current
+SQL implementation. The target design
+is [spiral-demo-plan.md](spiral-demo-plan.md).
+
+**Driver requirement:** use the rebuilt local upstream driver with native scoring
+and ADBC EXPLAIN support (verified against local `41e373f4b` with EXPLAIN JSON schema version 2).
+Rebuild with `adbc-build` and run Studio with `local-driver`; the default public
+archive is not qualified for this cutover. The local build also includes the
+prior native decoding and scan-pruning fixes.
 Position/action arrays now work through the normal Arrow transport. See
 [episode-playback.md](episode-playback.md) for the contract, bounds and verification,
 and [database-boundary.md](database-boundary.md) for exact driver provenance.
@@ -73,9 +77,9 @@ starting a feature; this is not a new live integration result.
 | Browse datasets, episodes, and topics | [Dataset storage](../crates/backend/storage/src/datasets.rs), [episode browser](../crates/frontend/src/activities/data/episode_browser.rs), [topic inspector](../crates/frontend/src/activities/data/episode_topics.rs) | An episode workspace with cameras and joints together. Import is already outside this flow. |
 | Play one recorded camera | [Native packet reads](../crates/backend/storage/src/datasets/playback.rs), [WebCodecs decoder](../crates/frontend/src/activities/data/episode_decoder.rs), [player](../crates/frontend/src/activities/data/episode_playback.rs) | Multiple feeds sharing one clock. Exact UUID reads and keyframe seeking already exist. |
 | Render recorded joint traces | [Dataset messages](../crates/backend/storage/src/datasets/messages.rs), [Timeline](../crates/frontend/src/panels/timeline/panel.rs) | Read imported native member/topic samples, without requiring Studio-private recording headers or a filename lookup. |
-| Ask the Workflow Assistant to build a graph | [Agent](../crates/backend/src/workflow/agent.rs), [manager](../crates/backend/src/workflow/manager.rs), [Workflow UI](../crates/frontend/src/activities/workflow/workspace.rs) | One intent graph with explicit Run, followed by ML reuse and optional questions. The Assistant authors and inspects; computation requires an explicit workflow action. |
-| Run SigLIP over Arrow batches | [Arrow Model operator](../crates/backend/src/workflow/model.rs) | Single-pass inference is implemented; dataset-level reuse follows in 3.2. |
-| Save and switch named graphs | [Workflow storage](../crates/backend/storage/src/workflows.rs), [common contracts](../crates/common/src/workflow.rs) | Durable complete output membership. Current query previews are bounded results, not complete training selections. |
+| Ask the Workflow Assistant to author SQL | [Agent](../crates/frontend/src/activities/workflow/agent.rs), [manager](../crates/backend/src/workflow/manager.rs), [Workflow UI](../crates/frontend/src/activities/workflow/workspace.rs) | Document boundaries are preserved; SQL authoring and native JSON plan inspection with Dioxus Flow are implemented. |
+| Run native SQL inference | [Native query adapter](../crates/backend/src/workflow/query.rs) | Native AI is upstream; Studio’s Model operator is removed. Native reuse follows in 3.2. |
+| Save and switch named SQL workflows | [Workflow storage](../crates/backend/storage/src/workflows.rs), [common contracts](../crates/common/src/workflow.rs) | SQL encoding v4 is implemented; durable complete output membership follows in 3.3. Current previews are not training selections. |
 | Configure ACT and manage jobs/checkpoints | [Training manager](../crates/backend/src/training/manager.rs), [worker jobs](../training/src/spiral_training_runtime/jobs.py), [training UI](../crates/frontend/src/activities/training/workspace.rs) | Completed workflow outputs as training inputs and native training examples. The [MCAP loader](../training/src/spiral_training_runtime/mcap.py) currently raises unavailable. |
 
 The worker continues to own training reads, batches, optimization, and checkpoint
@@ -88,12 +92,12 @@ do not require introducing a Studio-to-worker training-batch upload architecture
 | --- | --- | --- |
 | M1 — Inspect an episode | Watch its cameras together and inspect the joints at the same time. | 1.1–1.2 |
 | M2 — Describe the dataset to keep | Ask for an episode filter, save it, and refine its meaning. | 2.1–2.2 |
-| M3 — Run and review the dataset | Execute the Arrow graph, then add ML reuse, full-population outputs, and review. | 3.1–3.5 |
+| M3 — Run and review the dataset | Run native SQL inference, visualize its plan, then add native reuse, full-population outputs, and review. | 3.1a–3.1b, 3.2–3.5 |
 | M4 — Train from the workflow | Choose workflow outputs, inspect training examples, configure sampling, and train. | 4.1–4.2 |
 | Optional Q — Clarify an instruction | Answer an agent question and return to an unanswered one later. | Q.1 |
 | Optional B — Filter by ball-in-bowl outcome | Inspect visual detections and use the outcome alongside lighting. | B.1–B.2 |
 
-There are **11 core feature tasks and three optional tasks**. M1 and M2 can start
+There are **12 core feature tasks and three optional tasks**. M1 and M2 can start
 independently. The main sequence is M2 → M3 → M4, with M1 supplying the inspector
 used by result review and training-example preview. Q and B can be added when
 wanted without holding up the initial lighting-filter flow.
@@ -140,6 +144,10 @@ remain aligned without a physical robot connection.
 
 ## M2 — Describe the dataset to keep
 
+M2's checked tasks record the graph-based behavior already delivered. Task 3.1b
+must preserve these behaviors while replacing their executable definition with
+SQL; these checks are not evidence that SQL authoring already works.
+
 ### 2.1 — Build and refine an episode filter with the agent
 
 - [x] Done — native schema, live Assistant corrections, backend authoring boundary, and reopen verified September 10, 2026.
@@ -179,7 +187,8 @@ workflow, and return to either one with its own definition and conversation cont
 **Build:** add create/name/select behavior to the current workflow persistence and
 picker. Each workflow owns one Assistant conversation; there is no separate
 conversation picker. Open the latest workflow and carry its real identity through
-the manager, Assistant, and UI. Each workflow is one row with independently saved graph and conversation JSON.
+the manager, Assistant, and UI. Each workflow is one row whose graph and
+conversation JSON are saved atomically.
 Load the list first, then the selected workflow’s details. Saves replace the current
 definition.
 Keep current serialized execution; concurrent workflow scheduling is unnecessary.
@@ -193,56 +202,124 @@ compatibility are removed.
 
 ## M3 — Run and review the dataset
 
-### 3.1 — Execute the Arrow graph without ML reuse
+### 3.1a — Run model inference as native Spiral SQL
 
-- [ ] Full demo verification pending; executor implemented.
+- [ ] Done
 
-**After this lands:** the engineer clicks **Run** on a workflow scoped to one episode
-and sees its model outputs, SQL-derived episode decision, and supporting frame times.
-The graph always describes intent; execution does not create a different prepared graph.
+**After this lands:** the engineer can use the existing SQL query path to evaluate
+one episode's decoded frames with native AI scoring and inspect scores, an SQL-derived
+episode decision, and supporting timestamps. No Studio Model node is required.
+This is a usable native query feature before the workflow UI switches over.
 
-**Implementation:** `workflow/execution.rs` and `workflow/model.rs` now replace the special episode-filter execution path with one push-based
-DAG. Sources emit Arrow batches; downstream SQL and ML operators consume and emit
-Arrow batches. The ML node records its model/configuration and input/output columns,
-preserves upstream columns, and appends inference results. Plan schemas before
-execution and use native SQL for filtering, sampling, aggregation, and joins.
-Keep connected SQL operations optimizable together. The local native packet
-video decoder supplies camera inputs. The release build of Spiral `xiangpeng/dev`
-at `fe0726b14` fixes native scan scheduling across streaming exchanges: both the
-original `IN` query and diagnostic JOIN now read only the selected 274 camera
-packets instead of all 10,990. Native execution measured 3.8 and 5.2 seconds.
+**Build:** implement the existing image/concept scoring behavior as a native Spiral
+function/operator. Reuse its model implementation where appropriate; Spiral owns
+model loading, batching, resources, and execution. SQL expresses source selection,
+frame selection/decoding, inference, projection, joins, and aggregation together.
+Define actual catalog signatures, typed image inputs and outputs, null/error
+behavior, pinned model/preprocessing semantics, and determinism/volatility rules.
+The optimizer must know when it can eliminate, move, duplicate, or reuse an AI
+expression. A named CTE alone does not guarantee a single evaluation.
 
-There is **no ML reuse in this milestone**: no cache lookup, persisted sparse score
-columns, candidate/cache preflight, or ML-to-scanner pushdown. Each run evaluates
-its selected inputs once through the ML operator. Remove the current two-pass
-candidate execution from this path. Model/column configuration stays explicit so
-the immediate follow-up can optimize the same graph. Authoring does not start a run.
+Use the existing native query transport and result viewer. Plan and type-check
+without loading weights or evaluating inference. Workflow cancellation is not
+required for the cutover. Preserve selected-input scan pruning and avoid evaluating source work
+in a separate preliminary pass. Every Run computes selected inference again;
+persistent reuse is deferred to 3.2. Land and record the required native driver
+support before its Studio consumer. Do not route the SQL function back through
+Studio's graph executor.
 
-**Verify:** run the lighting graph on a bright and a dark episode. Check actual
-Arrow image values, appended model scores, downstream SQL decisions, and evidence
-times. Reject incompatible schemas before inference. Confirm that inputs are not
-decoded in a preliminary cache scan and then executed again for ML. A second Run
-performs inference again. Missing evidence remains unknown. Verify cancellation
-and that the graph definition is unchanged by execution.
+**Verify:** run native decode → AI scoring → SQL on a bright and a dark episode. Compare
+the native model semantics and null/error behavior; CLIP logits are not SigLIP scores, check source
+identities and evidence times, and verify selection before expensive work where
+semantically valid. Exercise schema errors without inference, errors
+after preview rows, and repeated AI expressions/CTE references according to their
+declared semantics. Repeat the query and verify fresh inference with no cache.
+A real native query must work without the Studio Model operator.
 
-**Depends on:** 2.1. Its former **Needs preparation** boundary is replaced by the unified executor.
+**Depends on:** existing native query/image support. Recorded driver `fe0726b14`
+proves earlier decode/pruning behavior, not native SQL inference. New support is
+part of this feature. No unfinished workflow UI dependency is required.
+
+### 3.1b — Author SQL and visualize its native plan in Workflow
+
+- [ ] Done — Studio cutover implemented and tested; full bright/dark episode
+  acceptance remains dependent on 3.1a's non-null inference verification.
+
+September 11 JSON plan verification: 255 native and 120 browser tests pass, with native and
+web lint passing. native plan rendering, native catalog discovery, null-input scoring,
+immutable SQL runs, and late-error propagation are covered. The JSON EXPLAIN
+report now contains structured graphs; Dioxus Flow displays their nodes and edges.
+
+**After this lands:** the engineer asks the Assistant for a lighting filter,
+inspects its SQL and Spiral query plan, and clicks **Run** to get results directly
+from Spiral. SQL is the only executable workflow definition.
+
+**Build:** preserve named workflow identity, one conversation, Save/Discard,
+optimistic revisions, draft ownership, and immutable run submissions. Store SQL
+instead of executable graph JSON; a separate bound-parameter interface is future work. Both direct SQL edits and
+Assistant edits update the same draft; validate with Spiral and reject stale
+responses without discarding newer user edits. Save changes only authoring state;
+Run can submit an unsaved definition without persisting it.
+
+Change the Assistant's graph-writing tool to SQL authoring and discover actual
+native model functions through capability/catalog inspection. Keep schema and
+bounded source inspection, but enforce that authoring cannot execute AI through
+read-only SQL, views, or another inspection tool. Query classification must use
+native capability information; SELECT is not proof of cheap or permitted work.
+
+Render Spiral's EXPLAIN JSON diagnostic graphs with Dioxus Flow. Default to the
+logical plan, with optimized logical and physical views available. Preserve native
+node IDs, ordered inputs, shared subplans, schemas, and operator properties.
+Keep the display read-only and expose selected-node details and full report JSON.
+Graphviz and its server-side rendering dependency are removed.
+Named CTEs may explain stages without promising one physical operator per stage.
+
+Route Run through the existing native query and result transport. Cancellation
+is not required. Keep Studio's run identity, admission, observation, and preview
+responsibilities. Remove its graph topological executor, schema propagation, SQL-node fusion,
+`{{node:id}}` bindings, fork buffering, and external Model operator. Remove obsolete
+graph tools and contracts; do not retain a second production execution path.
+Arrow remains valid for native internals and final result transport.
+
+Version the SQL document format. Convert old graphs only where semantic equivalence
+is proven; otherwise preserve the old document and explain that it needs
+reauthoring. Do not silently reinterpret it or keep the old executor as a fallback.
+Update workflow-authoring and HTTP documentation with this cutover.
+
+**Verify:** the real dim-camera instruction creates valid SQL, renders the native
+plan, and returns scores/decisions on Run. Correct the camera and threshold; edit
+SQL manually; verify that explanation, plan, and executed SQL agree. Save/switch/
+reopen two documents with separate conversations, reject stale Assistant responses,
+and check legacy-document handling. Change or save the draft during execution:
+the submitted query stays fixed. Confirm planning/authoring does no inference,
+late errors are visible, and native operator metrics are
+not presented as invented per-CTE progress. The integration path must no longer
+invoke Studio graph execution or manually route intermediate Arrow batches.
+
+**Depends on:** 3.1a, 2.1, 2.2. This completes the architectural replacement;
+3.2 must build on native SQL, not on the superseded Arrow graph runner.
 
 ### 3.2 — Reuse ML outputs through scanner pushdown
 
 - [ ] Done
 
 **After this lands:** repeated runs and other workflows can reuse compatible model
-outputs without changing the logical graph or introducing a preparation step.
-This is the immediately following milestone, not a requirement for 3.1.
+outputs without changing the SQL or introducing a preparation step.
+This follows the SQL workflow cutover and is not required for 3.1a–3.1b.
 
-**Build:** add a planner optimization for eligible source/filter/sample/ML paths.
+**Build:** add reuse and a planner optimization inside Spiral for eligible
+source/filter/sample/AI paths. Studio submits the same SQL with no cache preflight
+or application dependency planner.
 When pushdown is safe, the scanner applies eligible filters, reads compatible cached
 values, computes missing selected values, and attaches the requested model column.
 Store sparse outputs at dataset scope with stable input identity and explicit
 producer semantics; uncomputed rows remain distinguishable from computed results.
-Keep ordinary Arrow ML execution for paths whose pushdown cannot be proven safe.
+Keep ordinary native Spiral AI execution for paths whose pushdown cannot be
+proven safe; all execution remains inside the query engine.
 Do not tie cached columns to workflow IDs. Define partial publication and retry
-behavior here, rather than adding cache machinery to 3.1.
+behavior here, rather than adding cache machinery to 3.1a–3.1b. Cache identity
+includes source content/version, model version, concept, and preprocessing; any
+coverage-dependent camera/sampling semantics must also be preserved.
 
 **Verify:** rerun an unchanged workflow and reuse its scores in another workflow.
 Changing only a downstream threshold performs no inference for cached inputs.
@@ -251,7 +328,7 @@ A sampled run leaves uncomputed positions in the persisted column; a later run
 computes missing selected values. Verify empty selections, interrupted runs, and
 ordinary execution when pushdown is unsupported.
 
-**Depends on:** 3.1.
+**Depends on:** 3.1b.
 
 ### 3.3 — Run the full dataset
 
@@ -259,14 +336,18 @@ ordinary execution when pushdown is unsupported.
 
 **After this lands:** clicking **Run** evaluates all required episodes
 and produces a saved, completed workflow output ready for inspection and downstream
-use. The engineer can cancel, leave the activity, and retry later.
+use. The engineer can leave the activity while execution continues and retry after failure.
 
 **Build:** expand the working one-episode path to the source population. Show real
 progress; persist required columns, coverage, inclusion decisions, and complete
-membership against pinned source/workflow revisions. Only successful completion
+membership against pinned source snapshots and exact SQL/parameter definitions,
+including unsaved drafts. Keep completed output identity separate from authoring
+Save and from native inference-cache commits. Only successful completion
 publishes an output for downstream use. Include native snapshot/atomic publication
-support in this feature where needed. Reuse existing backfill and execution owners instead of adding another
-runner. Include cancel/retry controls and reconnect recovery. Retain the last
+support in Spiral with this feature where needed. Materialize the query result
+inside Spiral without rerunning inference to publish the previewed result. Reuse
+Studio query submission/observation and native execution; add no backfill runner.
+Include retry controls and reconnect recovery; workflow cancellation is out of scope. Retain the last
 completed output and reuse successful compatible dependency work; do not claim
 resumability for partial values that were never durably committed.
 
@@ -291,9 +372,9 @@ when the required values are already cached.
 **Build:** add decision views with derived values, reasons, accurate counts, and
 paginated results. Connect **Inspect episode** to the existing multi-camera/joint
 inspector with pinned source/member/evidence-time identity. Apply natural-language
-or manual edits through dependency-aware re-evaluation and save a new output
-revision. Explain when a changed camera/model/sampling rule needs new inference;
-keep the previous output selectable.
+or manual edits to SQL/parameters; on the next Run, let Spiral reuse compatible
+values and publish a new output revision. Explain when a changed camera, model,
+or sampling rule needs new inference; keep the previous output selectable.
 
 **Verify:** inspect one episode from each outcome and change a lighting threshold.
 The selection changes with zero enrichment calls; a producer change performs new
@@ -413,9 +494,9 @@ can still decide and explain semantics without asking a question.
 **After this lands:** the engineer explicitly runs a visual producer on one episode
 and inspects its ball/bowl detections beside the recorded frames.
 
-**Build:** add one suitable pinned producer to the existing model execution and
-one-episode preview. Persist its typed outputs and show the relevant evidence,
-including uncertainty/occlusion. Choose it against actual recordings and implement
+**Build:** add one suitable pinned producer as a native Spiral SQL capability and
+use the existing query execution and one-episode preview. Persist its typed
+outputs and show the relevant evidence, including uncertainty/occlusion. Choose it against actual recordings and implement
 any needed native support with this feature. This is not a general model catalog.
 
 **Verify:** inspect real detections on representative frames, including missing or
@@ -430,7 +511,7 @@ a successful placement; that episode interpretation is the next feature.
 - [ ] Done
 
 **After this lands:** the engineer adds the bowl instruction to the lighting workflow,
-runs the updated graph, and reviews the resulting combined selection.
+runs the updated SQL, and reviews the resulting combined selection.
 
 **Build:** let the agent choose and explain the temporal interpretation, aggregate
 stored observations into an episode assessment, and compose it with lighting.
@@ -460,9 +541,10 @@ test an error path; it cannot prove that the new feature works on native recordi
 
 M1 is complete when cameras and joints can be inspected together. M2 is complete
 when the engineer can create, save, and correct a workflow through the Assistant.
-M3 is complete when the engineer can run, reuse, inspect, refine, retry, and update
-its dataset. M4 completes the requested training flow. Optional Q/B features have
-their own checkboxes and do not delay the initial lighting example.
+M3 is complete when the engineer authors SQL, inspects its native plan, and can
+run, reuse, inspect, refine, retry, and update its dataset entirely through Spiral
+query execution. The old Arrow executor does not satisfy this milestone. M4
+completes the requested training flow. Optional Q/B features have their own checkboxes and do not delay the initial lighting example.
 
 Keep final rehearsal lightweight: run the actual product sequence after M4, including
 one reconnect and one changed workflow, and record observed results. There is no

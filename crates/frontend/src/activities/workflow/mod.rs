@@ -8,3 +8,4 @@ pub(crate) use client::WorkflowClient;
 
 mod agent;
 mod document_controls;
+mod plan_display;

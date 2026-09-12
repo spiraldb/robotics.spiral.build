@@ -64,12 +64,11 @@ impl WorkflowClient {
             .request(HttpRequest::new("POST", "/api/workflow-runs").json(workflow))
             .await
     }
-    pub(crate) async fn cancel(&self, id: &str) -> Result<WorkflowRun, CommandError> {
+    pub(crate) async fn capabilities(
+        &self,
+    ) -> Result<spiral_robotics_common::relations::SpiralQuerySnapshot, CommandError> {
         self.project
-            .request(HttpRequest::new(
-                "POST",
-                format!("/api/workflow-runs/{}/cancel", id.url_component()),
-            ))
+            .request(HttpRequest::new("GET", "/api/models/capabilities"))
             .await
     }
     pub(crate) async fn model_status(&self) -> Result<WorkflowAgentReadiness, CommandError> {

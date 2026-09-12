@@ -26,8 +26,7 @@ struct RunObservationHarness {
 }
 impl RunObservationHarness {
     fn render(self) -> Element {
-        let catalog = use_signal(|| None);
-        let mut controller = WorkflowController::use_controller(catalog.into());
+        let mut controller = WorkflowController::use_controller();
         use_hook(move || {
             let workflow = controller.spec();
             controller.document.runs.set(vec![WorkflowRun::new(

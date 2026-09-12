@@ -6,7 +6,7 @@ impl WorkflowTool for ListModelCapabilities {
         "list_model_capabilities"
     }
     fn description(&self) -> &'static str {
-        "List executable Workflow Model capabilities and input contracts."
+        "Read the installed Spiral AI function catalog: signatures, effects, visibility, and descriptions. Optional model and device arguments use native defaults when omitted."
     }
     fn parameters(&self) -> Value {
         json!({"type":"object","properties":{},"additionalProperties":false})
@@ -22,7 +22,7 @@ impl WorkflowTool for ListModelCapabilities {
         true
     }
     fn completion(&self, output: &Value) -> ToolCompletion {
-        ToolCompletion::count(output, "models", "model capabilities")
+        ToolCompletion::count(output, "functions", "native AI functions")
     }
     fn call<'a>(
         &'a self,
@@ -30,18 +30,11 @@ impl WorkflowTool for ListModelCapabilities {
     ) -> LocalBoxFuture<'a, Result<String, String>> {
         Box::pin(async move {
             let _: NoArguments = invocation.arguments()?;
-            Ok(json!({
-                "models": [{
-                    "id": "siglip-base",
-                    "label": "SigLIP base",
-                    "max_features": 32,
-                    "score_semantics": "text/image matching score, not measured brightness or a calibrated probability",
-                    "input": "one Arrow input; image_column names a decoded spql.image.Image column",
-                    "output": "all input columns plus nullable Float32 scores, one per named concept; null images produce null scores",
-                    "reuse": "not implemented; each Run recomputes inference",
-                    "device_policy": "Metal when available; CPU fallback"
-                }]
-            }).to_string())
+            let capabilities = WorkflowClient::current().capabilities().await?;
+            Ok(
+                json!({"functions": capabilities.rows(), "complete": !capabilities.truncated()})
+                    .to_string(),
+            )
         })
     }
 }

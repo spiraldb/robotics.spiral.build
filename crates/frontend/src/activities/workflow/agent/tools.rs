@@ -8,10 +8,10 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use spiral_robotics_common::workflow::{WorkflowAgentArtifactReceipt, WorkflowSpec};
 
+mod author_sql;
 mod dataset;
 mod models;
 mod relations;
-mod save_graph;
 
 trait WorkflowTool: Send + Sync {
     fn name(&self) -> &'static str;
@@ -55,10 +55,10 @@ impl ToolInvocation<'_> {
         serde_json::from_value(arguments)
             .map_err(|error| format!("Tool arguments are malformed: {error}"))
     }
-    async fn update_graph(self, workflow: WorkflowSpec) -> Result<String, String> {
+    async fn update_query(self, workflow: WorkflowSpec) -> Result<String, String> {
         if self.controller.spec() != *self.expected {
             return Err(
-                "The draft changed while the assistant was working. Retry with the current graph."
+                "The draft changed while the assistant was working. Retry with the current SQL."
                     .into(),
             );
         }
@@ -71,7 +71,7 @@ impl ToolInvocation<'_> {
             return Err(error.into());
         }
         self.controller
-            .replace_authored_graph(self.expected, workflow.clone())?;
+            .replace_authored_query(self.expected, workflow.clone())?;
         *self.expected = workflow.clone();
         Ok(json!({"ok":true, "workflow":workflow}).to_string())
     }
@@ -84,14 +84,13 @@ struct NoArguments {}
 pub(super) struct WorkflowToolCatalog;
 
 impl WorkflowToolCatalog {
-    fn tools() -> [Box<dyn WorkflowTool>; 6] {
+    fn tools() -> [Box<dyn WorkflowTool>; 5] {
         [
             Box::new(dataset::InspectDataset),
             Box::new(relations::ListRelations),
             Box::new(relations::DescribeRelations),
             Box::new(models::ListModelCapabilities),
-            Box::new(save_graph::SetWorkflow),
-            Box::new(relations::RunQuery),
+            Box::new(author_sql::SetWorkflow),
         ]
     }
     fn find(name: &str) -> Option<Box<dyn WorkflowTool>> {
@@ -193,10 +192,10 @@ impl ToolCompletion {
         WorkflowToolCatalog::completion(name, &value)
     }
 
-    fn graph_updated(value: &Value) -> Self {
+    fn query_updated(value: &Value) -> Self {
         let Some(workflow) = value.get("workflow") else {
             return ToolCompletion {
-                summary: "Graph needs changes".to_owned(),
+                summary: "SQL needs changes".to_owned(),
                 receipt: None,
             };
         };
@@ -211,31 +210,7 @@ impl ToolCompletion {
         ToolCompletion {
             summary: format!("Updated {name}{suffix}"),
             receipt: revision
-                .map(|revision| WorkflowAgentArtifactReceipt::graph("View graph", revision)),
-        }
-    }
-
-    fn query_preview(value: &Value) -> Self {
-        let count = value
-            .get("row_count")
-            .and_then(Value::as_u64)
-            .and_then(|count| usize::try_from(count).ok())
-            .unwrap_or_else(|| {
-                value
-                    .get("rows")
-                    .and_then(Value::as_array)
-                    .map_or(0, Vec::len)
-            });
-        ToolCompletion {
-            summary: format!(
-                "Inspected {count} rows{}",
-                if value.get("truncated").and_then(Value::as_bool) == Some(true) {
-                    " · bounded preview"
-                } else {
-                    ""
-                }
-            ),
-            receipt: None,
+                .map(|revision| WorkflowAgentArtifactReceipt::authored("View plan", revision)),
         }
     }
 

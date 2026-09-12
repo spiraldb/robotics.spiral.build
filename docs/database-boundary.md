@@ -69,6 +69,33 @@ published archive as a qualified replacement for the native adapter until the
 hosted contract passes. Update the archive pin when a qualifying release is
 published; a source fix alone does not update the downloaded library.
 
+## Structured plan driver verification
+
+The Dioxus Flow plan display uses a release rebuild from upstream
+`41e373f4b5d52df37cb4d422579aab6aea0f065b`, including EXPLAIN JSON schema version 2.
+The library SHA-256 is
+`1d29c533609e3bbc2e07e30947183d0f17bb9aa3936501f40ace8ecb4419a10b`.
+Logical, optimized logical, and physical plan fields now contain versioned
+node/edge diagnostics. Text trees remain under the `*_plan_text` keys. Studio
+requires this structured contract and no longer uses Graphviz.
+Rebuild with `adbc-build`, run with `local-driver`, and restart existing servers.
+
+## SQL workflow driver verification
+
+On September 11, 2026, the SQL workflow checks used a release rebuild from the
+local upstream checkout at `aca5089b16bbeaa12ae988abc4e3a4b0c948fb52`, including
+its in-progress ADBC EXPLAIN support. Studio did not modify upstream source.
+The library SHA-256 is
+`070d58d8b1f94db7ea50a118a74e8c6f7d3ce0a2b3e3bcfbea0af86a7324d62c`.
+Use `local-driver` after rebuilding with the command above. Existing processes
+must restart to load it. The default public archive remains unchanged.
+
+Native SQL execution, AI capability discovery, null-input `spql.ai.score`, and
+`EXPLAIN FORMAT GRAPHVIZ` rendering pass Studio's integration tests.
+`EXPLAIN (FORMAT JSON)` also works, but its logical and physical plan fields
+are formatted strings. Structured node/edge plan export is still separate work.
+These checks do not verify non-null model inference on complete episodes.
+
 ## Current local driver refresh
 
 The local driver was rebuilt on September 11, 2026 from upstream

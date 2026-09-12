@@ -88,22 +88,6 @@ impl ProjectConnection {
             .map_err(|error| error.to_string())
     }
 
-    pub async fn bind_arrow_input(
-        &mut self,
-        name: &str,
-        batches: RecordBatchStream,
-    ) -> Result<(), String> {
-        let name = RelationName::parse(name).map_err(|error| error.to_string())?;
-        self.ingest(BatchIngestion::new(
-            name,
-            super::database::IngestMode::ReplaceTemporary,
-            batches,
-        ))
-        .await
-        .map(|_| ())
-        .map_err(|error| error.to_string())
-    }
-
     pub async fn relation_schema(&mut self, table: &str) -> Result<Option<Schema>, String> {
         let relation = RelationName::parse(table).map_err(|error| error.to_string())?;
         self.table_schema(relation)

@@ -1,6 +1,6 @@
 //! Saved authoring documents and stateless model requests.
+use super::WorkflowSpec;
 use super::conversation::{ProviderMessage, WorkflowConversation};
-use super::{WorkflowSpec, WorkflowValidationReport};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -62,22 +62,9 @@ impl ModelRequest {
     }
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct WorkflowPlan {
-    validation: WorkflowValidationReport,
-    error: Option<String>,
-}
-impl WorkflowPlan {
-    pub fn new(validation: WorkflowValidationReport, error: Option<String>) -> Self {
-        Self { validation, error }
-    }
-    pub fn error(&self) -> Option<&str> {
-        self.error.as_deref()
-    }
-}
+pub use super::plan::WorkflowPlan;
 
-/// Encoding version and payload of one graph or conversation.
+/// Encoding version and payload of one workflow or conversation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkflowJson {
     version: u32,
@@ -105,7 +92,7 @@ pub enum ModelEvent {
     Error(String),
 }
 
-/// The exact submitted graph travels with its execution observations.
+/// The exact submitted SQL travels with its execution observations.
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct WorkflowRun {

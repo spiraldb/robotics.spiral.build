@@ -668,3 +668,50 @@
 
 .episode-fields-panel, .episode-field-plots-layout { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .episode-window-controls { flex-wrap: wrap; }
+
+/* Native SQL workflow: the query owns the definition; the plan is inspectable output. */
+.workflow-sql-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  height: 100%;
+  padding: 12px;
+}
+.workflow-sql-input {
+  flex: 1;
+  min-height: 120px;
+  resize: none;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  line-height: 1.6;
+  tab-size: 2;
+}
+.workflow-plan-display { display: flex; flex-direction: column; flex: 1; min-height: 0; container-type: inline-size; }
+.workflow-plan-controls, .workflow-plan-navigation { display: flex; align-items: center; gap: 8px; padding: 6px 12px; flex-wrap: wrap; border-bottom: 1px solid var(--tone-line); }
+.workflow-plan-origin, .workflow-plan-count { margin-left: auto; color: var(--tone-ink-soft); font-size: 11px; }
+.workflow-plan-graph { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.workflow-plan-body { display: flex; flex: 1; min-height: 0; }
+.workflow-diagnostic-canvas { flex: 1; min-width: 0; min-height: 180px; }
+.workflow-plan-inspector { width: 270px; flex-shrink: 0; overflow: auto; padding: 12px; border-left: 1px solid var(--tone-line); background: var(--tone-surface); }
+.workflow-plan-inspector h3 { font-size: 14px; font-weight: 600; }
+.workflow-plan-inspector h4 { margin-top: 16px; margin-bottom: 6px; font-size: 12px; font-weight: 600; }
+.workflow-plan-node-id { color: var(--tone-ink-soft); font-size: 11px; margin-top: 2px; }
+.workflow-plan-inspector pre, .workflow-plan-report pre { font-size: 11px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.workflow-plan-inspector details { margin-top: 12px; }
+.workflow-plan-display summary { cursor: pointer; color: var(--tone-ink-soft); font-size: 11px; }
+.workflow-plan-report { border-top: 1px solid var(--tone-line); padding: 6px 12px; max-height: 40%; overflow: auto; }
+.workflow-plan-schema { width: 100%; font-size: 11px; border-collapse: collapse; }
+.workflow-plan-schema th, .workflow-plan-schema td { text-align: left; vertical-align: top; padding: 4px; border-bottom: 1px solid var(--tone-line); overflow-wrap: anywhere; }
+.workflow-plan-operator { box-sizing: border-box; height: 88px; width: 224px; border: 1px solid var(--tone-line); border-radius: 6px; background: var(--tone-surface); padding: 10px 12px; display: flex; flex-direction: column; gap: 5px; cursor: pointer; }
+.workflow-plan-operator.is-selected { border-color: var(--tone-accent); }
+.workflow-plan-operator-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.workflow-plan-operator-heading strong { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workflow-plan-operator-heading span, .workflow-plan-operator small { color: var(--tone-ink-soft); font-size: 10px; }
+.workflow-plan-operator code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.workflow-plan-operator .df-handle { pointer-events: none; }
+@container (max-width: 750px) {
+  .workflow-plan-body { flex-direction: column; overflow: auto; }
+  .workflow-diagnostic-canvas { flex: none; height: 240px; }
+  .workflow-plan-inspector { width: auto; border-left: 0; border-top: 1px solid var(--tone-line); overflow: visible; }
+  .workflow-plan-origin { display: none; }
+}

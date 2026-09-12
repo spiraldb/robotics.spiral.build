@@ -16,10 +16,12 @@ export function installWorkflowFetch(nextMode) {
     globalThis.fetch = async (input, options) => {
         const request = input instanceof Request ? input : new Request(input, options);
         const url = new URL(request.url).pathname;
-        const body = await request.clone().json();
+        const body = request.method === 'GET' ? null : await request.clone().json();
         calls.push({url, body});
+        if (url === '/api/models/capabilities') return Response.json({columns:[],rows:[],truncated:false,elapsed_ms:0});
         if (url === '/api/workflows/plan') {
-            return new Response(JSON.stringify({validation:{errors:[]}, error:null}));
+            const graph = {schema_version:1,root:0,nodes:[{id:0,operator:'Values',inputs:[],output:{},properties:{}}]};
+            return Response.json({report:{explain_schema_version:2,logical_plan:graph,optimized_logical_plan:graph,physical_plan:graph,physical_lowering_error:null},error:null});
         }
         if (url !== '/api/models/complete') throw new Error('Unexpected request ' + url);
         if (mode === 'pending') {
@@ -29,10 +31,7 @@ export function installWorkflowFetch(nextMode) {
             });
         }
         const first = calls.filter(call => call.url === '/api/models/complete').length === 1;
-        const graph = {name:'Authored in browser', nodes:[
-            {id:'source',name:'Source',kind:'query',sql:'SELECT 42 AS answer',max_rows:10},
-            {id:'result',name:'Result',kind:'result'}
-        ], edges:[{source:'source',target:'result'}]};
+        const graph = {name:'Authored in browser',sql:'SELECT 42 AS answer'};
         const message = first
             ? {role:'assistant',content:'I’ll build it.',tool_calls:[{id:'graph-call',type:'function',function:{name:'set_workflow',arguments:JSON.stringify({workflow:graph})}}]}
             : {role:'assistant',content:'Ready to run.'};
@@ -82,8 +81,7 @@ impl AgentHarness {
         let current = session.clone();
         let state = use_signal(move || ProjectSessionState::Unavailable(Some(current)));
         use_context_provider(|| ProjectClient::new(session, state.into(), refresh));
-        let catalog = use_signal(|| None);
-        let controller = WorkflowController::use_controller(catalog.into());
+        let controller = WorkflowController::use_controller();
         let assistant = use_hook(|| WorkflowAssistant::new(controller.spec().id()));
         *self.0.borrow_mut() = Some((controller, assistant));
         rsx! {}
@@ -96,7 +94,8 @@ impl AgentHarness {
     }
     fn start(&self, dom: &VirtualDom) {
         dom.in_scope(ScopeId::ROOT, || {
-            self.assistant().send(self.editor(), "Build a graph".into())
+            self.assistant()
+                .send(self.editor(), "Build a SQL workflow".into())
         });
     }
     async fn pump(&self, dom: &mut VirtualDom) {
@@ -147,19 +146,20 @@ async fn browser_loop_plans_and_updates_the_local_draft_without_applying_or_savi
             .map(|call| call["url"].as_str().unwrap())
             .collect::<Vec<_>>(),
         [
+            "/api/models/capabilities",
             "/api/models/complete",
             "/api/workflows/plan",
             "/api/models/complete"
         ]
     );
     assert!(
-        calls[2]["body"]["messages"][0]["content"]
+        calls[3]["body"]["messages"][0]["content"]
             .as_str()
             .unwrap()
             .contains("Authored in browser")
     );
     assert!(
-        calls[2]["body"]["messages"]
+        calls[3]["body"]["messages"]
             .as_array()
             .unwrap()
             .iter()
@@ -175,7 +175,11 @@ async fn cancelling_a_browser_turn_aborts_fetch_and_keeps_valid_history() {
     dom.rebuild_in_place();
     harness.start(&dom);
     for _ in 0..200 {
-        if !fetch.calls().is_empty() {
+        if fetch
+            .calls()
+            .iter()
+            .any(|call| call["url"] == "/api/models/complete")
+        {
             break;
         }
         harness.pump(&mut dom).await;
@@ -195,7 +199,7 @@ async fn cancelling_a_browser_turn_aborts_fetch_and_keeps_valid_history() {
             .provider_messages()
             .is_structurally_valid(false)
     );
-    assert!(harness.editor().spec().nodes().is_empty());
+    assert!(harness.editor().spec().sql().is_empty());
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test]
@@ -206,7 +210,11 @@ async fn a_user_edit_while_the_model_responds_prevents_a_stale_tool_from_overwri
     dom.rebuild_in_place();
     harness.start(&dom);
     for _ in 0..200 {
-        if !fetch.calls().is_empty() {
+        if fetch
+            .calls()
+            .iter()
+            .any(|call| call["url"] == "/api/models/complete")
+        {
             break;
         }
         harness.pump(&mut dom).await;
@@ -220,7 +228,7 @@ async fn a_user_edit_while_the_model_responds_prevents_a_stale_tool_from_overwri
     assert_eq!(harness.editor().spec().name(), "User edited this");
     assert_eq!(
         fetch.calls().len(),
-        1,
+        2,
         "stale tools must not even start schema planning"
     );
     assert_eq!(
