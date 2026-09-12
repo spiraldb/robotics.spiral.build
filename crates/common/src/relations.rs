@@ -36,6 +36,18 @@ impl QueryColumn {
     pub const fn nullable(&self) -> bool {
         self.nullable
     }
+    /// Encoded previews produced by the shared native query result adapter.
+    pub fn image_data_url<'a>(&self, value: Option<&'a serde_json::Value>) -> Option<&'a str> {
+        matches!(
+            self.semantic_type(),
+            Some("spql.image.Image" | "arrow.variable_shape_tensor")
+        )
+        .then(|| value?.as_str())?
+        .filter(|value| {
+            value.starts_with("data:image/jpeg;base64,")
+                || value.starts_with("data:image/png;base64,")
+        })
+    }
     pub fn semantic_type(&self) -> Option<&str> {
         self.semantic_type.as_deref()
     }

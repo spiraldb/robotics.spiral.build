@@ -307,6 +307,7 @@ impl ProjectSession {
                 .unwrap_or_default(),
             connection.credentials().is_some(),
         )
+        .with_huggingface_token_configured(connection.huggingface_token().is_some())
         .with_table_prefix(self.storage().table_prefix())
     }
 

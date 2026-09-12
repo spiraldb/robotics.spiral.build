@@ -227,6 +227,13 @@ the pair; the backend revalidates hardware admission before recording begins.
 | POST | `/settings/spiral/test` | — | ConnectionTest |
 | POST | `/settings/training/test` | — | ConnectionTest |
 
+`SpiralConnectionUpdate.huggingface_token` is write-only: omitted or `null` keeps
+the saved token; a non-empty string replaces it; an empty string removes it.
+Settings responses contain only `huggingface_token_configured`. The backend keeps
+the token in its private bootstrap file and supplies it to the native ADBC
+database. Saving a changed token replaces the project connection through the
+normal settings lifecycle. Project exports and agent context do not contain it.
+
 ### Queries
 
 The recording catalog uses `/recording-datasets`; `/datasets` lists Spiral dataset
@@ -329,3 +336,10 @@ central component knows the set of feature operations.
 
 Dioxus renders the UI and serves the application shell; it does not define or
 implement the wire protocol.
+
+Workflow Assistant execution uses the existing `/workflow-runs` endpoints. Runs retain
+exact submitted SQL and bounded previews. The browser agent can page those previews,
+attach selected native image previews to the next model request, and select a completed
+run for presentation. `/models/complete` accepts text or standard text/image content
+parts; transient image messages are not allowed in persisted conversation history.
+Stopping the Assistant does not cancel an admitted native query.

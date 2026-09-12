@@ -69,6 +69,7 @@ struct WorkflowDefinitionSignals {
     draft: Signal<WorkflowSpec>,
     runs: Signal<Vec<WorkflowRun>>,
     conflict: Signal<bool>,
+    selected_run: Signal<Option<String>>,
 }
 #[derive(Clone, Copy, PartialEq)]
 struct WorkflowLifecycleSignals {
@@ -91,6 +92,7 @@ impl WorkflowController {
                 draft: Signal::new(initial_spec),
                 runs: Signal::new(Vec::new()),
                 conflict: Signal::new(false),
+                selected_run: Signal::new(None),
             },
             lifecycle: WorkflowLifecycleSignals {
                 loaded: Signal::new(false),
@@ -106,7 +108,8 @@ impl WorkflowController {
     }
 
     pub(crate) fn snapshot(&self) -> WorkflowRunSnapshot {
-        Self::project_run(&self.document.draft.read(), &self.document.runs.read())
+        let runs = self.visible_run().into_iter().collect::<Vec<_>>();
+        Self::project_run(&self.document.draft.read(), &runs)
     }
     fn project_run(draft: &WorkflowSpec, runs: &[WorkflowRun]) -> WorkflowRunSnapshot {
         let Some(run) = runs
@@ -122,15 +125,60 @@ impl WorkflowController {
         snapshot.set_result_stale(&submitted != draft);
         snapshot
     }
-    pub(crate) fn executed_query(&self) -> Option<WorkflowSpec> {
+    fn visible_run(&self) -> Option<WorkflowRun> {
+        let runs = self.workflow_runs();
+        let selected = self.document.selected_run.read();
+        selected
+            .as_ref()
+            .and_then(|id| {
+                runs.iter()
+                    .find(|run| run.snapshot().run_id() == Some(id.as_str()))
+            })
+            .or_else(|| runs.last())
+            .cloned()
+    }
+    pub(crate) fn workflow_runs(&self) -> Vec<WorkflowRun> {
         let id = self.document.draft.read().id().to_owned();
-        self.document
+        let mut runs = self
+            .document
             .runs
             .read()
             .iter()
             .filter(|run| run.workflow().id() == id)
-            .max_by_key(|run| run.snapshot().started_ms())
-            .map(|run| run.workflow().clone())
+            .cloned()
+            .collect::<Vec<_>>();
+        runs.sort_by_key(|run| run.snapshot().started_ms());
+        runs
+    }
+    pub(crate) fn select_run(mut self, id: String) {
+        if self
+            .workflow_runs()
+            .iter()
+            .any(|run| run.snapshot().run_id() == Some(id.as_str()))
+        {
+            self.document.selected_run.set(Some(id));
+        }
+    }
+    pub(crate) fn executed_query(&self) -> Option<WorkflowSpec> {
+        self.visible_run().map(|run| run.workflow().clone())
+    }
+    pub(super) fn observe_run(self, run: WorkflowRun) {
+        self.accept_runs(vec![run]);
+    }
+    pub(super) async fn submit_query(
+        mut self,
+        expected: &WorkflowSpec,
+    ) -> Result<WorkflowRun, String> {
+        if self.spec() != *expected || self.command().is_some() {
+            return Err("The draft changed or a document operation is in progress.".into());
+        }
+        let run = WorkflowClient::current().start(expected).await.map_err(|error| {
+            format!("{error}. Do not blindly retry a submission: inspect this workflow's runs to check whether it was admitted.")
+        })?;
+        self.document.selected_run.set(None);
+        self.observe_run(run.clone());
+        QueryRefresh::current().invalidate(&[QueryDomain::Workflow]);
+        Ok(run)
     }
     pub(crate) fn editor_status(&self) -> Option<WorkflowEditorStatus> {
         self.loaded()
@@ -349,6 +397,7 @@ impl WorkflowController {
         self.document.baseline.set(document);
         self.document.conflict.set(false);
         self.active_panel.set(None);
+        self.document.selected_run.set(None);
         self.lifecycle.loaded.set(true);
         self.lifecycle.load_error.set(None);
     }
@@ -415,7 +464,10 @@ impl WorkflowController {
             .set(Some(WorkflowPendingCommand::Starting));
         self.spawn(async move {
             match WorkflowClient::current().start(&workflow).await {
-                Ok(run) => self.accept_runs(vec![run]),
+                Ok(run) => {
+                    self.document.selected_run.set(None);
+                    self.observe_run(run);
+                }
                 Err(error) => studio.report_from(MessageSource::Workflow, error.to_string()),
             }
             self.lifecycle.command.set(None);

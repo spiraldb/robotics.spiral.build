@@ -365,9 +365,7 @@ impl QueryColumnPresentation for QueryColumn {
     }
 
     fn image_src<'a>(&self, value: Option<&'a serde_json::Value>) -> Option<&'a str> {
-        self.is_image()
-            .then(|| value?.as_str())?
-            .filter(|value| value.starts_with("data:image/"))
+        self.image_data_url(value)
     }
 }
 

@@ -1,7 +1,7 @@
 # Spiral robotics demo plan
 
-Status: **SQL workflow cutover implemented; adapter and browser checks passing**, September 11,
-2026. Native scoring and EXPLAIN are available in the current local upstream driver. Studio now authors and runs
+Status: **Agent execution/evidence loop implemented; adapter and browser checks passing**, September 11,
+2026. Native scoring is registered, but live scoring is blocked by Spiral's unavailable Hugging Face credential service. Studio now authors and runs
 SQL and displays Spiral's structured JSON plans with Dioxus Flow. The logical plan
 is the default; optimized logical and physical views are also inspectable.
 Workflow cancellation is out of scope. Native reuse and durable outputs remain
@@ -21,8 +21,8 @@ selection, and use the workflow as an input to training.
 The central demonstration is:
 
 > Inspect the dataset. Ask to exclude episodes whose top camera is too dim.
-> Let the agent write SQL and inspect its query plan. Click Run, review the
-> selected episodes, then train from the completed output without recomputing
+> Let the agent write SQL, run it, inspect evidence, and refine the selection.
+> Follow its query plan and review the final episodes, then train from the completed output without recomputing
 > its ML predicates.
 
 An optional second condition is “also exclude episodes where the ball was not
@@ -41,14 +41,15 @@ The following are requirements from the discussion:
 - **The workflow agent** interprets vague instructions and chooses concrete,
   executable semantics. Optional follow-up questions can help refine the workflow;
   users are not required to specify every parameter or resolve every ambiguity.
-- **Run** is the single explicit computation action. Spiral evaluates the query,
-  including inference. Native reuse and durable completed outputs follow the first
+- **The agent works through to results**, executing and refining native SQL as
+  authorized by the task. Manual **Run** remains available. Spiral evaluates each
+  submitted query, including inference. Native reuse and durable completed outputs follow the first
   working SQL execution; there is no separate preparation stage.
 - **Training** can choose a workflow as its data source. Its input path consumes
   completed outputs and never evaluates the workflow's enrichment models on the fly.
 
 Proposed product headline: **Describe the episodes you want, inspect the plan,
-and run it to get a dataset you can review and train from.**
+and let the agent return a dataset you can review and train from.**
 
 The [Spiral homepage](https://spiraldb.com/) was a presentation reference in the
 first draft. The episode → SQL workflow → Run → review → training flow above now owns
@@ -112,11 +113,13 @@ The engineer selects an existing Spiral dataset and types:
 
 > Select all episodes, but remove the ones whose top camera is too dim.
 
-The Assistant interprets the request and edits the in-memory SQL draft with a
-readable explanation. Natural language is the primary authoring path for this
+The Assistant interprets the request, authors SQL, runs candidates, inspects rows
+and representative images, and refines the selection until it can present a supported
+answer or a concrete blocker. The native plan visualizes this investigation. Natural language is the primary authoring path for this
 demo; SQL remains directly inspectable and editable. Save
 persists the definition and conversation together. Run submits an immutable copy
-of the visible SQL, including when the draft has not been saved.
+of the visible SQL, including when the draft has not been saved. Agent execution
+uses the same path and does not require a manual Run click.
 Neither action silently performs the other.
 
 Spiral validates the query and returns its plan without executing inference.
@@ -140,11 +143,9 @@ The draft identifies:
 The ownership and data flow are:
 
 ```text
-Instruction → Assistant → SQL
-                            ├─ Spiral planning → JSON plan → Dioxus Flow
-                            └─ Run → Spiral query execution → results
-                                       ├─ native decoding and inference
-                                       └─ native reuse and materialization (later milestones)
+Instruction → Assistant ↔ SQL → Spiral planning → JSON plan → Dioxus Flow
+                 ↑         └─ native execution → results
+                 └──────── inspect rows / images ────┘
 ```
 
 The SQL can express camera/frame selection, decoding, model evaluation, episode
@@ -162,7 +163,7 @@ alone does not establish that a ball was placed in a bowl.
 | Owner | Responsibilities |
 | --- | --- |
 | Spiral | SQL parsing and type/schema validation; logical and physical plans; native image/AI functions or operators; optimization, batch execution, model resources; later, compatible reuse and atomic output materialization. |
-| Studio | Workflow documents, conversations, explicit Run, query submission and observation, plan rendering, bounded result display, and navigation to evidence or Training. |
+| Studio | Workflow documents, conversations, agent investigation and manual Run, query submission and observation, plan rendering, bounded result display, and navigation to evidence or Training. |
 | Training runtime | Training-job lifecycle, pinned input loading, sampling, optimization, and checkpoints. Physical robot actions retain their separate lifecycle APIs. |
 
 Implement native inference as part of Spiral's execution system, reusing the
@@ -180,11 +181,13 @@ relations for graph edges, fork materialization, and external Model operator aft
 the SQL cutover. Reuse the existing query connection, run-observation, document,
 and result-display components; do not build another scheduler around native SQL.
 
-Authoring can inspect schemas, capabilities, and bounded source data. Enforce the
-computation boundary in the backend: a read-only SELECT can still invoke AI or
-perform expensive work. Authoring query inspection must not provide a bypass for
-workflow inference; use native function/capability information, including through
-views, rather than assuming read-only SQL is sufficient authorization.
+Metadata inspection remains bounded and does not execute inference. The agent's
+explicit `run_workflow` tool submits native read-only SQL through the existing runner,
+including its admission and recording exclusion rules. `inspect_run` reads immutable
+results; `inspect_images` supplies actual selected previews to the model. `show_results`
+selects a successful run and restores its exact SQL. Save stays a separate user action.
+Stopping the agent stops its investigation; admitted native queries continue because
+query cancellation is not part of this delivery.
 
 Resolving ambiguity is part of the agent's job. Using the instruction, dataset
 schema, available evidence, supported producers, and conversation history, it
@@ -260,7 +263,7 @@ optional scope, while agent ownership of interpretation is part of the core flow
 
 ## 5. Run the query and consume its output
 
-There is one Run action, whether values are cached or must be computed. The
+Agent and manual execution share one native runner, whether values are cached or must be computed. The
 workflow is the saved query; a plan explains how Spiral intends to evaluate it.
 A completed output is a separate result tied to the exact submitted definition
 and source snapshot. Saving or editing a workflow does not mutate a running query
@@ -412,11 +415,11 @@ A presenter-led 5–7 minute walkthrough is still a proposed format. Its sequenc
    interpretation, camera mapping, derived-column definition, episode predicate,
    SQL, and native query plan. If clarification UI is included, demonstrate one useful
    follow-up and how its answer changes the same draft.
-3. Click **Run**. Show real computation/reuse and the transition to a
-   completed output with full population counts.
+3. Follow the agent running an evaluation, inspecting scores and frames, and refining
+   its SQL before processing the requested population and presenting results.
 4. Review included, excluded, and unknown episodes. Open supporting evidence in
-   Data. Adjust a threshold, click **Run**, and demonstrate selection changes using
-   stored values.
+   Data. Ask the agent to adjust the interpretation and demonstrate the revised
+   selection; reuse stored values when that later milestone is available.
 5. If supported and appropriate to the archive, add the ball-in-bowl condition.
    Show which new values need computation and which existing values can be reused.
 6. In Training, load the completed workflow output. Inspect a real batch and run a
@@ -487,7 +490,7 @@ developing each feature.
 | Native dataset | Earlier migration notes report `dataset_default`, 52 episodes, 10 topics, and 66,549 decoded messages. Recheck the actual population and camera/action contents. |
 | Episode filtering | Current episode-filter notes document the upstream UUID comparison fix in Spiral PR #7033; exact Arrow UUID binding is implemented. Revalidate the installed build with two members and an empty result. |
 | Media inspection | Native H.264 packet reads and single-camera WebCodecs playback/keyframe seeking are implemented. Multi-camera synchronization and joint inspection are recorded as implemented in M1. Browser decoding does not prove native model/training images. |
-| Workflow | SQL authoring, native capability discovery, Dioxus Flow plan display, and native query execution are implemented. Named workflows, Save/Discard, and conversation ownership are preserved. Full episode inference verification remains upstream-dependent. |
+| Workflow | Agent SQL authoring, execution, row/image inspection, final-result selection, native capability discovery, and Dioxus Flow plan display are implemented. Named workflows, Save/Discard, and conversation ownership are preserved. Full episode inference verification remains upstream-dependent. |
 | Models | Existing SigLIP image/concept scoring is not a verified object detector or temporal task-success assessor. Choose and validate the actual producers; do not advertise unsupported ones. |
 | Persistence | Legacy feature-cache code exists but the current runner does not use it. Native source-version-aware reuse and immutable completed outputs with full membership are planned. Prove historical dependency resolution and retention. |
 | Training | ACT and the worker job/checkpoint lifecycle exist. The Python MCAP dataset constructor currently raises unavailable, and Studio explicitly blocks these jobs. Implement native worker-owned resolution/loading and completed-output preflight; do not merely remove the blocker. |

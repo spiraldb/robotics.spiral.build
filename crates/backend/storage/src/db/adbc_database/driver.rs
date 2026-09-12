@@ -36,6 +36,12 @@ impl DriverConfiguration {
             options.push((OptionDatabase::Username, credentials.client_id().into()));
             options.push((OptionDatabase::Password, credentials.client_secret().into()));
         }
+        if let Some(token) = settings.huggingface_token() {
+            options.push((
+                OptionDatabase::Other("spiral.huggingface_token".into()),
+                token.into(),
+            ));
+        }
         Self { options }
     }
 
@@ -149,5 +155,27 @@ impl DatabaseError {
             }
         }
         Self::new(DatabaseErrorKind::Internal, error.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use adbc_core::Optionable as _;
+
+    #[test]
+    fn huggingface_token_reaches_the_native_driver_as_a_write_only_option() {
+        let settings =
+            SpiralConnectionSettings::new("http://127.0.0.1:1".into(), "http://127.0.0.1:1".into())
+                .unwrap()
+                .with_huggingface_token(Some("hf_test_only".into()));
+        let database = DriverConfiguration::hosted(settings).load().unwrap();
+        let error = database
+            .database()
+            .get_option_string(OptionDatabase::Other("spiral.huggingface_token".into()))
+            .unwrap_err();
+        assert_eq!(error.status, adbc_core::error::Status::InvalidState);
+        assert!(error.message.contains("write-only"));
+        assert!(!error.message.contains("hf_test_only"));
     }
 }

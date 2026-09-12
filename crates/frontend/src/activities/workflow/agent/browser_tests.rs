@@ -9,10 +9,10 @@ use std::{cell::RefCell, rc::Rc};
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(inline_js = r#"
-let originalFetch, calls, mode, releaseResponse, aborted;
+let originalFetch, calls, mode, releaseResponse, aborted, runs;
 export function installWorkflowFetch(nextMode) {
     originalFetch = globalThis.fetch;
-    calls = []; mode = nextMode; aborted = false;
+    calls = []; mode = nextMode; aborted = false; runs = [];
     globalThis.fetch = async (input, options) => {
         const request = input instanceof Request ? input : new Request(input, options);
         const url = new URL(request.url).pathname;
@@ -23,6 +23,26 @@ export function installWorkflowFetch(nextMode) {
             const graph = {schema_version:1,root:0,nodes:[{id:0,operator:'Values',inputs:[],output:{},properties:{}}]};
             return Response.json({report:{explain_schema_version:2,logical_plan:graph,optimized_logical_plan:graph,physical_plan:graph,physical_lowering_error:null},error:null});
         }
+        if (url === '/api/workflow-runs' && request.method === 'POST') {
+            const run = {workflow:body,snapshot:{workflow_id:body.id,workflow_revision:body.revision,run_id:'run-'+(runs.length+1),phase:'running',started_ms:runs.length+1,updated_ms:runs.length+1}};
+            runs.push(run);
+            return Response.json(run);
+        }
+        if (url === '/api/workflow-runs') return Response.json(runs);
+        if (url.startsWith('/api/workflow-runs/')) {
+            const run = runs.find(run => url.endsWith('/'+run.snapshot.run_id));
+            if (!run) throw new Error('Unknown run');
+            if (mode !== 'running') {
+                run.snapshot.updated_ms = 100 + run.snapshot.started_ms;
+                if (run.snapshot.run_id === 'run-1') {
+                    run.snapshot.phase = 'failed'; run.snapshot.error = 'Native evaluation failed';
+                } else {
+                    run.snapshot.phase = 'completed';
+                    run.snapshot.result = {columns:[{name:'answer',data_type:'Int32',nullable:false},{name:'frame',data_type:'Utf8',nullable:false,semantic_type:'spql.image.Image'}],rows:[{answer:43,frame:'data:image/png;base64,aW1hZ2U='}],truncated:true,elapsed_ms:1};
+                }
+            }
+            return Response.json(run);
+        }
         if (url !== '/api/models/complete') throw new Error('Unexpected request ' + url);
         if (mode === 'pending') {
             await new Promise((resolve, reject) => {
@@ -32,9 +52,21 @@ export function installWorkflowFetch(nextMode) {
         }
         const first = calls.filter(call => call.url === '/api/models/complete').length === 1;
         const graph = {name:'Authored in browser',sql:'SELECT 42 AS answer'};
-        const message = first
+        let message = first
             ? {role:'assistant',content:'I’ll build it.',tool_calls:[{id:'graph-call',type:'function',function:{name:'set_workflow',arguments:JSON.stringify({workflow:graph})}}]}
             : {role:'assistant',content:'Ready to run.'};
+        if (mode === 'iterate' || mode === 'running') {
+            const set = sql => ['set_workflow',{workflow:{name:'Evaluated result',sql}}];
+            const steps = [set('SELECT 42 AS answer'), ['run_workflow',{}], ['inspect_run',{run_id:'run-1'}],
+                set('SELECT 43 AS answer'), ['run_workflow',{}], ['inspect_run',{run_id:'run-2'}],
+                ['inspect_images',{run_id:'run-2',column:'frame',rows:[0]}],
+                set('SELECT count(*) AS count FROM evidence'), ['run_workflow',{}], ['inspect_run',{run_id:'run-3'}],
+                ['show_results',{run_id:'run-2'}]];
+            const index = calls.filter(call => call.url === '/api/models/complete').length - 1;
+            const step = steps[index];
+            message = step ? {role:'assistant',content:'Evaluating evidence.',tool_calls:[{id:'step-'+index,type:'function',function:{name:step[0],arguments:JSON.stringify(step[1])}}]}
+                : {role:'assistant',content:'The result is 43. I inspected the frame; the displayed rows are a truncated preview.'};
+        }
         const payload = new TextEncoder().encode(JSON.stringify({event:'text',data:message.content})+'\n'+JSON.stringify({event:'complete',data:message})+'\n');
         // Deliberately split inside the UTF-8 apostrophe and across JSON records.
         const stream = new ReadableStream({start(controller) {
@@ -104,7 +136,7 @@ impl AgentHarness {
         dom.render_immediate_to_vec();
     }
     async fn finished(&self, dom: &mut VirtualDom) {
-        for _ in 0..200 {
+        for _ in 0..1000 {
             self.pump(dom).await;
             if self.assistant().task.peek().is_none() {
                 return;
@@ -241,5 +273,123 @@ async fn a_user_edit_while_the_model_responds_prevents_a_stale_tool_from_overwri
             .conversation()
             .provider_messages()
             .is_structurally_valid(false)
+    );
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test]
+async fn agent_recovers_from_execution_failure_inspects_images_and_presents_the_producing_query() {
+    let fetch = FetchFixture::new("iterate");
+    let harness = AgentHarness::default();
+    let mut dom = VirtualDom::new_with_props(AgentHarness::render, harness.clone());
+    dom.rebuild_in_place();
+    harness.start(&dom);
+    harness.finished(&mut dom).await;
+    let conversation = harness.assistant().conversation();
+    assert_eq!(
+        conversation.session().phase(),
+        WorkflowAgentPhase::Idle,
+        "{:?}",
+        conversation.session().error()
+    );
+    assert!(
+        conversation
+            .provider_messages()
+            .is_structurally_valid(false)
+    );
+    assert_eq!(harness.editor().spec().sql(), "SELECT 43 AS answer");
+    assert_eq!(harness.editor().snapshot().run_id(), Some("run-2"));
+    assert!(!harness.editor().snapshot().result_stale());
+    assert_eq!(harness.editor().workflow_runs().len(), 3);
+    let calls = fetch.calls();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call["url"] == "/api/workflow-runs")
+            .count(),
+        3
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|call| call["url"] == "/api/workflows/save")
+    );
+    let requests = calls
+        .iter()
+        .filter(|call| call["url"] == "/api/models/complete")
+        .collect::<Vec<_>>();
+    assert!(
+        requests[3]["body"]["messages"]
+            .to_string()
+            .contains("Native evaluation failed")
+    );
+    assert!(
+        requests[6]["body"]["messages"]
+            .to_string()
+            .contains("preview_truncated")
+    );
+    assert!(
+        requests[7]["body"]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["content"].is_array())
+    );
+    assert!(
+        !requests[8]["body"]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["content"].is_array())
+    );
+    assert!(
+        !serde_json::to_string(&conversation)
+            .unwrap()
+            .contains("data:image")
+    );
+    assert_eq!(
+        conversation.session().messages().last().unwrap().text(),
+        "The result is 43. I inspected the frame; the displayed rows are a truncated preview."
+    );
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test]
+async fn stopping_during_result_inspection_preserves_the_admitted_run() {
+    let fetch = FetchFixture::new("running");
+    let harness = AgentHarness::default();
+    let mut dom = VirtualDom::new_with_props(AgentHarness::render, harness.clone());
+    dom.rebuild_in_place();
+    harness.start(&dom);
+    for _ in 0..200 {
+        harness.pump(&mut dom).await;
+        if fetch
+            .calls()
+            .iter()
+            .any(|call| call["url"] == "/api/workflow-runs/run-1")
+        {
+            break;
+        }
+    }
+    assert_eq!(harness.editor().snapshot().run_id(), Some("run-1"));
+    dom.in_scope(ScopeId::ROOT, || harness.assistant().cancel());
+    harness.pump(&mut dom).await;
+    assert!(harness.editor().snapshot().phase().active());
+    assert_eq!(
+        harness.assistant().conversation().session().phase(),
+        WorkflowAgentPhase::Cancelled
+    );
+    assert!(
+        harness
+            .assistant()
+            .conversation()
+            .provider_messages()
+            .is_structurally_valid(false)
+    );
+    assert_eq!(
+        fetch
+            .calls()
+            .iter()
+            .filter(|call| call["url"] == "/api/workflow-runs")
+            .count(),
+        1
     );
 }

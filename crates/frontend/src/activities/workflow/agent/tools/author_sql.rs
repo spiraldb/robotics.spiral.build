@@ -12,7 +12,7 @@ impl WorkflowTool for SetWorkflow {
         "set_workflow"
     }
     fn description(&self) -> &'static str {
-        "Validate SQL with Spiral, then update the workflow draft in memory. SQL is the complete executable definition, including native AI calls. Use inspected catalog signatures and native default models; never invent functions. The native query plan is derived for display. Validation does not execute the query. Only the user's Save button persists the definition and conversation; Run executes it."
+        "Validate SQL with Spiral, then update the workflow draft in memory. SQL is the complete executable definition, including native AI calls. Use inspected catalog signatures and native default models; never invent functions. The native query plan is derived for display. Validation does not execute the query. Use run_workflow to evaluate it and inspect_run to examine the results. Only the user's Save button persists the definition and conversation."
     }
     fn parameters(&self) -> Value {
         json!({"type":"object","properties":{"workflow":{

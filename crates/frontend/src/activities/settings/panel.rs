@@ -34,6 +34,8 @@ struct SettingsDraftSignals {
     base: Signal<DataSettings>,
     saved: Signal<Option<DataSettings>>,
     client_secret: Signal<String>,
+    huggingface_token: Signal<String>,
+    clear_huggingface_token: Signal<bool>,
     section: Signal<SettingsSection>,
 }
 
@@ -60,6 +62,8 @@ impl SettingsPanelState {
                 saved: Signal::new(None),
                 current: Signal::new(initial),
                 client_secret: Signal::new(String::new()),
+                huggingface_token: Signal::new(String::new()),
+                clear_huggingface_token: Signal::new(false),
                 section: Signal::new(section),
             },
             operations: SettingsOperationSignals {
@@ -103,6 +107,8 @@ pub(crate) fn SettingsPanel(
                 mut base,
                 mut saved,
                 mut client_secret,
+                mut huggingface_token,
+                mut clear_huggingface_token,
                 mut section,
             },
         operations:
@@ -186,8 +192,10 @@ pub(crate) fn SettingsPanel(
         save_error.set(None);
         saving.set(true);
         let submitted = current();
-        let destination_changed =
-            submitted.spiral() != base.peek().spiral() || !client_secret.peek().is_empty();
+        let destination_changed = submitted.spiral() != base.peek().spiral()
+            || !client_secret.peek().is_empty()
+            || !huggingface_token.peek().trim().is_empty()
+            || clear_huggingface_token();
         let connection = SpiralConnectionUpdate::new(
             current().spiral().endpoint(),
             current().spiral().spfs_endpoint(),
@@ -198,6 +206,12 @@ pub(crate) fn SettingsPanel(
             current().spiral().client_id().trim().is_empty()
                 && current().spiral().client_secret_configured(),
         );
+        let connection = connection.with_huggingface_token(if clear_huggingface_token() {
+            Some(String::new())
+        } else {
+            let token = huggingface_token();
+            (!token.trim().is_empty()).then_some(token)
+        });
         let training = current().training().to_owned();
         let video = current().video().to_owned();
         crate::client::project::ProjectClient::current().spawn(async move {
@@ -217,6 +231,8 @@ pub(crate) fn SettingsPanel(
                 Ok(_) => {
                     saved.set(Some(submitted));
                     client_secret.set(String::new());
+                    huggingface_token.set(String::new());
+                    clear_huggingface_token.set(false);
                     on_saved();
                     if let Some(connection_test) =
                         connection_test.filter(|_| !destination_changed && preferences_loaded)
@@ -359,6 +375,28 @@ pub(crate) fn SettingsPanel(
                                 p { class: "settings-help",
                                     "The API, SpFS endpoint, project, and optional client credentials are applied to a new scoped SpiralDB connection when you save. The secret is stored only in the backend's private bootstrap file and is never returned to this page."
                                 }
+                                SettingsField {
+                                    label: "Hugging Face token",
+                                    value: huggingface_token(),
+                                    behavior: SettingsInputBehavior::new(
+                                        if current().spiral().huggingface_token_configured() { "Saved — leave blank to keep" } else { "hf_…" },
+                                        move |value| { huggingface_token.set(value); clear_huggingface_token.set(false); },
+                                    ).with_secret().with_disabled_when(saving() || import_project.pending()),
+                                }
+                                p { class: "settings-help",
+                                    "Used by Spiral to download models and datasets from Hugging Face. Stored privately on this backend; the saved token is never returned to the browser."
+                                }
+                                if current().spiral().huggingface_token_configured() {
+                                    Toggle {
+                                        label: "Remove saved Hugging Face token",
+                                        checked: clear_huggingface_token(),
+                                        disabled: saving() || import_project.pending(),
+                                        onchange: move |remove| { clear_huggingface_token.set(remove); huggingface_token.set(String::new()); },
+                                    }
+                                    if clear_huggingface_token() {
+                                        p { class: "settings-help", role: "status", "The token will be removed when you save settings." }
+                                    }
+                                }
                                 Action {
                                     purpose: ActionPurpose::Apply,
                                     variant: ActionVariant::Outline,
@@ -470,7 +508,7 @@ pub(crate) fn SettingsPanel(
                         "Applies to this Studio."
                     }
                     div {
-                        Action { purpose: ActionPurpose::Cancel, disabled: saving() || import_project.pending(), onclick: move |_| { current.set(base()); client_secret.set(String::new()); save_error.set(None); test_result.set(None); }, "Discard changes" }
+                        Action { purpose: ActionPurpose::Cancel, disabled: saving() || import_project.pending(), onclick: move |_| { current.set(base()); client_secret.set(String::new()); huggingface_token.set(String::new()); clear_huggingface_token.set(false); save_error.set(None); test_result.set(None); }, "Discard changes" }
                         Action { purpose: ActionPurpose::Apply, variant: ActionVariant::Solid, disabled: saving() || import_project.pending() || current().spiral().project_id().trim().is_empty(), aria_busy: saving(), onclick: move |_| save(None), if saving() { "Saving…" } else { "Save settings" } }
                     }
                 }
@@ -548,6 +586,11 @@ impl SettingsInputBehavior {
 
     const fn with_disabled(mut self) -> Self {
         self.disabled = true;
+        self
+    }
+
+    const fn with_disabled_when(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
         self
     }
 

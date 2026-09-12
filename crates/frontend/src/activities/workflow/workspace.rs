@@ -18,7 +18,7 @@ use crate::activities::workflow::state::{
 use crate::components::icons::{ResultNodeIcon, WorkflowIcon};
 use crate::shell::state::StudioProjectState;
 
-const WORKFLOW_LAYOUT_SCOPE: &str = "workflow-sql-plan-v6";
+const WORKFLOW_LAYOUT_SCOPE: &str = "workflow-investigation-v7";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum AssistantBlock {
@@ -93,15 +93,9 @@ impl WorkflowWorkspaceLayout {
         let right = LayoutNode::split(
             "workflow-right-rows",
             SplitAxis::Vertical,
-            0.60,
+            0.45,
             LayoutNode::tile("workflow-canvas", [CANVAS_PANEL_ID]),
-            LayoutNode::split(
-                "workflow-details-columns",
-                SplitAxis::Horizontal,
-                0.50,
-                LayoutNode::tile("workflow-inspector", [NODE_PANEL_ID]),
-                LayoutNode::tile("workflow-results", [RESULTS_PANEL_ID]),
-            ),
+            LayoutNode::tile("workflow-results", [RESULTS_PANEL_ID, NODE_PANEL_ID]),
         );
         PanelLayout::new(LayoutNode::split(
             "workflow-columns",
@@ -219,6 +213,9 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
                     }
                 }
             }
+            if active && controller.workflow_runs().iter().any(|run| run.snapshot().phase().active()) {
+                p { class: "workflow-plan-node-id", role: "status", "Spiral is running a query. Stopping the Assistant leaves that query running." }
+            }
             div {
                 id: "workflow-assistant-scroll",
                 class: "workflow-assistant-scroll",
@@ -232,7 +229,7 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
                 if messages.is_empty() {
                     section { class: "workflow-assistant-empty",
                         h3 { "What should we find?" }
-                        p { "Describe what to find. I’ll inspect the data and build a workflow for you to run. Click Save to keep your work." }
+                        p { "Describe the result you need. I’ll inspect the data, run queries, and refine the results. Click Save to keep the SQL and conversation." }
                         if configured {
                             div { class: "workflow-assistant-examples",
                                 Action {
@@ -395,7 +392,7 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
                         Action {
                             purpose: ActionPurpose::Stop,
                             variant: ActionVariant::Outline,
-                            disabled: command.is_some(),
+                            disabled: command == Some(AgentPendingCommand::Cancelling),
                             aria_busy: command == Some(AgentPendingCommand::Cancelling),
                             onclick: move |_| controller.cancel_agent(studio),
                             if command == Some(AgentPendingCommand::Cancelling) { "Stopping…" } else { "Stop" }
@@ -806,6 +803,7 @@ fn WorkflowResults(controller: super::state::WorkflowController) -> Element {
         WorkflowRunPhase::Interrupted | WorkflowRunPhase::Failed
     ) && run_reason.is_none();
     let spec = controller.spec();
+    let runs = controller.workflow_runs();
 
     let empty_workflow = spec.sql().trim().is_empty();
     let executed = controller.executed_query().unwrap_or_else(|| spec.clone());
@@ -839,6 +837,22 @@ fn WorkflowResults(controller: super::state::WorkflowController) -> Element {
 
     rsx! {
         section { class: "workflow-results", "aria-label": "Workflow results",
+            if !runs.is_empty() {
+                div { class: "workflow-plan-navigation",
+                    label { r#for: "workflow-result-run", "Run" }
+                    select { id: "workflow-result-run", value: snapshot.run_id().unwrap_or_default(),
+                        onchange: move |event| controller.select_run(event.value()),
+                        for (index, run) in runs.iter().enumerate() {
+                            option { key: "{run.snapshot().run_id().unwrap_or_default()}",
+                                value: run.snapshot().run_id().unwrap_or_default(),
+                                selected: run.snapshot().run_id() == snapshot.run_id(),
+                                "{index + 1} · {run.workflow().name()} · {run.snapshot().phase().run_label()}"
+                            }
+                        }
+                    }
+                    details { class: "workflow-executed-sql", summary { "Executed SQL" } pre { "{sql}" } }
+                }
+            }
             if let Some(result) = snapshot.result() {
                 header { class: "workflow-results-meta",
                     span { "{snapshot.phase().run_label()}" }

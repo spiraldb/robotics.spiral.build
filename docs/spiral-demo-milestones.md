@@ -299,6 +299,29 @@ invoke Studio graph execution or manually route intermediate Arrow batches.
 **Depends on:** 3.1a, 2.1, 2.2. This completes the architectural replacement;
 3.2 must build on native SQL, not on the superseded Arrow graph runner.
 
+### 3.1c — Agent completes the investigation and presents results
+
+- [ ] Done — execution/evidence loop implemented and tested. Live evaluation decoded
+  nine frames from three episodes; native scoring is blocked by Spiral's unavailable
+  Hugging Face credential service. Full episode decisions remain unverified.
+
+The agent authors and plans SQL, submits through the native runner, waits for results,
+inspects row pages and actual image previews, and revises candidates. It finishes by
+selecting a successful immutable run and restoring its producing SQL. The graph
+visualizes the current investigation. Manual Run remains available; Save is explicit.
+No additional scheduler, inference implementation, or persistent cache is introduced.
+
+Tests exercise execution failure followed by refinement, transient image attachments,
+selection of an earlier result after an evidence query, and stopping without losing an
+admitted run. A result selector exposes previous runs and their exact SQL. Images do
+not enter persisted conversation JSON.
+
+**Accept:** request dim-top-camera episode filtering without clicking Run. Verify
+actual frame assessment, full population coverage, retained/excluded/unknown decisions,
+representative evidence, and a final result tied to its producing query. Explain
+subjective thresholds and any preview truncation. Missing native features or resources
+must be reported directly rather than replaced by Studio inference.
+
 ### 3.2 — Reuse ML outputs through scanner pushdown
 
 - [ ] Done

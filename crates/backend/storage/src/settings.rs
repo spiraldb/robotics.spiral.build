@@ -118,6 +118,8 @@ struct BackendState {
     client_id: String,
     #[serde(default)]
     client_secret: String,
+    #[serde(default)]
+    huggingface_token: Option<String>,
 }
 
 #[derive(Clone, Default, Eq, PartialEq)]
@@ -153,6 +155,7 @@ pub struct SpiralConnectionSettings {
     spfs_endpoint: String,
     project_id: Option<String>,
     credentials: Option<SpiralCredentials>,
+    huggingface_token: Option<String>,
 }
 
 impl SpiralConnectionSettings {
@@ -162,6 +165,7 @@ impl SpiralConnectionSettings {
             spfs_endpoint: ServiceEndpoint::spiral_spfs(&spfs_endpoint)?.into_string(),
             project_id: None,
             credentials: None,
+            huggingface_token: None,
         })
     }
 
@@ -173,6 +177,17 @@ impl SpiralConnectionSettings {
     pub fn with_credentials(mut self, credentials: Option<SpiralCredentials>) -> Self {
         self.credentials = credentials;
         self
+    }
+
+    pub fn with_huggingface_token(mut self, token: Option<String>) -> Self {
+        self.huggingface_token = token
+            .map(|token| token.trim().to_owned())
+            .filter(|token| !token.is_empty());
+        self
+    }
+
+    pub fn huggingface_token(&self) -> Option<&str> {
+        self.huggingface_token.as_deref()
     }
 
     pub fn endpoint(&self) -> &str {
@@ -337,11 +352,16 @@ impl BackendStateStore {
             .then_some(SpiralCredentials::new(client_id, client_secret))
     }
 
+    pub fn huggingface_token(&self) -> Option<String> {
+        self.current.lock_unpoisoned().huggingface_token.clone()
+    }
+
     pub fn save_connection(&self, settings: &SpiralConnectionSettings) -> Result<(), String> {
         let project_id = settings.project_id().ok_or_else(|| {
             "Spiral project is not configured. Choose a project in Settings → SpiralDB.".to_owned()
         })?;
         let next = BackendState {
+            huggingface_token: settings.huggingface_token().map(str::to_owned),
             project_id: project_id.to_owned(),
             spiral_endpoint: settings.endpoint().to_owned(),
             spiral_spfs_endpoint: settings.spfs_endpoint().to_owned(),
@@ -541,7 +561,8 @@ mod tests {
         .unwrap()
         .with_project(" project-123 ")
         .unwrap()
-        .with_credentials(Some(credentials.clone()));
+        .with_credentials(Some(credentials.clone()))
+        .with_huggingface_token(Some("hf_private".into()));
         store.save_connection(&settings).unwrap();
         assert_eq!(store.project_id().as_deref(), Some("project-123"));
         assert_eq!(
@@ -555,7 +576,7 @@ mod tests {
         let saved = store.credentials().expect("credentials are saved");
         assert_eq!(saved.client_id(), credentials.client_id());
         assert_eq!(saved.client_secret(), credentials.client_secret());
-        let reopened = BackendStateStore::open(path).unwrap();
+        let reopened = BackendStateStore::open(path.clone()).unwrap();
         assert_eq!(reopened.project_id().as_deref(), Some("project-123"));
         assert_eq!(
             reopened.spiral_endpoint().as_deref(),
@@ -568,6 +589,24 @@ mod tests {
         let saved = reopened.credentials().expect("credentials are reopened");
         assert_eq!(saved.client_id(), credentials.client_id());
         assert_eq!(saved.client_secret(), credentials.client_secret());
+        assert_eq!(reopened.huggingface_token().as_deref(), Some("hf_private"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        reopened
+            .save_connection(&settings.with_huggingface_token(None))
+            .unwrap();
+        assert!(
+            BackendStateStore::open(path)
+                .unwrap()
+                .huggingface_token()
+                .is_none()
+        );
     }
 
     #[test]

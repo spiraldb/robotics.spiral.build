@@ -715,3 +715,7 @@
   .workflow-plan-inspector { width: auto; border-left: 0; border-top: 1px solid var(--tone-line); overflow: visible; }
   .workflow-plan-origin { display: none; }
 }
+
+.workflow-results .workflow-plan-navigation select { flex: 1; min-width: 0; }
+.workflow-executed-sql { width: 100%; font-size: 11px; }
+.workflow-executed-sql pre { max-height: 144px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }

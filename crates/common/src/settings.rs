@@ -96,6 +96,8 @@ pub struct SpiralSettings {
     /// The secret is write-only and never crosses back to the browser.
     #[serde(default)]
     client_secret_configured: bool,
+    #[serde(default)]
+    huggingface_token_configured: bool,
     table_prefix: String,
 }
 
@@ -107,6 +109,7 @@ impl Default for SpiralSettings {
             project_id: String::new(),
             client_id: String::new(),
             client_secret_configured: false,
+            huggingface_token_configured: false,
             table_prefix: "studio".to_owned(),
         }
     }
@@ -134,6 +137,15 @@ impl SpiralSettings {
         self.client_secret_configured = secret_configured;
         self
     }
+    pub const fn with_huggingface_token_configured(mut self, configured: bool) -> Self {
+        self.huggingface_token_configured = configured;
+        self
+    }
+
+    pub const fn huggingface_token_configured(&self) -> bool {
+        self.huggingface_token_configured
+    }
+
     pub fn with_table_prefix(mut self, table_prefix: impl Into<String>) -> Self {
         self.table_prefix = table_prefix.into();
         self
@@ -203,7 +215,7 @@ impl VideoSettings {
 
 /// Spiral connection and write-only credential changes from the settings screen.
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SpiralConnectionUpdate {
     #[serde(default = "SpiralConnectionUpdate::default_spiral_endpoint")]
     spiral_endpoint: String,
@@ -217,6 +229,9 @@ pub struct SpiralConnectionUpdate {
     client_secret: String,
     #[serde(default)]
     clear_client_secret: bool,
+    /// Omitted preserves the saved token; an empty string removes it.
+    #[serde(default)]
+    huggingface_token: Option<String>,
 }
 
 impl SpiralConnectionUpdate {
@@ -240,6 +255,7 @@ impl SpiralConnectionUpdate {
             client_id: String::new(),
             client_secret: String::new(),
             clear_client_secret: false,
+            huggingface_token: None,
         }
     }
 
@@ -258,7 +274,16 @@ impl SpiralConnectionUpdate {
         self
     }
 
-    pub fn into_parts(self) -> (String, String, String, String, String, bool) {
+    pub fn with_huggingface_token(mut self, token: Option<String>) -> Self {
+        self.huggingface_token = token;
+        self
+    }
+
+    pub fn huggingface_token(&self) -> Option<&str> {
+        self.huggingface_token.as_deref()
+    }
+
+    pub fn into_parts(self) -> (String, String, String, String, String, bool, Option<String>) {
         (
             self.spiral_endpoint,
             self.spiral_spfs_endpoint,
@@ -266,7 +291,25 @@ impl SpiralConnectionUpdate {
             self.client_id,
             self.client_secret,
             self.clear_client_secret,
+            self.huggingface_token,
         )
+    }
+}
+
+impl std::fmt::Debug for SpiralConnectionUpdate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpiralConnectionUpdate")
+            .field("spiral_endpoint", &self.spiral_endpoint)
+            .field("spiral_spfs_endpoint", &self.spiral_spfs_endpoint)
+            .field("project_id", &self.project_id)
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"<redacted>")
+            .field("clear_client_secret", &self.clear_client_secret)
+            .field(
+                "huggingface_token",
+                &self.huggingface_token.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
     }
 }
 
@@ -282,3 +325,27 @@ impl Default for SpiralConnectionUpdate {
 
 mod requests;
 pub use requests::{ConnectionTest, SettingsUpdate};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn huggingface_settings_expose_presence_and_redact_update_debug() {
+        let update = SpiralConnectionUpdate::default()
+            .with_client_credentials("client", "private-client-secret")
+            .with_huggingface_token(Some("hf_private".into()));
+        let debug = format!("{update:?}");
+        assert!(!debug.contains("hf_private"));
+        assert!(!debug.contains("private-client-secret"));
+        let settings = SpiralSettings::default().with_huggingface_token_configured(true);
+        let json = serde_json::to_value(settings).unwrap();
+        assert_eq!(json["huggingface_token_configured"], true);
+        assert!(json.get("huggingface_token").is_none());
+        let legacy: SpiralSettings = serde_json::from_value(serde_json::json!({
+            "endpoint": DEFAULT_SPIRAL_ENDPOINT, "project_id": "project", "table_prefix": "studio"
+        }))
+        .unwrap();
+        assert!(!legacy.huggingface_token_configured());
+    }
+}

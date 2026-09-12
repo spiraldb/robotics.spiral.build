@@ -10,8 +10,24 @@ use spiral_robotics_common::workflow::{WorkflowAgentArtifactReceipt, WorkflowSpe
 
 mod author_sql;
 mod dataset;
+mod execution;
 mod models;
 mod relations;
+
+use spiral_robotics_common::workflow::conversation::ProviderMessage;
+
+pub(super) struct ToolContext {
+    pub(super) expected: WorkflowSpec,
+    pub(super) evidence: Vec<ProviderMessage>,
+}
+impl ToolContext {
+    pub(super) fn new(expected: WorkflowSpec) -> Self {
+        Self {
+            expected,
+            evidence: Vec::new(),
+        }
+    }
+}
 
 trait WorkflowTool: Send + Sync {
     fn name(&self) -> &'static str;
@@ -43,6 +59,7 @@ struct ToolInvocation<'a> {
     controller: WorkflowController,
     expected: &'a mut WorkflowSpec,
     arguments: &'a str,
+    evidence: &'a mut Vec<ProviderMessage>,
 }
 
 impl ToolInvocation<'_> {
@@ -84,13 +101,17 @@ struct NoArguments {}
 pub(super) struct WorkflowToolCatalog;
 
 impl WorkflowToolCatalog {
-    fn tools() -> [Box<dyn WorkflowTool>; 5] {
+    fn tools() -> [Box<dyn WorkflowTool>; 9] {
         [
             Box::new(dataset::InspectDataset),
             Box::new(relations::ListRelations),
             Box::new(relations::DescribeRelations),
             Box::new(models::ListModelCapabilities),
             Box::new(author_sql::SetWorkflow),
+            Box::new(execution::RunWorkflow),
+            Box::new(execution::InspectRun),
+            Box::new(execution::InspectImages),
+            Box::new(execution::ShowResults),
         ]
     }
     fn find(name: &str) -> Option<Box<dyn WorkflowTool>> {
@@ -116,9 +137,12 @@ impl WorkflowToolCatalog {
         )
     }
     fn resolve(workflow: &WorkflowSpec, name: &str) -> Result<Box<dyn WorkflowTool>, String> {
-        let tool = Self::find(name).ok_or_else(|| format!(
-            "Unknown Workflow tool {:?}. The Assistant only authors workflows; run computation explicitly from the workflow controls.", name
-        ))?;
+        let tool = Self::find(name).ok_or_else(|| {
+            format!(
+                "Unknown Workflow tool {:?}. Use the available native workflow tools.",
+                name
+            )
+        })?;
         if !tool.available(workflow) {
             return Err("Native episode authoring supports dataset inspection, model capabilities, and filter saves only. Computation is unavailable.".into());
         }
@@ -128,12 +152,13 @@ impl WorkflowToolCatalog {
     pub(super) async fn execute(
         controller: WorkflowController,
         call: &spiral_robotics_common::workflow::conversation::ProviderToolCall,
-        expected: &mut WorkflowSpec,
+        context: &mut ToolContext,
     ) -> Result<String, String> {
-        let tool = Self::resolve(expected, call.function().name())?;
+        let tool = Self::resolve(&context.expected, call.function().name())?;
         tool.call(ToolInvocation {
             controller,
-            expected,
+            expected: &mut context.expected,
+            evidence: &mut context.evidence,
             arguments: call.function().arguments(),
         })
         .await

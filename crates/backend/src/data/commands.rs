@@ -191,7 +191,8 @@ impl DataCommands {
         change: SettingsUpdate,
     ) -> Result<DataSettings, BackendCommandError> {
         let (connection, training, video) = change.into_parts();
-        let (endpoint, spfs, project, client_id, secret, clear_secret) = connection.into_parts();
+        let (endpoint, spfs, project, client_id, secret, clear_secret, huggingface_token) =
+            connection.into_parts();
         let secret = if clear_secret {
             Some(String::new())
         } else if secret.trim().is_empty() {
@@ -203,6 +204,7 @@ impl DataCommands {
             .with_spfs_endpoint(spfs)
             .with_client(client_id)
             .with_client_secret(secret)
+            .with_huggingface_token(huggingface_token)
             .with_video_enabled(video.enabled());
         let result = self
             .state

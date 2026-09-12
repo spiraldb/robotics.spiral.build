@@ -98,6 +98,21 @@ These checks do not verify non-null model inference on complete episodes.
 
 ## Current local driver refresh
 
+September 12, 2026: Settings → SpiralDB accepts a write-only Hugging Face token.
+Studio passes it as `spiral.huggingface_token` when opening the ADBC database.
+This requires the local upstream HF-token support merged at
+`5eaad38bd4d150efe8525c2a8bdbd8a5266a0152`; the public archive pin is unchanged.
+
+The Settings preview on port 8094 uses that driver's **debug build**, copied to
+`target/release/libadbc_driver_spiraldb.dylib` so `local-driver` selects it.
+The directory name does not indicate this artifact's build profile. Its SHA-256 is
+`8438918bab084281b9e06b15b1c79c6e3a506660200c6a946bd8a400718d24d6`.
+The build command was `cargo build -p adbc-driver-spiraldb` in the upstream checkout.
+Tests verified private token persistence, preserve/replace/remove updates, and the
+native write-only option boundary. Non-null inference remains unverified.
+
+### Previous production Dataset repair
+
 The local driver was rebuilt on September 11, 2026 from upstream
 `0435bb5b0fdff2aec21b537fc702333769e49215` (the production Dataset repair).
 The SHA-256 of `target/release/libadbc_driver_spiraldb.dylib` is

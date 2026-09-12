@@ -270,7 +270,9 @@ impl ServerStartup {
                 .with_project(&project)
                 .map_err(std::io::Error::other)?;
         }
-        connection = connection.with_credentials(backend_state.credentials());
+        connection = connection
+            .with_credentials(backend_state.credentials())
+            .with_huggingface_token(backend_state.huggingface_token());
         let hardware = Arc::new(HardwareHandle::spawn(control_settings));
         let cameras = Arc::new(CameraManager::new());
         if let Some(error) = camera_access_error {

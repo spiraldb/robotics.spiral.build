@@ -165,7 +165,7 @@ impl WorkflowConversation {
 pub struct ProviderMessage {
     role: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
+    content: Option<ProviderContent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -176,7 +176,7 @@ impl ProviderMessage {
     pub fn text(role: &str, content: impl Into<String>) -> Self {
         Self {
             role: role.to_owned(),
-            content: Some(content.into()),
+            content: Some(ProviderContent::Text(content.into())),
             tool_call_id: None,
             tool_calls: Vec::new(),
         }
@@ -185,7 +185,7 @@ impl ProviderMessage {
     pub fn tool(call_id: String, content: String) -> Self {
         Self {
             role: "tool".to_owned(),
-            content: Some(content),
+            content: Some(ProviderContent::Text(content)),
             tool_call_id: Some(call_id),
             tool_calls: Vec::new(),
         }
@@ -194,17 +194,40 @@ impl ProviderMessage {
     pub fn assistant(content: Option<String>, tool_calls: Vec<ProviderToolCall>) -> Self {
         Self {
             role: "assistant".to_owned(),
-            content,
+            content: content.map(ProviderContent::Text),
             tool_call_id: None,
             tool_calls,
         }
+    }
+
+    /// Visual evidence is sent only in the next model request, never saved in history.
+    pub fn image_evidence(caption: String, data_url: String) -> Result<Self, String> {
+        if !data_url.starts_with("data:image/jpeg;base64,")
+            && !data_url.starts_with("data:image/png;base64,")
+        {
+            return Err("Evidence must be an encoded JPEG or PNG from a query result.".into());
+        }
+        Ok(Self {
+            role: "user".into(),
+            content: Some(ProviderContent::Parts(vec![
+                ProviderPart::Text { text: caption },
+                ProviderPart::ImageUrl {
+                    image_url: ProviderImageUrl { url: data_url },
+                },
+            ])),
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+        })
     }
 
     pub fn role(&self) -> &str {
         &self.role
     }
     pub fn content(&self) -> Option<&str> {
-        self.content.as_deref()
+        match &self.content {
+            Some(ProviderContent::Text(text)) => Some(text),
+            _ => None,
+        }
     }
     pub fn tool_call_id(&self) -> Option<&str> {
         self.tool_call_id.as_deref()
@@ -212,6 +235,27 @@ impl ProviderMessage {
     pub fn tool_calls(&self) -> &[ProviderToolCall] {
         &self.tool_calls
     }
+}
+
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(untagged)]
+enum ProviderContent {
+    Text(String),
+    Parts(Vec<ProviderPart>),
+}
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum ProviderPart {
+    Text { text: String },
+    ImageUrl { image_url: ProviderImageUrl },
+}
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderImageUrl {
+    url: String,
 }
 
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
@@ -278,7 +322,9 @@ impl ProviderMessageHistory for Vec<ProviderMessage> {
             // The system prompt is constructed in memory for each request. Only
             // conversation roles produced by Studio may cross the persistence
             // boundary, so imported history cannot inject system/developer text.
-            if !matches!(message.role(), "user" | "assistant" | "tool") {
+            if !matches!(message.role(), "user" | "assistant" | "tool")
+                || matches!(message.content, Some(ProviderContent::Parts(_)))
+            {
                 return false;
             }
             if let Some(expected) = pending.as_mut() {
@@ -359,6 +405,36 @@ mod tests {
     use super::*;
     use crate::workflow::{WorkflowAgentMessage, WorkflowAgentRole};
     use serde_json::json;
+
+    #[test]
+    fn image_evidence_uses_multimodal_transport_but_cannot_enter_saved_history() {
+        let image = ProviderMessage::image_evidence(
+            "Run one, row zero".into(),
+            "data:image/png;base64,aW1hZ2U=".into(),
+        )
+        .unwrap();
+        let encoded = serde_json::to_value(&image).unwrap();
+        assert_eq!(encoded["content"][0]["type"], "text");
+        assert_eq!(encoded["content"][1]["type"], "image_url");
+        assert_eq!(
+            serde_json::from_value::<ProviderMessage>(encoded).unwrap(),
+            image
+        );
+        let mut conversation = WorkflowConversation::new("workflow");
+        conversation.provider_messages_mut().push(image);
+        assert!(conversation.validate().is_err());
+        assert!(
+            ProviderMessage::image_evidence(
+                "remote".into(),
+                "https://example.com/image.jpg".into()
+            )
+            .is_err()
+        );
+        assert_eq!(
+            serde_json::to_value(ProviderMessage::text("user", "hello")).unwrap()["content"],
+            "hello"
+        );
+    }
 
     #[test]
     fn conversation_round_trip_is_bound_to_its_workflow() {
