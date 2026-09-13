@@ -129,9 +129,7 @@ impl WorkflowConversation {
                 "Assistant history has an invalid workflow or conversation identity.".to_owned(),
             );
         }
-        if self.session.messages().len() > MAX_WORKFLOW_AGENT_MESSAGES_PER_CONVERSATION
-            || self.provider_messages.len() > MAX_WORKFLOW_AGENT_MESSAGES_PER_CONVERSATION
-        {
+        if self.session.messages().len() > MAX_WORKFLOW_AGENT_MESSAGES_PER_CONVERSATION {
             return Err("Assistant conversation exceeds its message bound.".to_owned());
         }
         if !self
@@ -379,21 +377,18 @@ impl ProviderMessageHistory for Vec<ProviderMessage> {
         let provider_before = self.len();
         if self.len() > MAX_WORKFLOW_AGENT_MESSAGES_PER_CONVERSATION {
             let minimum = self.len() - MAX_WORKFLOW_AGENT_MESSAGES_PER_CONVERSATION;
-            if let Some(boundary) = self
+            // Retire complete older turns only. A long current turn must keep
+            // its user request and every tool exchange. Its size is bounded by
+            // the agent's iteration/tool budgets and the persisted byte limit,
+            // not the visible transcript's message count.
+            let boundary = self
                 .iter()
                 .enumerate()
-                .skip(minimum)
-                .find_map(|(index, message)| (message.role() == "user").then_some(index))
-            {
-                // Provider history begins only at a user/backend-completion
-                // boundary. This cannot retain a tool result without its
-                // assistant tool call or split a multi-result tool exchange.
+                .filter_map(|(index, message)| (message.role() == "user").then_some(index))
+                .find(|index| *index >= minimum)
+                .or_else(|| self.iter().rposition(|message| message.role() == "user"));
+            if let Some(boundary) = boundary {
                 self.drain(..boundary);
-            } else {
-                // A valid retained conversation always has a user boundary. Drop
-                // malformed provider history instead of emitting an invalid or
-                // unbounded provider request.
-                self.clear();
             }
         }
         self.len() != provider_before
@@ -557,6 +552,37 @@ mod tests {
             MAX_WORKFLOW_AGENT_MESSAGES_PER_CONVERSATION + 1
         );
         assert!(WorkflowConversation::decode(&" ".repeat(MAX_CONVERSATION_BYTES + 1)).is_err());
+    }
+
+    #[test]
+    fn a_long_tool_turn_keeps_its_goal_and_evidence() {
+        let mut messages = vec![ProviderMessage::text("user", "Find dim episodes")];
+        for index in 0..50 {
+            let id = format!("call-{index}");
+            messages.extend([
+                ProviderMessage::assistant(
+                    None,
+                    vec![ProviderToolCall::new(&id, "inspect_run", "{}")],
+                ),
+                ProviderMessage::tool(id, "evidence".into()),
+            ]);
+            messages.trim_to_provider_bound();
+        }
+        assert_eq!(messages.len(), 101);
+        assert_eq!(messages[0].content(), Some("Find dim episodes"));
+        assert!(messages.is_structurally_valid(false));
+        let mut conversation = WorkflowConversation::new("lighting");
+        *conversation.provider_messages_mut() = messages;
+        conversation.persisted().unwrap();
+        conversation
+            .provider_messages_mut()
+            .push(ProviderMessage::text("user", "Next task"));
+        assert!(
+            conversation
+                .provider_messages_mut()
+                .trim_to_provider_bound()
+        );
+        assert_eq!(conversation.provider_messages().len(), 1);
     }
 
     #[test]

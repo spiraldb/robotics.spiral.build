@@ -67,10 +67,10 @@ struct WorkflowRuntime {
 #[derive(Default)]
 struct WorkflowRuns {
     snapshots: BTreeMap<String, WorkflowRun>,
-    active: Option<ActiveRun>,
+    active: BTreeMap<String, ActiveRun>,
 }
 struct ActiveRun {
-    id: String,
+    workflow_id: String,
     task: Option<tokio::task::JoinHandle<()>>,
 }
 impl WorkflowManager {
@@ -172,7 +172,7 @@ impl WorkflowManager {
         }
     }
     pub(crate) fn is_active(&self) -> bool {
-        self.inner.runs.recover_lock().active.is_some()
+        !self.inner.runs.recover_lock().active.is_empty()
     }
     pub(crate) fn runs(&self) -> Vec<WorkflowRun> {
         self.inner
@@ -199,10 +199,15 @@ impl WorkflowManager {
             ));
         }
         let mut runs = self.inner.runs.recover_lock();
-        if runs.active.is_some() {
-            return Err(OperationError::Conflict(
-                "A workflow run is already active.".into(),
-            ));
+        if let Some((id, _)) = runs
+            .active
+            .iter()
+            .find(|(_, active)| active.workflow_id == workflow.id())
+        {
+            return Err(OperationError::Conflict(format!(
+                "Workflow '{}' already has an active run: {id}.",
+                workflow.name()
+            )));
         }
         let id = format!("run-{}", uuid::Uuid::new_v4());
         let snapshot = WorkflowRunSnapshot::started(&workflow, id.clone())
@@ -211,21 +216,28 @@ impl WorkflowManager {
         runs.snapshots.insert(id.clone(), record.clone());
         let manager = self.clone();
         let task_id = id.clone();
+        let workflow_id = workflow.id().to_owned();
         let task = tokio::spawn(async move {
             manager.execute(task_id, workflow).await;
         });
-        runs.active = Some(ActiveRun {
+        runs.active.insert(
             id,
-            task: Some(task),
-        });
+            ActiveRun {
+                workflow_id,
+                task: Some(task),
+            },
+        );
         Ok(record)
     }
     pub(crate) async fn shutdown(&self) {
-        let task = {
+        let tasks = {
             let mut runs = self.inner.runs.recover_lock();
-            runs.active.as_mut().and_then(|active| active.task.take())
+            runs.active
+                .values_mut()
+                .filter_map(|active| active.task.take())
+                .collect::<Vec<_>>()
         };
-        if let Some(task) = task {
+        for task in tasks {
             let _ = task.await;
         }
     }
@@ -247,9 +259,9 @@ impl WorkflowManager {
     }
     fn finish(&self, id: &str, result: Result<SpiralQuerySnapshot, String>) {
         let mut runs = self.inner.runs.recover_lock();
-        let Some(_) = runs.active.as_ref().filter(|active| active.id == id) else {
+        if !runs.active.contains_key(id) {
             return;
-        };
+        }
         let snapshot = runs
             .snapshots
             .get_mut(id)
@@ -268,7 +280,7 @@ impl WorkflowManager {
         let now = SystemTime::now().unix_millis();
         snapshot.set_finished_ms(now);
         snapshot.set_updated_ms(now);
-        runs.active = None;
+        runs.active.remove(id);
     }
 }
 

@@ -1,7 +1,5 @@
 //! Workflow conversation, execution canvas, and dedicated node inspector.
 
-use std::rc::Rc;
-
 use crate::components::interaction::{Action, ActionPurpose, ActionVariant};
 use dioxus::prelude::*;
 use dioxus_workbench::{LayoutNode, Panel, PanelId, PanelLayout, PanelWorkspace, SplitAxis};
@@ -113,7 +111,7 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
     let state = controller.agent_state();
     let mut follow_latest = use_signal(|| true);
     let mut show_latest_action = use_signal(|| false);
-    let mut thread_tail = use_signal(|| None::<Rc<MountedData>>);
+    let mut thread_scroll = use_signal(|| None::<web_sys::Element>);
     let mut drafts = controller.agent_drafts();
     let command = controller.agent_command();
     let active = state.session().phase().active();
@@ -170,11 +168,13 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
         if !*follow_latest.peek() {
             return;
         }
-        let tail = thread_tail.peek().to_owned();
+        let scroll = thread_scroll.peek().to_owned();
         spawn(async move {
             gloo_timers::future::TimeoutFuture::new(24).await;
-            if let Some(tail) = tail {
-                let _ = tail.scroll_to(ScrollBehavior::Smooth).await;
+            if *follow_latest.peek()
+                && let Some(scroll) = scroll
+            {
+                scroll.set_scroll_top(scroll.scroll_height());
             }
         });
     }));
@@ -219,6 +219,11 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
             div {
                 id: "workflow-assistant-scroll",
                 class: "workflow-assistant-scroll",
+                onmounted: move |event| {
+                    if let Some(element) = event.data().downcast::<web_sys::Element>() {
+                        thread_scroll.set(Some(element.clone()));
+                    }
+                },
                 onscroll: move |event| {
                     let distance = f64::from(event.data().scroll_height() - event.data().client_height())
                         - event.data().scroll_top();
@@ -261,6 +266,7 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
                     ol { class: "workflow-assistant-thread",
                         for message in messages.clone() {
                             li {
+                                key: "{message.id()}",
                                 class: match message.role() { WorkflowAgentRole::User => "workflow-agent-message is-user", WorkflowAgentRole::Assistant => "workflow-agent-message is-assistant", WorkflowAgentRole::Synthetic => "workflow-agent-message is-system" },
                                 div { class: "workflow-agent-message-meta",
                                     strong { match message.role() { WorkflowAgentRole::User => "You", WorkflowAgentRole::Assistant => "Assistant", WorkflowAgentRole::Synthetic => "Workflow" } }
@@ -331,7 +337,6 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
                 div {
                     class: "workflow-assistant-thread-tail",
                     "aria-hidden": "true",
-                    onmounted: move |event| thread_tail.set(Some(event.data())),
                 }
             }
             form {
@@ -352,12 +357,10 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
                         onclick: move |_| {
                             follow_latest.set(true);
                             show_latest_action.set(false);
-                            let tail = thread_tail.peek().to_owned();
-                            spawn(async move {
-                                if let Some(tail) = tail {
-                                    let _ = tail.scroll_to(ScrollBehavior::Smooth).await;
-                                }
-                            });
+                            let scroll = thread_scroll.peek().to_owned();
+                            if let Some(scroll) = scroll {
+                                scroll.set_scroll_top(scroll.scroll_height());
+                            }
                         },
                         "Jump to latest"
                     }

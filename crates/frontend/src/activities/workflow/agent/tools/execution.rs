@@ -45,10 +45,10 @@ impl WorkflowTool for InspectRun {
         "inspect_run"
     }
     fn description(&self) -> &'static str {
-        "Without run_id, list this workflow's admitted runs to recover IDs. With run_id, wait for completion and inspect a page of its stored preview (default 10, maximum 20 rows). Returns exact SQL, phase, errors and preview truncation. Image cells are references; use inspect_images to see them. Query aggregates for exact counts or SQL-selected evidence beyond the preview. No query is executed or retried by this tool."
+        "Without run_id, list this workflow's admitted runs to recover IDs. With run_id, wait for completion and inspect a page of its stored preview (default 100, maximum 100 rows). Returns exact SQL, phase, errors and preview truncation. Image cells are references; use inspect_images to see them. When preview_truncated=false the retained rows are the entire result; summarize them without rerunning inference. Use SQL for evidence beyond a truncated preview. Request fewer rows for very wide results. No query is executed or retried by this tool."
     }
     fn parameters(&self) -> Value {
-        json!({"type":"object","properties":{"run_id":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":20}},"additionalProperties":false})
+        json!({"type":"object","properties":{"run_id":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":100}},"additionalProperties":false})
     }
     fn presentation(&self) -> ToolPresentation {
         ToolPresentation::new(
@@ -63,11 +63,11 @@ impl WorkflowTool for InspectRun {
     ) -> LocalBoxFuture<'a, Result<String, String>> {
         Box::pin(async move {
             let arguments: InspectRunArguments = invocation.arguments()?;
-            let limit = arguments.limit.unwrap_or(10);
-            if !(1..=20).contains(&limit) {
-                return Err("Request 1–20 preview rows.".into());
+            let limit = arguments.limit.unwrap_or(100);
+            if !(1..=100).contains(&limit) {
+                return Err("Request 1–100 preview rows.".into());
             }
-            let Some(id) = arguments.run_id else {
+            let Some(id) = arguments.run_id.filter(|id| !id.trim().is_empty()) else {
                 let runs = WorkflowClient::current()
                     .runs()
                     .await
@@ -311,6 +311,34 @@ mod tests {
         )));
         WorkflowRun::new(workflow, snapshot)
     }
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn complete_cohort_can_be_inspected_without_another_query() {
+        let workflow = WorkflowSpec::new("cohort", "Cohort");
+        let mut snapshot = WorkflowRunSnapshot::started(&workflow, "cohort-run");
+        snapshot.set_phase(WorkflowRunPhase::Completed);
+        let rows = (0..52)
+            .map(|index| {
+                serde_json::from_value(
+                    json!({"episode_id": format!("episode-{index}"), "retained": index >= 3}),
+                )
+                .unwrap()
+            })
+            .collect();
+        snapshot.set_result(Some(SpiralQuerySnapshot::new(Vec::new(), rows, false)));
+        let run = WorkflowRun::new(workflow, snapshot);
+        let page = RunEvidence::new(&run).page(0, 100);
+        let rows = page["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 52);
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row["cells"]["retained"] == false)
+                .count(),
+            3
+        );
+        assert_eq!(page["preview_truncated"], false);
+        assert!(page["next_offset"].is_null());
+    }
+
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn evidence_pages_preserve_identity_and_truncation_without_image_payloads() {
         let run = fixture();

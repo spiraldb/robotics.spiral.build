@@ -67,6 +67,11 @@ export function installWorkflowFetch(nextMode) {
             message = step ? {role:'assistant',content:'Evaluating evidence.',tool_calls:[{id:'step-'+index,type:'function',function:{name:step[0],arguments:JSON.stringify(step[1])}}]}
                 : {role:'assistant',content:'The result is 43. I inspected the frame; the displayed rows are a truncated preview.'};
         }
+        if (mode === 'empty-id') {
+            message = first
+                ? {role:'assistant',content:'Recovering runs.',tool_calls:[{id:'recover',type:'function',function:{name:'inspect_run',arguments:JSON.stringify({run_id:''})}}]}
+                : {role:'assistant',content:'No admitted runs.'};
+        }
         const payload = new TextEncoder().encode(JSON.stringify({event:'text',data:message.content})+'\n'+JSON.stringify({event:'complete',data:message})+'\n');
         // Deliberately split inside the UTF-8 apostrophe and across JSON records.
         const stream = new ReadableStream({start(controller) {
@@ -273,6 +278,32 @@ async fn a_user_edit_while_the_model_responds_prevents_a_stale_tool_from_overwri
             .conversation()
             .provider_messages()
             .is_structurally_valid(false)
+    );
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test]
+async fn empty_run_id_recovers_the_workflows_run_list() {
+    let fetch = FetchFixture::new("empty-id");
+    let harness = AgentHarness::default();
+    let mut dom = VirtualDom::new_with_props(AgentHarness::render, harness.clone());
+    dom.rebuild_in_place();
+    harness.start(&dom);
+    harness.finished(&mut dom).await;
+    let calls = fetch.calls();
+    assert!(
+        calls
+            .iter()
+            .any(|call| call["url"] == "/api/workflow-runs" && call["body"].is_null())
+    );
+    assert!(!calls.iter().any(|call| {
+        call["url"]
+            .as_str()
+            .unwrap()
+            .starts_with("/api/workflow-runs/")
+    }));
+    assert_eq!(
+        harness.assistant().conversation().session().phase(),
+        WorkflowAgentPhase::Idle
     );
 }
 

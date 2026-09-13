@@ -101,7 +101,7 @@ struct NoArguments {}
 pub(super) struct WorkflowToolCatalog;
 
 impl WorkflowToolCatalog {
-    fn tools() -> [Box<dyn WorkflowTool>; 9] {
+    fn tools() -> [Box<dyn WorkflowTool>; 10] {
         [
             Box::new(dataset::InspectDataset),
             Box::new(relations::ListRelations),
@@ -112,6 +112,7 @@ impl WorkflowToolCatalog {
             Box::new(execution::InspectRun),
             Box::new(execution::InspectImages),
             Box::new(execution::ShowResults),
+            Box::new(models::InspectFunctions),
         ]
     }
     fn find(name: &str) -> Option<Box<dyn WorkflowTool>> {

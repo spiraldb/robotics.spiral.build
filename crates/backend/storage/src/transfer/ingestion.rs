@@ -114,7 +114,11 @@ impl HuggingFaceRepository {
         client: &reqwest::Client,
         revision: &str,
     ) -> Result<Vec<TreeEntry>, String> {
-        let mut next = Some(self.api_url("tree", revision)?);
+        let mut first_page = self.api_url("tree", revision)?;
+        first_page
+            .query_pairs_mut()
+            .extend_pairs([("recursive", "true"), ("expand", "true")]);
+        let mut next = Some(first_page);
         let mut files = Vec::new();
         for _ in 0..MAX_TREE_PAGES {
             let Some(url) = next.take() else {
@@ -122,7 +126,6 @@ impl HuggingFaceRepository {
             };
             let response = client
                 .get(url)
-                .query(&[("recursive", "true"), ("expand", "true")])
                 .send()
                 .await
                 .map_err(|error| format!("listing Hugging Face repository files: {error}"))?

@@ -87,7 +87,7 @@ async fn execute_accepts_unsaved_sql_and_keeps_its_exact_input() {
     graph.set_name("Next draft");
     assert!(
         fixture.manager.start(graph.clone()).is_err(),
-        "one executor remains the resource limit"
+        "a workflow cannot start a duplicate run"
     );
     let finished = fixture.finished(run.snapshot().run_id().unwrap()).await;
     assert_eq!(finished.workflow(), &submitted);
@@ -127,6 +127,36 @@ async fn execute_accepts_unsaved_sql_and_keeps_its_exact_input() {
             .unwrap(),
         finished
     );
+}
+
+#[tokio::test]
+async fn independent_workflows_run_concurrently_and_shutdown_waits_for_both() {
+    let fixture = WorkflowFixture::new();
+    let first = fixture.manager.start(WorkflowFixture::query()).unwrap();
+    let second = fixture
+        .manager
+        .start(WorkflowSpec::new("second", "Second query").with_sql("SELECT 43 AS answer"))
+        .unwrap();
+    assert_eq!(fixture.manager.inner.runs.recover_lock().active.len(), 2);
+    let duplicate = fixture.manager.start(WorkflowFixture::query()).unwrap_err();
+    assert!(
+        duplicate
+            .to_string()
+            .contains(first.snapshot().run_id().unwrap())
+    );
+    fixture.manager.shutdown().await;
+    assert!(!fixture.manager.is_active());
+    for (run, answer) in [(first, 42), (second, 43)] {
+        let finished = fixture
+            .manager
+            .run(run.snapshot().run_id().unwrap())
+            .unwrap();
+        assert_eq!(finished.snapshot().phase(), WorkflowRunPhase::Completed);
+        assert_eq!(
+            finished.snapshot().result().unwrap().rows()[0]["answer"],
+            answer
+        );
+    }
 }
 
 #[tokio::test]
