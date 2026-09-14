@@ -98,6 +98,34 @@ These checks do not verify non-null model inference on complete episodes.
 
 ## Current local driver refresh
 
+September 14, 2026: Studio on port 8080 uses a debug driver built from the sibling
+`../spiraldb` checkout at `dcf103dc23b3630896f6e017f7a590722f5a0488`, with its
+workspace Vortex dependencies pointing to `../vortex`. That fork is based on
+`eff56e5b9034e9489ab3167448e4b57daf27bbcb` and includes the local decimal-to-integer
+cast fix. Scalar and column casts share the same conversion policy. SpiralDB's
+protobuf imports were updated for the fork's schema-module move.
+
+The driver SHA-256 is
+`60ceb4f136ea949899db6c80b345b4c48106fa211eb94ac1339d82cf39668bf0`.
+It is copied from `../spiraldb/target/debug/libadbc_driver_spiraldb.dylib` to
+`target/release/libadbc_driver_spiraldb.dylib`; the destination directory name
+does not indicate its build profile. Existing servers must restart to load it.
+The `adbc-build` shell now supplies FlatBuffers 25.12.19, required by the fork.
+To rebuild from the SpiralDB checkout with its pinned Rust toolchain:
+
+```sh
+nix develop ../spiral-robotics#adbc-build --command \
+  "$HOME/.cargo/bin/cargo" build --locked -p adbc-driver-spiraldb
+```
+
+Validation passed all 377 decimal-related Vortex tests, the SPQL protobuf feature
+check, and the original `CAST(row_number() OVER () - 1 AS BIGINT)` reproduction
+through Studio. The two-episode decoder evaluation returned 12 images, including
+the episode that previously failed with a missing H.264 parameter set. Its SQL
+uses `row_number()` ordered by `(chunk_start_offset, sample_ordinal)` within each
+episode, because `sample_ordinal` alone resets across chunks. These checks cover
+casting and decoding; they do not establish object-holding detection accuracy.
+
 September 12, 2026: Settings → SpiralDB accepts a write-only Hugging Face token.
 Studio passes it as `spiral.huggingface_token` when opening the ADBC database.
 This requires the local upstream HF-token support merged at

@@ -7,7 +7,7 @@ use spiral_robotics_common::{
     workflow::{
         WorkflowRunPhase, WorkflowRunSnapshot, WorkflowSpec, WorkflowSummary,
         conversation::WorkflowConversation,
-        document::{WorkflowDocument, WorkflowPlan, WorkflowRun},
+        document::{WorkflowDocument, WorkflowPlan, WorkflowRun, WorkflowSqlPlan},
     },
 };
 use spiral_robotics_storage::{StorageManager, workflows::WorkflowJson};
@@ -22,6 +22,8 @@ const WORKFLOW_ENCODING_VERSION: u32 = 4;
 #[serde(deny_unknown_fields)]
 struct SavedWorkflow {
     workflow: WorkflowSpec,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    planned_sql: Option<WorkflowSqlPlan>,
 }
 impl SavedWorkflow {
     fn persisted(&self) -> Result<WorkflowJson, String> {
@@ -110,7 +112,13 @@ impl WorkflowManager {
                 .map_err(OperationError::IncompatibleWorkflow)?,
             None => WorkflowConversation::new(id),
         };
-        Ok(WorkflowDocument::new(saved.workflow).with_conversation(conversation))
+        let document = WorkflowDocument::new(saved.workflow)
+            .with_conversation(conversation)
+            .with_plan(saved.planned_sql);
+        document
+            .validate()
+            .map_err(OperationError::IncompatibleWorkflow)?;
+        Ok(document)
     }
     pub(crate) async fn save(
         &self,
@@ -142,6 +150,7 @@ impl WorkflowManager {
         );
         let graph = SavedWorkflow {
             workflow: document.workflow().clone(),
+            planned_sql: document.planned_sql().cloned(),
         }
         .persisted()
         .map_err(OperationError::External)?;

@@ -166,6 +166,7 @@
               packages = (pkgs.lib.remove rustToolchain developmentShell.packages) ++ [
                 adbcBuildToolchain
                 pkgs.openssl
+                pkgs.flatbuffers
               ];
               # openssl-sys otherwise prefers Homebrew on macOS over pkg-config.
               OPENSSL_INCLUDE_DIR = "${pkgs.openssl.dev}/include";

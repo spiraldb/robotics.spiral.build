@@ -10,6 +10,8 @@ use serde_json::Value;
 pub struct WorkflowDocument {
     workflow: WorkflowSpec,
     conversation: WorkflowConversation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    planned_sql: Option<WorkflowSqlPlan>,
 }
 impl WorkflowDocument {
     pub fn new(workflow: WorkflowSpec) -> Self {
@@ -17,6 +19,7 @@ impl WorkflowDocument {
         Self {
             workflow,
             conversation,
+            planned_sql: None,
         }
     }
     pub fn with_conversation(mut self, conversation: WorkflowConversation) -> Self {
@@ -32,6 +35,13 @@ impl WorkflowDocument {
     pub fn conversation(&self) -> &WorkflowConversation {
         &self.conversation
     }
+    pub fn with_plan(mut self, planned_sql: Option<WorkflowSqlPlan>) -> Self {
+        self.planned_sql = planned_sql;
+        self
+    }
+    pub fn planned_sql(&self) -> Option<&WorkflowSqlPlan> {
+        self.planned_sql.as_ref()
+    }
     pub fn validate(&self) -> Result<(), String> {
         if self.workflow.id().is_empty() || self.workflow.id().len() > 128 {
             return Err("Workflow identity must contain 1–128 characters.".into());
@@ -39,7 +49,33 @@ impl WorkflowDocument {
         if self.workflow.id() != self.conversation.workflow_id() {
             return Err("Conversation belongs to another workflow.".into());
         }
+        if let Some(planned) = &self.planned_sql {
+            if planned.for_workflow(&self.workflow).is_none() {
+                return Err("The saved plan belongs to different SQL.".into());
+            }
+            planned.plan.validate()?;
+        }
         self.conversation.validate()
+    }
+}
+
+/// A display snapshot tied to the exact SQL that Spiral planned.
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowSqlPlan {
+    sql: String,
+    plan: WorkflowPlan,
+}
+impl WorkflowSqlPlan {
+    pub fn new(workflow: &WorkflowSpec, plan: WorkflowPlan) -> Self {
+        Self {
+            sql: workflow.sql().to_owned(),
+            plan,
+        }
+    }
+    pub fn for_workflow(&self, workflow: &WorkflowSpec) -> Option<&WorkflowPlan> {
+        (self.sql == workflow.sql()).then_some(&self.plan)
     }
 }
 

@@ -10,6 +10,12 @@ pub struct WorkflowPlan {
     error: Option<String>,
 }
 impl WorkflowPlan {
+    pub(super) fn validate(&self) -> Result<(), String> {
+        if let Some(report) = &self.report {
+            report.validate()?;
+        }
+        Ok(())
+    }
     pub fn from_native_json(json: &str) -> Result<Self, String> {
         let report: SpiralPlanReport = serde_json::from_str(json)
             .map_err(|error| format!("Reading Spiral's structured query plan: {error}"))?;

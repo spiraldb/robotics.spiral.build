@@ -89,6 +89,7 @@ impl ToolInvocation<'_> {
         }
         self.controller
             .replace_authored_query(self.expected, workflow.clone())?;
+        self.controller.remember_plan(&workflow, plan);
         *self.expected = workflow.clone();
         Ok(json!({"ok":true, "workflow":workflow}).to_string())
     }

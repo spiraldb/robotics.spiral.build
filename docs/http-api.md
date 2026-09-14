@@ -126,7 +126,11 @@ to backend readiness, hardware, and activity validation.
 Training polling accepts `?selected=<run-id>` to include bounded full history for
 one run. Omit it when only the run catalog and current metrics are needed.
 Workflow authoring is local to the browser. Save sends a `WorkflowDocument` whose
-document revision is the expected saved version. Run sends a complete `WorkflowSpec`
+document revision is the expected saved version. Its optional `planned_sql` field
+contains `{sql, plan}`: the exact SQL and the `/workflows/plan` response used for
+display. Save/load preserves this snapshot alongside SQL and conversation; a plan
+for different SQL is rejected. Documents without a snapshot remain supported.
+Run sends a complete `WorkflowSpec`
 and returns a `WorkflowRun` containing that exact SQL definition and a run snapshot.
 `WorkflowSpec` contains `id`, `name`, `revision`, and `sql`. `/workflows/plan`
 returns a native JSON `report` (EXPLAIN schema version 2) and optional `error`.

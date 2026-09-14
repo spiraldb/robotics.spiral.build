@@ -18,7 +18,10 @@ impl WorkflowFixture {
     }
     fn saved() -> SavedWorkflow {
         let workflow = Self::query();
-        SavedWorkflow { workflow }
+        SavedWorkflow {
+            workflow,
+            planned_sql: None,
+        }
     }
     async fn finished(&self, id: &str) -> WorkflowRun {
         tokio::time::timeout(Duration::from_secs(15), async {
@@ -168,6 +171,33 @@ async fn planning_checks_native_sql_without_creating_a_run() {
     graph.set_sql("SELECT missing_column");
     assert!(fixture.manager.plan(&graph).await.error().is_some());
     assert!(fixture.manager.runs().is_empty());
+}
+
+#[tokio::test]
+async fn saved_native_plan_round_trips_and_remains_bound_to_its_sql() {
+    let fixture = WorkflowFixture::new();
+    let workflow = WorkflowFixture::query();
+    let plan = fixture.manager.plan(&workflow).await;
+    assert!(plan.report().is_some());
+    let saved = SavedWorkflow {
+        planned_sql: Some(WorkflowSqlPlan::new(&workflow, plan.clone())),
+        workflow,
+    };
+    let restored = SavedWorkflow::restored(&saved.persisted().unwrap()).unwrap();
+    let mut document = WorkflowDocument::new(restored.workflow).with_plan(restored.planned_sql);
+    assert!(document.validate().is_ok());
+    assert_eq!(
+        document
+            .planned_sql()
+            .unwrap()
+            .for_workflow(document.workflow()),
+        Some(&plan)
+    );
+    document.workflow_mut().set_name("Renamed");
+    document.workflow_mut().set_revision(2);
+    assert!(document.validate().is_ok());
+    document.workflow_mut().set_sql("SELECT 99 AS answer");
+    assert!(document.validate().unwrap_err().contains("different SQL"));
 }
 
 #[tokio::test]

@@ -160,6 +160,17 @@ async fn browser_loop_plans_and_updates_the_local_draft_without_applying_or_savi
     harness.start(&dom);
     harness.finished(&mut dom).await;
     assert_eq!(harness.editor().spec().name(), "Authored in browser");
+    // The graph can reuse candidate validation instead of issuing another EXPLAIN.
+    let workflow = harness.editor().spec();
+    assert!(
+        harness
+            .editor()
+            .plan_query(&workflow)
+            .await
+            .unwrap()
+            .report()
+            .is_some()
+    );
     let conversation = harness.assistant().conversation();
     assert_eq!(
         conversation.session().phase(),

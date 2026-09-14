@@ -13,7 +13,9 @@ use spiral_robotics_common::workflow::{
 use super::agent::{WorkflowAgentState, WorkflowAssistant};
 use crate::shell::notifications::MessageSource;
 use crate::shell::state::StudioProjectState;
-use spiral_robotics_common::workflow::document::{WorkflowDocument, WorkflowRun};
+use spiral_robotics_common::workflow::document::{
+    WorkflowDocument, WorkflowPlan, WorkflowRun, WorkflowSqlPlan,
+};
 
 pub(crate) const ASSISTANT_PANEL_ID: &str = "workflow-assistant";
 pub(crate) const NODE_PANEL_ID: &str = "workflow-node";
@@ -70,6 +72,7 @@ struct WorkflowDefinitionSignals {
     runs: Signal<Vec<WorkflowRun>>,
     conflict: Signal<bool>,
     selected_run: Signal<Option<String>>,
+    planned_sql: Signal<Option<WorkflowSqlPlan>>,
 }
 #[derive(Clone, Copy, PartialEq)]
 struct WorkflowLifecycleSignals {
@@ -93,6 +96,7 @@ impl WorkflowController {
                 runs: Signal::new(Vec::new()),
                 conflict: Signal::new(false),
                 selected_run: Signal::new(None),
+                planned_sql: Signal::new(None),
             },
             lifecycle: WorkflowLifecycleSignals {
                 loaded: Signal::new(false),
@@ -275,6 +279,36 @@ impl WorkflowController {
         self.document.draft.write().set_sql(sql);
     }
 
+    pub(super) fn plan_for(&self, workflow: &WorkflowSpec) -> Option<WorkflowPlan> {
+        self.document
+            .planned_sql
+            .peek()
+            .as_ref()
+            .and_then(|planned| planned.for_workflow(workflow))
+            .cloned()
+    }
+
+    pub(super) fn remember_plan(mut self, workflow: &WorkflowSpec, plan: WorkflowPlan) {
+        let current = self.spec();
+        if current.id() == workflow.id() && current.sql() == workflow.sql() {
+            self.document
+                .planned_sql
+                .set(Some(WorkflowSqlPlan::new(workflow, plan)));
+        }
+    }
+
+    pub(super) async fn plan_query(
+        self,
+        workflow: &WorkflowSpec,
+    ) -> Result<WorkflowPlan, crate::client::CommandError> {
+        if let Some(plan) = self.plan_for(workflow) {
+            return Ok(plan);
+        }
+        let plan = WorkflowClient::current().plan(workflow).await?;
+        self.remember_plan(workflow, plan.clone());
+        Ok(plan)
+    }
+
     pub(crate) fn set_name(mut self, name: String) {
         self.document.draft.write().set_name(name);
     }
@@ -393,6 +427,9 @@ impl WorkflowController {
     }
     fn install(mut self, document: WorkflowDocument) {
         self.assistant.install(document.conversation().clone());
+        self.document
+            .planned_sql
+            .set(document.planned_sql().cloned());
         self.document.draft.set(document.workflow().clone());
         self.document.baseline.set(document);
         self.document.conflict.set(false);
@@ -423,7 +460,16 @@ impl WorkflowController {
             .set(Some(WorkflowPendingCommand::Saving));
         self.spawn(async move {
             let client = WorkflowClient::current();
-            match client.save(&submitted).await {
+            let saved = async {
+                let plan = if submitted.workflow().sql().trim().is_empty() {
+                    None
+                } else {
+                    let plan = self.plan_query(submitted.workflow()).await?;
+                    Some(WorkflowSqlPlan::new(submitted.workflow(), plan))
+                };
+                client.save(&submitted.with_plan(plan)).await
+            }.await;
+            match saved {
                 Ok(saved) => {
                     // A save acknowledges its input. Edits made while it was in flight stay local.
                     if self.spec().id() == saved.workflow().id() {

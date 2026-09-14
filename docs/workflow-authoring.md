@@ -7,17 +7,21 @@ query execution; Studio owns authoring, plan display, run identity, and results.
 ## Documents and ownership
 
 The browser owns the current draft, saved baseline, and Assistant loop. Direct
-SQL edits and `set_workflow` change the same draft. Save atomically persists SQL
-and conversation with optimistic revision checking. Run submits an immutable
-copy of the visible SQL, including an unsaved draft, without saving it. Editing
+SQL edits and `set_workflow` change the same draft. Save atomically persists SQL,
+its native plan display snapshot, and conversation with optimistic revision
+checking. Run submits an immutable copy of the visible SQL, including an unsaved
+draft, without saving it. Editing
 or saving during execution cannot change the submitted query or its results.
 Save or Discard before switching documents. Unsent chat text stays local to its
 workflow. Page reload loses unsaved edits; submitted backend runs continue.
 
 The existing Spiral `workflows` relation keeps its column names (`graph_version`
-and `graph_json`), but encoding version 4 contains only a `workflow` with `id`,
-`name`, `revision`, and `sql`. Conversation encoding is independent. There is no
-saved runtime snapshot. Older graph documents are preserved and refused with a
+and `graph_json`), but encoding version 4 contains a `workflow` with `id`,
+`name`, `revision`, and `sql`, plus an optional `planned_sql` containing the exact
+SQL and native plan report/error. Earlier SQL documents without this additive
+field are planned on opening and include it on their next Save. Conversation
+encoding is independent. There is no saved runtime snapshot. Older graph
+documents are preserved and refused with a
 reauthoring message. They are never silently converted or executed by a fallback.
 An incompatible saved document does not prevent creating a new SQL workflow.
 This cutover stores SQL literals; a separate bound-parameter editor is not implemented.
@@ -60,7 +64,14 @@ preview limitations. Planning or successful execution alone is not task completi
 Requests only to explain or draft SQL need not execute it. Missing capabilities or
 resources remain explicit blockers.
 
-Only Save persists SQL and conversation. New workflow starts blank; creating one
+Only Save persists SQL, its plan snapshot, and conversation. The browser reuses the
+plan produced by `set_workflow` for graph display and Save. Reopening a saved
+workflow reuses its plan without issuing EXPLAIN. SQL changes invalidate reuse;
+renaming or advancing the saved revision does not. Save obtains a plan if none
+matches the submitted SQL, and a transport failure leaves the document unsaved.
+The saved plan describes the schema/resources at planning time; Run still submits
+SQL to Spiral for current planning and execution. Plan snapshots are display data,
+not executable plans or durable run results. New workflow starts blank; creating one
 from a dataset starts with a native `spql.mcap.episodes` query. The Assistant discovers
 the actual recorded camera columns and uses native video and AI functions.
 

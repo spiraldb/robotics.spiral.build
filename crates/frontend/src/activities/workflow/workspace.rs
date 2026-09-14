@@ -447,12 +447,15 @@ fn WorkflowCanvas(controller: super::state::WorkflowController) -> Element {
             if expected.0.sql().trim().is_empty() {
                 return (expected, Ok(None));
             }
+            if let Some(plan) = controller.plan_for(&expected.0) {
+                return (expected, Ok(Some(plan)));
+            }
             // Debounce typing, but request an opened document immediately.
             if editing {
                 gloo_timers::future::TimeoutFuture::new(350).await;
             }
-            let result = super::WorkflowClient::current()
-                .plan(&expected.0)
+            let result = controller
+                .plan_query(&expected.0)
                 .await
                 .map(Some)
                 .map_err(|error| error.to_string());
