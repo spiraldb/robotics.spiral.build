@@ -43,15 +43,15 @@ nix develop .#local-driver
 ```
 
 The shell sets `SPIRALDB_ADBC_DRIVER` to the platform's shared library in
-`target/release` and checks that it exists. Build it from an isolated upstream
-source checkout using the flake's `adbc-build` shell, which supplies upstream's
+`target/release` and checks that it exists. Build it directly from the sibling
+SpiralDB checkout using the flake's `adbc-build` shell, which supplies upstream's
 August 10 compiler, OpenSSL, and FFmpeg while Studio keeps its own compiler pin:
 
 ```sh
 # Run from the upstream Spiral checkout so its Cargo configuration applies.
-nix develop /absolute/path/to/rerobot#adbc-build --command cargo build \
+nix develop /absolute/path/to/spiral-robotics#adbc-build --command cargo build \
   --release --locked -p adbc-driver-spiraldb \
-  --target-dir /absolute/path/to/rerobot/target
+  --target-dir /absolute/path/to/spiral-robotics/target
 ```
 
 This is a locally built release library; its native dependencies live in the
@@ -98,25 +98,18 @@ These checks do not verify non-null model inference on complete episodes.
 
 ## Current local driver refresh
 
-September 14, 2026: Studio on port 8080 uses a debug driver built from the sibling
-`../spiraldb` checkout at `dcf103dc23b3630896f6e017f7a590722f5a0488`, with its
-workspace Vortex dependencies pointing to `../vortex`. That fork is based on
-`eff56e5b9034e9489ab3167448e4b57daf27bbcb` and includes the local decimal-to-integer
-cast fix. Scalar and column casts share the same conversion policy. SpiralDB's
-protobuf imports were updated for the fork's schema-module move.
+September 14, 2026: the decimal-to-integer cast fix is merged upstream in Vortex
+commit `0a2d04c7163114b36f6e821c96774b5439d99125` ([PR #9873](https://github.com/vortex-data/vortex/pull/9873)).
+SpiralDB commit `a2ac94916` pins that revision, and the current checkout already
+uses compatible protobuf APIs. Build the driver directly from that checkout
+using the command above; no Studio patch or local Vortex fork is required.
+The `adbc-build` shell supplies the required FlatBuffers 25.12.19 compiler.
 
-The driver SHA-256 is
-`60ceb4f136ea949899db6c80b345b4c48106fa211eb94ac1339d82cf39668bf0`.
-It is copied from `../spiraldb/target/debug/libadbc_driver_spiraldb.dylib` to
-`target/release/libadbc_driver_spiraldb.dylib`; the destination directory name
-does not indicate its build profile. Existing servers must restart to load it.
-The `adbc-build` shell now supplies FlatBuffers 25.12.19, required by the fork.
-To rebuild from the SpiralDB checkout with its pinned Rust toolchain:
-
-```sh
-nix develop ../spiral-robotics#adbc-build --command \
-  "$HOME/.cargo/bin/cargo" build --locked -p adbc-driver-spiraldb
-```
+The earlier local-fork validation installed a debug driver with SHA-256
+`60ceb4f136ea949899db6c80b345b4c48106fa211eb94ac1339d82cf39668bf0` at
+`target/release/libadbc_driver_spiraldb.dylib`. The directory name does not
+indicate its build profile. Rebuilding the driver does not replace a running
+server's loaded library; restart Studio after rebuilding.
 
 Validation passed all 377 decimal-related Vortex tests, the SPQL protobuf feature
 check, and the original `CAST(row_number() OVER () - 1 AS BIGINT)` reproduction

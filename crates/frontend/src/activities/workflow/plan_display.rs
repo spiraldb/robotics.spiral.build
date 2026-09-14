@@ -7,7 +7,7 @@ use dioxus_flow::{
     use_flow_handle,
 };
 use spiral_robotics_common::workflow::plan::{DiagnosticNode, SpiralPlanReport};
-use workflow_graph::{WorkflowGraph, WorkflowStage};
+use workflow_graph::{StageContent, WorkflowGraph, WorkflowStage};
 
 #[component]
 pub(super) fn WorkflowPlanDisplay(
@@ -43,7 +43,7 @@ impl From<&WorkflowGraph> for PlanFlow {
                     Point::ZERO,
                     stage.clone(),
                 )
-                .size((224.0, 112.0))
+                .size((256.0, 136.0))
                 .sides(Side::Left, Side::Right)
                 .draggable(false)
             })
@@ -151,7 +151,23 @@ pub(super) fn WorkflowStageInspector(selection: Option<WorkflowStageDetails>) ->
             if let Some(selection) = selection {
                 h3 { "{selection.stage.content.title}" }
                 p { "{selection.stage.content.summary}" }
-                if let Some(expression) = &selection.stage.content.expression { pre { "{expression}" } }
+                if selection.stage.content.function.is_none() {
+                    if let Some(expression) = &selection.stage.content.expression { pre { "{expression}" } }
+                }
+                if selection.stage.operators.len() > 1 {
+                    h4 { "What happens in this stage" }
+                    ol { class: "workflow-stage-steps",
+                        for node in &selection.stage.operators {
+                            { let content = StageContent::relational(node);
+                              rsx! { li { strong { "{content.title}" } p { "{content.summary}" } } } }
+                        }
+                    }
+                }
+                if let Some(expression) = &selection.stage.content.expression {
+                    if selection.stage.content.function.is_some() {
+                        details { summary { "Function expression" } pre { "{expression}" } }
+                    }
+                }
                 for node in &selection.stage.operators {
                     details { class: "workflow-stage-native-details",
                         summary { "{node.operator()} · #{node.id()}" }
@@ -242,7 +258,7 @@ fn PlanOperatorCard(ctx: NodeViewCtx<WorkflowStage>, root: String) -> Element {
     rsx! {
         div { class: "workflow-plan-operator", class: if ctx.node.selected { "is-selected" },
             class: if stage.content.function.is_some() { "is-spql" },
-            div { class: "workflow-plan-operator-heading", strong { "{stage.content.title}" } }
+            div { class: "workflow-plan-operator-heading", strong { title: "{stage.content.title}", "{stage.content.title}" } }
             p { class: "workflow-stage-summary", title: "{stage.content.summary}", "{stage.content.summary}" }
             small {
                 if let Some(function) = &stage.content.function { "{function}" }
@@ -261,12 +277,14 @@ fn PlanOperatorCard(ctx: NodeViewCtx<WorkflowStage>, root: String) -> Element {
 
 #[component]
 fn PlanOperatorDetails(node: DiagnosticNode) -> Element {
+    let content = StageContent::relational(&node);
     let fields = node
         .output()
         .pointer("/schema/fields")
         .and_then(serde_json::Value::as_array);
     rsx! {
-        h3 { "{node.operator()}" }
+        h3 { "{content.title}" }
+        p { "{content.summary}" }
         p { class: "workflow-plan-node-id", "Operator #{node.id()}" }
         h4 { "Output schema" }
         if let Some(fields) = fields.filter(|fields| !fields.is_empty()) {

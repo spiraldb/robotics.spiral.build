@@ -1,4 +1,6 @@
 //! A presentation graph derived only from native relational and expression edges.
+mod descriptions;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Deserialize;
@@ -42,15 +44,7 @@ impl WorkflowStage {
             id: format!("call-{}-{}", node.id(), expression.id),
             inputs: Vec::new(),
             content: StageContent {
-                title: match function.as_str() {
-                    "spql.image.decode" | "spql.image._decode" => "Decode images".into(),
-                    "spql.image.mean_luminance" => "Measure luminance".into(),
-                    "spql.ai.score" => "Score images".into(),
-                    _ => function
-                        .strip_prefix("spql.")
-                        .unwrap_or(&function)
-                        .replace('_', " "),
-                },
+                title: StageContent::function_title(&function),
                 summary: String::new(),
                 function: Some(function),
                 expression: Some(expression.display.clone()),
@@ -63,7 +57,14 @@ impl WorkflowStage {
             && self.operators.iter().all(|node| {
                 matches!(
                     node.operator(),
-                    "Project" | "Filter" | "Aggregate" | "Sort" | "Limit" | "TopK" | "Distinct"
+                    "Project"
+                        | "Filter"
+                        | "Aggregate"
+                        | "Sort"
+                        | "Limit"
+                        | "TopK"
+                        | "Distinct"
+                        | "Window"
                 )
             })
     }
@@ -77,182 +78,36 @@ impl WorkflowStage {
             .operators
             .iter()
             .any(|node| StageContent::relational(node).title == "Classify rows");
-        self.content.title = match (
-            has("Filter"),
-            has("Aggregate"),
-            classify,
-            has("Sort") || has("TopK"),
-        ) {
-            (true, true, _, _) => "Filter & summarize",
-            (_, true, _, _) => "Summarize rows",
-            (_, _, true, true) => "Classify & order",
-            (_, _, true, _) => "Classify rows",
-            (true, _, _, _) => "Filter & prepare",
-            (_, _, _, true) => "Prepare results",
-            _ => "Prepare columns",
-        }
-        .into();
-        self.content.summary = self
-            .operators
+        // Lead with the operation that changes the row population, then explain
+        // the supporting calculations in native execution order in the inspector.
+        let priority = [
+            "Aggregate",
+            "Limit",
+            "TopK",
+            "Filter",
+            "Window",
+            "Sort",
+            "Distinct",
+            "Project",
+        ];
+        let lead = priority
             .iter()
-            .filter(|node| {
-                node.operator() != "Project"
-                    || ExpressionGraph::read(node).is_ok_and(|graph| graph.has_computation())
-            })
-            .map(|node| StageContent::relational(node).summary)
-            .filter(|summary| !summary.is_empty())
-            .collect::<Vec<_>>()
-            .join("; ");
+            .find_map(|kind| self.operators.iter().find(|node| node.operator() == *kind));
+        if let Some(lead) = lead {
+            self.content = StageContent::relational(lead);
+        }
+        if classify && !has("Aggregate") && !has("Limit") && !has("TopK") {
+            self.content.title = "Classify rows".into();
+        }
     }
-}
-impl StageContent {
-    fn relational(node: &DiagnosticNode) -> Self {
-        let properties = &node.properties()["operator"];
-        let (title, summary) = match node.operator() {
-            "Source" => (
-                "Read data",
-                properties["provider"]
-                    .as_str()
-                    .unwrap_or("Source relation")
-                    .to_owned(),
-            ),
-            "Values" => (
-                "Input rows",
-                properties
-                    .get("rows")
-                    .map(|rows| format!("{rows} rows"))
-                    .unwrap_or_default(),
-            ),
-            "Project" => (
-                "Select & compute",
-                properties["expressions"]
-                    .as_array()
-                    .map(|expressions| {
-                        expressions
-                            .iter()
-                            .filter_map(|expr| expr["name"].as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    })
-                    .unwrap_or_default(),
-            ),
-            "Filter" => (
-                "Filter rows",
-                properties["predicate"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_owned(),
-            ),
-            "Aggregate" => (
-                "Summarize",
-                properties["aggregates"]
-                    .as_array()
-                    .map(|aggregates| {
-                        aggregates
-                            .iter()
-                            .filter_map(|agg| agg["name"].as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    })
-                    .unwrap_or_default(),
-            ),
-            "Sort" | "TopK" => (
-                "Order rows",
-                properties["keys"]
-                    .as_array()
-                    .map(|keys| {
-                        keys.iter()
-                            .map(|key| {
-                                format!(
-                                    "{} {}",
-                                    key["field"].as_str().unwrap_or_default(),
-                                    if key["descending"].as_bool() == Some(true) {
-                                        "descending"
-                                    } else {
-                                        "ascending"
-                                    }
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    })
-                    .unwrap_or_default(),
-            ),
-            "Limit" => (
-                "Limit rows",
-                format!(
-                    "{} rows; skip {}",
-                    properties["fetch"], properties["offset"]
-                ),
-            ),
-            "Distinct" => ("Remove duplicates", String::new()),
-            "Join" | "AsOfJoin" => (
-                "Join data",
-                properties["kind"].as_str().unwrap_or_default().to_owned(),
-            ),
-            "TableFunction" | "Generate" => (
-                "Read / expand",
-                properties["function"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_owned(),
-            ),
-            other => (other, String::new()),
-        };
-        let mut content = Self {
-            title: title.into(),
-            summary,
-            function: None,
-            expression: None,
-        };
-        if node.operator() == "Source" {
-            let fields = node
-                .output()
-                .pointer("/schema/fields")
-                .and_then(serde_json::Value::as_array);
-            if let Some(fields) = fields {
-                content.summary = fields
-                    .iter()
-                    .filter_map(|field| field["name"].as_str())
-                    .take(3)
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                if fields.len() > 3 {
-                    content
-                        .summary
-                        .push_str(&format!(" +{} columns", fields.len() - 3));
-                }
-            }
-        }
-        if let Ok(graph) = ExpressionGraph::read(node) {
-            if node.operator() == "Filter" {
-                content.summary = graph
-                    .roots
-                    .first()
-                    .map(|root| graph.render(root.id))
-                    .unwrap_or(content.summary);
-            } else if node.operator() == "Project" && graph.has_computation() {
-                let computed = graph.roots.iter().filter(|root| {
-                    graph
-                        .node(root.id)
-                        .is_some_and(|expr| expr.kind != "field" && !expr.is_spql())
-                });
-                content.summary = computed
-                    .map(|root| format!("{} = {}", root.name, graph.render(root.id)))
-                    .collect::<Vec<_>>()
-                    .join("; ");
-                if graph.nodes.iter().any(|expr| {
-                    expr.function
-                        .as_ref()
-                        .is_some_and(|function| function.set == "spql.case_when")
-                }) {
-                    content.title = "Classify rows".into();
-                    content.expression = Some(content.summary.clone());
-                    content.summary = graph.decision_rules();
-                }
-            }
-        }
-        content
+
+    fn changes_rows(&self) -> bool {
+        self.operators.iter().any(|node| {
+            matches!(
+                node.operator(),
+                "Filter" | "Aggregate" | "Limit" | "TopK" | "Distinct"
+            )
+        })
     }
 }
 
@@ -286,25 +141,10 @@ impl WorkflowGraph {
                         .map(|id| format!("call-{}-{id}", node.id()))
                         .collect()
                 };
-                let names = graph
-                    .roots
-                    .iter()
-                    .filter(|root| root.id == expression.id)
-                    .map(|root| root.name.as_str())
-                    .collect::<Vec<_>>();
-                stage.content.summary = if names.is_empty() {
-                    expression
-                        .inputs
-                        .iter()
-                        .filter_map(|id| graph.node(*id))
-                        .map(|arg| arg.display.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                } else {
-                    format!("Produces {}", names.join(", "))
-                };
+                stage.content.summary = graph.call_summary(expression);
                 if let Some(condition) = graph.condition_for(expression.id) {
-                    stage.content.summary = format!("Used when {condition}");
+                    stage.content.summary =
+                        format!("{}; only when {condition}", stage.content.summary);
                 }
                 stages.push(stage);
             }
@@ -364,6 +204,9 @@ impl WorkflowGraph {
                             && up.id != stage.id
                             && up.id != self.root
                             && up.mergeable()
+                            // Keep each population change visible. Numbering, ordering,
+                            // and projections can live inside the operation they support.
+                            && !(up.changes_rows() && stage.changes_rows())
                             && consumers.get(&up.id) == Some(&1)
                     })
                     .map(|up| (up, down))
@@ -400,6 +243,7 @@ struct Expression {
     inputs: Vec<u64>,
     function: Option<FunctionIdentity>,
     display: String,
+    dtype: Option<String>,
 }
 #[derive(Deserialize)]
 struct FunctionIdentity {
@@ -409,6 +253,9 @@ impl Expression {
     fn is_spql(&self) -> bool {
         self.function.as_ref().is_some_and(|function| {
             // SQL arithmetic, predicates, and standard scalar functions stay with their SQL stage.
+            if function.set == "spql.video.frame_slice" {
+                return false;
+            }
             let Some(name) = function.set.strip_prefix("spql.") else {
                 return false;
             };
@@ -553,6 +400,10 @@ impl ExpressionGraph {
                 "spql.neq" => "≠",
                 "spql.and" => "AND",
                 "spql.or" => "OR",
+                "spql.add" => "+",
+                "spql.sub" => "−",
+                "spql.mul" => "×",
+                "spql.div" => "/",
                 _ => "",
             };
             let value = match arguments.as_slice() {
@@ -562,6 +413,10 @@ impl ExpressionGraph {
                 }
                 [input] if function == "spql.is_null" => format!("{input} is null"),
                 [input] if function == "spql.not" => format!("NOT ({input})"),
+                [input] if expr.kind == "cast" => match &expr.dtype {
+                    Some(dtype) => format!("{input} as {dtype}"),
+                    None => input.clone(),
+                },
                 _ if expr.kind == "field" => expr
                     .display
                     .strip_prefix("$.")
@@ -612,6 +467,174 @@ mod tests {
         }
         fn plan(nodes: Vec<Value>) -> DiagnosticPlan {
             serde_json::from_value(json!({"schema_version":1,"root":0,"nodes":nodes})).unwrap()
+        }
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn packet_workflow_explains_sources_numbering_and_frame_selection() {
+        let mut source = Fixture::node(7, "Source", &[]);
+        source["properties"]["operator"] = json!({"provider":"McapTopic", "source":{"dataset":{"name":"dataset_default", "id":"dataset-id", "version_id":"version-id"}, "topic":"/camera/follower.camera.gripper/video", "schema_variant":"variant"}});
+        let mut window = Fixture::node(6, "Window", &[7]);
+        window["properties"]["operator"] = json!({"expressions":[{
+            "name":"__window_expr_0", "function":{"kind":"RowNumber"},
+            "partition_by":["$.id"], "order_by":[
+                {"field":"$chunk_start_offset","descending":false},
+                {"field":"$sample_ordinal","descending":false}
+            ]
+        }]});
+        let mut aggregate = Fixture::node(4, "Aggregate", &[5]);
+        aggregate["properties"]["operator"] = json!({"group_by":["episode_id"],
+            "aggregates":[{"function":"spiral.list.collect","input":"$.packet","name":"packets","distinct":false}]});
+        let mut video = Fixture::node(3, "Project", &[4]);
+        Fixture::expressions(
+            &mut video,
+            vec![
+                Fixture::call(0, "spql.video.from_packets", &[1, 2, 3]),
+                json!({"id":1,"kind":"field","inputs":[],"display":"$.packets"}),
+                json!({"id":2,"kind":"literal","inputs":[],"display":"\"h264\""}),
+                json!({"id":3,"kind":"literal","inputs":[],"display":"\"annex_b\""}),
+            ],
+        );
+        let mut limit = Fixture::node(2, "Limit", &[3]);
+        limit["properties"]["operator"] = json!({"fetch":2,"offset":10});
+        let mut frames = Fixture::node(1, "Generate", &[2]);
+        frames["properties"]["operator"] = json!({"function":"spql.video.frames#packets_slice"});
+        Fixture::expressions(
+            &mut frames,
+            vec![
+                Fixture::call(0, "spql.video.frame_slice", &[1, 2, 3]),
+                json!({"id":1,"kind":"literal","inputs":[],"display":"0"}),
+                json!({"id":2,"kind":"literal","inputs":[],"display":"NULL"}),
+                json!({"id":3,"kind":"literal","inputs":[],"display":"50"}),
+            ],
+        );
+        let mut decode = Fixture::node(0, "Project", &[1]);
+        Fixture::expressions(
+            &mut decode,
+            vec![
+                Fixture::call(0, "spql.video.decode", &[1]),
+                json!({"id":1,"kind":"field","inputs":[],"display":"$.frame"}),
+            ],
+        );
+        let plan = Fixture::plan(vec![
+            decode,
+            frames,
+            limit,
+            video,
+            aggregate,
+            Fixture::node(5, "Project", &[6]),
+            window,
+            source,
+        ]);
+        let graph = WorkflowGraph::from_plan(&plan).unwrap();
+        assert_eq!(graph.stages.len(), 6);
+        let source = graph
+            .stages
+            .iter()
+            .find(|stage| stage.id == "operator-7")
+            .unwrap();
+        assert_eq!(source.content.title, "Read dataset_default");
+        assert_eq!(
+            source.content.summary,
+            "/camera/follower.camera.gripper/video"
+        );
+        let grouped = graph
+            .stages
+            .iter()
+            .find(|stage| stage.id == "operator-4")
+            .unwrap();
+        assert_eq!(grouped.content.title, "Group by episode_id");
+        assert_eq!(
+            grouped
+                .operators
+                .iter()
+                .map(DiagnosticNode::operator)
+                .collect::<Vec<_>>(),
+            ["Window", "Project", "Aggregate"]
+        );
+        let numbering = StageContent::relational(&grouped.operators[0]);
+        assert!(numbering.summary.contains("restart for each id"));
+        assert!(
+            numbering
+                .summary
+                .contains("chunk_start_offset ascending, sample_ordinal ascending")
+        );
+        let frames = graph
+            .stages
+            .iter()
+            .find(|stage| stage.id == "operator-1")
+            .unwrap();
+        assert_eq!(frames.content.title, "Select video frames");
+        assert!(frames.content.summary.contains("Every 50 frame positions"));
+        assert!(frames.content.summary.contains("end of the video"));
+        assert!(
+            graph
+                .stages
+                .iter()
+                .any(|stage| stage.content.summary == "Skip 10 rows, then take 2 rows")
+        );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn separate_population_changes_preserve_sources_with_missing_metadata() {
+        let mut source = Fixture::node(3, "Source", &[]);
+        source["properties"]["operator"] = json!({"provider":"McapTopic"});
+        let plan = Fixture::plan(vec![
+            Fixture::node(0, "Aggregate", &[1]),
+            Fixture::node(1, "Filter", &[2]),
+            Fixture::node(2, "Project", &[3]),
+            source,
+        ]);
+        let graph = WorkflowGraph::from_plan(&plan).unwrap();
+        assert_eq!(graph.stages.len(), 3);
+        let source = graph
+            .stages
+            .iter()
+            .find(|stage| stage.id == "operator-3")
+            .unwrap();
+        assert_eq!(source.content.title, "Read data");
+        assert!(source.content.expression.is_none());
+        assert!(
+            source
+                .content
+                .summary
+                .contains("source identity is unavailable")
+        );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn joined_sources_keep_their_own_dataset_topic_and_revision() {
+        let mut camera = Fixture::node(2, "Source", &[]);
+        camera["properties"]["operator"] = json!({"provider":"McapTopic", "source":{
+            "dataset":{"name":"recording_a", "id":"a", "version_id":"v1"},
+            "topic":"/camera", "schema_variant":"video-v1", "data_revision_id":"data-a"
+        }});
+        let mut gripper = Fixture::node(1, "Source", &[]);
+        gripper["properties"]["operator"] = json!({"provider":"McapTopic", "source":{
+            "dataset":{"name":"recording_b", "id":"b", "version_id":"v2"},
+            "topic":"/gripper", "schema_variant":"joints-v1", "data_revision_id":"data-b"
+        }});
+        let graph = WorkflowGraph::from_plan(&Fixture::plan(vec![
+            Fixture::node(0, "Join", &[2, 1]),
+            gripper,
+            camera,
+        ]))
+        .unwrap();
+        for (id, name, topic, revision) in [
+            ("operator-2", "Read recording_a", "/camera", "data-a"),
+            ("operator-1", "Read recording_b", "/gripper", "data-b"),
+        ] {
+            let source = graph.stages.iter().find(|stage| stage.id == id).unwrap();
+            assert_eq!(source.content.title, name);
+            assert_eq!(source.content.summary, topic);
+            assert!(
+                source
+                    .content
+                    .expression
+                    .as_ref()
+                    .unwrap()
+                    .contains(revision)
+            );
         }
     }
 
@@ -757,7 +780,7 @@ mod tests {
             .iter()
             .find(|stage| stage.content.function.is_some())
             .unwrap();
-        assert_eq!(call.content.summary, "Used when needs_review");
+        assert!(call.content.summary.ends_with("only when needs_review"));
         assert_ne!(graph.root, call.id);
     }
 

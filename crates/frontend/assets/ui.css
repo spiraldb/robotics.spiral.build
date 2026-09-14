@@ -764,11 +764,14 @@
 .query-row-inspector h3:focus-visible { outline: 2px solid var(--tone-accent); outline-offset: 3px; }
 
 /* Workflow stages prioritize meaning; native operators live in the inspector. */
-.workflow-plan-operator { width: 224px; height: 112px; padding: 12px 14px; gap: 6px; }
+.workflow-plan-operator { width: 256px; height: 136px; padding: 12px 14px; gap: 6px; }
 .workflow-plan-operator.is-spql { border-color: var(--tone-accent); }
 .workflow-plan-operator.is-selected { outline: 2px solid var(--tone-accent); outline-offset: 2px; }
 .workflow-plan-operator-heading strong { font-size: 15px; }
-.workflow-stage-summary { margin: 0; font-size: 13px; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.workflow-stage-summary { margin: 0; font-size: 13px; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.workflow-stage-steps { padding-left: 20px; }
+.workflow-stage-steps li + li { margin-top: 12px; }
+.workflow-stage-steps p { margin: 4px 0 0; overflow-wrap: anywhere; }
 .workflow-plan-operator small { margin-top: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .workflow-stage-native-details { border-top: 1px solid var(--tone-line); padding: 12px 0; }
 .workflow-stage-native-details > summary { cursor: pointer; font-weight: 600; }
