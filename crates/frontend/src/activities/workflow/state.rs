@@ -558,7 +558,6 @@ impl WorkflowController {
             let result = async {
                 let workflows = client.list().await?;
                 self.lifecycle.workflows.set(workflows.clone());
-                self.lifecycle.loaded.set(true);
                 let document = match workflows.first() {
                     Some(workflow) => client.load(workflow.id()).await?,
                     None => Self::fresh_document(),
@@ -598,7 +597,7 @@ impl WorkflowController {
                 .read()
                 .iter()
                 .any(|run| run.snapshot().phase().active())
-                || self.command().is_some()
+                || self.command() == Some(WorkflowPendingCommand::Starting)
         });
         let runs = QueryPolicy::new(QueryDomain::Workflow, 500)
             .with_activity(active.into())

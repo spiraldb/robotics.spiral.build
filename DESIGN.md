@@ -955,7 +955,8 @@ explain the investigation.
   conversation does not compete with authoritative Results. The 13px body
   uses restrained spacing and a readable line height. Send/Stop, readiness,
   cancellation semantics, auto-follow, and jump recovery remain explicit.
-- **Results:** A single run strip owns run selection, phase, count, duration,
+- **Results:** Data and Workflow share one query result table and row inspector,
+  with identical presentation. A single run strip owns run selection, phase, count, duration,
   truncation, and Executed SQL. Stale and failed observations remain visible.
   Images precede decision/status/label fields; IDs and paths move later in the
   same table. Human-readable column labels retain exact names and types in

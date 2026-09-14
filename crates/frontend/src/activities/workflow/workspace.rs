@@ -100,6 +100,7 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
     let draft = drafts.read().get(&draft_key).cloned().unwrap_or_default();
     let catalog_available =
         crate::shell::project::ProjectSessionSignals::current().catalog_available();
+    let loading = !controller.loaded() && controller.load_error().is_none();
     let can_send = configured
         && controller.loaded()
         && state.history_available()
@@ -108,7 +109,9 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
         && command.is_none()
         && catalog_available
         && !draft.trim().is_empty();
-    let status = if !state.history_available() {
+    let status = if loading {
+        "Loading workflow…"
+    } else if !state.history_available() {
         "Assistant history needs attention"
     } else if !(studio.live())() {
         "Reconnecting to Studio…"
@@ -319,7 +322,9 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
                     },
                 }
                 div { class: "workflow-assistant-composer-actions",
-                    span { role: "status", "{composer_hint}" }
+                    span { role: "status",
+                        if loading { "Loading workflow…" } else { "{composer_hint}" }
+                    }
                     if active {
                         Action {
                             purpose: ActionPurpose::Stop,
@@ -425,15 +430,29 @@ fn WorkflowSqlEditor(controller: super::state::WorkflowController) -> Element {
 #[component]
 fn WorkflowCanvas(controller: super::state::WorkflowController) -> Element {
     let spec = controller.spec();
+    // A rename or save revision cannot change a SQL plan. Subscribe to the
+    // actual query so those actions neither clear the graph nor replan it.
+    let query = use_memo(move || {
+        let spec = controller.spec();
+        WorkflowPlanInput(spec)
+    });
+    let mut previous_query: Option<WorkflowPlanInput> = None;
     let plan = use_resource(move || {
-        let expected = controller.spec();
+        let expected = query();
+        let editing = previous_query
+            .as_ref()
+            .is_some_and(|previous| previous.0.id() == expected.0.id());
+        previous_query = Some(expected.clone());
         async move {
-            if expected.sql().trim().is_empty() {
+            if expected.0.sql().trim().is_empty() {
                 return (expected, Ok(None));
             }
-            gloo_timers::future::TimeoutFuture::new(350).await;
+            // Debounce typing, but request an opened document immediately.
+            if editing {
+                gloo_timers::future::TimeoutFuture::new(350).await;
+            }
             let result = super::WorkflowClient::current()
-                .plan(&expected)
+                .plan(&expected.0)
                 .await
                 .map(Some)
                 .map_err(|error| error.to_string());
@@ -443,15 +462,16 @@ fn WorkflowCanvas(controller: super::state::WorkflowController) -> Element {
     let current = plan
         .read()
         .as_ref()
-        .filter(|(expected, _)| expected == &spec)
+        .filter(|(expected, _)| expected == &*query.read())
         .map(|(_, result)| result.clone());
     rsx! {
         section { class: "workflow-canvas", "aria-label": "Native query plan",
 
             if let Some(error) = controller.load_error() {
                 div { class: "workflow-results-error", role: "alert", "{error}" }
-            }
-            if spec.sql().trim().is_empty() {
+            } else if !controller.loaded() {
+                div { class: "workflow-panel-empty", role: "status", "Loading workflow…" }
+            } else if spec.sql().trim().is_empty() {
                 div { class: "workflow-panel-empty", WorkflowIcon {}, strong { "Build a workflow" }
                     p { "Ask the Assistant or write SQL. Explore the resulting graph here, then inspect the rows below." }
                 }
@@ -471,6 +491,17 @@ fn WorkflowCanvas(controller: super::state::WorkflowController) -> Element {
                 }
             }
         }
+    }
+}
+
+/// Document metadata travels with the request, but only identity and SQL
+/// invalidate its plan. A save or rename leaves an in-flight request valid.
+#[derive(Clone)]
+struct WorkflowPlanInput(spiral_robotics_common::workflow::WorkflowSpec);
+
+impl PartialEq for WorkflowPlanInput {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.id() == other.0.id() && self.0.sql() == other.0.sql()
     }
 }
 
@@ -561,8 +592,10 @@ fn WorkflowResults(controller: super::state::WorkflowController) -> Element {
                 div { class: "workflow-results-error", role: "alert", "{snapshot.error().clone().unwrap_or_default()}" }
             }
             div { key: "{snapshot.run_id().unwrap_or_default()}", class: "workflow-result-body",
-                if let Some(model) = result_model.or(transient_model) {
-                    {model.render_review()}
+                if !controller.loaded() && controller.load_error().is_none() {
+                    div { class: "workflow-panel-empty", role: "status", "Loading workflow…" }
+                } else if let Some(model) = result_model.or(transient_model) {
+                    {model.render()}
                 } else {
                     div { class: "workflow-panel-empty",
                         ResultNodeIcon {}

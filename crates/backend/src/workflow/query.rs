@@ -16,12 +16,15 @@ impl WorkflowQuery {
 
     pub(super) async fn plan(&self, workflow: &WorkflowSpec) -> Result<WorkflowPlan, String> {
         Self::validate(workflow)?;
+        let started = Instant::now();
         let mut connection = self.store.connect().await?;
-        let result = connection
+        let connected = started.elapsed();
+        let records = connection
             .execute_query(format!("EXPLAIN (FORMAT JSON) {}", workflow.sql()))
-            .await?
-            .into_preview_drained(1)
             .await?;
+        let executed = started.elapsed();
+        let result = records.into_preview_drained(1).await?;
+        let drained = started.elapsed();
         if result.truncated() {
             return Err("The native plan exceeds the display limit.".into());
         }
@@ -31,7 +34,16 @@ impl WorkflowQuery {
             .and_then(|row| row.values().next())
             .and_then(serde_json::Value::as_str)
             .ok_or("Spiral did not return a JSON plan report.")?;
-        WorkflowPlan::from_native_json(report)
+        let plan = WorkflowPlan::from_native_json(report);
+        tracing::info!(
+            connect_ms = connected.as_millis(),
+            explain_ms = (executed - connected).as_millis(),
+            drain_ms = (drained - executed).as_millis(),
+            decode_ms = (started.elapsed() - drained).as_millis(),
+            report_bytes = report.len(),
+            "Workflow plan timing"
+        );
+        plan
     }
 
     pub(super) async fn run(&self, workflow: &WorkflowSpec) -> Result<SpiralQuerySnapshot, String> {

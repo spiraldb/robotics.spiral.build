@@ -4253,14 +4253,6 @@
 .query-table tbody tr:hover td {
   background: var(--tone-hover);
 }
-.query-result-ready {
-  display: flex;
-  min-width: 0;
-  min-height: 0;
-  flex: 1 1 auto;
-  flex-direction: column;
-  overflow: hidden;
-}
 .query-result-table-scroll {
   min-height: 0;
   flex: 1 1 auto;

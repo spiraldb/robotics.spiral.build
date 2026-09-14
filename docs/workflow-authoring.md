@@ -106,14 +106,15 @@ disclosure. CommonMark headings, lists, code, and tables use pulldown-cmark foll
 by ammonia sanitization; image tags are removed and tables are disclosed.
 The underlying conversation is unchanged.
 
-Workflow result rows place native image columns first, followed by decision,
+Data and Workflow use the same query result table. Rows place native image columns first, followed by decision,
 status, and label columns. Identifiers and paths remain available later in the
 same table. Column types are optional; row-number and image actions open exact
 values and larger images in a local inspector, moving focus to its heading.
 Close or Escape returns focus to the invoking action. Floating-point display precision is reduced
 only in the table; exact integers, stored values, and row ordering are preserved.
-Changing the selected run resets the row inspector. Data's SQL result viewer
-retains its existing presentation.
+Changing the selected run, query tab, or result snapshot resets the row inspector.
+There is one rendering path for loading, errors, empty results, and populated tables;
+neither activity defines a separate result presentation mode.
 
 Studio preserves the native report's additional diagnostics and does not parse
 text to recover topology. Expression identities and dependencies are structured;

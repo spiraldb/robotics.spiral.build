@@ -1,38 +1,34 @@
-//! Evidence-first column order and exact row inspection for investigation results.
+//! Shared query result table with media previews and exact row inspection.
 
 use super::*;
 
 #[component]
-pub(super) fn QueryReview(result: SpiralQuerySnapshot) -> Element {
-    let prefix = use_hook(|| {
-        format!(
-            "result-review-{}",
-            dioxus::dioxus_core::current_scope_id().0
-        )
-    });
+pub(super) fn QueryResultTable(result: SpiralQuerySnapshot) -> Element {
+    let prefix = use_hook(|| format!("query-result-{}", dioxus::dioxus_core::current_scope_id().0));
     let inspector_id = format!("{prefix}-inspector");
     let mut selected = use_signal(|| None::<RowInspection>);
+    use_effect(use_reactive((&result,), move |_| selected.set(None)));
     let selected_row = selected
         .read()
         .as_ref()
         .map(|inspection| inspection.row_index);
     let mut show_types = use_signal(|| false);
     let mut columns = result.columns().iter().collect::<Vec<_>>();
-    columns.sort_by_key(|column| ReviewColumn(column).priority());
+    columns.sort_by_key(|column| ResultColumn(column).priority());
     rsx! {
-        div { class: "query-review",
-            div { class: "query-review-options",
+        div { class: "query-result",
+            div { class: "query-result-options",
                 span { "Select a row to inspect exact values" }
                 label { input { r#type: "checkbox", checked: show_types(), onchange: move |event| show_types.set(event.checked()) } "Column types" }
             }
-            div { class: "query-review-body",
+            div { class: "query-result-body",
                 div { class: "query-result-table-scroll",
-                    table { class: "query-table query-review-table", "aria-label": "Workflow result rows",
+                    table { class: "query-table query-result-table", "aria-label": "Query results",
                         thead { tr {
                             th { scope: "col", class: "query-row-number", "Row" }
                             for column in &columns {
                                 th { key: "{column.name()}", scope: "col", title: format!("{} · {}", column.name(), column.presentation_title()),
-                                    span { class: "query-column-name", "{ReviewColumn(column).label()}" }
+                                    span { class: "query-column-name", "{ResultColumn(column).label()}" }
                                     if show_types() { span { class: "query-column-type", "{column.presentation_kind()}" } }
                                 }
                             }
@@ -53,20 +49,20 @@ pub(super) fn QueryReview(result: SpiralQuerySnapshot) -> Element {
                                         if column.is_image() {
                                             td { class: "query-media-cell",
                                                 Action { purpose: ActionPurpose::Select, variant: ActionVariant::Quiet,
-                                                    class: "query-review-image-action", aria_label: "Inspect {column.humanized_name()} in row {index + 1}",
+                                                    class: "query-result-image-action", aria_label: "Inspect {column.humanized_name()} in row {index + 1}",
                                                     id: "{prefix}-image-{index}-{column_index}",
                                                     onclick: { let trigger = format!("{prefix}-image-{index}-{column_index}"); let inspector_id = inspector_id.clone(); move |_| {
                                                         selected.set(Some(RowInspection::new(index, trigger.clone())));
                                                         BrowserFocus::after_render(inspector_id.clone());
                                                     } },
                                                     if let Some(src) = column.image_src(row.get(column.name())) {
-                                                        img { class: "query-image-preview", src, alt: QueryCellContext::new(column, row, QueryRowPosition::new(index, result.rows().len())).image_alt(), loading: "lazy", decoding: "async" }
+                                                        img { class: "query-image-preview", src, alt: QueryCellContext::new(column, row, QueryRowPosition::new(index, result.rows().len())).image_alt(), loading: "lazy", decoding: "async", draggable: "false" }
                                                     } else { span { class: "query-image-unavailable", "No image" } }
                                                 }
                                             }
                                         } else {
                                             td { class: row.get(column.name()).presentation_class(), title: row.get(column.name()).cell_text(),
-                                                "{ReviewValue(row.get(column.name())).display()}"
+                                                "{ResultValue(row.get(column.name())).display()}"
                                             }
                                         }
                                     }
@@ -133,9 +129,9 @@ impl RowInspection {
     }
 }
 
-struct ReviewColumn<'a>(&'a QueryColumn);
+struct ResultColumn<'a>(&'a QueryColumn);
 
-impl ReviewColumn<'_> {
+impl ResultColumn<'_> {
     fn priority(&self) -> u8 {
         let name = self.0.name();
         if self.0.is_image() {
@@ -159,9 +155,9 @@ impl ReviewColumn<'_> {
     }
 }
 
-struct ReviewValue<'a>(Option<&'a serde_json::Value>);
+struct ResultValue<'a>(Option<&'a serde_json::Value>);
 
-impl ReviewValue<'_> {
+impl ResultValue<'_> {
     fn display(&self) -> String {
         match self.0 {
             None | Some(serde_json::Value::Null) => "—".to_owned(),
@@ -192,21 +188,21 @@ mod tests {
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn readable_floats_preserve_integer_identity_and_nonzero_magnitudes() {
         assert_eq!(
-            ReviewValue(Some(&serde_json::json!(18446744073709551615_u64))).display(),
+            ResultValue(Some(&serde_json::json!(18446744073709551615_u64))).display(),
             "18446744073709551615"
         );
         assert_eq!(
-            ReviewValue(Some(&serde_json::json!(0.002061118))).display(),
+            ResultValue(Some(&serde_json::json!(0.002061118))).display(),
             "0.00206112"
         );
         assert_eq!(
-            ReviewValue(Some(&serde_json::json!(0.000000002))).display(),
+            ResultValue(Some(&serde_json::json!(0.000000002))).display(),
             "2.0000e-9"
         );
         assert_eq!(
-            ReviewValue(Some(&serde_json::json!(0.03))).display(),
+            ResultValue(Some(&serde_json::json!(0.03))).display(),
             "0.03"
         );
-        assert_eq!(ReviewValue(None).display(), "—");
+        assert_eq!(ResultValue(None).display(), "—");
     }
 }

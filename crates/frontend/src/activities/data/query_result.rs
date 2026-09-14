@@ -6,7 +6,7 @@ use crate::components::interaction::{
 use dioxus::prelude::*;
 use spiral_robotics_common::relations::{QueryColumn, SpiralQuerySnapshot};
 
-mod review;
+mod table;
 
 pub(crate) const DEFAULT_QUERY_ROWS: usize = 100;
 const IMAGE_EXTENSION_NAME: &str = "spql.image.Image";
@@ -40,15 +40,6 @@ impl QueryExecutionPresentation {
 
     pub(crate) const fn state(&self) -> &QueryState {
         &self.state
-    }
-
-    pub(crate) fn render_review(&self) -> Element {
-        match &self.state {
-            QueryState::Ready(result) if !result.rows().is_empty() => {
-                rsx! { review::QueryReview { result: result.clone() } }
-            }
-            _ => self.render(),
-        }
     }
 
     pub(crate) fn render(&self) -> Element {
@@ -180,6 +171,7 @@ pub(crate) fn QueryResultView(controller: super::state::QueryController) -> Elem
             }
             if let Some(tab) = active {
                 div {
+                    key: "{tab.id}",
                     id: "{prefix}-panel-{tab.id}",
                     class: "query-result-panel",
                     role: "tabpanel",
@@ -275,36 +267,8 @@ fn QueryResultContent(model: QueryExecutionPresentation) -> Element {
                     }
                 }
             },
-            QueryState::Ready(result) => {
-                let result_row_count = result.rows().len();
-                rsx! {
-                    div { class: "query-result-ready",
-                        div { class: "query-result-table-scroll",
-                            table { class: "query-table", "aria-label": "Query results",
-                                thead { tr {
-
-                                    for column in &result.columns() {
-                                        th { key: "{column.name()}", scope: "col",
-                                            title: column.presentation_title(),
-                                            span { class: "query-column-name", "{column.name()}" }
-                                            span { class: "query-column-type", "{column.presentation_kind()}" }
-                                        }
-                                    }
-                                } }
-                                tbody {
-                                    for (index, row) in result.rows().iter().enumerate() {
-                                        tr { key: "{index}",
-
-                                            for column in &result.columns() {
-                                                {QueryCellContext::new(column, row, QueryRowPosition::new(index, result_row_count)).render()}
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+            QueryState::Ready(result) => rsx! {
+                table::QueryResultTable { result: result.clone() }
             },
         }
     }
@@ -448,44 +412,6 @@ impl<'a> QueryCellContext<'a> {
             self.row_index + 1,
             self.row_count
         )
-    }
-
-    fn render(&self) -> Element {
-        let column = self.column;
-        let value = self.row.get(column.name());
-        if column.is_image() {
-            return rsx! {
-                td { key: "{column.name()}", class: "query-media-cell",
-                    if let Some(src) = column.image_src(value) {
-                        img {
-                            class: "query-image-preview",
-                            src,
-                            alt: self.image_alt(),
-                            loading: "lazy",
-                            decoding: "async",
-                            draggable: "false",
-                        }
-                    } else {
-                        span { class: "query-image-unavailable", "No image" }
-                    }
-                }
-            };
-        }
-
-        let rendered = value.cell_text();
-        let display = if value.is_none_or(serde_json::Value::is_null) {
-            "—"
-        } else {
-            rendered.as_str()
-        };
-        rsx! {
-            td {
-                key: "{column.name()}",
-                class: value.presentation_class(),
-                title: "{rendered}",
-                "{display}"
-            }
-        }
     }
 }
 
