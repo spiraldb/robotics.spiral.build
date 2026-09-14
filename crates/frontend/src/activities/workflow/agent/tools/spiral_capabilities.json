@@ -1,0 +1,98 @@
+[
+  {
+    "function_set": "spql.mcap.episodes",
+    "kind": "source",
+    "summary": "Read the complete member population of an MCAP Dataset.",
+    "parameters": ["dataset: required literal string; Dataset name or spiral-dataset:<resource>:<version>:<data-revision> selector"],
+    "returns": "One row per member, including id (UUIDv7), source Blob, and bounded MCAP file statistics.",
+    "details": "Use FROM spql.mcap.episodes('actual_dataset'). This is the cohort population, including members without the selected camera topic. Preserve these members when joining camera evidence. Inspect the relation schema before using file-statistic columns."
+  },
+  {
+    "function_set": "spql.mcap.read_topic",
+    "kind": "source",
+    "summary": "Read one MCAP topic with its native message schema and member identity.",
+    "parameters": ["dataset: required literal string; Dataset name or exact spiral-dataset selector", "topic: required literal string from the Dataset schema", "variant: optional literal string; inspected schema fingerprint when the topic cannot unify losslessly"],
+    "returns": "id (UUIDv7), chunk_start_offset (UInt64), sample_ordinal (UInt32), log_time and publish_time (UInt64), sequence, channel_id, and value (schema-dependent message struct).",
+    "details": "Use FROM spql.mcap.read_topic('actual_dataset', 'actual_topic', 'actual_variant'); arguments are literals, not per-row Blobs. foxglove.CompressedVideo value.data contains encoded packets and value.format identifies the codec. sample_ordinal is local to a chunk: it is not a stream-wide decode index, even if all its values happen to be unique. Zero does not prove a stream start or keyframe. Native message order within a member is determined by chunk_start_offset and sample_ordinal together. MCAP log_time is not automatically presentation time. Prefer read_video for decoded camera evidence."
+  },
+  {
+    "function_set": "spql.mcap.read_video",
+    "kind": "source",
+    "summary": "Read a foxglove.CompressedVideo H.264 MCAP topic as decoded YUV420 frames.",
+    "parameters": ["dataset: required literal string; Dataset name or exact spiral-dataset selector", "topic: required literal string from the Dataset schema", "variant: optional literal string; inspected schema fingerprint"],
+    "returns": "id (UUIDv7), log_time and publish_time (UInt64), chunk_start_offset (UInt64), sample_ordinal and frame_ordinal (UInt32), value (nullable Yuv420Image). Each row is a decoded frame.",
+    "details": "Use FROM spql.mcap.read_video('actual_dataset', 'actual_topic', 'actual_variant'). Filter id and half-open log_time bounds to limit reads. The reader preserves packet order and decodes preceding parameter sets/keyframes and following GOP packets as support without emitting frames outside the requested bounds. Native log_time and publish_time remain attached to access units through decoder reordering; do not relabel them as inferred presentation time. Stable frame identity is id, chunk_start_offset, sample_ordinal, frame_ordinal. value is already a displayed image with color metadata; do not call video.decode on it. Missing topics produce no frames. Unsupported codecs, missing random access, schema changes, and oversized GOPs fail explicitly. Validate and inspect a small bounded query before building a full-cohort analysis."
+  },
+  {
+    "function_set": "spql.media.streams",
+    "kind": "generator",
+    "summary": "Expand encoded MP4 media into supported stream descriptions.",
+    "parameters": ["media: EncodedMedia"],
+    "returns": "One normalized stream-description row per supported MP4 stream.",
+    "details": "Use CROSS JOIN LATERAL spql.media.streams(input.media) stream. Inspect the output schema before selecting stream fields. No pixel decoding is performed."
+  },
+  {
+    "function_set": "spql.mp4.read",
+    "kind": "generator",
+    "summary": "Expand an MP4 Blob into decode-order encoded sample rows.",
+    "parameters": ["blob: Blob"],
+    "returns": "Sample rows with container offsets, exact timing, sync status, and EncodedPacket values.",
+    "details": "Use CROSS JOIN LATERAL spql.mp4.read(input.blob) sample. This reads container samples without decoding pixels. Inspect the output schema before selecting sample fields."
+  },
+  {
+    "function_set": "spql.mp4.tracks",
+    "kind": "generator",
+    "summary": "Expand an MP4 Blob into track headers.",
+    "parameters": ["blob: Blob"],
+    "returns": "One track-header row per supported MP4 track.",
+    "details": "Use CROSS JOIN LATERAL spql.mp4.tracks(input.blob) track. This does not decode samples. Inspect the output schema before selecting track fields."
+  },
+  {
+    "function_set": "spql.parquet.read",
+    "kind": "source",
+    "summary": "Read a Parquet relation with a schema resolved from its source.",
+    "parameters": ["path: required literal string"],
+    "returns": "Rows with the source Parquet schema.",
+    "details": "Use FROM spql.parquet.read('actual_path'). The path must be available to the current project; do not invent a source path. Inspect the resolved schema before selecting columns."
+  },
+  {
+    "function_set": "spql.range",
+    "kind": "generator",
+    "summary": "Generate integers in a half-open range.",
+    "parameters": ["overload 1: stop (Int64)", "overload 2: start (Int64), stop (Int64)"],
+    "returns": "One value (Int64) per integer in [0, stop) or [start, stop).",
+    "details": "Use CROSS JOIN LATERAL spql.range(input.start, input.stop) r for a range per input row. Null arguments or stop <= start produce no rows. The stop value is exclusive."
+  },
+  {
+    "function_set": "spql.video.frames",
+    "kind": "generator",
+    "summary": "Expand a video source and a native selection into frame references without decoding pixels.",
+    "parameters": ["source: StreamRef, EncodedMedia, or packet source from spql.video.from_packets", "selection: FrameIndices, FrameSlice, or FrameTimes; FrameNeighborhood additionally supported for StreamRef and EncodedMedia, not packet sources"],
+    "returns": "request_index, requested_time, frame, time, duration. Selected frame references appear in request order, including duplicates.",
+    "details": "Use CROSS JOIN LATERAL spql.video.frames(input.source, input.selection) f, then spql.video.decode(f.frame) when pixels are needed. f is a relation alias, not a frame value. Discover the native frame-selection constructors and use their exact signatures. A packet source requires original decode order, in-band SPS/PPS, and an initial IDR; frame selection does not repair an incorrectly assembled stream. Do not assume the same fixed frame index exists in every episode."
+  },
+  {
+    "function_set": "spql.video.from_packets",
+    "kind": "scalar",
+    "summary": "Describe one video stream from packet descriptors; requires original decode order and codec configuration.",
+    "parameters": ["packets: list of structs with payload (binary or Blob), decode_index (unique Int64), optional presentation_time (nanosecond duration)", "codec: string; supported value h264", "framing: string; supported value annex_b"],
+    "returns": "A packet-backed video source usable with spql.video.frames and spql.video.frame_at.",
+    "details": "Construction is lazy. Execution sorts descriptors by decode_index, and frame indexing reads packet headers. Uniqueness alone does not establish correct order. Preserve each member/camera stream separately, in original decode order, including in-band SPS/PPS and an initial IDR. sample_ordinal from an MCAP reader is chunk-local and cannot alone supply decode_index. No MCAP schema or timestamp mapping is inferred. Prefer the source-aware MCAP video reader for camera tasks. An UndefinedPicParamSetId error can result from incorrect assembly; it does not establish that the source lacks parameter sets."
+  },
+  {
+    "function_set": "spql.video.read",
+    "kind": "generator",
+    "summary": "Expand encoded media or a stream into presentation-order frame references without pixel decoding.",
+    "parameters": ["interval overload: source (StreamRef or EncodedMedia), optional start/end (nanosecond duration), optional fps (Float64), optional keyframes (boolean)", "times overload: source (StreamRef or EncodedMedia), times (list of nanosecond durations), optional mode (string)"],
+    "returns": "frame, time, duration; times overload additionally returns request_index and requested_time in request order, including duplicates.",
+    "details": "Use CROSS JOIN LATERAL spql.video.read(input.source, ...) f, then decode f.frame if pixels are needed. Omit optional arguments unless a supported value is known. Packet-backed sources use video.frames instead."
+  },
+  {
+    "function_set": "spql.vortex.read",
+    "kind": "source",
+    "summary": "Read a Vortex relation with a schema resolved from its source.",
+    "parameters": ["path: required literal string"],
+    "returns": "Rows with the source Vortex schema.",
+    "details": "Use FROM spql.vortex.read('actual_path'). The path must be available to the current project; do not invent a source path. Inspect the resolved schema before selecting columns."
+  }
+]

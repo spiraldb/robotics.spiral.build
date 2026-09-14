@@ -43,7 +43,7 @@ impl WorkflowTool for InspectDataset {
             Ok(json!({
                 "dataset": inspection["dataset"],
                 "cameras": inspection["cameras"],
-                "camera_input": "foxglove.CompressedVideo value.data and value.format. Spiral supports packet video through spql.video.from_packets, spql.video.frames, and spql.video.decode.",
+                "camera_input": "foxglove.CompressedVideo stores encoded packets in value.data, with codec information in value.format. These are packets, not decoded frames; inspect native video-reader documentation before interpreting them.",
             }).to_string())
         })
     }

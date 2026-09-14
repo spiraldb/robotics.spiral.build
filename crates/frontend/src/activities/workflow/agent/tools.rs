@@ -11,6 +11,7 @@ use spiral_robotics_common::workflow::{WorkflowAgentArtifactReceipt, WorkflowSpe
 mod author_sql;
 mod dataset;
 mod execution;
+mod function_discovery;
 mod models;
 mod relations;
 
@@ -113,7 +114,7 @@ impl WorkflowToolCatalog {
             Box::new(execution::InspectRun),
             Box::new(execution::InspectImages),
             Box::new(execution::ShowResults),
-            Box::new(models::InspectFunctions),
+            Box::new(function_discovery::InspectFunctions),
         ]
     }
     fn find(name: &str) -> Option<Box<dyn WorkflowTool>> {
