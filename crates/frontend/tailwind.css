@@ -1311,10 +1311,7 @@
 }
 
 @layer components {
-  /* Workflow -----------------------------------------------------------
-     A relation lineage bench, not an external-source builder. The canvas is
-     the working surface; conversation stays visible while Node and Results
-     share the area below the graph in equally sized, resizable panes. */
+  /* Workflow: author on the left; inspect graph and evidence together on the right. */
   .workflow-assistant-editor,
   .workflow-node-editor,
   .workflow-canvas-editor,
@@ -1375,12 +1372,12 @@
 
   .workflow-workspace { @apply flex h-full min-h-0 min-w-0 flex-col; }
   .workflow-panels { @apply min-h-0 min-w-0 flex-1; }
-  .workflow-picker { @apply relative z-10 flex flex-wrap shrink-0 items-center gap-1.5 border-b border-line bg-surface px-2 py-1; }
+  .workflow-picker { @apply relative z-10 flex flex-wrap shrink-0 items-center gap-2 border-b border-line bg-surface px-3 py-2; }
   .workflow-picker label { @apply text-xs font-medium text-ink-soft; }
   .workflow-picker select, .workflow-name-input {
     @apply h-6 min-w-0 rounded border border-line bg-surface px-1.5 text-xs text-ink outline-none focus-visible:border-accent focus-visible:ring-2 focus-visible:ring-accent/15 disabled:text-ink-faint;
   }
-  .workflow-picker select { @apply w-56 max-w-full; }
+  .workflow-picker select { @apply w-64 max-w-full; }
   .workflow-filter-summary { @apply min-h-0 overflow-auto p-3 text-xs leading-relaxed; }
   .workflow-filter-summary p { @apply mb-3; }
   .workflow-filter-summary ul { @apply my-2 list-disc pl-4; }
@@ -1417,7 +1414,7 @@
   }
 
   .workflow-assistant-thread {
-    @apply grid gap-4 px-3 py-2;
+    @apply grid gap-6 px-4 py-3;
   }
 
   .workflow-agent-message {
@@ -1425,31 +1422,19 @@
   }
 
   .workflow-agent-message.is-user {
-    @apply ml-5 justify-self-end rounded-md bg-sunken px-2.5 py-2;
+    @apply ml-3 rounded bg-sunken px-3 py-2.5;
   }
 
   .workflow-agent-message.is-system {
     @apply py-2 text-ink-faint;
   }
 
-  .workflow-agent-message-meta {
-    @apply flex items-center gap-2 text-[10px];
-  }
-
-  .workflow-agent-message-meta strong {
-    @apply sr-only;
-  }
-
-  .workflow-agent-message-meta span {
-    @apply mb-1 text-ink-faint;
-  }
-
   .workflow-agent-message-body {
-    @apply grid gap-2 text-[12px] leading-[1.6] text-ink;
+    @apply min-w-0 space-y-3 text-[13px] leading-[1.65] text-ink;
   }
 
   .workflow-agent-message-body p {
-    @apply whitespace-pre-wrap;
+    @apply whitespace-normal;
   }
 
   .workflow-agent-message-body ul {
@@ -1473,16 +1458,12 @@
     @apply block;
   }
 
-  .workflow-agent-code-language {
-    @apply mb-1 block border-b border-line pb-1 text-[10px] text-ink-faint;
-  }
-
   .workflow-agent-tools-disclosure {
-    @apply mt-2 border-l border-line pl-2.5 text-[11px] text-ink-faint;
+    @apply min-w-0 text-[11px] text-ink-soft;
   }
 
   .workflow-agent-tools-disclosure > summary {
-    @apply cursor-pointer select-none py-0.5 font-medium text-ink-soft outline-none hover:text-ink focus-visible:text-accent;
+    @apply cursor-pointer select-none py-1 font-medium text-ink-soft outline-none hover:text-ink focus-visible:text-accent;
   }
 
   .workflow-agent-tools-disclosure[data-failed="true"] > summary {
@@ -1491,38 +1472,6 @@
 
   .workflow-agent-tools-disclosure[open] > summary {
     @apply mb-1.5;
-  }
-
-  .workflow-agent-tools {
-    @apply grid gap-1.5;
-  }
-
-  .workflow-agent-tools li {
-    @apply grid grid-cols-[0.5rem_minmax(0,1fr)] items-start gap-1.5 text-[11px] text-ink-faint;
-  }
-
-  .workflow-agent-tool-mark {
-    @apply mt-[0.3rem] size-1.5 rounded-full bg-ink-faint;
-  }
-
-  .workflow-agent-tools .is-running .workflow-agent-tool-mark {
-    @apply bg-accent;
-  }
-
-  .workflow-agent-tools .is-complete .workflow-agent-tool-mark {
-    @apply bg-good;
-  }
-
-  .workflow-agent-tools .is-failed .workflow-agent-tool-mark {
-    @apply bg-danger;
-  }
-
-  .workflow-agent-tools strong {
-    @apply font-medium text-ink-soft;
-  }
-
-  .workflow-agent-tools p {
-    @apply mt-0.5 leading-4 text-danger;
   }
 
   .workflow-agent-tool-detail {
@@ -1758,53 +1707,6 @@
 
   .workflow-canvas {
     @apply flex flex-col overflow-hidden;
-  }
-
-  .workflow-canvas-toolbar {
-    @apply flex min-h-8 shrink-0 flex-wrap items-center gap-2 border-b border-line bg-surface px-2 py-1;
-  }
-
-  .workflow-canvas-toolbar > div {
-    @apply flex min-w-0 flex-1 items-baseline gap-2;
-  }
-
-  .workflow-canvas-toolbar strong {
-    @apply rounded px-1.5 py-0.5 text-[10px] font-medium;
-  }
-
-  .workflow-edit-badge.is-modified {
-    background: var(--tone-sunken);
-    color: var(--tone-ink);
-  }
-
-  .workflow-edit-badge,
-  .workflow-run-badge {
-    background: var(--tone-sunken);
-    color: var(--tone-ink-soft);
-  }
-
-  .workflow-run-badge.is-active {
-    background: color-mix(in srgb, var(--tone-accent) 10%, var(--tone-surface));
-    color: var(--tone-accent);
-  }
-
-  .workflow-run-badge.is-complete {
-    background: var(--tone-good-soft);
-    color: var(--tone-good);
-  }
-
-  .workflow-run-badge.is-warning {
-    background: var(--tone-caution-soft);
-    color: var(--tone-caution);
-  }
-
-  .workflow-run-badge.is-failed {
-    background: var(--tone-danger-soft);
-    color: var(--tone-danger);
-  }
-
-  .workflow-canvas-toolbar span {
-    @apply font-mono text-[10px] tabular-nums text-ink-faint;
   }
 
   .workflow-fit-action {
@@ -2046,14 +1948,6 @@
 
   .workflow-results {
     @apply flex flex-col overflow-hidden;
-  }
-
-  .workflow-results-meta {
-    @apply flex min-h-8 shrink-0 items-center gap-3 border-b border-line bg-sunken px-3 text-[10px] text-ink-faint;
-  }
-
-  .workflow-results-meta > :first-child {
-    @apply font-medium text-ink-soft;
   }
 
   .workflow-results-retry {

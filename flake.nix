@@ -45,7 +45,9 @@
             targets = [ "wasm32-unknown-unknown" ];
           };
           # Current upstream Spiral requires this compiler for driver builds.
-          adbcBuildToolchain = pkgs.rust-bin.nightly."2026-08-10".minimal;
+          adbcBuildToolchain = pkgs.rust-bin.nightly."2026-08-10".minimal.override {
+            extensions = [ "rustfmt" "clippy" ];
+          };
           # nixpkgs kept Tailwind 3 under the unsuffixed name for a while.
           tailwind = pkgs.tailwindcss_4 or pkgs.tailwindcss;
           # `dx` builds the web client and native server as one fullstack app,

@@ -191,6 +191,46 @@ async fn native_capabilities_and_plan_do_not_execute_inference() {
     assert!(!report.logical().nodes().is_empty());
     assert!(report.logical().node(report.logical().root()).is_some());
     assert!(report.physical().is_some());
+    let expressions = report
+        .logical()
+        .nodes()
+        .iter()
+        .flat_map(|node| {
+            node.properties()["expressions"]["nodes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        expressions
+            .iter()
+            .any(|expression| expression["function"]["set"] == "spql.ai.score")
+    );
+    let image_workflow = WorkflowSpec::new("image", "Image operations")
+        .with_sql("SELECT spql.image.mean_luminance(spql.image.decode(NULL)) AS luminance");
+    let image_plan = fixture.manager.plan(&image_workflow).await;
+    assert!(image_plan.error().is_none(), "{:?}", image_plan.error());
+    let image_report = image_plan.report().unwrap();
+    let calls = image_report
+        .logical()
+        .nodes()
+        .iter()
+        .flat_map(|node| {
+            node.properties()["expressions"]["nodes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+        })
+        .filter_map(|expression| expression["function"]["set"].as_str())
+        .collect::<Vec<_>>();
+    assert!(calls.contains(&"spql.image.mean_luminance"), "{calls:?}");
+    assert!(
+        calls
+            .iter()
+            .any(|function| function.starts_with("spql.image.") && function.ends_with("decode")),
+        "{calls:?}"
+    );
     let result = query.run(&workflow).await.unwrap();
     assert!(result.rows()[0]["score"].is_null());
     assert!(fixture.manager.runs().is_empty());

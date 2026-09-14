@@ -110,7 +110,8 @@ pub(super) fn WorkflowDocumentControls(controller: WorkflowController) -> Elemen
                     }
                 }
             }
-            if let Some(reason) = reason.as_ref() { span { role: "status", "{reason}" } }
+            if let Some(reason) = reason.as_ref() { span { class: "workflow-selection-reason", title: "{reason}", role: "status", if controller.unsaved_changes() { "Save before switching" } else { "{reason}" } } }
+            WorkflowDocumentActions { controller }
         }
     }
 }
@@ -157,5 +158,40 @@ fn WorkflowDatasetCreation(controller: WorkflowController, oncreated: EventHandl
         }
         Some(Err(error)) => rsx! { p { role: "alert", "Could not load datasets: {error}" } },
         None => rsx! { p { role: "status", "Loading datasets…" } },
+    }
+}
+
+#[component]
+fn WorkflowDocumentActions(controller: WorkflowController) -> Element {
+    let studio = StudioProjectState::current();
+    let dirty = controller.unsaved_changes();
+    let command = controller.command();
+    let save_reason = controller.save_disabled_reason();
+    let run_reason = controller.run_disabled_reason();
+    let running = controller.snapshot().phase().active();
+    rsx! {
+        div { class: "workflow-document-actions",
+            span { class: "workflow-document-state", role: "status",
+                if dirty { "Draft not saved" } else { "Saved" }
+            }
+            if controller.revision_conflict() {
+                Action { purpose: ActionPurpose::Sync, variant: ActionVariant::Outline,
+                    onclick: move |_| controller.reload_current(), "Reload current" }
+            } else if dirty {
+                Action { purpose: ActionPurpose::Cancel, variant: ActionVariant::Link,
+                    disabled: command.is_some() || controller.agent_state().session().phase().active(),
+                    onclick: move |_| controller.discard(studio), "Discard" }
+            }
+            Action { purpose: ActionPurpose::Apply, variant: ActionVariant::Outline,
+                disabled: save_reason.is_some(), title: save_reason.unwrap_or_else(|| "Save SQL and conversation".into()),
+                onclick: move |_| controller.save(studio),
+                if command == Some(super::state::WorkflowPendingCommand::Saving) { "Saving…" } else { "Save" }
+            }
+            Action { purpose: ActionPurpose::Start, variant: ActionVariant::Solid,
+                disabled: run_reason.is_some(), title: run_reason.unwrap_or_else(|| "Run this SQL in Spiral".into()),
+                onclick: move |_| controller.run(studio),
+                if running { "Running…" } else { "Run" }
+            }
+        }
     }
 }

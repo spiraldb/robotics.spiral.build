@@ -24,9 +24,13 @@ This cutover stores SQL literals; a separate bound-parameter editor is not imple
 
 ## Assistant investigation and plan inspection
 
-The four dockable panes are Assistant, Query plan, SQL, and Results. A request to
-find, evaluate, or filter data authorizes the Assistant to run the required read-only
-queries. The Assistant receives the installed `spql.ai` function catalog each turn,
+The four dockable panes are Assistant, SQL, Graph, and Results. Assistant and SQL
+share the left authoring lane; Graph and Results remain visible together on the
+right. The native workbench keeps both splits resizable and all panels dockable.
+One document header owns Save, Discard, Run, and the saved/draft state. Results
+owns the selected run, its phase, row count, elapsed time, and Executed SQL.
+A request to find, evaluate, or filter data authorizes the Assistant to run the
+required read-only queries. The Assistant receives the installed `spql.ai` function catalog each turn,
 including signatures, metadata, and descriptions. Metadata tools remain
 `inspect_dataset`, `list_relations`, `describe_relations`, and
 `list_model_capabilities`.
@@ -60,21 +64,61 @@ Only Save persists SQL and conversation. New workflow starts blank; creating one
 from a dataset starts with a native `spql.mcap.episodes` query. The Assistant discovers
 the actual recorded camera columns and uses native video and AI functions.
 
-`EXPLAIN (FORMAT JSON)` supplies version 2 native diagnostics. Studio displays
-its logical graph by default, with optimized logical and physical views available
-in the plan selector. Dioxus Flow owns layout, panning, zooming, fitting, and node
-selection. Native IDs and ordered input edges are preserved, including repeated
-inputs and shared subplans. Node IDs belong to one graph, not to a workflow revision.
-The graph is read-only; SQL remains the executable definition.
+`EXPLAIN (FORMAT JSON)` supplies version 2 native diagnostics. Logical operators
+now carry additive `properties.expressions` metadata with its own schema version 1:
+named roots, expression occurrence IDs, ordered argument edges, structured function
+set/overload identity, display text, types, and a completeness flag. Expression IDs
+are local to one relational operator, and parents precede their arguments. This
+requires a local ADBC driver rebuilt with the expression exporter.
 
-Selecting an operator shows its output schema, properties, optional detail text,
-and available execution identity. Full native report JSON is also inspectable.
-The inspector stacks below the graph in narrow panels. New SQL resets the plan
-and selection, so an old node ID cannot select an unrelated operator.
+Studio defaults to Workflow, a presentation derived from the logical plan's
+relational and expression dependencies. Native identities identify SPQL operations
+such as image decoding and luminance measurement; nested calls retain their
+dependencies and independent calls stay separate. Routine arithmetic, predicates,
+and standard scalar functions stay within SQL stages. Linear routine SQL chains
+collapse without collapsing joins or shared branches. Conditional calls display
+their guard. For the inspected dim-image query, six native operators become four
+stages: Read data → Decode images → Measure luminance → Classify & order; the last
+stage retains three SQL operations. Stage summaries describe the query's own rules,
+not inferred classifications.
+
+Logical, optimized logical, and physical views remain available in the selector.
+These native views preserve operator IDs and ordered inputs, including repeated
+inputs and shared subplans. Missing, unsupported, invalid, or incomplete expression
+metadata blocks the Workflow projection explicitly without hiding the native plan
+modes. Subqueries and opaque plugin expressions can mark coverage incomplete.
+All graph views are read-only diagnostics; SQL remains the executable definition.
+
+Dioxus Flow owns layout, panning, zooming, fitting, and selection. Initial zoom is
+bounded to 0.75–1.0 and refits while the dock layout settles. Large graphs begin at
+the source and remain pannable, with a native minimap above six stages. Overview
+fits the entire graph; the stage selector centers a stage at 0.9 zoom. Once the
+user navigates, resizing the pane or opening/closing Details preserves graph-space
+center and zoom. Selecting a node or opening Details reveals the stage and its
+underlying native operators. Each operator retains its stacked schema, properties,
+optional detail text, and execution identity; Full plan JSON preserves the complete
+report. New SQL resets the plan and selection. IDs belong to one graph, not to a
+workflow revision, so an old ID cannot select an unrelated stage.
+
+Assistant activity is grouped by user request. The latest answer stays visible;
+earlier findings, tool outcomes, and result receipts remain in one activity
+disclosure. CommonMark headings, lists, code, and tables use pulldown-cmark followed
+by ammonia sanitization; image tags are removed and tables are disclosed.
+The underlying conversation is unchanged.
+
+Workflow result rows place native image columns first, followed by decision,
+status, and label columns. Identifiers and paths remain available later in the
+same table. Column types are optional; row-number and image actions open exact
+values and larger images in a local inspector, moving focus to its heading.
+Close or Escape returns focus to the invoking action. Floating-point display precision is reduced
+only in the table; exact integers, stored values, and row ordering are preserved.
+Changing the selected run resets the row inspector. Data's SQL result viewer
+retains its existing presentation.
 
 Studio preserves the native report's additional diagnostics and does not parse
-text to recover topology. Expressions, type descriptions, and some opaque
-properties remain native display strings; these diagnostic graphs are not an
+text to recover topology. Expression identities and dependencies are structured;
+expression display text, type descriptions, and opaque properties remain native
+display strings. These diagnostic graphs are not an
 executable serialization. When physical lowering fails, the logical plans remain
 inspectable alongside the error. Unsupported report versions fail explicitly.
 Planning does not execute inference. Graphviz and its server process are removed.
@@ -115,10 +159,21 @@ earlier run, stale-edit rejection, and stopping while an admitted query continue
 conversation tests continue to cover document ownership. Full episode inference
 is separate from these checks.
 
-The structured-plan cutover uses the current local driver at `41e373f4b`, which
-includes JSON diagnostic graph support. Verification checks native plan decoding,
-shared and repeated inputs, read-only Flow projection, and incomplete physical
-plans. Full non-null episode inference remains separate from this UI change.
+The local ADBC driver was rebuilt with the additive native expression metadata.
+Graph tests cover native projection, nested and independent calls, repeated/shared
+inputs, conditional guards, literal function-name text, missing/invalid metadata,
+and incomplete coverage across operator kinds. The latest seven graph tests pass;
+132 frontend tests passed before the final completeness guard. Native metadata
+and inference regression checks, frontend/native Clippy, both formatting checks,
+native documentation lint, and the final release web build pass.
+
+Cold-load visual review passed at desktop widths of 1280 and 1511 pixels. Browser
+checks covered graph modes, schema details, row-image inspection with Escape focus
+restoration, and a 30-row read-only dim-image query displayed at 4.3 seconds.
+Manual graph-space center and zoom were preserved across the 1280→1511 resize and
+Details open/close; no console errors were observed. This verifies those desktop
+states, not mobile layouts or every workflow. Full non-null episode inference
+remains separate from this UI change.
 
 September 11 agent-loop verification: 256 native tests and 124 browser tests passed.
 Live agent evaluation recovered from a native decimal-cast error and decoded nine

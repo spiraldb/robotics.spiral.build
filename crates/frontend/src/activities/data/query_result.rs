@@ -6,6 +6,8 @@ use crate::components::interaction::{
 use dioxus::prelude::*;
 use spiral_robotics_common::relations::{QueryColumn, SpiralQuerySnapshot};
 
+mod review;
+
 pub(crate) const DEFAULT_QUERY_ROWS: usize = 100;
 const IMAGE_EXTENSION_NAME: &str = "spql.image.Image";
 const VARIABLE_TENSOR_EXTENSION_NAME: &str = "arrow.variable_shape_tensor";
@@ -38,6 +40,15 @@ impl QueryExecutionPresentation {
 
     pub(crate) const fn state(&self) -> &QueryState {
         &self.state
+    }
+
+    pub(crate) fn render_review(&self) -> Element {
+        match &self.state {
+            QueryState::Ready(result) if !result.rows().is_empty() => {
+                rsx! { review::QueryReview { result: result.clone() } }
+            }
+            _ => self.render(),
+        }
     }
 
     pub(crate) fn render(&self) -> Element {

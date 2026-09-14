@@ -910,117 +910,66 @@ This is the signature component system.
 
 ### Workflow Workbench
 
-- **Relation-first boundary:** Workflow begins with qualified Spiral Table
-  relations. Hugging Face datasets, MCAP files, and other external sources are
-  import producers owned elsewhere; they never appear as Workflow nodes or
-  controls. One import may produce several Table roots.
-- **Node grammar:** Table, Model, Query, and Result are the only node kinds.
-  A Query defines the Model's candidate cohort; Model cards name the
-  source-derived Studio feature cache; a final Query joins candidate/cache and
-  other evidence; Result is terminal.
-- **Card:** Paper surface, one-pixel hairline, 4px radius, 12px sentence-case
-  title, 10–11px detail, and a reserved footer for semantic state. Selection is
-  a role-blue inset ring and must remain legible without relying on colour.
-- **Canvas:** Pale viewport surface with a subtle dot grid, thin graphite
-  lineage edges, no MiniMap, and a typed Fit action. **New workflow** creates a
-  reversible unapplied blank draft; Apply persists the empty canvas and clears
-  stale Results so the Assistant's later save is visibly the source of every
-  node. The blank canvas and Results use matching activation copy rather than
-  showing graph-validation jargon. `--df-*` values map to the existing
-  `--tone-*` roles rather than forming a second palette.
-- **Current truth:** The 30% left lane keeps Assistant and Node as tabs. The
-  Assistant shows secret-free product readiness, a durable bounded
-  conversation selector, the selected message thread, safe paragraphs/lists/emphasis/inline-code/code-block
-  rendering, streaming response state, near-bottom auto-follow with explicit
-  jump recovery, and a compact disclosed execution trace that stays collapsed
-  during ordinary work. A successful turn labels nonfatal retries as recovered;
-  only a terminal failed turn opens the trace for action.
-  Completed graph/run/result tools offer stale-safe **View graph**, **View run**,
-  or **View results** receipts without moving focus until invoked. The
-  autosizing 8,000-character composer keeps Send or Stop as mutually exclusive
-  turn actions; Enter sends and Shift+Enter inserts a line. Up to 20 conversations with 80 public messages each are preserved;
-  hitting the bound disables New instead of evicting history. New/select are
-  also disabled during Agent-owned work or when Spiral history is unavailable,
-  but remain usable when only provider availability is absent. New is idempotent
-  on an already-pristine active conversation. Studio silently reads its ignored,
-  owner-only local credential fallback and applies the prototype Terra/OpenRouter
-  defaults; provider/model identities, credential names, and configuration
-  instructions never appear in the product surface. An unavailable provider
-  leaves the same stable surface with bounded retry language.
-  Manual Table→Query→Result and
-  Table→candidate Query→Model→final Query→Result graphs continue to run over
-  authoritative Spiral relations. The canvas exclusively owns manual
-  Run/Cancel and prints every disabled reason on-page; the Assistant may start
-  a run only through its bounded backend tool.
-- **Agent boundary:** Seven backend tools may list and describe existing
-  relations, list the one advertised Model capability, validate/save a complete
-  Workflow, start and wait for that Workflow, and inspect at most 50 read-only
-  query rows. The graph tool exposes only name, nodes, and edges; Studio injects
-  the server-owned workflow identity and revision before validation. There is no
-  sampling or generic mutation tool. Periodic selection
-  is an ordinary read-only candidate Query using inspected Spiral media and
-  `frame_slice` before decode; the existing pinned PIL bicubic processor remains
-  the only SigLIP resize path.
-  Tool state is summarized from bounded allow-listed output facts such as graph
-  revision, run identity/phase, query row counts, and terminal result count;
-  raw tool payloads, media/tensors, and provider credentials never appear
-  there. Only one
-  turn is active, and manual Apply or
-  Run waits until it finishes. A long Workflow run keeps its tool call pending until durable completion,
-  then continues the same Assistant turn.
-  Restarted active turns become Interrupted rather than appearing to resume;
-  an incomplete trailing provider tool exchange is removed before Retry.
-- **Manual inspector:** The only advertised Model is pinned SigLIP; its
-  inspector owns structured `_feature` name, description, concept, candidate
-  image field, optional stream IDs, normalized source, and source-derived cache.
-  Untouched feature definitions collapse to one actionable completion issue;
-  entered invalid fields retain their field-specific errors. Table, Model, and
-  Query edits use explicit Apply with revision-conflict recovery.
-- **Controlled topology:** Add model preserves the existing Query as a candidate
-  cohort, inserts SigLIP plus a generated final cache-join Query, and connects
-  candidate→Model, candidate→final Query, and Model→final Query. Remove model
-  restores the candidate Query as terminal.
-  Topology changes trigger compact left-to-right auto-layout after cards are
-  measurable. First visibility also lays out before fitting so a five-rank,
-  six-node, two-Table lineage stays complete at the supported 1024px desktop minimum;
-  later activation only fits unchanged geometry. Manual Fit also clamps to the
-  0.70 readability floor and leaves wider graphs pannable. The canvas exposes no
-  arbitrary connection or delete tool.
-- **Runtime state:** Cards render authoritative Pending, Validating, Loading,
-  Running, Complete, Complete-with-warnings, Failed, Stale, Cancelling, and
-  Cancelled states. Model Running uses bounded `completed / total feature cells`, never
-  fabricated percentages or ETA. The inspector exposes actual device,
-  decode/inference timing, quarantine count/examples, warnings, fingerprint,
-  and computed/reused state. A neutral Saved/Modified identity is separate from
-  the semantic run badge: active is blue, Complete green, warnings ochre,
-  failure red, and Cancelled/Interrupted neutral. New cards use one bounded
-  left-to-right reveal when an Assistant save introduces topology. During a
-  run, only lineage feeding the active node uses marching dashes; the active
-  footer carries a restrained moving wash and real completed/total work uses a
-  semantic progress element. All three motion cues stop with the state and are
-  disabled under `prefers-reduced-motion`. Reruns and
-  failed/cancelled attempts retain prior query rows as visibly stale and expose
-  phase-specific recovery. Results reuse Data's bounded media-aware renderer;
-  exact `spql.image.Image` values render directly in their schema cells, with
-  contextual episode/stream/frame alt text. Image-bearing rows retain ordinary
-  table semantics beside their score, identity, time, frame, and joint values;
-  compact type-aware headers, aligned numbers, quiet nulls, and one metadata
-  strip avoid a duplicate evidence surface.
-- **Focus, history, and reload:** Pointer selection or Enter/Space from a focused
-  node opens the Node inspector; initial rendering leaves Assistant active.
-  Workflow and Assistant query refreshes preserve node geometry and
-  never steal panel focus. The backend persists bounded Assistant conversations
-  and tool summaries as one server-owned schema-v2 envelope in the active Spiral
-  project; only the selected conversation is provider context, while
-  create/select leaves graph/run truth unchanged. Valid current schema-v2
-  history is preserved. Unsupported or unreadable history remains preserved and unavailable;
-  conversation mutation stays blocked until the project can be read.
-  Switching or restoring a project replaces the visible collection under a new
-  server scope instead of merging histories. Unsent Assistant drafts are keyed
-  by both server scope and conversation identity, so a cloned/imported
-  conversation identity cannot expose another project's draft. A dirty graph draft whose
-  base revision is obsolete can only be discarded through the explicit Reload
-  saved action.
+**Operate.** Inspect how a SQL workflow produces its results. Graph and Results
+are peer surfaces and remain visible together; the Assistant helps author and
+explain the investigation.
+
+- **Composition:** The default 28% left lane groups Assistant and SQL as native
+  workbench tabs. The remaining width splits vertically into Graph (45%) and
+  Results (55%). All panels remain dockable and resizable. The v8 layout scope
+  applies this arrangement without changing other activities' layouts.
+- **Document header:** Workflow selection, naming, and creation sit beside the
+  saved/draft state, Discard, Save, and one manual Run action. Save persists SQL
+  and conversation; Run executes the current SQL without implicitly saving it.
+  Unsaved changes still block document switching. Loading, revision conflicts,
+  and disabled-action reasons remain tied to the existing controller.
+- **Graph:** Workflow is the default view. Explicit SPQL operations become
+  named stages from native function identities and expression dependencies;
+  routine linear SQL chains collapse while joins and shared branches remain.
+  Conditional calls name their guard. Logical, optimized logical, and physical
+  diagnostics remain available in the same toolbar beside stage navigation,
+  Details, Overview, and zoom. Missing, invalid, or incomplete expression
+  metadata produces an explicit error while native plan modes remain reachable.
+  SQL is the executable definition; every graph is a read-only presentation.
+  Do not fabricate per-operator progress or recover topology from text.
+- **Graph navigation:** Dioxus Flow owns layout and interaction. Initial zoom
+  stays readable (0.75–1.0), refitting as the dock layout settles. Large graphs
+  begin at their source and remain pannable; graphs over six stages show the
+  native minimap. Overview explicitly fits the whole graph, and the stage
+  selector centers a stage at readable zoom. After user navigation, resizing
+  or opening details preserves graph-space center and zoom.
+- **Stage details:** Hidden until requested, inside the graph pane. Each stage
+  retains its underlying native operators with schema, properties, detail text,
+  and execution identity; the full native report remains inspectable. Schema
+  fields stack their exact name and type, with a nonwrapping nullable label.
+  Stage cards use a 224×112px paper surface, hairline, 4px radius, 15px title,
+  13px two-line summary, and 11px footer naming the SPQL function or SQL operation
+  count. SPQL stages have an accent border; selection adds an accent outline.
+  Existing role tokens own all colors.
+- **Assistant:** One user request groups its intermediate messages and tool
+  receipts in one activity disclosure, followed by the latest nonempty answer.
+  Active tool descriptions and terminal failures retain explicit wording.
+  The complete underlying conversation is preserved. Headings, emphasis,
+  lists, code, links, and tables use a maintained parser and sanitizer; remote
+  image tags are removed. Tables are collapsed behind View table so a narrow
+  conversation does not compete with authoritative Results. The 13px body
+  uses restrained spacing and a readable line height. Send/Stop, readiness,
+  cancellation semantics, auto-follow, and jump recovery remain explicit.
+- **Results:** A single run strip owns run selection, phase, count, duration,
+  truncation, and Executed SQL. Stale and failed observations remain visible.
+  Images precede decision/status/label fields; IDs and paths move later in the
+  same table. Human-readable column labels retain exact names and types in
+  tooltips, and Column types exposes types inline. Floats use concise display
+  precision, while integers retain exact identity. Row-number and image actions
+  open exact values and larger images in a local inspector and focus its heading.
+  Close or Escape restores focus to the invoking action; changing runs clears
+  the inspector.
+  All original rows and columns remain inspectable, with no inferred result
+  counts or computed classifications added by the presentation.
+- **Ownership:** The draft drives the graph. The selected immutable run drives
+  Results and Executed SQL. Chat prose cannot override either. The browser's
+  existing state controller owns all document, proposal, and run transitions.
+  Refer to `docs/workflow-authoring.md` for the current native SQL boundary.
 
 ### Timeline
 

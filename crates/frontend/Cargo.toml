@@ -62,6 +62,8 @@ web-sys = { version = "0.3", features = [
     "ResizeObserver",
     "Window",
 ] }
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+ammonia = "4"
 
 [dev-dependencies]
 wasm-bindgen-test = "=0.3.76"
