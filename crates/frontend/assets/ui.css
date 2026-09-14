@@ -708,21 +708,19 @@
 .workflow-agent-message-body hr { border: 0; border-top: 1px solid var(--tone-line); }
 .workflow-agent-message-body pre { white-space: pre; }
 .workflow-plan-display { display: flex; flex-direction: column; flex: 1; min-height: 0; }
-.workflow-plan-navigation, .workflow-results-toolbar { display: flex; align-items: center; gap: 8px; padding: 6px 12px; min-height: 36px; flex-wrap: wrap; border-bottom: 1px solid var(--tone-line); font-size: 11px; }
-.workflow-plan-navigation select, .workflow-results-toolbar select { min-width: 0; max-width: 190px; height: 26px; padding: 2px 6px; background: var(--tone-surface); border: 1px solid var(--tone-line); border-radius: 4px; color: var(--tone-ink); }
-.workflow-plan-navigation select:focus-visible, .workflow-results-toolbar select:focus-visible { outline: 2px solid var(--tone-accent); outline-offset: 2px; }
-.workflow-plan-count { margin-left: auto; color: var(--tone-ink-soft); font-size: 11px; }
+.workflow-results-toolbar { display: flex; align-items: center; gap: 8px; padding: 6px 12px; min-height: 36px; flex-wrap: wrap; border-bottom: 1px solid var(--tone-line); font-size: 11px; }
+.workflow-results-toolbar select { min-width: 0; max-width: 190px; height: 26px; padding: 2px 6px; background: var(--tone-surface); border: 1px solid var(--tone-line); border-radius: 4px; color: var(--tone-ink); }
+.workflow-results-toolbar select:focus-visible { outline: 2px solid var(--tone-accent); outline-offset: 2px; }
 .workflow-plan-graph { display: flex; flex-direction: column; flex: 1; min-height: 0; }
-.workflow-plan-body { display: flex; flex: 1; min-height: 0; position: relative; }
 .workflow-diagnostic-canvas { flex: 1; min-width: 0; min-height: 0; }
-.workflow-plan-inspector { width: 280px; max-width: 42%; flex-shrink: 0; overflow: auto; padding: 12px; border-left: 1px solid var(--tone-line); background: var(--tone-surface); }
-.workflow-inspector-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 11px; margin-bottom: 12px; }
+.workflow-stage-details-editor { display: flex; flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
+.workflow-plan-inspector { flex: 1; min-height: 0; min-width: 0; overflow: auto; padding: 12px; background: var(--tone-surface); }
 .workflow-plan-inspector h3 { font-size: 14px; font-weight: 600; }
 .workflow-plan-inspector h4 { margin-top: 18px; margin-bottom: 8px; font-size: 12px; font-weight: 600; }
 .workflow-plan-node-id { color: var(--tone-ink-soft); font-size: 11px; margin-top: 3px; }
 .workflow-plan-inspector pre { font-size: 11px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
 .workflow-plan-inspector details { margin-top: 14px; }
-.workflow-plan-display summary { cursor: pointer; color: var(--tone-ink-soft); font-size: 11px; }
+.workflow-plan-inspector summary { cursor: pointer; color: var(--tone-ink-soft); font-size: 11px; }
 .workflow-plan-schema { font-size: 11px; }
 .workflow-plan-schema > div { padding: 8px 0; border-bottom: 1px solid var(--tone-line); }
 .workflow-plan-schema dt { font-weight: 600; overflow-wrap: anywhere; }

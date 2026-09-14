@@ -1,71 +1,26 @@
 //! Workflow meaning first; native execution diagnostics remain inspectable.
 mod workflow_graph;
-use crate::components::interaction::{Action, ActionPurpose, ActionVariant};
 use dioxus::prelude::*;
 use dioxus_flow::{
     Background, BackgroundVariant, Edge, EdgeKind, Flow, Handle, HandleKind, LayoutDirection,
     LayoutOptions, MiniMap, Node, NodeViewCtx, Point, Rect, Side, Viewport, use_flow,
     use_flow_handle,
 };
-use spiral_robotics_common::workflow::plan::{DiagnosticNode, DiagnosticPlan, SpiralPlanReport};
+use spiral_robotics_common::workflow::plan::{DiagnosticNode, SpiralPlanReport};
 use workflow_graph::{WorkflowGraph, WorkflowStage};
 
-#[derive(Clone, Copy, PartialEq)]
-enum PlanStage {
-    Workflow,
-    Logical,
-    Optimized,
-    Physical,
-}
-impl PlanStage {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Workflow => "Workflow",
-            Self::Logical => "Logical",
-            Self::Optimized => "Optimized logical",
-            Self::Physical => "Physical",
-        }
-    }
-    fn graph(self, report: &SpiralPlanReport) -> Option<&DiagnosticPlan> {
-        match self {
-            Self::Workflow | Self::Logical => Some(report.logical()),
-            Self::Optimized => Some(report.optimized()),
-            Self::Physical => report.physical(),
-        }
-    }
-}
-
 #[component]
-pub(super) fn NativePlanDisplay(report: SpiralPlanReport) -> Element {
-    let mut stage = use_signal(|| PlanStage::Workflow);
-    let graph = stage().graph(&report).cloned();
-    let stage_controls = rsx! {
-        select { id: "workflow-plan-stage", "aria-label": "Plan stage", value: stage().label(),
-            onchange: move |event| stage.set(match event.value().as_str() {
-                "Physical" => PlanStage::Physical, "Optimized logical" => PlanStage::Optimized, "Logical" => PlanStage::Logical, _ => PlanStage::Workflow,
-            }),
-            for option in [PlanStage::Workflow, PlanStage::Logical, PlanStage::Optimized, PlanStage::Physical] {
-                option { value: option.label(), "{option.label()}" }
-            }
-        }
-    };
+pub(super) fn WorkflowPlanDisplay(
+    report: SpiralPlanReport,
+    on_select: EventHandler<WorkflowStageDetails>,
+) -> Element {
     rsx! {
         div { class: "workflow-plan-display",
-            if let Some(graph) = graph {
-                if stage() == PlanStage::Workflow {
-                    match WorkflowGraph::from_plan(&graph) {
-                        Ok(graph) => rsx! { NativePlanGraph { key: "{stage().label()}", graph, stage_controls, report } },
-                        Err(error) => rsx! {
-                            div { class: "workflow-plan-navigation", {stage_controls} }
-                            div { class: "workflow-panel-empty", "{error}" }
-                        },
-                    }
-                } else {
-                    NativePlanGraph { key: "{stage().label()}", graph: WorkflowGraph::native(&graph), stage_controls, report }
-                }
-            } else {
-                div { class: "workflow-plan-navigation", {stage_controls} }
-                div { class: "workflow-panel-empty", "No physical plan is available. Inspect the logical plan and planning error." }
+            match WorkflowGraph::from_plan(report.logical()) {
+                Ok(graph) => rsx! { WorkflowPlanGraph { graph, report, on_select } },
+                Err(error) => rsx! {
+                    div { class: "workflow-panel-empty", "{error}" }
+                },
             }
         }
     }
@@ -82,7 +37,7 @@ impl From<&WorkflowGraph> for PlanFlow {
             .stages
             .iter()
             .map(|stage| {
-                let mut node = Node::with_data(
+                Node::with_data(
                     stage.id.clone(),
                     &stage.content.title,
                     Point::ZERO,
@@ -90,9 +45,7 @@ impl From<&WorkflowGraph> for PlanFlow {
                 )
                 .size((224.0, 112.0))
                 .sides(Side::Left, Side::Right)
-                .draggable(false);
-                node.selected = stage.id == graph.root;
-                node
+                .draggable(false)
             })
             .collect::<Vec<_>>();
         let edges = graph
@@ -139,90 +92,77 @@ impl From<&WorkflowGraph> for PlanFlow {
     }
 }
 
-#[component]
-fn NativePlanGraph(
-    graph: WorkflowGraph,
-    stage_controls: Element,
+/// The graph owns stage interpretation; its parent owns the active inspection.
+#[derive(Clone, PartialEq)]
+pub(super) struct WorkflowStageDetails {
+    stage: WorkflowStage,
     report: SpiralPlanReport,
+}
+impl WorkflowStageDetails {
+    fn new(stage: WorkflowStage, report: SpiralPlanReport) -> Self {
+        Self { stage, report }
+    }
+}
+
+#[component]
+fn WorkflowPlanGraph(
+    graph: WorkflowGraph,
+    report: SpiralPlanReport,
+    on_select: EventHandler<WorkflowStageDetails>,
 ) -> Element {
     let initial = use_hook(|| PlanFlow::from(&graph));
-    let mut details_open = use_signal(|| false);
-    let mut nodes = use_signal(|| initial.nodes);
+    let nodes = use_signal(|| initial.nodes);
     let edges = use_signal(|| initial.edges);
     let flow = use_flow_handle::<WorkflowStage>();
-    let selected = nodes
-        .read()
-        .iter()
-        .find(|node| node.selected)
-        .map(|node| node.data.clone());
+    let selected = use_memo(move || {
+        nodes
+            .read()
+            .iter()
+            .find(|node| node.selected)
+            .map(|node| node.data.clone())
+    });
+    use_effect(move || {
+        if let Some(stage) = selected() {
+            on_select.call(WorkflowStageDetails::new(stage, report.clone()));
+        }
+    });
     let root = graph.root.clone();
     rsx! {
         div { class: "workflow-plan-graph",
-            div { class: "workflow-plan-navigation",
-                {stage_controls}
-                select { id: "workflow-plan-node", "aria-label": "Find a stage", value: selected.as_ref().map(|node| node.id.clone()).unwrap_or_default(),
-                    onchange: move |event| {
-                        nodes.with_mut(|nodes| {
-                            for node in nodes { node.selected = node.id == event.value(); }
-                        });
-                        if let Some(node) = nodes.peek().iter().find(|node| node.selected)
-                            && let Some(core) = flow.core() {
-                                let zoom = core.viewport.peek().zoom;
-                                core.zoom_by(0.9 / zoom, None, 0);
-                                core.center_on(node.rect().center(), 0);
-                            }
-                    },
-                    option { value: "", disabled: true, "Select a stage" }
-                    for node in &graph.stages { option { value: "{node.id}", "{node.content.title}" } }
+            div { class: "workflow-flow-wrap workflow-diagnostic-canvas",
+                Flow { id: "workflow-native-plan", class: "workflow-flow",
+                    nodes, edges, handle: flow, fit_view: false, fit_view_padding: 0.08,
+                    min_zoom: 0.1, max_zoom: 1.5, nodes_draggable: false, delete_key: false,
+                    is_valid_connection: move |_| false,
+                    node_view: move |ctx: NodeViewCtx<WorkflowStage>| rsx! { PlanOperatorCard { ctx, root: root.clone() } },
+                    Background { variant: BackgroundVariant::Dots, gap: 24.0, size: 0.6 }
+                    PlanInitialViewport {}
+                    if graph.stages.len() > 6 { MiniMap { width: 160.0, height: 52.0 } }
                 }
-                span { class: "workflow-plan-count", "{graph.stages.len()} stages" }
-                Action { purpose: ActionPurpose::Toggle, variant: ActionVariant::Link,
-                    aria_pressed: details_open(), disabled: selected.is_none(),
-                    onclick: move |_| details_open.toggle(), "Details" }
-                Action { purpose: ActionPurpose::Fit, variant: ActionVariant::Link,
-                    title: "Show the complete graph", onclick: move |_| flow.fit_view(0), "Overview" }
-                Action { purpose: ActionPurpose::Fit, variant: ActionVariant::Link,
-                    title: "Zoom out", onclick: move |_| flow.zoom_out(0), "−" }
-                Action { purpose: ActionPurpose::Fit, variant: ActionVariant::Link,
-                    title: "Zoom in", onclick: move |_| flow.zoom_in(0), "+" }
             }
-            div { class: "workflow-plan-body",
-                div { class: "workflow-flow-wrap workflow-diagnostic-canvas",
-                    Flow { id: "workflow-native-plan", class: "workflow-flow",
-                        nodes, edges, handle: flow, fit_view: false, fit_view_padding: 0.08,
-                        min_zoom: 0.1, max_zoom: 1.5, nodes_draggable: false, delete_key: false,
-                        is_valid_connection: move |_| false,
-                        on_node_click: move |_| details_open.set(true),
-                        node_view: move |ctx: NodeViewCtx<WorkflowStage>| rsx! { PlanOperatorCard { ctx, root: root.clone() } },
-                        Background { variant: BackgroundVariant::Dots, gap: 24.0, size: 0.6 }
-                        PlanInitialViewport {}
-                        if graph.stages.len() > 6 { MiniMap { width: 160.0, height: 52.0 } }
+        }
+    }
+}
+
+#[component]
+pub(super) fn WorkflowStageInspector(selection: Option<WorkflowStageDetails>) -> Element {
+    rsx! {
+        section { class: "workflow-plan-inspector", "aria-label": "Workflow stage details",
+            if let Some(selection) = selection {
+                h3 { "{selection.stage.content.title}" }
+                p { "{selection.stage.content.summary}" }
+                if let Some(expression) = &selection.stage.content.expression { pre { "{expression}" } }
+                for node in &selection.stage.operators {
+                    details { class: "workflow-stage-native-details",
+                        summary { "{node.operator()} · #{node.id()}" }
+                        PlanOperatorDetails { node: node.clone() }
                     }
                 }
-                if details_open() {
-                    aside { class: "workflow-plan-inspector", "aria-label": "Workflow stage details",
-                        header { class: "workflow-inspector-actions",
-                            strong { "Stage details" }
-                            Action { purpose: ActionPurpose::Close, variant: ActionVariant::Link,
-                                onclick: move |_| details_open.set(false), "Close" }
-                        }
-                        if let Some(stage) = &selected {
-                            h3 { "{stage.content.title}" }
-                            p { "{stage.content.summary}" }
-                            if let Some(expression) = &stage.content.expression { pre { "{expression}" } }
-                            for node in &stage.operators {
-                                details { class: "workflow-stage-native-details",
-                                    summary { "{node.operator()} · #{node.id()}" }
-                                    PlanOperatorDetails { node: node.clone() }
-                                }
-                            }
-                        }
-                        else { p { "Select a stage to inspect its operations and outputs." } }
-                        details { class: "workflow-plan-report", summary { "Full plan JSON" }
-                            pre { "{serde_json::to_string_pretty(&report).unwrap_or_default()}" }
-                        }
-                    }
+                details { class: "workflow-plan-report", summary { "Full plan JSON" }
+                    pre { "{serde_json::to_string_pretty(&selection.report).unwrap_or_default()}" }
                 }
+            } else {
+                div { class: "workflow-panel-empty", "Select a graph stage to inspect its operations and output columns." }
             }
         }
     }
@@ -355,16 +295,17 @@ fn PlanOperatorDetails(node: DiagnosticNode) -> Element {
 mod tests {
     use super::*;
     use serde_json::json;
+    use spiral_robotics_common::workflow::plan::DiagnosticPlan;
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn flow_preserves_shared_inputs_and_native_nodes_without_editing_the_plan() {
         let plan: DiagnosticPlan =
             serde_json::from_value(json!({"schema_version":1,"root":0,"nodes":[
-                {"id":0,"operator":"Union","inputs":[1,1],"output":{},"properties":{}},
-                {"id":1,"operator":"Values","inputs":[],"output":{},"properties":{}}
+                {"id":0,"operator":"Union","inputs":[1,1],"output":{},"properties":{"expressions":{"schema_version":1,"complete":true,"roots":[],"nodes":[]}}},
+                {"id":1,"operator":"Values","inputs":[],"output":{},"properties":{"expressions":{"schema_version":1,"complete":true,"roots":[],"nodes":[]}}}
             ]}))
             .unwrap();
         let original = plan.clone();
-        let flow = PlanFlow::from(&WorkflowGraph::native(&plan));
+        let flow = PlanFlow::from(&WorkflowGraph::from_plan(&plan).unwrap());
         assert_eq!(flow.nodes.len(), 2);
         assert_eq!(flow.edges.len(), 2);
         assert_ne!(flow.edges[0].id, flow.edges[1].id);

@@ -262,27 +262,6 @@ pub(super) struct WorkflowGraph {
     pub(super) root: String,
 }
 impl WorkflowGraph {
-    pub(super) fn native(plan: &DiagnosticPlan) -> Self {
-        Self {
-            root: format!("operator-{}", plan.root()),
-            stages: plan
-                .nodes()
-                .iter()
-                .map(|node| {
-                    let mut stage = WorkflowStage::relational(node);
-                    stage.content.title = node.operator().to_owned();
-                    stage.content.summary = node
-                        .output()
-                        .pointer("/schema/dtype")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("Schema in details")
-                        .to_owned();
-                    stage
-                })
-                .collect(),
-        }
-    }
-
     pub(super) fn from_plan(plan: &DiagnosticPlan) -> Result<Self, String> {
         let mut stages = Vec::new();
         let mut outputs = BTreeMap::new();
@@ -466,7 +445,7 @@ impl Expression {
 }
 impl ExpressionGraph {
     fn read(node: &DiagnosticNode) -> Result<Self, String> {
-        let metadata = node.properties().get("expressions").ok_or("Workflow view needs Spiral's native expression metadata. Update the local driver; the execution plans remain available.")?;
+        let metadata = node.properties().get("expressions").ok_or("The workflow graph needs Spiral's native expression metadata. Update the local driver and plan the SQL again.")?;
         let graph: Self = serde_json::from_value(metadata.clone())
             .map_err(|_| "Spiral returned invalid expression metadata.")?;
         let ids = graph
@@ -486,7 +465,7 @@ impl ExpressionGraph {
             return Err("Spiral returned unsupported or invalid expression dependencies.".into());
         }
         if !graph.complete {
-            return Err("This plan contains opaque or subquery expressions. Inspect its execution plan for complete dependencies.".into());
+            return Err("Spiral did not report complete dependencies for this SQL. The workflow graph cannot display its opaque or subquery expressions.".into());
         }
         Ok(graph)
     }

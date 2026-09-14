@@ -13,10 +13,27 @@ use crate::activities::workflow::state::{
 use crate::components::icons::{ResultNodeIcon, WorkflowIcon};
 use crate::shell::state::StudioProjectState;
 
-const WORKFLOW_LAYOUT_SCOPE: &str = "workflow-investigation-v8";
+const WORKFLOW_LAYOUT_SCOPE: &str = "workflow-investigation-v9";
+const STAGE_DETAILS_PANEL_ID: &str = "workflow-stage-details";
 
 #[component]
 fn WorkflowPanels(controller: super::state::WorkflowController) -> Element {
+    let mut inspection = use_signal(|| None::<WorkflowInspection>);
+    use_effect(move || {
+        let query = WorkflowPlanInput(controller.spec());
+        if inspection
+            .peek()
+            .as_ref()
+            .is_some_and(|inspection| inspection.query != query)
+        {
+            inspection.set(None);
+        }
+    });
+    let selection = inspection
+        .read()
+        .as_ref()
+        .filter(|inspection| inspection.query == WorkflowPlanInput(controller.spec()))
+        .map(|inspection| inspection.details.clone());
     let panels = vec![
         Panel::new(
             ASSISTANT_PANEL_ID,
@@ -29,7 +46,12 @@ fn WorkflowPanels(controller: super::state::WorkflowController) -> Element {
             CANVAS_PANEL_ID,
             "Graph",
             "workflow-canvas",
-            rsx! { WorkflowCanvas { controller } },
+            rsx! { WorkflowCanvas { controller,
+                on_inspect: move |selected| {
+                    inspection.set(Some(selected));
+                    controller.activate_panel(STAGE_DETAILS_PANEL_ID.into());
+                },
+            } },
         )
         .with_class("workflow-canvas-editor"),
         Panel::new(
@@ -46,6 +68,13 @@ fn WorkflowPanels(controller: super::state::WorkflowController) -> Element {
             rsx! { WorkflowResults { controller } },
         )
         .with_class("workflow-results-editor"),
+        Panel::new(
+            STAGE_DETAILS_PANEL_ID,
+            "Stage details",
+            "workflow-stage-details",
+            rsx! { super::plan_display::WorkflowStageInspector { selection } },
+        )
+        .with_class("workflow-stage-details-editor"),
     ];
 
     rsx! {
@@ -71,14 +100,20 @@ impl WorkflowWorkspaceLayout {
         let right = LayoutNode::split(
             "workflow-right-rows",
             SplitAxis::Vertical,
-            0.45,
+            0.62,
             LayoutNode::tile("workflow-canvas", [CANVAS_PANEL_ID]),
-            LayoutNode::tile("workflow-results", [RESULTS_PANEL_ID]),
+            LayoutNode::split(
+                "workflow-inspection-columns",
+                SplitAxis::Horizontal,
+                0.5,
+                LayoutNode::tile("workflow-results", [RESULTS_PANEL_ID]),
+                LayoutNode::tile("workflow-stage-details", [STAGE_DETAILS_PANEL_ID]),
+            ),
         );
         PanelLayout::new(LayoutNode::split(
             "workflow-columns",
             SplitAxis::Horizontal,
-            0.28,
+            0.20,
             LayoutNode::tile("workflow-left", [ASSISTANT_PANEL_ID, NODE_PANEL_ID]),
             right,
         ))
@@ -428,7 +463,10 @@ fn WorkflowSqlEditor(controller: super::state::WorkflowController) -> Element {
 }
 
 #[component]
-fn WorkflowCanvas(controller: super::state::WorkflowController) -> Element {
+fn WorkflowCanvas(
+    controller: super::state::WorkflowController,
+    on_inspect: EventHandler<WorkflowInspection>,
+) -> Element {
     let spec = controller.spec();
     // A rename or save revision cannot change a SQL plan. Subscribe to the
     // actual query so those actions neither clear the graph nor replan it.
@@ -468,7 +506,7 @@ fn WorkflowCanvas(controller: super::state::WorkflowController) -> Element {
         .filter(|(expected, _)| expected == &*query.read())
         .map(|(_, result)| result.clone());
     rsx! {
-        section { class: "workflow-canvas", "aria-label": "Native query plan",
+        section { class: "workflow-canvas", "aria-label": "Workflow graph",
 
             if let Some(error) = controller.load_error() {
                 div { class: "workflow-results-error", role: "alert", "{error}" }
@@ -487,12 +525,32 @@ fn WorkflowCanvas(controller: super::state::WorkflowController) -> Element {
                             div { class: "workflow-results-error", role: "alert", "{error}" }
                         }
                         if let Some(report) = plan.report() {
-                            super::plan_display::NativePlanDisplay { key: "{spec.id()}:{spec.sql()}", report: report.clone() }
+                            super::plan_display::WorkflowPlanDisplay {
+                                key: "{spec.id()}:{spec.sql()}", report: report.clone(),
+                                on_select: move |details| on_inspect.call(WorkflowInspection::new(spec.clone(), details)),
+                            }
                         }
                     },
                     Some(Ok(None)) => rsx! {},
                 }
             }
+        }
+    }
+}
+
+#[derive(Clone)]
+struct WorkflowInspection {
+    query: WorkflowPlanInput,
+    details: super::plan_display::WorkflowStageDetails,
+}
+impl WorkflowInspection {
+    fn new(
+        workflow: spiral_robotics_common::workflow::WorkflowSpec,
+        details: super::plan_display::WorkflowStageDetails,
+    ) -> Self {
+        Self {
+            query: WorkflowPlanInput(workflow),
+            details,
         }
     }
 }

@@ -28,9 +28,14 @@ This cutover stores SQL literals; a separate bound-parameter editor is not imple
 
 ## Assistant investigation and plan inspection
 
-The four dockable panes are Assistant, SQL, Graph, and Results. Assistant and SQL
-share the left authoring lane; Graph and Results remain visible together on the
-right. The native workbench keeps both splits resizable and all panels dockable.
+The five dockable panes are Assistant, SQL, Graph, Results, and Stage details.
+Assistant and SQL share a narrow left authoring lane (20% of the workspace).
+The graph fills the upper 62% of the right lane; Results and Stage details split
+the lower area equally. Selecting a graph node updates Stage details without
+changing graph dimensions, including keyboard selection. SQL changes clear the
+inspection. The graph has no navigation toolbar; native panning, zooming, keyboard
+interaction, and the minimap remain available. The workbench keeps all splits
+resizable and all panels dockable.
 One document header owns Save, Discard, Run, and the saved/draft state. Results
 owns the selected run, its phase, row count, elapsed time, and Executed SQL.
 A request to find, evaluate, or filter data authorizes the Assistant to run the
@@ -93,19 +98,18 @@ stages: Read data → Decode images → Measure luminance → Classify & order; 
 stage retains three SQL operations. Stage summaries describe the query's own rules,
 not inferred classifications.
 
-Logical, optimized logical, and physical views remain available in the selector.
-These native views preserve operator IDs and ordered inputs, including repeated
-inputs and shared subplans. Missing, unsupported, invalid, or incomplete expression
-metadata blocks the Workflow projection explicitly without hiding the native plan
-modes. Subqueries and opaque plugin expressions can mark coverage incomplete.
-All graph views are read-only diagnostics; SQL remains the executable definition.
+The Graph pane shows only the simplified Workflow projection. Operator details and
+Full plan JSON preserve the native diagnostics, including operator IDs and ordered
+inputs. Missing, unsupported, invalid, or incomplete expression metadata blocks
+the projection explicitly. Subqueries and opaque plugin expressions can mark
+coverage incomplete. The graph is a read-only diagnostic; SQL remains the
+executable definition.
 
 Dioxus Flow owns layout, panning, zooming, fitting, and selection. Initial zoom is
 bounded to 0.75–1.0 and refits while the dock layout settles. Large graphs begin at
-the source and remain pannable, with a native minimap above six stages. Overview
-fits the entire graph; the stage selector centers a stage at 0.9 zoom. Once the
-user navigates, resizing the pane or opening/closing Details preserves graph-space
-center and zoom. Selecting a node or opening Details reveals the stage and its
+the source and remain pannable, with a native minimap above six stages. Once the
+user navigates, resizing the pane preserves graph-space center and zoom.
+Selecting a node reveals the stage in the separate Stage details pane and its
 underlying native operators. Each operator retains its stacked schema, properties,
 optional detail text, and execution identity; Full plan JSON preserves the complete
 report. New SQL resets the plan and selection. IDs belong to one graph, not to a
