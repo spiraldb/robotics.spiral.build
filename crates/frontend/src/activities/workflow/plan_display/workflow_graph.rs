@@ -12,7 +12,18 @@ pub(super) struct WorkflowStage {
     pub(super) inputs: Vec<String>,
     pub(super) content: StageContent,
     pub(super) operators: Vec<DiagnosticNode>,
+    output: StageOutput,
 }
+/// Relational edges carry rows; expression edges carry one native typed value.
+#[derive(Clone, PartialEq)]
+pub(super) enum StageOutput {
+    Relation(serde_json::Value),
+    Expression {
+        expression: String,
+        dtype: Option<String>,
+    },
+}
+
 #[derive(Clone, PartialEq)]
 pub(super) struct StageContent {
     pub(super) title: String,
@@ -30,6 +41,7 @@ impl WorkflowStage {
                 .map(|id| format!("operator-{id}"))
                 .collect(),
             content: StageContent::relational(node),
+            output: StageOutput::Relation(node.output().clone()),
             operators: vec![node.clone()],
         }
     }
@@ -43,6 +55,10 @@ impl WorkflowStage {
         Self {
             id: format!("call-{}-{}", node.id(), expression.id),
             inputs: Vec::new(),
+            output: StageOutput::Expression {
+                expression: expression.display.clone(),
+                dtype: expression.dtype.clone(),
+            },
             content: StageContent {
                 title: StageContent::function_title(&function),
                 summary: String::new(),
@@ -52,6 +68,10 @@ impl WorkflowStage {
             operators: vec![node.clone()],
         }
     }
+    pub(super) fn output(&self) -> &StageOutput {
+        &self.output
+    }
+
     fn mergeable(&self) -> bool {
         self.content.function.is_none()
             && self.operators.iter().all(|node| {
@@ -162,6 +182,13 @@ impl WorkflowGraph {
                         .is_some_and(|expr| expr.kind == "field" || expr.is_spql())
                 });
             if passthrough {
+                // This call also represents the completed projection, including
+                // passthrough columns, so its outgoing edge carries the row schema.
+                stages
+                    .iter_mut()
+                    .find(|stage| stage.id == terminals[0])
+                    .expect("terminal call was added above")
+                    .output = relational.output;
                 outputs.insert(relational.id, terminals[0].clone());
             } else {
                 if !terminals.is_empty() {
@@ -468,6 +495,79 @@ mod tests {
         fn plan(nodes: Vec<Value>) -> DiagnosticPlan {
             serde_json::from_value(json!({"schema_version":1,"root":0,"nodes":nodes})).unwrap()
         }
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn collapsed_stage_exposes_its_final_projection_schema() {
+        let mut filter = Fixture::node(2, "Filter", &[3]);
+        filter["output"] =
+            json!({"schema":{"fields":[{"name":"raw", "dtype":"i64", "nullable":false}]}});
+        let mut project = Fixture::node(1, "Project", &[2]);
+        project["output"] =
+            json!({"schema":{"fields":[{"name":"renamed", "dtype":"i64?", "nullable":true}]}});
+        let expected = project["output"].clone();
+        let plan = Fixture::plan(vec![
+            Fixture::node(0, "Sink", &[1]),
+            project,
+            filter,
+            Fixture::node(3, "Source", &[]),
+        ]);
+        let graph = WorkflowGraph::from_plan(&plan).unwrap();
+        let stage = graph
+            .stages
+            .iter()
+            .find(|stage| stage.id == "operator-1")
+            .unwrap();
+        assert_eq!(stage.operators.len(), 2);
+        assert!(matches!(stage.output(), StageOutput::Relation(output) if output == &expected));
+        assert_eq!(graph.stages[0].inputs, ["operator-1"]);
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn nested_calls_expose_value_types_until_the_projection_is_complete() {
+        let mut project = Fixture::node(1, "Project", &[2]);
+        project["output"] = json!({"schema":{"fields":[
+            {"name":"episode_id", "dtype":"i64", "nullable":false},
+            {"name":"image", "dtype":"spql.image.Image", "nullable":false}
+        ]}});
+        let expected = project["output"].clone();
+        let mut outer = Fixture::call(0, "spql.image.resize", &[1]);
+        outer["dtype"] = json!("spql.image.Image");
+        let mut inner = Fixture::call(1, "spql.video.decode", &[]);
+        inner["dtype"] = json!("spql.image.Image?");
+        Fixture::expressions(
+            &mut project,
+            vec![
+                outer,
+                inner,
+                json!({"id":2,"kind":"field","inputs":[],"display":"$.episode_id","dtype":"i64"}),
+            ],
+        );
+        project["properties"]["expressions"]["roots"] = json!([
+            {"name":"image","id":0}, {"name":"episode_id","id":2}
+        ]);
+        let graph = WorkflowGraph::from_plan(&Fixture::plan(vec![
+            Fixture::node(0, "Sink", &[1]),
+            project,
+            Fixture::node(2, "Source", &[]),
+        ]))
+        .unwrap();
+        let inner = graph
+            .stages
+            .iter()
+            .find(|stage| stage.id == "call-1-1")
+            .unwrap();
+        assert!(
+            matches!(inner.output(), StageOutput::Expression { dtype: Some(dtype), .. } if dtype == "spql.image.Image?")
+        );
+        let outer = graph
+            .stages
+            .iter()
+            .find(|stage| stage.id == "call-1-0")
+            .unwrap();
+        assert_eq!(outer.inputs, ["call-1-1"]);
+        assert!(matches!(outer.output(), StageOutput::Relation(output) if output == &expected));
+        assert_eq!(graph.stages[0].inputs, ["call-1-0"]);
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]

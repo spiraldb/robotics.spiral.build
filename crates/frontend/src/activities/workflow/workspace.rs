@@ -70,9 +70,9 @@ fn WorkflowPanels(controller: super::state::WorkflowController) -> Element {
         .with_class("workflow-results-editor"),
         Panel::new(
             STAGE_DETAILS_PANEL_ID,
-            "Stage details",
+            "Details",
             "workflow-stage-details",
-            rsx! { super::plan_display::WorkflowStageInspector { selection } },
+            rsx! { super::plan_display::WorkflowGraphInspector { selection } },
         )
         .with_class("workflow-stage-details-editor"),
     ];
@@ -541,12 +541,12 @@ fn WorkflowCanvas(
 #[derive(Clone)]
 struct WorkflowInspection {
     query: WorkflowPlanInput,
-    details: super::plan_display::WorkflowStageDetails,
+    details: super::plan_display::WorkflowGraphDetails,
 }
 impl WorkflowInspection {
     fn new(
         workflow: spiral_robotics_common::workflow::WorkflowSpec,
-        details: super::plan_display::WorkflowStageDetails,
+        details: super::plan_display::WorkflowGraphDetails,
     ) -> Self {
         Self {
             query: WorkflowPlanInput(workflow),

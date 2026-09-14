@@ -7,12 +7,12 @@ use dioxus_flow::{
     use_flow_handle,
 };
 use spiral_robotics_common::workflow::plan::{DiagnosticNode, SpiralPlanReport};
-use workflow_graph::{StageContent, WorkflowGraph, WorkflowStage};
+use workflow_graph::{StageContent, StageOutput, WorkflowGraph, WorkflowStage};
 
 #[component]
 pub(super) fn WorkflowPlanDisplay(
     report: SpiralPlanReport,
-    on_select: EventHandler<WorkflowStageDetails>,
+    on_select: EventHandler<WorkflowGraphDetails>,
 ) -> Element {
     rsx! {
         div { class: "workflow-plan-display",
@@ -92,15 +92,31 @@ impl From<&WorkflowGraph> for PlanFlow {
     }
 }
 
-/// The graph owns stage interpretation; its parent owns the active inspection.
+/// The graph owns interpretation; its parent owns the active inspection.
 #[derive(Clone, PartialEq)]
-pub(super) struct WorkflowStageDetails {
-    stage: WorkflowStage,
+pub(super) struct WorkflowGraphDetails {
+    selection: GraphSelection,
     report: SpiralPlanReport,
 }
-impl WorkflowStageDetails {
-    fn new(stage: WorkflowStage, report: SpiralPlanReport) -> Self {
-        Self { stage, report }
+#[derive(Clone, PartialEq)]
+enum GraphSelection {
+    Stage(WorkflowStage),
+    Edge(WorkflowEdgeDetails),
+}
+
+#[derive(Clone, PartialEq)]
+struct WorkflowEdgeDetails {
+    source: WorkflowStage,
+    target_title: String,
+}
+impl WorkflowEdgeDetails {
+    fn from_edge(edge: &Edge, nodes: &[Node<WorkflowStage>]) -> Option<Self> {
+        let source = nodes.iter().find(|node| node.id == edge.source)?;
+        let target = nodes.iter().find(|node| node.id == edge.target)?;
+        Some(Self {
+            source: source.data.clone(),
+            target_title: target.data.content.title.clone(),
+        })
     }
 }
 
@@ -108,22 +124,29 @@ impl WorkflowStageDetails {
 fn WorkflowPlanGraph(
     graph: WorkflowGraph,
     report: SpiralPlanReport,
-    on_select: EventHandler<WorkflowStageDetails>,
+    on_select: EventHandler<WorkflowGraphDetails>,
 ) -> Element {
     let initial = use_hook(|| PlanFlow::from(&graph));
     let nodes = use_signal(|| initial.nodes);
     let edges = use_signal(|| initial.edges);
     let flow = use_flow_handle::<WorkflowStage>();
     let selected = use_memo(move || {
-        nodes
-            .read()
-            .iter()
-            .find(|node| node.selected)
-            .map(|node| node.data.clone())
+        let nodes = nodes.read();
+        if let Some(edge) = edges.read().iter().find(|edge| edge.selected) {
+            WorkflowEdgeDetails::from_edge(edge, &nodes).map(GraphSelection::Edge)
+        } else {
+            nodes
+                .iter()
+                .find(|node| node.selected)
+                .map(|node| GraphSelection::Stage(node.data.clone()))
+        }
     });
     use_effect(move || {
-        if let Some(stage) = selected() {
-            on_select.call(WorkflowStageDetails::new(stage, report.clone()));
+        if let Some(selection) = selected() {
+            on_select.call(WorkflowGraphDetails {
+                selection,
+                report: report.clone(),
+            });
         }
     });
     let root = graph.root.clone();
@@ -145,41 +168,72 @@ fn WorkflowPlanGraph(
 }
 
 #[component]
-pub(super) fn WorkflowStageInspector(selection: Option<WorkflowStageDetails>) -> Element {
+pub(super) fn WorkflowGraphInspector(selection: Option<WorkflowGraphDetails>) -> Element {
     rsx! {
-        section { class: "workflow-plan-inspector", "aria-label": "Workflow stage details",
-            if let Some(selection) = selection {
-                h3 { "{selection.stage.content.title}" }
-                p { "{selection.stage.content.summary}" }
-                if selection.stage.content.function.is_none() {
-                    if let Some(expression) = &selection.stage.content.expression { pre { "{expression}" } }
-                }
-                if selection.stage.operators.len() > 1 {
-                    h4 { "What happens in this stage" }
-                    ol { class: "workflow-stage-steps",
-                        for node in &selection.stage.operators {
-                            { let content = StageContent::relational(node);
-                              rsx! { li { strong { "{content.title}" } p { "{content.summary}" } } } }
-                        }
+        section { class: "workflow-plan-inspector", "aria-label": "Workflow graph details",
+            match selection {
+                Some(WorkflowGraphDetails { selection: GraphSelection::Stage(stage), report }) => rsx! {
+                    WorkflowStageInspector { stage, report }
+                },
+                Some(WorkflowGraphDetails { selection: GraphSelection::Edge(details), .. }) => rsx! {
+                    h3 { "Connection schema" }
+                    p { "{details.source.content.title} → {details.target_title}" }
+                    match details.source.output() {
+                        StageOutput::Relation(output) => rsx! {
+                            h4 { "Columns" }
+                            PlanOutputSchema { output: output.clone() }
+                        },
+                        StageOutput::Expression { expression, dtype } => rsx! {
+                            h4 { "Value type" }
+                            if let Some(dtype) = dtype {
+                                pre { "{dtype}" }
+                            } else {
+                                p { "Type metadata is unavailable for this expression." }
+                            }
+                            details { summary { "Function expression" } pre { "{expression}" } }
+                        },
                     }
-                }
-                if let Some(expression) = &selection.stage.content.expression {
-                    if selection.stage.content.function.is_some() {
-                        details { summary { "Function expression" } pre { "{expression}" } }
+                },
+                None => rsx! {
+                    div { class: "workflow-panel-empty",
+                        "Select a stage to inspect its operations or an edge to inspect its schema."
                     }
-                }
-                for node in &selection.stage.operators {
-                    details { class: "workflow-stage-native-details",
-                        summary { "{node.operator()} · #{node.id()}" }
-                        PlanOperatorDetails { node: node.clone() }
-                    }
-                }
-                details { class: "workflow-plan-report", summary { "Full plan JSON" }
-                    pre { "{serde_json::to_string_pretty(&selection.report).unwrap_or_default()}" }
-                }
-            } else {
-                div { class: "workflow-panel-empty", "Select a graph stage to inspect its operations and output columns." }
+                },
             }
+        }
+    }
+}
+
+#[component]
+fn WorkflowStageInspector(stage: WorkflowStage, report: SpiralPlanReport) -> Element {
+    rsx! {
+        h3 { "{stage.content.title}" }
+        p { "{stage.content.summary}" }
+        if stage.content.function.is_none() {
+            if let Some(expression) = &stage.content.expression { pre { "{expression}" } }
+        }
+        if stage.operators.len() > 1 {
+            h4 { "What happens in this stage" }
+            ol { class: "workflow-stage-steps",
+                for node in &stage.operators {
+                    { let content = StageContent::relational(node);
+                      rsx! { li { strong { "{content.title}" } p { "{content.summary}" } } } }
+                }
+            }
+        }
+        if let Some(expression) = &stage.content.expression {
+            if stage.content.function.is_some() {
+                details { summary { "Function expression" } pre { "{expression}" } }
+            }
+        }
+        for node in &stage.operators {
+            details { class: "workflow-stage-native-details",
+                summary { "{node.operator()} · #{node.id()}" }
+                PlanOperatorDetails { node: node.clone() }
+            }
+        }
+        details { class: "workflow-plan-report", summary { "Full plan JSON" }
+            pre { "{serde_json::to_string_pretty(&report).unwrap_or_default()}" }
         }
     }
 }
@@ -278,27 +332,12 @@ fn PlanOperatorCard(ctx: NodeViewCtx<WorkflowStage>, root: String) -> Element {
 #[component]
 fn PlanOperatorDetails(node: DiagnosticNode) -> Element {
     let content = StageContent::relational(&node);
-    let fields = node
-        .output()
-        .pointer("/schema/fields")
-        .and_then(serde_json::Value::as_array);
     rsx! {
         h3 { "{content.title}" }
         p { "{content.summary}" }
         p { class: "workflow-plan-node-id", "Operator #{node.id()}" }
         h4 { "Output schema" }
-        if let Some(fields) = fields.filter(|fields| !fields.is_empty()) {
-            dl { class: "workflow-plan-schema",
-                for field in fields {
-                    { let name = field["name"].as_str().unwrap_or_default();
-                      let dtype = field["dtype"].as_str().map(str::to_owned).unwrap_or_else(|| field["dtype"].to_string());
-                      rsx! { div {
-                          dt { "{name}" }
-                          dd { code { "{dtype}" } if field["nullable"].as_bool() == Some(true) { span { "Nullable" } } }
-                      } } }
-                }
-            }
-        } else { p { "No named output columns." } }
+        PlanOutputSchema { output: node.output().clone() }
         h4 { "Properties" }
         pre { "{serde_json::to_string_pretty(node.properties()).unwrap_or_default()}" }
         if let Some(details) = node.details() { h4 { "Operator details" } pre { "{details}" } }
@@ -309,11 +348,50 @@ fn PlanOperatorDetails(node: DiagnosticNode) -> Element {
     }
 }
 
+#[component]
+fn PlanOutputSchema(output: serde_json::Value) -> Element {
+    let fields = output
+        .pointer("/schema/fields")
+        .and_then(serde_json::Value::as_array);
+    rsx! {
+        if let Some(fields) = fields {
+            dl { class: "workflow-plan-schema",
+                for field in fields {
+                    { let name = field["name"].as_str().unwrap_or_default();
+                      let dtype = field["dtype"].as_str().map(str::to_owned).unwrap_or_else(|| field["dtype"].to_string());
+                      rsx! { div {
+                          dt { "{name}" }
+                          dd { code { "{dtype}" } if field["nullable"].as_bool() == Some(true) { span { "Nullable" } } }
+                      } } }
+                }
+            }
+            if fields.is_empty() { p { "No named output columns." } }
+        } else { p { "Schema metadata is unavailable." } }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
     use spiral_robotics_common::workflow::plan::DiagnosticPlan;
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn each_join_edge_inspects_its_own_source_schema() {
+        let plan: DiagnosticPlan = serde_json::from_value(json!({"schema_version":1,"root":0,"nodes":[
+            {"id":0,"operator":"Join","inputs":[1,2],"output":{},"properties":{"expressions":{"schema_version":1,"complete":true,"roots":[],"nodes":[]}}},
+            {"id":1,"operator":"Source","inputs":[],"output":{"schema":{"fields":[{"name":"left_id","dtype":"i64","nullable":false}]}},"properties":{"expressions":{"schema_version":1,"complete":true,"roots":[],"nodes":[]}}},
+            {"id":2,"operator":"Source","inputs":[],"output":{"schema":{"fields":[{"name":"right_id","dtype":"utf8?","nullable":true}]}},"properties":{"expressions":{"schema_version":1,"complete":true,"roots":[],"nodes":[]}}}
+        ]})).unwrap();
+        let flow = PlanFlow::from(&WorkflowGraph::from_plan(&plan).unwrap());
+        for (edge, name) in flow.edges.iter().zip(["left_id", "right_id"]) {
+            let details = WorkflowEdgeDetails::from_edge(edge, &flow.nodes).unwrap();
+            let StageOutput::Relation(output) = details.source.output() else {
+                panic!("source must carry rows")
+            };
+            assert_eq!(output["schema"]["fields"][0]["name"], name);
+        }
+    }
+
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn flow_preserves_shared_inputs_and_native_nodes_without_editing_the_plan() {
         let plan: DiagnosticPlan =
