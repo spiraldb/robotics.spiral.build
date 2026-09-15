@@ -259,26 +259,10 @@ impl WorkflowManager {
         self.update(&id, |snapshot| {
             snapshot.set_phase(WorkflowRunPhase::Running)
         });
-        let result = async {
-            let version = self.comparison_version(&workflow).await?;
-            let result = WorkflowQuery::new(self.inner.storage.workflow_store()).run(&workflow).await?;
-            if self.comparison_version(&workflow).await? != version {
-                return Err("The dataset changed during this workflow run. Run again to compare its current episodes.".into());
-            }
-            Ok((result, version))
-        }.await;
+        let result = WorkflowQuery::new(self.inner.storage.workflow_store())
+            .run(&workflow)
+            .await;
         self.finish(&id, result);
-    }
-    async fn comparison_version(&self, workflow: &WorkflowSpec) -> Result<Option<String>, String> {
-        match workflow.comparison() {
-            Some(output) => self
-                .inner
-                .storage
-                .inspect_dataset(output.dataset().clone())
-                .await
-                .map(|inspection| Some(inspection.dataset().version_id().to_owned())),
-            None => Ok(None),
-        }
     }
     fn update(&self, id: &str, change: impl FnOnce(&mut WorkflowRunSnapshot)) {
         if let Some(record) = self.inner.runs.recover_lock().snapshots.get_mut(id) {
@@ -287,7 +271,7 @@ impl WorkflowManager {
             snapshot.set_updated_ms(SystemTime::now().unix_millis());
         }
     }
-    fn finish(&self, id: &str, result: Result<(SpiralQuerySnapshot, Option<String>), String>) {
+    fn finish(&self, id: &str, result: Result<SpiralQuerySnapshot, String>) {
         let mut runs = self.inner.runs.recover_lock();
         if !runs.active.contains_key(id) {
             return;
@@ -298,10 +282,9 @@ impl WorkflowManager {
             .expect("active run has a snapshot")
             .snapshot_mut();
         match result {
-            Ok((result, version)) => {
+            Ok(result) => {
                 snapshot.set_phase(WorkflowRunPhase::Completed);
                 snapshot.set_result(Some(result));
-                snapshot.set_comparison_version(version);
             }
             Err(error) => {
                 snapshot.set_phase(WorkflowRunPhase::Failed);

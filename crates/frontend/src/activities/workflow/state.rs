@@ -152,18 +152,6 @@ impl WorkflowController {
         runs.sort_by_key(|run| run.snapshot().started_ms());
         runs
     }
-    pub(super) fn latest_output(&self, workflow_id: &str) -> Option<WorkflowRun> {
-        self.document
-            .runs
-            .read()
-            .iter()
-            .filter(|run| {
-                run.workflow().id() == workflow_id
-                    && run.snapshot().phase() == WorkflowRunPhase::Completed
-            })
-            .max_by_key(|run| run.snapshot().started_ms())
-            .cloned()
-    }
     pub(crate) fn select_run(mut self, id: String) {
         if self
             .workflow_runs()
@@ -331,13 +319,6 @@ impl WorkflowController {
         let plan = WorkflowClient::current().plan(workflow).await?;
         self.remember_plan(workflow, plan.clone());
         Ok(plan)
-    }
-
-    pub(super) fn set_comparison(
-        mut self,
-        comparison: spiral_robotics_common::workflow::comparison::EpisodeComparison,
-    ) {
-        self.document.draft.write().set_comparison(Some(comparison));
     }
 
     pub(crate) fn set_name(mut self, name: String) {

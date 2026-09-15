@@ -122,7 +122,7 @@ fn WorkflowPanels(controller: super::state::WorkflowController) -> Element {
 
     rsx! {
         div { class: "workflow-workspace",
-            super::document_controls::WorkflowDocumentControls { controller }
+            if !comparing() { super::document_controls::WorkflowDocumentControls { controller } }
             nav { class: "workflow-view-switch", "aria-label": "Workflow view",
                 button { "aria-pressed": !comparing(), onclick: move |_| comparing.set(false), "Build" }
                 button { "aria-pressed": comparing(), onclick: move |_| comparing.set(true), "Compare" }
@@ -137,7 +137,7 @@ fn WorkflowPanels(controller: super::state::WorkflowController) -> Element {
                 }
             }
             div { class: if comparing() { "workflow-comparison-container" } else { "workflow-comparison-container workflow-mode-hidden" },
-                super::comparison::WorkflowComparison { key: "{controller.spec().id()}", controller, on_author: move |_| { comparing.set(false); controller.activate_panel(ASSISTANT_PANEL_ID.into()); } }
+                super::comparison::WorkflowComparison { key: "{controller.spec().id()}", controller }
             }
         }
     }
@@ -524,7 +524,6 @@ fn WorkflowSqlEditor(controller: super::state::WorkflowController) -> Element {
     // metrics; both grow with the text and scroll together in one surface.
     rsx! {
         section { class: "workflow-sql-editor", "aria-label": "SQL definition",
-            super::comparison::WorkflowOutputDefinition { controller }
             div { class: "workflow-sql-surface",
                 pre { class: "workflow-sql-highlight", "aria-hidden": "true",
                     SqlHighlight { sql: spec.sql().to_owned() }

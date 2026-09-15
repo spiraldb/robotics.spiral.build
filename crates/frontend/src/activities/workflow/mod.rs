@@ -14,3 +14,5 @@ mod assistant_content;
 mod highlight;
 
 mod comparison;
+
+mod function_discovery;

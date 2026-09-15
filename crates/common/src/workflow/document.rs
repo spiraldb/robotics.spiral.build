@@ -55,9 +55,6 @@ impl WorkflowDocument {
             }
             planned.plan.validate()?;
         }
-        if let Some(comparison) = self.workflow.comparison() {
-            comparison.validate()?;
-        }
         self.conversation.validate()
     }
 }

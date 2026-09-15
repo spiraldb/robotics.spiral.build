@@ -1,83 +1,39 @@
-# Episode comparison output
+# Workflow comparison
 
-Build and Compare are two views of one workflow and its run history. The existing
-Assistant authors the measurement SQL and optional episode-comparison output.
-The ordinary Run button and `run_workflow` tool execute that complete definition.
-Compare has no selection editor, run submission, polling loop, or separate
-workflow identity. It reads the selected completed `WorkflowRun`.
+Workflow → Compare compares two saved workflows. Workflow B defaults to **All episodes** in the dataset identified by the comparison agent.
 
-## One executable workflow
+1. Build and save any ordinary workflow with the existing Assistant, SQL editor, graph, and Run controls.
+2. Open Compare, select Workflow A and Workflow B, and click **Compare**.
+3. The comparison agent reads saved SQL, output schemas, small previews, task context, and recorded topic schemas and sensor metadata. It submits one complete dashboard plan, including population normalization and all measurement cards.
+4. Spiral establishes the complete populations, then runs up to four planned card analyses concurrently, starting the next queued card whenever one finishes. Each card appears as its query finishes, with means, differences, measurement coverage and distributions using shared bin boundaries. A failed card does not discard completed results or stop other queries.
+5. Open **Metrics** to show or hide the agent-discovered metrics without rerunning the analysis. Episode populations and histogram bins link to the existing recording inspector.
 
-`WorkflowSpec::execution_sql()` compiles the measurement SQL and configured
-selection into one native query. Both EXPLAIN and execution use this same query,
-so the existing graph includes the source, model calls, selection, and distribution
-aggregates. Ordinary SQL workflows continue to execute their SQL unchanged.
-The SQL editor shows the output contract alongside the measurement query.
-The Assistant can clear the optional comparison configuration to return to raw
-SQL results, including image-evidence queries.
+The user sees preparation status and the resulting dashboard, not the agent's reasoning. Comparison never edits either workflow or its conversation.
 
-Measurement SQL supplies at most one row per `episode_id`, with numeric columns
-for criteria and charts. Frame queries aggregate to episode level first. A native
-left join to the dataset episode catalog keeps missing measurements in the base
-population. `duration_seconds` and `message_count` come from that catalog. Missing
-or nonfinite criterion values remain Unknown. Selected means the criterion
-matches, not that training approval has been granted.
+## Ownership
 
-The workflow publishes one population summary plus ten equal-width histogram bins
-per metric, at most 61 rows for six metrics regardless of episode count. Results
-shows these native rows; Compare derives means from their sums and measured
-counts. It never calculates dataset counts from a truncated episode preview.
-Each episode has equal weight. Mean differences use the metric's units, including
-arbitrary model-score units, rather than relative percentages or causal claims.
-Duplicate episode rows and truncated aggregates block dashboard presentation.
+Workflows contain ordinary SQL and conversation history. They have no comparison metadata, mandatory episode output format, or selection contract. The recent experimental contract was removed without a runtime compatibility layer.
 
-## Dashboard behavior
+`ComparisonPlan` owns the temporary interpretation: two normalization queries over fixed source CTEs, an observation unit, optional dataset, and up to eight numeric metrics. Episode normalizers must return one non-null unique `episode_id` per selected episode; repeated frame or moment rows must first be grouped. Generic tabular outputs can be compared as rows. Incompatible outputs produce a short explanation.
 
-- Existing Run publishes the output; Build Results and Compare share run selection.
-- The baseline is an implicit select-all workflow by default. Users can instead
-  choose another saved workflow, using its latest completed selected population.
-  Both outputs keep their own episode counts and means. Changing the baseline
-  never runs either workflow.
-- Charts normalize by each population's measured count. Missing means stay
-  unavailable. Users can add, reorder, and remove metrics.
-- Baseline changes and reordering/removing computed metrics reuse the output.
-  Changing the selection, measurement SQL, or adding an uncomputed metric marks
-  the output stale and requires running the workflow.
-- Edit workflow returns to the existing Assistant and graph.
-- Chart clicks focus the matching-episode evidence, with 20 episodes per page.
-  Inspect recording reuses the synchronized camera/joint workspace.
+The compiler embeds source SQL unchanged. Each recorded-signal card computes one value per episode and LEFT JOINs it into both fixed populations, preserving episodes with missing measurements. It computes exact counts and ten shared bins per metric over the complete results. Every card checks the dataset version and population sizes against the initial comparison. Missing and non-finite metric values are excluded from measured counts and averages. Population counts remain independent: neither workflow must be a subset of the other.
 
-## Identity and persistence
+The all-episodes baseline uses the identified dataset's native episode catalog. Inspection uses the same source SQL and normalization snapshot as the dashboard, with dataset version checks around both aggregation and evidence loading. A changed dataset requires a new comparison.
 
-The backend checks the dataset version before and after execution and records it
-on the same run. Evidence queries use the executed workflow definition, checking
-that version before and after retrieval. They are native query reads, not new
-workflow runs. Evidence still reevaluates the query; no durable episode membership
-or inference cache is claimed.
+## Physical measurements
 
-Save persists workflow SQL, comparison configuration, dashboard settings, and
-conversation. Runs remain session-owned. A page reload can recover an existing
-backend run; a backend restart requires a new run. Cached plans are invalidated
-when the complete execution changes, including selection criteria.
+Cards can measure scalar fields with native SQL, or inspected array fields with a typed query compiler. The agent chooses fields, aggregation, actual named joints, validity flags and units from recorded schemas and metadata. It is instructed to favor diverse measurements such as motion range, gripper posture, tracking error, temperature, voltage and load over repeated volume counters. Configuration limits are not readings; uncertain units and suspicious raw values are disclosed.
 
-## Local demonstration
+The demo uses the explicitly approved SQL workaround for Spiral’s UUID/UNNEST limitation: validate a one-to-one mapping between recorded textual episode keys and native IDs, expand only text keys and arrays, aggregate by textual key, then restore native UUIDs. Named joint arrays use the recorded metadata names. Missing or ambiguous identity mappings fail explicitly.
 
-The saved **Episode comparison — top-camera visibility** workflow uses native
-CLIP contrast between dim-scene and well-lit descriptions on the first decoded
-top-camera frame. Its provisional criterion is above −3. This is a candidate
-ranking, not calibrated illumination. RGB conversion uses the disclosed
-`bt601_625_full` assumption. A normal workflow run selects 21 of 52 episodes,
-with 31 remaining and no unknowns. Selected mean duration is 7.836 seconds versus
-7.113 seconds across the dataset.
+## Boundaries
 
-**Episode comparison — long recordings** selects durations above 8 seconds:
-15 selected, 37 remaining, no unknowns. Both saved definitions use the same
-workflow machinery as agent-authored SQL.
+Comparison currently reevaluates saved SQL; it does not reuse materialized workflow results. Preview limits bound returned rows, not native computation. Results and panel choices live in the current comparison workspace and are not saved dashboards. Manual selection shows or hides discovered metrics; defining arbitrary new metrics remains future work.
 
-Different datasets, dataset versions, measurement definitions, or histogram ranges
-are explicitly unsupported for now. Missing baseline metrics are shown as
-unavailable rather than silently substituted. Duration and message-count
-comparisons work between different selection workflows over the same dataset
-version. Custom metrics currently require the same measurement SQL.
+## Verification
 
-Desktop support starts at 1024 CSS pixels.
+Shared tests cover unchanged source queries, read-only SQL, shared distributions, required dataset identity for the default baseline, episode identity validation, and inspection query consistency. Browser tests cover independent population counts, measured means, missing values, and rejection of truncated or duplicate-identity results.
+
+Live demo verification (2026-09-15): the ordinary toy-side decision workflow was interpreted as 49 retained episodes versus the default 52-episode population, with mean durations 7.227s and 7.113s. Comparing it to the ordinary long-recordings workflow produced 49 versus 15 episodes and mean durations 7.227s versus 9.943s. Metric toggles updated immediately; episode evidence and the existing recording inspector loaded. Both saved documents, including conversation histories, were unchanged by comparison. The two recent experimental demo records were updated once to ordinary SQL before removing the old contract; there is no runtime migration layer.
+
+The comprehensive batch was verified live against 15 long recordings and 52 baseline episodes. Ten cards included temperature, voltage, load, current, tracking error and named-joint motion. A capture shows five cards complete while five are still running. Follower maximum recorded peak temperature averaged 106.9°C versus 89.2°C; the recording contains suspicious 150°C readings, which remain disclosed as recorded. Out-of-order completion tests verify independent pending/error state and preservation of manual metric visibility.
