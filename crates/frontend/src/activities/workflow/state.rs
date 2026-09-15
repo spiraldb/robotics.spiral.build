@@ -124,9 +124,7 @@ impl WorkflowController {
             return WorkflowRunSnapshot::idle_for(draft);
         };
         let mut snapshot = run.snapshot().clone();
-        let mut submitted = run.workflow().clone();
-        submitted.set_revision(draft.revision());
-        snapshot.set_result_stale(&submitted != draft);
+        snapshot.set_result_stale(run.workflow().sql() != draft.sql());
         snapshot
     }
     fn visible_run(&self) -> Option<WorkflowRun> {
@@ -822,6 +820,20 @@ mod tests {
         draft.acknowledge_save(&other);
         assert_eq!(draft.revision(), 1);
     }
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn renaming_or_saving_keeps_results_current_but_sql_changes_do_not() {
+        let workflow = WorkflowSpec::new("result", "Original").with_sql("SELECT 1");
+        let mut snapshot = WorkflowRunSnapshot::started(&workflow, "run");
+        snapshot.set_phase(WorkflowRunPhase::Completed);
+        let runs = [WorkflowRun::new(workflow.clone(), snapshot)];
+        let mut draft = workflow;
+        draft.set_name("Renamed");
+        draft.set_revision(2);
+        assert!(!WorkflowController::project_run(&draft, &runs).result_stale());
+        draft.set_sql("SELECT 2");
+        assert!(WorkflowController::project_run(&draft, &runs).result_stale());
+    }
+
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn a_late_assistant_proposal_preserves_manual_edits() {
         let expected = WorkflowSpec::default();

@@ -24,6 +24,10 @@ impl DriverConfiguration {
         let mut options = vec![
             (OptionDatabase::Uri, uri.to_string().into()),
             (
+                OptionDatabase::Other("spiral.local_cache".into()),
+                "true".into(),
+            ),
+            (
                 OptionDatabase::Other("spiral.api_url".into()),
                 settings.endpoint().into(),
             ),

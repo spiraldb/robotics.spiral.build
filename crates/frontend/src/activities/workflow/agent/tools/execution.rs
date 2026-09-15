@@ -16,6 +16,12 @@ impl WorkflowTool for RunWorkflow {
     fn presentation(&self) -> ToolPresentation {
         ToolPresentation::new("Starting query", "Query run", "start the query")
     }
+    fn completion(&self, _output: &Value) -> ToolCompletion {
+        ToolCompletion {
+            summary: "Query submitted".into(),
+            receipt: None,
+        }
+    }
     fn call<'a>(
         &'a self,
         invocation: ToolInvocation<'a>,
@@ -218,7 +224,14 @@ impl<'a> RunEvidence<'a> {
     }
     fn summary(&self) -> Value {
         let snapshot = self.0.snapshot();
-        json!({"ok":!matches!(snapshot.phase(), WorkflowRunPhase::Failed | WorkflowRunPhase::Interrupted),"run_id":snapshot.run_id(),"workflow":self.0.workflow(),"phase":snapshot.phase(),"error":snapshot.error(),"started_ms":snapshot.started_ms(),"preview_rows":snapshot.result().map(|result| result.rows().len()),"preview_truncated":snapshot.result().map(|result| result.truncated())})
+        let result = snapshot.result();
+        let total_rows = result
+            .filter(|result| !result.truncated())
+            .map(|result| result.rows().len());
+        let count_notice = result.filter(|result| result.truncated()).map(|result| format!(
+            "Only {} preview rows are retained. The total matching row count and total matching episode count are unknown. Report this as a partial preview or compute SQL aggregates; never present preview_rows as the total. Visual inspection validates only the specifically inspected rows.", result.rows().len()
+        ));
+        json!({"ok":!matches!(snapshot.phase(), WorkflowRunPhase::Failed | WorkflowRunPhase::Interrupted),"run_id":snapshot.run_id(),"workflow":self.0.workflow(),"phase":snapshot.phase(),"error":snapshot.error(),"started_ms":snapshot.started_ms(),"preview_rows":result.map(|result| result.rows().len()),"preview_truncated":result.map(|result| result.truncated()),"total_result_rows":total_rows,"result_notice":count_notice})
     }
     fn page(&self, offset: usize, limit: usize) -> Value {
         let mut output = self.summary();

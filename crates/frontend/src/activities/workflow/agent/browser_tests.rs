@@ -338,6 +338,19 @@ async fn agent_recovers_from_execution_failure_inspects_images_and_presents_the_
             .provider_messages()
             .is_structurally_valid(false)
     );
+    let submissions = conversation
+        .session()
+        .messages()
+        .iter()
+        .flat_map(WorkflowAgentMessage::tools)
+        .filter(|tool| tool.name() == "run_workflow")
+        .collect::<Vec<_>>();
+    assert_eq!(submissions.len(), 3);
+    assert!(
+        submissions
+            .iter()
+            .all(|tool| tool.summary() == "Query submitted")
+    );
     assert_eq!(harness.editor().spec().sql(), "SELECT 43 AS answer");
     assert_eq!(harness.editor().snapshot().run_id(), Some("run-2"));
     assert!(!harness.editor().snapshot().result_stale());
@@ -363,6 +376,24 @@ async fn agent_recovers_from_execution_failure_inspects_images_and_presents_the_
         requests[3]["body"]["messages"]
             .to_string()
             .contains("Native evaluation failed")
+    );
+    let preview: Value = serde_json::from_str(
+        requests[6]["body"]["messages"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()["content"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(preview["preview_truncated"], true);
+    assert_eq!(preview["total_result_rows"], Value::Null);
+    assert!(
+        preview["result_notice"]
+            .as_str()
+            .unwrap()
+            .contains("total matching row count")
     );
     assert!(
         requests[6]["body"]["messages"]
@@ -415,6 +446,24 @@ async fn stopping_during_result_inspection_preserves_the_admitted_run() {
     dom.in_scope(ScopeId::ROOT, || harness.assistant().cancel());
     harness.pump(&mut dom).await;
     assert!(harness.editor().snapshot().phase().active());
+    let conversation = harness.assistant().conversation();
+    let inspection = conversation
+        .session()
+        .messages()
+        .iter()
+        .flat_map(WorkflowAgentMessage::tools)
+        .find(|tool| tool.name() == "inspect_run")
+        .unwrap();
+    assert_eq!(
+        inspection.summary(),
+        "Assistant stopped before this action completed"
+    );
+    assert!(
+        inspection
+            .error()
+            .unwrap()
+            .contains("query continues independently")
+    );
     assert_eq!(
         harness.assistant().conversation().session().phase(),
         WorkflowAgentPhase::Cancelled

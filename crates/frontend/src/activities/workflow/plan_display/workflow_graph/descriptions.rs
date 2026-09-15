@@ -235,6 +235,7 @@ impl StageContent {
     pub(super) fn function_title(function: &str) -> String {
         match function {
             "spql.image.decode" | "spql.image._decode" => "Decode images".into(),
+            "spql.image.to_rgb" => "Convert frames to RGB".into(),
             "spql.image.mean_luminance" => "Measure brightness".into(),
             "spql.ai.score" => "Score images".into(),
             "spql.video.from_packets" => "Build video from packets".into(),

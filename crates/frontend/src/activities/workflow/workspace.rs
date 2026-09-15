@@ -13,7 +13,7 @@ use crate::activities::workflow::state::{
 use crate::components::icons::{ResultNodeIcon, WorkflowIcon};
 use crate::shell::state::StudioProjectState;
 
-const WORKFLOW_LAYOUT_SCOPE: &str = "workflow-investigation-v9";
+const WORKFLOW_LAYOUT_SCOPE: &str = "workflow-investigation-v10";
 const STAGE_DETAILS_PANEL_ID: &str = "workflow-stage-details";
 
 #[component]
@@ -71,7 +71,7 @@ fn WorkflowPanels(controller: super::state::WorkflowController) -> Element {
         Panel::new(
             STAGE_DETAILS_PANEL_ID,
             "Details",
-            "workflow-stage-details",
+            "workflow-canvas",
             rsx! { super::plan_display::WorkflowGraphInspector { selection } },
         )
         .with_class("workflow-stage-details-editor"),
@@ -100,20 +100,14 @@ impl WorkflowWorkspaceLayout {
         let right = LayoutNode::split(
             "workflow-right-rows",
             SplitAxis::Vertical,
-            0.62,
-            LayoutNode::tile("workflow-canvas", [CANVAS_PANEL_ID]),
-            LayoutNode::split(
-                "workflow-inspection-columns",
-                SplitAxis::Horizontal,
-                0.5,
-                LayoutNode::tile("workflow-results", [RESULTS_PANEL_ID]),
-                LayoutNode::tile("workflow-stage-details", [STAGE_DETAILS_PANEL_ID]),
-            ),
+            0.45,
+            LayoutNode::tile("workflow-canvas", [CANVAS_PANEL_ID, STAGE_DETAILS_PANEL_ID]),
+            LayoutNode::tile("workflow-results", [RESULTS_PANEL_ID]),
         );
         PanelLayout::new(LayoutNode::split(
             "workflow-columns",
             SplitAxis::Horizontal,
-            0.20,
+            0.28,
             LayoutNode::tile("workflow-left", [ASSISTANT_PANEL_ID, NODE_PANEL_ID]),
             right,
         ))
@@ -231,8 +225,11 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
                     }
                 }
             }
-            if active && controller.workflow_runs().iter().any(|run| run.snapshot().phase().active()) {
-                p { class: "workflow-plan-node-id", role: "status", "Spiral is running a query. Stopping the Assistant leaves that query running." }
+            if controller.workflow_runs().iter().any(|run| run.snapshot().phase().active()) {
+                p { class: "workflow-plan-node-id", role: "status",
+                    if active { "Spiral is running a query. Stopping the Assistant leaves that query running." }
+                    else { "Spiral is still running the submitted query. Results will update when it finishes." }
+                }
             }
             div {
                 id: "workflow-assistant-scroll",
@@ -579,18 +576,47 @@ impl RunDuration {
 }
 
 #[component]
+fn WorkflowRunElapsed(started_ms: u64) -> Element {
+    let mut now = use_signal(|| js_sys::Date::now() as u64);
+    use_future(move || async move {
+        loop {
+            gloo_timers::future::TimeoutFuture::new(1000).await;
+            now.set(js_sys::Date::now() as u64);
+        }
+    });
+    let elapsed = now().saturating_sub(started_ms) / 1000;
+    rsx! { span { class: "workflow-result-duration", "Elapsed: {elapsed / 60}m {elapsed % 60}s" } }
+}
+
+#[component]
 fn WorkflowResults(controller: super::state::WorkflowController) -> Element {
     let studio = StudioProjectState::current();
     let snapshot = controller.snapshot();
     let run_reason = controller.run_disabled_reason();
-    let can_run_again = matches!(
-        snapshot.phase(),
-        WorkflowRunPhase::Interrupted | WorkflowRunPhase::Failed
-    ) && run_reason.is_none();
+
     let spec = controller.spec();
     let runs = controller.workflow_runs();
 
     let empty_workflow = spec.sql().trim().is_empty();
+    let historical_results = runs.is_empty()
+        && !empty_workflow
+        && controller
+            .agent_state()
+            .session()
+            .messages()
+            .iter()
+            .any(|message| {
+                message
+                    .tools()
+                    .iter()
+                    .any(|tool| tool.name() == "run_workflow")
+            });
+    let can_run_again = (historical_results
+        || matches!(
+            snapshot.phase(),
+            WorkflowRunPhase::Interrupted | WorkflowRunPhase::Failed
+        ))
+        && run_reason.is_none();
     let executed = controller.executed_query().unwrap_or_else(|| spec.clone());
     let sql = executed.sql().to_owned();
     let max_rows = 100;
@@ -616,9 +642,16 @@ fn WorkflowResults(controller: super::state::WorkflowController) -> Element {
     } else {
         None
     };
-    let (empty_title, empty_detail) = snapshot
-        .phase()
-        .empty_result_copy(controller.validation().valid(), empty_workflow);
+    let (empty_title, empty_detail) = if historical_results {
+        (
+            "Results from the saved conversation are unavailable",
+            "Save keeps SQL and conversation, but not result rows. Run the saved SQL to produce current results; earlier answers describe earlier runs.",
+        )
+    } else {
+        snapshot
+            .phase()
+            .empty_result_copy(controller.validation().valid(), empty_workflow)
+    };
 
     rsx! {
         section { class: "workflow-results", "aria-label": "Workflow results",
@@ -636,9 +669,15 @@ fn WorkflowResults(controller: super::state::WorkflowController) -> Element {
                         }
                     }
                     if let Some(result) = snapshot.result() {
-                        strong { class: "workflow-result-count", "{result.rows().len()} rows" }
+                        strong { class: "workflow-result-count",
+                            if result.truncated() { "{result.rows().len()} preview rows" }
+                            else { "{result.rows().len()} rows" }
+                        }
                         span { class: "workflow-result-duration", "{RunDuration(result.elapsed_ms()).display()}" }
                         if result.truncated() { span { class: "chip chip-caution", "Truncated" } }
+                    }
+                    if snapshot.phase().active() {
+                        WorkflowRunElapsed { started_ms: snapshot.started_ms() }
                     }
                     details { class: "workflow-executed-sql", summary { "Executed SQL" } pre { "{sql}" } }
                 }
@@ -667,7 +706,7 @@ fn WorkflowResults(controller: super::state::WorkflowController) -> Element {
                                 purpose: ActionPurpose::Retry,
                                 variant: ActionVariant::Outline,
                                 onclick: move |_| controller.run(studio),
-                                "Run again"
+                                if historical_results { "Run saved SQL" } else { "Run again" }
                             }
                         }
                     }
@@ -734,7 +773,12 @@ impl WorkflowRunPresentation for WorkflowRunPhase {
             WorkflowRunPhase::Failed => {
                 "The latest run failed. These rows remain evidence from the previous completed run."
             }
-            _ => "These rows remain stale until the current query completes.",
+            WorkflowRunPhase::Validating | WorkflowRunPhase::Running => {
+                "These rows belong to earlier SQL. A submitted query is still running."
+            }
+            _ => {
+                "These rows were produced by different SQL. Run the current SQL to refresh the results."
+            }
         }
     }
 

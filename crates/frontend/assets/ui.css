@@ -775,3 +775,7 @@
 .workflow-plan-operator small { margin-top: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .workflow-stage-native-details { border-top: 1px solid var(--tone-line); padding: 12px 0; }
 .workflow-stage-native-details > summary { cursor: pointer; font-weight: 600; }
+
+/* Keep primary composer actions intact in narrow dock panels. */
+.workflow-assistant-composer-actions > button { flex-shrink: 0; white-space: nowrap; }
+.workflow-assistant-composer-actions > span { flex: 1; min-width: 0; }
