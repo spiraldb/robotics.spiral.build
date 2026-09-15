@@ -1,4 +1,24 @@
-//! Workflow conversation, execution canvas, and dedicated node inspector.
+//! Workflow investigation: the pipeline as the hero, its rows beneath it,
+//! the conversation as a tall column at its side.
+//!
+//! Direction contract (user-pinned composition over seed b05dbd1e).
+//! THESIS: the graph is how an engineer understands what a workflow does, so
+//! it owns the center; results prove it beneath, and the Assistant authors it
+//! from a narrow tall column. This refuses the debugger arrangement where a
+//! plan is a strip of unreadable operators above a table.
+//! OWN-WORLD: the one-light bench, unchanged: paper, graphite, hairlines, 4px
+//! radii, 12/11/10px type, tabular mono numerals. Added: six stage-kind
+//! identity tints as glyph tiles, categorical chips in soft washes, 2px value
+//! bars under measurements, skeleton shimmer while Spiral runs, and one
+//! staggered entrance that follows the data left to right.
+//! STORY: ask, watch the query flow across the pipeline, see rows with images
+//! arrive, read each stage's plain-language role, inspect exact values.
+//! FIRST VIEWPORT: one document bar (title ▾ · state · Discard Save ▶Run);
+//! left 24% Assistant | SQL; right: Graph (74%) beside Details (26%) over
+//! Results (54% of the height).
+//! FORM: graph hero with a side console and a results shelf.
+//! FINISH: unreviewed and undocumented is unfinished; this build ends with the
+//! finish review, the verdict, and DESIGN.md.
 
 use crate::components::interaction::{Action, ActionPurpose, ActionVariant};
 use dioxus::prelude::*;
@@ -10,15 +30,24 @@ use crate::activities::workflow::state::{
     ASSISTANT_PANEL_ID, AgentDraftKey, AgentPendingCommand, CANVAS_PANEL_ID, NODE_PANEL_ID,
     RESULTS_PANEL_ID,
 };
-use crate::components::icons::{ResultNodeIcon, WorkflowIcon};
+use crate::components::icons::{
+    ConversationIcon, DetailsIcon, ResultNodeIcon, SendIcon, SpinnerIcon, SqlIcon, StopIcon,
+    WorkflowIcon,
+};
 use crate::shell::state::StudioProjectState;
 
-const WORKFLOW_LAYOUT_SCOPE: &str = "workflow-investigation-v10";
+use super::highlight::SqlHighlight;
+
+const WORKFLOW_LAYOUT_SCOPE: &str = "workflow-investigation-v12";
 const STAGE_DETAILS_PANEL_ID: &str = "workflow-stage-details";
 
 #[component]
 fn WorkflowPanels(controller: super::state::WorkflowController) -> Element {
     let mut inspection = use_signal(|| None::<WorkflowInspection>);
+    // A stage asked for from outside the canvas: the overview list or the
+    // stage strip. The graph selects and centres it, then clears the request.
+    let focus_stage = use_signal(|| None::<String>);
+    let report = controller.planned_report();
     use_effect(move || {
         let query = WorkflowPlanInput(controller.spec());
         if inspection
@@ -36,58 +65,63 @@ fn WorkflowPanels(controller: super::state::WorkflowController) -> Element {
         .map(|inspection| inspection.details.clone());
     let panels = vec![
         Panel::new(
-            ASSISTANT_PANEL_ID,
-            "Assistant",
-            "workflow-left",
-            rsx! { WorkflowAssistant { controller } },
+            RESULTS_PANEL_ID,
+            "Results",
+            "workflow-results",
+            rsx! { WorkflowResults { controller } },
         )
-        .with_class("workflow-assistant-editor"),
+        .with_class("workflow-results-editor")
+        .with_tab_icon(rsx! { ResultNodeIcon {} }),
         Panel::new(
             CANVAS_PANEL_ID,
             "Graph",
             "workflow-canvas",
-            rsx! { WorkflowCanvas { controller,
+            rsx! { WorkflowCanvas { controller, focus_stage,
                 on_inspect: move |selected| {
                     inspection.set(Some(selected));
                     controller.activate_panel(STAGE_DETAILS_PANEL_ID.into());
                 },
             } },
         )
-        .with_class("workflow-canvas-editor"),
-        Panel::new(
-            NODE_PANEL_ID,
-            "SQL",
-            "workflow-inspector",
-            rsx! { WorkflowSqlEditor { controller } },
-        )
-        .with_class("workflow-node-editor"),
-        Panel::new(
-            RESULTS_PANEL_ID,
-            "Results",
-            "workflow-results",
-            rsx! { WorkflowResults { controller } },
-        )
-        .with_class("workflow-results-editor"),
+        .with_class("workflow-canvas-editor")
+        .with_tab_icon(rsx! { WorkflowIcon {} }),
         Panel::new(
             STAGE_DETAILS_PANEL_ID,
             "Details",
-            "workflow-canvas",
-            rsx! { super::plan_display::WorkflowGraphInspector { selection } },
+            "workflow-details",
+            rsx! { super::plan_display::WorkflowGraphInspector { selection, report, focus_stage } },
         )
-        .with_class("workflow-stage-details-editor"),
+        .with_class("workflow-stage-details-editor")
+        .with_tab_icon(rsx! { DetailsIcon {} }),
+        Panel::new(
+            ASSISTANT_PANEL_ID,
+            "Assistant",
+            "workflow-console",
+            rsx! { WorkflowAssistant { controller } },
+        )
+        .with_class("workflow-assistant-editor")
+        .with_tab_icon(rsx! { ConversationIcon {} }),
+        Panel::new(
+            NODE_PANEL_ID,
+            "SQL",
+            "workflow-console",
+            rsx! { WorkflowSqlEditor { controller } },
+        )
+        .with_class("workflow-node-editor")
+        .with_tab_icon(rsx! { SqlIcon {} }),
     ];
 
     rsx! {
         div { class: "workflow-workspace",
             super::document_controls::WorkflowDocumentControls { controller }
             div { class: "workflow-panels",
-        PanelWorkspace {
-            panels,
-            initial_layout: WorkflowWorkspaceLayout::initial(),
-            layout_scope: Some(WORKFLOW_LAYOUT_SCOPE.to_owned()),
-            active_panel: controller.active_panel(),
-            on_panel_activate: move |id: PanelId| controller.activate_panel(id),
-        }
+                PanelWorkspace {
+                    panels,
+                    initial_layout: WorkflowWorkspaceLayout::initial(),
+                    layout_scope: Some(WORKFLOW_LAYOUT_SCOPE.to_owned()),
+                    active_panel: controller.active_panel(),
+                    on_panel_activate: move |id: PanelId| controller.activate_panel(id),
+                }
             }
         }
     }
@@ -96,20 +130,33 @@ fn WorkflowPanels(controller: super::state::WorkflowController) -> Element {
 struct WorkflowWorkspaceLayout;
 
 impl WorkflowWorkspaceLayout {
+    /// The graph owns the large central tile with its inspector beside it,
+    /// results run along the bottom, and the Assistant and SQL share a tall
+    /// column at the left. Every tile stays dockable and resizable.
     fn initial() -> PanelLayout {
-        let right = LayoutNode::split(
-            "workflow-right-rows",
+        let explanation = LayoutNode::split(
+            "workflow-explanation-columns",
+            SplitAxis::Horizontal,
+            0.74,
+            LayoutNode::tile("workflow-canvas", [CANVAS_PANEL_ID]),
+            LayoutNode::tile("workflow-details", [STAGE_DETAILS_PANEL_ID]),
+        );
+        // A pipeline is wider than it is tall: two stacked sources and a chain
+        // need about 220px of canvas, so the graph row takes 46% of the height
+        // and the results shelf keeps five rows of previews.
+        let evidence = LayoutNode::split(
+            "workflow-evidence-rows",
             SplitAxis::Vertical,
-            0.45,
-            LayoutNode::tile("workflow-canvas", [CANVAS_PANEL_ID, STAGE_DETAILS_PANEL_ID]),
+            0.46,
+            explanation,
             LayoutNode::tile("workflow-results", [RESULTS_PANEL_ID]),
         );
         PanelLayout::new(LayoutNode::split(
             "workflow-columns",
             SplitAxis::Horizontal,
-            0.28,
-            LayoutNode::tile("workflow-left", [ASSISTANT_PANEL_ID, NODE_PANEL_ID]),
-            right,
+            0.24,
+            LayoutNode::tile("workflow-console", [ASSISTANT_PANEL_ID, NODE_PANEL_ID]),
+            evidence,
         ))
     }
 }
@@ -155,7 +202,7 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
             WorkflowAgentPhase::Interrupted => "Assistant turn was interrupted",
             WorkflowAgentPhase::Idle => {
                 if configured {
-                    "Ready"
+                    "Assistant ready"
                 } else {
                     "Assistant unavailable"
                 }
@@ -205,6 +252,15 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
         },
     }
     .hint();
+    let query_running = controller
+        .workflow_runs()
+        .iter()
+        .any(|run| run.snapshot().phase().active());
+    let composer_disabled = !state.history_available()
+        || !configured
+        || active
+        || command.is_some()
+        || !catalog_available;
     let starter_relations_key = draft_key.clone();
     let starter_siglip_key = draft_key.clone();
     let submit_key = draft_key.clone();
@@ -213,24 +269,7 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
     let send_key = draft_key;
     rsx! {
         section { class: "workflow-assistant", "aria-label": "Workflow assistant",
-            header { class: "workflow-assistant-intro",
-                div { class: "workflow-assistant-heading",
-                    h2 { class: "sr-only", "Assistant" }
-                    span {
-                        class: if active { "workflow-assistant-presence is-active" } else if configured { "workflow-assistant-presence is-ready" } else { "workflow-assistant-presence" },
-                        role: "status",
-                        "aria-live": "polite",
-                        "aria-atomic": "true",
-                        "{status}"
-                    }
-                }
-            }
-            if controller.workflow_runs().iter().any(|run| run.snapshot().phase().active()) {
-                p { class: "workflow-plan-node-id", role: "status",
-                    if active { "Spiral is running a query. Stopping the Assistant leaves that query running." }
-                    else { "Spiral is still running the submitted query. Results will update when it finishes." }
-                }
-            }
+            div { class: "workflow-assistant-body",
             div {
                 id: "workflow-assistant-scroll",
                 class: "workflow-assistant-scroll",
@@ -249,12 +288,12 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
                 if messages.is_empty() {
                     section { class: "workflow-assistant-empty",
                         h3 { "What should we find?" }
-                        p { "Describe the result you need. I’ll inspect the data, run queries, and refine the results. Click Save to keep the SQL and conversation." }
+                        p { "Describe the result you need. The Assistant inspects the data, writes and runs the SQL, and refines the rows until they answer the question. Save keeps the SQL and this conversation." }
                         if configured {
                             div { class: "workflow-assistant-examples",
                                 Action {
                                     purpose: ActionPurpose::Select,
-                                    variant: ActionVariant::Outline,
+                                    variant: ActionVariant::Row,
                                     onclick: {
                                         let draft_key = starter_relations_key.clone();
                                         move |_| {
@@ -265,7 +304,7 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
                                 }
                                 Action {
                                     purpose: ActionPurpose::Select,
-                                    variant: ActionVariant::Outline,
+                                    variant: ActionVariant::Row,
                                     onclick: {
                                         let draft_key = starter_siglip_key.clone();
                                         move |_| {
@@ -298,26 +337,13 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
                         }
                     }
                 }
-                div {
-                    class: "workflow-assistant-thread-tail",
-                    "aria-hidden": "true",
-                }
+                div { class: "workflow-assistant-thread-tail", "aria-hidden": "true" }
             }
-            form {
-                class: "workflow-assistant-composer",
-                onsubmit: move |event| {
-                    event.prevent_default();
-                    if can_send {
-                        let text = drafts.peek().get(&submit_key).cloned().unwrap_or_default();
-                        controller.send_agent(text, studio);
-                    }
-                },
-                label { r#for: "workflow-agent-input", "Message the Workflow Assistant" }
-                if show_latest_action() {
+            if show_latest_action() {
+                div { class: "workflow-assistant-jump",
                     Action {
                         purpose: ActionPurpose::Navigate,
                         variant: ActionVariant::Outline,
-                        class: "workflow-assistant-latest-action",
                         onclick: move |_| {
                             follow_latest.set(true);
                             show_latest_action.set(false);
@@ -329,59 +355,90 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
                         "Jump to latest"
                     }
                 }
-                textarea {
-                    id: "workflow-agent-input",
-                    rows: "1",
-                    maxlength: "8000",
-                    disabled: !state.history_available() || !configured || active || command.is_some() || !catalog_available,
-                    placeholder: if !state.history_available() { "Assistant history is unavailable" } else if configured { "Ask about your robotics data…" } else { "Assistant is temporarily unavailable" },
-                    value: "{draft}",
-                    oninput: {
-                        let draft_key = input_key.clone();
-                        move |event| {
-                            drafts.write().insert(draft_key.clone(), event.value());
-                        }
-                    },
-                    onkeydown: move |event| {
-                        if event.key() == Key::Enter
-                            && !event.modifiers().shift()
-                            && can_send
-                        {
-                            event.prevent_default();
-                            let text = drafts.peek().get(&keydown_key).cloned().unwrap_or_default();
-                            controller.send_agent(text, studio);
-                        }
-                    },
+            }
+            }
+            form {
+                class: "workflow-assistant-composer",
+                onsubmit: move |event| {
+                    event.prevent_default();
+                    if can_send {
+                        let text = drafts.peek().get(&submit_key).cloned().unwrap_or_default();
+                        controller.send_agent(text, studio);
+                    }
+                },
+                if query_running {
+                    p { class: "workflow-assistant-notice", role: "status",
+                        if active { "Spiral is running a query. Stopping the Assistant leaves that query running." }
+                        else { "Spiral is still running the submitted query. Results update when it finishes." }
+                    }
                 }
-                div { class: "workflow-assistant-composer-actions",
-                    span { role: "status",
-                        if loading { "Loading workflow…" } else { "{composer_hint}" }
+                label { r#for: "workflow-agent-input", class: "sr-only", "Message the Workflow Assistant" }
+                div { class: "workflow-composer-field", class: if composer_disabled { "is-disabled" },
+                    textarea {
+                        id: "workflow-agent-input",
+                        rows: "1",
+                        maxlength: "8000",
+                        disabled: composer_disabled,
+                        placeholder: if !state.history_available() { "Assistant history is unavailable" } else if configured { "Ask about your robotics data…" } else { "Assistant is temporarily unavailable" },
+                        value: "{draft}",
+                        oninput: {
+                            let draft_key = input_key.clone();
+                            move |event| {
+                                drafts.write().insert(draft_key.clone(), event.value());
+                            }
+                        },
+                        onkeydown: move |event| {
+                            if event.key() == Key::Enter
+                                && !event.modifiers().shift()
+                                && can_send
+                            {
+                                event.prevent_default();
+                                let text = drafts.peek().get(&keydown_key).cloned().unwrap_or_default();
+                                controller.send_agent(text, studio);
+                            }
+                        },
                     }
                     if active {
                         Action {
                             purpose: ActionPurpose::Stop,
                             variant: ActionVariant::Outline,
+                            class: "ui-action--square workflow-composer-send",
                             disabled: command == Some(AgentPendingCommand::Cancelling),
                             aria_busy: command == Some(AgentPendingCommand::Cancelling),
+                            aria_label: if command == Some(AgentPendingCommand::Cancelling) { "Stopping the Assistant turn" } else { "Stop the Assistant turn" },
+                            title: "Stop this turn. A submitted Spiral query keeps running.",
                             onclick: move |_| controller.cancel_agent(studio),
-                            if command == Some(AgentPendingCommand::Cancelling) { "Stopping…" } else { "Stop" }
+                            if command == Some(AgentPendingCommand::Cancelling) { SpinnerIcon {} } else { StopIcon {} }
                         }
                     } else {
                         Action {
                             purpose: ActionPurpose::Start,
                             variant: ActionVariant::Solid,
-                            class: "workflow-assistant-send-action",
+                            class: "ui-action--square workflow-composer-send",
                             disabled: !can_send,
                             aria_busy: command == Some(AgentPendingCommand::Sending),
-                            title: if !catalog_available { "Reconnect Spiral before sending a message" } else if !configured { "Assistant is temporarily unavailable" } else { "Send this message to the Workflow Assistant" },
+                            aria_label: "Send to the Workflow Assistant",
+                            title: if !catalog_available { "Reconnect Spiral before sending a message" } else if !configured { "Assistant is temporarily unavailable" } else { "Send · Enter" },
                             onclick: move |_| {
                                 if can_send {
                                     let text = drafts.peek().get(&send_key).cloned().unwrap_or_default();
                                     controller.send_agent(text, studio);
                                 }
                             },
-                            if command == Some(AgentPendingCommand::Sending) { "Sending…" } else { "Send" }
+                            if command == Some(AgentPendingCommand::Sending) { SpinnerIcon {} } else { SendIcon {} }
                         }
+                    }
+                }
+                div { class: "workflow-composer-meta",
+                    span {
+                        class: if active { "workflow-assistant-presence is-active" } else if configured && !loading { "workflow-assistant-presence is-ready" } else { "workflow-assistant-presence" },
+                        role: "status",
+                        "aria-live": "polite",
+                        "aria-atomic": "true",
+                        "{status}"
+                    }
+                    span { class: "workflow-composer-hint",
+                        if loading { "Loading workflow…" } else { "{composer_hint}" }
                     }
                 }
             }
@@ -426,15 +483,15 @@ impl AssistantComposerState {
             return "Assistant is temporarily unavailable. Retry in a moment.";
         }
         if self.activity.active {
-            return "Assistant is working. You can stop this turn.";
+            return "You can stop this turn at any time.";
         }
         if self.activity.command.is_some() {
             return "Finishing the current Assistant action…";
         }
         if self.activity.draft_empty {
-            return "Enter to send · Shift+Enter for a new line.";
+            return "Enter to send · Shift+Enter for a new line";
         }
-        "Enter to send · Shift+Enter for a new line."
+        "Enter to send · Shift+Enter for a new line"
     }
 }
 
@@ -442,17 +499,32 @@ impl AssistantComposerState {
 fn WorkflowSqlEditor(controller: super::state::WorkflowController) -> Element {
     let spec = controller.spec();
     let validation = controller.validation();
+    let issues = if spec.sql().trim().is_empty() {
+        Vec::new()
+    } else {
+        validation.errors().to_vec()
+    };
+    // The coloured copy sits under a transparent textarea with identical
+    // metrics; both grow with the text and scroll together in one surface.
     rsx! {
-        section { class: "workflow-sql-editor",
-            label { r#for: "workflow-sql", class: "label", "Query" }
-            textarea {
-                id: "workflow-sql", class: "field workflow-sql-input", spellcheck: "false",
-                value: spec.sql(), placeholder: "SELECT …",
-                oninput: move |event| controller.set_sql(event.value()),
+        section { class: "workflow-sql-editor", "aria-label": "SQL definition",
+            div { class: "workflow-sql-surface",
+                pre { class: "workflow-sql-highlight", "aria-hidden": "true",
+                    SqlHighlight { sql: spec.sql().to_owned() }
+                    "\n"
+                }
+                textarea {
+                    id: "workflow-sql", class: "workflow-sql-input", spellcheck: "false",
+                    "aria-label": "SQL definition",
+                    value: spec.sql(), placeholder: "SELECT …",
+                    oninput: move |event| controller.set_sql(event.value()),
+                }
             }
-            if !spec.sql().trim().is_empty() {
-                for issue in validation.errors() {
-                    p { class: "workflow-results-error", "{issue.message()}" }
+            if !issues.is_empty() {
+                div { class: "workflow-sql-issues", role: "alert",
+                    for issue in issues {
+                        p { "{issue.message()}" }
+                    }
                 }
             }
         }
@@ -462,9 +534,11 @@ fn WorkflowSqlEditor(controller: super::state::WorkflowController) -> Element {
 #[component]
 fn WorkflowCanvas(
     controller: super::state::WorkflowController,
+    focus_stage: Signal<Option<String>>,
     on_inspect: EventHandler<WorkflowInspection>,
 ) -> Element {
     let spec = controller.spec();
+    let active = controller.snapshot().phase().active();
     // A rename or save revision cannot change a SQL plan. Subscribe to the
     // actual query so those actions neither clear the graph nor replan it.
     let query = use_memo(move || {
@@ -504,26 +578,35 @@ fn WorkflowCanvas(
         .map(|(_, result)| result.clone());
     rsx! {
         section { class: "workflow-canvas", "aria-label": "Workflow graph",
-
             if let Some(error) = controller.load_error() {
-                div { class: "workflow-results-error", role: "alert", "{error}" }
+                div { class: "workflow-inline-error", role: "alert", "{error}" }
             } else if !controller.loaded() {
-                div { class: "workflow-panel-empty", role: "status", "Loading workflow…" }
+                div { class: "workflow-panel-empty", role: "status",
+                    SpinnerIcon {}
+                    strong { "Loading workflow…" }
+                }
             } else if spec.sql().trim().is_empty() {
-                div { class: "workflow-panel-empty", WorkflowIcon {}, strong { "Build a workflow" }
-                    p { "Ask the Assistant or write SQL. Explore the resulting graph here, then inspect the rows below." }
+                div { class: "workflow-panel-empty",
+                    WorkflowIcon {}
+                    strong { "Build a workflow" }
+                    p { "Ask the Assistant or write SQL. The graph shows how the query reads, shapes, and scores your data, one stage at a time." }
                 }
             } else {
                 match current {
-                    None => rsx! { div { class: "workflow-panel-empty", role: "status", "Planning SQL…" } },
-                    Some(Err(error)) => rsx! { div { class: "workflow-results-error", role: "alert", "{error}" } },
+                    None => rsx! {
+                        div { class: "workflow-panel-empty", role: "status",
+                            SpinnerIcon {}
+                            strong { "Planning SQL…" }
+                        }
+                    },
+                    Some(Err(error)) => rsx! { div { class: "workflow-inline-error", role: "alert", "{error}" } },
                     Some(Ok(Some(plan))) => rsx! {
                         if let Some(error) = plan.error() {
-                            div { class: "workflow-results-error", role: "alert", "{error}" }
+                            div { class: "workflow-inline-error", role: "alert", "{error}" }
                         }
                         if let Some(report) = plan.report() {
                             super::plan_display::WorkflowPlanDisplay {
-                                key: "{spec.id()}:{spec.sql()}", report: report.clone(),
+                                key: "{spec.id()}:{spec.sql()}", report: report.clone(), active, focus_stage,
                                 on_select: move |details| on_inspect.call(WorkflowInspection::new(spec.clone(), details)),
                             }
                         }
@@ -569,8 +652,11 @@ impl RunDuration {
     fn display(&self) -> String {
         if self.0 < 1000 {
             format!("{} ms", self.0)
-        } else {
+        } else if self.0 < 60_000 {
             format!("{:.1} s", self.0 as f64 / 1000.0)
+        } else {
+            let seconds = self.0 / 1000;
+            format!("{}m {:02}s", seconds / 60, seconds % 60)
         }
     }
 }
@@ -585,7 +671,11 @@ fn WorkflowRunElapsed(started_ms: u64) -> Element {
         }
     });
     let elapsed = now().saturating_sub(started_ms) / 1000;
-    rsx! { span { class: "workflow-result-duration", "Elapsed: {elapsed / 60}m {elapsed % 60}s" } }
+    rsx! {
+        span { class: "workflow-run-elapsed", title: "Time since Spiral admitted this run",
+            "{elapsed / 60}m {elapsed % 60:02}s"
+        }
+    }
 }
 
 #[component]
@@ -652,34 +742,55 @@ fn WorkflowResults(controller: super::state::WorkflowController) -> Element {
             .phase()
             .empty_result_copy(controller.validation().valid(), empty_workflow)
     };
+    let selected_position = runs
+        .iter()
+        .position(|run| run.snapshot().run_id() == snapshot.run_id())
+        .map(|index| index + 1)
+        .unwrap_or(runs.len());
 
     rsx! {
         section { class: "workflow-results", "aria-label": "Workflow results",
             if !runs.is_empty() {
-                div { class: "workflow-results-toolbar",
-                    label { r#for: "workflow-result-run", "Run" }
-                    select { id: "workflow-result-run", value: snapshot.run_id().unwrap_or_default(),
-                        onchange: move |event| controller.select_run(event.value()),
-                        for (index, run) in runs.iter().enumerate() {
-                            option { key: "{run.snapshot().run_id().unwrap_or_default()}",
-                                value: run.snapshot().run_id().unwrap_or_default(),
-                                selected: run.snapshot().run_id() == snapshot.run_id(),
-                                "{index + 1} · {run.snapshot().phase().run_label()}"
+                div { class: "workflow-run-strip",
+                    span { class: "workflow-run-phase {snapshot.phase().class_name()}", role: "status",
+                        span { class: "workflow-run-phase-dot", "aria-hidden": "true" }
+                        "{snapshot.phase().run_label()}"
+                    }
+                    if runs.len() > 1 {
+                        label { r#for: "workflow-result-run", class: "sr-only", "Run" }
+                        select { id: "workflow-result-run", class: "workflow-run-select",
+                            value: snapshot.run_id().unwrap_or_default(),
+                            onchange: move |event| controller.select_run(event.value()),
+                            for (index, run) in runs.iter().enumerate() {
+                                option { key: "{run.snapshot().run_id().unwrap_or_default()}",
+                                    value: run.snapshot().run_id().unwrap_or_default(),
+                                    selected: run.snapshot().run_id() == snapshot.run_id(),
+                                    "Run {index + 1} of {runs.len()} · {run.snapshot().phase().run_label()}"
+                                }
                             }
                         }
+                    } else {
+                        span { class: "workflow-run-single", "Run {selected_position}" }
                     }
                     if let Some(result) = snapshot.result() {
-                        strong { class: "workflow-result-count",
-                            if result.truncated() { "{result.rows().len()} preview rows" }
-                            else { "{result.rows().len()} rows" }
+                        span { class: "workflow-run-count",
+                            strong { "{result.rows().len()}" }
+                            if result.truncated() { " preview rows" } else if result.rows().len() == 1 { " row" } else { " rows" }
                         }
-                        span { class: "workflow-result-duration", "{RunDuration(result.elapsed_ms()).display()}" }
-                        if result.truncated() { span { class: "chip chip-caution", "Truncated" } }
+                        span { class: "workflow-run-duration", title: "Spiral execution time",
+                            "{RunDuration(result.elapsed_ms()).display()}"
+                        }
+                        if result.truncated() {
+                            span { class: "chip chip-caution", title: "Spiral returned more rows than this preview keeps. Use SQL to count or narrow the total.", "Truncated" }
+                        }
                     }
                     if snapshot.phase().active() {
                         WorkflowRunElapsed { started_ms: snapshot.started_ms() }
                     }
-                    details { class: "workflow-executed-sql", summary { "Executed SQL" } pre { "{sql}" } }
+                    details { class: "workflow-executed-sql",
+                        summary { SqlIcon {} "Executed SQL" }
+                        pre { SqlHighlight { sql: sql.clone() } }
+                    }
                 }
             }
             if snapshot.result_stale() {
@@ -689,11 +800,14 @@ fn WorkflowResults(controller: super::state::WorkflowController) -> Element {
                 }
             }
             if snapshot.result().is_some() && snapshot.error().is_some() {
-                div { class: "workflow-results-error", role: "alert", "{snapshot.error().clone().unwrap_or_default()}" }
+                div { class: "workflow-inline-error", role: "alert", "{snapshot.error().clone().unwrap_or_default()}" }
             }
             div { key: "{snapshot.run_id().unwrap_or_default()}", class: "workflow-result-body",
                 if !controller.loaded() && controller.load_error().is_none() {
-                    div { class: "workflow-panel-empty", role: "status", "Loading workflow…" }
+                    div { class: "workflow-panel-empty", role: "status",
+                        SpinnerIcon {}
+                        strong { "Loading workflow…" }
+                    }
                 } else if let Some(model) = result_model.or(transient_model) {
                     {model.render()}
                 } else {
@@ -724,6 +838,7 @@ trait WorkflowRunPresentation {
     ) -> (&'static str, &'static str);
     fn stale_result_copy(self) -> &'static str;
     fn run_label(self) -> &'static str;
+    fn class_name(self) -> &'static str;
 }
 
 impl WorkflowRunPresentation for WorkflowRunPhase {
@@ -735,12 +850,12 @@ impl WorkflowRunPresentation for WorkflowRunPhase {
         if empty_workflow {
             return (
                 "No workflow yet",
-                "Ask the Assistant to build a workflow. Results will appear here after it runs.",
+                "Ask the Assistant to build a workflow. Results appear here after it runs.",
             );
         }
         match self {
             WorkflowRunPhase::Idle if configured => {
-                ("No results yet", "Run workflow to see results here.")
+                ("No results yet", "Run the workflow to see its rows here.")
             }
             WorkflowRunPhase::Idle => (
                 "Configure the workflow",
@@ -760,7 +875,7 @@ impl WorkflowRunPresentation for WorkflowRunPhase {
             ),
             WorkflowRunPhase::Validating | WorkflowRunPhase::Running => (
                 "Workflow in progress",
-                "Results will appear when the backend publishes the terminal payload.",
+                "Results appear when the backend publishes the terminal payload.",
             ),
         }
     }
@@ -792,6 +907,17 @@ impl WorkflowRunPresentation for WorkflowRunPhase {
             WorkflowRunPhase::Interrupted => "Interrupted",
         }
     }
+
+    fn class_name(self) -> &'static str {
+        match self {
+            WorkflowRunPhase::Idle => "is-idle",
+            WorkflowRunPhase::Validating => "is-validating",
+            WorkflowRunPhase::Running => "is-running",
+            WorkflowRunPhase::Completed => "is-complete",
+            WorkflowRunPhase::Failed => "is-failed",
+            WorkflowRunPhase::Interrupted => "is-interrupted",
+        }
+    }
 }
 
 #[cfg(test)]
@@ -815,6 +941,13 @@ mod tests {
         );
         assert!(first.clear_if_unchanged(&mut drafts, "use top camera"));
         assert_eq!(drafts.get(&second).unwrap(), "use wrist camera");
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn run_durations_read_in_the_unit_a_person_would_say() {
+        assert_eq!(RunDuration(640).display(), "640 ms");
+        assert_eq!(RunDuration(56_500).display(), "56.5 s");
+        assert_eq!(RunDuration(125_000).display(), "2m 05s");
     }
 }
 

@@ -1,117 +1,254 @@
-//! Compact document selection, naming, and creation for the Workflow workspace.
+//! The document bar: which workflow this is, whether it is saved, and the
+//! three things you can do to it. Switching, creating, and renaming live in
+//! one popover behind the title so the bar itself stays a single quiet line.
 
 use dioxus::prelude::*;
 
-use super::state::WorkflowController;
+use super::state::{WorkflowController, WorkflowPendingCommand};
 use crate::activities::data::DatasetClient;
 use crate::client::queries::{QueryDomain, QueryPolicy};
-use crate::components::interaction::{Action, ActionPurpose, ActionVariant};
+use crate::components::icons::{CheckIcon, PlayIcon, SpinnerIcon, WorkflowIcon};
+use crate::components::interaction::{
+    Action, ActionPurpose, ActionVariant, BrowserFocus, ChevronIcon,
+};
 use crate::shell::state::StudioProjectState;
+
+const SWITCHER_ID: &str = "workflow-switcher";
+const TITLE_ID: &str = "workflow-document-title";
 
 #[component]
 pub(super) fn WorkflowDocumentControls(controller: WorkflowController) -> Element {
-    let studio = StudioProjectState::current();
     let workflow = controller.spec();
     let reason = controller.workflow_selection_reason();
     let mut rename = use_signal(|| None::<String>);
-    let mut creating = use_signal(|| false);
+    let mut switching = use_signal(|| false);
     let rename_disabled = controller.save_disabled_reason().is_some();
+    let state = DocumentState::of(controller);
+    let title_hint = reason
+        .clone()
+        .unwrap_or_else(|| "Switch, create, or rename workflows".to_owned());
 
     rsx! {
-        header { class: "workflow-picker",
-            label { r#for: "workflow-picker", "Workflow" }
-            if let Some(name) = rename() {
-                form {
-                    class: "workflow-rename",
-                    onsubmit: move |event| {
-                        event.prevent_default();
-                        if !rename_disabled
-                            && let Some(name) = rename().filter(|name| !name.trim().is_empty()) {
-                            controller.set_name(name.trim().to_owned());
-                            rename.set(None);
-                        }
-                    },
-                    onkeydown: move |event| {
-                        if event.key() == Key::Escape {
+        header { class: "workflow-document-bar",
+            div { class: "workflow-document-identity",
+                span { class: "workflow-document-glyph", "aria-hidden": "true", WorkflowIcon {} }
+                if let Some(name) = rename() {
+                    form {
+                        class: "workflow-rename",
+                        onsubmit: move |event| {
                             event.prevent_default();
-                            rename.set(None);
+                            if !rename_disabled
+                                && let Some(name) = rename().filter(|name| !name.trim().is_empty()) {
+                                controller.set_name(name.trim().to_owned());
+                                rename.set(None);
+                                BrowserFocus::after_render(TITLE_ID.to_owned());
+                            }
+                        },
+                        onkeydown: move |event| {
+                            if event.key() == Key::Escape {
+                                event.prevent_default();
+                                rename.set(None);
+                                BrowserFocus::after_render(TITLE_ID.to_owned());
+                            }
+                        },
+                        input {
+                            class: "workflow-name-input",
+                            "aria-label": "Workflow name",
+                            value: "{name}",
+                            disabled: rename_disabled,
+                            oninput: move |event| rename.set(Some(event.value())),
+                            onmounted: move |event| async move { let _ = event.set_focus(true).await; },
                         }
-                    },
-                    input {
-                        id: "workflow-picker",
-                        class: "workflow-name-input",
-                        "aria-label": "Workflow name",
-                        value: "{name}",
-                        disabled: rename_disabled,
-                        oninput: move |event| rename.set(Some(event.value())),
-                        onmounted: move |event| async move { let _ = event.set_focus(true).await; },
+                        Action {
+                            purpose: ActionPurpose::Apply,
+                            variant: ActionVariant::Outline,
+                            r#type: "submit",
+                            disabled: rename_disabled || name.trim().is_empty(),
+                            "Apply"
+                        }
+                        Action {
+                            purpose: ActionPurpose::Cancel,
+                            variant: ActionVariant::Link,
+                            onclick: move |_| {
+                                rename.set(None);
+                                BrowserFocus::after_render(TITLE_ID.to_owned());
+                            },
+                            "Cancel"
+                        }
                     }
+                } else {
                     Action {
-                        purpose: ActionPurpose::Apply,
-                        r#type: "submit",
-                        disabled: rename_disabled || name.trim().is_empty(),
-                        "Apply"
+                        id: TITLE_ID,
+                        purpose: ActionPurpose::Select,
+                        variant: ActionVariant::Quiet,
+                        class: "workflow-document-title",
+                        aria_haspopup: "listbox",
+                        aria_expanded: switching(),
+                        disabled: reason.is_some(),
+                        title: "{title_hint}",
+                        onclick: move |_| switching.toggle(),
+                        span { class: "workflow-document-name", "{workflow.name()}" }
+                        ChevronIcon { open: false }
                     }
-                    Action { purpose: ActionPurpose::Cancel, onclick: move |_| rename.set(None), "Cancel" }
+                    WorkflowDocumentState { state }
                 }
+            }
+            if let Some(reason) = reason.as_ref() {
+                span { class: "workflow-selection-reason", title: "{reason}", role: "status",
+                    if controller.unsaved_changes() { "Save or discard before switching" } else { "{reason}" }
+                }
+            }
+            WorkflowDocumentActions { controller }
+            if switching() {
+                WorkflowSwitcher {
+                    controller,
+                    on_close: move |_| switching.set(false),
+                    on_rename: move |_| {
+                        switching.set(false);
+                        rename.set(Some(controller.spec().name().to_owned()));
+                    },
+                }
+            }
+        }
+    }
+}
+
+/// Keyed on the state so a change replays its settle motion once.
+#[component]
+fn WorkflowDocumentState(state: DocumentState) -> Element {
+    rsx! {
+        span {
+            key: "{state.class_name()}",
+            class: "workflow-document-state {state.class_name()}",
+            role: "status",
+            span { class: "workflow-document-state-dot", "aria-hidden": "true" }
+            "{state.label()}"
+        }
+    }
+}
+
+/// Whether what is on screen matches what Spiral has stored.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DocumentState {
+    Saved,
+    Draft,
+    Conflict,
+}
+
+impl DocumentState {
+    fn of(controller: WorkflowController) -> Self {
+        if controller.revision_conflict() {
+            Self::Conflict
+        } else if controller.unsaved_changes() {
+            Self::Draft
+        } else {
+            Self::Saved
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Saved => "Saved",
+            Self::Draft => "Unsaved changes",
+            Self::Conflict => "Changed in another session",
+        }
+    }
+
+    const fn class_name(self) -> &'static str {
+        match self {
+            Self::Saved => "is-saved",
+            Self::Draft => "is-draft",
+            Self::Conflict => "is-conflict",
+        }
+    }
+}
+
+#[component]
+fn WorkflowSwitcher(
+    controller: WorkflowController,
+    on_close: EventHandler<()>,
+    on_rename: EventHandler<()>,
+) -> Element {
+    let studio = StudioProjectState::current();
+    let current = controller.spec();
+    let workflows = controller.workflows();
+    let disabled = controller.workflow_selection_reason().is_some();
+    let rename_disabled = controller.save_disabled_reason().is_some();
+    let initial_focus = workflows
+        .iter()
+        .position(|item| item.id() == current.id())
+        .map(|index| format!("{SWITCHER_ID}-option-{index}"))
+        .unwrap_or_else(|| format!("{SWITCHER_ID}-new"));
+    use_hook(move || BrowserFocus::after_render(initial_focus));
+    let close = move || {
+        on_close.call(());
+        BrowserFocus::after_render(TITLE_ID.to_owned());
+    };
+    rsx! {
+        div { class: "workflow-popover-backdrop", onclick: move |_| close() }
+        div {
+            id: SWITCHER_ID,
+            class: "workflow-switcher",
+            role: "dialog",
+            "aria-label": "Workflows",
+            onkeydown: move |event| {
+                if event.key() == Key::Escape {
+                    event.prevent_default();
+                    close();
+                }
+            },
+            if workflows.is_empty() {
+                p { class: "workflow-switcher-empty", "No saved workflows yet." }
             } else {
-                select {
-                    id: "workflow-picker", value: "{workflow.id()}",
-                    disabled: reason.is_some(),
-                    onchange: move |event| controller.select_workflow(Some(event.value()), studio),
-                    if !controller.workflows().iter().any(|item| item.id() == workflow.id()) {
-                        option { value: "{workflow.id()}", selected: true, "{workflow.name()}" }
-                    }
-                    for item in controller.workflows() {
-                        option {
-                            value: "{item.id()}", selected: item.id() == workflow.id(),
-                            if item.id() == workflow.id() { "{workflow.name()}" } else { "{item.name()}" }
+                ul { class: "workflow-switcher-list", role: "listbox", "aria-label": "Saved workflows",
+                    for (index, item) in workflows.iter().enumerate() {
+                        li { key: "{item.id()}", role: "none",
+                            Action {
+                                id: "{SWITCHER_ID}-option-{index}",
+                                role: "option",
+                                purpose: ActionPurpose::Select,
+                                variant: ActionVariant::Row,
+                                class: "workflow-switcher-option",
+                                aria_selected: item.id() == current.id(),
+                                disabled,
+                                onclick: {
+                                    let id = item.id().to_owned();
+                                    move |_| {
+                                        controller.select_workflow(Some(id.clone()), studio);
+                                        close();
+                                    }
+                                },
+                                span { class: "workflow-switcher-name",
+                                    if item.id() == current.id() { "{current.name()}" } else { "{item.name()}" }
+                                }
+                                if item.id() == current.id() { CheckIcon {} }
+                            }
                         }
                     }
                 }
+            }
+            div { class: "workflow-switcher-actions",
+                Action {
+                    id: "{SWITCHER_ID}-new",
+                    purpose: ActionPurpose::Create,
+                    variant: ActionVariant::Outline,
+                    disabled,
+                    onclick: move |_| {
+                        controller.select_workflow(None, studio);
+                        close();
+                    },
+                    "New blank workflow"
+                }
+                WorkflowDatasetCreation { controller, oncreated: move |_| close() }
                 Action {
                     purpose: ActionPurpose::Apply,
+                    variant: ActionVariant::Link,
+                    class: "workflow-switcher-rename",
                     disabled: rename_disabled,
-                    title: "Rename this workflow",
-                    onclick: move |_| rename.set(Some(controller.spec().name().to_owned())),
-                    "Rename"
+                    onclick: move |_| on_rename.call(()),
+                    "Rename this workflow"
                 }
             }
-            details {
-                class: "workflow-create", open: creating(),
-                onkeydown: move |event| {
-                    if event.key() == Key::Escape {
-                        creating.set(false);
-                    }
-                },
-                summary {
-                    "aria-disabled": reason.is_some() || rename().is_some(),
-                    onclick: move |event| {
-                        event.prevent_default();
-                        if controller.workflow_selection_reason().is_none() && rename().is_none() {
-                            creating.set(!creating());
-                        }
-                    },
-                    "New workflow"
-                }
-                if creating() {
-                    div { class: "workflow-create-options",
-                        Action {
-                            purpose: ActionPurpose::Create,
-                            variant: ActionVariant::Outline,
-                            disabled: reason.is_some(),
-                            onclick: move |_| {
-                                controller.select_workflow(None, studio);
-                                creating.set(false);
-                            },
-                            "Blank workflow"
-                        }
-                        WorkflowDatasetCreation { controller, oncreated: move |_| creating.set(false) }
-                    }
-                }
-            }
-            if let Some(reason) = reason.as_ref() { span { class: "workflow-selection-reason", title: "{reason}", role: "status", if controller.unsaved_changes() { "Save before switching" } else { "{reason}" } } }
-            WorkflowDocumentActions { controller }
         }
     }
 }
@@ -132,32 +269,38 @@ fn WorkflowDatasetCreation(controller: WorkflowController, oncreated: EventHandl
                 .find(|source| source.resource_id() == selected())
                 .cloned();
             rsx! {
-                label { r#for: "workflow-dataset", "From dataset" }
-                select {
-                    id: "workflow-dataset", value: "{selected}",
-                    disabled: items.is_empty(),
-                    onchange: move |event| selected.set(event.value()),
-                    option { value: "", disabled: true, if items.is_empty() { "No datasets available" } else { "Choose a dataset" } }
-                    for source in items {
-                        option { value: "{source.resource_id()}", "{source.selection().label()}" }
-                    }
-                }
-                Action {
-                    purpose: ActionPurpose::Create,
-                    variant: ActionVariant::Outline,
-                    disabled: source.is_none() || controller.workflow_selection_reason().is_some(),
-                    onclick: move |_| {
-                        if let Some(source) = source.clone() {
-                            controller.create_from_dataset(source);
-                            oncreated.call(());
+                div { class: "workflow-dataset-creation",
+                    label { r#for: "workflow-dataset", "From dataset" }
+                    div {
+                        select {
+                            id: "workflow-dataset", value: "{selected}",
+                            disabled: items.is_empty(),
+                            onchange: move |event| selected.set(event.value()),
+                            option { value: "", disabled: true, if items.is_empty() { "No datasets available" } else { "Choose a dataset" } }
+                            for source in items {
+                                option { value: "{source.resource_id()}", "{source.selection().label()}" }
+                            }
                         }
-                    },
-                    "Create from dataset"
+                        Action {
+                            purpose: ActionPurpose::Create,
+                            variant: ActionVariant::Outline,
+                            disabled: source.is_none() || controller.workflow_selection_reason().is_some(),
+                            onclick: move |_| {
+                                if let Some(source) = source.clone() {
+                                    controller.create_from_dataset(source);
+                                    oncreated.call(());
+                                }
+                            },
+                            "Create"
+                        }
+                    }
                 }
             }
         }
-        Some(Err(error)) => rsx! { p { role: "alert", "Could not load datasets: {error}" } },
-        None => rsx! { p { role: "status", "Loading datasets…" } },
+        Some(Err(error)) => {
+            rsx! { p { class: "workflow-switcher-note", role: "alert", "Could not load datasets: {error}" } }
+        }
+        None => rsx! { p { class: "workflow-switcher-note", role: "status", "Loading datasets…" } },
     }
 }
 
@@ -168,29 +311,34 @@ fn WorkflowDocumentActions(controller: WorkflowController) -> Element {
     let command = controller.command();
     let save_reason = controller.save_disabled_reason();
     let run_reason = controller.run_disabled_reason();
-    let running = controller.snapshot().phase().active();
+    let running =
+        controller.snapshot().phase().active() || command == Some(WorkflowPendingCommand::Starting);
     rsx! {
         div { class: "workflow-document-actions",
-            span { class: "workflow-document-state", role: "status",
-                if dirty { "Draft not saved" } else { "Saved" }
-            }
             if controller.revision_conflict() {
                 Action { purpose: ActionPurpose::Sync, variant: ActionVariant::Outline,
                     onclick: move |_| controller.reload_current(), "Reload current" }
             } else if dirty {
-                Action { purpose: ActionPurpose::Cancel, variant: ActionVariant::Link,
+                Action { purpose: ActionPurpose::Discard, variant: ActionVariant::Link,
+                    class: "workflow-discard-action",
                     disabled: command.is_some() || controller.agent_state().session().phase().active(),
+                    title: "Return to the saved SQL and conversation",
                     onclick: move |_| controller.discard(studio), "Discard" }
             }
             Action { purpose: ActionPurpose::Apply, variant: ActionVariant::Outline,
-                disabled: save_reason.is_some(), title: save_reason.unwrap_or_else(|| "Save SQL and conversation".into()),
+                disabled: save_reason.is_some(),
+                aria_busy: command == Some(WorkflowPendingCommand::Saving),
+                title: save_reason.unwrap_or_else(|| "Save SQL and conversation".into()),
                 onclick: move |_| controller.save(studio),
-                if command == Some(super::state::WorkflowPendingCommand::Saving) { "Saving…" } else { "Save" }
+                if command == Some(WorkflowPendingCommand::Saving) { "Saving…" } else { "Save" }
             }
             Action { purpose: ActionPurpose::Start, variant: ActionVariant::Solid,
-                disabled: run_reason.is_some(), title: run_reason.unwrap_or_else(|| "Run this SQL in Spiral".into()),
+                class: "workflow-run-action",
+                disabled: run_reason.is_some(),
+                aria_busy: running,
+                title: run_reason.unwrap_or_else(|| "Run this SQL in Spiral".into()),
                 onclick: move |_| controller.run(studio),
-                if running { "Running…" } else { "Run" }
+                if running { SpinnerIcon {} "Running" } else { PlayIcon {} "Run" }
             }
         }
     }

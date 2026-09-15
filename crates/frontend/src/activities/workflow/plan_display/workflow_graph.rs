@@ -30,8 +30,154 @@ pub(super) struct StageContent {
     pub(super) summary: String,
     pub(super) function: Option<String>,
     pub(super) expression: Option<String>,
+    /// Whether the summary is a rendered expression (fields, literals,
+    /// operators) or a sentence. Expressions are painted token by token.
+    pub(super) summary_kind: SummaryKind,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SummaryKind {
+    Prose,
+    Expression,
+}
+
+/// One labelled thing worth knowing about a stage: the dataset it reads, the
+/// keys it joins on, the condition it keeps, the columns it computes.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct StageFact {
+    pub(super) label: String,
+    pub(super) value: String,
+    pub(super) kind: SummaryKind,
+}
+
+impl StageFact {
+    pub(super) fn prose(label: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            value: value.into(),
+            kind: SummaryKind::Prose,
+        }
+    }
+
+    pub(super) fn expression(label: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            value: value.into(),
+            kind: SummaryKind::Expression,
+        }
+    }
+}
+
+/// What a stage does to the data. It drives the stage glyph and identity tint
+/// only; the native operators remain the truth about what executes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum StageKind {
+    /// Rows read from a Spiral relation or literal values.
+    Source,
+    /// Native video and image functions that produce or transform pixels.
+    Media,
+    /// Native AI inference over images or text.
+    Model,
+    /// Ordinary SQL shaping: filters, projections, grouping, ordering.
+    Shape,
+    /// Two row populations combined.
+    Join,
+    /// The relation the workflow returns.
+    Output,
+}
+
+impl StageKind {
+    pub(super) const fn label(self) -> &'static str {
+        match self {
+            Self::Source => "Source",
+            Self::Media => "Media",
+            Self::Model => "Model",
+            Self::Shape => "SQL",
+            Self::Join => "Join",
+            Self::Output => "Output",
+        }
+    }
+
+    pub(super) const fn class_name(self) -> &'static str {
+        match self {
+            Self::Source => "source",
+            Self::Media => "media",
+            Self::Model => "model",
+            Self::Shape => "shape",
+            Self::Join => "join",
+            Self::Output => "output",
+        }
+    }
+}
+
 impl WorkflowStage {
+    pub(super) fn kind(&self, root: &str) -> StageKind {
+        if let Some(function) = &self.content.function {
+            return if function.starts_with("spql.ai.") {
+                StageKind::Model
+            } else {
+                StageKind::Media
+            };
+        }
+        if self.reads_source() {
+            return StageKind::Source;
+        }
+        if self.id == root {
+            return StageKind::Output;
+        }
+        if self.is_join() {
+            return StageKind::Join;
+        }
+        StageKind::Shape
+    }
+
+    /// A stage that begins by reading rows, whatever shaping was folded in.
+    pub(super) fn reads_source(&self) -> bool {
+        self.operators
+            .first()
+            .is_some_and(|node| matches!(node.operator(), "Source" | "Values"))
+    }
+
+    pub(super) fn is_join(&self) -> bool {
+        self.operators.iter().any(|node| node.operator() == "Join")
+    }
+
+    /// The footer line under a stage: the native function it calls, the
+    /// provider it reads from, or how many SQL operations were folded into it.
+    pub(super) fn footer(&self, root: &str) -> String {
+        if let Some(function) = &self.content.function {
+            return function.clone();
+        }
+        if self.kind(root) == StageKind::Source
+            && let Some(provider) = self
+                .operators
+                .first()
+                .and_then(|node| node.properties()["operator"]["provider"].as_str())
+        {
+            return provider.to_owned();
+        }
+        match self.operators.len() {
+            1 => "1 operation".to_owned(),
+            count => format!("{count} operations"),
+        }
+    }
+
+    /// Column names this stage hands on, when it hands on rows.
+    pub(super) fn output_columns(&self) -> Vec<String> {
+        match &self.output {
+            StageOutput::Relation(output) => output
+                .pointer("/schema/fields")
+                .and_then(serde_json::Value::as_array)
+                .map(|fields| {
+                    fields
+                        .iter()
+                        .filter_map(|field| field["name"].as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            StageOutput::Expression { .. } => Vec::new(),
+        }
+    }
     fn relational(node: &DiagnosticNode) -> Self {
         Self {
             id: format!("operator-{}", node.id()),
@@ -64,6 +210,7 @@ impl WorkflowStage {
                 summary: String::new(),
                 function: Some(function),
                 expression: Some(expression.display.clone()),
+                summary_kind: SummaryKind::Prose,
             },
             operators: vec![node.clone()],
         }
@@ -94,6 +241,38 @@ impl WorkflowStage {
                 .iter()
                 .any(|node| node.operator() == operator)
         };
+        if self.reads_source() {
+            self.content = StageContent::relational(&self.operators[0]);
+            let kept = self
+                .operators
+                .iter()
+                .rev()
+                .find(|node| node.operator() == "Project")
+                .map(StageContent::projected_columns)
+                .filter(|columns| !columns.is_empty());
+            if let Some(columns) = kept {
+                self.content.summary = format!("{} → {columns}", self.content.summary);
+            }
+            return;
+        }
+        // Numbering rows inside groups and keeping the first is one idea:
+        // pick one row per group.
+        if let Some((groups, order)) = self
+            .operators
+            .iter()
+            .find(|node| node.operator() == "Window")
+            .and_then(StageContent::one_row_per_group)
+            .filter(|_| has("Filter"))
+        {
+            self.content = StageContent {
+                title: format!("One row per {groups}"),
+                summary: format!("First by {order}"),
+                function: None,
+                expression: None,
+                summary_kind: SummaryKind::Prose,
+            };
+            return;
+        }
         let classify = self
             .operators
             .iter()
@@ -117,8 +296,27 @@ impl WorkflowStage {
             self.content = StageContent::relational(lead);
         }
         if classify && !has("Aggregate") && !has("Limit") && !has("TopK") {
-            self.content.title = "Classify rows".into();
+            self.content.title = if has("Filter") {
+                "Classify and keep rows".into()
+            } else {
+                "Classify rows".into()
+            };
         }
+    }
+
+    /// Column selection and ordering directly after a read are how the query
+    /// reads, not separate ideas; they fold into the source stage. A
+    /// projection that computes something is a step of its own and stays out.
+    fn folds_into_source(&self) -> bool {
+        self.content.function.is_none()
+            && self.inputs.len() == 1
+            && self.operators.iter().all(|node| match node.operator() {
+                "Sort" => true,
+                "Project" => {
+                    !ExpressionGraph::read(node).is_ok_and(|graph| graph.has_computation())
+                }
+                _ => false,
+            })
     }
 
     fn changes_rows(&self) -> bool {
@@ -209,17 +407,61 @@ impl WorkflowGraph {
             stages,
             root: outputs[&format!("operator-{}", plan.root())].clone(),
         };
+        graph.fold_source_shaping();
         graph.collapse_sql();
         Ok(graph)
     }
-    fn collapse_sql(&mut self) {
+    fn consumers(&self) -> BTreeMap<String, usize> {
+        let mut consumers = BTreeMap::<String, usize>::new();
+        for stage in &self.stages {
+            for input in &stage.inputs {
+                *consumers.entry(input.clone()).or_default() += 1;
+            }
+        }
+        consumers
+    }
+    fn fold_source_shaping(&mut self) {
         loop {
-            let mut consumers = BTreeMap::<String, usize>::new();
-            for stage in &self.stages {
-                for input in &stage.inputs {
-                    *consumers.entry(input.clone()).or_default() += 1;
+            let consumers = self.consumers();
+            let pair = self.stages.iter().enumerate().find_map(|(down, stage)| {
+                if !stage.folds_into_source() {
+                    return None;
+                }
+                self.stages
+                    .iter()
+                    .position(|up| {
+                        up.id == stage.inputs[0]
+                            && up.id != stage.id
+                            && up.reads_source()
+                            && consumers.get(&up.id) == Some(&1)
+                    })
+                    .map(|up| (up, down))
+            });
+            let Some((up, down)) = pair else {
+                break;
+            };
+            let downstream = self.stages.remove(down);
+            let up = if down < up { up - 1 } else { up };
+            let source_id = self.stages[up].id.clone();
+            for stage in &mut self.stages {
+                for input in &mut stage.inputs {
+                    if *input == downstream.id {
+                        *input = source_id.clone();
+                    }
                 }
             }
+            if self.root == downstream.id {
+                self.root = source_id;
+            }
+            let source = &mut self.stages[up];
+            source.operators.extend(downstream.operators);
+            source.output = downstream.output;
+            source.refresh_summary();
+        }
+    }
+    fn collapse_sql(&mut self) {
+        loop {
+            let consumers = self.consumers();
             let pair = self.stages.iter().enumerate().find_map(|(down, stage)| {
                 if !stage.mergeable() || stage.inputs.len() != 1 {
                     return None;
@@ -882,6 +1124,243 @@ mod tests {
             .unwrap();
         assert!(call.content.summary.ends_with("only when needs_review"));
         assert_ne!(graph.root, call.id);
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn stage_kinds_follow_native_functions_operators_and_the_root() {
+        let mut source = Fixture::node(3, "Source", &[]);
+        source["properties"]["operator"] = json!({"provider":"McapTopic"});
+        let mut project = Fixture::node(2, "Project", &[3]);
+        Fixture::expressions(
+            &mut project,
+            vec![
+                Fixture::call(0, "spql.ai.score", &[1]),
+                Fixture::call(1, "spql.image.decode", &[2]),
+                json!({"id":2,"kind":"field","inputs":[],"display":"$.image"}),
+            ],
+        );
+        let graph = WorkflowGraph::from_plan(&Fixture::plan(vec![
+            Fixture::node(0, "Join", &[1, 1]),
+            Fixture::node(1, "Filter", &[2]),
+            project,
+            source,
+        ]))
+        .unwrap();
+        let kind = |id: &str| {
+            graph
+                .stages
+                .iter()
+                .find(|stage| stage.id == id)
+                .unwrap()
+                .kind(&graph.root)
+        };
+        assert_eq!(kind("operator-3"), StageKind::Source);
+        assert_eq!(kind("call-2-1"), StageKind::Media);
+        assert_eq!(kind("call-2-0"), StageKind::Model);
+        assert_eq!(kind("operator-1"), StageKind::Shape);
+        assert_eq!(kind("operator-0"), StageKind::Output);
+        assert_eq!(StageKind::Output.label(), "Output");
+        let join = WorkflowGraph::from_plan(&Fixture::plan(vec![
+            Fixture::node(0, "Project", &[1]),
+            Fixture::node(1, "Join", &[2, 2]),
+            Fixture::node(2, "Source", &[]),
+        ]))
+        .unwrap();
+        let joined = join
+            .stages
+            .iter()
+            .find(|stage| stage.id == "operator-1")
+            .unwrap();
+        assert_eq!(joined.kind(&join.root), StageKind::Join);
+        assert_eq!(joined.footer(&join.root), "1 operation");
+        let output = join
+            .stages
+            .iter()
+            .find(|stage| stage.id == join.root)
+            .unwrap();
+        assert_eq!(output.footer(&join.root), "1 operation");
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn reading_folds_its_column_selection_and_one_row_per_group_reads_as_one_idea() {
+        // The shape of the live gripper audit: episodes are read and trimmed to
+        // two columns through two projections, joined to video frames, numbered
+        // within (episode, second), and only the first frame per second kept.
+        let mut episodes = Fixture::node(13, "Source", &[]);
+        episodes["properties"]["operator"] = json!({"provider":"dataset_member","source":{}});
+        let mut trim = Fixture::node(12, "Project", &[13]);
+        trim["properties"]["operator"] =
+            json!({"expressions":[{"name":"id"},{"name":"message_start_time"}]});
+        let mut rename = Fixture::node(11, "Project", &[12]);
+        rename["properties"]["operator"] =
+            json!({"expressions":[{"name":"id_1"},{"name":"message_start_time"}]});
+        rename["output"] = json!({"schema":{"fields":[
+            {"name":"id_1","dtype":"i64"},{"name":"message_start_time","dtype":"u64"}
+        ]}});
+        let mut video = Fixture::node(10, "Source", &[]);
+        video["properties"]["operator"] = json!({"provider":"McapVideo","source":{"dataset":{"name":"dataset_default"},"topic":"/camera/gripper/video"}});
+        let mut join = Fixture::node(9, "Join", &[10, 11]);
+        join["properties"]["operator"] =
+            json!({"kind":"Inner","on":[{"left":"$.id","right":"$.id_1"}]});
+        let mut window = Fixture::node(7, "Window", &[9]);
+        window["properties"]["operator"] = json!({"expressions":[{"name":"__window_expr_0","function":{"kind":"RowNumber"},
+            "partition_by":["$.episode_id","$.sampled_second"],
+            "order_by":[{"field":"$log_time","descending":false},{"field":"$chunk_start_offset","descending":false}]}]});
+        let mut second_rank = Fixture::node(6, "Project", &[7]);
+        second_rank["properties"]["operator"] =
+            json!({"expressions":[{"name":"episode_id"},{"name":"second_rank"}]});
+        let mut first = Fixture::node(5, "Filter", &[6]);
+        Fixture::expressions(
+            &mut first,
+            vec![
+                Fixture::call(0, "spql.eq", &[1, 2]),
+                json!({"id":1,"kind":"field","inputs":[],"display":"$.second_rank"}),
+                json!({"id":2,"kind":"literal","inputs":[],"display":"1"}),
+            ],
+        );
+        let graph = WorkflowGraph::from_plan(&Fixture::plan(vec![
+            Fixture::node(0, "Project", &[5]),
+            first,
+            second_rank,
+            window,
+            join,
+            video,
+            rename,
+            trim,
+            episodes,
+        ]))
+        .unwrap();
+        let ids = graph
+            .stages
+            .iter()
+            .map(|stage| stage.id.as_str())
+            .collect::<Vec<_>>();
+        assert!(!ids.contains(&"operator-12") && !ids.contains(&"operator-11"));
+        let read = graph
+            .stages
+            .iter()
+            .find(|stage| stage.id == "operator-13")
+            .unwrap();
+        assert_eq!(read.content.title, "Read episodes");
+        assert_eq!(
+            read.content.summary,
+            "One row per dataset episode → id_1, message_start_time"
+        );
+        assert_eq!(read.kind(&graph.root), StageKind::Source);
+        assert_eq!(read.footer(&graph.root), "dataset_member");
+        assert_eq!(read.output_columns(), ["id_1", "message_start_time"]);
+        let joined = graph
+            .stages
+            .iter()
+            .find(|stage| stage.id == "operator-9")
+            .unwrap();
+        assert_eq!(joined.inputs, ["operator-10", "operator-13"]);
+        assert_eq!(joined.content.summary, "on id = id_1");
+        assert!(
+            joined
+                .facts()
+                .iter()
+                .any(|fact| fact.label == "Join" && fact.value == "Inner")
+        );
+        // The first-per-group idea absorbs the final projection here, so the
+        // stage is found by what it says rather than by which operator kept its id.
+        let per_second = graph
+            .stages
+            .iter()
+            .find(|stage| stage.content.title.starts_with("One row per"))
+            .unwrap();
+        assert_eq!(
+            per_second.content.title,
+            "One row per episode_id, sampled_second"
+        );
+        assert_eq!(
+            per_second.content.summary,
+            "First by log_time ascending, chunk_start_offset ascending"
+        );
+        assert!(
+            per_second
+                .facts()
+                .iter()
+                .any(|fact| fact.label == "Condition" && fact.value == "(second_rank = 1)")
+        );
+        let video = graph
+            .stages
+            .iter()
+            .find(|stage| stage.id == "operator-10")
+            .unwrap();
+        assert_eq!(video.footer(&graph.root), "McapVideo");
+        assert!(
+            video
+                .facts()
+                .iter()
+                .any(|fact| fact.label == "Topic" && fact.value == "/camera/gripper/video")
+        );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn model_scores_name_their_prompt_and_classifications_list_their_outcomes() {
+        let mut project = Fixture::node(0, "Project", &[1]);
+        Fixture::expressions(
+            &mut project,
+            vec![
+                Fixture::call(0, "spql.ai.score", &[1, 2]),
+                json!({"id":1,"kind":"field","inputs":[],"display":"$.image"}),
+                json!({"id":2,"kind":"literal","inputs":[],"display":"\"a robot gripper holding an object\""}),
+            ],
+        );
+        let graph = WorkflowGraph::from_plan(&Fixture::plan(vec![
+            project,
+            Fixture::node(1, "Source", &[]),
+        ]))
+        .unwrap();
+        let score = graph
+            .stages
+            .iter()
+            .find(|stage| stage.content.function.is_some())
+            .unwrap();
+        assert_eq!(score.content.title, "Score images");
+        assert_eq!(
+            score.content.summary,
+            "“a robot gripper holding an object” · image"
+        );
+        assert_eq!(score.kind(&graph.root), StageKind::Model);
+        assert!(
+            score
+                .facts()
+                .iter()
+                .any(|fact| fact.label == "Function" && fact.value == "spql.ai.score")
+        );
+
+        let mut decide = Fixture::node(0, "Project", &[1]);
+        Fixture::expressions(
+            &mut decide,
+            vec![
+                Fixture::call(0, "spql.case_when", &[1, 2, 3]),
+                Fixture::call(1, "spql.gte", &[4, 5]),
+                json!({"id":2,"kind":"literal","inputs":[],"display":"\"retained\""}),
+                json!({"id":3,"kind":"literal","inputs":[],"display":"\"excluded\""}),
+                json!({"id":4,"kind":"field","inputs":[],"display":"$.score"}),
+                json!({"id":5,"kind":"literal","inputs":[],"display":"-0.5"}),
+            ],
+        );
+        decide["properties"]["expressions"]["roots"] = json!([{"name":"decision","id":0}]);
+        let graph = WorkflowGraph::from_plan(&Fixture::plan(vec![
+            decide,
+            Fixture::node(1, "Source", &[]),
+        ]))
+        .unwrap();
+        let classify = graph
+            .stages
+            .iter()
+            .find(|stage| stage.id == graph.root)
+            .unwrap();
+        assert_eq!(classify.content.title, "Classify rows");
+        assert_eq!(classify.content.summary, "decision → retained · excluded");
+        assert_eq!(classify.content.summary_kind, SummaryKind::Expression);
+        assert_eq!(
+            classify.content.expression.as_deref(),
+            Some("decision = when (score ≥ -0.5): \"retained\"; otherwise \"excluded\"")
+        );
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]

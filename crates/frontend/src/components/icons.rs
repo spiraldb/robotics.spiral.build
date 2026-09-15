@@ -143,3 +143,153 @@ pub(crate) fn NotificationIcon() -> Element {
         }
     }
 }
+
+/// Native video and image stages: a film frame with sprocket marks.
+#[component]
+pub(crate) fn MediaStageIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            rect { x: "2.5", y: "3.5", width: "11", height: "9", rx: "1" }
+            path { d: "M5.25 3.5v9M10.75 3.5v9M2.5 6.5h2.75M2.5 9.5h2.75M10.75 6.5h2.75M10.75 9.5h2.75" }
+        }
+    }
+}
+
+/// Native AI inference: a four-point spark.
+#[component]
+pub(crate) fn ModelStageIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            path { d: "M7.5 2.75 8.9 6.6l3.85 1.4-3.85 1.4L7.5 13.25 6.1 9.4 2.25 8l3.85-1.4L7.5 2.75Z" }
+            path { d: "M12.75 2.5v2M11.75 3.5h2" }
+        }
+    }
+}
+
+/// Two row populations combined on a key.
+#[component]
+pub(crate) fn JoinStageIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            circle { cx: "6", cy: "8", r: "3.75" }
+            circle { cx: "10", cy: "8", r: "3.75" }
+        }
+    }
+}
+
+/// Start something: a run, a query.
+#[component]
+pub(crate) fn PlayIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            path { d: "M4.75 3.25v9.5l7.5-4.75-7.5-4.75Z" }
+        }
+    }
+}
+
+/// Stop the current turn or run.
+#[component]
+pub(crate) fn StopIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            rect { x: "4", y: "4", width: "8", height: "8", rx: "1" }
+        }
+    }
+}
+
+/// Send a message: an upward arrow, the direction the thread grows.
+#[component]
+pub(crate) fn SendIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            path { d: "M8 12.75V3.5M4.25 7.25 8 3.5l3.75 3.75" }
+        }
+    }
+}
+
+/// Work in progress. The ring spins through `ui-icon--spin`.
+#[component]
+pub(crate) fn SpinnerIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon ui-icon--spin", view_box: "0 0 16 16", "aria-hidden": "true",
+            path { d: "M13 8a5 5 0 1 1-1.9-3.93" }
+        }
+    }
+}
+
+#[component]
+pub(crate) fn CheckIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            path { d: "M3.5 8.5 6.5 11.5 12.5 4.5" }
+        }
+    }
+}
+
+#[component]
+pub(crate) fn ZoomInIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            path { d: "M8 3.75v8.5M3.75 8h8.5" }
+        }
+    }
+}
+
+#[component]
+pub(crate) fn ZoomOutIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            path { d: "M3.75 8h8.5" }
+        }
+    }
+}
+
+/// Step to the previous row.
+#[component]
+pub(crate) fn ArrowUpIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            path { d: "M8 12.5v-9M4.5 7 8 3.5 11.5 7" }
+        }
+    }
+}
+
+/// Step to the next row.
+#[component]
+pub(crate) fn ArrowDownIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            path { d: "M8 3.5v9M4.5 9 8 12.5 11.5 9" }
+        }
+    }
+}
+
+/// The Assistant conversation.
+#[component]
+pub(crate) fn ConversationIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            path { d: "M2.5 4.5A1.5 1.5 0 0 1 4 3h8a1.5 1.5 0 0 1 1.5 1.5v5A1.5 1.5 0 0 1 12 11H7.5l-3 2.5V11H4a1.5 1.5 0 0 1-1.5-1.5v-5Z" }
+        }
+    }
+}
+
+/// The SQL definition.
+#[component]
+pub(crate) fn SqlIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            path { d: "M5.5 4 2.5 8l3 4M10.5 4l3 4-3 4M9 3 7 13" }
+        }
+    }
+}
+
+/// Stage details: a heading with two facts beneath it.
+#[component]
+pub(crate) fn DetailsIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            path { d: "M3 4h10M3 8h6M3 12h8" }
+        }
+    }
+}

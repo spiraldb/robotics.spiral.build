@@ -10,6 +10,7 @@ colors:
   lift: "rgb(0 0 0 / 0.12)"
   hover: "rgb(55 53 47 / 0.06)"
   line: "#e8e8e6"
+  line-strong: "#cfcfcb"
   ink: "#37352f"
   ink-soft: "#65645f"
   ink-faint: "#71706c"
@@ -39,6 +40,18 @@ colors:
   series-validation: "#d9572b"
   series-memory: "#7a58a5"
   series-transfer: "#7560b8"
+  stage-source: "#5b7fb8"
+  stage-media: "#b5701f"
+  stage-model: "#8b5cc7"
+  stage-shape: "#65645f"
+  stage-join: "#3d8f86"
+  stage-output: "#2f7d5b"
+  category-1: "#2a78d6"
+  category-2: "#eb6834"
+  category-3: "#1baf7a"
+  category-4: "#c98f00"
+  category-5: "#d9679a"
+  category-6: "#7560b8"
 typography:
   readout:
     fontFamily: "ui-monospace, SF Mono, JetBrains Mono, Menlo, monospace"
@@ -196,6 +209,76 @@ components:
     textColor: "{colors.ink}"
     rounded: "{rounded.md}"
     padding: "4px 8px"
+  action-square:
+    backgroundColor: "{colors.accent}"
+    textColor: "{colors.accent-ink}"
+    rounded: "{rounded.sm}"
+    padding: "0"
+    size: "{spacing.target}"
+  document-bar:
+    backgroundColor: "{colors.surface}"
+    textColor: "{colors.ink}"
+    typography: "{typography.title}"
+    padding: "0 8px 0 12px"
+    height: "36px"
+  stage-card:
+    backgroundColor: "{colors.surface}"
+    textColor: "{colors.ink}"
+    typography: "{typography.title}"
+    rounded: "{rounded.sm}"
+    padding: "10px 12px 8px"
+    width: "224px"
+    height: "92px"
+  stage-card-selected:
+    backgroundColor: "{colors.surface}"
+    textColor: "{colors.ink}"
+  stage-mark:
+    backgroundColor: "transparent"
+    textColor: "{colors.stage-source}"
+    rounded: "{rounded.sm}"
+    size: "18px"
+  stage-strip-chip:
+    backgroundColor: "{colors.surface}"
+    textColor: "{colors.ink-soft}"
+    typography: "{typography.micro}"
+    rounded: "{rounded.sm}"
+    padding: "0 6px"
+    height: "22px"
+  run-strip:
+    backgroundColor: "{colors.surface}"
+    textColor: "{colors.ink-soft}"
+    typography: "{typography.label}"
+    padding: "4px 12px"
+    height: "32px"
+  result-category-chip:
+    backgroundColor: "transparent"
+    textColor: "{colors.ink}"
+    typography: "{typography.label}"
+    rounded: "{rounded.sm}"
+    padding: "1px 6px"
+  result-image-preview:
+    backgroundColor: "{colors.camera}"
+    rounded: "3px"
+    width: "96px"
+    height: "54px"
+  row-inspector:
+    backgroundColor: "{colors.surface}"
+    textColor: "{colors.ink}"
+    typography: "{typography.label}"
+    padding: "12px"
+    width: "320px"
+  assistant-request:
+    backgroundColor: "{colors.sunken}"
+    textColor: "{colors.ink-soft}"
+    typography: "{typography.body}"
+    rounded: "{rounded.sm}"
+    padding: "8px 12px"
+  composer-field:
+    backgroundColor: "{colors.surface}"
+    textColor: "{colors.ink}"
+    typography: "{typography.body}"
+    rounded: "{rounded.sm}"
+    padding: "8px 40px 8px 12px"
 ---
 
 # Design System: Spiral Robotics Studio
@@ -256,19 +339,17 @@ put reads as a bench tool.
 - Data defaults to a 25% Tables directory beside 75% native object panels.
   Each top-level object tab owns Inspect, SQL, and Results; Load and Import
   sit alongside the native tab header. Import opens as a peer tab.
-- Workflow uses a 30% Assistant/Node tab lane beside a right column with a
-  dominant lineage canvas above Results; the initial 66/34 vertical split
-  favors the graph until evidence exists. It has its own layout scope.
-- Workflow's Model inspector is the truthful execution surface: one advertised
-  SigLIP capability; structured feature name, description, concept, candidate
-  image field, optional stream applicability, normalized source and shared
-  cache; bounded feature-cell progress; warnings/quarantine; actual device and
-  timings; and computed/reused state. The compact Assistant adds a durable
-  project-scoped conversation selector, fixed thread header, autosizing composer,
-  auto-follow/jump recovery, and collapsible terse tool summaries without displacing
-  canvas or Results as the authoritative execution surfaces. Periodic frame
-  selection is ordinary read-only candidate SQL, not a typed tool or Model
-  setting.
+- Workflow puts the graph first: a 24% Assistant/SQL column at the left, then
+  the Graph (74%) beside Stage details (26%) over a Results shelf in the lower
+  54%. It has its own layout scope, and every tile stays a dockable workbench
+  panel.
+- Workflow's data is vivid because its cells know what they are: image
+  previews lead, repeated decisions become tinted chips, measurements carry a
+  bar between the column's extremes, timestamps read as UTC clock time, and
+  identifiers step back into mono. Stage cards wear one of six kind glyphs and
+  identity tints; a run animates its edges and shows skeleton rows until Spiral
+  answers. Every inference is display-only and the stored value stays exact in
+  tooltips and the row inspector.
 - One playhead synchronizes every representation of an episode.
 - Compact 12px type, 24px controls, 32px panel tabs, small radii, and hairlines.
 - Monospace tabular figures for elapsed time, rates, durations, counts, and IDs.
@@ -309,6 +390,19 @@ small set of semantic, arm, axis, and signal accents.
   objects; they do not imply health.
 - **Axis accents** (`{colors.axis-x}`, `{colors.axis-y}`, `{colors.axis-z}`):
   Orientation key only.
+- **Stage kinds** (`{colors.stage-source}`, `{colors.stage-media}`,
+  `{colors.stage-model}`, `{colors.stage-shape}`, `{colors.stage-join}`,
+  `{colors.stage-output}`): What a workflow stage does to the data. Each paints
+  only an 18px glyph tile and its 14% wash, the one-word kind in the card
+  footer, and the 14px tile in the stage strip and overview, so the hue is
+  never the only carrier. Model lends its tint to the Assistant's conversation
+  tile and to function names in syntax colour; Media lends its amber, mixed
+  toward ink, to literals.
+- **Result categories** (`{colors.category-1}` through `{colors.category-6}`):
+  Washes for repeated string values in a result table, assigned by a value's
+  rank within that result. The wash is the hue at 13%; chip text mixes the hue
+  55% toward ink so it clears 4.5:1 on its own wash. The same six hues never
+  encode health, and a chip's text is always the stored value itself.
 - **Joint signal slots** (`{colors.signal-1}` through `{colors.signal-6}`):
   Assigned by joint name in kinematic order so the same joint keeps the same
   trace colour across arms. Every plotted value must also be available as text;
@@ -329,6 +423,9 @@ small set of semantic, arm, axis, and signal accents.
   surfaces only.
 - **Hairline** (`{colors.line}`): Panel, tile, settings, table, and control
   boundaries.
+- **Strong Hairline** (`{colors.line-strong}`): Connectors in the stage
+  strip, resting tool-step dots, and the hover edge of outlined chips: a rule
+  that must read against the recess or beside 10px type.
 - **Graphite ramp** (`{colors.ink}` → `{colors.ink-soft}` →
   `{colors.ink-faint}`): Primary labels, secondary text, then metadata.
 - **Hover wash** (`{colors.hover}`): Quiet hover treatment for controls, tabs,
@@ -753,7 +850,18 @@ reserved for an object that genuinely floats above the shell.
 ### Shadow Vocabulary
 
 - **Resting lift** (`0 1px 2px rgb(0 0 0 / 0.05)`): Small controls placed above
-  a visualization, such as the view cube.
+  a visualization, such as the view cube, the graph's zoom group, and its
+  minimap. Stage cards and stage-strip chips use the same lift one step
+  lighter (`0 1px 2px rgb(0 0 0 / 0.04)`), because they sit on the bench, not
+  in the chrome.
+- **Hover lift** (`0 2px 6px rgb(0 0 0 / 0.06)`): A stage card under the
+  pointer, together with a 1px rise. The "Jump to latest" float uses the
+  same geometry at 0.08.
+- **Selection glow** (`inset 0 0 0 1px {colors.accent}, 0 2px 8px` accent at
+  14%): The selected stage card only; the inset ring is the state, the glow
+  is the card returning to rest.
+- **Focus ring** (`0 0 0 2px` accent at 15%): The Assistant composer, the run
+  selector, and the rename field, paired with an accent border.
 - **Dock preview lift** (`0 6px 18px rgb(0 0 0 / 0.08)`): The blue docking
   footprint while a tab is dragged.
 - **Dock compass lift** (`0 6px 18px rgb(0 0 0 / 0.12)`): The small floating
@@ -766,7 +874,9 @@ reserved for an object that genuinely floats above the shell.
 ### Named Rules
 
 **The Flat-by-Default Rule.** Resting panels, tabs, cards, controls, Timeline,
-and settings do not cast shadows.
+and settings do not cast shadows. The graph bench is a visualization, so the
+objects standing on it (stage cards, strip chips, zoom group, minimap) may
+carry the resting lift; nothing inside a panel's own chrome does.
 
 **The Inset-State Rule.** Selection and disabled treatments happen inside the
 existing box with a wash, edge, or inset ring. State changes never add geometry.
@@ -792,7 +902,10 @@ Every interactive action is an `Action`, `ActionLink`, `FileAction`,
 verb first; visual presentation never changes the verb.
 
 - **Shape:** Compact rectangle, 4px radius, 24px target, and 6px horizontal
-  padding. Prominent transport actions use 32px.
+  padding. Prominent transport actions use 32px. `ui-action--square` makes
+  any variant a 24px square with no padding while keeping its fill; it exists
+  for the Assistant's filled send and outline stop. `ui-icon--spin` turns the
+  shared spinner glyph once every 900ms and is the only self-moving icon.
 - **Presentation:** Quiet, Outline, Solid, Link, Icon, Row, Tab, and Segment are
   presentation variants. A local surface may own geometry but not restate
   hover, focus, selected, disabled, pending, or destructive state.
@@ -910,67 +1023,148 @@ This is the signature component system.
 
 ### Workflow Workbench
 
-**Operate.** Inspect how a SQL workflow produces its results. Graph and Results
-are peer surfaces and remain visible together; the Assistant helps author and
-explain the investigation.
+**Operate.** The graph is how an engineer understands what a workflow does,
+so it owns the center; Results prove it beneath, and the Assistant authors it
+from a tall column at the side.
 
-- **Composition:** The default 28% left lane groups Assistant and SQL as native
-  workbench tabs. The remaining width splits vertically into Graph (45%) and
-  Results (55%). All panels remain dockable and resizable. The v8 layout scope
-  applies this arrangement without changing other activities' layouts.
-- **Document header:** Workflow selection, naming, and creation sit beside the
-  saved/draft state, Discard, Save, and one manual Run action. Save persists SQL
-  and conversation; Run executes the current SQL without implicitly saving it.
-  Unsaved changes still block document switching. Loading, revision conflicts,
-  and disabled-action reasons remain tied to the existing controller.
-- **Graph:** Workflow is the default view. Explicit SPQL operations become
-  named stages from native function identities and expression dependencies;
-  routine linear SQL chains collapse while joins and shared branches remain.
-  Conditional calls name their guard. Logical, optimized logical, and physical
-  diagnostics remain available in the same toolbar beside stage navigation,
-  Details, Overview, and zoom. Missing, invalid, or incomplete expression
-  metadata produces an explicit error while native plan modes remain reachable.
-  SQL is the executable definition; every graph is a read-only presentation.
-  Do not fabricate per-operator progress or recover topology from text.
-- **Graph navigation:** Dioxus Flow owns layout and interaction. Initial zoom
-  stays readable (0.75–1.0), refitting as the dock layout settles. Large graphs
-  begin at their source and remain pannable; graphs over six stages show the
-  native minimap. Overview explicitly fits the whole graph, and the stage
-  selector centers a stage at readable zoom. After user navigation, resizing
-  or opening details preserves graph-space center and zoom.
-- **Stage details:** Hidden until requested, inside the graph pane. Each stage
-  retains its underlying native operators with schema, properties, detail text,
-  and execution identity; the full native report remains inspectable. Schema
-  fields stack their exact name and type, with a nonwrapping nullable label.
-  Stage cards use a 224×112px paper surface, hairline, 4px radius, 15px title,
-  13px two-line summary, and 11px footer naming the SPQL function or SQL operation
-  count. SPQL stages have an accent border; selection adds an accent outline.
-  Existing role tokens own all colors.
-- **Assistant:** One user request groups its intermediate messages and tool
-  receipts in one activity disclosure, followed by the latest nonempty answer.
-  Active tool descriptions and terminal failures retain explicit wording.
-  The complete underlying conversation is preserved. Headings, emphasis,
-  lists, code, links, and tables use a maintained parser and sanitizer; remote
-  image tags are removed. Tables are collapsed behind View table so a narrow
-  conversation does not compete with authoritative Results. The 13px body
-  uses restrained spacing and a readable line height. Send/Stop, readiness,
-  cancellation semantics, auto-follow, and jump recovery remain explicit.
-- **Results:** Data and Workflow share one query result table and row inspector,
-  with identical presentation. A single run strip owns run selection, phase, count, duration,
-  truncation, and Executed SQL. Stale and failed observations remain visible.
-  Images precede decision/status/label fields; IDs and paths move later in the
-  same table. Human-readable column labels retain exact names and types in
-  tooltips, and Column types exposes types inline. Floats use concise display
-  precision, while integers retain exact identity. Row-number and image actions
-  open exact values and larger images in a local inspector and focus its heading.
-  Close or Escape restores focus to the invoking action; changing runs clears
-  the inspector.
-  All original rows and columns remain inspectable, with no inferred result
-  counts or computed classifications added by the presentation.
+- **Composition:** One document bar, then a 24/76 horizontal split. The left
+  24% is a tall console tile holding Assistant and SQL as tabs. The right 76%
+  divides 46/54 vertically: above, the Graph (74%) beside Stage details (26%);
+  below, Results across the full width. A pipeline is wider than it is tall, so
+  the graph row is sized for two stacked sources and the results shelf keeps
+  about five rows of previews. The `workflow-investigation-v12` layout scope
+  applies this arrangement; every tile remains a dockable, resizable workbench
+  panel with a leading tab icon.
+- **Document bar:** A 36px paper line with a lower hairline. The workflow
+  glyph, the name as a quiet 12px semibold button with a 12px chevron that
+  turns when open, and a keyed 11px state chip with a 6px dot (Saved · green
+  dot, Unsaved changes · ochre, Changed in another session · red) sit at left;
+  Discard, Save, and the filled Run with a play glyph sit at right. Run turns
+  into a spinning "Running" while a query is admitted, keeping its 72px
+  minimum width so the bar does not shift. The name button opens one popover:
+  a 320px paper sheet with a 6px radius and the floating-notice shadow, holding
+  a listbox of saved workflows with the current one checked, then New blank
+  workflow, From dataset, and Rename behind a hairline. Escape and a click on
+  the transparent backdrop close it and return focus to the title. Unsaved
+  changes still block switching, and the reason is printed in the bar.
+- **Graph:** Reads left to right on the pale bench with a 22px dot grid.
+  Stages follow the author's ideas, not the planner's operators: column
+  selection and ordering fold into the read that feeds them; numbering rows
+  inside groups and keeping the first reads as "One row per …"; every SPQL
+  call is its own stage, named by what it does (Score images with its prompt,
+  Convert frames to RGB with its profile); a CASE becomes "Classify rows"
+  listing its outcomes; joins name their type and keys and label their edges
+  left and right in 10px. Stage cards are 224×92 paper with a hairline, 4px
+  radius, and the resting lift: an 18px kind glyph tile (4px radius, 12px
+  icon, 14% wash) beside a 12px semibold title, a two-line 11px/15px summary
+  painted token by token when it is an expression, and a 10px footer naming
+  the kind in its tint, then the native function, provider, or folded
+  operation count in mono. Six kinds carry identity tints: Source, Media,
+  Model, SQL, Join, Output. Hover darkens the hairline toward faint ink and
+  lifts 1px; selection is the accent hairline plus inset ring and a 14% accent
+  glow. Cards enter once, left to right, 320ms each and 45ms apart on the
+  Studio easing; edges (1.25px, faint ink at 72%) fade in 180ms after them.
+  While a run is admitted every edge turns accent, thickens to 1.5px, and
+  carries 5/5 marching dashes on a 700ms cycle. Handles are 7px and inert;
+  they turn accent with the card. A stage strip along the top of the canvas
+  lists every stage in reading order as a 22px paper chip (10px title, 14px
+  glyph tile with a 3px radius, 8px hairline connectors, 20px fade at the
+  right edge); a pipeline wider than the pane is still complete there, and
+  each chip selects and centres its stage. Zoom and fit controls sit bottom
+  left in one hairline group with the resting lift. Cards never render below
+  0.7 zoom: a graph that fits at readable zoom is fitted, and one that does
+  not keeps its cards at the largest size the pane's height allows, starts at
+  its sources, stays pannable, and shows a small 4px-radius minimap at bottom
+  right. After the user moves the viewport, resizing preserves graph-space
+  center and zoom.
+- **Stage details:** Its own tile beside the graph, so selecting a stage never
+  resizes the canvas. It answers, in order: what the stage does (heading with
+  kind tile, 12px semibold title, "Kind · footer" in 10px, the 11px summary,
+  and the full classification rule on the recess when there is one); what it
+  reads or combines (Left/Right for joins); Details as a label/value grid of
+  facts drawn from the native properties (10px faint labels, 11px ink values;
+  dataset, topic, provider, revision; join type and keys; conditions; groups
+  and order; computed columns as `name = expression`; function, call, and
+  produced type); Steps for folded stages as a decimal list with tabular
+  markers; Columns produced as an 11px schema table with a count and a green
+  "new" mark (12% wash) on every column the stage adds over its inputs, its
+  row washed 7% green; then the native operators and Full plan JSON behind
+  hairline disclosures. Selecting a connection shows what travels along it.
+  Before any selection the tile shows the workflow overview derived from the
+  same plan: what it reads (dataset, topic, provider), what it combines (join
+  type and keys), how many columns it returns, and every stage as a 32px
+  clickable row (glyph tile, 11px title, 10px summary) that selects and
+  centres it on the graph. The body settles in over 200ms.
+- **Syntax colour:** One lexer paints SQL (editor, Executed SQL, and fenced
+  code in the conversation) and the graph's rendered expressions (summaries,
+  facts, rules), with ligatures off. Keywords take the accent at medium
+  weight, functions the Model tint, literals the Media amber mixed 78% toward
+  ink, operators soft ink, punctuation faint ink, and comments italic faint
+  ink; fields stay in ink (medium weight inside stage summaries) so the
+  author's own names read strongest. Every kind also differs in weight or
+  style, and the text stays complete and copyable. The SQL editor is a
+  coloured copy under a transparent textarea with identical metrics: 12px
+  mono at 1.6, 12px/16px padding, a 2-space tab.
+- **Results:** One 32px run strip: phase with its 6px dot (green complete,
+  pulsing accent while running or validating, red failed, ochre
+  interrupted), the run selector only when more than one run exists, the row
+  count as 12px semibold mono, Spiral's elapsed time in 11px faint mono, a
+  live accent elapsed while running, the Truncated chip when it applies, and
+  an Executed SQL disclosure at the right that expands inline across the
+  strip. While a run is admitted the body shows shimmering skeleton rows in
+  the table's own geometry: 60px rows entering 40ms apart, 10px bars sweeping
+  recess-to-hairline every 1.4s, and an 88×48 block where the preview will
+  land. Stale and failed observations remain visible above the rows on the
+  ochre wash.
+- **Result table (shared with Data):** A 28px tools row names the column
+  count and offers a Types toggle. Headers are sticky paper, 11px medium soft
+  ink, with the hairline drawn as an inset shadow so it travels with the
+  header. Cells are 12px with 12px/6px padding and a 22rem ceiling. Cells are
+  painted by kind: image previews (88×50 on the camera mat, 3px radius, a 2px
+  accent ring on hover or focus) lead so five rows stay in view, with the full
+  16:9 frame in the inspector; repeated short strings become 11px medium chips
+  whose wash is the hue at 13% and whose text is the hue mixed 55% toward ink;
+  varying numbers carry a 2px bar (accent at 55%) between the column's
+  smallest and largest returned value, explained in the tooltip, and a column
+  with both signs anchors its bars at a 1px faint-ink zero mark so negatives
+  reach left in graphite (soft ink at 60%) while positives reach right in the
+  accent; numbers and timestamps are right-aligned 11px tabular mono;
+  timestamps read as `YYYY-MM-DD HH:MM:SS.mmm` UTC in soft ink with the raw
+  value in the tooltip; identifiers and paths sit last in faint mono. Rows
+  enter 260ms each and 14ms apart, hover washes the row, and any cell click
+  opens the inspector. The inspector is a 320px side sheet (at most 45% of the
+  tile) that enters over 180ms: a sticky "Row N of M" heading, previous/next/
+  close, images at 16:9, then exact values in 11px mono under 10px mono field
+  names. Up and Down arrows step rows; Escape closes and returns focus to the
+  invoking action. No count, class, or total is inferred by the presentation.
+- **Assistant column:** The thread and composer share the column, capped at a
+  76ch measure when docked wide. Every message names its speaker in a 10px
+  medium faint label: your requests sit right-aligned on the recess at up to
+  85% width under "You"; answers read at 12px/1.6 on paper beside an 18px
+  Model-tinted conversation tile under "Assistant"; Studio notices share the
+  tile in graphite on the hover wash; findings inside a turn read at 11px soft
+  ink; tool receipts inside the activity fold are 10.5px mono on a hairline.
+  Each turn's activity folds behind a disclosure whose 6px dot pulses while a
+  tool runs; inside, steps stand on a left hairline with strong-line, good,
+  accent, or danger dots. The composer is one bordered field with a filled
+  24px square send (an up arrow) or an outline stop at bottom right, an accent
+  border plus a 2px 15% accent ring on focus, and a 10px meta line: presence
+  dot with the Assistant's state at left, the keyboard hint at right. "Jump to
+  latest" floats above the composer with a small lift when the reader has
+  scrolled away. The empty thread offers example asks as outlined 11px chips.
+- **SQL:** A full-bleed mono textarea; validation issues appear in a danger
+  strip beneath it. Run submits exactly this text without saving it.
 - **Ownership:** The draft drives the graph. The selected immutable run drives
   Results and Executed SQL. Chat prose cannot override either. The browser's
   existing state controller owns all document, proposal, and run transitions.
   Refer to `docs/workflow-authoring.md` for the current native SQL boundary.
+- **Motion:** Everything in Workflow moves on one easing, `--ease-out-expo`
+  (`cubic-bezier(0.16, 1, 0.3, 1)`): settle-ins of 160–220ms, the 140ms
+  popover, 320ms stage entry, 360ms edge entry, 260ms row entry, 180ms
+  inspector entry. Only work in progress loops: the 900ms pulse on run,
+  activity, and presence dots, the 700ms edge dashes, the 1.4s skeleton
+  shimmer, and the 900ms spinner. All of it is removed under
+  `prefers-reduced-motion`.
 
 ### Timeline
 
@@ -1218,6 +1412,19 @@ movement, pending-request guards, and value formatting each have one shared
 owner. Product components own domain behavior and placement; they do not wrap
 another component only to rename it or copy shared mechanics.
 
+**The Display-Only-Inference Rule.** A cell's kind (image, chip, bar, clock
+time, identity) changes how a stored value is drawn, never what it is. The
+exact value stays in the tooltip and the row inspector, and the presentation
+never invents a count, class, or total.
+
+**The Hue-Plus-Word Rule.** A stage tint, category wash, or syntax colour is
+always paired with a word, glyph, weight, or style that carries the same
+meaning. Remove the colour and the graph, table, and SQL still read.
+
+**The One-Easing Rule.** Studio motion uses `--ease-out-expo` for entrances
+and settle-ins; durations stay under 400ms; loops exist only while work is
+in progress; and every animation is removed under `prefers-reduced-motion`.
+
 ## Do's and Don'ts
 
 ### Do:
@@ -1257,6 +1464,13 @@ another component only to rename it or copy shared mechanics.
   Loading/device/fallback state, bounded progress, quarantine/warnings, and
   computed/reused materialization evidence explicit. Empty Results must
   distinguish no run from real empty rows.
+- **Do** keep Workflow graph-first: a 24% Assistant/SQL console, the Graph
+  (74%) beside Stage details (26%), and Results in the lower 54%, with stage
+  cards fixed at 224×92 and result previews at 88×50.
+- **Do** paint result cells by kind through the shared table and lexer:
+  category chips at 13% wash, 2px measure bars anchored at zero when a column
+  crosses it, UTC clock time, faint mono identity, and one syntax palette for
+  SQL and rendered expressions.
 - **Do** route workbench, Timeline, panel-focus, and backend events through one
   activity controller that derives the complete visible projection.
 - **Do** represent Live, Recorded Loading, Recorded Ready, Recorded Unavailable,
@@ -1342,3 +1556,8 @@ another component only to rename it or copy shared mechanics.
   deadline-miss values; every one comes from the backend session.
 - **Don't** add uppercase tracked kickers, decorative display type, pill-shaped
   containers, a fixed-dark workspace, or ornamental looping animation.
+- **Don't** let a stage or category hue stand alone, restate the six tints as
+  health, or add a seventh kind without a glyph and a one-word label.
+- **Don't** add a second easing curve, a looping animation that outlives the
+  work it reports, or a resting shadow on anything that is not standing on the
+  graph bench.

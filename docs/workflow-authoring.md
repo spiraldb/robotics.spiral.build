@@ -28,16 +28,22 @@ This cutover stores SQL literals; a separate bound-parameter editor is not imple
 
 ## Assistant investigation and plan inspection
 
-The five dockable panes are Assistant, SQL, Graph, Results, and Stage details.
-Assistant and SQL share a narrow left authoring lane (20% of the workspace).
-The graph fills the upper 62% of the right lane; Results and Stage details split
-the lower area equally. Selecting a graph node updates Stage details without
-changing graph dimensions, including keyboard selection. SQL changes clear the
-inspection. The graph has no navigation toolbar; native panning, zooming, keyboard
-interaction, and the minimap remain available. The workbench keeps all splits
-resizable and all panels dockable.
-One document header owns Save, Discard, Run, and the saved/draft state. Results
-owns the selected run, its phase, row count, elapsed time, and Executed SQL.
+The five dockable panes are Graph, Stage details, Results, Assistant, and SQL.
+Assistant and SQL share a tall 24% column at the left. The graph owns the large
+central tile (72% of the remaining width, 60% of the height) and reads left to
+right, with Stage details beside it so selecting a node never resizes the
+canvas, including keyboard selection. Results run along the bottom 40%. SQL
+changes clear the inspection. The graph has no navigation toolbar; native panning, zooming,
+keyboard interaction, a stage-count caption, zoom/fit controls, and a minimap
+above eight stages remain available. The workbench keeps all splits resizable
+and all panels dockable.
+One document bar owns the workflow name (which opens the switcher, creation, and
+rename popover), the saved/draft state, Save, Discard, and Run. Results owns the
+selected run, its phase, row count, elapsed time, and Executed SQL, and shows
+skeleton rows while a run is admitted. Result cells are painted by inferred kind
+(images, categorical chips, measurement bars, UTC timestamps, mono identifiers);
+the inference is display-only and every tooltip and the row inspector keep the
+stored value exact.
 A request to find, evaluate, or filter data authorizes the Assistant to run the
 required read-only queries. The Assistant receives the installed `spql.ai` function catalog each turn,
 including signatures, metadata, and descriptions. Metadata tools remain

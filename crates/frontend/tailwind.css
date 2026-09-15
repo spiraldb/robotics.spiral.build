@@ -57,6 +57,29 @@
   --tone-viewport: #f5f5f3;
   --tone-camera: #1f1f1f;
 
+  /* Stage identity: what a workflow stage does to the data. Identity, not
+     health — the same kind keeps the same hue on every graph, and a 6px mark
+     or a 14% wash is all it ever paints. */
+  --tone-stage-source: #5b7fb8;
+  --tone-stage-media: #b5701f;
+  --tone-stage-model: #8b5cc7;
+  --tone-stage-shape: #65645f;
+  --tone-stage-join: #3d8f86;
+  --tone-stage-output: #2f7d5b;
+
+  /* Categorical washes for repeated result values, assigned by a value's
+     rank within one result so the same decision keeps its tint down a table.
+     Text is mixed toward ink so every chip clears 4.5:1 on its own wash. */
+  --tone-category-1: #2a78d6;
+  --tone-category-2: #eb6834;
+  --tone-category-3: #1baf7a;
+  --tone-category-4: #c98f00;
+  --tone-category-5: #d9679a;
+  --tone-category-6: #7560b8;
+
+  /* The one easing the Studio moves with: fast out of the gate, settled early. */
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+
 }
 
 /* dioxus-workbench, spoken in this palette ---------------------------------
@@ -1311,24 +1334,752 @@
 }
 
 @layer components {
-  /* Workflow: author on the left; inspect graph and evidence together on the right. */
+  /* Workflow ------------------------------------------------------------
+     The graph is the hero: it owns the large central tile with its inspector
+     beside it, results run along the bottom, and the Assistant and SQL share
+     a tall column at the left. Every tile is a workbench panel and may be
+     moved. */
+  .workflow-workspace {
+    @apply flex h-full min-h-0 min-w-0 flex-col;
+  }
+
+  .workflow-panels {
+    @apply min-h-0 min-w-0 flex-1;
+  }
+
   .workflow-assistant-editor,
   .workflow-node-editor,
   .workflow-canvas-editor,
-  .workflow-results-editor {
+  .workflow-results-editor,
+  .workflow-stage-details-editor {
     min-width: 0;
     min-height: 0;
   }
 
-  .workflow-assistant,
-  .workflow-inspector,
-  .workflow-results,
-  .workflow-canvas {
-    @apply h-full min-h-0 w-full min-w-0 bg-surface text-ink;
+  /* Document bar: identity on the left, the three document actions on the
+     right, one 36px line. Switching, creating, and renaming open behind the
+     title so the bar never grows a second row of controls. */
+  .workflow-document-bar {
+    @apply relative z-10 flex min-h-9 shrink-0 items-center gap-3 border-b border-line bg-surface pl-3 pr-2;
   }
 
+  .workflow-document-identity {
+    @apply flex min-w-0 flex-1 items-center gap-1;
+  }
+
+  .workflow-document-glyph {
+    @apply inline-flex size-6 shrink-0 items-center justify-center text-ink-faint;
+  }
+
+  .workflow-document-title {
+    @apply min-w-0 max-w-[40rem] gap-1 px-1.5 text-[12px] font-semibold tracking-[-0.01em] text-ink;
+  }
+
+  /* The chevron points where the switcher will open, and turns when it has. */
+  .workflow-document-title .ui-icon {
+    @apply size-3 shrink-0 text-ink-faint;
+    rotate: 90deg;
+    transition: rotate 160ms var(--ease-out-expo);
+  }
+
+  .workflow-document-title[aria-expanded="true"] .ui-icon {
+    rotate: -90deg;
+  }
+
+  .workflow-document-name {
+    @apply truncate;
+  }
+
+  .workflow-rename {
+    @apply flex min-w-0 items-center gap-1;
+  }
+
+  .workflow-name-input {
+    @apply h-6 w-72 max-w-full rounded border border-line bg-surface px-1.5 text-[12px] font-semibold text-ink outline-none focus-visible:border-accent focus-visible:ring-2 focus-visible:ring-accent/15;
+  }
+
+  .workflow-document-state {
+    @apply inline-flex min-h-6 shrink-0 items-center gap-1.5 px-1.5 text-[11px] text-ink-faint;
+    animation: workflow-settle 220ms var(--ease-out-expo) both;
+  }
+
+  .workflow-document-state-dot {
+    @apply size-1.5 rounded-full;
+    background: var(--tone-ink-faint);
+  }
+
+  .workflow-document-state.is-saved .workflow-document-state-dot {
+    background: var(--tone-good);
+  }
+
+  .workflow-document-state.is-draft {
+    @apply text-caution;
+  }
+
+  .workflow-document-state.is-draft .workflow-document-state-dot {
+    background: var(--tone-caution);
+  }
+
+  .workflow-document-state.is-conflict {
+    @apply text-danger;
+  }
+
+  .workflow-document-state.is-conflict .workflow-document-state-dot {
+    background: var(--tone-danger);
+  }
+
+  @keyframes workflow-settle {
+    from {
+      opacity: 0;
+      translate: 0 2px;
+    }
+  }
+
+  @keyframes workflow-pulse {
+    50% {
+      opacity: 0.35;
+      scale: 0.7;
+    }
+  }
+
+  .workflow-selection-reason {
+    @apply shrink-0 truncate text-[11px] text-ink-faint;
+    max-width: 24rem;
+  }
+
+  .workflow-document-actions {
+    @apply ml-auto flex shrink-0 items-center gap-1;
+  }
+
+  .workflow-run-action {
+    @apply min-w-[4.5rem] gap-1.5 pl-2 pr-2.5;
+  }
+
+  .workflow-run-action .ui-icon {
+    @apply size-3;
+  }
+
+  .workflow-run-action .ui-icon:not(.ui-icon--spin) {
+    fill: currentColor;
+    stroke-width: 1;
+  }
+
+  /* The switcher floats from the title. A transparent backdrop closes it. */
+  .workflow-popover-backdrop {
+    @apply fixed inset-0 z-30;
+  }
+
+  .workflow-switcher {
+    @apply absolute left-9 top-full z-40 mt-1 flex w-80 flex-col overflow-hidden rounded-md border border-line bg-surface;
+    max-width: calc(100vw - 6rem);
+    box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+    animation: workflow-popover-enter 140ms var(--ease-out-expo) both;
+  }
+
+  @keyframes workflow-popover-enter {
+    from {
+      opacity: 0;
+      translate: 0 -4px;
+    }
+  }
+
+  .workflow-switcher-list {
+    @apply max-h-72 overflow-y-auto p-1;
+  }
+
+  .workflow-switcher-option {
+    @apply w-full gap-2 pr-2 text-[12px];
+  }
+
+  .workflow-switcher-option .ui-icon {
+    @apply ml-auto size-3.5 shrink-0;
+  }
+
+  .workflow-switcher-name {
+    @apply min-w-0 truncate;
+  }
+
+  .workflow-switcher-empty,
+  .workflow-switcher-note {
+    @apply px-3 py-2 text-[11px] text-ink-faint;
+  }
+
+  .workflow-switcher-actions {
+    @apply grid gap-2 border-t border-line p-2;
+  }
+
+  .workflow-dataset-creation {
+    @apply grid gap-1 text-[11px] text-ink-soft;
+  }
+
+  .workflow-dataset-creation > div {
+    @apply flex gap-1;
+  }
+
+  .workflow-dataset-creation select {
+    @apply h-6 min-w-0 flex-1 rounded border border-line bg-surface px-1.5 text-[12px] text-ink outline-none focus-visible:border-accent;
+  }
+
+  .workflow-switcher-rename {
+    @apply justify-self-start;
+  }
+
+  /* Shared empty and pending states inside any workflow tile. */
+  .workflow-panel-empty {
+    @apply flex h-full min-h-0 flex-1 flex-col items-center justify-center gap-1 px-6 py-6 text-center;
+  }
+
+  .workflow-panel-empty > .ui-icon {
+    @apply mb-1 size-5 text-ink-faint;
+  }
+
+  .workflow-panel-empty strong {
+    @apply text-[12px] font-semibold text-ink;
+  }
+
+  .workflow-panel-empty p {
+    @apply max-w-[46ch] text-[11px] leading-4 text-ink-faint;
+  }
+
+  .workflow-panel-empty .ui-action {
+    @apply mt-2;
+  }
+
+  .workflow-inline-error {
+    @apply shrink-0 border-b border-line bg-danger-soft px-3 py-1.5 text-[11px] leading-4 text-danger;
+    overflow-wrap: anywhere;
+  }
+
+  /* Graph canvas ---------------------------------------------------------- */
+  .workflow-canvas {
+    @apply flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden bg-surface text-ink;
+  }
+
+  .workflow-plan-display,
+  .workflow-plan-graph {
+    @apply flex min-h-0 flex-1 flex-col;
+  }
+
+  .workflow-flow-wrap {
+    @apply relative min-h-0 min-w-0 flex-1 overflow-hidden;
+    background: var(--tone-viewport);
+    container-type: inline-size;
+  }
+
+  /* The whole pipeline in reading order along the top of the canvas. A
+     pipeline wider than the pane is still complete here, and every entry
+     centres its stage. */
+  .workflow-stage-strip {
+    @apply absolute inset-x-2 top-2 z-[5] flex min-w-0 items-start gap-2 text-[10px] text-ink-faint;
+  }
+
+  .workflow-stage-strip-count {
+    @apply shrink-0 whitespace-nowrap pl-1 leading-[22px];
+  }
+
+  /* Chips wrap onto a second line so every stage stays reachable in a
+     narrow pane; beyond two lines the strip scrolls rather than eating the
+     canvas. */
+  .workflow-stage-strip ol {
+    @apply flex min-w-0 flex-1 flex-wrap items-center gap-1 overflow-y-auto;
+    max-height: 3.25rem;
+    scrollbar-width: thin;
+  }
+
+  .workflow-stage-strip li {
+    @apply flex shrink-0 items-center;
+  }
+
+  .workflow-stage-strip li + li::before {
+    content: "";
+    @apply mr-1 block h-px w-2;
+    background: var(--tone-line-strong);
+  }
+
+  .workflow-strip-stage {
+    @apply max-w-52 gap-1 rounded border border-line bg-surface px-1.5 text-[10px] text-ink-soft;
+    min-height: 22px;
+    box-shadow: 0 1px 2px rgb(0 0 0 / 0.04);
+  }
+
+  .workflow-strip-mark {
+    @apply inline-flex size-3.5 shrink-0 items-center justify-center rounded-[3px];
+    color: var(--stage-tone);
+    background: color-mix(in srgb, var(--stage-tone) 14%, transparent);
+  }
+
+  .workflow-strip-mark .ui-icon {
+    @apply size-2.5;
+  }
+
+  .workflow-strip-title {
+    @apply min-w-0 truncate;
+  }
+
+  /* A narrow canvas trades chip width and the count for keeping every stage,
+     including the last one, on screen. */
+  @container (max-width: 640px) {
+    .workflow-stage-strip-count {
+      display: none;
+    }
+
+    .workflow-stage-strip ol {
+      max-height: 4.75rem;
+    }
+
+    .workflow-strip-stage {
+      max-width: 7.25rem;
+    }
+  }
+
+  .workflow-overview-summary {
+    @apply block text-ink-soft;
+    overflow-wrap: break-word;
+  }
+
+  .workflow-facts dd strong {
+    @apply font-medium;
+    overflow-wrap: normal;
+  }
+
+  .workflow-overview-stages {
+    @apply -mx-1 grid gap-px;
+  }
+
+  .workflow-overview-stage {
+    @apply w-full gap-2 px-1.5 py-1 text-left;
+    min-height: 32px;
+  }
+
+  .workflow-overview-stage .workflow-stage-mark {
+    @apply mt-px;
+  }
+
+  .workflow-overview-stage-copy {
+    @apply grid min-w-0 gap-px;
+  }
+
+  .workflow-overview-stage-copy strong {
+    @apply truncate text-[11px] font-medium text-ink;
+  }
+
+  .workflow-overview-stage-copy small {
+    @apply truncate text-[10px] text-ink-faint;
+  }
+
+  .workflow-canvas-controls {
+    @apply absolute bottom-2 left-2 z-[5] flex items-center gap-px rounded border border-line bg-surface p-px;
+    box-shadow: 0 1px 2px rgb(0 0 0 / 0.05);
+  }
+
+  /* Stage cards. Fixed 224×92 so the layered layout can place them before
+     they mount; the glyph tile carries the kind, the title carries the
+     meaning, the footer names what executes. */
+  .workflow-stage-source { --stage-tone: var(--tone-stage-source); }
+  .workflow-stage-media { --stage-tone: var(--tone-stage-media); }
+  .workflow-stage-model { --stage-tone: var(--tone-stage-model); }
+  .workflow-stage-shape { --stage-tone: var(--tone-stage-shape); }
+  .workflow-stage-join { --stage-tone: var(--tone-stage-join); }
+  .workflow-stage-output { --stage-tone: var(--tone-stage-output); }
+
+  .workflow-stage-card {
+    @apply relative flex flex-col gap-1 rounded border border-line bg-surface px-3 pb-2 pt-2.5 text-left text-ink;
+    box-sizing: border-box;
+    width: 224px;
+    height: 92px;
+    box-shadow: 0 1px 2px rgb(0 0 0 / 0.04);
+    transition: border-color 120ms ease-out, box-shadow 160ms var(--ease-out-expo), translate 160ms var(--ease-out-expo);
+    animation: workflow-stage-enter 320ms var(--ease-out-expo) both;
+    animation-delay: calc(var(--stage-order, 0) * 45ms);
+  }
+
+  @keyframes workflow-stage-enter {
+    from {
+      opacity: 0;
+      translate: -6px 0;
+    }
+  }
+
+  .workflow-stage-card:hover {
+    border-color: color-mix(in srgb, var(--tone-ink-faint) 50%, var(--tone-line));
+    box-shadow: 0 2px 6px rgb(0 0 0 / 0.06);
+    translate: 0 -1px;
+  }
+
+  .workflow-stage-card.is-selected,
+  .workflow-stage-card.is-selected:hover {
+    border-color: var(--tone-accent);
+    box-shadow: inset 0 0 0 1px var(--tone-accent), 0 2px 8px color-mix(in srgb, var(--tone-accent) 14%, transparent);
+    translate: none;
+  }
+
+  .workflow-stage-heading {
+    @apply flex min-w-0 items-center gap-2;
+  }
+
+  .workflow-stage-mark {
+    @apply inline-flex size-[18px] shrink-0 items-center justify-center rounded-sm;
+    color: var(--stage-tone);
+    background: color-mix(in srgb, var(--stage-tone) 14%, transparent);
+  }
+
+  .workflow-stage-mark .ui-icon {
+    @apply size-3;
+  }
+
+  .workflow-stage-title {
+    @apply min-w-0 truncate text-[12px] font-semibold leading-4 tracking-[-0.01em];
+  }
+
+  /* Paths offer their own break points (after each slash); anything else
+     breaks only as a last resort, so "video" never arrives as "vide / o". */
+  .workflow-stage-summary {
+    @apply m-0 min-h-0 flex-1 text-[11px] leading-[15px] text-ink-soft;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    overflow-wrap: break-word;
+  }
+
+  .workflow-stage-summary .tok-field {
+    color: var(--tone-ink);
+  }
+
+  .workflow-stage-footer {
+    @apply flex min-w-0 items-baseline gap-1.5 text-[10px] leading-3 text-ink-faint;
+  }
+
+  .workflow-stage-footer > * {
+    @apply min-w-0 truncate;
+  }
+
+  .workflow-stage-kind {
+    @apply shrink-0 font-medium;
+    color: var(--stage-tone);
+  }
+
+  .workflow-stage-footer code {
+    @apply font-mono;
+  }
+
+  .workflow-stage-output-flag {
+    @apply ml-auto shrink-0 rounded px-1 font-medium;
+    color: var(--tone-stage-output);
+    background: color-mix(in srgb, var(--tone-stage-output) 12%, transparent);
+  }
+
+  /* Stage inspector ------------------------------------------------------- */
+  .workflow-stage-inspector {
+    @apply h-full min-h-0 w-full min-w-0 overflow-y-auto bg-surface text-ink;
+  }
+
+  .workflow-inspector-body {
+    @apply px-3 pb-4 pt-3;
+    animation: workflow-settle 200ms var(--ease-out-expo) both;
+  }
+
+  .workflow-inspector-heading {
+    @apply flex items-start gap-2;
+  }
+
+  .workflow-inspector-heading > div {
+    @apply min-w-0;
+  }
+
+  .workflow-inspector-heading h3 {
+    @apply text-[12px] font-semibold leading-4 tracking-[-0.01em];
+    overflow-wrap: anywhere;
+  }
+
+  .workflow-inspector-heading small {
+    @apply mt-0.5 block text-[10px] text-ink-faint;
+    overflow-wrap: anywhere;
+  }
+
+  .workflow-inspector-summary {
+    @apply mt-2 text-[11px] leading-4 text-ink-soft;
+    overflow-wrap: anywhere;
+  }
+
+  .workflow-inspector-expression {
+    @apply mt-2 rounded bg-sunken px-2 py-1.5 font-mono text-[10px] leading-4 text-ink-soft;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .workflow-inspector-body h4 {
+    @apply mb-1.5 mt-4 text-[11px] font-semibold text-ink;
+  }
+
+  .workflow-inspector-inputs,
+  .workflow-stage-steps {
+    @apply grid gap-1 pl-4 text-[11px] text-ink-soft;
+    list-style: decimal;
+  }
+
+  .workflow-stage-steps {
+    @apply gap-2;
+  }
+
+  .workflow-inspector-inputs li::marker,
+  .workflow-stage-steps li::marker {
+    color: var(--tone-ink-faint);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .workflow-stage-steps strong {
+    @apply font-medium text-ink;
+  }
+
+  .workflow-stage-steps p {
+    @apply mt-0.5;
+    overflow-wrap: anywhere;
+  }
+
+  .workflow-schema {
+    @apply w-full text-[11px];
+    border-collapse: collapse;
+  }
+
+  .workflow-schema th {
+    @apply border-b border-line py-1 text-left text-[10px] font-medium text-ink-faint;
+  }
+
+  .workflow-schema td {
+    @apply border-b border-line py-1 align-top;
+  }
+
+  /* Names never break mid-word; the type column is the one that wraps. */
+  .workflow-schema td:first-child {
+    @apply whitespace-nowrap pr-3 align-top;
+  }
+
+  .workflow-schema code {
+    @apply font-mono text-[10px] text-ink;
+  }
+
+  .workflow-schema-type {
+    @apply font-mono text-[10px] text-ink-soft;
+    overflow-wrap: anywhere;
+  }
+
+  .workflow-schema-nullable {
+    @apply ml-1.5 whitespace-nowrap text-[10px] text-ink-faint;
+  }
+
+  .workflow-inspector-disclosure {
+    @apply mt-3 border-t border-line pt-2 text-[11px];
+  }
+
+  .workflow-inspector-disclosure > summary {
+    @apply cursor-pointer select-none py-1 text-ink-soft hover:text-ink;
+  }
+
+  .workflow-inspector-disclosure > summary:focus-visible {
+    outline: 2px solid var(--tone-accent);
+    outline-offset: -2px;
+    border-radius: 4px;
+  }
+
+  .workflow-inspector-disclosure pre,
+  .workflow-native-operator pre {
+    @apply mt-1 max-h-72 overflow-auto rounded bg-sunken px-2 py-1.5 font-mono text-[10px] leading-4 text-ink-soft;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .workflow-native-operator {
+    @apply mt-2 border-t border-line pt-2 text-[11px];
+  }
+
+  .workflow-native-operator header {
+    @apply flex flex-wrap items-baseline justify-between gap-x-2;
+  }
+
+  .workflow-native-operator header code {
+    @apply font-mono text-[10px] text-ink-faint;
+  }
+
+  .workflow-native-operator h5 {
+    @apply mt-2 text-[10px] font-medium text-ink-faint;
+  }
+
+  .workflow-native-operator p {
+    @apply mt-0.5 text-ink-soft;
+  }
+
+  .workflow-inspector-note {
+    @apply text-[11px] text-ink-faint;
+  }
+
+  .workflow-inspector-code {
+    @apply font-mono text-[10px];
+  }
+
+  /* Results --------------------------------------------------------------- */
+  .workflow-results {
+    @apply flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden bg-surface text-ink;
+  }
+
+  .workflow-run-strip {
+    @apply flex min-h-8 shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-line bg-surface px-3 py-1 text-[11px] text-ink-soft;
+  }
+
+  .workflow-run-phase {
+    @apply inline-flex items-center gap-1.5 font-medium text-ink;
+  }
+
+  .workflow-run-phase-dot {
+    @apply size-1.5 shrink-0 rounded-full;
+    background: var(--tone-ink-faint);
+  }
+
+  .workflow-run-phase.is-complete .workflow-run-phase-dot {
+    background: var(--tone-good);
+  }
+
+  .workflow-run-phase.is-running .workflow-run-phase-dot,
+  .workflow-run-phase.is-validating .workflow-run-phase-dot {
+    background: var(--tone-accent);
+    animation: workflow-pulse 900ms ease-in-out infinite;
+  }
+
+  .workflow-run-phase.is-failed .workflow-run-phase-dot {
+    background: var(--tone-danger);
+  }
+
+  .workflow-run-phase.is-interrupted .workflow-run-phase-dot {
+    background: var(--tone-caution);
+  }
+
+  .workflow-run-select {
+    @apply h-6 max-w-56 rounded border border-line bg-surface px-1.5 text-[11px] text-ink outline-none focus-visible:border-accent focus-visible:ring-2 focus-visible:ring-accent/15;
+  }
+
+  .workflow-run-single {
+    @apply text-ink-faint;
+  }
+
+  .workflow-run-count {
+    @apply inline-flex items-baseline gap-1 text-ink-soft;
+  }
+
+  .workflow-run-count strong {
+    @apply font-mono text-[12px] font-semibold text-ink tabular-nums;
+  }
+
+  .workflow-run-duration,
+  .workflow-run-elapsed {
+    @apply font-mono text-[11px] text-ink-faint tabular-nums;
+  }
+
+  .workflow-run-elapsed {
+    @apply text-accent;
+  }
+
+  .workflow-executed-sql {
+    @apply ml-auto min-w-0 text-[11px];
+  }
+
+  .workflow-executed-sql > summary {
+    @apply inline-flex min-h-6 cursor-pointer select-none items-center gap-1 rounded px-1.5 text-ink-soft hover:bg-hover hover:text-ink;
+    list-style: none;
+  }
+
+  .workflow-executed-sql > summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .workflow-executed-sql > summary:focus-visible {
+    outline: 2px solid var(--tone-accent);
+    outline-offset: 1px;
+  }
+
+  .workflow-executed-sql > summary .ui-icon {
+    @apply size-3;
+  }
+
+  .workflow-executed-sql[open] {
+    flex-basis: 100%;
+  }
+
+  .workflow-executed-sql pre {
+    @apply mt-1 max-h-40 overflow-auto rounded border border-line bg-sunken px-2.5 py-2 font-mono text-[10px] leading-4 text-ink;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .workflow-results-stale {
+    @apply flex shrink-0 flex-wrap items-baseline gap-x-2 border-b border-line bg-caution-soft px-3 py-1.5 text-[10px] text-caution;
+  }
+
+  .workflow-results-stale strong {
+    @apply font-medium;
+  }
+
+  .workflow-result-body {
+    @apply flex min-h-0 flex-1 flex-col overflow-hidden;
+  }
+
+  /* SQL ------------------------------------------------------------------- */
+  .workflow-sql-editor {
+    @apply flex h-full min-h-0 w-full min-w-0 flex-col bg-surface;
+  }
+
+  /* The coloured copy and the textarea share one grid cell and one set of
+     metrics, so the caret lands on the letter it appears over. The surface
+     scrolls both; the textarea itself never scrolls. */
+  .workflow-sql-surface {
+    @apply relative grid min-h-0 flex-1 overflow-auto bg-surface;
+  }
+
+  .workflow-sql-highlight,
+  .workflow-sql-input {
+    grid-area: 1 / 1;
+    margin: 0;
+    padding: 12px 16px;
+    border: 0;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.6;
+    tab-size: 2;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .workflow-sql-highlight {
+    @apply pointer-events-none select-none text-ink;
+  }
+
+  .workflow-sql-input {
+    @apply block w-full resize-none overflow-hidden bg-transparent outline-none placeholder:text-ink-faint;
+    color: transparent;
+    caret-color: var(--tone-ink);
+    field-sizing: content;
+    min-height: 100%;
+  }
+
+  .workflow-sql-input::selection {
+    background: var(--tone-selected);
+  }
+
+  .workflow-sql-surface:focus-within {
+    outline: 2px solid var(--tone-accent);
+    outline-offset: -2px;
+  }
+
+  .workflow-sql-issues {
+    @apply shrink-0 border-t border-line bg-danger-soft px-4 py-2 text-[11px] leading-4 text-danger;
+  }
+
+  /* Assistant console ------------------------------------------------------ */
   .workflow-assistant {
-    @apply flex flex-col;
+    @apply relative flex h-full min-h-0 w-full min-w-0 flex-col bg-surface text-ink;
+  }
+
+  .workflow-assistant-body {
+    @apply relative flex min-h-0 flex-1 flex-col;
   }
 
   .workflow-assistant-scroll {
@@ -1336,85 +2087,32 @@
     scrollbar-gutter: stable;
   }
 
-  .workflow-assistant-intro {
-    @apply shrink-0 bg-surface px-3 py-1.5;
-  }
-
-  .workflow-assistant-intro h2,
-  .workflow-inspector-heading h2 {
-    @apply text-xs font-semibold tracking-[-0.01em];
-  }
-
-  .workflow-inspector-description {
-    @apply px-4 pb-2 text-[11px] leading-relaxed text-ink-soft;
-  }
-
-  .workflow-assistant-heading {
-    @apply flex items-center justify-end gap-3;
-  }
-
-  .workflow-assistant-presence {
-    @apply inline-flex items-center gap-1.5 text-[11px] text-ink-faint;
-  }
-
-  .workflow-assistant-presence::before {
-    content: "";
-    @apply size-1.5 rounded-full bg-ink-faint;
-  }
-
-  .workflow-assistant-presence.is-ready::before {
-    @apply bg-good;
-  }
-
-  .workflow-assistant-presence.is-active::before {
-    @apply bg-accent;
-  }
-
-  .workflow-workspace { @apply flex h-full min-h-0 min-w-0 flex-col; }
-  .workflow-panels { @apply min-h-0 min-w-0 flex-1; }
-  .workflow-picker { @apply relative z-10 flex flex-wrap shrink-0 items-center gap-2 border-b border-line bg-surface px-3 py-2; }
-  .workflow-picker label { @apply text-xs font-medium text-ink-soft; }
-  .workflow-picker select, .workflow-name-input {
-    @apply h-6 min-w-0 rounded border border-line bg-surface px-1.5 text-xs text-ink outline-none focus-visible:border-accent focus-visible:ring-2 focus-visible:ring-accent/15 disabled:text-ink-faint;
-  }
-  .workflow-picker select { @apply w-64 max-w-full; }
-  .workflow-filter-summary { @apply min-h-0 overflow-auto p-3 text-xs leading-relaxed; }
-  .workflow-filter-summary p { @apply mb-3; }
-  .workflow-filter-summary ul { @apply my-2 list-disc pl-4; }
-  .workflow-filter-note { @apply text-ink-soft; }
-  .workflow-name-input { @apply w-56; }
-  .workflow-rename { @apply flex min-w-0 items-center gap-1; }
-  .workflow-create { @apply relative; }
-  .workflow-create > summary { @apply cursor-pointer rounded border border-line px-2 py-0.5 text-xs text-ink hover:bg-hover focus-visible:outline-accent; }
-  .workflow-create > summary[aria-disabled="true"] { @apply cursor-default text-ink-faint; }
-  .workflow-create-options { @apply absolute left-0 top-full z-20 mt-1 grid w-64 gap-2 rounded border border-line bg-surface p-3; box-shadow: 0 6px 18px rgb(0 0 0 / 0.1); }
-  .workflow-create-options label { @apply mt-1; }
-  .workflow-create-options select { @apply w-full; }
-  .workflow-create-options p { @apply text-xs text-ink-soft; }
-  .workflow-picker > span { @apply text-xs text-ink-soft; }
-
   .workflow-assistant-empty {
-    @apply px-4 py-6;
+    @apply mx-auto w-full max-w-[76ch] px-4 py-5;
   }
 
   .workflow-assistant-empty h3 {
-    @apply text-[13px] font-semibold tracking-[-0.01em] text-ink;
+    @apply text-[12px] font-semibold tracking-[-0.01em] text-ink;
   }
 
   .workflow-assistant-empty > p {
-    @apply mt-1.5 max-w-[36ch] text-[11px] leading-[1.55] text-ink-soft;
+    @apply mt-1 max-w-[62ch] text-[11px] leading-[1.55] text-ink-soft;
   }
 
   .workflow-assistant-examples {
-    @apply mt-4 grid gap-2;
+    @apply mt-3 flex flex-wrap gap-1.5;
   }
 
-  .workflow-assistant-examples button {
-    @apply min-h-10 rounded border border-line bg-surface px-3 py-2.5 text-left text-[11px] leading-4 text-ink-soft transition-colors hover:border-line-strong hover:bg-hover hover:text-ink focus-visible:ring-2 focus-visible:ring-accent/15 disabled:cursor-not-allowed disabled:opacity-45;
+  .workflow-assistant-examples .ui-action {
+    @apply rounded border border-line px-2 text-[11px] text-ink-soft hover:border-line-strong hover:text-ink;
   }
 
   .workflow-assistant-thread {
-    @apply grid gap-6 px-4 py-3;
+    @apply mx-auto grid w-full max-w-[76ch] gap-4 px-4 py-3;
+  }
+
+  .workflow-assistant-turn {
+    @apply grid min-w-0 gap-2.5;
   }
 
   .workflow-agent-message {
@@ -1422,40 +2120,94 @@
   }
 
   .workflow-agent-message.is-user {
-    @apply ml-3 rounded bg-sunken px-3 py-2.5;
+    @apply max-w-[85%] justify-self-end rounded bg-sunken px-3 py-2;
   }
 
-  .workflow-agent-message.is-system {
-    @apply py-2 text-ink-faint;
+  .workflow-agent-message.is-user .workflow-agent-message-body {
+    @apply text-ink-soft;
   }
 
   .workflow-agent-message-body {
-    @apply min-w-0 space-y-3 text-[13px] leading-[1.65] text-ink;
+    @apply min-w-0 space-y-2.5 text-[12px] leading-[1.6] text-ink;
+    overflow-wrap: anywhere;
   }
 
   .workflow-agent-message-body p {
     @apply whitespace-normal;
   }
 
+  .workflow-agent-message-body :is(h1, h2, h3, h4, h5, h6) {
+    @apply mb-1.5 mt-4 text-[12px] font-semibold leading-4 text-ink;
+  }
+
+  .workflow-agent-message-body > :first-child {
+    margin-top: 0;
+  }
+
+  .workflow-agent-message-body :is(ul, ol) {
+    @apply space-y-1 pl-4;
+  }
+
   .workflow-agent-message-body ul {
-    @apply ml-4 list-disc space-y-1;
+    list-style: disc;
+  }
+
+  .workflow-agent-message-body ol {
+    list-style: decimal;
+  }
+
+  .workflow-agent-message-body li::marker {
+    color: var(--tone-ink-faint);
   }
 
   .workflow-agent-message-body strong {
     @apply font-semibold text-ink;
   }
 
+  .workflow-agent-message-body a {
+    @apply text-accent underline underline-offset-[3px];
+  }
+
   .workflow-agent-message-body :not(pre) > code {
-    @apply rounded bg-sunken px-1 py-0.5 font-mono text-[10px] text-ink;
+    @apply rounded bg-sunken px-1 py-px font-mono text-[10.5px] text-ink;
   }
 
   .workflow-agent-message-body pre {
     @apply overflow-auto rounded border border-line bg-sunken px-2.5 py-2 font-mono text-[10px] leading-4 text-ink;
-    white-space: pre-wrap;
+    white-space: pre;
   }
 
   .workflow-agent-message-body pre code {
-    @apply block;
+    @apply block bg-transparent p-0 text-[10px];
+  }
+
+  .workflow-agent-message-body blockquote {
+    @apply border-l border-line pl-3 text-ink-soft;
+  }
+
+  .workflow-agent-message-body hr {
+    @apply border-0 border-t border-line;
+  }
+
+  .workflow-agent-message-body details {
+    @apply text-[11px];
+  }
+
+  .workflow-agent-message-body summary {
+    @apply cursor-pointer select-none text-ink-soft hover:text-ink;
+  }
+
+  .workflow-agent-message-body table {
+    @apply mt-2 block max-w-full overflow-x-auto text-[11px];
+    border-collapse: collapse;
+  }
+
+  .workflow-agent-message-body :is(th, td) {
+    @apply min-w-[4rem] border-b border-line px-2 py-1.5 text-left align-top;
+  }
+
+  .workflow-agent-message-body th {
+    @apply bg-sunken font-semibold;
   }
 
   .workflow-agent-tools-disclosure {
@@ -1463,27 +2215,84 @@
   }
 
   .workflow-agent-tools-disclosure > summary {
-    @apply cursor-pointer select-none py-1 font-medium text-ink-soft outline-none hover:text-ink focus-visible:text-accent;
+    @apply inline-flex cursor-pointer select-none items-center gap-1.5 rounded py-0.5 pr-1 text-ink-faint hover:text-ink;
+    list-style: none;
+  }
+
+  .workflow-agent-tools-disclosure > summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .workflow-agent-tools-disclosure > summary:focus-visible {
+    outline: 2px solid var(--tone-accent);
+    outline-offset: 1px;
+  }
+
+  .workflow-activity-dot {
+    @apply size-1.5 shrink-0 rounded-full;
+    background: var(--tone-ink-faint);
+  }
+
+  .workflow-agent-tools-disclosure[data-running="true"] .workflow-activity-dot {
+    background: var(--tone-accent);
+    animation: workflow-pulse 900ms ease-in-out infinite;
   }
 
   .workflow-agent-tools-disclosure[data-failed="true"] > summary {
     @apply text-danger;
   }
 
-  .workflow-agent-tools-disclosure[open] > summary {
-    @apply mb-1.5;
+  .workflow-agent-tools-disclosure[data-failed="true"] .workflow-activity-dot {
+    background: var(--tone-danger);
+  }
+
+  .workflow-turn-activity {
+    @apply mt-1.5 grid gap-2 border-l border-line pl-3;
+    margin-left: 2px;
   }
 
   .workflow-agent-tool-detail {
+    @apply grid items-start gap-2;
+    grid-template-columns: 0.5rem minmax(0, 1fr);
+    overflow-wrap: anywhere;
+  }
+
+  .workflow-tool-step-dot {
+    @apply mt-1.5 size-1.5 rounded-full;
+    background: var(--tone-line-strong);
+  }
+
+  .workflow-agent-tool-detail.is-complete .workflow-tool-step-dot {
+    background: var(--tone-good);
+  }
+
+  .workflow-agent-tool-detail.is-running .workflow-tool-step-dot {
+    background: var(--tone-accent);
+    animation: workflow-pulse 900ms ease-in-out infinite;
+  }
+
+  .workflow-agent-tool-detail.is-failed .workflow-tool-step-dot {
+    background: var(--tone-danger);
+  }
+
+  .workflow-tool-step-copy {
     @apply min-w-0;
   }
 
+  .workflow-tool-step-copy strong {
+    @apply font-medium text-ink-soft;
+  }
+
+  .workflow-tool-error {
+    @apply mt-0.5 text-danger;
+  }
+
   .workflow-agent-receipt-action {
-    @apply mt-1 min-h-0 p-0 text-[11px];
+    @apply mt-0.5 min-h-0 p-0 text-[11px] text-accent;
   }
 
   .workflow-assistant-error {
-    @apply m-3 rounded border border-danger/30 bg-danger-soft px-3 py-2.5 text-[10px] text-ink-soft;
+    @apply mx-auto my-3 w-full max-w-[76ch] rounded border border-danger/30 bg-danger-soft px-3 py-2.5 text-[11px] text-ink-soft;
   }
 
   .workflow-assistant-error strong {
@@ -1494,485 +2303,259 @@
     @apply my-1.5 leading-4;
   }
 
-  .workflow-assistant-composer {
-    @apply shrink-0 bg-surface px-3 pb-2 pt-3;
-  }
-
-  .workflow-assistant-composer > label {
-    @apply sr-only;
-  }
-
-  .workflow-assistant-composer textarea {
-    @apply block max-h-40 min-h-11 w-full resize-none rounded border border-line bg-surface px-3 py-2.5 text-[12px] leading-[1.5] text-ink opacity-100 outline-none transition-[border-color,box-shadow] placeholder:text-ink-faint focus-visible:border-accent focus-visible:ring-2 focus-visible:ring-accent/15 disabled:cursor-not-allowed disabled:border-line disabled:bg-surface disabled:text-ink-faint;
-    field-sizing: content;
-  }
-
-  .workflow-assistant-latest-action {
-    @apply mb-2 ml-auto min-h-7 px-2 text-[11px];
-  }
-
-  .workflow-assistant-composer-actions {
-    @apply mt-2 flex items-center justify-between gap-3;
-  }
-
-  .workflow-assistant-composer-actions > span {
-    @apply text-[10px] leading-4 text-ink-faint;
-  }
-
-  .workflow-assistant-send-action {
-    @apply min-h-6 min-w-10 justify-center disabled:bg-surface disabled:text-ink-faint disabled:opacity-100;
-  }
-
   .workflow-assistant-thread-tail {
     @apply h-px w-full;
   }
 
-  .workflow-inspector {
-    @apply overflow-y-auto;
+  .workflow-assistant-jump {
+    @apply pointer-events-none absolute inset-x-0 bottom-2 z-[3] flex justify-center;
   }
 
-  .workflow-inspector-heading {
-    @apply flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-line px-4 py-2;
+  .workflow-assistant-jump .ui-action {
+    @apply pointer-events-auto bg-surface text-[11px];
+    box-shadow: 0 2px 6px rgb(0 0 0 / 0.08);
+    animation: workflow-settle 160ms var(--ease-out-expo) both;
   }
 
-  .workflow-inspector-inputs {
-    @apply flex flex-wrap items-baseline gap-x-3 gap-y-1 px-4 py-2 text-[11px] text-ink-soft;
+  .workflow-assistant-composer {
+    @apply mx-auto w-full max-w-[76ch] shrink-0 px-4 pb-2 pt-2;
   }
 
-  .workflow-inspector-inputs .ui-action {
-    @apply min-h-0 p-0 text-[11px] text-accent underline decoration-transparent underline-offset-2 hover:decoration-current;
-    overflow-wrap: anywhere;
+  .workflow-assistant-notice {
+    @apply mb-1.5 text-[10px] leading-4 text-caution;
   }
 
-  .workflow-inspector-input-empty {
-    @apply text-ink-faint;
+  .workflow-composer-field {
+    @apply relative rounded border border-line bg-surface;
+    transition: border-color 150ms ease-out, box-shadow 150ms ease-out, background-color 150ms ease-out;
   }
 
-  .workflow-inspector-diagnostics {
-    @apply border-t border-line;
-  }
-
-  .workflow-inspector-diagnostics > summary {
-    @apply cursor-pointer px-4 py-2 text-[11px] text-ink-soft;
-  }
-
-  .workflow-inspector-diagnostics > summary:focus-visible {
-    outline: 2px solid var(--tone-accent);
-    outline-offset: -2px;
-  }
-
-  .workflow-inspector-error,
-  .workflow-validation {
-    @apply border-b border-line bg-danger-soft px-4 py-2.5 text-[10px] leading-4 text-danger;
-  }
-
-  .workflow-inspector-error strong,
-  .workflow-validation strong {
-    @apply font-medium;
-  }
-
-  .workflow-inspector-error p,
-  .workflow-validation p {
-    @apply mt-0.5;
-  }
-
-  .workflow-inspector-warning {
-    @apply border-b border-line bg-caution-soft px-4 py-2.5 text-[10px] leading-4 text-caution;
-  }
-
-  .workflow-validation {
-    @apply border-t border-b-0;
-  }
-
-  .workflow-validation > div + div {
-    @apply mt-2 border-t pt-2;
-    border-color: color-mix(in srgb, var(--tone-danger) 20%, transparent);
-  }
-
-  .workflow-inspector-kind {
-    @apply inline-flex items-center gap-1.5 text-[10px] font-medium text-ink-faint;
-  }
-
-  .workflow-inspector-kind .ui-icon {
-    @apply size-3.5;
-  }
-
-  .workflow-inspector-facts {
-    @apply divide-y divide-line;
-  }
-
-  .workflow-inspector-facts > div {
-    @apply grid grid-cols-[5rem_minmax(0,1fr)] items-start gap-2 px-4 py-2.5;
-  }
-
-  .workflow-inspector-facts dt {
-    @apply text-[10px] text-ink-faint;
-  }
-
-  .workflow-inspector-facts dd {
-    @apply min-w-0 text-[11px] text-ink-soft;
-    overflow-wrap: anywhere;
-  }
-
-  .workflow-inspector-facts code {
-    @apply font-mono text-[10px] text-ink;
-  }
-
-  .workflow-inspector-fields {
-    @apply flex flex-wrap gap-x-2 gap-y-1;
-  }
-
-  .workflow-inspector-boundary {
-    @apply border-t border-line px-4 py-3 text-[10px] leading-4 text-ink-faint;
-  }
-
-  .workflow-inspector-editor {
-    @apply border-t border-line px-4 py-3;
-  }
-
-  .workflow-inspector-actions {
-    @apply mt-3 flex flex-wrap justify-end gap-2 border-t border-line pt-3;
-  }
-
-  .workflow-feature-definitions {
-    @apply mt-3 flex flex-col gap-2;
-  }
-
-  .workflow-feature-definition {
-    @apply rounded border border-line bg-sunken p-2.5;
-  }
-
-  .workflow-feature-definition > header {
-    @apply mb-2 flex items-center justify-between gap-2 text-[10px] text-ink-soft;
-  }
-
-  .workflow-feature-definition > label,
-  .workflow-feature-applicability > label {
-    @apply mt-2 block;
-  }
-
-  .workflow-feature-applicability {
-    @apply mt-1 border-t border-line pt-1;
-  }
-
-  .workflow-feature-definition code,
-  .workflow-quarantine-examples code {
-    @apply font-mono text-[10px];
-    overflow-wrap: anywhere;
-  }
-
-  .workflow-quarantine-examples {
-    @apply flex flex-col gap-1 bg-caution-soft text-caution;
-  }
-
-  .workflow-quarantine-examples strong {
-    @apply font-medium;
-  }
-
-  .workflow-inspector-query-editor {
-    @apply min-h-0;
-  }
-
-  .workflow-inspector .workflow-query-input {
-    @apply h-24 min-h-24 w-full resize-y font-mono text-[11px] leading-4;
-  }
-
-  .workflow-inspector-help {
-    @apply mt-2 text-[10px] leading-4 text-ink-faint;
-  }
-
-  .workflow-inspector-help code {
-    @apply font-mono text-ink-soft;
-  }
-
-  .workflow-panel-empty {
-    @apply flex h-full min-h-40 flex-col items-center justify-center px-6 text-center;
-  }
-
-  .workflow-panel-empty > .ui-icon {
-    @apply mb-2 size-5 text-ink-faint;
-  }
-
-  .workflow-panel-empty strong {
-    @apply text-[12px] font-semibold text-ink;
-  }
-
-  .workflow-panel-empty p {
-    @apply mt-1 max-w-[48ch] text-[11px] leading-4 text-ink-faint;
-  }
-
-  .workflow-panel-empty span {
-    @apply mt-3 rounded bg-sunken px-2 py-1 font-mono text-[10px] text-ink-soft;
-  }
-
-  .workflow-canvas {
-    @apply flex flex-col overflow-hidden;
-  }
-
-  .workflow-fit-action {
-    @apply gap-1.5 text-[10px];
-  }
-
-  .workflow-fit-action .ui-icon {
-    @apply size-3.5;
-  }
-
-  .workflow-canvas-status {
-    @apply shrink-0 border-b border-line bg-sunken px-3 py-1.5 text-[10px] leading-4 text-ink-faint;
-  }
-
-  .workflow-canvas-status-error {
-    background: var(--tone-danger-soft);
-    color: var(--tone-danger);
-  }
-
-  .workflow-flow-wrap {
-    @apply relative min-h-0 flex-1 overflow-hidden bg-viewport;
-  }
-
-  .workflow-flow-empty {
-    @apply pointer-events-none absolute inset-0 z-[4] flex flex-col items-center justify-center px-8 text-center text-ink-faint;
-  }
-
-  .workflow-flow-empty .ui-icon {
-    @apply mb-3 size-7 text-ink-soft;
-  }
-
-  .workflow-flow-empty strong {
-    @apply text-[12px] font-semibold tracking-[-0.01em] text-ink;
-  }
-
-  .workflow-flow-empty p {
-    @apply mt-1 max-w-[34rem] text-[10px] leading-4;
-  }
-
-  .workflow-flow-wrap .dioxus-flow {
-    --df-bg: var(--tone-viewport);
-    --df-node-bg: var(--tone-surface);
-    --df-node-color: var(--tone-ink);
-    --df-node-border: var(--tone-line);
-    --df-accent: var(--tone-accent);
-    --df-edge: var(--tone-ink-faint);
-    --df-edge-selected: var(--tone-accent);
-    --df-edge-label: var(--tone-ink-soft);
-    --df-handle-bg: var(--tone-surface);
-    --df-handle-border: var(--tone-ink-faint);
-    --df-grid: color-mix(in srgb, var(--tone-ink-faint) 22%, transparent);
-    --df-panel-bg: var(--tone-surface);
-    --df-panel-border: var(--tone-line);
-    --df-panel-color: var(--tone-ink-soft);
-  }
-
-  .workflow-flow .df-node {
-    animation: none;
-  }
-
-  .workflow-flow .df-node:focus-visible {
-    border-radius: 4px;
-    outline-width: 1px;
-    outline-offset: 3px;
-  }
-
-  .workflow-flow .df-edge-path {
-    stroke-width: 1.25;
-  }
-
-  .workflow-flow .df-edge.workflow-edge-running .df-edge-path {
-    stroke: var(--tone-accent);
-  }
-
-  .workflow-flow .df-edge-arrow {
-    fill: var(--tone-ink-faint);
-  }
-
-  .workflow-node-card {
-    @apply relative flex w-[10.5rem] flex-col overflow-visible border border-line bg-surface text-ink;
-    min-height: 8.5rem;
-    border-radius: 4px;
-    transition: border-color 120ms ease-out, box-shadow 120ms ease-out;
-  }
-
-  .workflow-node-card:hover {
-    border-color: color-mix(in srgb, var(--tone-ink-faint) 52%, var(--tone-line));
-  }
-
-  .workflow-node-card.workflow-node-selected {
+  .workflow-composer-field:focus-within {
     border-color: var(--tone-accent);
-    box-shadow: inset 0 0 0 1px var(--tone-accent);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--tone-accent) 15%, transparent);
   }
 
-  .workflow-node-card.workflow-node-dragging {
-    box-shadow: 0 7px 20px rgb(0 0 0 / 0.14);
+  .workflow-composer-field.is-disabled {
+    @apply bg-sunken;
   }
 
-  .workflow-node-card.workflow-node-state-running {
-    border-color: color-mix(in srgb, var(--tone-accent) 62%, var(--tone-line));
-    box-shadow: 0 3px 12px color-mix(in srgb, var(--tone-accent) 16%, transparent);
+  .workflow-composer-field textarea {
+    @apply block max-h-40 min-h-9 w-full resize-none bg-transparent py-2 pl-3 pr-10 text-[12px] leading-[1.5] text-ink outline-none placeholder:text-ink-faint disabled:cursor-not-allowed disabled:text-ink-faint;
+    field-sizing: content;
   }
 
-  .workflow-node-heading {
-    @apply flex min-h-7 items-center gap-1.5 border-b border-line px-2.5 text-[10px] font-medium text-ink-soft;
+  .workflow-composer-send {
+    @apply absolute bottom-1.5 right-1.5;
   }
 
-  .workflow-node-heading .ui-icon {
-    @apply size-3.5 shrink-0;
+  .workflow-composer-send .ui-icon {
+    @apply size-3.5;
   }
 
-  .workflow-node-body {
-    @apply min-h-0 flex-1 px-2.5 py-2;
+  .workflow-composer-meta {
+    @apply mt-1.5 flex items-center justify-between gap-3 text-[10px] leading-4 text-ink-faint;
   }
 
-  .workflow-node-body h3 {
-    @apply min-h-12 text-[12px] font-semibold leading-4 tracking-[-0.01em];
+  .workflow-assistant-presence {
+    @apply inline-flex min-w-0 items-center gap-1.5 truncate;
+  }
+
+  .workflow-assistant-presence::before {
+    content: "";
+    @apply size-1.5 shrink-0 rounded-full bg-ink-faint;
+  }
+
+  .workflow-assistant-presence.is-ready::before {
+    @apply bg-good;
+  }
+
+  .workflow-assistant-presence.is-active::before {
+    @apply bg-accent;
+    animation: workflow-pulse 900ms ease-in-out infinite;
+  }
+
+  .workflow-composer-hint {
+    @apply shrink-0 truncate;
+  }
+
+  /* Syntax colour. Keywords carry the accent, functions the model tint,
+     literals a darkened amber, comments recede; fields stay in ink so the
+     names the engineer wrote remain the most legible thing on the line. */
+  .workflow-code,
+  .workflow-expression {
+    font-variant-ligatures: none;
+  }
+
+  .workflow-code {
+    @apply font-mono;
+  }
+
+  .tok-keyword {
+    color: var(--tone-accent);
+    font-weight: 500;
+  }
+
+  .tok-function {
+    color: var(--tone-stage-model);
+  }
+
+  .tok-field {
+    color: var(--tone-ink);
+  }
+
+  .tok-literal {
+    color: color-mix(in srgb, var(--tone-stage-media) 78%, var(--tone-ink));
+  }
+
+  .tok-operator {
+    color: var(--tone-ink-soft);
+  }
+
+  .tok-punct {
+    color: var(--tone-ink-faint);
+  }
+
+  .tok-comment {
+    color: var(--tone-ink-faint);
+    font-style: italic;
+  }
+
+  .workflow-stage-summary .tok-field,
+  .workflow-inspector-summary .tok-field {
+    font-weight: 500;
+  }
+
+  .workflow-inspector-rule {
+    @apply mt-2 rounded bg-sunken px-2 py-1.5 text-[11px] leading-4;
+    white-space: pre-wrap;
     overflow-wrap: anywhere;
   }
 
-  .workflow-node-fields,
-  .workflow-node-relation {
-    @apply mt-1 truncate text-[10px] text-ink-faint;
+  .workflow-stage-inspector {
+    container-type: inline-size;
   }
 
-  .workflow-node-relation code {
-    @apply font-mono text-ink-soft;
+  .workflow-facts {
+    @apply grid gap-y-1 text-[11px];
+    grid-template-columns: minmax(4.5rem, 7rem) minmax(0, 1fr);
   }
 
-  .workflow-node-footer {
-    @apply flex min-h-7 items-center gap-1.5 border-t border-line px-2.5 text-[10px] text-ink-faint;
-  }
+  /* A narrow inspector stacks each label over its value instead of
+     squeezing titles and paths into a hundred pixels. */
+  @container (max-width: 300px) {
+    .workflow-facts {
+      grid-template-columns: minmax(0, 1fr);
+    }
 
-  .workflow-node-card.workflow-node-state-running .workflow-node-footer {
-    background-image: linear-gradient(
-      100deg,
-      transparent 20%,
-      color-mix(in srgb, var(--tone-accent) 12%, transparent) 48%,
-      transparent 76%
-    );
-    background-position: 120% 0;
-    background-size: 240% 100%;
-    animation: workflow-node-running 1.35s linear infinite;
-  }
+    .workflow-facts dt {
+      padding-top: 6px;
+    }
 
-  @keyframes workflow-node-running {
-    to {
-      background-position: -120% 0;
+    .workflow-facts > div:first-child dt {
+      padding-top: 0;
     }
   }
 
-  .workflow-node-status-dot {
-    @apply size-1.5 shrink-0 rounded-full;
-    background: var(--tone-ink-faint);
+  .workflow-facts > div {
+    @apply contents;
   }
 
-  .workflow-node-status-dot.workflow-node-state-complete {
-    background: var(--tone-good);
+  .workflow-facts dt {
+    @apply pr-3 pt-px text-[10px] leading-4 text-ink-faint;
+    overflow-wrap: anywhere;
   }
 
-  .workflow-node-status-dot.workflow-node-state-warning {
-    background: var(--tone-caution);
+  /* Lists wrap at their commas; a lone identifier breaks only as a last resort. */
+  .workflow-facts dd {
+    @apply min-w-0 leading-4 text-ink;
+    overflow-wrap: break-word;
   }
 
-  .workflow-node-status-dot.workflow-node-state-running {
-    background: var(--tone-accent);
-    animation: workflow-node-status-pulse 900ms ease-in-out infinite;
+  .workflow-facts dd .workflow-code {
+    @apply text-[10px];
+    white-space: pre-wrap;
   }
 
-  @keyframes workflow-node-status-pulse {
-    50% {
-      opacity: 0.38;
-      scale: 0.72;
-    }
+  .workflow-schema tr.is-new td {
+    background: color-mix(in srgb, var(--tone-good) 7%, transparent);
   }
 
-  .workflow-node-status-dot.workflow-node-state-failed {
-    background: var(--tone-danger);
+  .workflow-schema-new {
+    @apply ml-1.5 rounded px-1 text-[10px] font-medium;
+    color: var(--tone-good);
+    background: color-mix(in srgb, var(--tone-good) 12%, transparent);
   }
 
-  .workflow-node-status-dot.workflow-node-state-stale {
-    background: var(--tone-caution);
+  /* Who is speaking. Your requests sit on the recess at the right; the
+     Assistant answers from the left behind a small tile in the model tint;
+     Studio notices share the tile in graphite. Tool receipts stay inside the
+     activity fold, in mono, on a hairline. */
+  .workflow-agent-role {
+    @apply mb-1 block text-[10px] font-medium leading-3 text-ink-faint;
   }
 
-  .workflow-node-status-dot.workflow-node-state-cancelled {
-    background: var(--tone-ink-faint);
+  .workflow-agent-message.is-user .workflow-agent-role {
+    @apply text-right;
   }
 
-  .workflow-node-card .df-handle {
-    width: 8px;
-    height: 8px;
-    border-width: 1px;
-    pointer-events: none;
-    cursor: default;
+  .workflow-agent-message.is-assistant {
+    @apply grid items-start gap-2;
+    grid-template-columns: 18px minmax(0, 1fr);
   }
 
-  .workflow-node-progress {
-    @apply absolute inset-x-0 bottom-0 h-0.5 w-full overflow-hidden border-0 bg-transparent;
-    appearance: none;
+  .workflow-agent-avatar {
+    @apply mt-px inline-flex size-[18px] shrink-0 items-center justify-center rounded-sm;
+    color: var(--tone-stage-model);
+    background: color-mix(in srgb, var(--tone-stage-model) 14%, transparent);
   }
 
-  .workflow-node-progress::-webkit-progress-bar {
-    background: transparent;
+  .workflow-agent-avatar .ui-icon {
+    @apply size-3;
   }
 
-  .workflow-node-progress::-webkit-progress-value {
-    background: var(--tone-accent);
-    transition: inline-size 180ms cubic-bezier(0.16, 1, 0.3, 1);
+  .workflow-agent-message.is-synthetic .workflow-agent-avatar {
+    color: var(--tone-ink-soft);
+    background: var(--tone-hover);
   }
 
-  .workflow-node-progress::-moz-progress-bar {
-    background: var(--tone-accent);
-    transition: inline-size 180ms cubic-bezier(0.16, 1, 0.3, 1);
+  .workflow-agent-answer {
+    @apply min-w-0;
   }
 
-  .workflow-node-card.workflow-node-state-complete .workflow-node-progress,
-  .workflow-node-card.workflow-node-state-warning .workflow-node-progress {
-    accent-color: var(--tone-good);
+  .workflow-agent-finding {
+    @apply min-w-0;
   }
 
-  .workflow-node-card.workflow-node-state-complete .workflow-node-progress::-webkit-progress-value,
-  .workflow-node-card.workflow-node-state-warning .workflow-node-progress::-webkit-progress-value,
-  .workflow-node-card.workflow-node-state-complete .workflow-node-progress::-moz-progress-bar,
-  .workflow-node-card.workflow-node-state-warning .workflow-node-progress::-moz-progress-bar {
-    background: var(--tone-good);
+  .workflow-agent-finding .workflow-agent-message-body {
+    @apply text-[11px] text-ink-soft;
+  }
+
+  .workflow-agent-tool-detail .workflow-tool-step-copy strong {
+    @apply font-mono text-[10.5px] font-normal;
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .workflow-node-card.workflow-node-state-running .workflow-node-footer,
-    .workflow-node-status-dot.workflow-node-state-running {
+    .workflow-document-state,
+    .workflow-switcher,
+    .workflow-stage-card,
+    .workflow-inspector-body,
+    .workflow-assistant-jump .ui-action,
+    .workflow-run-phase-dot,
+    .workflow-activity-dot,
+    .workflow-tool-step-dot,
+    .workflow-assistant-presence::before {
       animation: none;
     }
 
-    .workflow-node-progress::-webkit-progress-value,
-    .workflow-node-progress::-moz-progress-bar {
+    .workflow-stage-card,
+    .workflow-composer-field,
+    .workflow-document-title .ui-icon {
       transition: none;
     }
-  }
 
-  .workflow-results {
-    @apply flex flex-col overflow-hidden;
-  }
-
-  .workflow-results-retry {
-    @apply ml-auto min-h-0 p-0 text-[10px];
-  }
-
-  .workflow-results-stale {
-    @apply flex shrink-0 items-baseline gap-2 border-b border-line bg-caution-soft px-3 py-1.5 text-[10px] text-caution;
-  }
-
-  .workflow-results-stale strong {
-    @apply font-medium;
-  }
-
-  .workflow-results-error {
-    @apply shrink-0 border-b border-line bg-danger-soft px-3 py-1.5 text-[10px] leading-4 text-danger;
-  }
-
-  .workflow-result-body {
-    @apply flex min-h-0 flex-1 flex-col overflow-hidden;
-  }
-
-  .workflow-results > .workflow-panel-empty,
-  .workflow-result-body > .workflow-panel-empty {
-    @apply min-h-0 flex-1;
+    .workflow-stage-card:hover {
+      translate: none;
+    }
   }
 
   /* Rollout -------------------------------------------------------------
@@ -2244,138 +2827,6 @@
   outline-offset: 1px;
 }
 
-.query-result-tabs {
-  display: flex;
-  min-height: 2rem;
-  flex: 0 0 auto;
-  overflow-x: auto;
-  border-bottom: 1px solid var(--tone-line);
-  background: var(--tone-sunken);
-}
-
-.query-result-panel {
-  display: flex;
-  min-height: 0;
-  flex: 1 1 auto;
-  flex-direction: column;
-}
-
-.query-result-tab-item {
-  position: relative;
-  display: flex;
-  min-width: 7rem;
-  max-width: 16rem;
-  min-height: 2rem;
-  flex: 0 0 auto;
-  align-items: stretch;
-  border-right: 1px solid var(--tone-line);
-}
-
-.query-result-tab-item-active {
-  background: var(--tone-surface);
-}
-
-.query-result-tab {
-  display: flex;
-  min-width: 0;
-  min-height: 2rem;
-  flex: 1 1 auto;
-  align-items: center;
-  gap: 0.375rem;
-  padding: 0 0.5rem;
-  color: var(--tone-ink-soft);
-  font-size: 0.6875rem;
-  white-space: nowrap;
-}
-
-.query-result-tab-active {
-  color: var(--tone-ink);
-  background: var(--tone-surface);
-  box-shadow: inset 0 -1px 0 var(--tone-accent);
-}
-
-.query-result-tab-label {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.query-result-tab-close {
-  align-self: center;
-  flex: 0 0 24px;
-}
-
-.query-tab-state {
-  width: 0.375rem;
-  height: 0.375rem;
-  flex: 0 0 auto;
-  border-radius: 999px;
-  background: var(--tone-line);
-}
-
-.query-tab-running { background: var(--tone-accent); }
-.query-tab-ready { background: var(--tone-good); }
-.query-tab-failed { background: var(--tone-danger); }
-
-.query-result-meta {
-  display: flex;
-  min-height: 2rem;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 0.75rem;
-  border-bottom: 1px solid var(--tone-line);
-  padding: 0 0.5rem;
-  color: var(--tone-ink-faint);
-  font-size: 0.625rem;
-}
-
-.query-result-count {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 0.4rem;
-  font-family: var(--font-mono);
-  font-variant-numeric: tabular-nums;
-}
-
-.query-result-count strong {
-  color: var(--tone-ink);
-  font-family: var(--font-sans);
-  font-size: 0.6875rem;
-  font-weight: 600;
-}
-
-.query-result-limit {
-  margin-left: auto;
-}
-
-.query-result-meta details {
-  position: relative;
-}
-
-.query-result-meta summary {
-  min-height: 1.5rem;
-  cursor: pointer;
-  padding: 0.25rem 0;
-}
-
-.query-result-meta details code {
-  position: absolute;
-  z-index: 20;
-  top: 1.5rem;
-  left: 0;
-  display: block;
-  width: min(42rem, 72vw);
-  max-height: 16rem;
-  overflow: auto;
-  border: 1px solid var(--tone-line);
-  background: var(--tone-surface);
-  padding: 0.5rem;
-  color: var(--tone-ink-soft);
-  font-family: var(--font-mono);
-  line-height: 1.5;
-  white-space: pre-wrap;
-}
-
 .data-error {
   margin-top: 0.375rem;
   color: var(--tone-danger);
@@ -2383,109 +2834,410 @@
   overflow-wrap: anywhere;
 }
 
-.query-table {
-  width: max-content;
-  min-width: 100%;
-  border-collapse: separate;
-  border-spacing: 0;
-  font-family: var(--font-mono);
-  font-size: 0.6875rem;
+/* Query results ----------------------------------------------------------
+   One table for Data and Workflow. A cell is painted by what it is: image
+   previews lead, repeated decisions become tinted chips, measurements carry a
+   bar between the column's extremes, timestamps read as clock time, and
+   identifiers step back into mono. The stored value stays exact in every
+   tooltip and in the inspector. */
+@layer components {
+  .query-result-tabs {
+    @apply flex min-h-8 shrink-0 overflow-x-auto border-b border-line bg-sunken;
+  }
+
+  .query-result-panel {
+    @apply flex min-h-0 flex-1 flex-col;
+  }
+
+  .query-result-tab-item {
+    @apply relative flex min-h-8 min-w-28 max-w-64 shrink-0 items-stretch border-r border-line;
+  }
+
+  .query-result-tab-item-active {
+    @apply bg-surface;
+  }
+
+  .query-result-tab {
+    @apply flex min-h-8 min-w-0 flex-1 items-center gap-1.5 whitespace-nowrap px-2 text-[11px] text-ink-soft;
+  }
+
+  .query-result-tab-active {
+    @apply bg-surface text-ink;
+    box-shadow: inset 0 -1px 0 var(--tone-accent);
+  }
+
+  .query-result-tab-label {
+    @apply min-w-0 overflow-hidden text-ellipsis;
+  }
+
+  .query-result-tab-close {
+    @apply shrink-0 self-center;
+    flex-basis: 24px;
+  }
+
+  .query-tab-state {
+    @apply size-1.5 shrink-0 rounded-full;
+    background: var(--tone-line);
+  }
+
+  .query-tab-running { background: var(--tone-accent); }
+  .query-tab-ready { background: var(--tone-good); }
+  .query-tab-failed { background: var(--tone-danger); }
+
+  .query-result-meta {
+    @apply flex min-h-8 shrink-0 items-center gap-3 border-b border-line px-2 text-[10px] text-ink-faint;
+  }
+
+  .query-result-count {
+    @apply inline-flex items-baseline gap-1.5 font-mono tabular-nums;
+  }
+
+  .query-result-count strong {
+    @apply font-sans text-[11px] font-semibold text-ink;
+  }
+
+  .query-result-limit {
+    @apply ml-auto;
+  }
+
+  .query-result-meta details {
+    @apply relative;
+  }
+
+  .query-result-meta summary {
+    @apply min-h-6 cursor-pointer py-1;
+  }
+
+  .query-result-meta details code {
+    @apply absolute left-0 top-6 z-20 block max-h-64 overflow-auto border border-line bg-surface p-2 font-mono leading-normal text-ink-soft;
+    width: min(42rem, 72vw);
+    white-space: pre-wrap;
+  }
+
+  .query-result {
+    @apply flex min-h-0 min-w-0 flex-1 flex-col;
+  }
+
+  .query-result-tools {
+    @apply flex min-h-7 shrink-0 items-center justify-between gap-3 border-b border-line px-3 text-[10px] text-ink-faint;
+  }
+
+  .query-result-tools .ui-toggle {
+    @apply text-[10px] text-ink-soft;
+  }
+
+  .query-result-body {
+    @apply flex min-h-0 min-w-0 flex-1;
+  }
+
+  .query-result-table-scroll {
+    @apply min-h-0 min-w-0 flex-1 overflow-auto;
+  }
+
+  .query-table {
+    @apply text-[12px] text-ink;
+    width: max-content;
+    min-width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+  }
+
+  .query-table th,
+  .query-table td {
+    @apply max-w-[22rem] overflow-hidden text-ellipsis whitespace-nowrap border-b border-line px-3 py-1 text-left align-middle;
+  }
+
+  /* The header stays put while rows scroll under it. Its rule is drawn as a
+     shadow so it travels with the sticky cell instead of staying behind. */
+  .query-table thead th {
+    @apply sticky top-0 z-[1] border-b-0 bg-surface py-1.5 text-[11px] font-medium text-ink-soft;
+    box-shadow: inset 0 -1px 0 var(--tone-line);
+  }
+
+  .query-column-name,
+  .query-column-type {
+    @apply block overflow-hidden text-ellipsis;
+  }
+
+  .query-column-type {
+    @apply font-mono text-[10px] font-normal leading-[0.875rem] text-ink-faint;
+  }
+
+  .query-table tbody tr {
+    animation: query-row-enter 260ms var(--ease-out-expo) both;
+    animation-delay: calc(var(--row, 0) * 14ms);
+  }
+
+  @keyframes query-row-enter {
+    from {
+      opacity: 0;
+      translate: 0 3px;
+    }
+  }
+
+  .query-table tbody td {
+    transition: background-color 100ms ease-out;
+  }
+
+  .query-table tbody tr:hover td {
+    background: var(--tone-hover);
+  }
+
+  .query-table tbody tr[data-selected="true"] td {
+    background: var(--tone-selected);
+  }
+
+  .query-table tbody tr[data-selected="true"] .query-row-action {
+    color: var(--tone-accent);
+    font-weight: 500;
+  }
+
+  .query-row-number {
+    @apply w-10 max-w-10 px-1 text-center;
+  }
+
+  .query-row-action {
+    @apply min-h-6 w-full justify-center font-mono text-[10px] text-ink-faint tabular-nums;
+  }
+
+  .query-cell {
+    cursor: default;
+  }
+
+  .query-cell-number,
+  .query-cell-measure,
+  .query-cell-time {
+    @apply text-right font-mono text-[11px] tabular-nums;
+  }
+
+  .query-cell-time {
+    @apply text-ink-soft;
+  }
+
+  .query-cell-identity {
+    @apply font-mono text-[11px] text-ink-faint;
+  }
+
+  .query-cell-boolean {
+    @apply font-mono text-[11px] text-ink-soft;
+  }
+
+  .query-value-null {
+    @apply text-center text-ink-faint;
+  }
+
+  .query-media-cell {
+    @apply w-[7rem] max-w-[7rem] p-1;
+  }
+
+  .query-result-image-action {
+    @apply block min-h-0 overflow-hidden rounded-[3px] border-0 p-0;
+  }
+
+  /* Small previews keep five or six rows in view; the inspector holds the
+     full frame. */
+  .query-image-preview,
+  .query-image-unavailable {
+    @apply block h-[3.125rem] w-[5.5rem] rounded-[3px] object-contain;
+    background: var(--tone-camera);
+    transition: box-shadow 160ms var(--ease-out-expo);
+  }
+
+  .query-result-image-action:hover .query-image-preview,
+  .query-result-image-action:focus-visible .query-image-preview {
+    box-shadow: 0 0 0 2px var(--tone-accent);
+  }
+
+  .query-image-unavailable {
+    @apply grid place-items-center text-[10px] text-ink-faint;
+    background: var(--tone-sunken);
+  }
+
+  /* A repeated value in its own wash. The hue is the value's rank in this
+     result, so the same decision keeps the same tint down the whole table. */
+  .query-chip {
+    @apply inline-flex max-w-full items-center truncate rounded px-1.5 py-px text-[11px] font-medium;
+    color: color-mix(in srgb, var(--hue) 55%, var(--tone-ink));
+    background: color-mix(in srgb, var(--hue) 13%, transparent);
+  }
+
+  /* A measurement with its place in the column drawn under it. The bar
+     spans the smallest to the largest value among the rows returned. */
+  .query-measure {
+    @apply inline-grid w-full min-w-[5.5rem] justify-items-end gap-0.5;
+  }
+
+  .query-measure-text {
+    @apply leading-4;
+  }
+
+  .query-measure {
+    --measure-tone: color-mix(in srgb, var(--tone-accent) 55%, transparent);
+  }
+
+  .query-measure.is-negative {
+    --measure-tone: color-mix(in srgb, var(--tone-ink-soft) 60%, transparent);
+  }
+
+  .query-measure-bar {
+    @apply relative block h-0.5 w-full rounded-full;
+    background: linear-gradient(
+      to right,
+      var(--tone-line) calc(var(--start, 0) * 100%),
+      var(--measure-tone) 0 calc(var(--end, 0) * 100%),
+      var(--tone-line) 0
+    );
+  }
+
+  /* A column with both signs anchors at zero and marks it, so a negative
+     reads as reaching left of the mark rather than as a shorter positive. */
+  .query-measure.is-signed .query-measure-bar::after {
+    content: "";
+    @apply absolute -top-0.5 -bottom-0.5 w-px;
+    left: calc(var(--zero, 0) * 100%);
+    background: var(--tone-ink-faint);
+  }
+
+  .query-row-inspector {
+    @apply flex w-80 max-w-[45%] shrink-0 flex-col overflow-y-auto border-l border-line bg-surface;
+    animation: query-inspector-enter 180ms var(--ease-out-expo) both;
+  }
+
+  @keyframes query-inspector-enter {
+    from {
+      opacity: 0;
+      translate: 6px 0;
+    }
+  }
+
+  .query-row-inspector-heading {
+    @apply sticky top-0 z-[1] flex min-h-9 items-center justify-between gap-2 border-b border-line bg-surface pl-3 pr-1.5;
+  }
+
+  .query-row-inspector-heading h3 {
+    @apply text-[12px] font-semibold tabular-nums;
+  }
+
+  .query-row-inspector-heading h3:focus-visible {
+    outline: 2px solid var(--tone-accent);
+    outline-offset: 3px;
+    border-radius: 4px;
+  }
+
+  .query-row-inspector-count {
+    @apply font-normal text-ink-faint;
+  }
+
+  .query-row-inspector-nav {
+    @apply flex items-center gap-px;
+  }
+
+  .query-row-inspector-media {
+    @apply grid gap-2 px-3 pt-3;
+  }
+
+  .query-row-inspector-media figure {
+    @apply m-0;
+  }
+
+  .query-row-inspector-media img {
+    @apply block aspect-video w-full rounded-[3px] object-contain;
+    background: var(--tone-camera);
+  }
+
+  .query-row-inspector-media .query-image-unavailable {
+    @apply aspect-video h-auto w-full;
+  }
+
+  .query-row-inspector-media figcaption {
+    @apply mt-1 text-[10px] text-ink-faint;
+  }
+
+  .query-row-inspector-facts {
+    @apply px-3 pb-3;
+  }
+
+  .query-row-inspector-facts > div {
+    @apply grid gap-0.5 border-b border-line py-2 last:border-b-0;
+  }
+
+  .query-row-inspector-facts dt code {
+    @apply font-mono text-[10px] text-ink-faint;
+    overflow-wrap: anywhere;
+  }
+
+  .query-row-inspector-facts dd {
+    @apply select-text font-mono text-[11px] text-ink;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  /* Rows on their way. The table's own geometry stands in for them so the
+     panel neither collapses to a sentence nor jumps when data lands. */
+  .query-skeleton {
+    @apply flex min-h-0 flex-1 flex-col overflow-hidden px-3 pt-1;
+  }
+
+  .query-skeleton-row {
+    @apply flex min-h-[3.75rem] shrink-0 items-center gap-4 border-b border-line;
+    animation: query-row-enter 260ms var(--ease-out-expo) both;
+    animation-delay: calc(var(--row, 0) * 40ms);
+  }
+
+  .query-skeleton-head {
+    @apply min-h-7;
+  }
+
+  .query-skeleton-row > span {
+    @apply block h-2.5 shrink-0 rounded-sm;
+    background: linear-gradient(
+      90deg,
+      var(--tone-sunken) 0%,
+      color-mix(in srgb, var(--tone-line) 70%, var(--tone-sunken)) 50%,
+      var(--tone-sunken) 100%
+    );
+    background-size: 200% 100%;
+    animation: query-shimmer 1.4s linear infinite;
+  }
+
+  .query-skeleton-index {
+    width: 1rem;
+  }
+
+  .query-skeleton-row > .query-skeleton-media {
+    height: 3rem;
+    width: 5.5rem;
+  }
+
+  .query-skeleton-head > .query-skeleton-media {
+    height: 0.625rem;
+  }
+
+  .query-skeleton-cell {
+    width: calc(var(--w, 5) * 0.9rem);
+  }
+
+  @keyframes query-shimmer {
+    to {
+      background-position: -200% 0;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .query-table tbody tr,
+    .query-skeleton-row,
+    .query-skeleton-row > span,
+    .query-row-inspector {
+      animation: none;
+    }
+
+    .query-image-preview,
+    .query-table tbody td {
+      transition: none;
+    }
+  }
 }
 
-.query-table th,
-.query-table td {
-  max-width: 24rem;
-  overflow: hidden;
-  padding: 0.35rem 0.5rem;
-  border-right: 1px solid var(--tone-line);
-  border-bottom: 1px solid var(--tone-line);
-  text-align: left;
-  text-overflow: ellipsis;
-  vertical-align: middle;
-  white-space: nowrap;
-}
-
-.query-table th {
-  position: sticky;
-  top: 0;
-  z-index: 1;
-  color: var(--tone-ink-soft);
-  background: var(--tone-sunken);
-  font-family: var(--font-sans);
-  font-weight: 600;
-}
-
-.query-column-name,
-.query-column-type {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.query-column-name {
-  color: var(--tone-ink-soft);
-  line-height: 1rem;
-}
-
-.query-column-type {
-  color: var(--tone-ink-faint);
-  font-family: var(--font-mono);
-  font-size: 0.625rem;
-  font-weight: 400;
-  line-height: 0.875rem;
-}
-
-.query-table tbody tr:hover td {
-  background: var(--tone-hover);
-}
-
-.query-result-table-scroll {
-  min-height: 0;
-  flex: 1 1 auto;
-  overflow: auto;
-}
-
-.query-table .query-media-cell {
-  width: 8.5rem;
-  max-width: 8.5rem;
-  padding: 0.25rem;
-  overflow: hidden;
-  background: var(--tone-surface);
-  text-align: center;
-}
-
-.query-image-preview,
-.query-image-unavailable {
-  display: block;
-  width: 8rem;
-  height: 4.75rem;
-  border-radius: 3px;
-  background: var(--tone-camera);
-  object-fit: contain;
-}
-
-.query-image-unavailable {
-  display: grid;
-  place-items: center;
-  color: var(--tone-ink-faint);
-  background: var(--tone-sunken);
-  font-family: var(--font-sans);
-  font-size: 0.625rem;
-}
-
-.query-value-number {
-  text-align: right !important;
-  font-variant-numeric: tabular-nums;
-}
-
-.query-value-null {
-  color: var(--tone-ink-faint);
-  text-align: center !important;
-}
-
-.query-value-boolean {
-  color: var(--tone-ink-soft);
-}
 
 .settings-field-row {
   display: grid;
@@ -3303,3 +4055,93 @@
 /* Retained workspaces contribute to the shell grid only while selected. */
 .studio-workspace { display: contents; }
 .studio-workspace[hidden] { display: none; }
+
+/* dioxus-flow, spoken in this palette -------------------------------------
+   The graph library injects its own unlayered stylesheet, so these overrides
+   must be unlayered too or the library's entrance animation, grey edges, and
+   default handle sizes win however specific the selector. */
+.workflow-flow-wrap .dioxus-flow {
+  --df-bg: var(--tone-viewport);
+  --df-node-bg: var(--tone-surface);
+  --df-node-color: var(--tone-ink);
+  --df-node-border: var(--tone-line);
+  --df-accent: var(--tone-accent);
+  --df-edge: color-mix(in srgb, var(--tone-ink-faint) 72%, transparent);
+  --df-edge-selected: var(--tone-accent);
+  --df-edge-label: var(--tone-ink-faint);
+  --df-handle-bg: var(--tone-surface);
+  --df-handle-border: var(--tone-ink-faint);
+  --df-grid: color-mix(in srgb, var(--tone-ink-faint) 20%, transparent);
+  --df-panel-bg: var(--tone-surface);
+  --df-panel-border: var(--tone-line);
+  --df-panel-color: var(--tone-ink-soft);
+  --df-minimap-node: var(--tone-line);
+  --df-minimap-mask: var(--tone-selected);
+}
+
+/* The library's own entrance is replaced by the stage's staggered one. */
+.workflow-flow .df-node {
+  animation: none;
+  cursor: pointer;
+}
+
+.workflow-flow .df-node:focus-visible {
+  border-radius: 4px;
+  outline-width: 2px;
+  outline-offset: 2px;
+}
+
+.workflow-flow .df-edge {
+  animation: workflow-edge-enter 360ms cubic-bezier(0.16, 1, 0.3, 1) 180ms both;
+}
+
+.workflow-flow .df-edge-path {
+  stroke-width: 1.25;
+}
+
+/* While a run is admitted every edge carries the accent, moving with the data. */
+.workflow-flow .df-edge.df-animated .df-edge-path {
+  stroke: var(--tone-accent);
+  stroke-width: 1.5;
+  stroke-dasharray: 5 5;
+  animation-duration: 700ms;
+}
+
+.workflow-flow .df-edge.df-animated .df-edge-arrow {
+  fill: var(--tone-accent);
+}
+
+.workflow-flow .df-edge-label {
+  font-size: 10px;
+  stroke: var(--tone-viewport);
+}
+
+.workflow-flow .df-minimap {
+  right: 8px;
+  bottom: 8px;
+  border-radius: 4px;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.05);
+}
+
+.workflow-stage-card .df-handle {
+  width: 7px;
+  height: 7px;
+  border-width: 1px;
+  pointer-events: none;
+  cursor: default;
+  transition: border-color 120ms ease-out, background 120ms ease-out;
+}
+
+.workflow-stage-card:is(:hover, .is-selected) .df-handle {
+  border-color: var(--tone-accent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workflow-flow .df-edge {
+    animation: none;
+  }
+
+  .workflow-stage-card .df-handle {
+    transition: none;
+  }
+}

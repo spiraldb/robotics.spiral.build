@@ -6,6 +6,7 @@ use crate::components::interaction::{
 use dioxus::prelude::*;
 use spiral_robotics_common::relations::{QueryColumn, SpiralQuerySnapshot};
 
+mod cells;
 mod table;
 
 pub(crate) const DEFAULT_QUERY_ROWS: usize = 100;
@@ -247,12 +248,7 @@ impl QueryTabPresentation for u64 {
 fn QueryResultContent(model: QueryExecutionPresentation) -> Element {
     rsx! {
         match model.state() {
-            QueryState::Running => rsx! {
-                div { class: "flex flex-1 items-center justify-center p-6 text-[11px] text-ink-soft", role: "status",
-                    span { class: "mr-2 h-1.5 w-1.5 rounded-full bg-accent" }
-                    "Running query…"
-                }
-            },
+            QueryState::Running => rsx! { QueryResultSkeleton {} },
             QueryState::Failed(error) => rsx! {
                 div { class: "m-3 rounded bg-danger-soft px-3 py-2 text-[11px] text-danger", role: "alert",
                     strong { class: "block font-medium", "Query failed" }
@@ -270,6 +266,34 @@ fn QueryResultContent(model: QueryExecutionPresentation) -> Element {
             QueryState::Ready(result) => rsx! {
                 table::QueryResultTable { result: result.clone() }
             },
+        }
+    }
+}
+
+/// Rows are on their way. The table's own geometry stands in for them, so the
+/// panel does not collapse to a sentence and then jump when data lands.
+#[component]
+fn QueryResultSkeleton() -> Element {
+    const COLUMN_WIDTHS: [u8; 6] = [5, 9, 4, 6, 7, 5];
+    rsx! {
+        div { class: "query-skeleton", role: "status", "aria-live": "polite", "aria-busy": "true",
+            span { class: "sr-only", "Running query…" }
+            div { class: "query-skeleton-row query-skeleton-head", "aria-hidden": "true",
+                span { class: "query-skeleton-index" }
+                span { class: "query-skeleton-media" }
+                for (index, width) in COLUMN_WIDTHS.iter().enumerate() {
+                    span { key: "{index}", class: "query-skeleton-cell", style: "--w: {width}" }
+                }
+            }
+            for row in 0..7_u8 {
+                div { key: "{row}", class: "query-skeleton-row", style: "--row: {row}", "aria-hidden": "true",
+                    span { class: "query-skeleton-index" }
+                    span { class: "query-skeleton-media" }
+                    for (index, width) in COLUMN_WIDTHS.iter().enumerate() {
+                        span { key: "{index}", class: "query-skeleton-cell", style: "--w: {width.saturating_sub((row + index as u8) % 3)}" }
+                    }
+                }
+            }
         }
     }
 }
@@ -351,7 +375,7 @@ struct QueryCellContext<'a> {
     row_count: usize,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 struct QueryRowPosition {
     index: usize,
     count: usize,
