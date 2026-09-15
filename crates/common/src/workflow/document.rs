@@ -55,6 +55,9 @@ impl WorkflowDocument {
             }
             planned.plan.validate()?;
         }
+        if let Some(comparison) = self.workflow.comparison() {
+            comparison.validate()?;
+        }
         self.conversation.validate()
     }
 }
@@ -70,12 +73,14 @@ pub struct WorkflowSqlPlan {
 impl WorkflowSqlPlan {
     pub fn new(workflow: &WorkflowSpec, plan: WorkflowPlan) -> Self {
         Self {
-            sql: workflow.sql().to_owned(),
+            sql: workflow
+                .execution_sql()
+                .unwrap_or_else(|_| workflow.sql().to_owned()),
             plan,
         }
     }
     pub fn for_workflow(&self, workflow: &WorkflowSpec) -> Option<&WorkflowPlan> {
-        (self.sql == workflow.sql()).then_some(&self.plan)
+        (workflow.execution_sql().is_ok_and(|sql| self.sql == sql)).then_some(&self.plan)
     }
 }
 

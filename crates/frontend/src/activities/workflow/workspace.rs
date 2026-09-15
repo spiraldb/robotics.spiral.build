@@ -44,6 +44,15 @@ const STAGE_DETAILS_PANEL_ID: &str = "workflow-stage-details";
 #[component]
 fn WorkflowPanels(controller: super::state::WorkflowController) -> Element {
     let mut inspection = use_signal(|| None::<WorkflowInspection>);
+    let mut comparing = use_signal(|| false);
+    let mut displayed_workflow = use_signal(String::new);
+    use_effect(move || {
+        let spec = controller.spec();
+        if *displayed_workflow.peek() != spec.id() && controller.loaded() {
+            comparing.set(false);
+            displayed_workflow.set(spec.id().to_owned());
+        }
+    });
     // A stage asked for from outside the canvas: the overview list or the
     // stage strip. The graph selects and centres it, then clears the request.
     let focus_stage = use_signal(|| None::<String>);
@@ -114,7 +123,11 @@ fn WorkflowPanels(controller: super::state::WorkflowController) -> Element {
     rsx! {
         div { class: "workflow-workspace",
             super::document_controls::WorkflowDocumentControls { controller }
-            div { class: "workflow-panels",
+            nav { class: "workflow-view-switch", "aria-label": "Workflow view",
+                button { "aria-pressed": !comparing(), onclick: move |_| comparing.set(false), "Build" }
+                button { "aria-pressed": comparing(), onclick: move |_| comparing.set(true), "Compare" }
+            }
+            div { class: if comparing() { "workflow-panels workflow-mode-hidden" } else { "workflow-panels" },
                 PanelWorkspace {
                     panels,
                     initial_layout: WorkflowWorkspaceLayout::initial(),
@@ -122,6 +135,9 @@ fn WorkflowPanels(controller: super::state::WorkflowController) -> Element {
                     active_panel: controller.active_panel(),
                     on_panel_activate: move |id: PanelId| controller.activate_panel(id),
                 }
+            }
+            div { class: if comparing() { "workflow-comparison-container" } else { "workflow-comparison-container workflow-mode-hidden" },
+                super::comparison::WorkflowComparison { key: "{controller.spec().id()}", controller, on_author: move |_| { comparing.set(false); controller.activate_panel(ASSISTANT_PANEL_ID.into()); } }
             }
         }
     }
@@ -508,6 +524,7 @@ fn WorkflowSqlEditor(controller: super::state::WorkflowController) -> Element {
     // metrics; both grow with the text and scroll together in one surface.
     rsx! {
         section { class: "workflow-sql-editor", "aria-label": "SQL definition",
+            super::comparison::WorkflowOutputDefinition { controller }
             div { class: "workflow-sql-surface",
                 pre { class: "workflow-sql-highlight", "aria-hidden": "true",
                     SqlHighlight { sql: spec.sql().to_owned() }
@@ -606,7 +623,7 @@ fn WorkflowCanvas(
                         }
                         if let Some(report) = plan.report() {
                             super::plan_display::WorkflowPlanDisplay {
-                                key: "{spec.id()}:{spec.sql()}", report: report.clone(), active, focus_stage,
+                                key: "{spec.id()}:{spec.execution_sql().unwrap_or_default()}", report: report.clone(), active, focus_stage,
                                 on_select: move |details| on_inspect.call(WorkflowInspection::new(spec.clone(), details)),
                             }
                         }
@@ -642,7 +659,7 @@ struct WorkflowPlanInput(spiral_robotics_common::workflow::WorkflowSpec);
 
 impl PartialEq for WorkflowPlanInput {
     fn eq(&self, other: &Self) -> bool {
-        self.0.id() == other.0.id() && self.0.sql() == other.0.sql()
+        self.0.id() == other.0.id() && self.0.execution_sql() == other.0.execution_sql()
     }
 }
 
@@ -708,7 +725,7 @@ fn WorkflowResults(controller: super::state::WorkflowController) -> Element {
         ))
         && run_reason.is_none();
     let executed = controller.executed_query().unwrap_or_else(|| spec.clone());
-    let sql = executed.sql().to_owned();
+    let sql = executed.execution_sql().unwrap_or_else(|error| error);
     let max_rows = 100;
     let result_model = snapshot.result().cloned().map(|result| {
         QueryExecutionPresentation::new(sql.clone(), max_rows, QueryState::Ready(result))

@@ -20,7 +20,10 @@ impl WorkflowQuery {
         let mut connection = self.store.connect().await?;
         let connected = started.elapsed();
         let records = connection
-            .execute_query(format!("EXPLAIN (FORMAT JSON) {}", workflow.sql()))
+            .execute_query(format!(
+                "EXPLAIN (FORMAT JSON) {}",
+                workflow.execution_sql()?
+            ))
             .await?;
         let executed = started.elapsed();
         let result = records.into_preview_drained(1).await?;
@@ -51,7 +54,7 @@ impl WorkflowQuery {
         let started = Instant::now();
         let mut connection = self.store.connect().await?;
         let result = connection
-            .execute_query(workflow.sql())
+            .execute_query(workflow.execution_sql()?)
             .await?
             .into_preview_drained(100)
             .await?;

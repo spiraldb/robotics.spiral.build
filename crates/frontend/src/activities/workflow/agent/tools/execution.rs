@@ -8,7 +8,7 @@ impl WorkflowTool for RunWorkflow {
         "run_workflow"
     }
     fn description(&self) -> &'static str {
-        "Submit the current visible SQL once to Spiral, including native inference. Returns a run ID; use inspect_run to wait for results. Select a small evaluation in SQL before full-cohort work. Preview limits do not limit execution. Does not save."
+        "Submit the current workflow once to Spiral, including native inference and any configured selection/comparison output. Returns a run ID; use inspect_run to wait for results. Select a small evaluation in SQL before full-cohort work. Preview limits do not limit execution. Does not save."
     }
     fn parameters(&self) -> Value {
         json!({"type":"object","properties":{},"additionalProperties":false})
@@ -231,7 +231,7 @@ impl<'a> RunEvidence<'a> {
         let count_notice = result.filter(|result| result.truncated()).map(|result| format!(
             "Only {} preview rows are retained. The total matching row count and total matching episode count are unknown. Report this as a partial preview or compute SQL aggregates; never present preview_rows as the total. Visual inspection validates only the specifically inspected rows.", result.rows().len()
         ));
-        json!({"ok":!matches!(snapshot.phase(), WorkflowRunPhase::Failed | WorkflowRunPhase::Interrupted),"run_id":snapshot.run_id(),"workflow":self.0.workflow(),"phase":snapshot.phase(),"error":snapshot.error(),"started_ms":snapshot.started_ms(),"preview_rows":result.map(|result| result.rows().len()),"preview_truncated":result.map(|result| result.truncated()),"total_result_rows":total_rows,"result_notice":count_notice})
+        json!({"ok":!matches!(snapshot.phase(), WorkflowRunPhase::Failed | WorkflowRunPhase::Interrupted),"run_id":snapshot.run_id(),"workflow":self.0.workflow(),"executed_sql":self.0.workflow().execution_sql().ok(),"comparison_version":snapshot.comparison_version(),"phase":snapshot.phase(),"error":snapshot.error(),"started_ms":snapshot.started_ms(),"preview_rows":result.map(|result| result.rows().len()),"preview_truncated":result.map(|result| result.truncated()),"total_result_rows":total_rows,"result_notice":count_notice})
     }
     fn page(&self, offset: usize, limit: usize) -> Value {
         let mut output = self.summary();

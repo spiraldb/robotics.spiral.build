@@ -20,3 +20,6 @@ mod client;
 mod import_dataset;
 mod resource_tree;
 pub(crate) use client::DatasetClient;
+
+mod comparison_episode;
+pub(crate) use comparison_episode::ComparisonEpisodeInspector;

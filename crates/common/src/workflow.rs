@@ -1,5 +1,6 @@
 //! SQL workflow documents and independent query execution observations.
 pub mod camera;
+pub mod comparison;
 pub mod conversation;
 pub mod document;
 pub mod plan;
@@ -17,6 +18,8 @@ pub struct WorkflowSpec {
     name: String,
     revision: u64,
     sql: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    comparison: Option<comparison::EpisodeComparison>,
 }
 impl Default for WorkflowSpec {
     fn default() -> Self {
@@ -30,6 +33,7 @@ impl WorkflowSpec {
             name: name.into(),
             revision: 0,
             sql: String::new(),
+            comparison: None,
         }
     }
     pub fn with_sql(mut self, sql: impl Into<String>) -> Self {
@@ -61,6 +65,38 @@ impl WorkflowSpec {
     pub fn set_revision(&mut self, revision: u64) {
         self.revision = revision;
     }
+    pub fn comparison(&self) -> Option<&comparison::EpisodeComparison> {
+        self.comparison.as_ref()
+    }
+    pub fn set_comparison(&mut self, comparison: Option<comparison::EpisodeComparison>) {
+        self.comparison = comparison;
+    }
+    /// The complete query shown in the graph and submitted by every run path.
+    /// Comparison workflows publish bounded aggregates over the full population.
+    pub fn execution_sql(&self) -> Result<String, String> {
+        match self.comparison() {
+            Some(output) => output.summary_sql(self.sql()),
+            None => Ok(self.sql.clone()),
+        }
+    }
+    pub fn accepts_output_from(&self, executed: &Self) -> bool {
+        self.id == executed.id
+            && self.sql == executed.sql
+            && match (self.comparison(), executed.comparison()) {
+                (None, None) => true,
+                (Some(current), Some(previous)) => {
+                    current.dataset() == previous.dataset()
+                        && current.criterion() == previous.criterion()
+                        && current.metrics().iter().all(|metric| {
+                            previous
+                                .metrics()
+                                .iter()
+                                .any(|old| old.column() == metric.column())
+                        })
+                }
+                _ => false,
+            }
+    }
     pub fn validate(&self) -> WorkflowValidationReport {
         let mut report = WorkflowValidationReport::default();
         if let Err(error) = ReadOnlyQuery::new(&self.sql, ReadOnlyQueryMode::Workflow).authorize() {
@@ -68,6 +104,15 @@ impl WorkflowSpec {
                 "invalid_query",
                 &error.to_string(),
                 "Write one SELECT or WITH query.",
+            ));
+        }
+        if let Some(comparison) = self.comparison()
+            && let Err(error) = comparison.validate()
+        {
+            report.errors.push(WorkflowValidationIssue::new(
+                "invalid_output",
+                &error,
+                "Ask the Assistant to correct the comparison output.",
             ));
         }
         report
@@ -138,6 +183,8 @@ struct RunExecution {
     error: Option<String>,
     #[serde(default)]
     result_stale: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    comparison_version: Option<String>,
 }
 
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
@@ -225,6 +272,12 @@ impl WorkflowRunSnapshot {
     }
     pub fn set_result(&mut self, result: Option<SpiralQuerySnapshot>) {
         self.execution.result = result;
+    }
+    pub fn comparison_version(&self) -> Option<&str> {
+        self.execution.comparison_version.as_deref()
+    }
+    pub fn set_comparison_version(&mut self, version: Option<String>) {
+        self.execution.comparison_version = version;
     }
     pub fn set_error(&mut self, error: Option<String>) {
         self.execution.error = error;

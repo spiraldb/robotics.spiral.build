@@ -124,10 +124,10 @@ impl WorkflowController {
             return WorkflowRunSnapshot::idle_for(draft);
         };
         let mut snapshot = run.snapshot().clone();
-        snapshot.set_result_stale(run.workflow().sql() != draft.sql());
+        snapshot.set_result_stale(!draft.accepts_output_from(run.workflow()));
         snapshot
     }
-    fn visible_run(&self) -> Option<WorkflowRun> {
+    pub(super) fn visible_run(&self) -> Option<WorkflowRun> {
         let runs = self.workflow_runs();
         let selected = self.document.selected_run.read();
         selected
@@ -151,6 +151,18 @@ impl WorkflowController {
             .collect::<Vec<_>>();
         runs.sort_by_key(|run| run.snapshot().started_ms());
         runs
+    }
+    pub(super) fn latest_output(&self, workflow_id: &str) -> Option<WorkflowRun> {
+        self.document
+            .runs
+            .read()
+            .iter()
+            .filter(|run| {
+                run.workflow().id() == workflow_id
+                    && run.snapshot().phase() == WorkflowRunPhase::Completed
+            })
+            .max_by_key(|run| run.snapshot().started_ms())
+            .cloned()
     }
     pub(crate) fn select_run(mut self, id: String) {
         if self
@@ -268,7 +280,7 @@ impl WorkflowController {
         let mut draft = self.document.draft.write();
         draft.set_name(source.selection().label());
         draft.set_sql(format!(
-            "SELECT * FROM spql.mcap.episodes('{}')",
+            "SELECT id AS episode_id, * FROM spql.mcap.episodes('{}')",
             source.selection().sql_name().replace('\'', "''")
         ));
     }
@@ -302,7 +314,7 @@ impl WorkflowController {
 
     pub(super) fn remember_plan(mut self, workflow: &WorkflowSpec, plan: WorkflowPlan) {
         let current = self.spec();
-        if current.id() == workflow.id() && current.sql() == workflow.sql() {
+        if current.id() == workflow.id() && current.execution_sql() == workflow.execution_sql() {
             self.document
                 .planned_sql
                 .set(Some(WorkflowSqlPlan::new(workflow, plan)));
@@ -319,6 +331,13 @@ impl WorkflowController {
         let plan = WorkflowClient::current().plan(workflow).await?;
         self.remember_plan(workflow, plan.clone());
         Ok(plan)
+    }
+
+    pub(super) fn set_comparison(
+        mut self,
+        comparison: spiral_robotics_common::workflow::comparison::EpisodeComparison,
+    ) {
+        self.document.draft.write().set_comparison(Some(comparison));
     }
 
     pub(crate) fn set_name(mut self, name: String) {

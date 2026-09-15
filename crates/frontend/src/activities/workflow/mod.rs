@@ -12,3 +12,5 @@ mod plan_display;
 
 mod assistant_content;
 mod highlight;
+
+mod comparison;

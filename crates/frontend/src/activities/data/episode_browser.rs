@@ -174,6 +174,19 @@ pub(super) struct EpisodeContext {
     recording: DatasetEpisode,
 }
 impl EpisodeContext {
+    pub(super) fn from_comparison(
+        dataset: DatasetSelection,
+        mut row: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<Self, String> {
+        let id = row
+            .remove("episode_id")
+            .ok_or("Comparison evidence has no episode identity.")?;
+        row.insert("id".into(), id);
+        let recording = serde_json::from_value(serde_json::Value::Object(row))
+            .map_err(|error| format!("Reading episode identity: {error}"))?;
+        Ok(Self::new(dataset, (0, recording)))
+    }
+
     fn new(dataset: DatasetSelection, selected: (usize, DatasetEpisode)) -> Self {
         Self {
             dataset,
@@ -185,7 +198,11 @@ impl EpisodeContext {
         &self.dataset
     }
     pub(super) fn title(&self) -> String {
-        format!("Episode {}", self.ordinal)
+        if self.ordinal == 0 {
+            format!("Episode {}", self.recording.id)
+        } else {
+            format!("Episode {}", self.ordinal)
+        }
     }
     pub(super) fn selection(&self) -> spiral_robotics_common::datasets::EpisodeSelection {
         spiral_robotics_common::datasets::EpisodeSelection::new(
