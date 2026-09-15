@@ -1,108 +1,57 @@
-//! Backend bootstrap state and project-owned Studio preferences.
-//!
-//! The one local JSON document stores only the control-plane pointers needed to
-//! find Spiral before Spiral can be read. Project data and preferences remain
-//! in Spiral; this file is never a mirror, spool, or fallback data store.
+//! Backend connection settings and project-owned Studio preferences in SQLite.
+//! The former private JSON settings file is read once when upgrading an empty
+//! SQLite database; subsequent starts read SQLite exclusively.
 
 use std::fs;
-use std::io::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 
-use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray};
-use arrow_schema::{DataType, Field, Schema};
 use serde::{Deserialize, Serialize};
-use serde_json::Value as JsonValue;
+
 use spiral_robotics_common::settings::{DEFAULT_SPIRAL_ENDPOINT, DEFAULT_SPIRAL_SPFS_ENDPOINT};
 use url::Url;
 
-use crate::db::{ManagedRelationSchema, Table, column as db};
-use crate::db::{ProjectStore, StorageClock};
-
 const BACKEND_STATE_FILE: &str = "backend-state.json";
-
-/// Studio preference relations contributed to project bundles.
-pub(crate) struct StudioPreferenceBundleSection;
-
-impl ManagedRelationSchema for StudioPreferenceBundleSection {
-    fn relations(&self) -> &'static [Table] {
-        &[Table::StudioSettings]
-    }
-
-    fn managed_relation_schema(&self, table: Table) -> Option<Schema> {
-        (table == Table::StudioSettings).then(|| {
-            Schema::new(vec![
-                Field::new(db::KEY, DataType::Utf8, false),
-                Field::new(db::VALUE_JSON, DataType::Utf8, false),
-                Field::new(db::UPDATED_MS, DataType::Int64, false),
-            ])
-        })
-    }
-}
 
 /// Project-owned Studio preference persistence.
 pub(crate) struct StudioPreferencePersistence<'a> {
-    project_store: &'a ProjectStore,
+    project_store: &'a crate::StudioProject,
 }
 
 impl<'a> StudioPreferencePersistence<'a> {
-    pub(crate) const fn new(project_store: &'a ProjectStore) -> Self {
+    pub(crate) const fn new(project_store: &'a crate::StudioProject) -> Self {
         Self { project_store }
     }
 
     pub(crate) async fn load(&self) -> Result<StoredStudioPreferences, String> {
-        if !self.project_store.is_configured() {
-            return Ok(StoredStudioPreferences::default());
-        }
-        let relation = Table::StudioSettings.qualified_name(self.project_store.table_prefix());
-        let mut connection = self.project_store.connect().await?;
-        let result = connection
-            .query_rows(
-                &format!(
-                    "SELECT {} FROM {relation} WHERE {} = 'preferences' ORDER BY {} DESC LIMIT 1",
-                    db::VALUE_JSON,
-                    db::KEY,
-                    db::UPDATED_MS,
-                ),
-                1,
-            )
-            .await?;
-        let Some(value) = result
-            .rows()
-            .first()
-            .and_then(|row| row.get(db::VALUE_JSON))
-            .and_then(JsonValue::as_str)
-        else {
-            return Ok(StoredStudioPreferences::default());
-        };
-        serde_json::from_str(value).map_err(|error| format!("decoding Studio preferences: {error}"))
+        use crate::studio::studio_settings;
+        use sea_orm::EntityTrait;
+        let row = studio_settings::Entity::find_by_id(self.project_store.key().to_owned())
+            .one(self.project_store.connection().await?)
+            .await
+            .map_err(|error| error.to_string())?;
+        row.map(|row| serde_json::from_value(row.document).map_err(|error| error.to_string()))
+            .transpose()
+            .map(Option::unwrap_or_default)
     }
 
     pub(crate) async fn save(&self, preferences: &StoredStudioPreferences) -> Result<(), String> {
-        let relation = Table::StudioSettings.qualified_name(self.project_store.table_prefix());
-        let json = serde_json::to_string(preferences)
-            .map_err(|error| format!("encoding Studio preferences: {error}"))?;
-        let mut connection = self.project_store.connect().await?;
-        connection
-            .execute_update_sql(&format!(
-                "DELETE FROM {relation} WHERE {} = 'preferences'",
-                db::KEY
-            ))
-            .await?;
-        let schema = StudioPreferenceBundleSection
-            .managed_relation_schema(Table::StudioSettings)
-            .expect("the settings section owns Studio settings");
-        let batch = RecordBatch::try_new(
-            schema.into(),
-            vec![
-                std::sync::Arc::new(StringArray::from(vec!["preferences"])) as ArrayRef,
-                std::sync::Arc::new(StringArray::from(vec![json])) as ArrayRef,
-                std::sync::Arc::new(Int64Array::from(vec![StorageClock::unix_millis()]))
-                    as ArrayRef,
-            ],
-        )
-        .map_err(|error| format!("building Studio preferences batch: {error}"))?;
-        connection.ingest_batch(&relation, batch).await
+        use crate::studio::studio_settings;
+        use sea_orm::{EntityTrait, Set};
+        let row = studio_settings::ActiveModel {
+            project: Set(self.project_store.key().to_owned()),
+            document: Set(serde_json::to_value(preferences).map_err(|error| error.to_string())?),
+        };
+        studio_settings::Entity::insert(row)
+            .on_conflict(
+                sea_orm::sea_query::OnConflict::column(studio_settings::Column::Project)
+                    .update_column(studio_settings::Column::Document)
+                    .to_owned(),
+            )
+            .exec(self.project_store.connection().await?)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(())
     }
 }
 
@@ -276,10 +225,10 @@ impl ServiceEndpoint {
     }
 }
 
-/// Private backend-local bootstrap state. Future auth/session metadata may
-/// live here, but durable product records must not.
+/// Private connection settings persisted alongside project-owned Studio records.
 pub struct BackendStateStore {
-    path: PathBuf,
+    studio: crate::StudioStore,
+    legacy_path: PathBuf,
     current: Mutex<BackendState>,
 }
 
@@ -295,28 +244,47 @@ impl BackendStateStore {
                         "could not determine the backend configuration directory".to_owned()
                     })
             })?;
-        Self::open(path)
+        Ok(Self::new(crate::StudioStore::open_default()?, path))
     }
 
-    /// Isolated bootstrap state for integration tests, without process-global environment changes.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn open_for_test(path: PathBuf) -> Result<Self, String> {
-        Self::open(path)
+    pub fn new(studio: crate::StudioStore, legacy_path: PathBuf) -> Self {
+        Self {
+            studio,
+            legacy_path,
+            current: Mutex::new(BackendState::default()),
+        }
     }
 
-    fn open(path: PathBuf) -> Result<Self, String> {
-        let current = if path.exists() {
-            let bytes =
-                fs::read(&path).map_err(|error| format!("reading {}: {error}", path.display()))?;
-            serde_json::from_slice(&bytes)
-                .map_err(|error| format!("parsing {}: {error}", path.display()))?
-        } else {
-            BackendState::default()
+    pub fn studio(&self) -> &crate::StudioStore {
+        &self.studio
+    }
+
+    pub async fn initialize(&self) -> Result<(), String> {
+        self.studio.initialize().await?;
+        let current = match self.studio.backend_settings().await? {
+            Some(document) => {
+                serde_json::from_value(document).map_err(|error| error.to_string())?
+            }
+            None => {
+                let current: BackendState = if self.legacy_path.exists() {
+                    let bytes = fs::read(&self.legacy_path).map_err(|error| {
+                        format!("reading {}: {error}", self.legacy_path.display())
+                    })?;
+                    serde_json::from_slice(&bytes)
+                        .map_err(|error| format!("parsing legacy backend settings: {error}"))?
+                } else {
+                    BackendState::default()
+                };
+                self.studio
+                    .save_backend_settings(
+                        serde_json::to_value(&current).map_err(|error| error.to_string())?,
+                    )
+                    .await?;
+                current
+            }
         };
-        Ok(Self {
-            path,
-            current: Mutex::new(current),
-        })
+        *self.current.lock_unpoisoned() = current;
+        Ok(())
     }
 
     pub fn project_id(&self) -> Option<String> {
@@ -356,7 +324,7 @@ impl BackendStateStore {
         self.current.lock_unpoisoned().huggingface_token.clone()
     }
 
-    pub fn save_connection(&self, settings: &SpiralConnectionSettings) -> Result<(), String> {
+    pub async fn save_connection(&self, settings: &SpiralConnectionSettings) -> Result<(), String> {
         let project_id = settings.project_id().ok_or_else(|| {
             "Spiral project is not configured. Choose a project in Settings → SpiralDB.".to_owned()
         })?;
@@ -374,7 +342,9 @@ impl BackendStateStore {
                 .map(|credentials| credentials.client_secret().to_owned())
                 .unwrap_or_default(),
         };
-        next.write_private(&self.path)?;
+        self.studio
+            .save_backend_settings(serde_json::to_value(&next).map_err(|error| error.to_string())?)
+            .await?;
         *self.current.lock_unpoisoned() = next;
         Ok(())
     }
@@ -496,57 +466,18 @@ impl<T> UnpoisonedMutex<T> for Mutex<T> {
     }
 }
 
-impl BackendState {
-    fn write_private(&self, path: &Path) -> Result<(), String> {
-        let parent = path
-            .parent()
-            .ok_or_else(|| format!("backend state path {} has no parent", path.display()))?;
-        let mut directory = fs::DirBuilder::new();
-        directory.recursive(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt as _;
-            directory.mode(0o700);
-        }
-        directory
-            .create(parent)
-            .map_err(|error| format!("creating {}: {error}", parent.display()))?;
-
-        let temporary = path.with_extension("json.tmp");
-        let bytes = serde_json::to_vec_pretty(self)
-            .map_err(|error| format!("encoding backend state: {error}"))?;
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o600);
-        }
-        let mut file = options
-            .open(&temporary)
-            .map_err(|error| format!("opening {}: {error}", temporary.display()))?;
-        file.write_all(&bytes)
-            .and_then(|()| file.write_all(b"\n"))
-            .and_then(|()| file.sync_all())
-            .map_err(|error| format!("writing {}: {error}", temporary.display()))?;
-        fs::rename(&temporary, path)
-            .map_err(|error| format!("publishing {}: {error}", path.display()))?;
-        fs::File::open(parent)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|error| format!("syncing {}: {error}", parent.display()))?;
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn backend_state_round_trips_only_the_spiral_bootstrap_pointers() {
+    #[tokio::test]
+    async fn backend_state_round_trips_only_the_spiral_bootstrap_pointers() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join(BACKEND_STATE_FILE);
-        let store = BackendStateStore::open(path.clone()).unwrap();
+        let store = BackendStateStore::new(
+            crate::StudioStore::at(path.with_extension("sqlite3")),
+            path.clone(),
+        );
         assert_eq!(store.project_id(), None);
         assert_eq!(store.spiral_endpoint(), None);
         assert_eq!(store.spiral_spfs_endpoint(), None);
@@ -563,7 +494,7 @@ mod tests {
         .unwrap()
         .with_credentials(Some(credentials.clone()))
         .with_huggingface_token(Some("hf_private".into()));
-        store.save_connection(&settings).unwrap();
+        store.save_connection(&settings).await.unwrap();
         assert_eq!(store.project_id().as_deref(), Some("project-123"));
         assert_eq!(
             store.spiral_endpoint().as_deref(),
@@ -576,7 +507,11 @@ mod tests {
         let saved = store.credentials().expect("credentials are saved");
         assert_eq!(saved.client_id(), credentials.client_id());
         assert_eq!(saved.client_secret(), credentials.client_secret());
-        let reopened = BackendStateStore::open(path.clone()).unwrap();
+        let reopened = BackendStateStore::new(
+            crate::StudioStore::at(path.with_extension("sqlite3")),
+            path.clone(),
+        );
+        reopened.initialize().await.unwrap();
         assert_eq!(reopened.project_id().as_deref(), Some("project-123"));
         assert_eq!(
             reopened.spiral_endpoint().as_deref(),
@@ -594,19 +529,22 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt as _;
             assert_eq!(
-                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                fs::metadata(store.studio().path().unwrap())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
                 0o600
             );
         }
         reopened
             .save_connection(&settings.with_huggingface_token(None))
+            .await
             .unwrap();
-        assert!(
-            BackendStateStore::open(path)
-                .unwrap()
-                .huggingface_token()
-                .is_none()
-        );
+        let reopened =
+            BackendStateStore::new(crate::StudioStore::at(path.with_extension("sqlite3")), path);
+        reopened.initialize().await.unwrap();
+        assert!(reopened.huggingface_token().is_none());
     }
 
     #[test]
@@ -618,13 +556,15 @@ mod tests {
         assert!(ServiceEndpoint::spiral_spfs("https://user:secret@example.com").is_err());
     }
 
-    #[test]
-    fn project_only_backend_state_remains_readable() {
+    #[tokio::test]
+    async fn project_only_backend_state_remains_readable() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join(BACKEND_STATE_FILE);
         fs::write(&path, br#"{"project_id":"legacy-project"}"#).unwrap();
 
-        let store = BackendStateStore::open(path).unwrap();
+        let store =
+            BackendStateStore::new(crate::StudioStore::at(path.with_extension("sqlite3")), path);
+        store.initialize().await.unwrap();
         assert_eq!(store.project_id().as_deref(), Some("legacy-project"));
         assert_eq!(store.spiral_endpoint(), None);
         assert_eq!(store.spiral_spfs_endpoint(), None);

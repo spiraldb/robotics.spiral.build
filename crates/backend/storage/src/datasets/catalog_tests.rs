@@ -13,25 +13,33 @@ use super::*;
 use crate::{AdbcDatabase, ProjectStore};
 
 #[test]
-fn studio_grouping_respects_configured_tables_and_keeps_user_data_visible() {
-    let grouping = StudioCatalogGrouping::new("bench");
-    for (path, kind, expected) in [
-        (vec!["bench_robots"], "table", true),
-        (vec!["bench_settings"], "table", true),
-        (vec!["dataset_source"], "table", true),
-        (vec!["dataset_source_default"], "view", true),
-        (vec!["dataset_default"], "dataset", false),
-        (vec!["bench_experiment"], "table", false),
-        (vec!["studio_robots"], "table", false),
-        (vec!["dataset_source_custom"], "dataset", false),
-        (vec!["user", "bench_robots"], "table", false),
+fn control_tables_are_excluded_without_hiding_data_plane_relations() {
+    let settings = crate::SpiralConnectionSettings::new(
+        "http://localhost:1".into(),
+        "http://localhost:2".into(),
+    )
+    .unwrap();
+    let store = ProjectStore::new(
+        settings.clone(),
+        "bench".into(),
+        Arc::new(AdbcDatabase::new(settings)),
+    )
+    .unwrap();
+    for (path, hidden) in [
+        (vec!["bench_robots"], true),
+        (vec!["bench_settings"], true),
+        (vec!["dataset_source"], false),
+        (vec!["dataset_source_default"], false),
+        (vec!["bench_training_checkpoints"], false),
+        (vec!["bench_experiment"], false),
+        (vec!["user", "bench_robots"], false),
     ] {
-        let resource = ProjectResource::new(
-            DatasetSelection::new(path.iter().map(|name| (*name).into()).collect()).unwrap(),
-            kind.into(),
-            ("resource".into(), "version".into()),
+        assert_eq!(
+            store.is_studio_control_relation(
+                &path.into_iter().map(str::to_owned).collect::<Vec<_>>()
+            ),
+            hidden
         );
-        assert_eq!(grouping.contains(&resource), expected, "{path:?}");
     }
 }
 

@@ -7,7 +7,6 @@ use std::error::Error;
 use std::fmt;
 
 use serde_json::{Map, Number, Value};
-use spiral_robotics_common::robots::strict_json::StrictValue;
 use spiral_robotics_hardware::{MotorDirection, MotorSpec};
 
 /// The newest robot-configuration schema understood by this crate.
@@ -93,17 +92,6 @@ impl Default for RobotConfig {
 }
 
 impl RobotConfig {
-    /// Parse an in-memory document while rejecting duplicate object keys at any
-    /// depth before a generic JSON value could silently overwrite one.
-    pub(crate) fn from_slice(bytes: &[u8]) -> Result<Self, ConfigError> {
-        let value =
-            serde_json::from_slice::<StrictValue>(bytes).map_err(|source| ConfigError::Json {
-                context: "in imported robot configuration".to_owned(),
-                source,
-            })?;
-        Self::from_value(value.into_value())
-    }
-
     /// Construct a document from an in-memory JSON value.
     pub(crate) fn from_value(value: Value) -> Result<Self, ConfigError> {
         let Value::Object(mut root) = value else {
@@ -349,15 +337,14 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_document_encodings() {
+    fn rejects_invalid_document_shapes_and_versions() {
         for document in [
-            "not json",
-            "[]",
-            r#"{"schema_version":0}"#,
-            r#"{"schema_version":1.5}"#,
-            r#"{"schema_version":2,"keep":"me"}"#,
+            json!([]),
+            json!({"schema_version":0}),
+            json!({"schema_version":1.5}),
+            json!({"schema_version":2,"keep":"me"}),
         ] {
-            assert!(RobotConfig::from_slice(document.as_bytes()).is_err());
+            assert!(RobotConfig::from_value(document).is_err());
         }
     }
 
@@ -408,17 +395,6 @@ mod tests {
         }))
         .unwrap();
         assert!(extended.motor_specs().unwrap().is_some());
-    }
-
-    #[test]
-    fn raw_parser_rejects_duplicate_keys_before_values_can_overwrite_them() {
-        for invalid in [
-            br#"{"schema_version":1,"schema_version":1}"#.as_slice(),
-            br#"{"motors":{"joint":{"id":1,"id":2}}}"#.as_slice(),
-            br#"{"calibration":{"motors":{"joint":{"id":1},"joint":{"id":2}}}}"#.as_slice(),
-        ] {
-            assert!(RobotConfig::from_slice(invalid).is_err());
-        }
     }
 
     #[test]

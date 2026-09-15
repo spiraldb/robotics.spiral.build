@@ -1,27 +1,20 @@
-//! Robot configuration project_store backed directly by SpiralDB.
+//! Robot configuration and validation backed by the local Studio database.
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::Arc;
-
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::OperationError;
-use arrow_array::{LargeStringArray, StringArray, StringViewArray};
-use futures::{StreamExt as _, TryStreamExt as _};
+
 use serde_json::{Map, Value};
 use spiral_robotics_common::robots::{
     CameraBinding, ConnectionStatus, MotorLimits, MotorSummary, PortSettings, RobotSummary,
 };
 use spiral_robotics_hardware::{Calibration, MotorSpec};
-use spiral_robotics_storage::{
-    ProjectStore, ROBOT_CONFIGURATION_COLUMN, ROBOT_IDENTIFIER_COLUMN, StorageSchema,
-};
+use spiral_robotics_storage::{RobotDocumentWrite, StudioProject};
 
 use super::calibration::CalibrationUpdate;
 use super::calibration_codec;
 use super::robot_config::{ConfigError, RobotConfig, RobotConfigUpdate};
-use spiral_robotics_storage::SpiralSql;
 
 pub(crate) const DEFAULT_BAUD_RATE: u32 = 1_000_000;
 const MAX_ROBOT_ID_LENGTH: usize = 64;
@@ -288,11 +281,11 @@ impl RobotRecord {
 }
 
 pub(crate) struct RobotWorkspace {
-    project_store: Arc<ProjectStore>,
+    project_store: StudioProject,
 }
 
 impl RobotWorkspace {
-    pub(crate) fn new(project_store: Arc<ProjectStore>) -> Self {
+    pub(crate) fn new(project_store: StudioProject) -> Self {
         Self { project_store }
     }
 
@@ -305,11 +298,16 @@ impl RobotWorkspace {
 
     pub(crate) async fn get(&self, id: &str) -> Result<RobotRecord, WorkspaceError> {
         let id = RobotId::try_from(id)?;
-        self.try_list()
-            .await?
-            .into_iter()
-            .find(|record| record.id == id.as_str())
-            .ok_or(WorkspaceError::NotFound(id.0))
+        let document = self
+            .project_store
+            .robot_document(id.as_str())
+            .await
+            .map_err(WorkspaceError::Invalid)?
+            .ok_or_else(|| WorkspaceError::NotFound(id.0.clone()))?;
+        Ok(RobotRecord {
+            id: id.0,
+            config: RobotConfig::from_value(document)?,
+        })
     }
 
     pub(crate) async fn save_document(
@@ -368,66 +366,32 @@ impl RobotWorkspace {
     }
 
     pub(crate) async fn delete(&self, id: &str) -> Result<(), WorkspaceError> {
-        self.get(id).await?;
-        let relation =
-            StorageSchema::robot_configuration_relation(self.project_store.table_prefix());
-        let id = SpiralSql::string_literal(id);
-        let mut connection = self
+        let id = RobotId::try_from(id)?;
+        if self
             .project_store
-            .connect_exclusive()
+            .delete_robot_document(id.as_str())
             .await
-            .map_err(WorkspaceError::Invalid)?;
-        connection
-            .execute_update_sql(&format!(
-                "DELETE FROM {relation} WHERE {ROBOT_IDENTIFIER_COLUMN} = {id}"
-            ))
-            .await
-            .map_err(WorkspaceError::Invalid)?;
-        Ok(())
+            .map_err(WorkspaceError::Invalid)?
+        {
+            Ok(())
+        } else {
+            Err(WorkspaceError::NotFound(id.0))
+        }
     }
 
     pub(crate) async fn try_list(&self) -> Result<Vec<RobotRecord>, WorkspaceError> {
-        let relation =
-            StorageSchema::robot_configuration_relation(self.project_store.table_prefix());
-        let mut connection = self
-            .project_store
-            .connect()
+        self.project_store
+            .robot_documents()
             .await
-            .map_err(WorkspaceError::Invalid)?;
-        let mut records_stream = connection
-            .execute_query(format!(
-                "SELECT {}, {} FROM {relation} ORDER BY {}",
-                ROBOT_IDENTIFIER_COLUMN, ROBOT_CONFIGURATION_COLUMN, ROBOT_IDENTIFIER_COLUMN
-            ))
-            .await
-            .map_err(WorkspaceError::Invalid)?;
-        let mut records = Vec::new();
-        while let Some(batch) = records_stream.next().await {
-            let batch = batch.map_err(|error| WorkspaceError::Invalid(error.to_string()))?;
-            let ids = batch
-                .column_by_name(ROBOT_IDENTIFIER_COLUMN)
-                .ok_or_else(|| {
-                    WorkspaceError::Invalid("robots result has no robot_id".to_owned())
-                })?;
-            let configs = batch
-                .column_by_name(ROBOT_CONFIGURATION_COLUMN)
-                .ok_or_else(|| {
-                    WorkspaceError::Invalid("robots result has no config_json".to_owned())
-                })?;
-            for row in 0..batch.num_rows() {
-                let id = ids.as_ref().text_at(row).map_err(WorkspaceError::Invalid)?;
-                let config = RobotConfig::from_slice(
-                    configs
-                        .as_ref()
-                        .text_at(row)
-                        .map_err(WorkspaceError::Invalid)?
-                        .as_bytes(),
-                )
-                .map_err(|error| WorkspaceError::Invalid(error.to_string()))?;
-                records.push(RobotRecord { id, config });
-            }
-        }
-        Ok(records)
+            .map_err(WorkspaceError::Invalid)?
+            .into_iter()
+            .map(|(id, document)| {
+                Ok(RobotRecord {
+                    id,
+                    config: RobotConfig::from_value(document)?,
+                })
+            })
+            .collect()
     }
 
     async fn persist(
@@ -435,96 +399,26 @@ impl RobotWorkspace {
         record: RobotRecord,
         expected: Option<&RobotConfig>,
     ) -> Result<RobotRecord, WorkspaceError> {
-        let relation =
-            StorageSchema::robot_configuration_relation(self.project_store.table_prefix());
-        let id_sql = SpiralSql::string_literal(&record.id);
-        let batch = StorageSchema::robot_configuration_batch(
-            record.id.clone(),
-            record.config.to_pretty_json()?,
-            SystemTime::now().unix_millis(),
-        )
-        .map_err(WorkspaceError::Invalid)?;
-        let mut connection = self
+        let document = serde_json::from_str(&record.config.to_pretty_json()?)
+            .map_err(|error| WorkspaceError::Invalid(error.to_string()))?;
+        let expected = expected
+            .map(RobotConfig::to_pretty_json)
+            .transpose()?
+            .map(|json| serde_json::from_str(&json))
+            .transpose()
+            .map_err(|error| WorkspaceError::Invalid(error.to_string()))?;
+        let write = RobotDocumentWrite::new(record.id.clone(), document, expected);
+        if !self
             .project_store
-            .connect_exclusive()
+            .save_robot_document(write)
             .await
-            .map_err(WorkspaceError::Invalid)?;
-        connection
-            .begin_transaction()
-            .await
-            .map_err(WorkspaceError::Invalid)?;
-        let result = async {
-            let sql = format!(
-                "SELECT {ROBOT_CONFIGURATION_COLUMN} FROM {relation} WHERE {ROBOT_IDENTIFIER_COLUMN} = {id_sql}"
-            );
-            let batches = connection.execute_query(sql).await
-                .map_err(WorkspaceError::Invalid)?
-                .try_collect::<Vec<_>>().await
-                .map_err(|error| WorkspaceError::Invalid(error.to_string()))?;
-            let mut saved = None;
-            for batch in batches {
-                for row in 0..batch.num_rows() {
-                    if saved.is_some() {
-                        return Err(WorkspaceError::Invalid("Duplicate robot identity".into()));
-                    }
-                    let json = batch.column(0).as_ref().text_at(row)
-                        .map_err(WorkspaceError::Invalid)?;
-                    saved = Some(RobotConfig::from_slice(json.as_bytes())?);
-                }
-            }
-            if saved.as_ref() != expected {
-                return Err(WorkspaceError::Conflict(
-                    "Robot configuration changed; reload it before saving".into(),
-                ));
-            }
-            let delete = format!("DELETE FROM {relation} WHERE {ROBOT_IDENTIFIER_COLUMN} = {id_sql}");
-            connection.execute_update_sql(&delete).await.map_err(WorkspaceError::Invalid)?;
-            connection.ingest_batch(&relation, batch).await.map_err(WorkspaceError::Invalid)?;
-            Ok(())
-        }.await;
-        if let Err(error) = result {
-            connection
-                .rollback()
-                .await
-                .map_err(WorkspaceError::Invalid)?;
-            return Err(error);
+            .map_err(WorkspaceError::Invalid)?
+        {
+            return Err(WorkspaceError::Conflict(
+                "Robot configuration changed; reload it before saving".into(),
+            ));
         }
-        connection.commit().await.map_err(WorkspaceError::Invalid)?;
         Ok(record)
-    }
-}
-
-trait ArrowTextValue {
-    fn text_at(&self, row: usize) -> Result<String, String>;
-}
-
-impl ArrowTextValue for dyn arrow_array::Array {
-    fn text_at(&self, row: usize) -> Result<String, String> {
-        if self.is_null(row) {
-            return Err("unexpected null text value".to_owned());
-        }
-        if let Some(array) = self.as_any().downcast_ref::<StringArray>() {
-            return Ok(array.value(row).to_owned());
-        }
-        if let Some(array) = self.as_any().downcast_ref::<StringViewArray>() {
-            return Ok(array.value(row).to_owned());
-        }
-        if let Some(array) = self.as_any().downcast_ref::<LargeStringArray>() {
-            return Ok(array.value(row).to_owned());
-        }
-        Err(format!("expected UTF-8 text, got {}", self.data_type()))
-    }
-}
-
-trait UnixMillis {
-    fn unix_millis(self) -> i64;
-}
-
-impl UnixMillis for SystemTime {
-    fn unix_millis(self) -> i64 {
-        self.duration_since(UNIX_EPOCH)
-            .map(|value| value.as_millis().min(i64::MAX as u128) as i64)
-            .unwrap_or(0)
     }
 }
 

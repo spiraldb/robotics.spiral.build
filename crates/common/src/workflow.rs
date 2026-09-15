@@ -5,15 +5,10 @@ pub mod document;
 pub mod plan;
 
 use crate::relations::SpiralQuerySnapshot;
-use crate::sql::{ReadOnlyQuery, ReadOnlyQueryMode, UnquotedSqlIdentifier};
+use crate::sql::{ReadOnlyQuery, ReadOnlyQueryMode};
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_WORKFLOW_ID: &str = "default";
-const MAX_WORKFLOW_FEATURE_NAME_LENGTH: usize = 96;
-pub const MAX_WORKFLOW_FEATURE_DESCRIPTION_LENGTH: usize = 240;
-pub const MAX_WORKFLOW_FEATURE_STREAMS: usize = 8;
-pub const MAX_SIGLIP_CONCEPT_LENGTH: usize = 80;
-
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -77,116 +72,6 @@ impl WorkflowSpec {
         }
         report
     }
-}
-
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct WorkflowFeatureDefinition {
-    name: String,
-    description: String,
-    concept: String,
-    applicability: WorkflowFeatureApplicability,
-}
-
-impl WorkflowFeatureDefinition {
-    pub fn new(
-        name: impl Into<String>,
-        description: impl Into<String>,
-        concept: impl Into<String>,
-    ) -> Self {
-        Self {
-            name: name.into(),
-            description: description.into(),
-            concept: concept.into(),
-            applicability: WorkflowFeatureApplicability {
-                source_relation: String::new(),
-                media_field: String::new(),
-                stream_ids: Vec::new(),
-            },
-        }
-    }
-
-    pub fn with_applicability(mut self, applicability: WorkflowFeatureApplicability) -> Self {
-        self.applicability = applicability;
-        self
-    }
-
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-    pub fn description(&self) -> &str {
-        &self.description
-    }
-    pub fn concept(&self) -> &str {
-        &self.concept
-    }
-    pub const fn applicability(&self) -> &WorkflowFeatureApplicability {
-        &self.applicability
-    }
-    pub fn set_name(&mut self, name: impl Into<String>) {
-        self.name = name.into();
-    }
-    pub fn set_description(&mut self, description: impl Into<String>) {
-        self.description = description.into();
-    }
-    pub fn set_concept(&mut self, concept: impl Into<String>) {
-        self.concept = concept.into();
-    }
-    pub fn set_source_relation(&mut self, relation: impl Into<String>) {
-        self.applicability.source_relation = relation.into();
-    }
-    pub fn set_media_field(&mut self, field: impl Into<String>) {
-        self.applicability.media_field = field.into();
-    }
-    pub fn set_stream_ids(&mut self, stream_ids: Vec<String>) {
-        self.applicability.stream_ids = stream_ids;
-    }
-    /// Whether this feature's output column has a safe, descriptive name.
-    pub fn has_valid_name(&self) -> bool {
-        UnquotedSqlIdentifier::try_from(self.name.as_str()).is_ok()
-            && self.name.ends_with("_feature")
-            && self.name.len() <= MAX_WORKFLOW_FEATURE_NAME_LENGTH
-    }
-}
-
-impl WorkflowFeatureApplicability {
-    /// Derive the unqualified server-owned feature cache name component.
-    pub fn derived_cache_name(source_relation: &str) -> String {
-        format!(
-            "features_{}",
-            crate::identity::SqlNameComponent::from(source_relation).as_str()
-        )
-    }
-
-    pub fn new(source_relation: impl Into<String>, media_field: impl Into<String>) -> Self {
-        Self {
-            source_relation: source_relation.into(),
-            media_field: media_field.into(),
-            stream_ids: Vec::new(),
-        }
-    }
-    pub fn with_stream_ids(mut self, stream_ids: Vec<String>) -> Self {
-        self.stream_ids = stream_ids;
-        self
-    }
-    pub fn source_relation(&self) -> &str {
-        &self.source_relation
-    }
-    pub fn media_field(&self) -> &str {
-        &self.media_field
-    }
-    pub fn stream_ids(&self) -> &[String] {
-        &self.stream_ids
-    }
-}
-
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct WorkflowFeatureApplicability {
-    source_relation: String,
-    media_field: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    stream_ids: Vec<String>,
 }
 
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]

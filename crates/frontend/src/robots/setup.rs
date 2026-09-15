@@ -28,7 +28,7 @@ impl RobotSetupState {
         let request = QueryPolicy::new(QueryDomain::RobotSetup, 2_000).use_when(
             move || active() && sessions.connected(),
             move || {
-                let available = sessions.catalog_available();
+                let available = sessions.studio_available();
                 async move { RobotSetupSnapshot::load(available).await }
             },
         );

@@ -1,4 +1,8 @@
-# Async database boundary
+# Spiral data-plane database boundary
+
+Studio control-plane records use [local SQLite with SeaORM](studio-sqlite.md).
+The ADBC boundary described below serves datasets, queries, ingestion, and model
+artifacts. Historical driver validations below describe their original scope.
 
 Storage features depend on `Database`, `DatabaseSession`,
 `DatabaseConnection`, and `DatabaseTransaction`. `ProjectStore` receives an
@@ -263,13 +267,13 @@ cargo test -p spiral-robotics-storage dropped_transaction_waits_for_result_befor
 
 ## Startup and schema checks
 
-Resuming the saved project publishes readiness without database I/O. It does
-not inspect the nine managed schemas or load preferences, robots, or rollout
-state. First-time project selection, project changes, and Settings → SpiralDB →
-Test connection still provision and validate managed relations before publishing
-the destination. A CLI/environment project override that differs from the saved
-project also takes this validation path. Missing or incompatible feature data on resume is reported by
-that feature when accessed.
+SQLite opens and migrates before the HTTP listener starts. Studio project
+readiness does not contact Spiral, including when no Spiral destination has been
+selected. Local feature reads use SQLite. Data-plane requests are admitted only
+with a configured destination and report connection failures at use time.
+Explicit project selection and Settings → SpiralDB → Test connection validate
+and provision the model-artifact relation only; Studio control tables are never
+created in Spiral. See the SQLite guide for persistence and project transfer.
 
 Robot configuration is read by the project-scoped robot workspace when needed by
 the hardware views, robot commands, and saved-device auto-connect. The discarded startup

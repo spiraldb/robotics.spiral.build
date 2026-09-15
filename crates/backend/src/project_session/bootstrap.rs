@@ -27,9 +27,7 @@ impl ProjectBootstrap {
     }
 
     async fn bootstrap_catalog(&self) {
-        self.0
-            .bootstrap()
-            .bootstrapping("Connecting to SpiralDB and loading the project");
+        self.0.bootstrap().bootstrapping("Loading Studio project");
         match self.0.projects().resume(self.0.project()).await {
             Ok(()) => {
                 crate::robots::commands::DeviceCommands::from(self.0.current())
@@ -37,7 +35,7 @@ impl ProjectBootstrap {
                     .await
             }
             Err(error) => {
-                tracing::warn!("could not load initial Spiral project: {error}");
+                tracing::warn!("could not load local Studio project: {error}");
                 self.0.bootstrap().failed(false, &error);
             }
         }

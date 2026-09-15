@@ -21,11 +21,8 @@ pub use database::{
 };
 pub use project_store::{ProjectConnection, ProjectStore};
 pub(crate) use project_store::{ProjectDatabasePersistence, StorageClock};
-pub(crate) use schema::{DatabaseBundleSection, ManagedRelationSchema, Table, column};
-pub use schema::{
-    ROBOT_CONFIGURATION_COLUMN, ROBOT_IDENTIFIER_COLUMN, ROBOT_UPDATED_MILLIS_COLUMN,
-    SCHEMA_VERSION, StorageSchema,
-};
+pub use schema::{SCHEMA_VERSION, StorageSchema};
+pub(crate) use schema::{Table, column};
 pub(crate) use sql::ProjectQueries;
 pub use sql::SpiralSql;
 

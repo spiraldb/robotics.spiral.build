@@ -8,9 +8,7 @@
 
 use arrow_array::builder::{Float64Builder, ListBuilder, StringBuilder, UInt64Builder};
 use arrow_array::{
-    Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array,
-    LargeListArray, LargeStringArray, ListArray, RecordBatch, StringViewArray, UInt32Array,
-    UInt64Array,
+    Array, LargeStringArray, RecordBatch, StringViewArray, UInt32Array, UInt64Array,
 };
 use arrow_schema::{DataType, Field};
 use std::sync::Arc;
@@ -135,9 +133,6 @@ impl<'a> ArrowColumns<'a> {
         format!("stored {} column {name} is not {expected}", self.label)
     }
 
-    /// Whether the relation carries this column at all. A relation written by
-    /// an older schema is read through this before its newer columns are
-    /// touched, so a missing column degrades instead of failing the row.
     pub(crate) fn optional_text(&self, name: &str, row: usize) -> Result<Option<&'a str>, String> {
         let column = self.column(name)?;
         if column.is_null(row) {
@@ -161,26 +156,6 @@ impl<'a> ArrowColumns<'a> {
             .ok_or_else(|| self.missing(name))
     }
 
-    pub(crate) fn optional_float(&self, name: &str, row: usize) -> Result<Option<f64>, String> {
-        let column = self.column(name)?;
-        if column.is_null(row) {
-            return Ok(None);
-        }
-        if let Some(values) = column.as_any().downcast_ref::<Float64Array>() {
-            return Ok(Some(values.value(row)));
-        }
-        column
-            .as_any()
-            .downcast_ref::<Float32Array>()
-            .map(|values| Some(f64::from(values.value(row))))
-            .ok_or_else(|| self.mismatch(name, "a float"))
-    }
-
-    pub(crate) fn float(&self, name: &str, row: usize) -> Result<f64, String> {
-        self.optional_float(name, row)?
-            .ok_or_else(|| self.missing(name))
-    }
-
     pub(crate) fn optional_unsigned(&self, name: &str, row: usize) -> Result<Option<u64>, String> {
         let column = self.column(name)?;
         if column.is_null(row) {
@@ -199,87 +174,6 @@ impl<'a> ArrowColumns<'a> {
     pub(crate) fn unsigned(&self, name: &str, row: usize) -> Result<u64, String> {
         self.optional_unsigned(name, row)?
             .ok_or_else(|| self.missing(name))
-    }
-
-    pub(crate) fn ordinal(&self, name: &str, row: usize) -> Result<u32, String> {
-        let value = self.unsigned(name, row)?;
-        u32::try_from(value).map_err(|_| self.mismatch(name, "a 32-bit ordinal"))
-    }
-
-    pub(crate) fn optional_timestamp(&self, name: &str, row: usize) -> Result<Option<i64>, String> {
-        let column = self.column(name)?;
-        if column.is_null(row) {
-            return Ok(None);
-        }
-        if let Some(values) = column.as_any().downcast_ref::<Int64Array>() {
-            return Ok(Some(values.value(row)));
-        }
-        column
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .map(|values| Some(i64::from(values.value(row))))
-            .ok_or_else(|| self.mismatch(name, "a signed integer"))
-    }
-
-    pub(crate) fn timestamp(&self, name: &str, row: usize) -> Result<i64, String> {
-        self.optional_timestamp(name, row)?
-            .ok_or_else(|| self.missing(name))
-    }
-
-    pub(crate) fn boolean(&self, name: &str, row: usize) -> Result<bool, String> {
-        let column = self.column(name)?;
-        if column.is_null(row) {
-            return Err(self.missing(name));
-        }
-        column
-            .as_any()
-            .downcast_ref::<BooleanArray>()
-            .map(|values| values.value(row))
-            .ok_or_else(|| self.mismatch(name, "a boolean"))
-    }
-
-    /// The item array of one list cell, or `None` when the cell is null.
-    fn items(&self, name: &str, row: usize) -> Result<Option<ArrayRef>, String> {
-        let column = self.column(name)?;
-        if column.is_null(row) {
-            return Ok(None);
-        }
-        if let Some(values) = column.as_any().downcast_ref::<ListArray>() {
-            return Ok(Some(values.value(row)));
-        }
-        column
-            .as_any()
-            .downcast_ref::<LargeListArray>()
-            .map(|values| Some(values.value(row)))
-            .ok_or_else(|| self.mismatch(name, "a list"))
-    }
-
-    pub(crate) fn text_list(&self, name: &str, row: usize) -> Result<Vec<String>, String> {
-        let Some(items) = self.items(name, row)? else {
-            return Ok(Vec::new());
-        };
-        let read = |index: usize| -> Option<&str> {
-            if items.is_null(index) {
-                return None;
-            }
-            if let Some(values) = items.as_any().downcast_ref::<arrow_array::StringArray>() {
-                return Some(values.value(index));
-            }
-            if let Some(values) = items.as_any().downcast_ref::<LargeStringArray>() {
-                return Some(values.value(index));
-            }
-            items
-                .as_any()
-                .downcast_ref::<StringViewArray>()
-                .map(|values| values.value(index))
-        };
-        (0..items.len())
-            .map(|index| {
-                read(index)
-                    .map(str::to_owned)
-                    .ok_or_else(|| self.mismatch(name, "a list of text"))
-            })
-            .collect()
     }
 }
 
@@ -322,17 +216,16 @@ mod tests {
         );
         assert!(
             columns
-                .float("count", 0)
+                .text("count", 0)
                 .unwrap_err()
-                .contains("count is not a float")
+                .contains("count is not text")
         );
     }
 
     #[test]
-    fn list_columns_read_back_in_order() {
+    fn unsigned_column_reads_the_count() {
         let batch = batch();
         let columns = ArrowColumns::new(&batch, "example");
         assert_eq!(columns.unsigned("count", 0).unwrap(), 7);
-        assert_eq!(columns.text_list("names", 0).unwrap(), ["left", "right"]);
     }
 }

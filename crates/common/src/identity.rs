@@ -42,41 +42,6 @@ impl From<DatasetId> for String {
     }
 }
 
-/// One SQL-safe generated-name component derived from an immutable external ID.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct SqlNameComponent(String);
-
-impl From<&str> for SqlNameComponent {
-    fn from(external_id: &str) -> Self {
-        let rendered = external_id
-            .chars()
-            .map(|character| {
-                if character.is_ascii_alphanumeric() || character == '_' {
-                    character
-                } else {
-                    '_'
-                }
-            })
-            .collect::<String>();
-        if rendered == external_id && !rendered.is_empty() {
-            return Self(rendered);
-        }
-        let hash = external_id
-            .as_bytes()
-            .iter()
-            .fold(0xcbf29ce484222325_u64, |hash, byte| {
-                (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
-            });
-        Self(format!("{rendered}_{hash:016x}"))
-    }
-}
-
-impl SqlNameComponent {
-    pub(crate) fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

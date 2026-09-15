@@ -7,8 +7,10 @@ SO-ARM101 arms; records synchronized robot and camera data directly in SpiralDB;
 queries that data; trains vision-conditioned ACT policies; and safely
 executes trained policies through the follower's bounded rollout path.
 
-SpiralDB is Studio's only persistent storage layer. Studio can transfer the
-complete active project from Settings as one `.spiral-project` file.
+Studio stores its control-plane state in persistent backend-local SQLite
+(SeaORM and versioned migrations). SpiralDB stores datasets and model artifacts.
+Settings can transfer project data and local Studio state as one `.spiral-project`
+file. See [SQLite storage and project bundles](docs/studio-sqlite.md).
 
 The backend HTTP contract and independent-client examples are documented in
 [Studio HTTP API](docs/http-api.md). A running backend serves its schemas at
@@ -131,13 +133,16 @@ On first launch, Studio opens **Settings → SpiralDB** so you can enter the
 Spiral API endpoint, SpFS endpoint, and project ID. The hosted services are the
 defaults; for the local stack use `http://127.0.0.1:4279` and
 `http://127.0.0.1:4295`. The backend remembers these three bootstrap pointers
-in one private JSON file. Project-only switches apply immediately while Studio
+in its private local SQLite database. Project-only switches apply immediately while Studio
 is idle. Service-endpoint and credential changes also apply live while Studio
 is idle, after the old repository pool drains.
 `--spiral-project` or `SPIRAL_PROJECT_ID` may still provide an initial project
 override.
-`SPIRAL_ROBOTICS_BACKEND_STATE` overrides the JSON file path for development
-and deployment isolation.
+The SQLite file defaults to `.studio/studio.sqlite3` in this repository;
+the entire `.studio/` directory is Git-ignored.
+`SPIRAL_ROBOTICS_STUDIO_DB` overrides the SQLite file path for development
+and deployment isolation. The old `SPIRAL_ROBOTICS_BACKEND_STATE` JSON is a
+one-time upgrade source; see the storage guide above.
 
 Studio currently has no product simulation mode. Use `--no-cameras` only when
 camera discovery is intentionally unavailable; configured robot connections

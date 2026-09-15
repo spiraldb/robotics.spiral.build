@@ -1,4 +1,9 @@
-# Storage schema version
+# Spiral data schema version
+
+SQLite control-plane migrations are maintained separately in
+[`../src/studio/migrations`](../src/studio/migrations). Version 3 project bundles
+contain a SQLite snapshot and a Spiral data archive. This bundle change leaves
+Spiral artifact schemas unchanged, so it does not bump the data schema version.
 
 [`version.json`](version.json) is the machine-readable source for the current
 relational schema written by Studio. Rust producers and consumers generate

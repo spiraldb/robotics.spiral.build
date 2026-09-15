@@ -12,7 +12,7 @@ pub(crate) struct HardwareViewState {
     last_telemetry_ms: Signal<f64>,
     clock_ms: Signal<f64>,
     connected: Memo<bool>,
-    catalog_available: Memo<bool>,
+    studio_available: Memo<bool>,
     is_active: ReadSignal<bool>,
 }
 impl HardwareViewState {
@@ -21,7 +21,7 @@ impl HardwareViewState {
         is_active: ReadSignal<bool>,
         sessions: ProjectSessionSignals,
     ) -> Self {
-        let catalog_available = use_memo(move || sessions.catalog_available());
+        let studio_available = use_memo(move || sessions.studio_available());
         let setup = super::RobotSetupState::use_state(is_active, sessions);
         let telemetry = use_hook(|| Self {
             setup,
@@ -29,7 +29,7 @@ impl HardwareViewState {
             last_telemetry_ms: Signal::new(0.0),
             clock_ms: project.clock_ms(),
             connected: project.live(),
-            catalog_available,
+            studio_available,
             is_active,
         });
         telemetry.use_hardware_polling(is_active);
@@ -118,7 +118,7 @@ impl HardwareViewState {
         let age = self.telemetry_age_seconds();
         (self.is_active)()
             && (self.connected)()
-            && (self.catalog_available)()
+            && (self.studio_available)()
             && self.setup.available()
             && age.is_finite()
             && age < 2.5
@@ -169,7 +169,7 @@ mod tests {
                 last_telemetry_ms: Signal::new(0.0),
                 clock_ms: Signal::new(js_sys::Date::now()),
                 connected: connected_memo,
-                catalog_available: catalog_memo,
+                studio_available: catalog_memo,
                 is_active: active.into(),
             });
             let request = use_resource(move || {

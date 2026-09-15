@@ -175,7 +175,6 @@ impl DeviceCommands {
     pub(crate) async fn list_ports(&self) -> Result<Vec<SerialPortSummary>, BackendCommandError> {
         self.state
             .execute(move |state, _activity| async move {
-                state.require_catalog_ready()?;
                 SerialPortDiscovery::list(&state).await.map_err(Into::into)
             })
             .await
@@ -213,7 +212,6 @@ impl DeviceCommands {
     pub(crate) async fn list_robots(&self) -> Result<Vec<RobotSummary>, BackendCommandError> {
         self.state
             .execute(move |state, _activity| async move {
-                state.require_catalog_ready()?;
                 let records = state
                     .workspace()
                     .try_list()
@@ -234,7 +232,6 @@ impl DeviceCommands {
     ) -> Result<RobotSummary, BackendCommandError> {
         self.state
             .execute(move |state, _activity| async move {
-                state.require_catalog_ready()?;
                 request
                     .document()
                     .validate()
@@ -268,17 +265,15 @@ impl DeviceCommands {
 
     pub(crate) async fn get_robot(&self, id: String) -> Result<RobotSummary, BackendCommandError> {
         self.state
-            .execute(move |state, _activity| async move {
-                state.require_catalog_ready()?;
-                Self::from(state).present_robot(&id).await
-            })
+            .execute(
+                move |state, _activity| async move { Self::from(state).present_robot(&id).await },
+            )
             .await
     }
 
     pub(crate) async fn delete_robot(&self, id: String) -> Result<(), BackendCommandError> {
         self.state
             .execute(move |state, _activity| async move {
-                state.require_catalog_ready()?;
                 let adapter = RobotAdapter::new(&state);
                 RobotActions::new(&adapter, &adapter)
                     .delete(&id)
@@ -291,7 +286,6 @@ impl DeviceCommands {
     pub(crate) async fn connect_robot(&self, id: String) -> Result<(), BackendCommandError> {
         self.state
             .execute(move |state, _activity| async move {
-                state.require_catalog_ready()?;
                 let adapter = RobotAdapter::new(&state);
                 RobotActions::new(&adapter, &adapter)
                     .connect(&id)
@@ -304,7 +298,6 @@ impl DeviceCommands {
     pub(crate) async fn disconnect_robot(&self, id: String) -> Result<(), BackendCommandError> {
         self.state
             .execute(move |state, _activity| async move {
-                state.require_catalog_ready()?;
                 state
                     .hardware()
                     .disconnect(&id)
@@ -317,7 +310,6 @@ impl DeviceCommands {
     pub(crate) async fn hold_robot(&self, id: String) -> Result<(), BackendCommandError> {
         self.state
             .execute(move |state, _activity| async move {
-                state.require_catalog_ready()?;
                 RobotControlActions::new(state.hardware().as_ref())
                     .execute(RobotControlCommand::Hold { robot: id })
                     .await
@@ -329,7 +321,6 @@ impl DeviceCommands {
     pub(crate) async fn release_robot(&self, id: String) -> Result<(), BackendCommandError> {
         self.state
             .execute(move |state, _activity| async move {
-                state.require_catalog_ready()?;
                 RobotControlActions::new(state.hardware().as_ref())
                     .execute(RobotControlCommand::Release { robot: id })
                     .await
@@ -345,7 +336,6 @@ impl DeviceCommands {
     ) -> Result<(), BackendCommandError> {
         self.state
             .execute(move |state, _activity| async move {
-                state.require_catalog_ready()?;
                 RobotControlActions::new(state.hardware().as_ref())
                     .execute(RobotControlCommand::MoveJoints {
                         robot: id,
@@ -360,7 +350,6 @@ impl DeviceCommands {
     pub(crate) async fn start_calibration(&self, id: String) -> Result<(), BackendCommandError> {
         self.state
             .execute(move |state, _activity| async move {
-                state.require_catalog_ready()?;
                 CalibrationControlPort::start_calibration(state.hardware().as_ref(), &id)
                     .await
                     .map_err(Into::into)
@@ -373,7 +362,6 @@ impl DeviceCommands {
         id: String,
     ) -> Result<RobotSummary, BackendCommandError> {
         self.state.execute(move |state, _activity| async move {
-                state.require_catalog_ready()?;
                 let output = CalibrationActions::new(
                     state.workspace().as_ref(),
                     state.hardware().as_ref(),
@@ -391,7 +379,6 @@ impl DeviceCommands {
     pub(crate) async fn cancel_calibration(&self, id: String) -> Result<(), BackendCommandError> {
         self.state
             .execute(move |state, _activity| async move {
-                state.require_catalog_ready()?;
                 CalibrationControlPort::cancel_calibration(state.hardware().as_ref(), &id)
                     .await
                     .map_err(Into::into)
@@ -404,7 +391,6 @@ impl DeviceCommands {
         selection: ModeSelection,
     ) -> Result<(), BackendCommandError> {
         self.state.execute(move |state, _activity| async move {
-                state.require_catalog_ready()?;
                 // Replay and policy need their own admission and resource-loading paths.
                 let mode = match selection {
                     ModeSelection::Idle => OperatorMode::Idle,

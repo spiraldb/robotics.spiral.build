@@ -9,7 +9,11 @@ impl WorkflowFixture {
     fn new() -> Self {
         let store = Arc::new(ProjectStore::workflow_test());
         Self {
-            manager: WorkflowManager::new(Arc::new(StorageManager::new(store.clone()))),
+            manager: WorkflowManager::new(Arc::new(StorageManager::new(
+                store.clone(),
+                spiral_robotics_storage::StudioStore::in_memory()
+                    .project(&store.connection_settings()),
+            ))),
             store,
         }
     }
@@ -104,13 +108,13 @@ async fn execute_accepts_unsaved_sql_and_keeps_its_exact_input() {
         finished.snapshot().result().unwrap().rows()[0]["answer"],
         42
     );
-    // This fixture deliberately has no durable workflows relation.
+    // Saving local state is independent of the Spiral query database.
     assert!(
         fixture
             .manager
             .save(WorkflowDocument::new(graph.clone()))
             .await
-            .is_err()
+            .is_ok()
     );
     assert_eq!(graph.name(), "Next draft");
     assert_eq!(

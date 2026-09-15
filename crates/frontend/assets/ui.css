@@ -538,10 +538,6 @@
 .data-session-nav > span { margin-left: auto; color: var(--ui-ink-soft); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .data-tree-scroll { flex: 1; overflow: auto; min-height: 0; padding: 6px 0; }
 .data-tree-list { list-style: none; margin: 0; padding: 0; }
-.data-studio-resources { margin-top: 12px; padding-top: 8px; border-top: 1px solid var(--ui-line); }
-.data-studio-resources > summary { padding: 8px 12px; color: var(--ui-ink-soft); font-size: 12px; cursor: pointer; }
-.data-studio-resources > summary:hover { background: var(--ui-hover); }
-.data-studio-resources > summary:focus-visible,
 .data-tree-name:focus-visible,
 .data-tree-toggle:focus-visible,
 .data-tree-refresh:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: -2px; }

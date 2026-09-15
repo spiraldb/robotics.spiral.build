@@ -140,18 +140,13 @@ impl StorageManager {
 
 /// Portable source files are feature data, provisioned by import rather than startup.
 pub(crate) struct McapSources;
-impl crate::db::ManagedRelationSchema for McapSources {
-    fn relations(&self) -> &'static [crate::db::Table] {
-        &[crate::db::Table::DatasetSources]
-    }
-    fn managed_relation_schema(&self, table: crate::db::Table) -> Option<Schema> {
-        (table == crate::db::Table::DatasetSources).then(|| {
-            Schema::new(vec![
-                arrow_schema::Field::new("dataset_name", arrow_schema::DataType::Utf8, false),
-                arrow_schema::Field::new("recording", arrow_schema::DataType::Utf8, false),
-                arrow_schema::Field::new("payload", arrow_schema::DataType::Binary, false),
-            ])
-        })
+impl McapSources {
+    pub(crate) fn bundle_schema() -> Schema {
+        Schema::new(vec![
+            arrow_schema::Field::new("dataset_name", arrow_schema::DataType::Utf8, false),
+            arrow_schema::Field::new("recording", arrow_schema::DataType::Utf8, false),
+            arrow_schema::Field::new("payload", arrow_schema::DataType::Binary, false),
+        ])
     }
 }
 impl McapSources {
@@ -547,13 +542,8 @@ mod tests {
 
     #[test]
     fn backup_restores_every_file_in_a_multirow_batch() {
-        use crate::db::ManagedRelationSchema as _;
         let batch = RecordBatch::try_new(
-            Arc::new(
-                McapSources
-                    .managed_relation_schema(crate::db::Table::DatasetSources)
-                    .unwrap(),
-            ),
+            Arc::new(McapSources::bundle_schema()),
             vec![
                 Arc::new(StringArray::from(vec!["first", "second"])),
                 Arc::new(StringArray::from(vec!["one.mcap", "two.mcap"])),
@@ -588,12 +578,11 @@ mod tests {
     async fn mcap_files_share_publication_and_dataset_reads() {
         use crate::episodes::{CameraRecording, EpisodeFixture, McapRecording};
         use crate::settings::{BackendStateStore, SpiralConnectionSettings};
-        let config = BackendStateStore::open_for_test(
-            std::env::var_os("SPIRAL_MCAP_TEST_CONFIG")
-                .expect("explicit test config")
-                .into(),
-        )
-        .unwrap();
+        let legacy_path = std::path::PathBuf::from(
+            std::env::var_os("SPIRAL_MCAP_TEST_CONFIG").expect("explicit test config"),
+        );
+        let config = BackendStateStore::new(crate::StudioStore::in_memory(), legacy_path);
+        config.initialize().await.unwrap();
         let settings = SpiralConnectionSettings::new(
             config.spiral_endpoint().unwrap(),
             config.spiral_spfs_endpoint().unwrap(),
@@ -610,7 +599,10 @@ mod tests {
             )
             .unwrap(),
         );
-        let storage = StorageManager::new(store.clone());
+        let storage = StorageManager::new(
+            store.clone(),
+            crate::StudioStore::in_memory().project(&store.connection_settings()),
+        );
         let name = format!("source_probe_{}", uuid::Uuid::new_v4().simple());
         let other_name = format!("{name}_other");
         let cameras = ["wrist", "overhead"]

@@ -1,6 +1,6 @@
 //! Creating robot instances and getting them ready to move.
 //!
-//! One arm is one robot instance in SpiralDB. Everything on this panel—the
+//! One arm is one robot instance in Studio. Everything on this panel—the
 //! port, cameras, motors, and calibration—is one durable configuration row.
 //!
 //! The panel lives in Settings as the durable owner of ports, camera
@@ -43,7 +43,7 @@ pub(super) fn RobotPanel(
     let focused = selection.focused(&robots);
     let sessions = ProjectSessionSignals::current();
     let mut ports = use_resource(move || {
-        let available = sessions.catalog_available();
+        let available = sessions.studio_available();
         async move {
             if !available {
                 return std::future::pending().await;
@@ -330,7 +330,7 @@ fn ImportRobotConfiguration(project: StudioProjectState, selection: RobotSelecti
     }
 }
 
-/// Everything about one arm stored in its SpiralDB configuration row.
+/// Everything about one arm stored in its local Studio configuration row.
 #[component]
 fn RobotSetup(
     project: StudioProjectState,
@@ -390,7 +390,7 @@ fn RobotSetup(
                 CalibrationSection { project, telemetry, robot: robot.clone() }
             }
             div { class: "device-file-row",
-                span { class: "min-w-0 flex-1 truncate text-[10px] text-ink-faint", "Stored in SpiralDB" }
+                span { class: "min-w-0 flex-1 truncate text-[10px] text-ink-faint", "Saved on this backend" }
                 DeleteRobotAction { project, telemetry, robot: robot.clone() }
             }
         }

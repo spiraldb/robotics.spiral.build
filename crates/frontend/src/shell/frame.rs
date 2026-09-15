@@ -218,13 +218,13 @@ fn StatusBar(route: crate::shell::routes::StudioRoute, status: WorkspaceStatus) 
     let training_step = training.step.as_deref();
     let training_runs_label = format!("{} runs", training.runs);
     let workflow_status = workflow
-        .filter(|_| backend_connected && readiness.catalog_available())
+        .filter(|_| backend_connected && readiness.studio_available())
         .unwrap_or_else(|| {
             WorkflowStatusContext {
                 state: None,
                 backend_connected,
                 readiness: readiness.state(),
-                catalog_available: readiness.catalog_available(),
+                catalog_available: readiness.studio_available(),
             }
             .project()
         });

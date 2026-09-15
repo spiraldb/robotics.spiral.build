@@ -138,7 +138,7 @@ pub(crate) fn SettingsPanel(
                 project.report_success_from(
                     MessageSource::Settings,
                     format!(
-                        "Project restored from {} relations ({} rows).{}",
+                        "Studio records restored; {} data relations ({} rows) imported.{}",
                         result.relations(),
                         result.rows(),
                         result.warnings().import_warning_suffix(),
@@ -320,7 +320,7 @@ pub(crate) fn SettingsPanel(
                         match section() {
                             SettingsSection::Robots => rsx! {},
                             SettingsSection::Spiral => rsx! {
-                                ProviderHeading { title: "SpiralDB", description: "The one persistent store for robots, episodes, video, runs, and Studio preferences." }
+                                ProviderHeading { title: "SpiralDB", description: "Datasets, recorded media, and model artifacts. Studio settings and history are saved on this backend." }
                                 if !preferences_loaded {
                                     p { class: "settings-help", role: "status", if load_error.is_some() { "Runtime preferences are unavailable. Saving this connection preserves them in the project." } else { "Loading runtime preferences. Connection changes preserve them in the project." } }
                                 }
@@ -351,7 +351,7 @@ pub(crate) fn SettingsPanel(
                                             move |value| current.write().spiral_mut().set_project_id(value),
                                         ),
                                     }
-                                    SettingsField { label: "Table prefix", value: current().spiral().table_prefix(), behavior: SettingsInputBehavior::new("studio", move |_| {}).with_disabled() }
+                                    SettingsField { label: "Artifact table prefix", value: current().spiral().table_prefix(), behavior: SettingsInputBehavior::new("studio", move |_| {}).with_disabled() }
                                 }
                                 div { class: "settings-field-row",
                                     SettingsField {
@@ -373,7 +373,7 @@ pub(crate) fn SettingsPanel(
                                     }
                                 }
                                 p { class: "settings-help",
-                                    "The API, SpFS endpoint, project, and optional client credentials are applied to a new scoped SpiralDB connection when you save. The secret is stored only in the backend's private bootstrap file and is never returned to this page."
+                                    "The API, SpFS endpoint, project, and optional client credentials are applied to a new scoped SpiralDB connection when you save. The secret is stored only in the backend's local database and is never returned to this page."
                                 }
                                 SettingsField {
                                     label: "Hugging Face token",
@@ -408,16 +408,16 @@ pub(crate) fn SettingsPanel(
                                 section { class: "settings-project-transfer", "aria-labelledby": "project-transfer-title",
                                     div { class: "provider-heading",
                                         h3 { id: "project-transfer-title", "Project backup" }
-                                        p { "Transfer the complete active SpiralDB project as one portable file." }
+                                        p { "Transfer project data and locally saved Studio state as one portable file." }
                                     }
                                     p { class: "settings-help",
-                                        "The file contains all Studio-managed data: robots, datasets, episodes, streams, video, preferences, training runs and metrics, checkpoints, and rollouts. Import replaces every existing Studio relation in the active project."
+                                        "The file contains all Studio-managed data: robots, datasets, episodes, streams, video, preferences, training runs and metrics, checkpoints, and rollouts. Import replaces this project’s managed data and locally saved Studio state."
                                     }
                                     div { class: "settings-transfer-actions",
                                         FileAction {
                                             purpose: ActionPurpose::Import,
                                             variant: ActionVariant::Outline,
-                                            title: if project_transfer_ready { "Replace all Studio-managed relations in the active SpiralDB project" } else { "Save the Spiral destination before transferring a project" },
+                                            title: if project_transfer_ready { "Replace this project’s data and local Studio state" } else { "Save the Spiral destination before transferring a project" },
                                             disabled: saving() || import_project.pending() || !project_transfer_ready,
                                             aria_busy: import_project.pending(),
                                             input: FileInput::new(
@@ -438,7 +438,7 @@ pub(crate) fn SettingsPanel(
                                                 variant: ActionVariant::Outline,
                                                 href: crate::client::project::ProjectClient::current().scoped_url("/api/project/export"),
                                                 download: "spiral-robotics-project.spiral-project",
-                                                title: "Export every Studio-managed relation from the active SpiralDB project",
+                                                title: "Export project data and local Studio state",
                                                 "Export project"
                                             }
                                         }
@@ -518,9 +518,9 @@ pub(crate) fn SettingsPanel(
             BlockingConfirmation {
                 id: "project-import-confirmation",
                 title: format!("Replace project {}?", current().spiral().project_id()),
-                consequence: "Every Studio-managed relation in this project will be replaced, including robots, episodes, media, settings, training history, checkpoints, and rollouts. Connected robots will disconnect first; imported robots will then connect automatically.".to_owned(),
+                consequence: "This project’s Studio records and managed data will be replaced, including robots, recordings, preferences, workflows, training history, checkpoints, and rollouts. Connected robots will disconnect first; imported robots will then connect automatically.".to_owned(),
                 copy: ConfirmationCopy::new(
-                    format!("Import {} into the active SpiralDB project.", file.name()),
+                    format!("Import {} into the active project.", file.name()),
                     if import_project.pending() { "Restoring…" } else { "Import and replace project" },
                     "Keep current project",
                 ),

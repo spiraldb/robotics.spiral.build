@@ -210,6 +210,12 @@ impl<'a> ProjectQueries<'a> {
             .into_iter()
             .filter_map(|entry| {
                 let (name, kind) = entry.into_parts();
+                if self
+                    .project_store
+                    .is_studio_control_relation(&[name.as_str().to_owned()])
+                {
+                    return None;
+                }
                 if QualifiedRelation::try_from(name.as_str()).is_err() {
                     skipped += 1;
                     None

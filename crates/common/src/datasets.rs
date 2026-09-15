@@ -12,7 +12,7 @@ pub use messages::{MessageCursor, MessageRead, MessageWindow, TopicRevision};
 
 use serde::{Deserialize, Serialize};
 
-/// What replacing the active SpiralDB project from a portable snapshot imported.
+/// Data-plane relation counts and warnings from restoring a project bundle.
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProjectImportSummary {

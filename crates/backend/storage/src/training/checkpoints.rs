@@ -7,6 +7,7 @@ use arrow_array::{
     BinaryArray, BinaryViewArray, LargeBinaryArray, LargeStringArray, RecordBatch, StringArray,
     StringViewArray,
 };
+use arrow_schema::{DataType, Field, Schema};
 use futures::StreamExt as _;
 
 use crate::db::DatabaseSession as _;
@@ -48,6 +49,19 @@ pub struct CheckpointArtifact {
 }
 
 impl CheckpointArtifact {
+    pub(crate) fn schema() -> Schema {
+        Schema::new(vec![
+            Field::new(db::RUN_ID, DataType::Utf8, false),
+            Field::new(db::RUN_NAME, DataType::Utf8, false),
+            Field::new(db::POLICY, DataType::Utf8, false),
+            Field::new(db::STEP, DataType::UInt64, false),
+            Field::new(db::CREATED_MS, DataType::Int64, false),
+            Field::new(db::VALIDATION_LOSS, DataType::Float64, true),
+            Field::new(db::CONFIG_JSON, DataType::Utf8, false),
+            Field::new(db::CHECKPOINT, DataType::LargeBinary, false),
+        ])
+    }
+
     pub(crate) fn from_bytes(config_json: Vec<u8>, payload: Vec<u8>) -> Result<Self, String> {
         Self::validate_size(config_json.len(), payload.len())?;
         Ok(Self {

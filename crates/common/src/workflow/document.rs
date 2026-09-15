@@ -101,7 +101,7 @@ impl ModelRequest {
 pub use super::plan::WorkflowPlan;
 
 /// Encoding version and payload of one workflow or conversation.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct WorkflowJson {
     version: u32,
     payload: String,

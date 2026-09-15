@@ -220,8 +220,6 @@ pub struct ProjectResource {
     selection: DatasetSelection,
     kind: String,
     identity: (String, String),
-    #[serde(default)]
-    studio_internal: bool,
 }
 impl ProjectResource {
     pub fn new(selection: DatasetSelection, kind: String, identity: (String, String)) -> Self {
@@ -229,15 +227,7 @@ impl ProjectResource {
             selection,
             kind,
             identity,
-            studio_internal: false,
         }
-    }
-    pub fn with_studio_internal(mut self, studio_internal: bool) -> Self {
-        self.studio_internal = studio_internal;
-        self
-    }
-    pub fn is_studio_internal(&self) -> bool {
-        self.studio_internal
     }
     pub fn selection(&self) -> &DatasetSelection {
         &self.selection

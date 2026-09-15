@@ -29,7 +29,7 @@ impl RolloutController {
         )
         .with_activity(active.into())
         .use_when(
-            move || *is_active.read() && sessions.catalog_available(),
+            move || *is_active.read() && sessions.studio_available(),
             move || {
                 let current = controller.snapshot.peek().clone();
                 async move {

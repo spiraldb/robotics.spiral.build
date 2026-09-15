@@ -251,8 +251,8 @@ impl WorkflowController {
         if self.unsaved_changes() {
             return Some("Save or discard your changes before switching workflows.".to_owned());
         }
-        if !crate::shell::project::ProjectSessionSignals::current().catalog_available() {
-            return Some("Reconnect Spiral before switching workflows.".to_owned());
+        if !crate::shell::project::ProjectSessionSignals::current().studio_available() {
+            return Some("Reconnect to Studio before switching workflows.".to_owned());
         }
         None
     }
@@ -636,7 +636,7 @@ impl WorkflowController {
     pub(crate) fn use_polling(self, is_active: ReadSignal<bool>) {
         let sessions = crate::shell::project::ProjectSessionSignals::current();
         use_effect(move || {
-            if sessions.catalog_available()
+            if sessions.studio_available()
                 && !self.loaded()
                 && self.command().is_none()
                 && self.load_error().is_none()
@@ -660,7 +660,7 @@ impl WorkflowController {
         let runs = QueryPolicy::new(QueryDomain::Workflow, 500)
             .with_activity(active.into())
             .use_when(
-                move || is_active() && sessions.catalog_available(),
+                move || is_active() && sessions.studio_available(),
                 move || {
                     let active = self
                         .document

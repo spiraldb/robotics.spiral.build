@@ -1,8 +1,5 @@
-//! The project-scoped persistence boundary used by Studio.
-//!
-//! Store facades for robots, episodes, training, and project bundles all use
-//! the same async database boundary. Nothing below this module falls back to
-//! a filesystem or a second database.
+//! Project-scoped Spiral data access and artifact schema provisioning.
+//! Studio records use a separate local SQLite store.
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -16,12 +13,10 @@ use super::database::{
     DatabaseResult, DatabaseSession, DatabaseTransaction, ExecutionSummary, RecordBatchStream,
     RelationName, SqlStatement,
 };
-use crate::LEGACY_PROJECT_ERROR;
 use crate::settings::{SpiralConnectionSettings, SpiralCredentials};
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard};
 
-use super::schema::{Table, column as db};
-use crate::transfer::ManagedRelationCatalog;
+use super::schema::Table;
 
 const SPIRAL_UNAVAILABLE_PREFIX: &str = "SpiralDB is unavailable at ";
 
@@ -219,24 +214,6 @@ impl ProjectConnection {
         Ok(batches)
     }
 
-    pub(crate) async fn relation_rows<T>(
-        &mut self,
-        relation: &str,
-        decode: fn(&RecordBatch, usize) -> Result<T, String>,
-    ) -> Result<Vec<T>, String> {
-        let mut rows = Vec::new();
-        for batch in self
-            .read_batches(&format!("SELECT * FROM {relation}"))
-            .await?
-        {
-            for row in 0..batch.num_rows() {
-                rows.push(decode(&batch, row)?);
-            }
-        }
-        Ok(rows)
-    }
-
-    /// Commit a mutation, or roll it back and keep both failures visible.
     pub(crate) async fn finish_transaction(
         &mut self,
         mutation: Result<(), String>,
@@ -298,18 +275,6 @@ impl ProjectConnection {
         batches: Vec<RecordBatch>,
     ) -> Result<(), String> {
         BatchWrite::new(target, batches, BatchWriteMode::ReplaceOrCreate)
-            .save(self)
-            .await
-    }
-
-    pub(crate) async fn create_managed_relation(
-        &mut self,
-        table_prefix: &str,
-        table: Table,
-    ) -> Result<(), String> {
-        let batch = RecordBatch::new_empty(Arc::new(ManagedRelationCatalog::schema(table)));
-        let target = table.qualified_name(table_prefix);
-        BatchWrite::new(&target, vec![batch], BatchWriteMode::CreateOrAppend)
             .save(self)
             .await
     }
@@ -481,7 +446,7 @@ impl ProjectStore {
             .to_owned()
     }
 
-    pub(crate) fn connection_settings(&self) -> SpiralConnectionSettings {
+    pub fn connection_settings(&self) -> SpiralConnectionSettings {
         self.connection_settings.clone()
     }
 
@@ -499,6 +464,25 @@ impl ProjectStore {
 
     pub(crate) fn is_configured(&self) -> bool {
         self.connection_settings.project_id().is_some()
+    }
+
+    pub(crate) fn is_studio_control_relation(&self, path: &[String]) -> bool {
+        let [name] = path else {
+            return false;
+        };
+        // Retired source tables can remain as a migration backup in Spiral.
+        [
+            "robots",
+            "settings",
+            "training_runs",
+            "training_run_metrics",
+            "training_run_checkpoints",
+            "rollout_runs",
+            "workflows",
+            "feature_registry",
+        ]
+        .iter()
+        .any(|suffix| *name == format!("{}_{suffix}", self.table_prefix))
     }
 
     pub fn table_prefix(&self) -> &str {
@@ -627,218 +611,24 @@ impl<'a> ProjectDatabasePersistence<'a> {
         }
         let provisioning = async {
             let mut connection = self.project_store.connect_exclusive().await?;
-            ManagedRelationProvisioner::new(&mut connection, self.project_store.table_prefix())
-                .provision()
-                .await
+            let relation = Table::TrainingCheckpoints.qualified_name(self.project_store.table_prefix());
+            if let Some(schema) = connection.relation_schema(&relation).await? {
+                Table::TrainingCheckpoints.validate(&schema, "SpiralDB destination")
+                    .map_err(|error| format!("{error}; existing artifact table {relation} was not modified. Choose a fresh table prefix or remove that table, then run Settings → SpiralDB → Test connection."))?;
+                Ok::<_, String>("model artifact table ready")
+            } else {
+                connection.ingest_batch(&relation, RecordBatch::new_empty(Arc::new(Table::TrainingCheckpoints.schema()))).await?;
+                Ok("created model artifact table")
+            }
         }
         .await;
-        let provisioning = match provisioning {
-            Ok(provisioning) => provisioning,
-            Err(error) => return (false, error),
-        };
-        (
-            true,
-            format!(
-                "Connected to {endpoint} · project {project} · {}",
-                provisioning.describe()
+        match provisioning {
+            Ok(detail) => (
+                true,
+                format!("Connected to {endpoint} · project {project} · {detail}"),
             ),
-        )
-    }
-}
-
-struct ManagedRelationProvisioning {
-    created_relations: Vec<Table>,
-}
-
-impl ManagedRelationProvisioning {
-    fn describe(&self) -> String {
-        let count = self.created_relations.len();
-        if count == 0 {
-            return format!(
-                "all {} managed relations present",
-                ManagedRelationProvisioner::tables().len()
-            );
+            Err(error) => (false, error),
         }
-        let relations = self
-            .created_relations
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!("created {count} missing relations: {relations}")
-    }
-}
-
-struct ManagedRelationProvisioner<'a> {
-    connection: &'a mut ProjectConnection,
-    table_prefix: &'a str,
-}
-
-impl<'a> ManagedRelationProvisioner<'a> {
-    fn tables() -> Vec<Table> {
-        ManagedRelationCatalog::tables()
-            .into_iter()
-            .filter(|table| *table != Table::DatasetSources)
-            .collect()
-    }
-
-    const fn new(connection: &'a mut ProjectConnection, table_prefix: &'a str) -> Self {
-        Self {
-            connection,
-            table_prefix,
-        }
-    }
-
-    async fn provision(mut self) -> Result<ManagedRelationProvisioning, String> {
-        let created_relations = self.relation_readiness().await?;
-        for table in &created_relations {
-            self.connection
-                .create_managed_relation(self.table_prefix, *table)
-                .await?;
-        }
-        Ok(ManagedRelationProvisioning { created_relations })
-    }
-
-    async fn relation_readiness(&mut self) -> Result<Vec<Table>, String> {
-        let tables = Self::tables();
-        let names = tables
-            .iter()
-            .map(|table| RelationName::parse(table.qualified_name(self.table_prefix)))
-            .collect::<DatabaseResult<Vec<_>>>()
-            .map_err(|error| error.to_string())?;
-        let schemas = self
-            .connection
-            .relation_schemas(names)
-            .await
-            .map_err(|error| error.to_string())?;
-        let mut missing = Vec::new();
-        for (table, (relation, schema)) in tables.into_iter().zip(schemas) {
-            match schema.map_err(|error| {
-                format!(
-                    "checking Spiral table {relation}: {error}",
-                    relation = relation.as_str()
-                )
-            })? {
-                Some(schema) => {
-                    Self::validate_existing_relation(table, relation.as_str(), &schema)?
-                }
-                None => missing.push(table),
-            }
-        }
-        Ok(missing)
-    }
-
-    fn validate_existing_relation(
-        table: Table,
-        relation: &str,
-        schema: &Schema,
-    ) -> Result<(), String> {
-        if Self::is_known_legacy_schema(table, schema) {
-            return Err(LEGACY_PROJECT_ERROR.to_owned());
-        }
-        ManagedRelationCatalog::validate(table, schema, "SpiralDB destination")
-            .map_err(|error| {
-                format!(
-                    "{error}; existing managed relation {relation} was not modified. Choose a fresh table prefix or remove that relation, then run Settings → SpiralDB → Test connection."
-                )
-            })
-    }
-
-    fn is_known_legacy_schema(table: Table, schema: &Schema) -> bool {
-        match table {
-            Table::TrainingRuns => {
-                schema.field_with_name(db::SNAPSHOT_JSON).is_ok()
-                    && schema.field_with_name(db::ORDINAL).is_err()
-            }
-            Table::RolloutRuns => {
-                schema.field_with_name(db::SNAPSHOT_JSON).is_ok()
-                    && schema.field_with_name(db::SESSION_ID).is_err()
-            }
-            _ => false,
-        }
-    }
-}
-
-#[cfg(test)]
-mod managed_relation_tests {
-    use super::*;
-    use arrow_schema::{DataType, Field};
-
-    #[test]
-    fn startup_provisions_application_state_without_recreating_recordings() {
-        let tables = ManagedRelationProvisioner::tables();
-        assert_eq!(tables.len(), 9);
-        assert!(tables.contains(&Table::Robots));
-        assert!(tables.contains(&Table::TrainingRuns));
-        assert!(!tables.contains(&Table::DatasetSources));
-    }
-
-    #[test]
-    fn provisioning_summary_reports_present_and_created_relations() {
-        let present = ManagedRelationProvisioning {
-            created_relations: Vec::new(),
-        };
-        assert_eq!(present.describe(), "all 9 managed relations present");
-
-        let created = ManagedRelationProvisioning {
-            created_relations: vec![Table::Robots, Table::StudioSettings],
-        };
-        assert_eq!(
-            created.describe(),
-            "created 2 missing relations: robots, studio_settings"
-        );
-    }
-
-    #[test]
-    fn readiness_refuses_known_legacy_relation_shapes_with_project_guidance() {
-        let legacy_document = || {
-            Schema::new(vec![
-                Field::new(db::RUN_ID, DataType::Utf8, false),
-                Field::new(db::SNAPSHOT_JSON, DataType::Utf8, false),
-                Field::new(db::UPDATED_MS, DataType::Int64, false),
-            ])
-        };
-        let legacy_relations = [
-            (Table::TrainingRuns, legacy_document()),
-            (Table::RolloutRuns, legacy_document()),
-        ];
-
-        for (table, schema) in legacy_relations {
-            let error = ManagedRelationProvisioner::validate_existing_relation(
-                table,
-                &table.qualified_name("spiral_robotics"),
-                &schema,
-            )
-            .unwrap_err();
-            assert_eq!(error, LEGACY_PROJECT_ERROR, "{table}");
-        }
-    }
-
-    #[test]
-    fn readiness_reports_actionable_schema_mismatches_without_modification() {
-        let table = Table::StudioSettings;
-        let relation = table.qualified_name("spiral_robotics");
-        let mut fields = ManagedRelationCatalog::schema(table)
-            .fields()
-            .iter()
-            .map(|field| field.as_ref().clone())
-            .collect::<Vec<_>>();
-        fields[1] = Field::new(db::VALUE_JSON, DataType::UInt64, false);
-
-        let error = ManagedRelationProvisioner::validate_existing_relation(
-            table,
-            &relation,
-            &Schema::new(fields),
-        )
-        .unwrap_err();
-
-        assert!(error.contains(&relation), "{error}");
-        assert!(error.contains("was not modified"), "{error}");
-        assert!(
-            error.contains("Settings → SpiralDB → Test connection"),
-            "{error}"
-        );
-        assert!(!error.contains(LEGACY_PROJECT_ERROR), "{error}");
     }
 }
 

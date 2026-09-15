@@ -16,7 +16,6 @@ pub(crate) struct WorkflowCommands {
 impl WorkflowCommands {
     fn admit(&self) -> Result<crate::project_admission::ProjectActivity, BackendCommandError> {
         let activity = self.state.admit()?;
-        self.state.require_catalog_ready()?;
         Ok(activity)
     }
     pub(crate) async fn list(&self) -> Result<Vec<WorkflowSummary>, BackendCommandError> {
@@ -33,7 +32,6 @@ impl WorkflowCommands {
     ) -> Result<WorkflowDocument, BackendCommandError> {
         self.state
             .execute(move |state, _activity| async move {
-                state.require_catalog_ready()?;
                 state.workflow().save(document).await.map_err(Into::into)
             })
             .await

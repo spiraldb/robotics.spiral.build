@@ -3,7 +3,6 @@
 mod bundle;
 mod ingestion;
 
-pub(crate) use bundle::ManagedRelationCatalog;
 pub use bundle::ProjectBundle;
 pub use ingestion::HuggingFaceDatasetDiscovery;
 
@@ -15,11 +14,18 @@ use bundle::{ProjectBundleExport, ProjectBundleImport};
 /// Portable transfer operations for one project.
 pub(crate) struct TransferPersistence<'a> {
     project_store: &'a ProjectStore,
+    studio: &'a crate::StudioProject,
 }
 
 impl<'a> TransferPersistence<'a> {
-    pub(crate) const fn new(project_store: &'a ProjectStore) -> Self {
-        Self { project_store }
+    pub(crate) const fn new(
+        project_store: &'a ProjectStore,
+        studio: &'a crate::StudioProject,
+    ) -> Self {
+        Self {
+            project_store,
+            studio,
+        }
     }
 
     pub(crate) async fn export_project(&self) -> Result<Vec<u8>, String> {
@@ -30,7 +36,7 @@ impl<'a> TransferPersistence<'a> {
         ProjectBundle
             .export(
                 &mut connection,
-                ProjectBundleExport::new(self.project_store.table_prefix(), datasets),
+                ProjectBundleExport::new(self.project_store.table_prefix(), self.studio, datasets),
             )
             .await
     }
@@ -39,19 +45,17 @@ impl<'a> TransferPersistence<'a> {
         &self,
         bytes: &[u8],
     ) -> Result<ProjectImportSummary, String> {
+        let source =
+            ProjectBundleImport::new(self.project_store.table_prefix(), self.studio, bytes)?;
+        for name in source.dataset_names() {
+            self.project_store.validate_mcap_destination(name).await?;
+        }
         let mut connection = self.project_store.connect_exclusive().await?;
         let datasets =
             crate::datasets::McapSources::validate_ownership(self.project_store, &mut connection)
                 .await?;
-        for name in ProjectBundle.dataset_names(bytes)? {
-            self.project_store.validate_mcap_destination(&name).await?;
-        }
         ProjectBundle
-            .import(
-                &mut connection,
-                ProjectBundleImport::new(self.project_store.table_prefix(), bytes)
-                    .with_current_datasets(datasets),
-            )
+            .import(&mut connection, source.with_current_datasets(datasets))
             .await
     }
 }

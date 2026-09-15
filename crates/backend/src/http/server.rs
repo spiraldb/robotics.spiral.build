@@ -30,7 +30,7 @@ const RESOURCE_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from
 #[command(
     version,
     about = "Set up, calibrate, and drive SO-ARM101 arms from a browser",
-    long_about = "Serves the Spiral Robotics Studio web UI, owns the hardware behind it, and stores all durable Studio data directly in SpiralDB."
+    long_about = "Serves the Spiral Robotics Studio web UI, owns the hardware behind it, and stores Studio state in local SQLite and datasets in SpiralDB."
 )]
 struct StudioServerArguments {
     #[command(flatten)]
@@ -71,12 +71,12 @@ struct VideoArguments {
 
 #[derive(Debug, clap::Args)]
 struct SpiralArguments {
-    /// Optional initial Spiral project. Settings and the backend state file are
+    /// Optional initial Spiral project. Settings in the local Studio database are
     /// used when this and SPIRAL_PROJECT_ID are omitted.
     #[arg(long, value_name = "PROJECT")]
     spiral_project: Option<String>,
 
-    /// Prefix for Studio-owned root tables.
+    /// Namespace for model artifacts.
     #[arg(long, default_value = "studio", value_name = "PREFIX")]
     studio_table_prefix: String,
 }
@@ -110,8 +110,6 @@ struct ServerStartup {
     arguments: StudioServerArguments,
     camera_access_error: Option<String>,
     backend_state: Arc<BackendStateStore>,
-    spiral_endpoint: String,
-    spiral_spfs_endpoint: String,
     control_settings: ControlSettings,
     public: PathBuf,
 }
@@ -164,28 +162,6 @@ impl StudioServer {
                 return ExitCode::FAILURE;
             }
         };
-        let spiral_endpoint = match ServiceEndpoint::spiral(
-            &backend_state
-                .spiral_endpoint()
-                .unwrap_or_else(|| ServiceEndpoint::environment_spiral().into_string()),
-        ) {
-            Ok(endpoint) => endpoint.into_string(),
-            Err(error) => {
-                eprintln!("error: {error}");
-                return ExitCode::FAILURE;
-            }
-        };
-        let spiral_spfs_endpoint = match ServiceEndpoint::spiral_spfs(
-            &backend_state
-                .spiral_spfs_endpoint()
-                .unwrap_or_else(|| ServiceEndpoint::environment_spiral_spfs().into_string()),
-        ) {
-            Ok(endpoint) => endpoint.into_string(),
-            Err(error) => {
-                eprintln!("error: {error}");
-                return ExitCode::FAILURE;
-            }
-        };
         // On macOS this puts up the system camera prompt, which has to happen on
         // the main thread before any runtime starts.
         let camera_access = if arguments.video.no_cameras {
@@ -213,8 +189,6 @@ impl StudioServer {
                 arguments,
                 camera_access_error: camera_access.err(),
                 backend_state,
-                spiral_endpoint,
-                spiral_spfs_endpoint,
                 control_settings,
                 public,
             }
@@ -235,11 +209,30 @@ impl ServerStartup {
             arguments,
             camera_access_error,
             backend_state,
-            spiral_endpoint,
-            spiral_spfs_endpoint,
             control_settings,
             public,
         } = self;
+        backend_state
+            .initialize()
+            .await
+            .map_err(std::io::Error::other)?;
+        if let Some(path) = backend_state.studio().path() {
+            tracing::info!(path = %path.display(), "Studio state is stored in SQLite");
+        }
+        let spiral_endpoint = ServiceEndpoint::spiral(
+            &backend_state
+                .spiral_endpoint()
+                .unwrap_or_else(|| ServiceEndpoint::environment_spiral().into_string()),
+        )
+        .map_err(std::io::Error::other)?
+        .into_string();
+        let spiral_spfs_endpoint = ServiceEndpoint::spiral_spfs(
+            &backend_state
+                .spiral_spfs_endpoint()
+                .unwrap_or_else(|| ServiceEndpoint::environment_spiral_spfs().into_string()),
+        )
+        .map_err(std::io::Error::other)?
+        .into_string();
         // `dx serve` publishes its chosen address through the standard fullstack
         // environment. An explicit CLI value still wins for standalone launches.
         let bind = arguments
@@ -286,7 +279,11 @@ impl ServerStartup {
                 arguments.video.video_codec.clone(),
             ),
         );
-        let factory = crate::project_session::ProjectSessionFactory::new(resources, table_prefix);
+        let factory = crate::project_session::ProjectSessionFactory::new(
+            resources,
+            table_prefix,
+            backend_state.studio().clone(),
+        );
         let projects =
             crate::project_session::ProjectCoordinator::new(factory, backend_state, connection)
                 .map_err(|error| std::io::Error::other(error.to_string()))?;

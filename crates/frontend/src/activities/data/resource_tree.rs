@@ -1,4 +1,4 @@
-//! Project data and expandable native outputs, with Studio internals folded away.
+//! Spiral data and expandable native dataset outputs.
 use super::{
     DatasetClient,
     screen::{OpenResource, ResourceTabs},
@@ -28,17 +28,9 @@ pub(super) fn ResourceTree(resources: ResourceCatalog, tabs: ResourceTabs) -> El
                     let roots = entries.iter().filter(|resource| if filter.is_empty() { resource.selection().path().len() == 1 } else { resource.selection().label().to_lowercase().contains(&filter) }).cloned().collect::<Vec<_>>();
                     rsx! {
                         if roots.is_empty() { p { class: "data-empty-copy", "No matching tables or datasets." } }
-                        ul { class: "data-tree-list", for resource in roots.iter().filter(|resource| !resource.is_studio_internal()) {
+                        ul { class: "data-tree-list", for resource in &roots {
                             ResourceBranch { key: "{resource.resource_id()}", resource: resource.clone(), resources, tabs }
                         } }
-                        if roots.iter().any(ProjectResource::is_studio_internal) {
-                            details { class: "data-studio-resources", open: !filter.is_empty(),
-                                summary { "Studio internals" }
-                                ul { class: "data-tree-list", for resource in roots.iter().filter(|resource| resource.is_studio_internal()) {
-                                    ResourceBranch { key: "{resource.resource_id()}", resource: resource.clone(), resources, tabs }
-                                } }
-                            }
-                        }
                     }
                 },
             }

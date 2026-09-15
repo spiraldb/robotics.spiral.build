@@ -19,8 +19,8 @@ pub enum BackendReadinessState {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct BackendReadiness {
     state: BackendReadinessState,
-    /// True when the project admits feature requests. Each feature owns its
-    /// initialization and reports storage failures within its own scope.
+    /// A Spiral destination is selected and data-plane requests can be attempted.
+    /// Connectivity failures are reported by the requesting data feature.
     catalog_available: bool,
     /// Short operator-facing description of the current phase or problem.
     detail: String,
@@ -55,6 +55,10 @@ impl BackendReadiness {
     pub const fn state(&self) -> BackendReadinessState {
         self.state
     }
+    pub const fn studio_available(&self) -> bool {
+        matches!(self.state, BackendReadinessState::Ready) || self.catalog_available
+    }
+
     pub const fn catalog_available(&self) -> bool {
         self.catalog_available
     }

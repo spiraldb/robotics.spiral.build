@@ -23,11 +23,19 @@ use crate::workflows::{StoredWorkflowDocument, WorkflowJson, WorkflowPersistence
 
 pub struct StorageManager {
     project_store: Arc<ProjectStore>,
+    studio: crate::StudioProject,
 }
 
 impl StorageManager {
-    pub fn new(project_store: Arc<ProjectStore>) -> Self {
-        Self { project_store }
+    pub fn new(project_store: Arc<ProjectStore>, studio: crate::StudioProject) -> Self {
+        Self {
+            project_store,
+            studio,
+        }
+    }
+
+    pub fn studio(&self) -> &crate::StudioProject {
+        &self.studio
     }
 
     pub(crate) fn project_store(&self) -> &ProjectStore {
@@ -68,34 +76,26 @@ impl StorageManager {
 
     /// Read the durable training history.
     pub async fn load_training_history(&self) -> Result<Vec<TrainingRun>, String> {
-        TrainingHistoryPersistence::new(&self.project_store)
-            .load()
-            .await
+        TrainingHistoryPersistence::new(&self.studio).load().await
     }
 
-    /// Replace the complete training history.
-    ///
-    /// All three relations are replaced inside one transaction so a run row
-    /// and its metric or checkpoint rows can never disagree about which runs
-    /// are retained.
+    /// Persist retained runs and their histories in one SQLite transaction.
     pub async fn save_training_history(&self, snapshot: &TrainingSnapshot) -> Result<(), String> {
-        TrainingHistoryPersistence::new(&self.project_store)
+        TrainingHistoryPersistence::new(&self.studio)
             .save(snapshot)
             .await
     }
 
     /// Read the one durable rollout session.
     pub async fn load_rollout_session(&self) -> Result<Option<RolloutSnapshot>, String> {
-        RolloutSessionPersistence::new(&self.project_store)
-            .load()
-            .await
+        RolloutSessionPersistence::new(&self.studio).load().await
     }
 
     /// Replace the durable rollout session. A snapshot that never named a
     /// session clears the relation, so a project that has never run a policy
     /// and a project whose history was cleared read back identically.
     pub async fn save_rollout_session(&self, snapshot: &RolloutSnapshot) -> Result<(), String> {
-        RolloutSessionPersistence::new(&self.project_store)
+        RolloutSessionPersistence::new(&self.studio)
             .save(snapshot)
             .await
     }
@@ -103,14 +103,14 @@ impl StorageManager {
     pub async fn workflows(
         &self,
     ) -> Result<Vec<spiral_robotics_common::workflow::WorkflowSummary>, String> {
-        WorkflowPersistence::new(&self.project_store).list().await
+        WorkflowPersistence::new(&self.studio).list().await
     }
 
     pub async fn load_workflow(
         &self,
         workflow_id: &str,
     ) -> Result<Option<StoredWorkflowDocument>, String> {
-        WorkflowPersistence::new(&self.project_store)
+        WorkflowPersistence::new(&self.studio)
             .load(workflow_id)
             .await
     }
@@ -121,28 +121,26 @@ impl StorageManager {
         workflow: &spiral_robotics_common::workflow::WorkflowSpec,
         contents: (&WorkflowJson, &WorkflowJson),
     ) -> Result<bool, String> {
-        WorkflowPersistence::new(&self.project_store)
+        WorkflowPersistence::new(&self.studio)
             .save(workflow, contents)
             .await
     }
 
     pub async fn load_studio_preferences(&self) -> Result<StoredStudioPreferences, String> {
-        StudioPreferencePersistence::new(&self.project_store)
-            .load()
-            .await
+        StudioPreferencePersistence::new(&self.studio).load().await
     }
 
     pub async fn save_studio_preferences(
         &self,
         preferences: &StoredStudioPreferences,
     ) -> Result<(), String> {
-        StudioPreferencePersistence::new(&self.project_store)
+        StudioPreferencePersistence::new(&self.studio)
             .save(preferences)
             .await
     }
 
     pub async fn export_project_bundle(&self) -> Result<Vec<u8>, String> {
-        TransferPersistence::new(&self.project_store)
+        TransferPersistence::new(&self.project_store, &self.studio)
             .export_project()
             .await
     }
@@ -151,7 +149,7 @@ impl StorageManager {
         &self,
         bytes: &[u8],
     ) -> Result<spiral_robotics_common::datasets::ProjectImportSummary, String> {
-        TransferPersistence::new(&self.project_store)
+        TransferPersistence::new(&self.project_store, &self.studio)
             .import_project(bytes)
             .await
     }

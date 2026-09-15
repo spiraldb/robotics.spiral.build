@@ -13,7 +13,12 @@ fn bootstrap_lifecycle_controls_catalog_admission() {
     );
     assert!(state.catalog_unavailable().is_some());
 
-    state.ready();
+    state.ready(false);
+    assert!(state.current().studio_available());
+    assert!(!state.current().catalog_available());
+    assert!(state.catalog_unavailable().is_some());
+
+    state.ready(true);
     assert_eq!(state.current().state(), BackendReadinessState::Ready);
     assert!(state.current().catalog_available());
     assert!(state.catalog_unavailable().is_none());

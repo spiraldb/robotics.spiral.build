@@ -67,10 +67,10 @@ impl ProjectReadiness {
         ));
     }
 
-    pub(crate) fn ready(&self) {
+    pub(crate) fn ready(&self, configured: bool) {
         self.current.send_replace(BackendReadiness::new(
             BackendReadinessState::Ready,
-            true,
+            configured,
             "Studio services are ready",
         ));
     }
@@ -149,14 +149,20 @@ impl ProjectHardware {
 pub(crate) struct ProjectSessionFactory {
     hardware: ProjectHardware,
     table_prefix: String,
+    studio: spiral_robotics_storage::StudioStore,
     admission: Arc<ProjectAdmissionGate>,
 }
 
 impl ProjectSessionFactory {
-    pub(crate) fn new(hardware: ProjectHardware, table_prefix: String) -> Self {
+    pub(crate) fn new(
+        hardware: ProjectHardware,
+        table_prefix: String,
+        studio: spiral_robotics_storage::StudioStore,
+    ) -> Self {
         Self {
             hardware,
             table_prefix,
+            studio,
             admission: Arc::new(ProjectAdmissionGate::default()),
         }
     }
@@ -184,9 +190,10 @@ impl ProjectSessionFactory {
         info: ProjectSessionInfo,
         store: Arc<ProjectStore>,
     ) -> Arc<ProjectSession> {
-        let workspace = Arc::new(RobotWorkspace::new(store.clone()));
+        let studio = self.studio.project(&store.connection_settings());
+        let workspace = Arc::new(RobotWorkspace::new(studio.clone()));
         let recording_buffer = Arc::new(RecordingBuffer::new());
-        let storage = Arc::new(StorageManager::new(store));
+        let storage = Arc::new(StorageManager::new(store, studio));
         let lease = Arc::new(CatalogMutationLease::default());
         let preferences = Arc::new(crate::data::preferences::RuntimePreferences::new(
             storage.clone(),
@@ -312,7 +319,7 @@ impl ProjectSession {
     }
 
     async fn prepare(&self, preparation: ProjectPreparation) -> Result<(), OperationError> {
-        if !self.storage().is_configured() {
+        if matches!(preparation, ProjectPreparation::Validate) && !self.storage().is_configured() {
             return Err(OperationError::invalid_input(
                 "Choose a Spiral project in Settings before loading it.",
             ));
@@ -323,7 +330,7 @@ impl ProjectSession {
                 return Err(OperationError::External(detail));
             }
         }
-        self.readiness.ready();
+        self.readiness.ready(self.storage().is_configured());
         Ok(())
     }
 
@@ -529,6 +536,7 @@ impl ProjectCoordinator {
             .await?;
         self.backend_state
             .save_connection(&connection)
+            .await
             .map_err(OperationError::Internal)?;
         self.publish(candidate, transition);
         Ok(())
@@ -570,8 +578,7 @@ impl ProjectCoordinator {
             origin.preferences().replace(preferences).await;
             return Ok(DataSettingsUpdate::new(origin.settings().await?, false));
         }
-        let transition =
-            self.begin_change(origin, "Connecting to SpiralDB and loading the project")?;
+        let transition = self.begin_change(origin, "Loading Studio project")?;
         self.require_idle(
             origin,
             if connection == previous {
@@ -602,6 +609,7 @@ impl ProjectCoordinator {
         if connection != previous {
             self.backend_state
                 .save_connection(&connection)
+                .await
                 .map_err(OperationError::Internal)?;
         }
         let result = candidate.settings().await?;
@@ -610,15 +618,7 @@ impl ProjectCoordinator {
     }
 
     pub(crate) async fn resume(&self, origin: &ProjectSession) -> Result<(), OperationError> {
-        // A CLI/environment override selecting another destination is an
-        // explicit project selection, even though it happens during startup.
-        let preparation =
-            if self.backend_state.project_id().as_deref() == Some(origin.info().project_id()) {
-                ProjectPreparation::Resume
-            } else {
-                ProjectPreparation::Validate
-            };
-        self.reload(origin, preparation).await
+        self.reload(origin, ProjectPreparation::Resume).await
     }
 
     pub(crate) async fn recover(&self, origin: &ProjectSession) -> Result<(), OperationError> {
@@ -632,8 +632,7 @@ impl ProjectCoordinator {
     ) -> Result<(), OperationError> {
         let _serialization = self.transition.lock().await;
         self.resolve(origin.info().id())?;
-        let transition =
-            self.begin_change(origin, "Connecting to SpiralDB and loading the project")?;
+        let transition = self.begin_change(origin, "Loading Studio project")?;
         self.require_idle(origin, ProjectChangeKind::Reload).await?;
         origin
             .rollout()
@@ -658,7 +657,7 @@ impl ProjectCoordinator {
         let transition = self.begin_change(origin, "Importing and loading the project")?;
         self.require_idle(origin, ProjectChangeKind::Import).await?;
         // Import uses a separate store at the same immutable destination. Its
-        // database transaction is owned by the existing native bundle importer.
+        // importer coordinates the Spiral data and local SQLite transactions.
         origin
             .rollout()
             .flush_persistence()
@@ -672,7 +671,9 @@ impl ProjectCoordinator {
             .import_project_bundle(document)
             .await
             .map_err(OperationError::External)?;
-        candidate.readiness().ready();
+        candidate
+            .readiness()
+            .ready(candidate.storage().is_configured());
         self.publish(candidate, transition);
         Ok(summary)
     }
@@ -766,10 +767,15 @@ pub(crate) mod tests {
                 Arc::new(CameraManager::new()),
                 VideoEncoderSettings::new("ffmpeg".to_owned(), "libx264".to_owned()),
             );
-            let factory = ProjectSessionFactory::new(hardware, "project_lifetime_test".to_owned());
-            let backend_state = Arc::new(
-                BackendStateStore::open_for_test(directory.path().join("backend.json")).unwrap(),
+            let factory = ProjectSessionFactory::new(
+                hardware,
+                "project_lifetime_test".to_owned(),
+                spiral_robotics_storage::StudioStore::in_memory(),
             );
+            let backend_state = Arc::new(BackendStateStore::new(
+                spiral_robotics_storage::StudioStore::at(directory.path().join("studio.sqlite3")),
+                directory.path().join("backend.json"),
+            ));
             let connection = SpiralConnectionSettings::new(
                 "https://api.spiraldb.dev".to_owned(),
                 "https://spfs.spiraldb.dev".to_owned(),
@@ -865,7 +871,9 @@ pub(crate) mod tests {
     async fn canceled_change_restores_readiness_and_releases_admission() {
         let fixture = ProjectFixture::new();
         let original = fixture.projects.active();
-        original.readiness().ready();
+        original
+            .readiness()
+            .ready(original.storage().is_configured());
         let previous_readiness = original.readiness().current();
         let mut readiness = original.readiness().subscribe();
         let projects = fixture.projects.clone();
@@ -884,7 +892,6 @@ pub(crate) mod tests {
         assert_eq!(loading.state(), BackendReadinessState::Bootstrapping);
         assert_eq!(loading.detail(), "Loading another project");
         assert!(!loading.catalog_available());
-        assert!(!loading.catalog_available());
         assert!(fixture.projects.admit(original.info().id()).is_err());
 
         change.abort();
@@ -900,7 +907,9 @@ pub(crate) mod tests {
     async fn publication_rejects_stale_requests_without_retargeting_old_storage() {
         let fixture = ProjectFixture::new();
         let original = fixture.projects.active();
-        original.readiness().ready();
+        original
+            .readiness()
+            .ready(original.storage().is_configured());
         let old_connection = original.storage().connection_settings();
         let replacement = fixture.replace("project_b");
         assert!(!Arc::ptr_eq(&original, &replacement));
@@ -924,7 +933,9 @@ pub(crate) mod tests {
     async fn admitted_request_blocks_replacement_until_its_last_owner_finishes() {
         let fixture = ProjectFixture::new();
         let original = fixture.projects.active();
-        original.readiness().ready();
+        original
+            .readiness()
+            .ready(original.storage().is_configured());
         let readiness = original.readiness().subscribe();
         let request = fixture.projects.admit(original.info().id()).unwrap();
         let background = request.clone();

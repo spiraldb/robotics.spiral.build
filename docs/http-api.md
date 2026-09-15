@@ -234,7 +234,7 @@ the pair; the backend revalidates hardware admission before recording begins.
 `SpiralConnectionUpdate.huggingface_token` is write-only: omitted or `null` keeps
 the saved token; a non-empty string replaces it; an empty string removes it.
 Settings responses contain only `huggingface_token_configured`. The backend keeps
-the token in its private bootstrap file and supplies it to the native ADBC
+the token in its local SQLite database and supplies it to the native ADBC
 database. Saving a changed token replaces the project connection through the
 normal settings lifecycle. Project exports and agent context do not contain it.
 
@@ -290,7 +290,11 @@ separate Studio dataset registry. Project snapshot restore is a separate operati
   The backend enforces the 256 MiB limit against both the advertised length and
   actual streamed bytes. The browser sends its native File without making a
   project-sized WebAssembly copy. Import returns `ProjectImportSummary`.
-- `GET /project/export?session_id=...`: project bundle download.
+- `GET /project/export?session_id=...`: version 3 project bundle download, a ZIP
+  containing exactly `studio.sqlite3` (project-scoped control records, no backend
+  credentials) and `spiral.data` (MCAP sources and checkpoint artifacts).
+  Import accepts only this version and also bounds total uncompressed contents
+  to 256 MiB. See [project transfer](studio-sqlite.md#project-transfer).
 - `POST /robots/save`: `{document, expected}`. `document` is the complete portable
   robot JSON object. `expected: null` creates a new robot; otherwise it is the
   editor baseline, compared inside the save transaction. Conflicts return 409.

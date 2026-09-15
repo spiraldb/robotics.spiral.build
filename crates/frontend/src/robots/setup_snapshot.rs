@@ -7,7 +7,7 @@ use spiral_robotics_common::robots::{CameraStatus, ModeStatus, RobotSummary};
 /// connect and then whenever it actually differs.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct RobotSetupSnapshot {
-    /// Every robot configuration found in SpiralDB, by ID.
+    /// Every robot configuration saved in Studio, by ID.
     robots: Vec<RobotSummary>,
     /// Cameras the server has discovered.
     cameras: Vec<CameraStatus>,

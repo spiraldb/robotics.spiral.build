@@ -21,7 +21,7 @@ impl TrainingHistory {
     ) -> Self {
         let sessions = ProjectSessionSignals::current();
         let request = QueryPolicy::new(QueryDomain::Training, 1_000).use_when(
-            move || is_active() && sessions.catalog_available(),
+            move || is_active() && sessions.studio_available(),
             move || {
                 let selected = selected();
                 async move {
