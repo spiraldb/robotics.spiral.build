@@ -153,10 +153,11 @@ trait StageInputLabels {
 }
 
 impl StageInputLabels for WorkflowStage {
-    /// A join's two inputs are its left and right sides; other multi-input
-    /// stages number theirs. A single input needs no label.
+    /// A join's two inputs are its left and right sides. A set operation's
+    /// inputs are peers and carry no label; other multi-input stages number
+    /// theirs. A single input needs no label.
     fn input_label(&self, index: usize) -> Option<String> {
-        if self.inputs.len() < 2 {
+        if self.inputs.len() < 2 || self.is_set_operation() {
             return None;
         }
         if self.is_join() && self.inputs.len() == 2 {
@@ -216,28 +217,8 @@ fn WorkflowPlanGraph(
     on_select: EventHandler<WorkflowGraphDetails>,
 ) -> Element {
     let initial = use_hook(|| PlanFlow::from(&graph));
-    let strip = use_hook(|| {
-        let root = graph.root.clone();
-        initial
-            .reading_order()
-            .into_iter()
-            .filter_map(|id| graph.stages.iter().find(|stage| stage.id == id))
-            .map(|stage| StripStage {
-                id: stage.id.clone(),
-                title: stage.content.title.clone(),
-                kind: stage.kind(&root),
-            })
-            .collect::<Vec<_>>()
-    });
     let nodes = use_signal(|| initial.nodes);
     let mut edges = use_signal(|| initial.edges);
-    let selected_id = use_memo(move || {
-        nodes
-            .read()
-            .iter()
-            .find(|node| node.selected)
-            .map(|node| node.id.clone())
-    });
     let flow = use_flow_handle::<StageNode>();
     let overflowing = use_signal(|| false);
     use_effect(use_reactive((&active,), move |(active,)| {
@@ -296,7 +277,6 @@ fn WorkflowPlanGraph(
                     Background { variant: BackgroundVariant::Dots, gap: 22.0, size: 0.7 }
                     PlanInitialViewport { overflowing }
                     PlanFocus { nodes, edges, focus_stage }
-                    PlanStageStrip { stages: strip, selected: selected_id(), focus_stage }
                     PlanCanvasControls { stage_count }
                     if overflowing() { MiniMap { width: 112.0, height: 64.0 } }
                 }
@@ -305,13 +285,18 @@ fn WorkflowPlanGraph(
     }
 }
 
-/// Zoom and fit live on the canvas itself, quiet until needed.
+/// Zoom and fit live on the canvas itself, quiet until needed, with the
+/// stage count beside them so a pipeline wider than the pane still says how
+/// much of it there is.
 #[component]
 fn PlanCanvasControls(stage_count: usize) -> Element {
     let core = use_flow();
     rsx! {
         div { class: "workflow-canvas-controls", role: "toolbar", "aria-label": "Graph view of {stage_count} stages",
             onpointerdown: move |event| event.stop_propagation(),
+            span { class: "workflow-canvas-count",
+                if stage_count == 1 { "1 stage" } else { "{stage_count} stages" }
+            }
             Action { purpose: ActionPurpose::Navigate, variant: ActionVariant::Icon,
                 aria_label: "Zoom in", title: "Zoom in",
                 onclick: move |_| core.zoom_in(200), ZoomInIcon {} }
@@ -325,49 +310,8 @@ fn PlanCanvasControls(stage_count: usize) -> Element {
     }
 }
 
-/// One entry of the stage strip: the whole pipeline in reading order.
-#[derive(Clone, PartialEq)]
-struct StripStage {
-    id: String,
-    title: String,
-    kind: StageKind,
-}
-
-/// Every stage, in order, along the top of the canvas. A pipeline wider than
-/// the pane is still complete here, and each entry centres its stage.
-#[component]
-fn PlanStageStrip(
-    stages: Vec<StripStage>,
-    selected: Option<String>,
-    focus_stage: Signal<Option<String>>,
-) -> Element {
-    let mut focus_stage = focus_stage;
-    rsx! {
-        nav { class: "workflow-stage-strip", "aria-label": "Stages in order",
-            onpointerdown: move |event| event.stop_propagation(),
-            span { class: "workflow-stage-strip-count",
-                if stages.len() == 1 { "1 stage" } else { "{stages.len()} stages" }
-            }
-            ol {
-                for stage in stages.iter() {
-                    li { key: "{stage.id}", class: "workflow-stage-{stage.kind.class_name()}",
-                        Action { purpose: ActionPurpose::Select, variant: ActionVariant::Quiet,
-                            class: "workflow-strip-stage",
-                            aria_pressed: selected.as_deref() == Some(stage.id.as_str()),
-                            title: "{stage.kind.label()} · {stage.title}",
-                            onclick: { let id = stage.id.clone(); move |_| focus_stage.set(Some(id.clone())) },
-                            span { class: "workflow-strip-mark", "aria-hidden": "true", StageKindGlyph { kind: stage.kind } }
-                            span { class: "workflow-strip-title", "{stage.title}" }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Applies a stage request from the strip or the overview: select it on the
-/// canvas, centre it, and clear the request.
+/// Applies a stage request from the overview: select it on the canvas,
+/// centre it, and clear the request.
 #[component]
 fn PlanFocus(
     nodes: Signal<Vec<Node<StageNode>>>,
@@ -440,7 +384,7 @@ fn WorkflowOverview(report: SpiralPlanReport, focus_stage: Signal<Option<String>
         .collect::<Vec<_>>();
     let joins = stages
         .iter()
-        .filter(|stage| stage.is_join())
+        .filter(|stage| stage.combines_inputs())
         .collect::<Vec<_>>();
     let output = graph.stages.iter().find(|stage| stage.id == root);
     let columns = output
@@ -464,11 +408,13 @@ fn WorkflowOverview(report: SpiralPlanReport, focus_stage: Signal<Option<String>
                 dl { class: "workflow-facts",
                     for source in sources.iter() {
                         div { key: "{source.id}",
-                            dt { "{source.footer(&root)}" }
+                            dt { "{StageContent::provider_label(&source.footer(&root))}" }
                             dd {
                                 strong { "{source.content.title}" }
                                 if !source.content.summary.is_empty() {
-                                    span { class: "workflow-overview-summary", PathText { text: source.content.summary.clone() } }
+                                    span { class: "workflow-overview-summary", title: "{source.content.summary}",
+                                        PathText { text: source.content.summary.clone() }
+                                    }
                                 }
                             }
                         }
@@ -575,9 +521,8 @@ pub(super) fn WorkflowGraphInspector(
                 None => match report {
                     Some(report) => rsx! { WorkflowOverview { report, focus_stage } },
                     None => rsx! {
-                        div { class: "workflow-panel-empty",
-                            strong { "Select a stage" }
-                            p { "Each stage explains what it does, what it reads or requires, and the columns it adds. Selecting a connection shows what travels along it." }
+                        div { class: "workflow-panel-empty is-quiet",
+                            p { "Stage details appear here once the graph exists: what each stage reads, requires, and produces." }
                         }
                     },
                 },
@@ -749,13 +694,12 @@ fn PlanInitialViewport(overflowing: Signal<bool>) -> Element {
             }
             return;
         }
-        // The stage strip owns up to two rows at the top (64px) and the
-        // controls the bottom 40px.
+        // The controls own the bottom 40px; the rest of the pane is canvas.
         let safe = Rect::new(
             24.0,
-            64.0,
+            20.0,
             (container.width - 48.0).max(1.0),
-            (container.height - 112.0).max(1.0),
+            (container.height - 68.0).max(1.0),
         );
         // Fit the whole graph while it stays readable. A pipeline wider than
         // the pane is going to be panned anyway, so it keeps its cards at the
@@ -932,7 +876,7 @@ mod tests {
         assert_ne!(flow.edges[0].target_handle, flow.edges[1].target_handle);
         assert_eq!(flow.edges[0].source, "operator-1");
         assert_eq!(flow.edges[0].target, "operator-0");
-        assert_eq!(flow.edges[0].label.as_deref(), Some("input 1"));
+        assert_eq!(flow.edges[0].label, None);
         assert!(flow.nodes.iter().all(|node| !node.draggable));
         let source = flow
             .nodes

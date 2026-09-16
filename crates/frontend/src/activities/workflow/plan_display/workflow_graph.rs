@@ -122,11 +122,11 @@ impl WorkflowStage {
         if self.reads_source() {
             return StageKind::Source;
         }
+        if self.combines_inputs() {
+            return StageKind::Join;
+        }
         if self.id == root {
             return StageKind::Output;
-        }
-        if self.is_join() {
-            return StageKind::Join;
         }
         StageKind::Shape
     }
@@ -142,8 +142,22 @@ impl WorkflowStage {
         self.operators.iter().any(|node| node.operator() == "Join")
     }
 
+    /// A set operation stacks or intersects two row populations. Its inputs
+    /// are peers, so unlike a join they carry no left/right labels.
+    pub(super) fn is_set_operation(&self) -> bool {
+        self.operators
+            .iter()
+            .any(|node| matches!(node.operator(), "SetOp" | "Union" | "Intersect" | "Except"))
+    }
+
+    /// Whether this stage brings two row populations together.
+    pub(super) fn combines_inputs(&self) -> bool {
+        self.is_join() || self.is_set_operation()
+    }
+
     /// The footer line under a stage: the native function it calls, the
-    /// provider it reads from, or how many SQL operations were folded into it.
+    /// provider it reads from, or the SQL operations folded into it, named in
+    /// execution order ("filter · number · select").
     pub(super) fn footer(&self, root: &str) -> String {
         if let Some(function) = &self.content.function {
             return function.clone();
@@ -156,10 +170,29 @@ impl WorkflowStage {
         {
             return provider.to_owned();
         }
-        match self.operators.len() {
-            1 => "1 operation".to_owned(),
-            count => format!("{count} operations"),
+        let mut words = Vec::<&str>::new();
+        for node in &self.operators {
+            let word = match node.operator() {
+                "Filter" => "filter",
+                "Project" => "select",
+                "Sort" => "sort",
+                "Limit" | "TopK" => "limit",
+                "Aggregate" => "group",
+                "Window" => "number",
+                "Distinct" => "distinct",
+                "Join" => "join",
+                "SetOp" | "Union" => "union",
+                "Intersect" => "intersect",
+                "Except" => "except",
+                "Values" => "values",
+                "TableFunction" | "Generate" => "expand",
+                other => other,
+            };
+            if !words.contains(&word) {
+                words.push(word);
+            }
         }
+        words.join(" · ")
     }
 
     /// Column names this stage hands on, when it hands on rows.
@@ -236,6 +269,11 @@ impl WorkflowStage {
             })
     }
     fn refresh_summary(&mut self) {
+        // A native call keeps its own name and summary whatever shaping was
+        // folded in after it; the inspector lists the folded steps.
+        if self.content.function.is_some() {
+            return;
+        }
         let has = |operator| {
             self.operators
                 .iter()
@@ -255,15 +293,32 @@ impl WorkflowStage {
             }
             return;
         }
-        // Numbering rows inside groups and keeping the first is one idea:
-        // pick one row per group.
-        if let Some((groups, order)) = self
+        if let Some(combining) = self.operators.iter().find(|node| {
+            matches!(
+                node.operator(),
+                "Join" | "SetOp" | "Union" | "Intersect" | "Except"
+            )
+        }) {
+            self.content = StageContent::relational(combining);
+            return;
+        }
+        // Numbering rows inside groups and then keeping row 1 is one idea:
+        // pick one row per group. The filter has to come after the window;
+        // a filter before it is an unrelated condition.
+        let numbering = self
             .operators
             .iter()
-            .find(|node| node.operator() == "Window")
-            .and_then(StageContent::one_row_per_group)
-            .filter(|_| has("Filter"))
-        {
+            .position(|node| node.operator() == "Window")
+            .and_then(|index| {
+                let keeps_first = self.operators[index + 1..].iter().any(|node| {
+                    node.operator() == "Filter"
+                        && StageContent::relational(node).summary.contains("= 1)")
+                });
+                keeps_first
+                    .then(|| StageContent::one_row_per_group(&self.operators[index]))
+                    .flatten()
+            });
+        if let Some((groups, order)) = numbering {
             self.content = StageContent {
                 title: format!("One row per {groups}"),
                 summary: format!("First by {order}"),
@@ -294,6 +349,20 @@ impl WorkflowStage {
             .find_map(|kind| self.operators.iter().find(|node| node.operator() == *kind));
         if let Some(lead) = lead {
             self.content = StageContent::relational(lead);
+            // Every condition the stage applies, not only the first one.
+            if lead.operator() == "Filter" {
+                let conditions = self
+                    .operators
+                    .iter()
+                    .filter(|node| node.operator() == "Filter")
+                    .map(|node| StageContent::relational(node).summary)
+                    .filter(|condition| !condition.is_empty())
+                    .collect::<Vec<_>>();
+                if conditions.len() > 1 {
+                    self.content.summary = conditions.join(" AND ");
+                    self.content.summary_kind = SummaryKind::Expression;
+                }
+            }
         }
         if classify && !has("Aggregate") && !has("Limit") && !has("TopK") {
             self.content.title = if has("Filter") {
@@ -304,10 +373,10 @@ impl WorkflowStage {
         }
     }
 
-    /// Column selection and ordering directly after a read are how the query
-    /// reads, not separate ideas; they fold into the source stage. A
+    /// Column selection and ordering directly after a stage are how that
+    /// stage hands its rows on, not separate ideas; they fold into it. A
     /// projection that computes something is a step of its own and stays out.
-    fn folds_into_source(&self) -> bool {
+    fn folds_into_upstream(&self) -> bool {
         self.content.function.is_none()
             && self.inputs.len() == 1
             && self.operators.iter().all(|node| match node.operator() {
@@ -317,15 +386,6 @@ impl WorkflowStage {
                 }
                 _ => false,
             })
-    }
-
-    fn changes_rows(&self) -> bool {
-        self.operators.iter().any(|node| {
-            matches!(
-                node.operator(),
-                "Filter" | "Aggregate" | "Limit" | "TopK" | "Distinct"
-            )
-        })
     }
 }
 
@@ -407,7 +467,7 @@ impl WorkflowGraph {
             stages,
             root: outputs[&format!("operator-{}", plan.root())].clone(),
         };
-        graph.fold_source_shaping();
+        graph.fold_shaping();
         graph.collapse_sql();
         Ok(graph)
     }
@@ -420,11 +480,15 @@ impl WorkflowGraph {
         }
         consumers
     }
-    fn fold_source_shaping(&mut self) {
+    /// Pure column selection and ordering fold into whichever stage feeds
+    /// them, as long as that stage feeds nothing else: a read keeps its
+    /// projection, a native call keeps the rename after it, a join keeps the
+    /// columns it hands on.
+    fn fold_shaping(&mut self) {
         loop {
             let consumers = self.consumers();
             let pair = self.stages.iter().enumerate().find_map(|(down, stage)| {
-                if !stage.folds_into_source() {
+                if !stage.folds_into_upstream() {
                     return None;
                 }
                 self.stages
@@ -432,7 +496,7 @@ impl WorkflowGraph {
                     .position(|up| {
                         up.id == stage.inputs[0]
                             && up.id != stage.id
-                            && up.reads_source()
+                            && !up.mergeable()
                             && consumers.get(&up.id) == Some(&1)
                     })
                     .map(|up| (up, down))
@@ -442,23 +506,25 @@ impl WorkflowGraph {
             };
             let downstream = self.stages.remove(down);
             let up = if down < up { up - 1 } else { up };
-            let source_id = self.stages[up].id.clone();
+            let upstream_id = self.stages[up].id.clone();
             for stage in &mut self.stages {
                 for input in &mut stage.inputs {
                     if *input == downstream.id {
-                        *input = source_id.clone();
+                        *input = upstream_id.clone();
                     }
                 }
             }
             if self.root == downstream.id {
-                self.root = source_id;
+                self.root = upstream_id;
             }
-            let source = &mut self.stages[up];
-            source.operators.extend(downstream.operators);
-            source.output = downstream.output;
-            source.refresh_summary();
+            let upstream = &mut self.stages[up];
+            upstream.operators.extend(downstream.operators);
+            upstream.output = downstream.output;
+            upstream.refresh_summary();
         }
     }
+    /// A linear run of routine SQL between two meaningful stages is one idea:
+    /// the rows are shaped, then handed on. The inspector keeps every step.
     fn collapse_sql(&mut self) {
         loop {
             let consumers = self.consumers();
@@ -473,9 +539,6 @@ impl WorkflowGraph {
                             && up.id != stage.id
                             && up.id != self.root
                             && up.mergeable()
-                            // Keep each population change visible. Numbering, ordering,
-                            // and projections can live inside the operation they support.
-                            && !(up.changes_rows() && stage.changes_rows())
                             && consumers.get(&up.id) == Some(&1)
                     })
                     .map(|up| (up, down))
@@ -682,10 +745,9 @@ impl ExpressionGraph {
                 }
                 [input] if function == "spql.is_null" => format!("{input} is null"),
                 [input] if function == "spql.not" => format!("NOT ({input})"),
-                [input] if expr.kind == "cast" => match &expr.dtype {
-                    Some(dtype) => format!("{input} as {dtype}"),
-                    None => input.clone(),
-                },
+                // A cast changes a value's type, not its meaning; the stored
+                // type stays in the native operator JSON.
+                [input] if expr.kind == "cast" => input.clone(),
                 _ if expr.kind == "field" => expr
                     .display
                     .strip_prefix("$.")
@@ -928,7 +990,16 @@ mod tests {
             source,
         ]);
         let graph = WorkflowGraph::from_plan(&plan).unwrap();
-        assert_eq!(graph.stages.len(), 3);
+        // The read keeps its projection; the filter and the aggregate are one
+        // shaping stage whose steps the inspector lists.
+        assert_eq!(graph.stages.len(), 2);
+        let shaped = graph
+            .stages
+            .iter()
+            .find(|stage| stage.id == graph.root)
+            .unwrap();
+        assert_eq!(shaped.content.title, "Summarize all rows");
+        assert_eq!(shaped.footer(&graph.root), "filter · group");
         let source = graph
             .stages
             .iter()
@@ -1158,7 +1229,18 @@ mod tests {
         assert_eq!(kind("call-2-1"), StageKind::Media);
         assert_eq!(kind("call-2-0"), StageKind::Model);
         assert_eq!(kind("operator-1"), StageKind::Shape);
-        assert_eq!(kind("operator-0"), StageKind::Output);
+        // A root that combines two populations is still a join; its card
+        // carries the Output flag instead of changing kind.
+        assert_eq!(kind("operator-0"), StageKind::Join);
+        let plain_root = WorkflowGraph::from_plan(&Fixture::plan(vec![
+            Fixture::node(0, "Filter", &[1]),
+            Fixture::node(1, "Source", &[]),
+        ]))
+        .unwrap();
+        assert_eq!(
+            plain_root.stages[0].kind(&plain_root.root),
+            StageKind::Output
+        );
         assert_eq!(StageKind::Output.label(), "Output");
         let join = WorkflowGraph::from_plan(&Fixture::plan(vec![
             Fixture::node(0, "Project", &[1]),
@@ -1166,19 +1248,120 @@ mod tests {
             Fixture::node(2, "Source", &[]),
         ]))
         .unwrap();
+        // The final column selection folds into the join it shapes, so the
+        // join is both the combining stage and the workflow's output.
+        assert_eq!(join.stages.len(), 2);
         let joined = join
             .stages
             .iter()
             .find(|stage| stage.id == "operator-1")
             .unwrap();
         assert_eq!(joined.kind(&join.root), StageKind::Join);
-        assert_eq!(joined.footer(&join.root), "1 operation");
-        let output = join
+        assert_eq!(joined.footer(&join.root), "join · select");
+        assert_eq!(join.root, "operator-1");
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn set_operations_combine_rows_and_linear_filters_read_as_one_condition() {
+        let mut union = Fixture::node(0, "SetOp", &[1, 2]);
+        union["properties"]["operator"] = json!({"op":"Union","all":true});
+        let mut full = Fixture::node(1, "Filter", &[3]);
+        Fixture::expressions(
+            &mut full,
+            vec![
+                Fixture::call(0, "spql.eq", &[1, 2]),
+                json!({"id":1,"kind":"field","inputs":[],"display":"$.range"}),
+                json!({"id":2,"kind":"literal","inputs":[],"display":"\"full\""}),
+            ],
+        );
+        let mut limited = Fixture::node(2, "Filter", &[4]);
+        Fixture::expressions(
+            &mut limited,
+            vec![
+                Fixture::call(0, "spql.eq", &[1, 2]),
+                json!({"id":1,"kind":"field","inputs":[],"display":"$.range"}),
+                json!({"id":2,"kind":"literal","inputs":[],"display":"\"limited\""}),
+            ],
+        );
+        let mut first = Fixture::node(3, "Filter", &[5]);
+        Fixture::expressions(
+            &mut first,
+            vec![
+                Fixture::call(0, "spql.eq", &[1, 2]),
+                json!({"id":1,"kind":"field","inputs":[],"display":"$.rn"}),
+                json!({"id":2,"kind":"literal","inputs":[],"display":"1"}),
+            ],
+        );
+        let mut first_again = Fixture::node(4, "Filter", &[5]);
+        Fixture::expressions(
+            &mut first_again,
+            vec![
+                Fixture::call(0, "spql.eq", &[1, 2]),
+                json!({"id":1,"kind":"field","inputs":[],"display":"$.rn"}),
+                json!({"id":2,"kind":"literal","inputs":[],"display":"1"}),
+            ],
+        );
+        let mut window = Fixture::node(5, "Window", &[6]);
+        window["properties"]["operator"] = json!({"expressions":[{"name":"rn","function":{"kind":"RowNumber"},
+            "partition_by":["$.id"],"order_by":[{"field":"$log_time","descending":false}]}]});
+        let mut earlier = Fixture::node(6, "Filter", &[7]);
+        Fixture::expressions(
+            &mut earlier,
+            vec![
+                Fixture::call(0, "spql.gte", &[1, 2]),
+                json!({"id":1,"kind":"field","inputs":[],"display":"$.log_time"}),
+                json!({"id":2,"kind":"field","inputs":[],"display":"$.start"}),
+            ],
+        );
+        let graph = WorkflowGraph::from_plan(&Fixture::plan(vec![
+            union,
+            full,
+            limited,
+            first,
+            first_again,
+            window,
+            earlier,
+            Fixture::node(7, "Source", &[]),
+        ]))
+        .unwrap();
+        let combine = graph
             .stages
             .iter()
-            .find(|stage| stage.id == join.root)
+            .find(|stage| stage.id == graph.root)
             .unwrap();
-        assert_eq!(output.footer(&join.root), "1 operation");
+        assert_eq!(combine.content.title, "Combine rows");
+        assert_eq!(
+            combine.content.summary,
+            "All rows from both inputs, duplicates kept"
+        );
+        assert_eq!(combine.kind(&graph.root), StageKind::Join);
+        assert!(combine.is_set_operation() && !combine.is_join());
+        assert_eq!(combine.inputs, ["operator-1", "operator-2"]);
+        assert!(
+            combine
+                .facts()
+                .iter()
+                .any(|fact| fact.label == "Operation" && fact.value == "Union all")
+        );
+        // Two consecutive filters are one stage stating both conditions.
+        let branch = graph
+            .stages
+            .iter()
+            .find(|stage| stage.id == "operator-1")
+            .unwrap();
+        assert_eq!(branch.content.title, "Keep matching rows");
+        assert_eq!(branch.content.summary, "(rn = 1) AND (range = \"full\")");
+        assert_eq!(branch.content.summary_kind, SummaryKind::Expression);
+        assert_eq!(branch.footer(&graph.root), "filter");
+        // A filter that precedes the numbering is not the first-row idea.
+        let numbered = graph
+            .stages
+            .iter()
+            .find(|stage| stage.id == "operator-5")
+            .unwrap();
+        assert_eq!(numbered.content.title, "Keep matching rows");
+        assert_eq!(numbered.content.summary, "(log_time ≥ start)");
+        assert_eq!(numbered.footer(&graph.root), "filter · number");
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]

@@ -1,6 +1,7 @@
-//! The document bar: which workflow this is, whether it is saved, and the
-//! three things you can do to it. Switching, creating, and renaming live in
-//! one popover behind the title so the bar itself stays a single quiet line.
+//! The document bar: which view is open, which workflow this is, whether it
+//! is saved, and the three things you can do to it. Switching, creating, and
+//! renaming live in one popover behind the title so the bar itself stays a
+//! single quiet line.
 
 use dioxus::prelude::*;
 
@@ -17,7 +18,10 @@ const SWITCHER_ID: &str = "workflow-switcher";
 const TITLE_ID: &str = "workflow-document-title";
 
 #[component]
-pub(super) fn WorkflowDocumentControls(controller: WorkflowController) -> Element {
+pub(super) fn WorkflowDocumentControls(
+    controller: WorkflowController,
+    comparing: Signal<bool>,
+) -> Element {
     let workflow = controller.spec();
     let reason = controller.workflow_selection_reason();
     let mut rename = use_signal(|| None::<String>);
@@ -30,8 +34,9 @@ pub(super) fn WorkflowDocumentControls(controller: WorkflowController) -> Elemen
 
     rsx! {
         header { class: "workflow-document-bar",
+            span { class: "workflow-document-glyph", "aria-hidden": "true", WorkflowIcon {} }
+            super::workspace::WorkflowViewSwitch { comparing }
             div { class: "workflow-document-identity",
-                span { class: "workflow-document-glyph", "aria-hidden": "true", WorkflowIcon {} }
                 if let Some(name) = rename() {
                     form {
                         class: "workflow-rename",
@@ -84,7 +89,6 @@ pub(super) fn WorkflowDocumentControls(controller: WorkflowController) -> Elemen
                         class: "workflow-document-title",
                         aria_haspopup: "listbox",
                         aria_expanded: switching(),
-                        disabled: reason.is_some(),
                         title: "{title_hint}",
                         onclick: move |_| switching.toggle(),
                         span { class: "workflow-document-name", "{workflow.name()}" }
@@ -92,23 +96,20 @@ pub(super) fn WorkflowDocumentControls(controller: WorkflowController) -> Elemen
                     }
                     WorkflowDocumentState { state }
                 }
-            }
-            if let Some(reason) = reason.as_ref() {
-                span { class: "workflow-selection-reason", title: "{reason}", role: "status",
-                    if controller.unsaved_changes() { "Save or discard before switching" } else { "{reason}" }
+                // The switcher hangs from the title it belongs to, wherever
+                // the title sits in the bar.
+                if switching() {
+                    WorkflowSwitcher {
+                        controller,
+                        on_close: move |_| switching.set(false),
+                        on_rename: move |_| {
+                            switching.set(false);
+                            rename.set(Some(controller.spec().name().to_owned()));
+                        },
+                    }
                 }
             }
             WorkflowDocumentActions { controller }
-            if switching() {
-                WorkflowSwitcher {
-                    controller,
-                    on_close: move |_| switching.set(false),
-                    on_rename: move |_| {
-                        switching.set(false);
-                        rename.set(Some(controller.spec().name().to_owned()));
-                    },
-                }
-            }
         }
     }
 }
@@ -172,7 +173,8 @@ fn WorkflowSwitcher(
     let studio = StudioProjectState::current();
     let current = controller.spec();
     let workflows = controller.workflows();
-    let disabled = controller.workflow_selection_reason().is_some();
+    let reason = controller.workflow_selection_reason();
+    let disabled = reason.is_some();
     let rename_disabled = controller.save_disabled_reason().is_some();
     let initial_focus = workflows
         .iter()
@@ -197,6 +199,9 @@ fn WorkflowSwitcher(
                     close();
                 }
             },
+            if let Some(reason) = reason.as_ref() {
+                p { class: "workflow-switcher-note is-blocking", role: "status", "{reason}" }
+            }
             if workflows.is_empty() {
                 p { class: "workflow-switcher-empty", "No saved workflows yet." }
             } else {

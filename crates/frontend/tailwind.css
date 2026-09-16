@@ -1359,12 +1359,14 @@
   /* Document bar: identity on the left, the three document actions on the
      right, one 36px line. Switching, creating, and renaming open behind the
      title so the bar never grows a second row of controls. */
+  /* The bar sits above the workbench so its popover clears the panels'
+     own layers (the graph's node and edge tiles are z-indexed). */
   .workflow-document-bar {
-    @apply relative z-10 flex min-h-9 shrink-0 items-center gap-3 border-b border-line bg-surface pl-3 pr-2;
+    @apply relative z-30 flex min-h-9 shrink-0 items-center gap-2 border-b border-line bg-surface pl-3 pr-2;
   }
 
   .workflow-document-identity {
-    @apply flex min-w-0 flex-1 items-center gap-1;
+    @apply relative flex min-w-0 flex-1 items-center gap-1;
   }
 
   .workflow-document-glyph {
@@ -1442,11 +1444,6 @@
     }
   }
 
-  .workflow-selection-reason {
-    @apply shrink-0 truncate text-[11px] text-ink-faint;
-    max-width: 24rem;
-  }
-
   .workflow-document-actions {
     @apply ml-auto flex shrink-0 items-center gap-1;
   }
@@ -1470,7 +1467,7 @@
   }
 
   .workflow-switcher {
-    @apply absolute left-9 top-full z-40 mt-1 flex w-80 flex-col overflow-hidden rounded-md border border-line bg-surface;
+    @apply absolute left-0 top-full z-40 mt-1.5 flex w-80 flex-col overflow-hidden rounded-md border border-line bg-surface;
     max-width: calc(100vw - 6rem);
     box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
     animation: workflow-popover-enter 140ms var(--ease-out-expo) both;
@@ -1502,6 +1499,12 @@
   .workflow-switcher-empty,
   .workflow-switcher-note {
     @apply px-3 py-2 text-[11px] text-ink-faint;
+  }
+
+  /* Why the list below is disabled, said once at the top of the popover
+     instead of permanently in the bar. */
+  .workflow-switcher-note.is-blocking {
+    @apply border-b border-line bg-caution-soft text-caution;
   }
 
   .workflow-switcher-actions {
@@ -1545,6 +1548,12 @@
     @apply mt-2;
   }
 
+  /* Before a workflow exists the Assistant does the teaching; the other
+     panes only say what will appear in them. */
+  .workflow-panel-empty.is-quiet p {
+    @apply max-w-[40ch] text-ink-faint;
+  }
+
   .workflow-inline-error {
     @apply shrink-0 border-b border-line bg-danger-soft px-3 py-1.5 text-[11px] leading-4 text-danger;
     overflow-wrap: anywhere;
@@ -1566,74 +1575,25 @@
     container-type: inline-size;
   }
 
-  /* The whole pipeline in reading order along the top of the canvas. A
-     pipeline wider than the pane is still complete here, and every entry
-     centres its stage. */
-  .workflow-stage-strip {
-    @apply absolute inset-x-2 top-2 z-[5] flex min-w-0 items-start gap-2 text-[10px] text-ink-faint;
+  /* Zoom, fit, and the stage count share one hairline group at the bottom
+     left; the canvas above them is nothing but stages. */
+  .workflow-canvas-controls {
+    @apply absolute bottom-2 left-2 z-[5] flex items-center gap-px rounded border border-line bg-surface p-px;
+    box-shadow: 0 1px 2px rgb(0 0 0 / 0.05);
   }
 
-  .workflow-stage-strip-count {
-    @apply shrink-0 whitespace-nowrap pl-1 leading-[22px];
+  .workflow-canvas-count {
+    @apply px-2 text-[10px] leading-3 text-ink-faint tabular-nums;
   }
 
-  /* Chips wrap onto a second line so every stage stays reachable in a
-     narrow pane; beyond two lines the strip scrolls rather than eating the
-     canvas. */
-  .workflow-stage-strip ol {
-    @apply flex min-w-0 flex-1 flex-wrap items-center gap-1 overflow-y-auto;
-    max-height: 3.25rem;
-    scrollbar-width: thin;
-  }
-
-  .workflow-stage-strip li {
-    @apply flex shrink-0 items-center;
-  }
-
-  .workflow-stage-strip li + li::before {
-    content: "";
-    @apply mr-1 block h-px w-2;
-    background: var(--tone-line-strong);
-  }
-
-  .workflow-strip-stage {
-    @apply max-w-52 gap-1 rounded border border-line bg-surface px-1.5 text-[10px] text-ink-soft;
-    min-height: 22px;
-    box-shadow: 0 1px 2px rgb(0 0 0 / 0.04);
-  }
-
-  .workflow-strip-mark {
-    @apply inline-flex size-3.5 shrink-0 items-center justify-center rounded-[3px];
-    color: var(--stage-tone);
-    background: color-mix(in srgb, var(--stage-tone) 14%, transparent);
-  }
-
-  .workflow-strip-mark .ui-icon {
-    @apply size-2.5;
-  }
-
-  .workflow-strip-title {
-    @apply min-w-0 truncate;
-  }
-
-  /* A narrow canvas trades chip width and the count for keeping every stage,
-     including the last one, on screen. */
-  @container (max-width: 640px) {
-    .workflow-stage-strip-count {
-      display: none;
-    }
-
-    .workflow-stage-strip ol {
-      max-height: 4.75rem;
-    }
-
-    .workflow-strip-stage {
-      max-width: 7.25rem;
-    }
-  }
-
+  /* A read's column list can run to a dozen names; two lines say enough
+     here and the stage itself lists them all. */
   .workflow-overview-summary {
     @apply block text-ink-soft;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
     overflow-wrap: break-word;
   }
 
@@ -1665,11 +1625,6 @@
 
   .workflow-overview-stage-copy small {
     @apply truncate text-[10px] text-ink-faint;
-  }
-
-  .workflow-canvas-controls {
-    @apply absolute bottom-2 left-2 z-[5] flex items-center gap-px rounded border border-line bg-surface p-px;
-    box-shadow: 0 1px 2px rgb(0 0 0 / 0.05);
   }
 
   /* Stage cards. Fixed 224×92 so the layered layout can place them before
@@ -4124,9 +4079,10 @@
 }
 
 .workflow-stage-card .df-handle {
-  width: 7px;
-  height: 7px;
+  width: 6px;
+  height: 6px;
   border-width: 1px;
+  border-color: var(--tone-line-strong);
   pointer-events: none;
   cursor: default;
   transition: border-color 120ms ease-out, background 120ms ease-out;
@@ -4147,72 +4103,88 @@
 }
 
 /* Workflow comparison: progressive measurements over fixed populations. */
-.workflow-view-switch { display:flex; align-items:center; gap:4px; min-height:34px; padding:4px 12px; border-bottom:1px solid var(--tone-line); flex-shrink:0; }
-.workflow-view-switch button { padding:3px 12px; border-radius:4px; color:var(--tone-ink-soft); font-size:12px; }
-.workflow-view-switch button[aria-pressed="true"] { background:var(--tone-selected); color:var(--tone-accent); font-weight:600; }
+/* Build | Compare lives in the document bar as a 22px segmented control. The
+   shared segment primitive is sized for the Live transport, so its 32px floor
+   is overridden here, unlayered, where the primitive's own rule can be met. */
+.workflow-view-switch {
+  flex-shrink: 0;
+  grid-auto-flow: column;
+  grid-auto-columns: max-content;
+}
+.workflow-view-switch .ui-action--segment {
+  min-height: 22px;
+  padding-inline: 9px;
+  font-size: 11px;
+}
 .workflow-comparison-container { flex:1; min-height:0; overflow:hidden; }
 .workflow-mode-hidden { display:none !important; }
 .episode-comparison { display:flex; flex-direction:column; height:100%; min-height:0; color:var(--tone-ink); font-size:12px; }
-.episode-comparison select { width:100%; min-width:0; padding:7px 10px; border:1px solid var(--tone-line-strong); border-radius:4px; background:var(--tone-surface); color:var(--tone-ink); font:inherit; }
-.episode-comparison :is(select,button,input,summary):focus-visible, .workflow-view-switch button:focus-visible { outline:2px solid var(--tone-accent); outline-offset:3px; }
+.episode-comparison :is(select,button,input,summary):focus-visible { outline:2px solid var(--tone-accent); outline-offset:2px; }
+/* The pair reads as one sentence in the bar: A [workflow] against B [workflow]. */
+.comparison-pair { display:flex; min-width:0; flex:1; align-items:center; gap:8px; }
+.comparison-side { display:flex; min-width:0; align-items:center; gap:6px; color:var(--tone-ink-soft); font-size:11px; }
+.comparison-side-key { flex-shrink:0; font-weight:600; color:var(--tone-ink); font-variant-numeric:tabular-nums; }
+.comparison-select { height:24px; min-width:0; max-width:24rem; padding:0 6px; border:1px solid var(--tone-line); border-radius:4px; background:var(--tone-surface); color:var(--tone-ink); font:inherit; font-size:12px; text-overflow:ellipsis; }
+.comparison-select:hover:not(:disabled) { border-color:var(--tone-line-strong); }
+.comparison-select:disabled { color:var(--tone-ink-faint); }
+.comparison-pair-against { flex-shrink:0; font-size:11px; color:var(--tone-ink-faint); }
 .episode-comparison button:not(:disabled), .episode-comparison summary { cursor:pointer; }
 .episode-comparison button:disabled { opacity:.5; cursor:default; }
-.comparison-pair-header { flex-shrink:0; padding:20px 24px; border-bottom:1px solid var(--tone-line); background:var(--tone-surface); }
-.comparison-pair-header h1 { font-size:16px; font-weight:600; letter-spacing:-.01em; }
-.comparison-pair-controls { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto; gap:16px; align-items:end; margin-top:16px; }
-.comparison-pair-controls label { display:flex; min-width:0; flex-direction:column; gap:6px; color:var(--tone-ink-soft); font-size:11px; }
-.comparison-primary { min-width:100px; padding:8px 16px; border-radius:4px; background:var(--tone-accent); color:var(--tone-accent-ink); font-weight:600; }
-.comparison-primary:hover:not(:disabled) { filter:brightness(.94); }
-.comparison-content { flex:1; min-height:0; overflow:auto; padding:20px 24px 32px; background:var(--tone-sunken); scrollbar-color:var(--tone-line-strong) transparent; }
-.comparison-results-toolbar { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:20px; }
-.comparison-population-summary { display:flex; align-items:center; gap:24px; }
+.comparison-content { flex:1; min-height:0; overflow:auto; padding:12px 16px 24px; background:var(--tone-sunken); scrollbar-color:var(--tone-line-strong) transparent; }
+.comparison-results-toolbar { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:12px; }
+.comparison-population-summary { display:flex; align-items:center; gap:20px; }
 .comparison-population-link { display:flex; align-items:baseline; gap:6px; color:var(--tone-ink-soft); padding:2px 0; }
 .comparison-population-link strong { font-size:16px; font-weight:600; color:var(--tone-ink); font-variant-numeric:tabular-nums; }
 .comparison-side-label { font-weight:600; color:var(--tone-ink); margin-right:2px; }
 .comparison-population-link.is-selected :is(strong,.comparison-side-label) { color:var(--tone-accent); }
 .comparison-population-link:hover:not(:disabled) { text-decoration:underline; text-underline-offset:4px; }
 .comparison-metrics-menu { position:relative; }
-.comparison-metrics-menu > summary { list-style:none; border:1px solid var(--tone-line-strong); border-radius:4px; padding:6px 12px; background:var(--tone-surface); }
+.comparison-metrics-menu > summary { display:inline-flex; align-items:center; min-height:24px; list-style:none; border:1px solid var(--tone-line); border-radius:4px; padding:0 8px; background:var(--tone-surface); font-size:11px; color:var(--tone-ink-soft); }
+.comparison-metrics-menu > summary:hover { color:var(--tone-ink); border-color:var(--tone-line-strong); }
 .comparison-metrics-menu > summary::-webkit-details-marker { display:none; }
-.comparison-metric-options { position:absolute; top:calc(100% + 6px); right:0; z-index:10; width:280px; max-height:340px; overflow:auto; padding:8px; border:1px solid var(--tone-line-strong); border-radius:6px; background:var(--tone-surface); }
-.comparison-metric-options label { display:flex; align-items:center; gap:8px; padding:8px; cursor:pointer; }
+.comparison-metric-options { position:absolute; top:calc(100% + 4px); right:0; z-index:10; width:260px; max-height:340px; overflow:auto; padding:4px; border:1px solid var(--tone-line); border-radius:6px; background:var(--tone-surface); box-shadow:0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1); font-size:11px; }
+.comparison-metric-options label { display:flex; align-items:center; gap:8px; min-height:24px; padding:2px 6px; border-radius:4px; cursor:pointer; }
 .comparison-metric-options label:hover { background:var(--tone-hover); }
 .comparison-metric-options input { accent-color:var(--tone-accent); }
-.comparison-progress { margin-bottom:20px; padding:24px; background:var(--tone-surface); border:1px solid var(--tone-line); border-radius:6px; }
+/* Progress reads at the bench's scale: a 12px title with the elapsed clock in
+   mono, one line of detail, and four hairline steps. */
+.comparison-progress { margin-bottom:12px; padding:12px 16px 14px; background:var(--tone-surface); border:1px solid var(--tone-line); border-radius:6px; animation:comparison-arrive 180ms cubic-bezier(.16,1,.3,1); }
 .comparison-progress-heading { display:flex; align-items:baseline; justify-content:space-between; gap:16px; }
-.comparison-progress-heading h2 { font-size:16px; font-weight:600; color:var(--tone-ink); }
-.comparison-elapsed { flex-shrink:0; font-size:11px; font-variant-numeric:tabular-nums; color:var(--tone-ink-soft); }
-.comparison-progress-detail { max-width:70ch; margin-top:8px; color:var(--tone-ink-soft); font-size:12px; line-height:1.6; }
-.comparison-stages { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:16px; margin-top:24px; list-style:none; padding:0; }
-.comparison-stages li { display:flex; gap:8px; align-items:center; padding-top:12px; border-top:2px solid var(--tone-line); color:var(--tone-ink-soft); font-size:11px; line-height:1.5; }
-.comparison-stages li.is-current { color:var(--tone-accent); border-color:var(--tone-accent); font-weight:600; }
-.comparison-stages li.is-complete { color:var(--tone-ink); border-color:var(--tone-ink-faint); }
-.comparison-stage-mark { display:inline-flex; align-items:center; justify-content:center; width:20px; height:20px; flex-shrink:0; border:1px solid var(--tone-line-strong); border-radius:50%; font-size:10px; font-variant-numeric:tabular-nums; }
+.comparison-progress-heading h2 { display:inline-flex; align-items:center; gap:8px; font-size:12px; font-weight:600; letter-spacing:-.01em; color:var(--tone-ink); }
+.comparison-progress-heading h2::before { content:""; width:6px; height:6px; border-radius:50%; background:var(--tone-accent); animation:workflow-pulse 900ms ease-in-out infinite; }
+.comparison-elapsed { flex-shrink:0; font-family:var(--font-mono); font-size:11px; font-variant-numeric:tabular-nums; color:var(--tone-ink-faint); }
+.comparison-progress-detail { max-width:70ch; margin-top:4px; color:var(--tone-ink-soft); font-size:11px; line-height:1.5; }
+.comparison-stages { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin-top:12px; list-style:none; padding:0; }
+.comparison-stages li { display:flex; gap:6px; align-items:center; padding-top:8px; border-top:2px solid var(--tone-line); color:var(--tone-ink-faint); font-size:11px; line-height:1.4; }
+.comparison-stages li.is-current { color:var(--tone-accent); border-color:var(--tone-accent); font-weight:500; }
+.comparison-stages li.is-complete { color:var(--tone-ink-soft); border-color:var(--tone-ink-faint); }
+.comparison-stage-mark { display:inline-flex; align-items:center; justify-content:center; width:16px; height:16px; flex-shrink:0; border:1px solid var(--tone-line-strong); border-radius:50%; font-size:10px; font-variant-numeric:tabular-nums; }
 .is-current > .comparison-stage-mark { border-color:var(--tone-accent); background:var(--tone-selected); }
 .is-complete > .comparison-stage-mark { border-color:transparent; }
-.comparison-progress-counts { display:flex; flex-wrap:wrap; gap:6px 16px; margin-top:16px; color:var(--tone-ink-soft); font-size:11px; font-variant-numeric:tabular-nums; }
+.comparison-progress-counts { display:flex; flex-wrap:wrap; gap:6px 16px; margin-top:12px; color:var(--tone-ink-soft); font-size:11px; font-variant-numeric:tabular-nums; }
 .comparison-progress-counts > :first-child { color:var(--tone-ink); font-weight:500; }
-.comparison-measurement-progress { display:block; appearance:none; width:100%; height:3px; margin-top:12px; border:0; background:var(--tone-line); accent-color:var(--tone-accent); }
+.comparison-measurement-progress { display:block; appearance:none; width:100%; height:2px; margin-top:8px; border:0; background:var(--tone-line); accent-color:var(--tone-accent); }
 .comparison-measurement-progress::-webkit-progress-bar { background:var(--tone-line); }
 .comparison-measurement-progress::-webkit-progress-value { background:var(--tone-accent); }
 .comparison-measurement-progress::-moz-progress-bar { background:var(--tone-accent); }
 .comparison-card-state { flex-shrink:0; color:var(--tone-ink-soft); font-size:10px; }
 .comparison-placeholder { display:flex; gap:32px; width:100%; }
 .comparison-placeholder span { width:88px; height:28px; background:var(--tone-line); border-radius:4px; }
-.comparison-card-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; align-items:start; }
-.comparison-metric-card { min-width:0; padding:20px; border:1px solid var(--tone-line); border-radius:6px; background:var(--tone-surface); animation:comparison-arrive 180ms cubic-bezier(.16,1,.3,1); }
+.comparison-card-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; align-items:start; }
+.comparison-metric-card { min-width:0; padding:12px 14px; border:1px solid var(--tone-line); border-radius:6px; background:var(--tone-surface); animation:comparison-arrive 180ms cubic-bezier(.16,1,.3,1); }
 .comparison-metric-card > header { display:flex; align-items:baseline; justify-content:space-between; gap:12px; }
 .comparison-metric-card h2 { font-size:12px; font-weight:600; }
 .comparison-delta { flex-shrink:0; font-size:11px; color:var(--tone-ink-soft); font-variant-numeric:tabular-nums; }
-.comparison-measurement-description { color:var(--tone-ink-soft); font-size:11px; line-height:1.6; margin-top:6px; min-height:36px; max-width:65ch; }
-.comparison-averages { display:flex; gap:40px; padding:16px 0 20px; }
-.comparison-averages > div { display:flex; flex-direction:column; gap:5px; }
+.comparison-measurement-description { color:var(--tone-ink-soft); font-size:11px; line-height:1.5; margin-top:4px; min-height:33px; max-width:65ch; }
+.comparison-averages { display:flex; gap:32px; padding:10px 0 12px; }
+.comparison-averages > div { display:flex; flex-direction:column; gap:3px; }
 .comparison-series-label { display:flex; align-items:center; gap:6px; font-size:11px; color:var(--tone-ink-soft); }
 .comparison-series-label::before { content:""; width:6px; height:6px; border-radius:2px; background:var(--tone-ink-faint); }
 .comparison-series-label.is-selected::before { background:var(--tone-accent); }
-.comparison-averages strong { font-size:24px; font-weight:500; line-height:1.2; font-variant-numeric:tabular-nums; letter-spacing:-.02em; }
-.comparison-averages small { font-size:11px; letter-spacing:0; color:var(--tone-ink-soft); }
-.comparison-histogram { display:flex; gap:5px; height:88px; border-bottom:1px solid var(--tone-line-strong); align-items:flex-end; }
+/* Means read at the Studio's 16px readout size, the same as the capture clock. */
+.comparison-averages strong { font-family:var(--font-mono); font-size:16px; font-weight:500; line-height:1.2; font-variant-numeric:tabular-nums; letter-spacing:-.02em; }
+.comparison-averages small { font-family:var(--font-sans, inherit); font-size:11px; font-weight:400; letter-spacing:0; color:var(--tone-ink-soft); }
+.comparison-histogram { display:flex; gap:4px; height:64px; border-bottom:1px solid var(--tone-line-strong); align-items:flex-end; }
 .comparison-bin { display:flex; align-items:flex-end; gap:2px; flex:1; min-width:0; height:100%; }
 .episode-comparison .comparison-bin:disabled { opacity:1; }
 .comparison-bin:hover:not(:disabled) { background:var(--tone-selected); }
@@ -4220,19 +4192,23 @@
 .comparison-bar.is-selected { background:var(--tone-accent); }
 .comparison-bar.is-baseline { background:var(--tone-ink-faint); }
 .comparison-axis { display:flex; justify-content:space-between; margin-top:6px; color:var(--tone-ink-soft); font-size:10px; font-variant-numeric:tabular-nums; }
-.comparison-metric-card > footer { display:flex; align-items:start; justify-content:space-between; flex-wrap:wrap; gap:8px; margin-top:16px; padding-top:12px; border-top:1px solid var(--tone-line); font-size:10px; color:var(--tone-ink-soft); }
+.comparison-metric-card > footer { display:flex; align-items:start; justify-content:space-between; flex-wrap:wrap; gap:8px; margin-top:12px; padding-top:8px; border-top:1px solid var(--tone-line); font-size:10px; color:var(--tone-ink-soft); }
 .comparison-metric-card > footer details { max-width:100%; }
 .comparison-metric-card > footer p { margin-top:8px; max-width:55ch; overflow-wrap:anywhere; line-height:1.6; }
-.comparison-pending-body, .comparison-no-values { min-height:192px; display:flex; align-items:center; color:var(--tone-ink-soft); font-size:11px; }
-.comparison-pending-body { flex-direction:column; align-items:flex-start; justify-content:center; gap:24px; }
+.comparison-pending-body, .comparison-no-values { min-height:150px; display:flex; align-items:center; color:var(--tone-ink-soft); font-size:11px; }
+.comparison-pending-body { flex-direction:column; align-items:flex-start; justify-content:center; gap:16px; }
 .comparison-pending-body p { line-height:1.6; max-width:60ch; }
-.comparison-failed-card > p { margin-top:12px; font-size:11px; line-height:1.6; color:var(--tone-ink-soft); }
-.comparison-failed-card details { margin-top:12px; font-size:10px; }
-.comparison-failed-card details p { margin-top:8px; overflow-wrap:anywhere; line-height:1.6; }
+.comparison-failed-card { border-style:dashed; }
+.comparison-failed-card .comparison-measurement-description { min-height:0; }
+.comparison-failed-list { display:flex; flex-wrap:wrap; gap:4px 6px; margin-top:8px; padding:0; list-style:none; }
+.comparison-failed-list li { padding:1px 6px; border-radius:4px; background:var(--tone-sunken); color:var(--tone-ink-soft); font-size:11px; }
+.comparison-failed-errors { margin-top:10px; font-size:10px; color:var(--tone-ink-faint); }
+.comparison-failed-errors summary { cursor:pointer; }
+.comparison-failed-errors p { margin-top:6px; padding:6px 8px; border-radius:4px; background:var(--tone-sunken); font-family:var(--font-mono); font-size:10px; line-height:1.6; color:var(--tone-ink-soft); overflow-wrap:anywhere; }
 .comparison-metric-card.is-pending { background:transparent; border-style:dashed; }
-.comparison-coverage-note { margin-top:20px; color:var(--tone-ink-soft); max-width:90ch; font-size:11px; line-height:1.7; }
-.comparison-empty { max-width:500px; margin:72px auto; text-align:center; color:var(--tone-ink-soft); line-height:1.7; }
-.comparison-empty h2 { font-size:16px; font-weight:500; color:var(--tone-ink); margin-bottom:12px; }
+.comparison-coverage-note { margin-top:12px; color:var(--tone-ink-soft); max-width:90ch; font-size:11px; line-height:1.6; }
+.comparison-empty { max-width:46ch; margin:64px auto; text-align:center; color:var(--tone-ink-faint); font-size:11px; line-height:1.55; }
+.comparison-empty h2 { font-size:12px; font-weight:600; letter-spacing:-.01em; color:var(--tone-ink); margin-bottom:4px; }
 .comparison-error { background:var(--tone-danger-soft); color:var(--tone-danger); padding:12px; border-radius:4px; margin-bottom:16px; line-height:1.6; }
 .comparison-error strong { font-weight:600; }
 .comparison-inspector { height:100%; min-height:580px; display:flex; flex-direction:column; }
@@ -4241,9 +4217,10 @@
 .comparison-evidence-loading { padding:24px 0; color:var(--tone-ink-soft); font-size:11px; }
 @keyframes comparison-arrive { from { transform:translateY(4px); } to { transform:translateY(0); } }
 @media (min-width:1500px) { .comparison-card-grid { grid-template-columns:repeat(3,minmax(0,1fr)); } }
-@media (prefers-reduced-motion:reduce) { .comparison-metric-card { animation:none; } }
-.comparison-episodes { margin-top:28px; }
-.comparison-episodes > header { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px; }
+@media (prefers-reduced-motion:reduce) { .comparison-metric-card, .comparison-progress, .comparison-progress-heading h2::before { animation:none; } }
+.comparison-episodes { margin-top:20px; }
+.comparison-episodes > header { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:8px; }
+.comparison-episodes > header h2 { font-size:12px; font-weight:600; letter-spacing:-.01em; color:var(--tone-ink); }
 .comparison-cohort-tabs { display:flex; gap:2px; background:var(--tone-sunken); padding:3px; border-radius:4px; }
 .comparison-cohort-tabs button { padding:3px 8px; font-size:11px; border-radius:4px; color:var(--tone-ink-soft); }
 .comparison-cohort-tabs button[aria-pressed="true"] { color:var(--tone-accent); background:var(--tone-selected); }

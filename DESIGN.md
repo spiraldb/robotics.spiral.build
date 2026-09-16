@@ -394,8 +394,8 @@ small set of semantic, arm, axis, and signal accents.
   `{colors.stage-model}`, `{colors.stage-shape}`, `{colors.stage-join}`,
   `{colors.stage-output}`): What a workflow stage does to the data. Each paints
   only an 18px glyph tile and its 14% wash, the one-word kind in the card
-  footer, and the 14px tile in the stage strip and overview, so the hue is
-  never the only carrier. Model lends its tint to the Assistant's conversation
+  footer, and the 14px tile in the overview, so the hue is never the only
+  carrier. Model lends its tint to the Assistant's conversation
   tile and to function names in syntax colour; Media lends its amber, mixed
   toward ink, to literals.
 - **Result categories** (`{colors.category-1}` through `{colors.category-6}`):
@@ -1027,7 +1027,11 @@ This is the signature component system.
 so it owns the center; Results prove it beneath, and the Assistant authors it
 from a tall column at the side.
 
-- **Composition:** One document bar, then a 24/76 horizontal split. The left
+- **Composition:** One 36px bar, then a 24/76 horizontal split. The bar
+  opens with the workflow glyph and a 22px Build | Compare segmented control
+  that stands in the same place in both views, so switching never moves the
+  header; Build fills the rest of the bar with the document identity and
+  actions, Compare with the pair of workflows and the Compare action. The left
   24% is a tall console tile holding Assistant and SQL as tabs. The right 76%
   divides 46/54 vertically: above, the Graph (74%) beside Stage details (26%);
   below, Results across the full width. A pipeline is wider than it is tall, so
@@ -1035,26 +1039,38 @@ from a tall column at the side.
   about five rows of previews. The `workflow-investigation-v12` layout scope
   applies this arrangement; every tile remains a dockable, resizable workbench
   panel with a leading tab icon.
-- **Document bar:** A 36px paper line with a lower hairline. The workflow
-  glyph, the name as a quiet 12px semibold button with a 12px chevron that
-  turns when open, and a keyed 11px state chip with a 6px dot (Saved · green
-  dot, Unsaved changes · ochre, Changed in another session · red) sit at left;
-  Discard, Save, and the filled Run with a play glyph sit at right. Run turns
+- **Document bar:** A 36px paper line with a lower hairline. After the glyph
+  and the view switch, the name as a quiet 12px semibold button with a 12px
+  chevron that turns when open, and a keyed 11px state chip with a 6px dot
+  (Saved · green dot, Unsaved changes · ochre, Changed in another session ·
+  red) sit at left; Discard, Save, and the filled Run with a play glyph sit at
+  right. Run turns
   into a spinning "Running" while a query is admitted, keeping its 72px
   minimum width so the bar does not shift. The name button opens one popover:
   a 320px paper sheet with a 6px radius and the floating-notice shadow, holding
   a listbox of saved workflows with the current one checked, then New blank
   workflow, From dataset, and Rename behind a hairline. Escape and a click on
-  the transparent backdrop close it and return focus to the title. Unsaved
-  changes still block switching, and the reason is printed in the bar.
+  the transparent backdrop close it and return focus to the title. The title
+  always opens; when switching is blocked (unsaved changes, an active
+  Assistant turn, loading) the reason sits at the top of the popover on the
+  caution wash and the list is disabled, so the bar never prints a status
+  sentence beside the state chip.
 - **Graph:** Reads left to right on the pale bench with a 22px dot grid.
-  Stages follow the author's ideas, not the planner's operators: column
-  selection and ordering fold into the read that feeds them; numbering rows
-  inside groups and keeping the first reads as "One row per …"; every SPQL
-  call is its own stage, named by what it does (Score images with its prompt,
-  Convert frames to RGB with its profile); a CASE becomes "Classify rows"
-  listing its outcomes; joins name their type and keys and label their edges
-  left and right in 10px. Stage cards are 224×92 paper with a hairline, 4px
+  Stages follow the author's ideas, not the planner's operators, and routine
+  SQL is condensed so the native and model work stands out: every linear run
+  of filters, projections, windows, sorts, and limits between two meaningful
+  stages is one card, titled by the operation that changes the row population
+  (consecutive filters state both conditions joined by AND) and footed by the
+  folded operations in words ("filter · number · select"); pure column
+  selection and ordering fold into whichever stage feeds them (a read, a
+  native call, a join); numbering rows inside groups and then keeping row 1
+  reads as "One row per …" only when that filter follows the window; every
+  SPQL call is its own stage, named by what it does (Score images with its
+  prompt, Convert frames to RGB with its profile); a CASE becomes "Classify
+  rows" listing its outcomes; joins name their type and keys and label their
+  edges left and right in 10px; UNION, INTERSECT, and EXCEPT are Join-kind
+  stages ("Combine rows · All rows from both inputs, duplicates kept") whose
+  peer inputs carry no labels. Casts render as their input. Stage cards are 224×92 paper with a hairline, 4px
   radius, and the resting lift: an 18px kind glyph tile (4px radius, 12px
   icon, 14% wash) beside a 12px semibold title, a two-line 11px/15px summary
   painted token by token when it is an expression, and a 10px footer naming
@@ -1065,20 +1081,20 @@ from a tall column at the side.
   glow. Cards enter once, left to right, 320ms each and 45ms apart on the
   Studio easing; edges (1.25px, faint ink at 72%) fade in 180ms after them.
   While a run is admitted every edge turns accent, thickens to 1.5px, and
-  carries 5/5 marching dashes on a 700ms cycle. Handles are 7px and inert;
-  they turn accent with the card. A stage strip along the top of the canvas
-  lists every stage in reading order as a 22px paper chip (10px title, 14px
-  glyph tile with a 3px radius, 8px hairline connectors, 20px fade at the
-  right edge); a pipeline wider than the pane is still complete there, and
-  each chip selects and centres its stage. Zoom and fit controls sit bottom
-  left in one hairline group with the resting lift. Cards never render below
+  carries 5/5 marching dashes on a 700ms cycle. Handles are 6px, strong-line,
+  and inert; they turn accent with the card. Nothing else sits on the canvas:
+  the stage count, zoom, and fit share one hairline group with the resting
+  lift at bottom left, and the Details overview is the complete list of
+  stages, each row selecting and centring its card. Cards never render below
   0.7 zoom: a graph that fits at readable zoom is fitted, and one that does
   not keeps its cards at the largest size the pane's height allows, starts at
   its sources, stays pannable, and shows a small 4px-radius minimap at bottom
   right. After the user moves the viewport, resizing preserves graph-space
   center and zoom.
 - **Stage details:** Its own tile beside the graph, so selecting a stage never
-  resizes the canvas. It answers, in order: what the stage does (heading with
+  resizes the canvas. Provider names read as what they are ("Video topic",
+  "Episodes"), planner-internal window columns are never shown, and a read's
+  column list clamps to two lines in the overview. It answers, in order: what the stage does (heading with
   kind tile, 12px semibold title, "Kind · footer" in 10px, the 11px summary,
   and the full classification rule on the recess when there is one); what it
   reads or combines (Left/Right for joins); Details as a label/value grid of
@@ -1137,6 +1153,21 @@ from a tall column at the side.
   close, images at 16:9, then exact values in 11px mono under 10px mono field
   names. Up and Down arrows step rows; Escape closes and returns focus to the
   invoking action. No count, class, or total is inferred by the presentation.
+- **Empty workflow:** The Assistant does the teaching ("What should we find?"
+  with two example asks); Graph, Details, and Results each show one faint
+  11px line saying what will appear there, with no icon or title, so a new
+  workflow is not four onboarding cards.
+- **Compare:** The same 36px bar carries the switch, then "A [workflow]
+  against B [workflow]" as two 24px selects with 11px keys, and the filled
+  Compare action at the right (Analyzing with a spinner while it runs). The
+  progress card reads at bench scale: a 12px semibold title with a pulsing
+  accent dot and a mono elapsed clock, one 11px line of detail, four hairline
+  steps in 11px with 16px marks, and a 2px measurement bar. Metric cards use
+  12px padding and 12px gaps, means at the 16px mono readout size, a 64px
+  histogram, and 10px footers; measurements that could not be calculated
+  share one dashed card that lists their names as chips and each distinct
+  error once behind a disclosure. Workflow A follows the workflow open in
+  Build, including one saved a moment ago, until the engineer picks another.
 - **Assistant column:** The thread and composer share the column, capped at a
   76ch measure when docked wide. Every message names its speaker in a 10px
   medium faint label: your requests sit right-aligned on the recess at up to

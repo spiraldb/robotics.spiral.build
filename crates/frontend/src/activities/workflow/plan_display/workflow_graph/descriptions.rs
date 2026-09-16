@@ -128,6 +128,7 @@ impl StageContent {
                     })
                     .unwrap_or_default(),
             ),
+            "SetOp" | "Union" | "Intersect" | "Except" => Self::set_operation(node, properties),
             "TableFunction" | "Generate" => {
                 let function = properties["function"].as_str().unwrap_or("Expand rows");
                 let function = function.split_once('#').map_or(function, |(set, _)| set);
@@ -213,6 +214,35 @@ impl StageContent {
             }
         }
         content
+    }
+
+    /// UNION, INTERSECT, and EXCEPT bring two row populations together. The
+    /// title says what happens to the rows; the summary says what happens to
+    /// duplicates, which is the part of a set operation people get wrong.
+    fn set_operation(node: &DiagnosticNode, properties: &Value) -> (String, String) {
+        let operation = properties["op"]
+            .as_str()
+            .filter(|op| !op.is_empty())
+            .unwrap_or(node.operator());
+        let keeps_duplicates = properties["all"] == true;
+        match operation {
+            "Intersect" => (
+                "Keep shared rows".into(),
+                "Only rows present in both inputs".into(),
+            ),
+            "Except" => (
+                "Remove matching rows".into(),
+                "Rows of the first input that the second does not contain".into(),
+            ),
+            _ if keeps_duplicates => (
+                "Combine rows".into(),
+                "All rows from both inputs, duplicates kept".into(),
+            ),
+            _ => (
+                "Combine rows".into(),
+                "Rows from both inputs, duplicates removed".into(),
+            ),
+        }
     }
 
     /// The column names a projection keeps, in order.
@@ -308,6 +338,18 @@ impl StageContent {
             }
         }
         facts
+    }
+
+    /// What a native provider reads, in the words of the catalog rather than
+    /// the driver: video topics, message topics, and the episode roster.
+    pub(in super::super) fn provider_label(provider: &str) -> &str {
+        match provider {
+            "McapVideo" => "Video topic",
+            "McapTopic" => "Topic",
+            "McapEpisodes" | "dataset_member" => "Episodes",
+            "Table" | "table" => "Table",
+            other => other,
+        }
     }
 
     pub(super) fn function_title(function: &str) -> String {
@@ -506,8 +548,22 @@ impl WorkflowStage {
                     if let Some(expressions) = properties["expressions"].as_array() {
                         for expr in expressions {
                             let kind = expr["function"]["kind"].as_str().unwrap_or("Window");
-                            let name = expr["name"].as_str().unwrap_or("result");
-                            facts.push(StageFact::expression(name.to_owned(), kind.to_owned()));
+                            let calculation = match kind {
+                                "RowNumber" => "Row number".to_owned(),
+                                "Rank" => "Rank".to_owned(),
+                                "DenseRank" => "Dense rank".to_owned(),
+                                other => other.to_owned(),
+                            };
+                            // The planner names its own window columns `__window_expr_N`;
+                            // only a name the author chose is worth showing.
+                            let value = match expr["name"]
+                                .as_str()
+                                .filter(|name| !name.starts_with("__"))
+                            {
+                                Some(name) => format!("{calculation} → {name}"),
+                                None => calculation,
+                            };
+                            facts.push(StageFact::prose("Calculates", value));
                             let groups = StageContent::fields(&expr["partition_by"]);
                             if !groups.is_empty() {
                                 facts.push(StageFact::expression("Groups", groups));
@@ -554,6 +610,25 @@ impl WorkflowStage {
                     if !by.is_empty() {
                         facts.push(StageFact::expression("Distinct by", by));
                     }
+                }
+                "SetOp" | "Union" | "Intersect" | "Except" => {
+                    let operation = properties["op"].as_str().unwrap_or(node.operator());
+                    facts.push(StageFact::prose(
+                        "Operation",
+                        if properties["all"] == true {
+                            format!("{operation} all")
+                        } else {
+                            operation.to_owned()
+                        },
+                    ));
+                    facts.push(StageFact::prose(
+                        "Duplicates",
+                        if properties["all"] == true {
+                            "kept"
+                        } else {
+                            "removed"
+                        },
+                    ));
                 }
                 "TableFunction" | "Generate" => {
                     if let Some(function) = properties["function"].as_str() {

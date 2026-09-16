@@ -2544,12 +2544,12 @@
   }
   .workflow-document-bar {
     position: relative;
-    z-index: 10;
+    z-index: 30;
     display: flex;
     min-height: calc(var(--spacing) * 9);
     flex-shrink: 0;
     align-items: center;
-    gap: calc(var(--spacing) * 3);
+    gap: calc(var(--spacing) * 2);
     border-bottom-style: var(--tw-border-style);
     border-bottom-width: 1px;
     border-color: var(--tone-line);
@@ -2558,6 +2558,7 @@
     padding-left: calc(var(--spacing) * 3);
   }
   .workflow-document-identity {
+    position: relative;
     display: flex;
     min-width: 0px;
     flex: 1;
@@ -2681,15 +2682,6 @@
       scale: 0.7;
     }
   }
-  .workflow-selection-reason {
-    flex-shrink: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-size: 11px;
-    color: var(--tone-ink-faint);
-    max-width: 24rem;
-  }
   .workflow-document-actions {
     margin-left: auto;
     display: flex;
@@ -2719,9 +2711,9 @@
   .workflow-switcher {
     position: absolute;
     top: 100%;
-    left: calc(var(--spacing) * 9);
+    left: 0px;
     z-index: 40;
-    margin-top: var(--spacing);
+    margin-top: calc(var(--spacing) * 1.5);
     display: flex;
     width: calc(var(--spacing) * 80);
     flex-direction: column;
@@ -2769,6 +2761,13 @@
     padding-block: calc(var(--spacing) * 2);
     font-size: 11px;
     color: var(--tone-ink-faint);
+  }
+  .workflow-switcher-note.is-blocking {
+    border-bottom-style: var(--tw-border-style);
+    border-bottom-width: 1px;
+    border-color: var(--tone-line);
+    background-color: var(--tone-caution-soft);
+    color: var(--tone-caution);
   }
   .workflow-switcher-actions {
     display: grid;
@@ -2844,6 +2843,10 @@
   .workflow-panel-empty .ui-action {
     margin-top: calc(var(--spacing) * 2);
   }
+  .workflow-panel-empty.is-quiet p {
+    max-width: 40ch;
+    color: var(--tone-ink-faint);
+  }
   .workflow-inline-error {
     flex-shrink: 0;
     border-bottom-style: var(--tw-border-style);
@@ -2884,101 +2887,38 @@
     background: var(--tone-viewport);
     container-type: inline-size;
   }
-  .workflow-stage-strip {
+  .workflow-canvas-controls {
     position: absolute;
-    inset-inline: calc(var(--spacing) * 2);
-    top: calc(var(--spacing) * 2);
+    bottom: calc(var(--spacing) * 2);
+    left: calc(var(--spacing) * 2);
     z-index: 5;
     display: flex;
-    min-width: 0px;
-    align-items: flex-start;
-    gap: calc(var(--spacing) * 2);
-    font-size: 10px;
-    color: var(--tone-ink-faint);
-  }
-  .workflow-stage-strip-count {
-    flex-shrink: 0;
-    padding-left: var(--spacing);
-    --tw-leading: 22px;
-    line-height: 22px;
-    white-space: nowrap;
-  }
-  .workflow-stage-strip ol {
-    display: flex;
-    min-width: 0px;
-    flex: 1;
-    flex-wrap: wrap;
     align-items: center;
-    gap: var(--spacing);
-    overflow-y: auto;
-    max-height: 3.25rem;
-    scrollbar-width: thin;
-  }
-  .workflow-stage-strip li {
-    display: flex;
-    flex-shrink: 0;
-    align-items: center;
-  }
-  .workflow-stage-strip li + li::before {
-    content: "";
-    margin-right: var(--spacing);
-    display: block;
-    height: 1px;
-    width: calc(var(--spacing) * 2);
-    background: var(--tone-line-strong);
-  }
-  .workflow-strip-stage {
-    max-width: calc(var(--spacing) * 52);
-    gap: var(--spacing);
+    gap: 1px;
     border-radius: 0.25rem;
     border-style: var(--tw-border-style);
     border-width: 1px;
     border-color: var(--tone-line);
     background-color: var(--tone-surface);
-    padding-inline: calc(var(--spacing) * 1.5);
+    padding: 1px;
+    box-shadow: 0 1px 2px rgb(0 0 0 / 0.05);
+  }
+  .workflow-canvas-count {
+    padding-inline: calc(var(--spacing) * 2);
     font-size: 10px;
-    color: var(--tone-ink-soft);
-    min-height: 22px;
-    box-shadow: 0 1px 2px rgb(0 0 0 / 0.04);
-  }
-  .workflow-strip-mark {
-    display: inline-flex;
-    width: calc(var(--spacing) * 3.5);
-    height: calc(var(--spacing) * 3.5);
-    flex-shrink: 0;
-    align-items: center;
-    justify-content: center;
-    border-radius: 3px;
-    color: var(--stage-tone);
-    background: var(--stage-tone);
-    @supports (color: color-mix(in lab, red, red)) {
-      background: color-mix(in srgb, var(--stage-tone) 14%, transparent);
-    }
-  }
-  .workflow-strip-mark .ui-icon {
-    width: calc(var(--spacing) * 2.5);
-    height: calc(var(--spacing) * 2.5);
-  }
-  .workflow-strip-title {
-    min-width: 0px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  @container (max-width: 640px) {
-    .workflow-stage-strip-count {
-      display: none;
-    }
-    .workflow-stage-strip ol {
-      max-height: 4.75rem;
-    }
-    .workflow-strip-stage {
-      max-width: 7.25rem;
-    }
+    --tw-leading: calc(var(--spacing) * 3);
+    line-height: calc(var(--spacing) * 3);
+    color: var(--tone-ink-faint);
+    --tw-numeric-spacing: tabular-nums;
+    font-variant-numeric: var(--tw-ordinal,) var(--tw-slashed-zero,) var(--tw-numeric-figure,) var(--tw-numeric-spacing,) var(--tw-numeric-fraction,);
   }
   .workflow-overview-summary {
     display: block;
     color: var(--tone-ink-soft);
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
     overflow-wrap: break-word;
   }
   .workflow-facts dd strong {
@@ -3022,22 +2962,6 @@
     white-space: nowrap;
     font-size: 10px;
     color: var(--tone-ink-faint);
-  }
-  .workflow-canvas-controls {
-    position: absolute;
-    bottom: calc(var(--spacing) * 2);
-    left: calc(var(--spacing) * 2);
-    z-index: 5;
-    display: flex;
-    align-items: center;
-    gap: 1px;
-    border-radius: 0.25rem;
-    border-style: var(--tw-border-style);
-    border-width: 1px;
-    border-color: var(--tone-line);
-    background-color: var(--tone-surface);
-    padding: 1px;
-    box-shadow: 0 1px 2px rgb(0 0 0 / 0.05);
   }
   .workflow-stage-source {
     --stage-tone: var(--tone-stage-source);
@@ -6275,9 +6199,10 @@
   box-shadow: 0 1px 2px rgb(0 0 0 / 0.05);
 }
 .workflow-stage-card .df-handle {
-  width: 7px;
-  height: 7px;
+  width: 6px;
+  height: 6px;
   border-width: 1px;
+  border-color: var(--tone-line-strong);
   pointer-events: none;
   cursor: default;
   transition: border-color 120ms ease-out, background 120ms ease-out;
@@ -6294,24 +6219,14 @@
   }
 }
 .workflow-view-switch {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  min-height: 34px;
-  padding: 4px 12px;
-  border-bottom: 1px solid var(--tone-line);
   flex-shrink: 0;
+  grid-auto-flow: column;
+  grid-auto-columns: max-content;
 }
-.workflow-view-switch button {
-  padding: 3px 12px;
-  border-radius: 4px;
-  color: var(--tone-ink-soft);
-  font-size: 12px;
-}
-.workflow-view-switch button[aria-pressed="true"] {
-  background: var(--tone-selected);
-  color: var(--tone-accent);
-  font-weight: 600;
+.workflow-view-switch .ui-action--segment {
+  min-height: 22px;
+  padding-inline: 9px;
+  font-size: 11px;
 }
 .workflow-comparison-container {
   flex: 1;
@@ -6329,19 +6244,54 @@
   color: var(--tone-ink);
   font-size: 12px;
 }
-.episode-comparison select {
-  width: 100%;
+.episode-comparison :is(select,button,input,summary):focus-visible {
+  outline: 2px solid var(--tone-accent);
+  outline-offset: 2px;
+}
+.comparison-pair {
+  display: flex;
   min-width: 0;
-  padding: 7px 10px;
-  border: 1px solid var(--tone-line-strong);
+  flex: 1;
+  align-items: center;
+  gap: 8px;
+}
+.comparison-side {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  color: var(--tone-ink-soft);
+  font-size: 11px;
+}
+.comparison-side-key {
+  flex-shrink: 0;
+  font-weight: 600;
+  color: var(--tone-ink);
+  font-variant-numeric: tabular-nums;
+}
+.comparison-select {
+  height: 24px;
+  min-width: 0;
+  max-width: 24rem;
+  padding: 0 6px;
+  border: 1px solid var(--tone-line);
   border-radius: 4px;
   background: var(--tone-surface);
   color: var(--tone-ink);
   font: inherit;
+  font-size: 12px;
+  text-overflow: ellipsis;
 }
-.episode-comparison :is(select,button,input,summary):focus-visible, .workflow-view-switch button:focus-visible {
-  outline: 2px solid var(--tone-accent);
-  outline-offset: 3px;
+.comparison-select:hover:not(:disabled) {
+  border-color: var(--tone-line-strong);
+}
+.comparison-select:disabled {
+  color: var(--tone-ink-faint);
+}
+.comparison-pair-against {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--tone-ink-faint);
 }
 .episode-comparison button:not(:disabled), .episode-comparison summary {
   cursor: pointer;
@@ -6350,48 +6300,11 @@
   opacity: .5;
   cursor: default;
 }
-.comparison-pair-header {
-  flex-shrink: 0;
-  padding: 20px 24px;
-  border-bottom: 1px solid var(--tone-line);
-  background: var(--tone-surface);
-}
-.comparison-pair-header h1 {
-  font-size: 16px;
-  font-weight: 600;
-  letter-spacing: -.01em;
-}
-.comparison-pair-controls {
-  display: grid;
-  grid-template-columns: minmax(0,1fr) minmax(0,1fr) auto;
-  gap: 16px;
-  align-items: end;
-  margin-top: 16px;
-}
-.comparison-pair-controls label {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: 6px;
-  color: var(--tone-ink-soft);
-  font-size: 11px;
-}
-.comparison-primary {
-  min-width: 100px;
-  padding: 8px 16px;
-  border-radius: 4px;
-  background: var(--tone-accent);
-  color: var(--tone-accent-ink);
-  font-weight: 600;
-}
-.comparison-primary:hover:not(:disabled) {
-  filter: brightness(.94);
-}
 .comparison-content {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: 20px 24px 32px;
+  padding: 12px 16px 24px;
   background: var(--tone-sunken);
   scrollbar-color: var(--tone-line-strong) transparent;
 }
@@ -6400,12 +6313,12 @@
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  margin-bottom: 20px;
+  margin-bottom: 12px;
 }
 .comparison-population-summary {
   display: flex;
   align-items: center;
-  gap: 24px;
+  gap: 20px;
 }
 .comparison-population-link {
   display: flex;
@@ -6436,33 +6349,46 @@
   position: relative;
 }
 .comparison-metrics-menu > summary {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
   list-style: none;
-  border: 1px solid var(--tone-line-strong);
+  border: 1px solid var(--tone-line);
   border-radius: 4px;
-  padding: 6px 12px;
+  padding: 0 8px;
   background: var(--tone-surface);
+  font-size: 11px;
+  color: var(--tone-ink-soft);
+}
+.comparison-metrics-menu > summary:hover {
+  color: var(--tone-ink);
+  border-color: var(--tone-line-strong);
 }
 .comparison-metrics-menu > summary::-webkit-details-marker {
   display: none;
 }
 .comparison-metric-options {
   position: absolute;
-  top: calc(100% + 6px);
+  top: calc(100% + 4px);
   right: 0;
   z-index: 10;
-  width: 280px;
+  width: 260px;
   max-height: 340px;
   overflow: auto;
-  padding: 8px;
-  border: 1px solid var(--tone-line-strong);
+  padding: 4px;
+  border: 1px solid var(--tone-line);
   border-radius: 6px;
   background: var(--tone-surface);
+  box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+  font-size: 11px;
 }
 .comparison-metric-options label {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px;
+  min-height: 24px;
+  padding: 2px 6px;
+  border-radius: 4px;
   cursor: pointer;
 }
 .comparison-metric-options label:hover {
@@ -6472,11 +6398,12 @@
   accent-color: var(--tone-accent);
 }
 .comparison-progress {
-  margin-bottom: 20px;
-  padding: 24px;
+  margin-bottom: 12px;
+  padding: 12px 16px 14px;
   background: var(--tone-surface);
   border: 1px solid var(--tone-line);
   border-radius: 6px;
+  animation: comparison-arrive 180ms cubic-bezier(.16,1,.3,1);
 }
 .comparison-progress-heading {
   display: flex;
@@ -6485,56 +6412,69 @@
   gap: 16px;
 }
 .comparison-progress-heading h2 {
-  font-size: 16px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
   font-weight: 600;
+  letter-spacing: -.01em;
   color: var(--tone-ink);
+}
+.comparison-progress-heading h2::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--tone-accent);
+  animation: workflow-pulse 900ms ease-in-out infinite;
 }
 .comparison-elapsed {
   flex-shrink: 0;
+  font-family: var(--font-mono);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
-  color: var(--tone-ink-soft);
+  color: var(--tone-ink-faint);
 }
 .comparison-progress-detail {
   max-width: 70ch;
-  margin-top: 8px;
+  margin-top: 4px;
   color: var(--tone-ink-soft);
-  font-size: 12px;
-  line-height: 1.6;
+  font-size: 11px;
+  line-height: 1.5;
 }
 .comparison-stages {
   display: grid;
   grid-template-columns: repeat(4,minmax(0,1fr));
-  gap: 16px;
-  margin-top: 24px;
+  gap: 12px;
+  margin-top: 12px;
   list-style: none;
   padding: 0;
 }
 .comparison-stages li {
   display: flex;
-  gap: 8px;
+  gap: 6px;
   align-items: center;
-  padding-top: 12px;
+  padding-top: 8px;
   border-top: 2px solid var(--tone-line);
-  color: var(--tone-ink-soft);
+  color: var(--tone-ink-faint);
   font-size: 11px;
-  line-height: 1.5;
+  line-height: 1.4;
 }
 .comparison-stages li.is-current {
   color: var(--tone-accent);
   border-color: var(--tone-accent);
-  font-weight: 600;
+  font-weight: 500;
 }
 .comparison-stages li.is-complete {
-  color: var(--tone-ink);
+  color: var(--tone-ink-soft);
   border-color: var(--tone-ink-faint);
 }
 .comparison-stage-mark {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 20px;
-  height: 20px;
+  width: 16px;
+  height: 16px;
   flex-shrink: 0;
   border: 1px solid var(--tone-line-strong);
   border-radius: 50%;
@@ -6552,7 +6492,7 @@
   display: flex;
   flex-wrap: wrap;
   gap: 6px 16px;
-  margin-top: 16px;
+  margin-top: 12px;
   color: var(--tone-ink-soft);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
@@ -6565,8 +6505,8 @@
   display: block;
   appearance: none;
   width: 100%;
-  height: 3px;
-  margin-top: 12px;
+  height: 2px;
+  margin-top: 8px;
   border: 0;
   background: var(--tone-line);
   accent-color: var(--tone-accent);
@@ -6599,12 +6539,12 @@
 .comparison-card-grid {
   display: grid;
   grid-template-columns: repeat(2,minmax(0,1fr));
-  gap: 16px;
+  gap: 12px;
   align-items: start;
 }
 .comparison-metric-card {
   min-width: 0;
-  padding: 20px;
+  padding: 12px 14px;
   border: 1px solid var(--tone-line);
   border-radius: 6px;
   background: var(--tone-surface);
@@ -6629,20 +6569,20 @@
 .comparison-measurement-description {
   color: var(--tone-ink-soft);
   font-size: 11px;
-  line-height: 1.6;
-  margin-top: 6px;
-  min-height: 36px;
+  line-height: 1.5;
+  margin-top: 4px;
+  min-height: 33px;
   max-width: 65ch;
 }
 .comparison-averages {
   display: flex;
-  gap: 40px;
-  padding: 16px 0 20px;
+  gap: 32px;
+  padding: 10px 0 12px;
 }
 .comparison-averages > div {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 3px;
 }
 .comparison-series-label {
   display: flex;
@@ -6662,21 +6602,24 @@
   background: var(--tone-accent);
 }
 .comparison-averages strong {
-  font-size: 24px;
+  font-family: var(--font-mono);
+  font-size: 16px;
   font-weight: 500;
   line-height: 1.2;
   font-variant-numeric: tabular-nums;
   letter-spacing: -.02em;
 }
 .comparison-averages small {
+  font-family: var(--font-sans, inherit);
   font-size: 11px;
+  font-weight: 400;
   letter-spacing: 0;
   color: var(--tone-ink-soft);
 }
 .comparison-histogram {
   display: flex;
-  gap: 5px;
-  height: 88px;
+  gap: 4px;
+  height: 64px;
   border-bottom: 1px solid var(--tone-line-strong);
   align-items: flex-end;
 }
@@ -6718,8 +6661,8 @@
   justify-content: space-between;
   flex-wrap: wrap;
   gap: 8px;
-  margin-top: 16px;
-  padding-top: 12px;
+  margin-top: 12px;
+  padding-top: 8px;
   border-top: 1px solid var(--tone-line);
   font-size: 10px;
   color: var(--tone-ink-soft);
@@ -6734,7 +6677,7 @@
   line-height: 1.6;
 }
 .comparison-pending-body, .comparison-no-values {
-  min-height: 192px;
+  min-height: 150px;
   display: flex;
   align-items: center;
   color: var(--tone-ink-soft);
@@ -6744,50 +6687,77 @@
   flex-direction: column;
   align-items: flex-start;
   justify-content: center;
-  gap: 24px;
+  gap: 16px;
 }
 .comparison-pending-body p {
   line-height: 1.6;
   max-width: 60ch;
 }
-.comparison-failed-card > p {
-  margin-top: 12px;
+.comparison-failed-card {
+  border-style: dashed;
+}
+.comparison-failed-card .comparison-measurement-description {
+  min-height: 0;
+}
+.comparison-failed-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  margin-top: 8px;
+  padding: 0;
+  list-style: none;
+}
+.comparison-failed-list li {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--tone-sunken);
+  color: var(--tone-ink-soft);
   font-size: 11px;
+}
+.comparison-failed-errors {
+  margin-top: 10px;
+  font-size: 10px;
+  color: var(--tone-ink-faint);
+}
+.comparison-failed-errors summary {
+  cursor: pointer;
+}
+.comparison-failed-errors p {
+  margin-top: 6px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: var(--tone-sunken);
+  font-family: var(--font-mono);
+  font-size: 10px;
   line-height: 1.6;
   color: var(--tone-ink-soft);
-}
-.comparison-failed-card details {
-  margin-top: 12px;
-  font-size: 10px;
-}
-.comparison-failed-card details p {
-  margin-top: 8px;
   overflow-wrap: anywhere;
-  line-height: 1.6;
 }
 .comparison-metric-card.is-pending {
   background: transparent;
   border-style: dashed;
 }
 .comparison-coverage-note {
-  margin-top: 20px;
+  margin-top: 12px;
   color: var(--tone-ink-soft);
   max-width: 90ch;
   font-size: 11px;
-  line-height: 1.7;
+  line-height: 1.6;
 }
 .comparison-empty {
-  max-width: 500px;
-  margin: 72px auto;
+  max-width: 46ch;
+  margin: 64px auto;
   text-align: center;
-  color: var(--tone-ink-soft);
-  line-height: 1.7;
+  color: var(--tone-ink-faint);
+  font-size: 11px;
+  line-height: 1.55;
 }
 .comparison-empty h2 {
-  font-size: 16px;
-  font-weight: 500;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: -.01em;
   color: var(--tone-ink);
-  margin-bottom: 12px;
+  margin-bottom: 4px;
 }
 .comparison-error {
   background: var(--tone-danger-soft);
@@ -6834,19 +6804,25 @@
   }
 }
 @media (prefers-reduced-motion:reduce) {
-  .comparison-metric-card {
+  .comparison-metric-card, .comparison-progress, .comparison-progress-heading h2::before {
     animation: none;
   }
 }
 .comparison-episodes {
-  margin-top: 28px;
+  margin-top: 20px;
 }
 .comparison-episodes > header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 12px;
+  margin-bottom: 8px;
+}
+.comparison-episodes > header h2 {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: -.01em;
+  color: var(--tone-ink);
 }
 .comparison-cohort-tabs {
   display: flex;

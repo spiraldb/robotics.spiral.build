@@ -21,7 +21,7 @@ impl SignalDiscovery {
     pub(super) fn tools() -> Vec<Value> {
         vec![
             NativeFunctionDiscovery::definition(),
-            json!({"type":"function","function":{"name":"inspect_dataset","description":"Read dataset topics, schemas and variant IDs when the supplied dataset_inspections do not answer a specific question. Reuse existing context whenever possible.","parameters":{"type":"object","properties":{"path":{"type":"array","items":{"type":"string"}}},"required":["path"],"additionalProperties":false}}}),
+            json!({"type":"function","function":{"name":"inspect_dataset","description":"Read dataset topics, schema names (not field types) and variant IDs when the supplied dataset_inspections do not answer a specific question. Reuse existing context whenever possible.","parameters":{"type":"object","properties":{"path":{"type":"array","items":{"type":"string"}}},"required":["path"],"additionalProperties":false}}}),
             json!({"type":"function","function":{"name":"inspect_query","description":"Resolve a specific missing field shape, unit or joint mapping with a read-only SQL sample. Returns schema and up to 3 rows. Batch independent probes; skip facts already supplied. Use SQL LIMIT to bound work and reuse recorded signals rather than decoding media or rerunning inference.","parameters":{"type":"object","properties":{"sql":{"type":"string"}},"required":["sql"],"additionalProperties":false}}}),
         ]
     }

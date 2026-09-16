@@ -20,7 +20,7 @@
 //! FINISH: unreviewed and undocumented is unfinished; this build ends with the
 //! finish review, the verdict, and DESIGN.md.
 
-use crate::components::interaction::{Action, ActionPurpose, ActionVariant};
+use crate::components::interaction::{Action, ActionPurpose, ActionVariant, ModeAction, ModeGroup};
 use dioxus::prelude::*;
 use dioxus_workbench::{LayoutNode, Panel, PanelId, PanelLayout, PanelWorkspace, SplitAxis};
 use spiral_robotics_common::workflow::{WorkflowAgentPhase, WorkflowRunPhase};
@@ -122,11 +122,7 @@ fn WorkflowPanels(controller: super::state::WorkflowController) -> Element {
 
     rsx! {
         div { class: "workflow-workspace",
-            if !comparing() { super::document_controls::WorkflowDocumentControls { controller } }
-            nav { class: "workflow-view-switch", "aria-label": "Workflow view",
-                button { "aria-pressed": !comparing(), onclick: move |_| comparing.set(false), "Build" }
-                button { "aria-pressed": comparing(), onclick: move |_| comparing.set(true), "Compare" }
-            }
+            if !comparing() { super::document_controls::WorkflowDocumentControls { controller, comparing } }
             div { class: if comparing() { "workflow-panels workflow-mode-hidden" } else { "workflow-panels" },
                 PanelWorkspace {
                     panels,
@@ -137,8 +133,24 @@ fn WorkflowPanels(controller: super::state::WorkflowController) -> Element {
                 }
             }
             div { class: if comparing() { "workflow-comparison-container" } else { "workflow-comparison-container workflow-mode-hidden" },
-                super::comparison::WorkflowComparison { key: "{controller.spec().id()}", controller }
+                super::comparison::WorkflowComparison { key: "{controller.spec().id()}", controller, comparing }
             }
+        }
+    }
+}
+
+/// Build authors one workflow; Compare measures two against each other. The
+/// switch stands at the same place in both bars, so changing view never moves
+/// the header.
+#[component]
+pub(super) fn WorkflowViewSwitch(comparing: Signal<bool>) -> Element {
+    let mut comparing = comparing;
+    rsx! {
+        ModeGroup { label: "Workflow view".to_owned(), class: "workflow-view-switch".to_owned(),
+            ModeAction { purpose: ActionPurpose::Select, checked: !comparing(),
+                onclick: move |_| comparing.set(false), "Build" }
+            ModeAction { purpose: ActionPurpose::Select, checked: comparing(),
+                onclick: move |_| comparing.set(true), "Compare" }
         }
     }
 }
@@ -384,8 +396,8 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
                 },
                 if query_running {
                     p { class: "workflow-assistant-notice", role: "status",
-                        if active { "Spiral is running a query. Stopping the Assistant leaves that query running." }
-                        else { "Spiral is still running the submitted query. Results update when it finishes." }
+                        if active { "A Spiral query is running. Stopping the Assistant does not stop the query." }
+                        else { "A Spiral query is still running. Results update when it finishes." }
                     }
                 }
                 label { r#for: "workflow-agent-input", class: "sr-only", "Message the Workflow Assistant" }
@@ -395,7 +407,7 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
                         rows: "1",
                         maxlength: "8000",
                         disabled: composer_disabled,
-                        placeholder: if !state.history_available() { "Assistant history is unavailable" } else if configured { "Ask about your robotics data…" } else { "Assistant is temporarily unavailable" },
+                        placeholder: if !state.history_available() { "Assistant history is unavailable" } else if active { "Assistant is working…" } else if configured { "Ask about your robotics data…" } else { "Assistant is temporarily unavailable" },
                         value: "{draft}",
                         oninput: {
                             let draft_key = input_key.clone();
@@ -602,10 +614,8 @@ fn WorkflowCanvas(
                     strong { "Loading workflow…" }
                 }
             } else if spec.sql().trim().is_empty() {
-                div { class: "workflow-panel-empty",
-                    WorkflowIcon {}
-                    strong { "Build a workflow" }
-                    p { "Ask the Assistant or write SQL. The graph shows how the query reads, shapes, and scores your data, one stage at a time." }
+                div { class: "workflow-panel-empty is-quiet",
+                    p { "The graph appears here once the workflow has SQL: one stage per step, reads at the left, the result at the right." }
                 }
             } else {
                 match current {
@@ -781,7 +791,10 @@ fn WorkflowResults(controller: super::state::WorkflowController) -> Element {
                                 option { key: "{run.snapshot().run_id().unwrap_or_default()}",
                                     value: run.snapshot().run_id().unwrap_or_default(),
                                     selected: run.snapshot().run_id() == snapshot.run_id(),
-                                    "Run {index + 1} of {runs.len()} · {run.snapshot().phase().run_label()}"
+                                    // The phase dot already names the selected run's state; only
+                                    // runs that did not complete say so in the list.
+                                    if run.snapshot().phase() == WorkflowRunPhase::Completed { "Run {index + 1} of {runs.len()}" }
+                                    else { "Run {index + 1} of {runs.len()} · {run.snapshot().phase().run_label().to_ascii_lowercase()}" }
                                 }
                             }
                         }
@@ -826,6 +839,10 @@ fn WorkflowResults(controller: super::state::WorkflowController) -> Element {
                     }
                 } else if let Some(model) = result_model.or(transient_model) {
                     {model.render()}
+                } else if empty_workflow {
+                    div { class: "workflow-panel-empty is-quiet",
+                        p { "{empty_detail}" }
+                    }
                 } else {
                     div { class: "workflow-panel-empty",
                         ResultNodeIcon {}
@@ -866,7 +883,7 @@ impl WorkflowRunPresentation for WorkflowRunPhase {
         if empty_workflow {
             return (
                 "No workflow yet",
-                "Ask the Assistant to build a workflow. Results appear here after it runs.",
+                "Result rows land here after the workflow runs.",
             );
         }
         match self {

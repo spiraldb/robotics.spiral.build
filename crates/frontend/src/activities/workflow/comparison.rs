@@ -11,7 +11,8 @@ mod selection;
 mod timing;
 
 use super::state::WorkflowController;
-use crate::components::interaction::BrowserFocus;
+use crate::components::icons::{SpinnerIcon, WorkflowIcon};
+use crate::components::interaction::{Action, ActionPurpose, ActionVariant, BrowserFocus};
 use agent::{ComparisonAgent, ComparisonResult};
 use dashboard::{ComparisonCard, ComparisonDashboard};
 use dioxus::prelude::*;
@@ -25,20 +26,17 @@ struct EvidenceRequest {
     selection: ComparisonEvidence,
 }
 
+/// Compare shares the Build bar: the view switch, then the pair of workflows
+/// and the Compare action, so switching views never moves the header.
 #[component]
-pub(super) fn WorkflowComparison(controller: WorkflowController) -> Element {
-    let mut left = use_signal(String::new);
-    use_effect(move || {
-        let current = controller.spec();
-        if left().is_empty()
-            && controller
-                .workflows()
-                .iter()
-                .any(|workflow| workflow.id() == current.id())
-        {
-            left.set(current.id().to_owned());
-        }
-    });
+pub(super) fn WorkflowComparison(
+    controller: WorkflowController,
+    comparing: Signal<bool>,
+) -> Element {
+    // Workflow A follows the workflow open in Build, including one saved a
+    // moment ago, until the engineer picks another one here.
+    let mut chosen_left = use_signal(|| None::<String>);
+    let left = use_memo(move || chosen_left().unwrap_or_else(|| controller.spec().id().to_owned()));
     let mut right = use_signal(String::new);
     let mut dashboard = use_signal(ComparisonDashboard::default);
     let mut evidence_request = use_signal(|| None::<EvidenceRequest>);
@@ -53,15 +51,17 @@ pub(super) fn WorkflowComparison(controller: WorkflowController) -> Element {
     };
     rsx! {
         section { class: "episode-comparison comparison-workspace", "aria-label": "Workflow comparison",
-            header { class: "comparison-pair-header",
-                h1 { "Compare workflows" }
-                div { class: "comparison-pair-controls",
-                    label {
-                        "Workflow A"
+            header { class: "workflow-document-bar comparison-pair-bar",
+                span { class: "workflow-document-glyph", "aria-hidden": "true", WorkflowIcon {} }
+                super::workspace::WorkflowViewSwitch { comparing }
+                div { class: "comparison-pair", role: "group", "aria-label": "Workflows to compare",
+                    label { class: "comparison-side",
+                        span { class: "comparison-side-key", "A" }
                         select {
+                            class: "comparison-select",
                             "aria-label": "Workflow A", value: left(), disabled: busy,
                             onchange: move |event| {
-                                left.set(event.value());
+                                chosen_left.set(Some(event.value()));
                                 dashboard.set(ComparisonDashboard::default());
                                 evidence_request.set(None);
                                 inspected.set(None);
@@ -72,9 +72,11 @@ pub(super) fn WorkflowComparison(controller: WorkflowController) -> Element {
                             }
                         }
                     }
-                    label {
-                        "Workflow B"
+                    span { class: "comparison-pair-against", "against" }
+                    label { class: "comparison-side",
+                        span { class: "comparison-side-key", "B" }
                         select {
+                            class: "comparison-select",
                             "aria-label": "Workflow B", value: right(), disabled: busy,
                             onchange: move |event| {
                                 right.set(event.value());
@@ -88,8 +90,13 @@ pub(super) fn WorkflowComparison(controller: WorkflowController) -> Element {
                             }
                         }
                     }
-                    button {
-                        class: "comparison-primary", disabled: busy || !valid_left,
+                }
+                div { class: "workflow-document-actions",
+                    Action {
+                        purpose: ActionPurpose::Start, variant: ActionVariant::Solid,
+                        class: "comparison-primary workflow-run-action",
+                        disabled: busy || !valid_left, aria_busy: busy,
+                        title: if !valid_left { "Choose a saved workflow for A" } else { "Run both workflows and measure their episodes" },
                         onclick: move |_| {
                             let selected_right=right();
                             let ids=(left(),(!selected_right.is_empty()).then_some(selected_right));
@@ -101,7 +108,7 @@ pub(super) fn WorkflowComparison(controller: WorkflowController) -> Element {
                                 dashboard.write().finish(outcome);
                             });
                         },
-                        if busy { "Analyzing…" } else { "Compare" }
+                        if busy { SpinnerIcon {} "Analyzing" } else { "Compare" }
                     }
                 }
             }
@@ -146,12 +153,8 @@ pub(super) fn WorkflowComparison(controller: WorkflowController) -> Element {
                                 MetricCard { card: card.clone(), on_inspect: inspect }
                             }
                             for metric in current.pending() { PendingMetricCard { key: "{metric.column()}", metric: metric.clone(), running: current.progress().running(metric.column()) } }
-                            for (metric, error) in current.failures() {
-                                section { class: "comparison-metric-card comparison-failed-card", key: "failed-{metric.column()}",
-                                    h2 { "{metric.label()}" }
-                                    p { "This measurement could not be calculated. Compare again to retry." }
-                                    details { summary { "Error details" } p { "{error}" } }
-                                }
+                            if !current.failures().is_empty() {
+                                UnavailableMeasurements { failures: current.failures().to_vec() }
                             }
                         }
                         if !current.cards().iter().any(|card|card.shown()) && current.pending().is_empty() && current.failures().is_empty() {
@@ -266,6 +269,38 @@ fn MetricCard(card: ComparisonCard, on_inspect: EventHandler<EvidenceRequest>) -
                     summary { "Measurement details" }
                     p { "{metric.source()}" }
                     p { "Bars show the share of measured {card.result().plan().unit().label()} on a shared scale. Missing values are excluded from means." }
+                }
+            }
+        }
+    }
+}
+
+/// Every measurement that could not be calculated, in one card: the names as
+/// a list and each distinct error once, instead of one apologetic card per
+/// metric repeating the same message.
+#[component]
+fn UnavailableMeasurements(failures: Vec<(DashboardMetric, String)>) -> Element {
+    let mut errors = Vec::<&String>::new();
+    for (_, error) in &failures {
+        if !errors.contains(&error) {
+            errors.push(error);
+        }
+    }
+    rsx! {
+        section { class: "comparison-metric-card comparison-failed-card", "aria-label": "Measurements that could not be calculated",
+            header {
+                h2 { if failures.len() == 1 { "1 measurement unavailable" } else { "{failures.len()} measurements unavailable" } }
+            }
+            p { class: "comparison-measurement-description", "These could not be calculated from the recorded signals. Compare again to retry them." }
+            ul { class: "comparison-failed-list",
+                for (metric, _) in &failures {
+                    li { key: "failed-{metric.column()}", "{metric.label()}" }
+                }
+            }
+            details { class: "comparison-failed-errors",
+                summary { if errors.len() == 1 { "Error" } else { "Errors · {errors.len()}" } }
+                for (index, error) in errors.iter().enumerate() {
+                    p { key: "{index}", "{error}" }
                 }
             }
         }
