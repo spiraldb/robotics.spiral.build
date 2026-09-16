@@ -14,7 +14,7 @@ use serde_json::Value;
 use spiral_robotics_common::workflow::conversation::{ProviderMessage, ProviderToolCall};
 
 const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
-const DEFAULT_OPENROUTER_MODEL: &str = "openai/gpt-5.6-terra";
+const DEFAULT_OPENROUTER_MODEL: &str = "openai/gpt-5.6-luna";
 const MAX_LOCAL_ENV_BYTES: u64 = 64 * 1024;
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_STREAM_TOOL_CALLS: usize = 24;
@@ -263,6 +263,8 @@ impl ProviderResponse {
 #[derive(Serialize)]
 struct ChatRequest<'a> {
     model: &'a str,
+    reasoning_effort: &'static str,
+    service_tier: &'static str,
     messages: &'a [ProviderMessage],
     tools: &'a [Value],
     tool_choice: &'static str,
@@ -373,6 +375,8 @@ impl OpenAiProvider {
             }
             let request = ChatRequest {
                 model: &self.config.model,
+                reasoning_effort: "medium",
+                service_tier: "priority",
                 messages,
                 tools,
                 tool_choice: "auto",

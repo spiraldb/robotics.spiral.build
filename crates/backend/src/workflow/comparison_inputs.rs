@@ -163,8 +163,9 @@ mod tests {
             .map(|value| format!("({value})"))
             .collect::<Vec<_>>()
             .join(",");
-        let left = WorkflowSpec::new("left", "Left")
-            .with_sql(format!("SELECT * FROM (VALUES {values}) AS numbers(value)"));
+        let left = WorkflowSpec::new("left", "Left").with_sql(format!(
+            "SELECT value, INTERVAL '1 second' AS elapsed FROM (VALUES {values}) AS numbers(value)"
+        ));
         let right = WorkflowSpec::new("right", "Right").with_sql("SELECT 149 AS value");
         let captured = inputs
             .capture(ComparisonInputRequest::new(left, Some(right)))
@@ -175,11 +176,12 @@ mod tests {
         let sql = "SELECT COUNT(*) AS n, SUM(value) AS total FROM comparison_input_left";
         let (one, two) = futures::future::try_join(
             inputs.query(captured.id(), (sql.into(), 1)),
-            inputs.query(captured.id(), ("SELECT l.value FROM comparison_input_left l JOIN comparison_input_right r ON l.value=r.value".into(), 1)),
+            inputs.query(captured.id(), ("SELECT l.value, l.elapsed = INTERVAL '1 second' AS duration_preserved FROM comparison_input_left l JOIN comparison_input_right r ON l.value=r.value".into(), 1)),
         ).await.unwrap();
         assert_eq!(one.rows()[0]["n"], 150);
         assert_eq!(one.rows()[0]["total"], 11175);
         assert_eq!(two.rows()[0]["value"], 149);
+        assert_eq!(two.rows()[0]["duration_preserved"], true);
         // A second comparison must have its own independent outputs.
         let another = inputs
             .capture(ComparisonInputRequest::new(

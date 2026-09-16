@@ -92,7 +92,10 @@ without direnv or manually exporting secrets:
 LLM_API_KEY=your-provider-key
 ```
 
-The default is `openai/gpt-5.6-terra` through OpenRouter. `LLM_MODEL` and
+The default is `openai/gpt-5.6-luna` through OpenRouter, with `medium` reasoning
+effort and fast mode requested using `service_tier: "priority"`. Priority
+processing costs more than standard processing; the provider determines the
+actual served tier. `LLM_MODEL` and
 `LLM_BASE_URL` remain optional developer overrides, and explicit process values
 take precedence over `.env.local`. Keep the file owner-readable only
 (`chmod 600 .env.local`). Never commit it. Production deployments should
