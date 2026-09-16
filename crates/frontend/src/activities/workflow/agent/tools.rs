@@ -10,23 +10,30 @@ use spiral_robotics_common::workflow::{WorkflowAgentArtifactReceipt, WorkflowSpe
 
 mod author_sql;
 mod dataset;
+mod evidence_review;
 mod execution;
 mod function_discovery;
 mod models;
 mod relations;
+mod result_contract;
 
 use spiral_robotics_common::workflow::conversation::ProviderMessage;
 
 pub(super) struct ToolContext {
     pub(super) expected: WorkflowSpec,
     pub(super) evidence: Vec<ProviderMessage>,
+    review: evidence_review::EvidenceReview,
 }
 impl ToolContext {
     pub(super) fn new(expected: WorkflowSpec) -> Self {
         Self {
             expected,
             evidence: Vec::new(),
+            review: evidence_review::EvidenceReview::default(),
         }
+    }
+    pub(super) fn require_finished(&self) -> Result<(), String> {
+        self.review.require_finished()
     }
 }
 
@@ -61,6 +68,7 @@ struct ToolInvocation<'a> {
     expected: &'a mut WorkflowSpec,
     arguments: &'a str,
     evidence: &'a mut Vec<ProviderMessage>,
+    review: &'a mut evidence_review::EvidenceReview,
 }
 
 impl ToolInvocation<'_> {
@@ -92,6 +100,7 @@ impl ToolInvocation<'_> {
             .replace_authored_query(self.expected, workflow.clone())?;
         self.controller.remember_plan(&workflow, plan);
         *self.expected = workflow.clone();
+        self.review.draft_changed();
         Ok(json!({"ok":true, "workflow":workflow}).to_string())
     }
 }
@@ -103,7 +112,7 @@ struct NoArguments {}
 pub(super) struct WorkflowToolCatalog;
 
 impl WorkflowToolCatalog {
-    fn tools() -> [Box<dyn WorkflowTool>; 10] {
+    fn tools() -> [Box<dyn WorkflowTool>; 11] {
         [
             Box::new(dataset::InspectDataset),
             Box::new(relations::ListRelations),
@@ -113,6 +122,7 @@ impl WorkflowToolCatalog {
             Box::new(execution::RunWorkflow),
             Box::new(execution::InspectRun),
             Box::new(execution::InspectImages),
+            Box::new(evidence_review::AssessEvidence),
             Box::new(execution::ShowResults),
             Box::new(function_discovery::InspectFunctions),
         ]
@@ -162,6 +172,7 @@ impl WorkflowToolCatalog {
             controller,
             expected: &mut context.expected,
             evidence: &mut context.evidence,
+            review: &mut context.review,
             arguments: call.function().arguments(),
         })
         .await

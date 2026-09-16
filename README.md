@@ -92,7 +92,7 @@ without direnv or manually exporting secrets:
 LLM_API_KEY=your-provider-key
 ```
 
-The default is `openai/gpt-5.6-luna` through OpenRouter, with `medium` reasoning
+The default is `openai/gpt-5.6-terra` through OpenRouter, with `medium` reasoning
 effort and fast mode requested using `service_tier: "priority"`. Priority
 processing costs more than standard processing; the provider determines the
 actual served tier. `LLM_MODEL` and

@@ -175,6 +175,8 @@ impl WorkflowAssistant {
             Err(error) => serde_json::json!({"functions": [], "error": error.to_string()}),
         };
         let mut calls = 0;
+        let mut completion_repair_attempted = false;
+        let mut completion_feedback = None;
         for iteration in 0..64 {
             if controller.spec() != context.expected {
                 return Err(
@@ -208,6 +210,9 @@ impl WorkflowAssistant {
                 ),
             )];
             messages.extend(self.conversation.peek().provider_messages().clone());
+            if let Some(feedback) = completion_feedback.take() {
+                messages.push(ProviderMessage::text("system", feedback));
+            }
             messages.append(&mut context.evidence);
             let response = client
                 .complete(
@@ -234,7 +239,15 @@ impl WorkflowAssistant {
                 }
             });
             if response.tool_calls().is_empty() {
-                return Ok(());
+                match context.require_finished() {
+                    Ok(()) => return Ok(()),
+                    Err(error) if !completion_repair_attempted => {
+                        completion_repair_attempted = true;
+                        completion_feedback = Some(error);
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                }
             }
             for call in response.tool_calls() {
                 calls += 1;
@@ -410,6 +423,7 @@ mod tests {
                 "run_workflow",
                 "inspect_run",
                 "inspect_images",
+                "assess_evidence",
                 "show_results",
                 "inspect_functions"
             ]

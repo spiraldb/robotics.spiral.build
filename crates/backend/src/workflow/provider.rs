@@ -14,7 +14,7 @@ use serde_json::Value;
 use spiral_robotics_common::workflow::conversation::{ProviderMessage, ProviderToolCall};
 
 const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
-const DEFAULT_OPENROUTER_MODEL: &str = "openai/gpt-5.6-luna";
+const DEFAULT_OPENROUTER_MODEL: &str = "openai/gpt-5.6-terra";
 const MAX_LOCAL_ENV_BYTES: u64 = 64 * 1024;
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_STREAM_TOOL_CALLS: usize = 24;
