@@ -1,5 +1,6 @@
 //! Incremental dashboard state: completed cards survive later analysis failures.
 use super::agent::{ComparisonEvent, ComparisonResult};
+use super::progress::{ComparisonPhase, ComparisonProgress};
 use spiral_robotics_common::workflow::comparison_plan::DashboardMetric;
 
 #[derive(Clone, Default, PartialEq)]
@@ -8,7 +9,7 @@ pub(super) struct ComparisonDashboard {
     cards: Vec<ComparisonCard>,
     pending: Vec<DashboardMetric>,
     failures: Vec<(DashboardMetric, String)>,
-    status: Option<String>,
+    progress: ComparisonProgress,
     note: String,
     error: Option<String>,
 }
@@ -46,7 +47,7 @@ impl ComparisonDashboard {
         &self.failures
     }
     pub(super) fn status(&self) -> Option<&str> {
-        self.status.as_deref()
+        self.progress.phase().map(ComparisonPhase::title)
     }
     pub(super) fn note(&self) -> &str {
         &self.note
@@ -56,12 +57,12 @@ impl ComparisonDashboard {
     }
     pub(super) fn start(&mut self) {
         *self = Self {
-            status: Some("Reading workflow outputs".into()),
+            progress: ComparisonProgress::start(),
             ..Self::default()
         };
     }
     pub(super) fn finish(&mut self, result: Result<String, String>) {
-        self.status = None;
+        self.progress.finish();
         self.pending.clear();
         match result {
             Ok(note) => self.note = note,
@@ -75,31 +76,47 @@ impl ComparisonDashboard {
     }
     pub(super) fn accept(&mut self, event: ComparisonEvent) {
         match event {
-            ComparisonEvent::Status(status) => self.status = Some(status.into()),
+            ComparisonEvent::Phase(phase) => self.progress.set_phase(phase),
+            ComparisonEvent::Planned(metrics) => {
+                self.progress.set_total(metrics.len());
+                self.pending = metrics;
+            }
             ComparisonEvent::PopulationReady(result) => {
                 self.population = Some(result.clone());
+                self.remove_pending(&result);
                 self.append(result);
-                self.status = Some("Inspecting recorded signals".into());
+                self.progress.set_phase(ComparisonPhase::Measurements);
             }
             ComparisonEvent::MetricStarted(metric) => {
-                self.status = Some("Analyzing recorded signals".into());
-                self.pending.push(metric);
+                self.progress.begin(metric.column());
+                if !self
+                    .pending
+                    .iter()
+                    .any(|pending| pending.column() == metric.column())
+                {
+                    self.pending.push(metric);
+                }
             }
             ComparisonEvent::MetricReady(result) => {
-                self.pending.retain(|metric| {
-                    !result
-                        .plan()
-                        .metrics()
-                        .iter()
-                        .any(|ready| ready.column() == metric.column())
-                });
+                self.remove_pending(&result);
                 self.append(result);
             }
             ComparisonEvent::MetricFailed((metric, error)) => {
                 self.pending
                     .retain(|pending| pending.column() != metric.column());
+                self.progress.end(metric.column());
                 self.failures.push((metric, error));
             }
+        }
+    }
+    pub(super) fn progress(&self) -> &ComparisonProgress {
+        &self.progress
+    }
+    fn remove_pending(&mut self, result: &ComparisonResult) {
+        for metric in result.plan().metrics() {
+            self.pending
+                .retain(|pending| pending.column() != metric.column());
+            self.progress.end(metric.column());
         }
     }
     fn append(&mut self, result: ComparisonResult) {

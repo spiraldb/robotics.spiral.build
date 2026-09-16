@@ -15,6 +15,9 @@ use spiral_robotics_common::{
 pub(crate) struct WorkflowEndpoints;
 impl WorkflowEndpoints {
     pub(crate) fn register(routes: &mut ApiRoutes) {
+        routes.post("/workflow-comparisons", Self::capture_comparison);
+        routes.post("/workflow-comparisons/{id}/query", Self::query_comparison);
+        routes.delete("/workflow-comparisons/{id}", Self::release_comparison);
         routes.get("/workflows", Self::list);
         routes.get("/workflows/{id}", Self::load);
         routes.post("/workflows/save", Self::save);
@@ -26,6 +29,32 @@ impl WorkflowEndpoints {
         routes.post("/datasets/cameras", Self::cameras);
         routes.get("/models/status", Self::model_status);
         routes.post("/models/complete", Self::complete);
+    }
+    async fn capture_comparison(
+        ScopedProject(commands): ScopedProject<WorkflowCommands>,
+        ApiJson(request): ApiJson<
+            spiral_robotics_common::workflow::comparison_inputs::ComparisonInputRequest,
+        >,
+    ) -> Result<
+        Json<spiral_robotics_common::workflow::comparison_inputs::CapturedComparisonInputs>,
+        HttpFailure,
+    > {
+        Ok(Json(commands.capture_comparison(request).await?))
+    }
+    async fn query_comparison(
+        ScopedProject(commands): ScopedProject<WorkflowCommands>,
+        ApiPath(id): ApiPath<String>,
+        ApiJson(request): ApiJson<spiral_robotics_common::relations::QueryRequest>,
+    ) -> Result<Json<spiral_robotics_common::relations::SpiralQuerySnapshot>, HttpFailure> {
+        Ok(Json(
+            commands.query_comparison(id, request.into_parts()).await?,
+        ))
+    }
+    async fn release_comparison(
+        ScopedProject(commands): ScopedProject<WorkflowCommands>,
+        ApiPath(id): ApiPath<String>,
+    ) -> Result<Json<bool>, HttpFailure> {
+        Ok(Json(commands.release_comparison(&id)?))
     }
     async fn list(
         ScopedProject(commands): ScopedProject<WorkflowCommands>,

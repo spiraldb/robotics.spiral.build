@@ -66,6 +66,47 @@ impl WorkflowCommands {
         debug_assert!(released);
         result.map_err(Into::into)
     }
+    pub(crate) async fn capture_comparison(
+        &self,
+        request: spiral_robotics_common::workflow::comparison_inputs::ComparisonInputRequest,
+    ) -> Result<
+        spiral_robotics_common::workflow::comparison_inputs::CapturedComparisonInputs,
+        BackendCommandError,
+    > {
+        self.state
+            .execute(move |state, _activity| async move {
+                state
+                    .workflow()
+                    .comparisons()
+                    .capture(request)
+                    .await
+                    .map_err(OperationError::External)
+                    .map_err(Into::into)
+            })
+            .await
+    }
+    pub(crate) async fn query_comparison(
+        &self,
+        id: String,
+        request: (String, usize),
+    ) -> Result<spiral_robotics_common::relations::SpiralQuerySnapshot, BackendCommandError> {
+        self.state
+            .execute(move |state, _activity| async move {
+                state
+                    .workflow()
+                    .comparisons()
+                    .query(&id, request)
+                    .await
+                    .map_err(OperationError::External)
+                    .map_err(Into::into)
+            })
+            .await
+    }
+    pub(crate) fn release_comparison(&self, id: &str) -> Result<bool, BackendCommandError> {
+        let _activity = self.admit()?;
+        self.state.workflow().comparisons().release(id);
+        Ok(true)
+    }
     pub(crate) async fn capabilities(
         &self,
     ) -> Result<spiral_robotics_common::relations::SpiralQuerySnapshot, BackendCommandError> {

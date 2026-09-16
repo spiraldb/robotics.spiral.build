@@ -21,8 +21,8 @@ impl SignalDiscovery {
     pub(super) fn tools() -> Vec<Value> {
         vec![
             NativeFunctionDiscovery::definition(),
-            json!({"type":"function","function":{"name":"inspect_dataset","description":"Read all recorded topics, schemas, coverage and exact native variant IDs of an actual dataset. Inspect joint, sensor, health and stream-metadata topics, not only cameras.","parameters":{"type":"object","properties":{"path":{"type":"array","items":{"type":"string"}}},"required":["path"],"additionalProperties":false}}}),
-            json!({"type":"function","function":{"name":"inspect_query","description":"Execute a read-only native SQL probe; returns schema and up to 3 sample rows including nested scalar fields. Use SQL LIMIT for small schema/sample probes. Learn field names, joint order, units and validity before computing metrics. Preview size does not bound computation. Never decode media or run inference for signal discovery.","parameters":{"type":"object","properties":{"sql":{"type":"string"}},"required":["sql"],"additionalProperties":false}}}),
+            json!({"type":"function","function":{"name":"inspect_dataset","description":"Read dataset topics, schemas and variant IDs when the supplied dataset_inspections do not answer a specific question. Reuse existing context whenever possible.","parameters":{"type":"object","properties":{"path":{"type":"array","items":{"type":"string"}}},"required":["path"],"additionalProperties":false}}}),
+            json!({"type":"function","function":{"name":"inspect_query","description":"Resolve a specific missing field shape, unit or joint mapping with a read-only SQL sample. Returns schema and up to 3 rows. Batch independent probes; skip facts already supplied. Use SQL LIMIT to bound work and reuse recorded signals rather than decoding media or rerunning inference.","parameters":{"type":"object","properties":{"sql":{"type":"string"}},"required":["sql"],"additionalProperties":false}}}),
         ]
     }
     pub(super) async fn call(name: &str, arguments: &str) -> Result<Value, String> {

@@ -3,9 +3,12 @@ mod agent;
 mod dashboard;
 mod discovery;
 mod evidence;
+mod inputs;
+mod progress;
 mod recorded_signal;
 mod report;
 mod selection;
+mod timing;
 
 use super::state::WorkflowController;
 use crate::components::interaction::BrowserFocus;
@@ -94,7 +97,7 @@ pub(super) fn WorkflowComparison(controller: WorkflowController) -> Element {
                             evidence_request.set(None);
                             inspected.set(None);
                             spawn(async move {
-                                let outcome=ComparisonAgent::compare(ids,move |event| dashboard.write().accept(event)).await;
+                                let outcome=timing::ComparisonTiming::measure("total", ComparisonAgent::compare(ids,move |event| dashboard.write().accept(event))).await;
                                 dashboard.write().finish(outcome);
                             });
                         },
@@ -122,13 +125,7 @@ pub(super) fn WorkflowComparison(controller: WorkflowController) -> Element {
                         }
                     }
                 }
-                if let Some(status)=current.status() {
-                    div { class: "comparison-analysis-status", role: "status",
-                        span { class: "comparison-status-dot" }
-                        span { "{status}…" }
-                        if !current.cards().is_empty() { span { class: "comparison-ready-count", "{current.cards().len()} ready · {current.pending().len()} running" } }
-                    }
-                }
+                if busy { progress::ComparisonProgressPanel { dashboard: current.clone() } }
                 if let Some(message)=current.error() {
                     div { class: "comparison-error", role: "alert",
                         strong { "Analysis stopped" }
@@ -143,12 +140,12 @@ pub(super) fn WorkflowComparison(controller: WorkflowController) -> Element {
                     }
                 }
                 div { class: if inspected().is_some() { "workflow-mode-hidden" } else { "comparison-review" },
-                    if current.population().is_some() {
+                    if current.population().is_some() || !current.pending().is_empty() {
                         div { class: "comparison-card-grid",
                             for card in current.cards().iter().filter(|card|card.shown()) {
                                 MetricCard { card: card.clone(), on_inspect: inspect }
                             }
-                            for metric in current.pending() { PendingMetricCard { key: "{metric.column()}", metric: metric.clone() } }
+                            for metric in current.pending() { PendingMetricCard { key: "{metric.column()}", metric: metric.clone(), running: current.progress().running(metric.column()) } }
                             for (metric, error) in current.failures() {
                                 section { class: "comparison-metric-card comparison-failed-card", key: "failed-{metric.column()}",
                                     h2 { "{metric.label()}" }
@@ -172,10 +169,6 @@ pub(super) fn WorkflowComparison(controller: WorkflowController) -> Element {
                         div { class: "comparison-empty",
                             h2 { "What changes between these workflows?" }
                             p { "Compare their episodes, motion, and recorded sensor signals. Each measurement appears as soon as its analysis finishes." }
-                        }
-                    } else if busy {
-                        div { class: "comparison-empty",
-                            p { "Establishing the two populations. Completed comparisons will appear here." }
                         }
                     }
                 }
@@ -280,12 +273,15 @@ fn MetricCard(card: ComparisonCard, on_inspect: EventHandler<EvidenceRequest>) -
 }
 
 #[component]
-fn PendingMetricCard(metric: DashboardMetric) -> Element {
+fn PendingMetricCard(metric: DashboardMetric, running: bool) -> Element {
     rsx! {
-        section { class: "comparison-metric-card is-pending", "aria-label": "Analyzing {metric.label()}",
-            header { h2 { "{metric.label()}" } }
+        section { class: "comparison-metric-card is-pending", "aria-label": if running { format!("Calculating {}",metric.label()) } else { format!("Queued {}",metric.label()) }, "aria-busy": "true",
+            header { h2 { "{metric.label()}" } span { class: "comparison-card-state", if running { "Calculating" } else { "Queued" } } }
             p { class: "comparison-measurement-description", "{metric.description()}" }
-            div { class: "comparison-pending-body", "Calculating from recorded values…" }
+            div { class: "comparison-pending-body",
+                div { class: "comparison-placeholder", "aria-hidden": "true", span {} span {} }
+                p { if running { "Reading measurements and building distributions…" } else { "This card will start when the preceding work finishes." } }
+            }
         }
     }
 }

@@ -1,13 +1,14 @@
 //! The comparison agent interprets ordinary outputs; its reasoning is never rendered.
 use super::report::ComparisonReport;
 use super::selection::{ComparisonEvidence, WorkflowSide};
+use super::timing::ComparisonTiming;
 use crate::activities::{data::DatasetClient, workflow::WorkflowClient};
 use serde_json::{Value, json};
 use spiral_robotics_common::{
     relations::SpiralQuerySnapshot,
     workflow::{
-        WorkflowSpec,
-        comparison_plan::{ComparisonPlan, ComparisonSlice},
+        comparison_inputs::ComparisonInputRequest,
+        comparison_plan::{ComparisonPlan, ComparisonSlice, DashboardMetric},
         conversation::ProviderMessage,
         document::{ModelRequest, WorkflowDocument},
     },
@@ -20,6 +21,7 @@ pub(super) struct ComparisonResult {
     names: (String, String),
     sources: (String, Option<String>),
     version: Option<String>,
+    inputs: Option<super::inputs::ComparisonInputs>,
 }
 impl ComparisonResult {
     pub(super) fn plan(&self) -> &ComparisonPlan {
@@ -63,10 +65,12 @@ impl ComparisonResult {
         let sql = self
             .plan
             .evidence_sql((&self.sources.0, self.sources.1.as_deref()), &slice)?;
-        let rows = data
-            .run_spiral_query(sql, 21)
-            .await
-            .map_err(|e| e.to_string())?;
+        let rows = self
+            .inputs
+            .as_ref()
+            .ok_or("Comparison inputs expired. Compare again.")?
+            .query(sql, 21)
+            .await?;
         let after = data
             .inspect_dataset(dataset.clone())
             .await
@@ -78,7 +82,8 @@ impl ComparisonResult {
     }
 }
 pub(super) enum ComparisonEvent {
-    Status(&'static str),
+    Phase(super::progress::ComparisonPhase),
+    Planned(Vec<DashboardMetric>),
     PopulationReady(ComparisonResult),
     MetricStarted(spiral_robotics_common::workflow::comparison_plan::DashboardMetric),
     MetricReady(ComparisonResult),
@@ -94,45 +99,67 @@ struct ComparisonSources {
     left: WorkflowDocument,
     right: Option<WorkflowDocument>,
     catalog: Vec<spiral_robotics_common::datasets::DatasetSummary>,
+    inputs: super::inputs::ComparisonInputs,
+    inspections: Vec<spiral_robotics_common::datasets::DatasetInspection>,
 }
 impl ComparisonSources {
     async fn load(ids: (String, Option<String>)) -> Result<Self, String> {
         let client = WorkflowClient::current();
-        let left = client
-            .load(&ids.0)
-            .await
-            .map_err(|error| error.to_string())?;
-        let right = match ids.1 {
-            Some(id) => Some(client.load(&id).await.map_err(|error| error.to_string())?),
-            None => None,
-        };
-        let catalog = DatasetClient::current()
-            .list_datasets()
-            .await
-            .map_err(|error| error.to_string())?;
+        let data = DatasetClient::current();
+        let (left, right, catalog) = ComparisonTiming::measure(
+            "load documents and catalog",
+            futures_util::future::try_join3(
+                client.load(&ids.0),
+                async {
+                    match ids.1 {
+                        Some(id) => client.load(&id).await.map(Some),
+                        None => Ok(None),
+                    }
+                },
+                data.list_datasets(),
+            ),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        let (inputs, inspections) = futures_util::future::try_join(
+            ComparisonTiming::measure(
+                "execute workflows once",
+                super::inputs::ComparisonInputs::capture(ComparisonInputRequest::new(
+                    left.workflow().clone(),
+                    right.as_ref().map(|document| document.workflow().clone()),
+                )),
+            ),
+            ComparisonTiming::measure("dataset inventories", async {
+                futures_util::future::try_join_all(
+                    catalog
+                        .iter()
+                        .map(|dataset| data.inspect_dataset(dataset.selection().clone())),
+                )
+                .await
+                .map_err(|error| error.to_string())
+            }),
+        )
+        .await?;
         Ok(Self {
             left,
             right,
             catalog,
+            inputs,
+            inspections,
         })
     }
-    async fn context(&self) -> Result<Value, String> {
-        let data = DatasetClient::current();
-        let left = data
-            .run_spiral_query(self.left.workflow().sql().into(), 8)
-            .await
-            .map_err(|error| error.to_string())?;
-        let right = match &self.right {
-            Some(document) => Some(
-                data.run_spiral_query(document.workflow().sql().into(), 8)
-                    .await
-                    .map_err(|error| error.to_string())?,
-            ),
-            None => None,
-        };
-        Ok(
-            json!({"left":Self::source(&self.left,&left),"right":self.right.as_ref().zip(right.as_ref()).map(|(document,preview)|Self::source(document,preview)),"default_baseline":self.right.is_none(),"datasets":self.catalog}),
-        )
+    fn context(&self) -> Value {
+        let output = self.inputs.output();
+        json!({"left":Self::source(&self.left,output.left()),"right":self.right.as_ref().zip(output.right()).map(|(document,preview)|Self::source(document,preview)),"default_baseline":self.right.is_none(),"datasets":self.catalog,"dataset_inspections":self.inspections,"topic_sample_query":"SELECT value FROM spql.mcap.read_topic(\'<dataset from catalog>\', \'<topic from inspection>\', \'<variant from inspection>\') LIMIT 1"})
+    }
+    fn inspection(
+        &self,
+        dataset: &spiral_robotics_common::datasets::DatasetSelection,
+    ) -> Result<&spiral_robotics_common::datasets::DatasetInspection, String> {
+        self.inspections
+            .iter()
+            .find(|inspection| inspection.dataset().selection() == dataset)
+            .ok_or_else(|| "Choose an inspected dataset.".into())
     }
     async fn evaluate(&self, plan: ComparisonPlan) -> Result<ComparisonResult, String> {
         let data = DatasetClient::current();
@@ -144,20 +171,8 @@ impl ComparisonSources {
         {
             return Err("Choose a dataset from the supplied catalog.".into());
         }
-        let sql = plan.aggregate_sql((
-            self.left.workflow().sql(),
-            self.right
-                .as_ref()
-                .map(|document| document.workflow().sql()),
-        ))?;
-        let definition = WorkflowSpec::new("comparison-analysis", "Comparison").with_sql(&sql);
-        let planned = WorkflowClient::current()
-            .plan(&definition)
-            .await
-            .map_err(|error| error.to_string())?;
-        if let Some(error) = planned.error() {
-            return Err(error.into());
-        }
+        let sources = self.inputs.sources();
+        let sql = plan.aggregate_sql((&sources.0, sources.1.as_deref()))?;
         let version = match plan.dataset() {
             Some(dataset) => Some(
                 data.inspect_dataset(dataset.clone())
@@ -169,10 +184,19 @@ impl ComparisonSources {
             ),
             None => None,
         };
-        let output = data
-            .run_spiral_query(sql, 100)
-            .await
-            .map_err(|error| error.to_string())?;
+        if let Some(dataset) = plan.dataset() {
+            let initial = self
+                .catalog
+                .iter()
+                .find(|candidate| candidate.selection() == dataset)
+                .unwrap();
+            if version.as_deref() != Some(initial.version_id()) {
+                return Err(
+                    "The dataset changed while reading workflow outputs. Compare again.".into(),
+                );
+            }
+        }
+        let output = self.inputs.query(sql, 100).await?;
         if let Some(dataset) = plan.dataset() {
             let after = data
                 .inspect_dataset(dataset.clone())
@@ -187,12 +211,8 @@ impl ComparisonSources {
             plan,
             report,
             version,
-            sources: (
-                self.left.workflow().sql().into(),
-                self.right
-                    .as_ref()
-                    .map(|document| document.workflow().sql().into()),
-            ),
+            sources,
+            inputs: Some(self.inputs.clone()),
             names: (
                 self.left.workflow().name().into(),
                 self.right
@@ -264,9 +284,11 @@ impl PlannedSignal {
             Self::Array(signal) => {
                 signal
                     .prepare(
-                        base.plan()
-                            .dataset()
-                            .ok_or("Array measurements require an episode dataset.")?,
+                        sources.inspection(
+                            base.plan()
+                                .dataset()
+                                .ok_or("Array measurements require an episode dataset.")?,
+                        )?,
                     )
                     .await?
             }
@@ -284,25 +306,44 @@ impl PlannedSignal {
     }
 }
 impl ComparisonBatch {
+    fn decode(arguments: &str) -> Result<Self, String> {
+        let batch: Self = serde_json::from_str(arguments).map_err(|error| error.to_string())?;
+        batch.population.validate()?;
+        let mut columns = std::collections::HashSet::new();
+        for metric in batch
+            .population
+            .metrics()
+            .iter()
+            .chain(batch.cards.iter().map(PlannedSignal::metric))
+        {
+            if !columns.insert(metric.column()) {
+                return Err("Choose a distinct column for each metric.".into());
+            }
+        }
+        Ok(batch)
+    }
     async fn execute(
         self,
         sources: &ComparisonSources,
         publish: &mut impl FnMut(ComparisonEvent),
     ) -> Result<String, String> {
         use futures_util::{StreamExt, stream::FuturesUnordered};
-        let mut columns = std::collections::HashSet::new();
-        for metric in self
-            .population
-            .metrics()
-            .iter()
-            .chain(self.cards.iter().map(PlannedSignal::metric))
-        {
-            if !columns.insert(metric.column()) {
-                return Err("Choose a distinct column for each metric.".into());
-            }
+        publish(ComparisonEvent::Planned(
+            self.population
+                .metrics()
+                .iter()
+                .chain(self.cards.iter().map(PlannedSignal::metric))
+                .cloned()
+                .collect(),
+        ));
+        publish(ComparisonEvent::Phase(
+            super::progress::ComparisonPhase::Populations,
+        ));
+        for metric in self.population.metrics() {
+            publish(ComparisonEvent::MetricStarted(metric.clone()));
         }
-        publish(ComparisonEvent::Status("Comparing episode populations"));
-        let base = sources.evaluate(self.population).await?;
+        let base = ComparisonTiming::measure("population query", sources.evaluate(self.population))
+            .await?;
         if base.report().counts().0 > 0
             && base.report().counts().1 > 0
             && base.report().metrics().iter().any(|metric| {
@@ -321,7 +362,14 @@ impl ComparisonBatch {
                 let metric = signal.metric().clone();
                 publish(ComparisonEvent::MetricStarted(metric.clone()));
                 let base = &base;
-                running.push(async move { (metric, signal.evaluate(sources, base).await) });
+                running.push(async move {
+                    let result = ComparisonTiming::measure(
+                        format!("card {}", metric.column()),
+                        signal.evaluate(sources, base),
+                    )
+                    .await;
+                    (metric, result)
+                });
             }
             let Some((metric, result)) = running.next().await else {
                 break;
@@ -340,17 +388,25 @@ impl ComparisonAgent {
         ids: (String, Option<String>),
         mut publish: impl FnMut(ComparisonEvent),
     ) -> Result<String, String> {
-        publish(ComparisonEvent::Status("Reading workflow outputs"));
+        publish(ComparisonEvent::Phase(
+            super::progress::ComparisonPhase::Workflows,
+        ));
         let sources = ComparisonSources::load(ids).await?;
-        let context = sources.context().await?;
+        publish(ComparisonEvent::Phase(
+            super::progress::ComparisonPhase::Planning,
+        ));
+        let context = sources.context();
         let mut messages = vec![
             ProviderMessage::text("system", Self::instructions()),
             ProviderMessage::text("user", context.to_string()),
         ];
-        for _ in 0..12 {
-            let response = WorkflowClient::current()
-                .complete(ModelRequest::new(messages.clone(), Self::tools()), |_| {})
-                .await?;
+        for round in 0..12 {
+            let response = ComparisonTiming::measure(
+                format!("model round {}", round + 1),
+                WorkflowClient::current()
+                    .complete(ModelRequest::new(messages.clone(), Self::tools()), |_| {}),
+            )
+            .await?;
             let calls = response.tool_calls().to_vec();
             messages.push(response);
             if calls.is_empty() {
@@ -358,15 +414,17 @@ impl ComparisonAgent {
                 continue;
             }
             // Independent discovery calls from the same model turn also run together.
-            publish(ComparisonEvent::Status("Inspecting recorded signals"));
             let discoveries = futures_util::future::join_all(calls.iter().map(|call| async {
                 if call.function().name() == "plan_comparison" {
                     return None;
                 }
                 Some(
-                    super::discovery::SignalDiscovery::call(
-                        call.function().name(),
-                        call.function().arguments(),
+                    ComparisonTiming::measure(
+                        format!("discovery {}", call.function().name()),
+                        super::discovery::SignalDiscovery::call(
+                            call.function().name(),
+                            call.function().arguments(),
+                        ),
                     )
                     .await,
                 )
@@ -378,7 +436,16 @@ impl ComparisonAgent {
                         call.id().to_owned(),
                         match attempt {
                             Ok(value) => value,
-                            Err(error) => json!({"error":error}),
+                            Err(error) => {
+                                web_sys::console::log_1(
+                                    &format!(
+                                        "comparison_profile discovery failed tool={} error={error}",
+                                        call.function().name()
+                                    )
+                                    .into(),
+                                );
+                                json!({"error":error})
+                            }
                         }
                         .to_string(),
                     ));
@@ -388,20 +455,25 @@ impl ComparisonAgent {
                 .iter()
                 .find(|call| call.function().name() == "plan_comparison")
             {
-                let attempt = async {
-                    let batch: ComparisonBatch = serde_json::from_str(call.function().arguments())
-                        .map_err(|error| error.to_string())?;
-                    batch.execute(&sources, &mut publish).await
-                }
-                .await;
-                // Invalid plans can be repaired before execution. Once cards are running,
-                // failures are reported together without another model round trip.
-                match attempt {
-                    Ok(note) => return Ok(note),
-                    Err(error) => messages.push(ProviderMessage::tool(
-                        call.id().to_owned(),
-                        json!({"error":error}).to_string(),
-                    )),
+                match ComparisonBatch::decode(call.function().arguments()) {
+                    Ok(batch) => {
+                        // Once a valid plan starts executing, native failures are terminal.
+                        // Sending them back to the model hides the cause behind repeated turns.
+                        return batch.execute(&sources, &mut publish).await;
+                    }
+                    Err(error) => {
+                        web_sys::console::log_1(
+                            &format!(
+                                "comparison_profile invalid plan round={} error={error}",
+                                round + 1
+                            )
+                            .into(),
+                        );
+                        messages.push(ProviderMessage::tool(
+                            call.id().to_owned(),
+                            json!({"error":error}).to_string(),
+                        ));
+                    }
                 }
             }
         }
@@ -413,23 +485,23 @@ impl ComparisonAgent {
     pub(super) fn metric_schema() -> Value {
         json!({"type":"object","properties":{
             "column":{"type":"string"},"label":{"type":"string"},"unit":{"type":"string"},"show":{"type":"boolean"},
-            "description":{"type":"string","description":"Explain exactly what one episode value means: aggregation, joint identity, validity and units. Max 300 characters."},
+            "description":{"type":"string","description":"Briefly define the per-episode measurement and aggregation. Include joint identity and units when relevant. Max 300 characters."},
             "source":{"type":"string","description":"Recorded topic and field name; max 200 characters."}
         },"required":["column","label","unit","show","description","source"],"additionalProperties":false})
     }
     fn tools() -> Vec<Value> {
         let mut tools = super::discovery::SignalDiscovery::tools();
-        tools.push(json!({"type":"function","function":{"name":"plan_comparison","description":"Submit the complete dashboard once, after inspecting schemas and representative values. The application establishes the populations, runs up to four cards concurrently, and displays each result immediately. No further model turn is needed.","parameters":{"type":"object","properties":{
+        tools.push(json!({"type":"function","function":{"name":"plan_comparison","description":"Commit to a complete dashboard using the supplied context and any necessary samples. Choose useful measurements and submit promptly; exhaustive inspection is unnecessary. The application runs up to four cards concurrently and displays each result immediately.","parameters":{"type":"object","properties":{
             "population":{"type":"object","properties":{
                 "title":{"type":"string"},"summary":{"type":"string"},"dataset":{"type":["object","null"],"properties":{"path":{"type":"array","items":{"type":"string"}}},"required":["path"],"additionalProperties":false},
-                "unit":{"type":"string","enum":["episodes","rows"]},"queries":{"type":"object","properties":{"left":{"type":"string"},"right":{"type":"string"}},"required":["left","right"],"additionalProperties":false},
+                "unit":{"type":"string","enum":["episodes","rows"]},"queries":{"type":"object","description":"Normalization SQL over the already captured workflow_left/workflow_right CTEs. Each query must SELECT every column named in population.metrics, plus episode_id for episodes. Never redefine workflow_left/workflow_right or copy source workflow SQL; it has already executed.","properties":{"left":{"type":"string","description":"SELECT the chosen rows from workflow_left with every population metric column. Join episode_catalog for duration_seconds when it is absent from the captured output."},"right":{"type":"string","description":"SELECT the chosen rows from workflow_right with the same population metric columns. The default workflow_right already contains episode_id, duration_seconds and message_count."}},"required":["left","right"],"additionalProperties":false},
                 "metrics":{"type":"array","minItems":1,"maxItems":8,"items":Self::metric_schema()}
             },"required":["title","summary","dataset","unit","queries","metrics"],"additionalProperties":false},
             "cards":{"type":"array","maxItems":12,"items":{"anyOf":[
                 {"type":"object","properties":{"kind":{"type":"string","enum":["sql"]},"analysis":{"type":"object","properties":{"metric":Self::metric_schema(),"sql":{"type":"string","description":"Read-only SQL returning one native episode_id and numeric value per episode."}},"required":["metric","sql"],"additionalProperties":false}},"required":["kind","analysis"],"additionalProperties":false},
                 {"type":"object","properties":{"kind":{"type":"string","enum":["array"]},"analysis":super::recorded_signal::RecordedArraySignal::definition()["function"]["parameters"]},"required":["kind","analysis"],"additionalProperties":false}
             ]}},
-            "coverage_note":{"type":"string","description":"Brief factual note about unavailable sensors, uncertain units or suspicious recorded readings. Do not predict computed results."}
+            "coverage_note":{"type":"string","description":"Empty string unless a short factual note materially changes interpretation of a chosen measurement. Focus on relevant ambiguity or unusual readings, not an inventory of missing sensors."}
         },"required":["population","cards","coverage_note"],"additionalProperties":false}}}));
         tools
     }
@@ -452,7 +524,49 @@ mod tests {
             names: ("A".into(), "B".into()),
             sources: ("SELECT 1".into(), None),
             version: Some("v1".into()),
+            inputs: None,
         }
+    }
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn planned_cards_distinguish_queued_running_and_failed_measurements() {
+        let mut dashboard = ComparisonDashboard::default();
+        dashboard.start();
+        let base = population();
+        let duration = base.plan().metrics()[0].clone();
+        let temperature: DashboardMetric = serde_json::from_value(
+            json!({"column":"temperature","label":"Temperature","unit":"°C","show":true}),
+        )
+        .unwrap();
+        dashboard.accept(ComparisonEvent::Planned(vec![
+            duration.clone(),
+            temperature.clone(),
+        ]));
+        assert_eq!(dashboard.pending().len(), 2);
+        assert!(!dashboard.progress().running("temperature"));
+        dashboard.accept(ComparisonEvent::MetricStarted(duration));
+        assert_eq!(dashboard.pending().len(), 2);
+        dashboard.accept(ComparisonEvent::PopulationReady(base));
+        assert_eq!(dashboard.cards().len(), 1);
+        assert_eq!(dashboard.pending().len(), 1);
+        assert!(!dashboard.progress().running("duration_seconds"));
+        dashboard.accept(ComparisonEvent::MetricStarted(temperature.clone()));
+        assert!(dashboard.progress().running("temperature"));
+        dashboard.accept(ComparisonEvent::MetricFailed((
+            temperature,
+            "Unavailable".into(),
+        )));
+        assert!(dashboard.pending().is_empty());
+        assert!(!dashboard.progress().running("temperature"));
+        dashboard.finish(Ok(String::new()));
+        assert_eq!(dashboard.cards().len(), 1);
+        assert_eq!(dashboard.failures().len(), 1);
+        dashboard.start();
+        assert!(dashboard.cards().is_empty());
+        assert!(dashboard.failures().is_empty());
+        assert_eq!(
+            dashboard.progress().phase(),
+            Some(super::super::progress::ComparisonPhase::Workflows)
+        );
     }
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn completed_cards_are_visible_during_analysis_and_survive_a_later_failure() {

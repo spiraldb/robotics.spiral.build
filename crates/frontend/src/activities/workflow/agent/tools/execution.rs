@@ -8,7 +8,7 @@ impl WorkflowTool for RunWorkflow {
         "run_workflow"
     }
     fn description(&self) -> &'static str {
-        "Submit the current workflow once to Spiral, including native inference and any configured selection/comparison output. Returns a run ID; use inspect_run to wait for results. Select a small evaluation in SQL before full-cohort work. Preview limits do not limit execution. Does not save."
+        "Execute the current SQL once in Spiral and return a run ID; use inspect_run for results. Run the requested scope once the approach is established. Use a small SQL-selected sample only when useful for expensive or unfamiliar work. Preview limits do not limit execution. Does not save."
     }
     fn parameters(&self) -> Value {
         json!({"type":"object","properties":{},"additionalProperties":false})

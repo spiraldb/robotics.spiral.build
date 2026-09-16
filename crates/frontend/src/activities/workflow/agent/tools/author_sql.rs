@@ -27,7 +27,7 @@ impl WorkflowTool for SetWorkflow {
         "set_workflow"
     }
     fn description(&self) -> &'static str {
-        "Validate and update the workflow SQL. Return the rows, images, statistics, or episode decisions the user requested, preserving useful identifiers and missing-evidence status. Do not configure comparison, baseline, dashboard panels, or a special output type. A separate comparison agent interprets workflow results when the user opens Compare. Planning does not execute; use run_workflow to evaluate, inspect_run to inspect, and show_results to present the final query. Save remains explicit."
+        "Set the SQL that answers the user’s request and display its native plan. Return useful rows, images, statistics or episode decisions with their identifiers. This tool checks the plan but does not execute it: continue with run_workflow, inspect_run and show_results to complete the task. Compare interprets ordinary outputs separately. Save remains explicit."
     }
     fn parameters(&self) -> Value {
         json!({"type":"object","properties":{"workflow":{

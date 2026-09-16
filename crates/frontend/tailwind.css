@@ -4178,9 +4178,27 @@
 .comparison-metric-options label { display:flex; align-items:center; gap:8px; padding:8px; cursor:pointer; }
 .comparison-metric-options label:hover { background:var(--tone-hover); }
 .comparison-metric-options input { accent-color:var(--tone-accent); }
-.comparison-analysis-status { display:flex; align-items:center; gap:8px; min-height:24px; margin-bottom:16px; color:var(--tone-ink-soft); font-size:11px; }
-.comparison-status-dot { width:6px; height:6px; border-radius:50%; background:var(--tone-accent); }
-.comparison-ready-count { margin-left:auto; font-variant-numeric:tabular-nums; }
+.comparison-progress { margin-bottom:20px; padding:24px; background:var(--tone-surface); border:1px solid var(--tone-line); border-radius:6px; }
+.comparison-progress-heading { display:flex; align-items:baseline; justify-content:space-between; gap:16px; }
+.comparison-progress-heading h2 { font-size:16px; font-weight:600; color:var(--tone-ink); }
+.comparison-elapsed { flex-shrink:0; font-size:11px; font-variant-numeric:tabular-nums; color:var(--tone-ink-soft); }
+.comparison-progress-detail { max-width:70ch; margin-top:8px; color:var(--tone-ink-soft); font-size:12px; line-height:1.6; }
+.comparison-stages { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:16px; margin-top:24px; list-style:none; padding:0; }
+.comparison-stages li { display:flex; gap:8px; align-items:center; padding-top:12px; border-top:2px solid var(--tone-line); color:var(--tone-ink-soft); font-size:11px; line-height:1.5; }
+.comparison-stages li.is-current { color:var(--tone-accent); border-color:var(--tone-accent); font-weight:600; }
+.comparison-stages li.is-complete { color:var(--tone-ink); border-color:var(--tone-ink-faint); }
+.comparison-stage-mark { display:inline-flex; align-items:center; justify-content:center; width:20px; height:20px; flex-shrink:0; border:1px solid var(--tone-line-strong); border-radius:50%; font-size:10px; font-variant-numeric:tabular-nums; }
+.is-current > .comparison-stage-mark { border-color:var(--tone-accent); background:var(--tone-selected); }
+.is-complete > .comparison-stage-mark { border-color:transparent; }
+.comparison-progress-counts { display:flex; flex-wrap:wrap; gap:6px 16px; margin-top:16px; color:var(--tone-ink-soft); font-size:11px; font-variant-numeric:tabular-nums; }
+.comparison-progress-counts > :first-child { color:var(--tone-ink); font-weight:500; }
+.comparison-measurement-progress { display:block; appearance:none; width:100%; height:3px; margin-top:12px; border:0; background:var(--tone-line); accent-color:var(--tone-accent); }
+.comparison-measurement-progress::-webkit-progress-bar { background:var(--tone-line); }
+.comparison-measurement-progress::-webkit-progress-value { background:var(--tone-accent); }
+.comparison-measurement-progress::-moz-progress-bar { background:var(--tone-accent); }
+.comparison-card-state { flex-shrink:0; color:var(--tone-ink-soft); font-size:10px; }
+.comparison-placeholder { display:flex; gap:32px; width:100%; }
+.comparison-placeholder span { width:88px; height:28px; background:var(--tone-line); border-radius:4px; }
 .comparison-card-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; align-items:start; }
 .comparison-metric-card { min-width:0; padding:20px; border:1px solid var(--tone-line); border-radius:6px; background:var(--tone-surface); animation:comparison-arrive 180ms cubic-bezier(.16,1,.3,1); }
 .comparison-metric-card > header { display:flex; align-items:baseline; justify-content:space-between; gap:12px; }
@@ -4206,6 +4224,8 @@
 .comparison-metric-card > footer details { max-width:100%; }
 .comparison-metric-card > footer p { margin-top:8px; max-width:55ch; overflow-wrap:anywhere; line-height:1.6; }
 .comparison-pending-body, .comparison-no-values { min-height:192px; display:flex; align-items:center; color:var(--tone-ink-soft); font-size:11px; }
+.comparison-pending-body { flex-direction:column; align-items:flex-start; justify-content:center; gap:24px; }
+.comparison-pending-body p { line-height:1.6; max-width:60ch; }
 .comparison-failed-card > p { margin-top:12px; font-size:11px; line-height:1.6; color:var(--tone-ink-soft); }
 .comparison-failed-card details { margin-top:12px; font-size:10px; }
 .comparison-failed-card details p { margin-top:8px; overflow-wrap:anywhere; line-height:1.6; }

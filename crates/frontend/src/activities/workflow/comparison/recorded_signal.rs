@@ -1,9 +1,9 @@
-//! Verified native array measurement, including the approved demo UUID workaround.
+//! Native array measurements grouped and joined by episode UUID.
 use crate::activities::data::DatasetClient;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use spiral_robotics_common::{
-    datasets::{DatasetInspection, DatasetSelection},
+    datasets::DatasetInspection,
     workflow::comparison_plan::{DashboardMetric, SignalAnalysis},
 };
 
@@ -74,7 +74,7 @@ impl TopicSource {
 }
 impl RecordedArraySignal {
     pub(super) fn definition() -> Value {
-        json!({"type":"function","function":{"name":"analyze_array_signal","description":"Reliably measure a discovered array-valued physical signal with verified native UNNEST SQL and the approved UUID workaround. Prefer this for joint positions, temperature, voltage, load and current. Each list element must be a struct with numeric value, and topic value.episode_id must uniquely map to native IDs (verified automatically). Choose the actual field from an inspected schema. A named joint uses inspected metadata value.joint_names.values. Missing measurements are preserved. The query compiler owns joins and arrays; you choose what to measure.","parameters":{"type":"object","properties":{
+        json!({"type":"function","function":{"name":"analyze_array_signal","description":"Reliably measure a discovered array-valued physical signal with native UNNEST SQL, grouped by episode UUID. Prefer this for joint positions, temperature, voltage, load and current. Each list element must be a struct with numeric value. Native episode IDs identify readings and joint metadata. Choose the actual field from an inspected schema. A named joint uses inspected metadata value.joint_names.values. Missing measurements are preserved. The query compiler owns joins and arrays; you choose what to measure.","parameters":{"type":"object","properties":{
             "metric":super::agent::ComparisonAgent::metric_schema(),"topic":TopicSource::schema(),
             "field":{"type":"string","description":"Actual array field path including value, e.g. value.peak_temperature_celsius.values or value.state_position.values."},
             "aggregation":{"type":"string","enum":["mean","min","max","range"]},
@@ -100,34 +100,10 @@ impl RecordedArraySignal {
     }
     pub(super) async fn prepare(
         self,
-        dataset: &DatasetSelection,
+        inspection: &DatasetInspection,
     ) -> Result<SignalAnalysis, String> {
         let data = DatasetClient::current();
-        let inspection = data
-            .inspect_dataset(dataset.clone())
-            .await
-            .map_err(|error| error.to_string())?;
-        let reader = self.topic.reader(&inspection)?;
-        // A textual label may be used during expansion only when it is bijective
-        // with the native episode ID. Missing or ambiguous labels fail explicitly.
-        let mapping = format!("SELECT DISTINCT id, value.episode_id AS episode_key FROM {reader}");
-        let validation = format!(
-            "WITH mapping AS ({mapping}), invalid_keys AS (SELECT episode_key FROM mapping GROUP BY episode_key HAVING COUNT(*)>1 OR episode_key IS NULL), invalid_ids AS (SELECT id FROM mapping GROUP BY id HAVING COUNT(*)>1) SELECT (SELECT COUNT(*) FROM invalid_keys)+(SELECT COUNT(*) FROM invalid_ids) AS invalid_count"
-        );
-        let output = data
-            .run_spiral_query(validation, 1)
-            .await
-            .map_err(|error| error.to_string())?;
-        if output.truncated()
-            || output
-                .rows()
-                .first()
-                .and_then(|row| row.get("invalid_count"))
-                .and_then(Value::as_u64)
-                != Some(0)
-        {
-            return Err("Recorded episode labels are missing or ambiguous; this array query cannot safely use the demo ID workaround.".into());
-        }
+        let reader = self.topic.reader(inspection)?;
         let field = Self::field(&self.field)?;
         let validity = self
             .validity
@@ -136,9 +112,8 @@ impl RecordedArraySignal {
             .transpose()?
             .map(|field| format!("WHERE {field}=TRUE"))
             .unwrap_or_default();
-        let observations = format!(
-            "SELECT value.episode_id AS episode_key, {field} AS readings FROM {reader} {validity}"
-        );
+        let observations =
+            format!("SELECT id AS episode_id, {field} AS readings FROM {reader} {validity}");
         let (metadata, expansion, filter): (String, String, String) = match &self.joint {
             None => (
                 String::new(),
@@ -146,8 +121,8 @@ impl RecordedArraySignal {
                 String::new(),
             ),
             Some(joint) => {
-                let names_reader = joint.metadata.reader(&inspection)?;
-                let duplicates=data.run_spiral_query(format!("WITH labels AS (SELECT value.episode_id AS episode_key FROM {names_reader}) SELECT COUNT(*) AS invalid_count FROM (SELECT episode_key FROM labels GROUP BY episode_key HAVING COUNT(*)<>1 OR episode_key IS NULL) duplicates"),1).await.map_err(|error|error.to_string())?;
+                let names_reader = joint.metadata.reader(inspection)?;
+                let duplicates=data.run_spiral_query(format!("SELECT COUNT(*) AS invalid_count FROM (SELECT id FROM {names_reader} GROUP BY id HAVING COUNT(*)<>1 OR id IS NULL) duplicates"),1).await.map_err(|error|error.to_string())?;
                 if duplicates
                     .rows()
                     .first()
@@ -159,13 +134,13 @@ impl RecordedArraySignal {
                         "Joint-name metadata must have one row per recorded episode.".into(),
                     );
                 }
-                (format!(", joint_metadata AS (SELECT value.episode_id AS episode_key,value.joint_names.values AS names FROM {names_reader})"),
-                "FROM observations o JOIN joint_metadata j ON o.episode_key=j.episode_key CROSS JOIN LATERAL UNNEST(j.names,o.readings) AS named(joint,reading)".into(),
+                (format!(", joint_metadata AS (SELECT id AS episode_id,value.joint_names.values AS names FROM {names_reader})"),
+                "FROM observations o JOIN joint_metadata j ON o.episode_id=j.episode_id CROSS JOIN LATERAL UNNEST(j.names,o.readings) AS named(joint,reading)".into(),
                 format!("WHERE joint.value='{}'",joint.name.replace('\'',"''")))
             }
         };
         let sql = format!(
-            "WITH observations AS ({observations}){metadata}, measurements AS (SELECT o.episode_key, {} AS value {expansion} {filter} GROUP BY o.episode_key), mapping AS ({mapping}) SELECT mapping.id AS episode_id, measurements.value FROM mapping JOIN measurements ON mapping.episode_key=measurements.episode_key",
+            "WITH observations AS ({observations}){metadata} SELECT o.episode_id, {} AS value {expansion} {filter} GROUP BY o.episode_id",
             self.aggregation.expression()
         );
         Ok(SignalAnalysis::new(self.metric, sql))
