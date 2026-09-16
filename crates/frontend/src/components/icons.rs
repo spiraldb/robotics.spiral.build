@@ -293,3 +293,94 @@ pub(crate) fn DetailsIcon() -> Element {
         }
     }
 }
+
+/// Transport: hold the clock where it is.
+#[component]
+pub(crate) fn PauseIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            path { d: "M5 3.5v9M11 3.5v9" }
+        }
+    }
+}
+
+/// Transport: jump to the first message.
+#[component]
+pub(crate) fn SkipToStartIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            path { d: "M4 3.5v9M12 3.5 6 8l6 4.5z" }
+        }
+    }
+}
+
+/// Transport: jump to the last message.
+#[component]
+pub(crate) fn SkipToEndIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            path { d: "M12 3.5v9M4 3.5 10 8l-6 4.5z" }
+        }
+    }
+}
+
+/// Transport: nudge the playhead backwards by one step.
+#[component]
+pub(crate) fn StepBackIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            path { d: "M10.5 4 6.5 8l4 4M5 4v8" }
+        }
+    }
+}
+
+/// Transport: nudge the playhead forwards by one step.
+#[component]
+pub(crate) fn StepForwardIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            path { d: "M5.5 4 9.5 8l-4 4M11 4v8" }
+        }
+    }
+}
+
+/// Transport: start over when the episode ends.
+#[component]
+pub(crate) fn LoopIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            path { d: "M3 8a5 5 0 0 1 8.5-3.6L13 6M13 2.5V6H9.5M13 8a5 5 0 0 1-8.5 3.6L3 10M3 13.5V10h3.5" }
+        }
+    }
+}
+
+/// A recorded video stream.
+#[component]
+pub(crate) fn CameraStreamIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            rect { x: "2", y: "4.5", width: "8.5", height: "7", rx: "1.2" }
+            path { d: "m10.5 7 3.5-2v6l-3.5-2" }
+        }
+    }
+}
+
+/// A recorded data stream: samples over time.
+#[component]
+pub(crate) fn SignalStreamIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            path { d: "M2 9.5h2.5l1.5-4 2 6 1.5-3.5 1 1.5H14" }
+        }
+    }
+}
+
+/// Fit the whole episode into the visible span.
+#[component]
+pub(crate) fn FitTimeIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            path { d: "M2.5 5v6M13.5 5v6M4 8h8M6 6 4 8l2 2M10 6l2 2-2 2" }
+        }
+    }
+}

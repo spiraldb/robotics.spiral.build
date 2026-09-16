@@ -4239,3 +4239,755 @@
 .comparison-evidence-pagination { display:flex; justify-content:space-between; gap:12px; padding-top:10px; color:var(--tone-ink-soft); font-size:10px; }
 .comparison-evidence-pagination > div { display:flex; gap:16px; }
 .comparison-bin-filter { display:flex; align-items:center; gap:12px; padding:8px 0; color:var(--tone-ink-soft); font-size:11px; }
+/* Data activity ---------------------------------------------------------
+   Datasets and episodes in a rail; one open episode across cameras, plots,
+   messages, and a timeline that shares a single clock. Geometry lives in a
+   few custom properties so the ruler, the stream rows, and the cursor agree
+   about where time starts. */
+@layer components {
+  .data-workspace {
+    --data-name-w: 16rem;
+    --data-readout-w: 11.5rem;
+    --data-plot-left: 56px;
+    --data-plot-right: 10px;
+  }
+
+  .data-catalog-panel,
+  .data-primary-panel,
+  .data-timeline-panel {
+    @apply flex min-h-0 min-w-0 flex-col overflow-hidden bg-surface text-ink;
+  }
+
+  .data-camera-panel {
+    @apply flex min-h-0 min-w-0 flex-col overflow-hidden;
+  }
+
+  .data-camera-panel .episode-camera-time {
+    @apply flex min-h-6 shrink-0 items-center border-t border-line px-2.5 font-mono text-[10px] tabular-nums text-ink-soft;
+  }
+
+  /* Rail ---------------------------------------------------------------- */
+  .data-rail {
+    @apply flex h-full min-h-0 flex-col;
+  }
+
+  .data-rail-head {
+    @apply flex min-h-9 shrink-0 items-center gap-1 border-b border-line px-2;
+  }
+
+  .data-rail-search {
+    @apply h-6 min-w-0 flex-1 text-[11px];
+  }
+
+  .data-rail-scroll {
+    @apply min-h-0 flex-1 overflow-y-auto pb-3;
+  }
+
+  .data-rail-note {
+    @apply px-3 py-2 text-[11px] leading-snug text-ink-soft;
+    overflow-wrap: anywhere;
+  }
+
+  .data-rail-note strong {
+    @apply block font-medium text-ink;
+  }
+
+  .data-rail-note[role="alert"] {
+    @apply text-danger;
+  }
+
+  .data-dataset-list,
+  .data-episode-list,
+  .data-table-list {
+    @apply m-0 list-none p-0;
+  }
+
+  .data-dataset-row {
+    @apply flex min-h-8 items-center gap-0.5 pr-2;
+  }
+
+  .data-dataset[data-selected="true"] > .data-dataset-row {
+    @apply bg-selected;
+  }
+
+  .data-dataset-expand {
+    @apply ml-1 shrink-0;
+  }
+
+  .data-dataset-name {
+    @apply flex min-h-8 min-w-0 flex-1 items-center gap-1.5 text-left text-[12px] font-medium;
+  }
+
+  .data-dataset-name .ui-icon {
+    @apply shrink-0 text-ink-faint;
+  }
+
+  .data-dataset[data-selected="true"] .data-dataset-name {
+    @apply text-accent;
+  }
+
+  .data-dataset-count {
+    @apply shrink-0 font-mono text-[10px] tabular-nums text-ink-faint;
+  }
+
+  .data-episode-row {
+    @apply grid w-full items-baseline gap-x-2 py-1 pr-2 text-left text-[12px];
+    grid-template-columns: 2.25rem minmax(0, 1fr) auto;
+    padding-left: 0.5rem;
+  }
+
+  .data-episode-row:hover {
+    background: var(--tone-hover);
+  }
+
+  .data-episode-row[aria-pressed="true"] {
+    @apply bg-selected;
+    box-shadow: inset 2px 0 0 var(--tone-accent);
+  }
+
+  .data-episode-ordinal {
+    @apply text-right font-mono text-[10px] tabular-nums text-ink-faint;
+  }
+
+  .data-episode-row[aria-pressed="true"] .data-episode-ordinal {
+    @apply text-accent;
+  }
+
+  .data-episode-head {
+    @apply min-w-0 overflow-hidden text-ellipsis whitespace-nowrap font-medium;
+  }
+
+  .data-episode-duration {
+    @apply font-mono text-[11px] tabular-nums text-ink-soft;
+  }
+
+  .data-episode-sub {
+    @apply col-start-2 col-end-4 flex min-w-0 gap-x-2 text-[10px] text-ink-faint;
+  }
+
+  .data-episode-sub > span {
+    @apply whitespace-nowrap;
+  }
+
+  .data-episode-tail {
+    @apply min-w-0 flex-1 overflow-hidden text-ellipsis;
+  }
+
+  .data-rail-more {
+    @apply px-2 py-1;
+  }
+
+  .data-rail-tables {
+    @apply mt-3 border-t border-line pt-1;
+  }
+
+  .data-rail-tables > summary {
+    @apply flex min-h-7 cursor-pointer items-center gap-2 px-3 text-[11px] text-ink-soft;
+  }
+
+  .data-rail-tables > summary:hover {
+    background: var(--tone-hover);
+  }
+
+  .data-rail-tables-count {
+    @apply font-mono text-[10px] tabular-nums text-ink-faint;
+  }
+
+  .data-table-row {
+    @apply flex min-h-7 w-full items-center gap-2 px-3 text-left text-[12px];
+    padding-left: 1.25rem;
+  }
+
+  .data-table-row:hover {
+    background: var(--tone-hover);
+  }
+
+  .data-table-row small {
+    @apply ml-auto shrink-0 text-[10px] text-ink-faint;
+  }
+
+  /* Welcome and dataset overview ---------------------------------------- */
+  .data-welcome {
+    @apply m-auto max-w-[30rem] p-8;
+  }
+
+  .data-welcome h2 {
+    @apply text-[18px] font-semibold;
+  }
+
+  .data-welcome p {
+    @apply my-3 text-[12px] leading-relaxed text-ink-soft;
+  }
+
+  .data-overview {
+    @apply flex min-h-0 flex-1 flex-col overflow-y-auto;
+  }
+
+  .data-overview-head {
+    @apply shrink-0 px-5 pb-4 pt-5;
+  }
+
+  .data-overview-head h2 {
+    @apply text-[18px] font-semibold leading-tight;
+    overflow-wrap: anywhere;
+  }
+
+  .data-overview-facts {
+    @apply mt-2 flex flex-wrap gap-1.5;
+  }
+
+  .data-overview-chip {
+    @apply rounded border border-line bg-sunken px-1.5 py-0.5 text-[11px] tabular-nums text-ink-soft;
+  }
+
+  .data-overview-chip-alert {
+    @apply border-danger text-danger;
+    background: var(--tone-danger-soft);
+  }
+
+  .data-overview-actions {
+    @apply mt-4 flex flex-wrap items-center gap-2;
+  }
+
+  .data-overview-copy {
+    @apply mt-3 max-w-[56ch] text-[12px] leading-relaxed text-ink-soft;
+  }
+
+  .data-overview-streams {
+    @apply min-h-0 border-t border-line;
+  }
+
+  .data-overview-streams h3 {
+    @apply px-5 pb-2 pt-4 text-[11px] font-semibold uppercase tracking-wide text-ink-faint;
+  }
+
+  /* Timeline ------------------------------------------------------------ */
+  .data-timeline {
+    @apply flex h-full min-h-0 flex-col outline-none;
+  }
+
+  .data-timeline:focus-visible {
+    box-shadow: inset 0 0 0 2px var(--tone-accent);
+  }
+
+  .data-transport {
+    @apply flex min-h-9 shrink-0 items-center gap-2 border-b border-line px-2 text-[12px];
+  }
+
+  .data-transport-identity {
+    @apply flex min-w-0 max-w-[16rem] items-baseline gap-1.5;
+  }
+
+  .data-transport-identity strong {
+    @apply shrink-0 font-semibold;
+  }
+
+  .data-transport-identity span {
+    @apply min-w-0 text-[11px] text-ink-soft;
+  }
+
+  .data-transport-group {
+    @apply flex items-center;
+  }
+
+  .data-transport-play {
+    @apply mx-0.5 rounded-full;
+    background: var(--tone-selected);
+    color: var(--tone-accent);
+  }
+
+  .data-transport-clock {
+    @apply flex items-baseline gap-1 font-mono text-[13px] tabular-nums;
+    min-width: 11.5rem;
+  }
+
+  .data-transport-total {
+    @apply text-[11px] text-ink-faint;
+  }
+
+  .data-transport-speed select {
+    @apply h-6 rounded border border-line bg-surface px-1 text-[11px] tabular-nums;
+  }
+
+  .data-transport-loop {
+    @apply text-[11px];
+  }
+
+  .data-transport-note {
+    @apply min-w-[5rem] flex-1 text-[10px] text-ink-faint;
+  }
+
+  .data-transport-zoom {
+    @apply ml-auto border-l border-line pl-1;
+  }
+
+  .data-timeline-empty {
+    @apply m-auto flex max-w-[34ch] flex-col items-center gap-1 p-6 text-center text-[11px] leading-relaxed text-ink-soft;
+  }
+
+  .data-timeline-empty strong {
+    @apply text-[12px] font-medium text-ink;
+  }
+
+  .data-timeline-empty[role="alert"] strong {
+    @apply text-danger;
+  }
+
+  .data-timeline-body {
+    @apply relative min-h-0 flex-1 overflow-auto;
+  }
+
+  .data-timeline-ruler,
+  .data-stream,
+  .data-field {
+    @apply grid;
+    grid-template-columns: var(--data-name-w) minmax(12rem, 1fr);
+  }
+
+  .data-timeline-ruler {
+    @apply sticky top-0 z-30 bg-surface;
+  }
+
+  .data-timeline-corner {
+    @apply flex h-8 items-center border-b border-r border-line px-1.5;
+  }
+
+  .data-stream-filter {
+    @apply h-6 w-full text-[11px];
+  }
+
+  .data-timeline-scale {
+    @apply relative h-8 overflow-hidden border-b border-line bg-sunken;
+  }
+
+  .data-time-tick {
+    @apply pointer-events-none absolute inset-y-0 border-l border-line;
+  }
+
+  .data-time-tick span {
+    @apply absolute left-1 top-1 whitespace-nowrap font-mono text-[10px] tabular-nums text-ink-faint;
+  }
+
+  .data-time-scrub,
+  .data-track-scrub,
+  .data-plot-scrub {
+    @apply absolute inset-0 m-0 h-full w-full cursor-ew-resize opacity-0;
+  }
+
+  .data-time-scrub {
+    @apply z-20;
+  }
+
+  .data-time-scrub:focus-visible + .data-timeline-handle {
+    box-shadow: 0 0 0 2px var(--tone-selected);
+  }
+
+  .data-timeline-handle {
+    @apply pointer-events-none absolute bottom-0 top-0 z-10 w-px;
+    background: var(--tone-accent);
+  }
+
+  .data-timeline-handle::before {
+    content: "";
+    @apply absolute -left-[5px] top-[3px] size-[11px] rounded-full;
+    background: var(--tone-accent);
+  }
+
+  .data-timeline-rows {
+    @apply relative;
+  }
+
+  .data-timeline-none {
+    @apply px-3 py-4 text-[11px] text-ink-soft;
+  }
+
+  .data-timeline-cursor {
+    @apply pointer-events-none absolute bottom-0 top-0 z-20 w-px;
+    left: calc(var(--data-name-w) + (100% - var(--data-name-w)) * var(--playhead, 0));
+    background: var(--tone-accent);
+    opacity: 0.85;
+  }
+
+  .data-stream-name,
+  .data-field-name {
+    @apply flex min-w-0 items-center gap-1 border-b border-r border-line pr-2 text-[12px];
+    padding-left: 0.25rem;
+  }
+
+  .data-stream-name {
+    @apply h-7;
+  }
+
+  .data-stream[data-selected="true"] .data-stream-name {
+    @apply bg-selected;
+  }
+
+  .data-stream-expand {
+    @apply shrink-0;
+  }
+
+  .data-stream-expand-space,
+  .data-field-check-space {
+    @apply inline-block size-6 shrink-0;
+  }
+
+  .data-stream-kind {
+    @apply flex shrink-0 text-ink-faint;
+  }
+
+  .data-stream[data-kind="video"] .data-stream-kind {
+    color: var(--tone-stage-media);
+  }
+
+  .data-stream-label {
+    @apply flex h-full min-w-0 flex-1 items-center text-left;
+  }
+
+  .data-stream-label:hover {
+    @apply text-accent;
+  }
+
+  .data-stream-label[aria-pressed="true"] {
+    @apply font-medium text-accent;
+  }
+
+  .data-stream-count {
+    @apply shrink-0 font-mono text-[10px] tabular-nums text-ink-faint;
+  }
+
+  .data-show-check {
+    @apply flex size-6 shrink-0 items-center justify-center rounded text-ink-faint;
+  }
+
+  .data-show-check:hover:not(:disabled) {
+    background: var(--tone-hover);
+    color: var(--tone-ink);
+  }
+
+  .data-show-check:disabled {
+    @apply cursor-not-allowed opacity-40;
+  }
+
+  .data-show-check:focus-visible {
+    outline: 2px solid var(--tone-accent);
+    outline-offset: -2px;
+  }
+
+  .data-show-check svg {
+    @apply size-3;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.4;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  .data-show-check[aria-checked="true"],
+  .data-show-check[aria-checked="mixed"] {
+    color: var(--tone-accent);
+  }
+
+  .data-show-check[aria-checked="true"] rect {
+    fill: var(--tone-accent);
+    stroke: var(--tone-accent);
+  }
+
+  .data-show-check[aria-checked="true"] path {
+    stroke: var(--tone-accent-ink);
+    stroke-width: 1.6;
+  }
+
+  .data-stream-track,
+  .data-field-track {
+    @apply relative min-w-0 border-b border-line;
+  }
+
+  .data-stream-track {
+    @apply h-7;
+  }
+
+  .data-track {
+    @apply absolute inset-x-0 inset-y-0;
+  }
+
+  .data-track-loading::after {
+    content: "";
+    @apply absolute inset-x-0 top-1/2 h-1.5 -translate-y-1/2 rounded-sm bg-sunken;
+    animation: data-track-pulse 1.2s ease-in-out infinite;
+  }
+
+  @keyframes data-track-pulse {
+    50% {
+      opacity: 0.35;
+    }
+  }
+
+  .data-track-failed {
+    @apply flex items-center px-2 text-[10px] text-caution;
+  }
+
+  .data-density {
+    @apply block h-full w-full;
+  }
+
+  .data-density path {
+    fill: var(--tone-accent);
+  }
+
+  .data-density-1 {
+    opacity: 0.28;
+  }
+
+  .data-density-2 {
+    opacity: 0.55;
+  }
+
+  .data-density-3 {
+    opacity: 0.85;
+  }
+
+  .data-field-name {
+    @apply h-6 text-[11px];
+    padding-left: calc(1.75rem + var(--depth, 0) * 0.75rem);
+  }
+
+  .data-field-track {
+    @apply h-6 bg-sunken;
+  }
+
+  .data-field-group .data-field-label {
+    @apply text-ink-soft;
+  }
+
+  .data-field-label {
+    @apply min-w-0 overflow-hidden text-ellipsis whitespace-nowrap;
+  }
+
+  .data-field-type {
+    @apply ml-auto shrink-0 font-mono text-[10px] text-ink-faint;
+  }
+
+  .data-field-note .data-field-label {
+    @apply text-ink-soft;
+  }
+
+  .data-field-note[role="alert"] .data-field-label {
+    @apply text-danger;
+  }
+
+  /* Plots --------------------------------------------------------------- */
+  .data-plots {
+    @apply flex h-full min-h-0 flex-col;
+  }
+
+  .data-plots-empty,
+  .data-messages-empty {
+    @apply m-auto max-w-[36rem] p-6 text-[12px] text-ink-soft;
+  }
+
+  .data-plots-empty strong,
+  .data-messages-empty strong {
+    @apply block text-[13px] font-medium text-ink;
+  }
+
+  .data-plots-empty p,
+  .data-messages-empty p {
+    @apply mt-1 leading-relaxed;
+  }
+
+  .data-plots-quick {
+    @apply mt-4 grid list-none gap-1 p-0;
+    grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
+  }
+
+  .data-plots-quick li {
+    @apply flex items-center gap-2;
+  }
+
+  .data-plots-quick .ui-action {
+    @apply min-w-0 justify-start;
+  }
+
+  .data-plots-quick .ui-action span {
+    @apply overflow-hidden text-ellipsis whitespace-nowrap;
+  }
+
+  .data-plots-quick-count {
+    @apply ml-auto font-mono text-[10px] tabular-nums text-ink-faint;
+  }
+
+  .data-plots-ruler {
+    @apply relative h-6 shrink-0 overflow-hidden border-b border-line bg-sunken;
+  }
+
+  .data-plots-tick {
+    @apply pointer-events-none absolute inset-y-0 border-l border-line;
+    left: calc(var(--data-readout-w) + var(--data-plot-left) + (100% - var(--data-readout-w) - var(--data-plot-left) - var(--data-plot-right)) * var(--x, 0));
+  }
+
+  .data-plots-tick span {
+    @apply absolute left-1 top-0.5 whitespace-nowrap font-mono text-[10px] tabular-nums text-ink-faint;
+  }
+
+  .data-plots-scroll {
+    @apply min-h-0 flex-1 overflow-y-auto;
+  }
+
+  .data-plot {
+    @apply border-b border-line;
+  }
+
+  .data-plot-head {
+    @apply flex min-h-8 items-center gap-1.5 px-2 text-[12px];
+  }
+
+  .data-plot-head .ui-icon {
+    @apply shrink-0 text-ink-faint;
+  }
+
+  .data-plot-head strong {
+    @apply min-w-0 font-medium;
+  }
+
+  .data-plot-meta {
+    @apply flex min-w-0 flex-1 items-center gap-2 text-[10px] text-ink-faint;
+  }
+
+  .data-plot-loading {
+    @apply text-accent;
+  }
+
+  .data-plot-error {
+    @apply mx-2 mb-2 flex flex-wrap items-center gap-2 rounded px-2 py-1.5 text-[11px] text-danger;
+    background: var(--tone-danger-soft);
+  }
+
+  .data-plot-skeleton {
+    @apply mx-2 mb-2 rounded bg-sunken;
+    animation: data-track-pulse 1.2s ease-in-out infinite;
+  }
+
+  .data-plot-lanes {
+    @apply grid;
+    grid-template-columns: var(--data-readout-w) minmax(12rem, 1fr);
+  }
+
+  .data-plot-readouts {
+    @apply min-w-0 border-r border-line;
+  }
+
+  .data-plot-readout {
+    @apply flex min-w-0 flex-col overflow-hidden px-2 pt-1.5;
+  }
+
+  .data-plot-readout-title {
+    @apply shrink-0 overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[11px] font-medium;
+  }
+
+  .data-plot-traces {
+    @apply mt-0.5 min-h-0 flex-1 overflow-y-auto;
+  }
+
+  .data-plot-trace {
+    @apply grid h-4 w-full items-center gap-1 text-left text-[10px] leading-4;
+    grid-template-columns: 0.5rem minmax(0, 1fr) auto;
+  }
+
+  .data-plot-trace:hover {
+    background: var(--tone-hover);
+  }
+
+  .data-plot-trace[aria-pressed="false"] {
+    @apply opacity-40;
+  }
+
+  .data-plot-swatch {
+    @apply h-0.5 w-2 shrink-0;
+  }
+
+  .data-plot-trace-name {
+    @apply overflow-hidden text-ellipsis whitespace-nowrap font-mono text-ink-soft;
+  }
+
+  .data-plot-trace-value {
+    @apply max-w-[6.5rem] overflow-hidden text-ellipsis whitespace-nowrap text-right font-mono tabular-nums text-ink;
+  }
+
+  .data-plot-canvas {
+    @apply relative min-w-0;
+  }
+
+  .data-plot-chart {
+    @apply h-full w-full;
+  }
+
+  .data-plot-scrub {
+    left: var(--data-plot-left);
+    right: var(--data-plot-right);
+    width: auto;
+  }
+
+  .data-plot-playhead,
+  .data-plot-hover {
+    @apply pointer-events-none absolute bottom-0 top-0 w-px;
+  }
+
+  .data-plot-playhead {
+    left: calc(var(--data-plot-left) + (100% - var(--data-plot-left) - var(--data-plot-right)) * var(--playhead, 0));
+    background: var(--tone-accent);
+  }
+
+  .data-plot-hover {
+    left: calc(var(--data-plot-left) + (100% - var(--data-plot-left) - var(--data-plot-right)) * var(--x, 0));
+    background: var(--tone-ink-faint);
+    opacity: 0.6;
+  }
+
+  .data-plot-foot {
+    @apply flex min-h-5 items-center gap-3 px-2 font-mono text-[10px] tabular-nums text-ink-faint;
+  }
+
+  .data-plot-foot-note {
+    @apply font-sans;
+  }
+
+  /* Messages ------------------------------------------------------------ */
+  .data-messages {
+    @apply flex h-full min-h-0 flex-col;
+  }
+
+  .data-messages-head {
+    @apply flex min-h-8 shrink-0 items-center gap-2 border-b border-line px-2 text-[12px];
+  }
+
+  .data-messages-head .ui-icon {
+    @apply shrink-0 text-ink-faint;
+  }
+
+  .data-messages-head strong {
+    @apply min-w-0 font-medium;
+  }
+
+  .data-messages-from {
+    @apply mr-auto font-mono text-[10px] tabular-nums text-ink-faint;
+  }
+
+  .data-messages-error {
+    @apply m-2 flex flex-wrap items-center gap-2 rounded px-2 py-1.5 text-[11px] text-danger;
+    background: var(--tone-danger-soft);
+  }
+
+  /* SQL ----------------------------------------------------------------- */
+  .data-sql {
+    @apply grid h-full min-h-0;
+    grid-template-rows: minmax(9rem, 34%) minmax(0, 1fr);
+  }
+
+  .data-sql-editor {
+    @apply min-h-0 border-b border-line;
+  }
+
+  .data-sql-results {
+    @apply min-h-0;
+  }
+}

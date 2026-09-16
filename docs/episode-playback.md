@@ -1,29 +1,31 @@
 # Schema-driven native episode inspection
 
-Open **Data → dataset → Inspect → episode**. Every recorded topic/schema variant
-gets one panel. The four topics with the most recorded messages seed a 2×2
-layout; extra topics join a group containing the same recorded schema names,
-using the smallest matching group. An unmatched topic joins the smallest group.
-Unknown counts are treated as zero, and ties retain catalog order. Topic
-names and robot roles do not influence placement. With fewer than four topics,
-only occupied panes are created. Every panel receives the same episode-owned
-playback clock; native tabs, splits and resizing remain available.
+Open **Data → dataset → episode**. The rail lists a dataset's members as
+chronological episodes; opening one fills the workspace: one camera panel per
+`foxglove.CompressedVideo` stream in the right-hand column, **Plots** and
+**Messages** tabs in the primary tile beside **SQL**, and the **Timeline**
+across the bottom. Every panel reads the same episode-owned clock and the same
+visible span; native tabs, splits, and resizing remain available.
 
-Inside a topic panel, a recognized video schema starts in **Video**; other topics
-start in **Fields & plots**. **Messages** is available for every topic. Video
-topics also expose Fields & plots in the same panel. The header's **Topics** menu
-activates a topic or reopens it after closing; there is no separate chooser panel.
+The Timeline lists every stream with messages in the episode, in topic order,
+with a density track of 240 buckets from `POST /api/datasets/topic-coverage`
+(loaded four streams at a time, progressively). Ticking a stream shows it:
+a camera opens its panel; a data stream draws all of its numeric fields
+(bounded to 16 per stream). Expanding a data stream reads its schema once and
+lists nested structs, lists, scalar types, and nullability (`?`) with
+per-field checkboxes. Clicking a stream name selects it for Messages. Kind is
+decided from recorded schema names only; topic and field names carry no
+physical meaning, and a validity flag is an ordinary selectable boolean.
 
-The schema browser shows nested structs, lists, scalar types and nullability
-(`?`). Array traces use their recorded indices. It does not infer physical
-meaning, joint names, calibration, units, or validity rules from field names.
-A validity flag is an ordinary selectable boolean field. **Messages** uses the
-existing table preview and preserves plot selections when switching back.
-Schema inspection starts on first visiting Fields & plots and retains its field
-selection while tabbed away. Video and message previews mount only while their
-mode and panel are visible. Switching away releases video buffers; returning
-reloads that video. This keeps resource ownership local and bounded without a
-second hidden-stream cache.
+Plots draw one section per plotted stream and one lane per field, one trace
+per recorded array index. The readout column shows each trace's value at the
+playhead or under the hover cursor, and doubles as the legend (clicking a
+trace hides it). Traces load a complete bounded window; if the whole episode
+exceeds the read bounds, that stream falls back to the visible span and says
+so. Messages shows the selected stream from the playhead forward, one hundred
+at a time, in the shared result table. Video and message previews mount only
+while their panel is visible; a closed camera releases its buffers and
+reloads when shown again.
 
 ## One message transport
 
@@ -72,7 +74,12 @@ renders message previews.
 
 Cameras use a media adapter for `foxglove.CompressedVideo` H.264. They consume
 binary packets from the same message transport and reuse the Annex B parser.
-WebCodecs decodes from the preceding keyframe. Camera timestamps and age remain
+Each visible camera keeps one WebCodecs decoder following the playhead: forward
+playback decodes every frame once, a jump restarts from the preceding keyframe,
+and only frames within a quarter second behind the playhead plus a short
+lookahead stay in memory, so every camera of an episode can be open at once.
+Seeking deep into a long keyframe interval reports buffering so the shared clock
+waits for the picture. Camera timestamps and age remain
 visible; uncovered times, unsupported codecs and decoding errors are explicit.
 Closing panels releases their media. Hiding the activity, dataset panel, or
 browser pauses playback. Space toggles playback outside interactive controls.
@@ -87,8 +94,9 @@ Lists exceeding 64 elements require a smaller field. Message previews show the
 first 100 rows and indicate continuation.
 
 Visible camera topics load independently and can download concurrently. Retained
-camera packets share a 128 MiB budget, and decoded frames share 256 MiB with a 128 MiB bound per
-keyframe interval. Accounting follows owned packets and frames, without counting
+camera packets share a 128 MiB budget, and retained decoded frames share 512 MiB
+(accounted at four bytes per coded pixel) with a 128 MiB bound per camera; with
+playhead-following retention a camera holds about fifteen frames. Accounting follows owned packets and frames, without counting
 shared Arrow backing buffers repeatedly. WebCodecs requires HTTPS or localhost
 and browser H.264 support. Desktop minimum viewport is 1024 CSS pixels.
 
@@ -127,9 +135,11 @@ Studio pins published `dioxus-workbench` revision
 `69cb3a26d7d5f3d0400a989f7e9295a91b965254`, preserving mounted panel state when
 neighboring panels close. No local dependency override is required.
 
-## Panel simplification: removal checks
+## Panel simplification: removal checks (historical)
 
-This is a bounded component-removal study, not a performance benchmark. Each
+This study predates the Timeline-led composition above; it is kept for the
+transport and ownership checks it records. It was a bounded component-removal
+study, not a performance benchmark. Each
 removal was checked against the interaction it previously supported. The shared
 transport, native docking and existing renderers were held unchanged.
 

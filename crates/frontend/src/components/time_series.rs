@@ -32,15 +32,16 @@ impl TimelineSignalPoint {
     }
 }
 
-/// One named series within a lane.
+/// One named series within a lane. A series without its own colour inherits
+/// the lane's; a coloured series stands on its own within the lane.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct TimelineSignalSeries {
     name: String,
     points: Vec<TimelineSignalPoint>,
+    color: Option<String>,
 }
 
 impl TimelineSignalSeries {
-    #[cfg(test)]
     pub(crate) fn name(&self) -> &str {
         &self.name
     }
@@ -49,7 +50,17 @@ impl TimelineSignalSeries {
         Self {
             name: name.into(),
             points,
+            color: None,
         }
+    }
+
+    pub(crate) fn with_color(mut self, color: impl Into<String>) -> Self {
+        self.color = Some(color.into());
+        self
+    }
+
+    pub(crate) fn color(&self) -> Option<&str> {
+        self.color.as_deref()
     }
 
     #[cfg(test)]
@@ -101,36 +112,110 @@ impl TimelineSignalLane {
     }
 }
 
+/// How lanes sit on the canvas: the visible span, lane geometry, and whether
+/// each lane carries a readable value axis.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TraceChartLayout {
+    window: (f64, f64),
+    lane_height: f64,
+    lane_gap: f64,
+    margins: (f64, f64),
+    labelled: bool,
+    tooltip: bool,
+}
+
+impl TraceChartLayout {
+    /// Live's compact stack: hairline lanes from the episode start, no axes.
+    pub(crate) fn sparkline(duration: f64) -> Self {
+        Self {
+            window: (0.0, duration.max(0.001)),
+            lane_height: TRACE_LANE_HEIGHT,
+            lane_gap: 0.0,
+            margins: (0.0, 0.0),
+            labelled: false,
+            tooltip: true,
+        }
+    }
+
+    /// Inspection lanes: tall, gapped, with value labels and a light grid.
+    pub(crate) fn labelled(window: (f64, f64), lane_height: f64) -> Self {
+        Self {
+            window: (window.0, window.1.max(window.0 + 0.001)),
+            lane_height,
+            lane_gap: 0.0,
+            margins: (0.0, 0.0),
+            labelled: true,
+            tooltip: false,
+        }
+    }
+
+    pub(crate) fn with_gap(mut self, gap: f64) -> Self {
+        self.lane_gap = gap.max(0.0);
+        self
+    }
+
+    pub(crate) fn with_margins(mut self, left: f64, right: f64) -> Self {
+        self.margins = (left.max(0.0), right.max(0.0));
+        self
+    }
+
+    /// Vertical pitch of one lane, including its gap.
+    pub(crate) fn lane_pitch(&self) -> f64 {
+        self.lane_height + self.lane_gap
+    }
+}
+
 pub(crate) trait TimelineSignalLanes {
     fn chart(&self, duration: f64) -> Chart;
+    fn chart_with(&self, layout: &TraceChartLayout) -> Chart;
 }
 
 impl TimelineSignalLanes for [TimelineSignalLane] {
     fn chart(&self, duration: f64) -> Chart {
-        let mut chart = Chart::new()
-            .animation(false)
-            .tooltip(StudioTooltip::numeric(3));
+        self.chart_with(&TraceChartLayout::sparkline(duration))
+    }
+
+    fn chart_with(&self, layout: &TraceChartLayout) -> Chart {
+        let mut chart = Chart::new().animation(false);
+        if layout.tooltip {
+            chart = chart.tooltip(StudioTooltip::numeric(3));
+        }
 
         for (lane_index, lane) in self.iter().enumerate() {
             let grid_index = lane_index as f64;
+            let y_axis = if layout.labelled {
+                TimelineChartStyle::labelled_value_axis(grid_index)
+            } else {
+                TimelineChartStyle::hidden_axis(AxisType::Value, grid_index).scale(true)
+            };
             chart = chart
                 .grid(
                     Grid::new()
                         .id(format!("timeline-grid-{lane_index}"))
-                        .left(0)
-                        .right(0)
-                        .top(lane_index as f64 * TRACE_LANE_HEIGHT)
-                        .height(TRACE_LANE_HEIGHT),
+                        .left(layout.margins.0)
+                        .right(layout.margins.1)
+                        .top(lane_index as f64 * layout.lane_pitch() + layout.lane_gap / 2.0)
+                        .height(layout.lane_height),
                 )
                 .x_axis(
                     TimelineChartStyle::hidden_axis(AxisType::Value, grid_index)
-                        .min(0)
-                        .max(duration.max(0.001)),
+                        .min(layout.window.0)
+                        .max(layout.window.1),
                 )
-                .y_axis(TimelineChartStyle::hidden_axis(AxisType::Value, grid_index).scale(true));
+                .y_axis(y_axis);
 
             for (series_index, series) in lane.series.iter().enumerate() {
                 let mark_samples = series.has_isolated_samples();
+                let line_style = match &series.color {
+                    Some(color) => LineStyle::new()
+                        .color(color.clone())
+                        .width(1.4)
+                        .opacity(0.95),
+                    None => LineStyle::new()
+                        .color(lane.color.clone())
+                        .width(if series_index == 0 { 1.5 } else { 1.2 })
+                        .opacity(if series_index == 0 { 0.95 } else { 0.52 }),
+                };
                 chart = chart.series(
                     Line::new()
                         .id(format!("{}-{}-{series_index}", lane.id, series.name))
@@ -146,12 +231,7 @@ impl TimelineSignalLanes for [TimelineSignalLane] {
                         .symbol_size(3.0)
                         .sampling(Sampling::Minmax)
                         .connect_nulls(false)
-                        .line_style(
-                            LineStyle::new()
-                                .color(lane.color.clone())
-                                .width(if series_index == 0 { 1.5 } else { 1.2 })
-                                .opacity(if series_index == 0 { 0.95 } else { 0.52 }),
-                        )
+                        .line_style(line_style)
                         .emphasis(Emphasis::new().disabled(true))
                         .data(series.chart_data(TRACE_POINT_BUDGET)),
                 );
@@ -174,6 +254,23 @@ impl TimelineChartStyle {
             .axis_tick(AxisTick::new().show(false))
             .axis_label(AxisLabel::new().show(false))
             .split_line(SplitLine::new().show(false))
+    }
+
+    /// A quiet value axis: small faint labels and hairline guides, no spine.
+    fn labelled_value_axis(grid_index: f64) -> Axis {
+        Axis::new()
+            .type_(AxisType::Value)
+            .grid_index(grid_index)
+            .scale(true)
+            .split_number(3.0)
+            .axis_line(AxisLine::new().show(false))
+            .axis_tick(AxisTick::new().show(false))
+            .axis_label(AxisLabel::new().show(true).font_size(9.0).color("#71706c"))
+            .split_line(
+                SplitLine::new()
+                    .show(true)
+                    .line_style(LineStyle::new().color("#e8e8e6").width(1.0)),
+            )
     }
 
     fn point(x: f64, y: Option<f64>) -> DataPoint {
@@ -283,6 +380,39 @@ mod tests {
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]
+    fn labelled_layouts_window_the_axis_and_colour_each_series() {
+        let series = |name: &str, color: &str| {
+            TimelineSignalSeries::new(
+                name,
+                vec![
+                    TimelineSignalPoint::new(0.0, Some(1.0)),
+                    TimelineSignalPoint::new(1.0, Some(2.0)),
+                ],
+            )
+            .with_color(color)
+        };
+        let lane =
+            TimelineSignalLane::new("position[]", "position[]", "#000000").with_series(vec![
+                series("position[0]", "#111111"),
+                series("position[1]", "#222222"),
+            ]);
+        let layout = TraceChartLayout::labelled((0.5, 0.75), 96.0)
+            .with_gap(10.0)
+            .with_margins(46.0, 10.0);
+        assert_eq!(layout.lane_pitch(), 106.0);
+        let chart = serde_json::to_value([lane].as_slice().chart_with(&layout)).unwrap();
+        // Charming flattens single-element component lists into one object.
+        let first = |value: &serde_json::Value| value.get(0).unwrap_or(value).clone();
+        assert_eq!(first(&chart["xAxis"])["min"], 0.5);
+        assert_eq!(first(&chart["xAxis"])["max"], 0.75);
+        assert_eq!(first(&chart["yAxis"])["axisLabel"]["show"], true);
+        assert_eq!(first(&chart["grid"])["left"], 46.0);
+        assert_eq!(first(&chart["grid"])["top"], 5.0);
+        assert_eq!(chart["series"][1]["lineStyle"]["color"], "#222222");
+        assert!(chart.get("tooltip").is_none());
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn traces_break_at_missing_samples_and_preserve_a_peak() {
         let mut points = (0..600)
             .map(|index| TimelineSignalPoint {
@@ -293,11 +423,7 @@ mod tests {
         points[250].value = Some(90.0);
         points[400].value = None;
 
-        let data = TimelineSignalSeries {
-            name: "test".to_owned(),
-            points,
-        }
-        .chart_data(TRACE_POINT_BUDGET);
+        let data = TimelineSignalSeries::new("test", points).chart_data(TRACE_POINT_BUDGET);
         let data = serde_json::to_value(data).expect("trace data should serialize");
         let rows = data.as_array().expect("trace data should be an array");
 

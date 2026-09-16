@@ -12,7 +12,8 @@ use spiral_robotics_common::datasets::{MessageCursor, MessageRead};
 use std::{collections::HashMap, sync::Arc};
 
 impl StorageManager {
-    pub async fn episode_messages(&self, request: MessageRead) -> Result<Vec<u8>, String> {
+    /// Refuse reads whose topic/schema revision no longer matches the dataset.
+    pub(super) async fn require_topic_revision(&self, request: &MessageRead) -> Result<(), String> {
         let catalog = self.project_store().dataset_catalog();
         let before = catalog.inspect(request.topic().dataset().clone()).await?;
         if before.dataset().version_id() != request.revision().version() {
@@ -23,7 +24,29 @@ impl StorageManager {
         }) {
             return Err("This topic/schema revision no longer exists".into());
         }
-        let query = MessageQuery { request: &request };
+        Ok(())
+    }
+
+    /// Refuse to deliver data whose read raced with a dataset replacement.
+    pub(super) async fn require_same_revision_after(
+        &self,
+        request: &MessageRead,
+    ) -> Result<(), String> {
+        let catalog = self.project_store().dataset_catalog();
+        if catalog
+            .resolve(request.topic().dataset())
+            .await?
+            .version_id()
+            != request.revision().version()
+        {
+            return Err("Dataset revision changed during the read; reopen this episode".into());
+        }
+        Ok(())
+    }
+
+    pub async fn episode_messages(&self, request: MessageRead) -> Result<Vec<u8>, String> {
+        self.require_topic_revision(&request).await?;
+        let query = MessageQuery::new(&request);
         let mut connection = self.project_store().connect().await?;
         let page = if let Some(window) = request.window() {
             let mut stream = connection
@@ -47,23 +70,23 @@ impl StorageManager {
                 .map_err(|error| error.to_string())?;
             MessagePage::new(schema)
         };
-        // Do not deliver a page whose query raced with a dataset replacement.
-        if catalog
-            .resolve(request.topic().dataset())
-            .await?
-            .version_id()
-            != request.revision().version()
-        {
-            return Err("Dataset revision changed during the read; reopen this episode".into());
-        }
+        self.require_same_revision_after(&request).await?;
         page.encode(&request)
     }
 }
-struct MessageQuery<'a> {
+/// One topic revision's SQL, bound to the exact member UUID.
+pub(super) struct MessageQuery<'a> {
     request: &'a MessageRead,
 }
-impl MessageQuery<'_> {
-    fn statement(&self, fields: &str, tail: &str) -> Result<crate::db::SqlStatement, String> {
+impl<'a> MessageQuery<'a> {
+    pub(super) fn new(request: &'a MessageRead) -> Self {
+        Self { request }
+    }
+    pub(super) fn statement(
+        &self,
+        fields: &str,
+        tail: &str,
+    ) -> Result<crate::db::SqlStatement, String> {
         let topic = self.request.topic();
         let sql = format!(
             "SELECT {fields} FROM spql.mcap.read_topic('{}', '{}', '{}') WHERE id = $1 {tail}",

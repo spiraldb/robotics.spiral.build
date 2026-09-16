@@ -116,6 +116,26 @@ impl DataCommands {
             .await?
     }
 
+    pub(crate) async fn topic_coverage(
+        &self,
+        request: spiral_robotics_common::datasets::TopicCoverageRequest,
+    ) -> Result<spiral_robotics_common::datasets::TopicCoverage, BackendCommandError> {
+        let commands = self.clone();
+        self.state
+            .tasks()
+            .read(async move {
+                let _activity = commands.state.admit()?;
+                commands.require_catalog_ready()?;
+                commands
+                    .state
+                    .storage()
+                    .topic_coverage(request)
+                    .await
+                    .map_err(Into::into)
+            })
+            .await?
+    }
+
     pub(crate) async fn episode_messages(
         &self,
         request: spiral_robotics_common::datasets::MessageRead,

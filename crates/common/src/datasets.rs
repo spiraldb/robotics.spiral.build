@@ -1,12 +1,14 @@
 //! Dataset identity and import contracts.
 
 mod catalog;
+mod coverage;
 mod h264;
 mod messages;
 pub use catalog::{
     DatasetInspection, DatasetSelection, DatasetSummary, DatasetTopic, EpisodeSelection,
     EpisodeTopicRequest, EpisodeVideo, ProjectResource, VideoPacket,
 };
+pub use coverage::{TopicCoverage, TopicCoverageRequest};
 pub use h264::H264AccessUnit;
 pub use messages::{MessageCursor, MessageRead, MessageWindow, TopicRevision};
 

@@ -1,16 +1,20 @@
 //! Recorded cameras render the episode playhead; they never own a playback clock.
 use super::{
-    episode_decoder::{DecodedGroup, EncodedCamera, MediaReservation},
+    episode_decoder::{CameraPlayback, EncodedCamera, MediaReservation},
     episode_transport::{EpisodeTimeRange, EpisodeTransport, FeedState},
     message_buffer::MessageBuffer,
 };
+use crate::format::PreciseClockPresentation;
 use dioxus::prelude::*;
 use spiral_robotics_common::datasets::{MessageRead, MessageWindow};
-use std::rc::Rc;
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 use wasm_bindgen::JsCast as _;
 
 struct LoadedCamera {
-    encoded: EncodedCamera,
+    encoded: Rc<EncodedCamera>,
     _memory: MediaReservation,
 }
 impl PartialEq for LoadedCamera {
@@ -42,7 +46,7 @@ pub(super) fn EpisodeCamera(
             let encoded = EncodedCamera::from_messages(source.batches(), timeline.start_ns())?;
             let memory = media.encoded().reserve(encoded.memory_bytes())?;
             Ok::<_, String>(Rc::new(LoadedCamera {
-                encoded,
+                encoded: Rc::new(encoded),
                 _memory: memory,
             }))
         }
@@ -83,89 +87,108 @@ pub(super) fn EpisodeCamera(
     }
 }
 
+/// Frames the operator is asking for, and whether a decode loop is serving them.
+struct FrameRequests {
+    wanted: Cell<Option<f64>>,
+    running: Cell<bool>,
+}
+
+/// Seeking this deep into a keyframe interval is reported as buffering so the
+/// shared clock waits instead of racing ahead of the picture.
+const QUIET_RESTART_PACKETS: usize = 15;
+const UNCOVERED_RETRIES: u8 = 8;
+
 #[component]
 fn CameraFrames(camera: Rc<LoadedCamera>, transport: EpisodeTransport, topic: String) -> Element {
     let mut canvas = use_signal(|| None::<web_sys::HtmlCanvasElement>);
-    let mut drawing_error = use_signal(|| None::<String>);
-    let mut revision = use_signal(|| 0u64);
+    let mut failure = use_signal(|| None::<String>);
+    let mut covered = use_signal(|| false);
     let panel = dioxus_workbench::PanelContext::current();
     let activity = crate::shell::activity::WorkspaceActivity::current();
-    let group_camera = camera.clone();
-    let group_transport = transport.clone();
-    let group = use_memo(move || {
-        if !panel.geometry().visible() || !activity.is_active() {
-            return None;
-        }
-        let seconds = group_transport.seconds();
-        if group_camera
-            .encoded
-            .last_frame_seconds()
-            .is_none_or(|end| seconds > end)
-        {
-            return None;
-        }
-        group_camera.encoded.group_at(seconds)
-    });
-    let decode_camera = camera.clone();
     let media = transport.media();
-    let frames = use_resource(move || {
-        let range = group();
-        let _ = revision();
-        let camera = decode_camera.clone();
-        let budget = media.decoded().clone();
-        async move {
-            match range {
-                Some(range) => {
-                    DecodedGroup::decode_with_budget(&camera.encoded, range, Some(budget))
-                        .await
-                        .map(Some)
-                }
-                None => Ok(None),
-            }
+    // The decode loop takes the playback out of its cell while it awaits the
+    // decoder and puts it back afterwards, so no borrow spans an await.
+    let fresh_playback = {
+        let camera = camera.clone();
+        move || {
+            Rc::new(RefCell::new(Some(CameraPlayback::new(
+                camera.encoded.clone(),
+                media.decoded().clone(),
+            ))))
         }
+    };
+    let mut playback = use_signal(fresh_playback.clone());
+    let requests = use_hook(|| {
+        Rc::new(FrameRequests {
+            wanted: Cell::new(None),
+            running: Cell::new(false),
+        })
     });
-    let render_transport = transport.clone();
-    use_effect(move || {
-        let seconds = render_transport.seconds();
-        let Some(canvas) = canvas() else {
-            return;
-        };
-        let pending = *frames.state().read() == UseResourceState::Pending;
-        let current = frames.read();
-        let result = match &*current {
-            Some(Ok(Some(decoded))) if !pending && group().is_some() => {
-                decoded.draw(&canvas, seconds)
-            }
-            _ => DecodedGroup::clear(&canvas),
-        };
-        if let Err(error) = result {
-            drawing_error.set(Some(error));
-        }
-    });
-    let mut status = transport.clone();
-    let report_topic = topic.clone();
+    let status = transport.clone();
+    let clock = transport.clone();
+    let drive_requests = requests.clone();
+    let drive_topic = topic.clone();
     use_effect(move || {
         let visible = panel.geometry().visible() && activity.is_active();
-        let failed = drawing_error().is_some() || matches!(&*frames.read(), Some(Err(_)));
-        let state = if !visible || failed {
-            FeedState::Unavailable
-        } else if *frames.state().read() == UseResourceState::Pending {
-            FeedState::Loading
-        } else {
-            FeedState::Ready
-        };
-        status.report(&report_topic, state);
+        let seconds = clock.seconds();
+        let playback = playback();
+        let Some(canvas) = canvas() else { return };
+        if !visible || failure.peek().is_some() {
+            return;
+        }
+        drive_requests.wanted.set(Some(seconds));
+        if drive_requests.running.replace(true) {
+            return;
+        }
+        let requests = drive_requests.clone();
+        let mut status = status.clone();
+        let topic = drive_topic.clone();
+        spawn(async move {
+            let mut retries = 0_u8;
+            while let Some(target) = requests.wanted.take() {
+                let Some(mut decoder) = playback.borrow_mut().take() else {
+                    break;
+                };
+                let deep_restart = decoder
+                    .restart_cost(target)
+                    .is_some_and(|packets| packets > QUIET_RESTART_PACKETS);
+                if deep_restart {
+                    status.report(&topic, FeedState::Loading);
+                }
+                let prepared = decoder.prepare(target).await;
+                let outcome = prepared.and_then(|prepared| {
+                    decoder
+                        .draw(&canvas, target)
+                        .map(|drawn| (drawn, prepared.covered()))
+                });
+                *playback.borrow_mut() = Some(decoder);
+                match outcome {
+                    Ok((drawn, ready)) => {
+                        covered.set(drawn);
+                        status.report(&topic, FeedState::Ready);
+                        // A slow decoder answers after the wait; ask again for a paused playhead.
+                        if !ready && requests.wanted.get().is_none() && retries < UNCOVERED_RETRIES
+                        {
+                            retries += 1;
+                            requests.wanted.set(Some(target));
+                        } else if ready {
+                            retries = 0;
+                        }
+                    }
+                    Err(error) => {
+                        failure.set(Some(error));
+                        status.report(&topic, FeedState::Unavailable);
+                        break;
+                    }
+                }
+            }
+            requests.running.set(false);
+        });
     });
     let seconds = transport.seconds();
     let sample = camera.encoded.frame_seconds(seconds);
-    let error = drawing_error().or_else(|| {
-        frames
-            .read()
-            .as_ref()
-            .and_then(|result| result.as_ref().err().cloned())
-    });
-    let pending = *frames.state().read() == UseResourceState::Pending;
-    let uncovered = group().is_none();
+    let uncovered = !covered();
+    let retry_playback = fresh_playback.clone();
     rsx! {
         div { class: "episode-camera-image",
             canvas { class: "episode-camera-canvas", width: 640, height: 360,
@@ -173,19 +196,26 @@ fn CameraFrames(camera: Rc<LoadedCamera>, transport: EpisodeTransport, topic: St
                 onmounted: move |event| {
                     if let Some(element) = event.data().downcast::<web_sys::Element>() {
                         canvas.set(Some(element.clone().unchecked_into()));
-                    } else { drawing_error.set(Some("Camera canvas is unavailable".into())); }
+                    } else { failure.set(Some("Camera canvas is unavailable".into())); }
                 }
             }
-            if let Some(error) = error { div { class: "episode-camera-message", role: "alert",
+            if let Some(error) = failure() { div { class: "episode-camera-message", role: "alert",
                 p { "{error}" }
-                button { class: "data-text-action", onclick: move |_| { drawing_error.set(None); revision += 1; }, "Retry decoding" }
+                button { class: "data-text-action", onclick: move |_| { failure.set(None); covered.set(false); playback.set(retry_playback()); }, "Retry decoding" }
             } }
-            else if pending { p { class: "episode-camera-message", role: "status", "Decoding recorded camera…" } }
-            else if uncovered { p { class: "episode-camera-message", "No frame at this time" } }
+            else if uncovered {
+                p { class: "episode-camera-message",
+                    match camera.encoded.first_frame_seconds().filter(|first| seconds < *first) {
+                        Some(first) => rsx! { "First frame at {first.precise_clock_label()}" },
+                        None if sample.is_some() => rsx! { "Decoding recorded camera…" },
+                        None => rsx! { "No frame at this time" },
+                    }
+                }
+            }
         }
         div { class: "episode-camera-time",
-            if let Some(sample) = sample.filter(|_| !uncovered && !pending) {
-                {format!("Frame {sample:.3} s · age {:.3} s", (seconds - sample).max(0.0))}
+            if let Some(sample) = sample.filter(|_| !uncovered) {
+                {format!("Frame {} · age {:.3} s", sample.precise_clock_label(), (seconds - sample).max(0.0))}
             } else { "Recorded camera" }
         }
     }

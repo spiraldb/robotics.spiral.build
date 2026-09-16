@@ -21,6 +21,7 @@ impl DatasetQueryEndpoints {
         routes.post("/datasets/inspect", Self::inspect_dataset);
         routes.post("/datasets/episode-messages", Self::episode_messages);
         routes.post("/datasets/episode-topics", Self::episode_topics);
+        routes.post("/datasets/topic-coverage", Self::topic_coverage);
         routes.get("/relations", Self::relation_catalog);
         routes.post("/queries", Self::run_spiral_query);
         routes.post(
@@ -54,6 +55,13 @@ impl DatasetQueryEndpoints {
         ApiJson(request): ApiJson<spiral_robotics_common::datasets::EpisodeSelection>,
     ) -> Result<Json<Vec<spiral_robotics_common::datasets::DatasetTopic>>, HttpFailure> {
         Ok(Json(commands.episode_topics(request).await?))
+    }
+
+    async fn topic_coverage(
+        ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,
+        ApiJson(request): ApiJson<spiral_robotics_common::datasets::TopicCoverageRequest>,
+    ) -> Result<Json<spiral_robotics_common::datasets::TopicCoverage>, HttpFailure> {
+        Ok(Json(commands.topic_coverage(request).await?))
     }
 
     async fn episode_messages(

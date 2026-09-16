@@ -71,6 +71,15 @@ impl DatasetClient {
             .request(HttpRequest::new("POST", "/api/datasets/episode-topics").json(&request))
     }
 
+    pub(crate) fn topic_coverage(
+        &self,
+        request: spiral_robotics_common::datasets::TopicCoverageRequest,
+    ) -> impl Future<Output = Result<spiral_robotics_common::datasets::TopicCoverage, CommandError>>
+    + use<> {
+        self.project
+            .request(HttpRequest::new("POST", "/api/datasets/topic-coverage").json(&request))
+    }
+
     pub(crate) fn episode_messages(
         &self,
         request: spiral_robotics_common::datasets::MessageRead,

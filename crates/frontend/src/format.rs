@@ -46,3 +46,184 @@ mod tests {
         assert_eq!(0.00125_f64.loss_label(), "1.250e-3");
     }
 }
+
+pub(crate) trait PreciseClockPresentation {
+    /// Minutes, seconds, and milliseconds for message-level inspection.
+    fn precise_clock_label(self) -> String;
+}
+
+impl PreciseClockPresentation for f64 {
+    fn precise_clock_label(self) -> String {
+        let seconds = if self.is_finite() { self.max(0.0) } else { 0.0 };
+        let total_millis = (seconds * 1000.0).round() as u64;
+        let minutes = total_millis / 60_000;
+        let millis = total_millis % 60_000;
+        format!("{minutes}:{:02}.{:03}", millis / 1000, millis % 1000)
+    }
+}
+
+pub(crate) trait GroupedCountPresentation {
+    /// Thousands separators for message and row counts.
+    fn grouped_label(self) -> String;
+}
+
+impl GroupedCountPresentation for u64 {
+    fn grouped_label(self) -> String {
+        let digits = self.to_string();
+        let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+        for (index, digit) in digits.chars().enumerate() {
+            if index > 0 && (digits.len() - index).is_multiple_of(3) {
+                grouped.push(',');
+            }
+            grouped.push(digit);
+        }
+        grouped
+    }
+}
+
+pub(crate) trait ByteCountPresentation {
+    /// Binary-prefixed size with one decimal above kilobytes.
+    fn byte_label(self) -> String;
+}
+
+impl ByteCountPresentation for u64 {
+    fn byte_label(self) -> String {
+        const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+        let mut value = self as f64;
+        let mut unit = 0;
+        while value >= 1024.0 && unit + 1 < UNITS.len() {
+            value /= 1024.0;
+            unit += 1;
+        }
+        if unit == 0 {
+            format!("{self} B")
+        } else {
+            format!("{value:.1} {}", UNITS[unit])
+        }
+    }
+}
+
+pub(crate) trait UtcTimestampPresentation {
+    /// `YYYY-MM-DD HH:MM:SS UTC` from Unix nanoseconds, computed without the
+    /// browser so native and WASM builds agree.
+    fn utc_label(self) -> String;
+    /// `YYYY-MM-DD` only.
+    fn utc_date_label(self) -> String;
+}
+
+struct CivilDateTime {
+    year: i64,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+    second: u32,
+}
+
+impl CivilDateTime {
+    fn from_unix_nanos(nanos: u64) -> Self {
+        let seconds = (nanos / 1_000_000_000) as i64;
+        let days = seconds.div_euclid(86_400);
+        let remainder = seconds.rem_euclid(86_400) as u32;
+        // Howard Hinnant's civil-from-days.
+        let z = days + 719_468;
+        let era = z.div_euclid(146_097);
+        let day_of_era = z.rem_euclid(146_097);
+        let year_of_era =
+            (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+        let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+        let month_index = (5 * day_of_year + 2) / 153;
+        let day = (day_of_year - (153 * month_index + 2) / 5 + 1) as u32;
+        let month = if month_index < 10 {
+            month_index + 3
+        } else {
+            month_index - 9
+        } as u32;
+        let year = year_of_era + era * 400 + i64::from(month <= 2);
+        Self {
+            year,
+            month,
+            day,
+            hour: remainder / 3_600,
+            minute: remainder % 3_600 / 60,
+            second: remainder % 60,
+        }
+    }
+}
+
+impl UtcTimestampPresentation for u64 {
+    fn utc_label(self) -> String {
+        let civil = CivilDateTime::from_unix_nanos(self);
+        format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC",
+            civil.year, civil.month, civil.day, civil.hour, civil.minute, civil.second
+        )
+    }
+    fn utc_date_label(self) -> String {
+        let civil = CivilDateTime::from_unix_nanos(self);
+        format!("{:04}-{:02}-{:02}", civil.year, civil.month, civil.day)
+    }
+}
+
+#[cfg(test)]
+mod presentation_tests {
+    use super::*;
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn precise_clock_and_counts_read_as_bench_figures() {
+        assert_eq!(4.2334_f64.precise_clock_label(), "0:04.233");
+        assert_eq!(61.0005_f64.precise_clock_label(), "1:01.001");
+        assert_eq!(f64::NAN.precise_clock_label(), "0:00.000");
+        assert_eq!(11_404_u64.grouped_label(), "11,404");
+        assert_eq!(999_u64.grouped_label(), "999");
+        assert_eq!(1_000_000_u64.grouped_label(), "1,000,000");
+        assert_eq!(15_932_137_u64.byte_label(), "15.2 MiB");
+        assert_eq!(512_u64.byte_label(), "512 B");
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn utc_labels_come_from_exact_nanoseconds() {
+        assert_eq!(
+            1_743_701_335_734_982_912_u64.utc_label(),
+            "2025-04-03 17:28:55 UTC"
+        );
+        assert_eq!(0_u64.utc_label(), "1970-01-01 00:00:00 UTC");
+        assert_eq!(951_782_400_000_000_000_u64.utc_date_label(), "2000-02-29");
+    }
+}
+
+pub(crate) trait LongDurationPresentation {
+    /// Hours, minutes, and seconds for totals across many recordings.
+    fn long_duration_label(self) -> String;
+}
+
+impl LongDurationPresentation for f64 {
+    fn long_duration_label(self) -> String {
+        let total = if self.is_finite() {
+            self.max(0.0).round() as u64
+        } else {
+            0
+        };
+        let (hours, minutes, seconds) = (total / 3600, total % 3600 / 60, total % 60);
+        if hours > 0 {
+            format!("{hours} h {minutes} min")
+        } else if minutes > 0 {
+            format!("{minutes} min {seconds} s")
+        } else {
+            format!("{seconds} s")
+        }
+    }
+}
+
+#[cfg(test)]
+mod long_duration_tests {
+    use super::LongDurationPresentation;
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn long_durations_step_up_through_units() {
+        assert_eq!(3_549.9_f64.long_duration_label(), "59 min 10 s");
+        assert_eq!(7_260.0_f64.long_duration_label(), "2 h 1 min");
+        assert_eq!(20.5_f64.long_duration_label(), "21 s");
+        assert_eq!(f64::NAN.long_duration_label(), "0 s");
+    }
+}

@@ -1,6 +1,7 @@
 //! Native Dataset discovery through the same project journal used by the ADBC driver.
 #[cfg(test)]
 mod catalog_tests;
+mod coverage;
 mod messages;
 mod playback;
 mod topics;

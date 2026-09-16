@@ -248,8 +248,9 @@ resources. These return distinct `RecordingDatasetSummary` and `DatasetSummary` 
 | GET | `/data-catalog` | — | ProjectResource[] (actual namespace paths and resource kinds) |
 | GET | `/datasets` | — | DatasetSummary[] |
 | POST | `/datasets/inspect` | DatasetSelection | DatasetInspection |
-| POST | `/datasets/episode-topic` | EpisodeTopicRequest (dataset, topic, episode_id) | SpiralQuerySnapshot (up to 100 messages from the exact recording ID) |
-| POST | `/datasets/episode-video` | EpisodeTopicRequest (dataset, topic, episode_id) | EpisodeVideo (H.264 codec and timestamped Annex B packets; up to 18,000 packets / 64 MiB encoded) |
+| POST | `/datasets/episode-topics` | EpisodeSelection (dataset, episode_id) | DatasetTopic[] (topics with messages in the exact recording, with schema revisions and counts) |
+| POST | `/datasets/episode-messages` | MessageRead (topic, revision, optional window) | `application/vnd.apache.arrow.stream` pages; see [episode playback](episode-playback.md) |
+| POST | `/datasets/topic-coverage` | TopicCoverageRequest (MessageRead with a plain window, `buckets` 8–2048) | TopicCoverage (message total, first/last log time as strings, one count per bucket) |
 | GET | `/relations` | — | RelationCatalog |
 | POST | `/queries` | QueryRequest | SpiralQuerySnapshot |
 | POST | `/datasets/hugging-face/inspect` | HuggingFaceDatasetSource | HuggingFaceDatasetInspection |

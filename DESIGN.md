@@ -336,9 +336,12 @@ put reads as a bench tool.
   two-thirds visualization, with Timeline in the lower 42% and each camera
   visible in its own row of the named camera column. Rollout narrows the
   workbench to 27% and replaces the Timeline slot with one low Inference lane.
-- Data defaults to a 25% Tables directory beside 75% native object panels.
-  Each top-level object tab owns Inspect, SQL, and Results; Load and Import
-  sit alongside the native tab header. Import opens as a peer tab.
+- Data defaults to a 21% Datasets rail beside an episode workspace: Plots,
+  Messages, and SQL as tabs in the primary tile, one panel per recorded
+  camera in a right-hand column, and a full-width Timeline across the lower
+  40%. The Timeline lists every recorded stream with its message density and
+  is where streams are shown, plotted, and selected. Import opens as a peer
+  tab in the primary tile.
 - Workflow puts the graph first: a 24% Assistant/SQL column at the left, then
   the Graph (74%) beside Stage details (26%) over a Results shelf in the lower
   54%. It has its own layout scope, and every tile stays a dockable workbench
@@ -553,13 +556,30 @@ in the Timeline and global status bar. Robot identity appears once in a compact
 switcher. There is no selected-arm toolbar beneath it. Setup is global Settings
 → Robots rather than a collapsible section in Live.
 
-Data uses a dockable Tables directory beside native object panels. The
-directory follows Spiral's actual namespace and expands native dataset outputs.
-Each object is a top-level panel tab with Inspect, SQL, and Results, without a
-Workspace wrapper. Load and Import sit alongside the native tab header; Import
-opens as a peer tab. The initial empty panel is Open data. Dataset Inspect states `Dataset → Episodes / Topics` explicitly; opening
-a topic output reuses its dataset tab. See the [Data surface brief](.impeccable/surfaces/data-inspector.md)
-for the shipped composition, interaction states, and review scope.
+Data follows the operator's own model of their recordings: a dataset is a
+folder of MCAP files and each file is one episode. The Datasets rail lists
+datasets, expands each into its chronological episodes (labelled by the part
+of the source path that differs between files), and folds ordinary tables
+and views into a quiet Tables & views section that opens
+SQL. Selecting a dataset shows its Overview; opening an episode replaces it
+with Plots and Messages tabs, one panel per recorded camera, and the Timeline.
+The canonical first-open Data layout is:
+
+```text
+┌── 21% ──┬────────── 64% ──────────┬──── 36% ────┐
+│ Datasets│ Plots │ Messages │ SQL   │ camera rows │
+│ rail    │                         │             │
+│         ├─────────────────────────┴─────────────┤
+│         │ Timeline — transport, ruler, one row  │
+│         │ per stream with message density       │
+└─────────┴───────────────────────────────────────┘
+```
+
+The Timeline is the navigation hub of an episode: ticking a stream shows it
+(a camera opens its panel; a data stream draws every numeric field in Plots),
+expanding a data stream exposes its fields for one-by-one selection, and
+clicking a stream name selects it for Messages. Cameras, Plots, the ruler,
+and the stream rows share one playhead and one visible span.
 
 Training is curve-first: its first-open composition gives the learning curve
 the dominant visualization area, keeps the literal data path beside it, and
@@ -1354,27 +1374,44 @@ ambient browser selection—decides whether execution may begin.
 
 ### Data, Episodes, and Query
 
-- **Directory:** A compact, searchable hierarchy of real Spiral objects uses
-  explicit expansion controls, kind labels, and blue selection. Dataset
-  outputs load on expansion; loading, failure, empty, and no-match states stay
-  inside the directory.
-- **Object tabs:** Each open object retains its own SQL draft, row limit, and
-  result during tab switching, docking, and splitting. Native PanelWorkspace chrome owns
-  closing, docking, splitting, and keyboard operation. Inspect / SQL / Results
-  use blue underlines; running SQL activates Results. Closing removes the panel
-  and its session; reopening starts a fresh session.
-- **Inspection:** Dataset Episodes and Topics remain distinct. Each episode is
-  one immutable MCAP recording. Selected-camera playback keeps native
-  play/pause and keyboard-accessible range controls in the existing inspector;
-  Live recorded cameras and joint plots share the episode playhead. Deleting
-  an episode removes Dataset membership, while retaining its local MCAP file.
-  Table schemas
-  use a disclosure above the bounded shared result table. Counts and source
-  metadata reflect returned data, without inferred filenames or zeroes.
+- **Datasets rail:** Datasets lead; each expands into chronological episode
+  rows of `#n`, the distinguishing directory of the source file, duration,
+  date, and message count, fifty at a time with an explicit Load more. The
+  selected dataset shows its episode count; the open episode is role blue.
+  Tables and views sit in a collapsed Tables & views
+  section; opening one loads `SELECT * … LIMIT 100` into SQL and runs it.
+- **Overview:** Selecting a dataset shows its name, chips for episode count,
+  total recorded time, total bytes, and date span from one aggregate query,
+  its declared streams with schema names and counts, and two actions: Open
+  first episode and Query episodes in SQL.
+- **Timeline:** A 36px transport row holds the episode identity, jump/step/
+  play controls, a millisecond clock beside the duration, speed, Loop, a
+  buffering note, and zoom. Below it a sticky ruler with round-interval ticks
+  sits over one 28px row per stream: expand chevron, a show checkbox (mixed
+  when only some fields are plotted), kind glyph, name, message count, and a
+  density track of 240 buckets tinted by relative count. Expanded data
+  streams list their fields with type labels and per-field checkboxes. The
+  playhead crosses ruler and rows; Space, arrows, Home/End, `+`/`−`/`0`, and
+  Ctrl/⌘-wheel operate the clock and zoom.
+- **Plots:** One section per plotted stream and one 96px lane per field, with
+  a labelled value axis and one coloured trace per array index. The readout
+  column doubles as the legend: swatch, index, and the value at the playhead
+  or under the hover cursor; clicking a trace hides it. A click seeks. A
+  whole episode that exceeds the read bounds falls back to the visible span
+  and says so. The empty state offers one-click plots of the busiest streams.
+- **Cameras:** Each video stream is its own camera panel in the right-hand
+  column, mounted only while open; the frame keeps the dark mat and the
+  recorded frame time. Closing a panel unticks the stream; the Timeline
+  reopens it.
+- **Messages:** The selected stream's messages from the playhead forward in
+  the shared result table, one hundred at a time, with From playhead and
+  Next 100 actions.
+- **SQL:** The read-only editor above its bounded results, as one tab beside
+  Plots and Messages; it retains its draft and result tabs across the
+  session.
 - **Import:** A peer native tab contains a restrained form leading from source
   fields to inspection, a resolved-revision review, import, and a success
-  receipt. Tab switching and docking retain the form. Inline status, disabled
-  busy controls, and explicit recovery keep state legible.
+  receipt. Finishing selects the new dataset in the rail.
 - **Destination state:** Settings selects the Spiral API endpoint, SpFS
   endpoint, and project; first launch opens this section when no project is
   selected. The backend remembers only those bootstrap pointers in its private
@@ -1464,7 +1501,7 @@ in progress; and every animation is removed under `prefers-reduced-motion`.
   one light neutral world; reserve the dark mat for camera imagery.
 - **Do** register independent surfaces as panels and give them durable IDs and
   meaningful home tiles.
-- **Do** preserve Live's one-third/two-thirds default, Data's 25% Tables / 75%
+- **Do** preserve Live's one-third/two-thirds default, Data's 21% rail / 79%
   native object panels default, and Rollout's 27% workbench default while treating
   persisted user layout as the active composition.
 - **Do** give every drag, dock, split, resize, and tab action a keyboard path,

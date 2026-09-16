@@ -1,5 +1,6 @@
-//! Native WebCodecs bindings and ownership of one decoded keyframe interval.
-//! Kept in Rust so decode cancellation and frame disposal follow component lifetime.
+//! Native WebCodecs bindings, one-shot keyframe-interval decoding for Live
+//! review, and playhead-following playback for Data. Kept in Rust so decode
+//! cancellation and frame disposal follow component lifetime.
 use base64::Engine as _;
 use js_sys::{Function, Object, Promise, Reflect, Uint8Array};
 use spiral_robotics_common::datasets::EpisodeVideo;
@@ -180,9 +181,9 @@ impl EncodedCamera {
             .checked_sub(1)?;
         Some(self.packets[index].microseconds as f64 / 1e6)
     }
-    pub(super) fn last_frame_seconds(&self) -> Option<f64> {
+    pub(super) fn first_frame_seconds(&self) -> Option<f64> {
         self.packets
-            .last()
+            .first()
             .map(|packet| packet.microseconds as f64 / 1e6)
     }
 
@@ -204,10 +205,168 @@ impl EncodedCamera {
     }
 }
 
-struct DecodedFrame(VideoFrame, Option<MediaReservation>);
+struct DecodedFrame(VideoFrame, Option<MediaReservation>, u64);
 impl Drop for DecodedFrame {
     fn drop(&mut self) {
         self.0.close();
+    }
+}
+
+const RETAIN_BEFORE_US: f64 = 250_000.0;
+const LOOKAHEAD_PACKETS: usize = 6;
+const FRAME_WAIT_ROUNDS: usize = 60;
+
+/// What one `prepare` achieved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Prepared {
+    covered: bool,
+}
+impl Prepared {
+    /// The frame for the requested moment is decoded and retained.
+    pub(super) fn covered(self) -> bool {
+        self.covered
+    }
+}
+
+/// Follows the shared playhead through one camera's packets: forward
+/// playback decodes each frame once, a jump restarts from the preceding
+/// keyframe, and only frames near the playhead stay in memory. That is what
+/// lets every camera of an episode stay visible at once.
+pub(super) struct CameraPlayback {
+    camera: Rc<EncodedCamera>,
+    output: Rc<RefCell<DecoderOutput>>,
+    session: Option<DecoderSession>,
+    group: Range<usize>,
+    fed: usize,
+    flushed: bool,
+}
+
+impl CameraPlayback {
+    pub(super) fn new(camera: Rc<EncodedCamera>, budget: MediaBudget) -> Self {
+        Self {
+            camera,
+            output: Rc::new(RefCell::new(DecoderOutput {
+                budget: Some(budget),
+                ..Default::default()
+            })),
+            session: None,
+            group: 0..0,
+            fed: 0,
+            flushed: false,
+        }
+    }
+
+    /// The packet whose frame shows at `seconds`, within its keyframe interval.
+    fn target(&self, seconds: f64) -> Option<(Range<usize>, usize)> {
+        let range = self.camera.group_at(seconds)?;
+        let timestamp = (seconds * 1e6).round() as i64;
+        let within = self.camera.packets[range.clone()]
+            .partition_point(|packet| packet.microseconds <= timestamp);
+        Some((range.clone(), range.start + within.checked_sub(1)?))
+    }
+
+    fn needs_restart(&self, range: &Range<usize>, target_index: usize) -> bool {
+        let target_timestamp = self.camera.packets[target_index].microseconds as f64;
+        self.session.is_none()
+            || *range != self.group
+            || (target_index < self.fed && !self.output.borrow().has_frame_at(target_timestamp))
+    }
+
+    /// How many packets a move to `seconds` must decode before its frame,
+    /// or `None` when the decoder can simply continue.
+    pub(super) fn restart_cost(&self, seconds: f64) -> Option<usize> {
+        let (range, target_index) = self.target(seconds)?;
+        self.needs_restart(&range, target_index)
+            .then_some(target_index - range.start)
+    }
+
+    fn restart(&mut self, range: Range<usize>) -> Result<(), String> {
+        self.session = None;
+        self.output.borrow_mut().clear();
+        let session = DecoderSession::new(self.output.clone()).map_err(DecoderSession::error)?;
+        let config = Object::new();
+        Reflect::set(&config, &"codec".into(), &self.camera.codec.clone().into())
+            .map_err(DecoderSession::error)?;
+        Reflect::set(&config, &"optimizeForLatency".into(), &true.into())
+            .map_err(DecoderSession::error)?;
+        session
+            .decoder
+            .configure(&config)
+            .map_err(DecoderSession::error)?;
+        self.session = Some(session);
+        self.fed = range.start;
+        self.group = range;
+        self.flushed = false;
+        Ok(())
+    }
+
+    /// Decode up to the frame for `seconds`, releasing frames well behind it.
+    pub(super) async fn prepare(&mut self, seconds: f64) -> Result<Prepared, String> {
+        let Some((range, target_index)) = self.target(seconds) else {
+            self.session = None;
+            self.output.borrow_mut().clear();
+            return Ok(Prepared { covered: false });
+        };
+        if self.needs_restart(&range, target_index) {
+            self.restart(range.clone())?;
+        }
+        let target_timestamp = self.camera.packets[target_index].microseconds as f64;
+        self.output
+            .borrow_mut()
+            .release_before(target_timestamp - RETAIN_BEFORE_US);
+        let feed_until = (target_index + 1 + LOOKAHEAD_PACKETS).min(range.end);
+        while self.fed < feed_until {
+            let session = self.session.as_ref().ok_or("Camera decoder is not open")?;
+            session
+                .push(&self.camera.packets[self.fed])
+                .map_err(DecoderSession::error)?;
+            self.fed += 1;
+            while session.decoder.queue_size() > 8 {
+                gloo_timers::future::TimeoutFuture::new(1).await;
+                self.output.borrow().check()?;
+            }
+        }
+        for _ in 0..FRAME_WAIT_ROUNDS {
+            self.output.borrow().check()?;
+            if self.output.borrow().has_frame_at(target_timestamp) {
+                return Ok(Prepared { covered: true });
+            }
+            if self.fed >= range.end && !self.flushed {
+                // The last frames of an interval only leave the decoder on flush;
+                // afterwards it needs a keyframe, which the next interval starts with.
+                self.flushed = true;
+                let session = self.session.as_ref().ok_or("Camera decoder is not open")?;
+                let flush = session.decoder.flush().map_err(DecoderSession::error)?;
+                wasm_bindgen_futures::JsFuture::from(flush)
+                    .await
+                    .map_err(DecoderSession::error)?;
+                continue;
+            }
+            gloo_timers::future::TimeoutFuture::new(4).await;
+        }
+        self.output.borrow().check()?;
+        Ok(Prepared {
+            covered: self.output.borrow().has_frame_at(target_timestamp),
+        })
+    }
+
+    /// Paint the latest retained frame at or before `seconds`; `false` clears.
+    pub(super) fn draw(
+        &self,
+        canvas: &web_sys::HtmlCanvasElement,
+        seconds: f64,
+    ) -> Result<bool, String> {
+        let timestamp = (seconds * 1e6).round();
+        let output = self.output.borrow();
+        match output
+            .frames
+            .iter()
+            .rev()
+            .find(|frame| frame.0.timestamp() <= timestamp)
+        {
+            Some(frame) => DecodedGroup::paint(canvas, &frame.0).map(|()| true),
+            None => DecodedGroup::clear(canvas).map(|()| false),
+        }
     }
 }
 
@@ -276,15 +435,18 @@ impl DecodedGroup {
         else {
             return Self::clear(canvas);
         };
-        if canvas.width() != frame.0.width() {
-            canvas.set_width(frame.0.width());
+        Self::paint(canvas, &frame.0)
+    }
+
+    fn paint(canvas: &web_sys::HtmlCanvasElement, frame: &VideoFrame) -> Result<(), String> {
+        if canvas.width() != frame.width() {
+            canvas.set_width(frame.width());
         }
-        if canvas.height() != frame.0.height() {
-            canvas.set_height(frame.0.height());
+        if canvas.height() != frame.height() {
+            canvas.set_height(frame.height());
         }
-        let context = Self::context(canvas)?;
-        context
-            .draw_frame(&frame.0, 0.0, 0.0)
+        Self::context(canvas)?
+            .draw_frame(frame, 0.0, 0.0)
             .map_err(DecoderSession::error)
     }
 
@@ -301,28 +463,41 @@ impl DecodedGroup {
     }
 }
 
-#[derive(Default)]
 struct DecoderOutput {
     frames: Vec<DecodedFrame>,
     bytes: u64,
     error: Option<String>,
     budget: Option<MediaBudget>,
+    /// Frames stamped before this moment are released as soon as they decode.
+    retain_after: f64,
+}
+impl Default for DecoderOutput {
+    fn default() -> Self {
+        Self {
+            frames: Vec::new(),
+            bytes: 0,
+            error: None,
+            budget: None,
+            retain_after: f64::NEG_INFINITY,
+        }
+    }
 }
 impl DecoderOutput {
     fn push(&mut self, frame: VideoFrame) {
-        let mut frame = DecodedFrame(frame, None);
+        if frame.timestamp() < self.retain_after {
+            frame.close();
+            return;
+        }
         // Four bytes per coded pixel conservatively bounds common H.264 surfaces.
-        self.bytes = self.bytes.saturating_add(
-            u64::from(frame.0.coded_width()) * u64::from(frame.0.coded_height()) * 4,
-        );
+        let size = u64::from(frame.coded_width()) * u64::from(frame.coded_height()) * 4;
+        let mut frame = DecodedFrame(frame, None, size);
+        self.bytes = self.bytes.saturating_add(size);
         if self.bytes > 128 * 1024 * 1024 {
             self.error =
                 Some("Camera keyframe interval exceeds the 128 MiB decoded playback limit".into());
         } else if self.error.is_none() {
             if let Some(budget) = &self.budget {
-                match budget.reserve(
-                    u64::from(frame.0.coded_width()) * u64::from(frame.0.coded_height()) * 4,
-                ) {
+                match budget.reserve(size) {
                     Ok(reservation) => frame.1 = Some(reservation),
                     Err(error) => {
                         self.error = Some(error);
@@ -332,6 +507,28 @@ impl DecoderOutput {
             }
             self.frames.push(frame);
         }
+    }
+    fn release_before(&mut self, cutoff: f64) {
+        self.retain_after = cutoff;
+        let released = self
+            .frames
+            .iter()
+            .filter(|frame| frame.0.timestamp() < cutoff)
+            .map(|frame| frame.2)
+            .sum::<u64>();
+        self.frames.retain(|frame| frame.0.timestamp() >= cutoff);
+        self.bytes = self.bytes.saturating_sub(released);
+    }
+    fn clear(&mut self) {
+        self.frames.clear();
+        self.bytes = 0;
+        self.error = None;
+        self.retain_after = f64::NEG_INFINITY;
+    }
+    fn has_frame_at(&self, timestamp: f64) -> bool {
+        self.frames
+            .iter()
+            .any(|frame| frame.0.timestamp() == timestamp)
     }
     fn check(&self) -> Result<(), String> {
         self.error.clone().map_or(Ok(()), Err)

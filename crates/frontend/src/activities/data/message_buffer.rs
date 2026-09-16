@@ -10,6 +10,12 @@ use arrow_schema::{DataType, Field, Schema};
 use spiral_robotics_common::datasets::{MessageCursor, MessageRead};
 use std::{collections::BTreeMap, io::Cursor, rc::Rc, sync::Arc};
 
+/// Trace colours within one lane: the category tints, then the stage tints.
+const TRACE_COLORS: [&str; 10] = [
+    "#2a78d6", "#eb6834", "#1baf7a", "#c98f00", "#d9679a", "#7560b8", "#3d8f86", "#b5701f",
+    "#5b7fb8", "#65645f",
+];
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum FieldStep {
     Name(String),
@@ -106,6 +112,13 @@ impl MessageField {
     }
     pub(super) fn plottable(&self) -> bool {
         self.field.data_type().is_numeric() || self.field.data_type() == &DataType::Boolean
+    }
+    pub(super) fn is_floating(&self) -> bool {
+        self.field.data_type().is_floating()
+    }
+    /// An element of a recorded list, drawn as one trace per index.
+    pub(super) fn is_list_item(&self) -> bool {
+        self.steps.contains(&FieldStep::Items)
     }
     pub(super) fn projection(&self) -> Vec<String> {
         self.projection.clone()
@@ -337,18 +350,19 @@ impl MessageBuffer {
         }
         Ok(result)
     }
+    /// One lane per selected field; a list field draws one series per index.
     pub(super) fn lanes(
         &self,
         fields: &[MessageField],
         origin: u64,
     ) -> Result<Vec<TimelineSignalLane>, String> {
-        let mut series = BTreeMap::<String, Vec<TimelineSignalPoint>>::new();
+        let mut per_field = vec![Vec::<(String, Vec<TimelineSignalPoint>)>::new(); fields.len()];
         let mut times = vec![];
         for batch in &self.batches {
             for row in 0..batch.num_rows() {
                 let seconds =
                     (i128::from(Self::time(batch, row)?) - i128::from(origin)) as f64 / 1e9;
-                for points in series.values_mut() {
+                for (_, points) in per_field.iter_mut().flatten() {
                     points.push(TimelineSignalPoint::new(seconds, None));
                 }
                 for (index, field) in fields.iter().enumerate() {
@@ -359,35 +373,53 @@ impl MessageBuffer {
                             .as_ref(),
                         row,
                     )? {
-                        let points = series.entry(cell.label(field)).or_insert_with(|| {
-                            times
-                                .iter()
-                                .copied()
-                                .chain([seconds])
-                                .map(|t| TimelineSignalPoint::new(t, None))
-                                .collect()
-                        });
-                        *points.last_mut().expect("current sample") =
+                        let label = cell.label(field);
+                        let series = &mut per_field[index];
+                        let position = match series.iter().position(|(name, _)| *name == label) {
+                            Some(position) => position,
+                            None => {
+                                series.push((
+                                    label,
+                                    times
+                                        .iter()
+                                        .copied()
+                                        .chain([seconds])
+                                        .map(|t| TimelineSignalPoint::new(t, None))
+                                        .collect(),
+                                ));
+                                series.len() - 1
+                            }
+                        };
+                        *series[position].1.last_mut().expect("current sample") =
                             TimelineSignalPoint::new(seconds, cell.numeric);
                     }
                 }
                 times.push(seconds);
-                if series.len() > 64 {
+                if per_field.iter().map(Vec::len).sum::<usize>() > 64 {
                     return Err("Plot exceeds 64 traces; select fewer fields".into());
                 }
             }
         }
-        Ok(series
-            .into_iter()
-            .enumerate()
-            .map(|(index, (label, points))| {
-                let color = [
-                    "#2a78d6", "#b44e23", "#21835e", "#916200", "#b04370", "#537927",
-                ][index % 6];
-                TimelineSignalLane::new(&label, &label, color)
-                    .with_series(vec![TimelineSignalSeries::new("value", points)])
+        Ok(fields
+            .iter()
+            .zip(per_field)
+            .map(|(field, series)| {
+                let label = field.label();
+                TimelineSignalLane::new(&label, &label, TRACE_COLORS[0]).with_series(
+                    series
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, (name, points))| {
+                            TimelineSignalSeries::new(name, points)
+                                .with_color(TRACE_COLORS[index % TRACE_COLORS.len()])
+                        })
+                        .collect(),
+                )
             })
             .collect())
+    }
+    pub(super) fn next_cursor(&self) -> Option<&MessageCursor> {
+        self.next.as_ref()
     }
     pub(super) fn snapshot(
         &self,
@@ -489,18 +521,20 @@ mod tests {
         assert_eq!(values["readings[0]"], "3.0");
         assert!(!values.contains_key("readings[1]"));
         let lanes = buffer.lanes(&fields, origin).unwrap();
-        let temperature = lanes
+        let labels = lanes
             .iter()
-            .find(|lane| lane.label() == "temperature")
-            .unwrap();
-        assert_eq!(temperature.series()[0].points()[1].value(), None);
-        assert_eq!(temperature.series()[0].points()[2].seconds(), 1e-9);
-        let second = lanes
-            .iter()
-            .find(|lane| lane.label() == "readings[1]")
-            .unwrap();
+            .map(TimelineSignalLane::label)
+            .collect::<Vec<_>>();
+        assert_eq!(labels, ["temperature", "counter", "readings[]"]);
+        let temperature = &lanes[0].series()[0];
+        assert_eq!(temperature.points()[1].value(), None);
+        assert_eq!(temperature.points()[2].seconds(), 1e-9);
+        let readings = lanes[2].series();
+        assert_eq!(readings.len(), 2);
+        assert_eq!(readings[1].name(), "readings[1]");
+        assert_ne!(readings[0].color(), readings[1].color());
         assert!(
-            second.series()[0]
+            readings[1]
                 .points()
                 .iter()
                 .all(|point| point.value().is_none())
