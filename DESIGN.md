@@ -1,6 +1,6 @@
 ---
 name: Spiral Robotics Studio
-description: A compact, dockable one-light workbench for operating robots, understanding episodes, training policies, and staging fixed-follower rollouts.
+description: A compact, dockable one-light workbench for operating robots, understanding episodes, curating them into kept sets, training policies, and staging fixed-follower rollouts.
 colors:
   canvas: "#ffffff"
   surface: "#ffffff"
@@ -261,6 +261,17 @@ components:
     rounded: "3px"
     width: "96px"
     height: "54px"
+  side-sheet:
+    backgroundColor: "{colors.surface}"
+    textColor: "{colors.ink}"
+    typography: "{typography.label}"
+    width: "320px"
+  side-sheet-heading:
+    backgroundColor: "{colors.surface}"
+    textColor: "{colors.ink}"
+    typography: "{typography.label}"
+    padding: "0 6px 0 12px"
+    height: "36px"
   row-inspector:
     backgroundColor: "{colors.surface}"
     textColor: "{colors.ink}"
@@ -279,6 +290,38 @@ components:
     typography: "{typography.body}"
     rounded: "{rounded.sm}"
     padding: "8px 40px 8px 12px"
+  curation-tile:
+    backgroundColor: "{colors.surface}"
+    textColor: "{colors.ink}"
+    typography: "{typography.body}"
+    rounded: "{rounded.sm}"
+    padding: "6px 8px"
+  curation-tile-struck:
+    backgroundColor: "{colors.sunken}"
+    textColor: "{colors.ink-faint}"
+    typography: "{typography.body}"
+    rounded: "{rounded.sm}"
+    padding: "6px 8px"
+  curation-tile-selected:
+    backgroundColor: "{colors.surface}"
+    textColor: "{colors.ink}"
+  curation-reason-chip:
+    backgroundColor: "color-mix(in srgb, var(--hue) 13%, transparent)"
+    textColor: "color-mix(in srgb, var(--hue) 55%, {colors.ink})"
+    rounded: "{rounded.sm}"
+    padding: "1px 6px"
+  curation-rule-mark:
+    backgroundColor: "transparent"
+    rounded: "{rounded.full}"
+    size: "16px"
+  curation-rule-dot:
+    backgroundColor: "{colors.category-2}"
+    rounded: "{rounded.full}"
+    size: "6px"
+  curation-frame:
+    backgroundColor: "{colors.camera}"
+    rounded: "{rounded.sm}"
+    width: "100%"
 ---
 
 # Design System: Spiral Robotics Studio
@@ -293,9 +336,10 @@ make it feel like a precise bench utility rather than a dashboard. Camera pixels
 alone keep a dark mat for honest letterboxing; application chrome never changes
 visual worlds when the operator changes tasks.
 
-The Studio has five primary activities: **Live** for operating hardware and
+The Studio has six primary activities: **Live** for operating hardware and
 recording, **Data** for catalog inspection, import, and query, **Workflow** for deriving and
-querying Spiral relations, **Training** for configuring and observing policy
+querying Spiral relations, **Curation** for judging every episode of a dataset
+against a written recipe, **Training** for configuring and observing policy
 runs, and **Rollout** for staging a trained checkpoint against the configured
 follower. Everything else is a panel. A
 reusable tab-and-tile system lets the operator attach a panel as a tab, split a
@@ -328,8 +372,9 @@ put reads as a bench tool.
 
 - One light neutral world across activity rail, panels, WebGL, plots,
   Timeline, settings, and status bar; camera pixels alone use the dark mat.
-- Live, Data, Workflow, Training, and Rollout are the primary activities; independent
-  content registers as panels instead of growing one-off shell regions.
+- Live, Data, Workflow, Curation, Training, and Rollout are the primary
+  activities; independent content registers as panels instead of growing
+  one-off shell regions.
 - A session-owned tab-and-tile workspace supports docking, tabbing, splitting,
   resizing, keyboard operation, and hot-plugged panel reconciliation.
 - The default Live desktop composition is one-third workbench and
@@ -353,6 +398,13 @@ put reads as a bench tool.
   identity tints; a run animates its edges and shows skeleton rows until Spiral
   answers. Every inference is display-only and the stored value stays exact in
   tooltips and the row inspector.
+- Curation is a contact sheet: a 26% Recipe column at the left and the
+  Sheet, a run strip over the tile grid, at the right. Every episode is a
+  tile; kept tiles stay in full ink on paper, struck tiles recede onto the
+  recess and carry the words of the rule that removed them in that rule's
+  own tint. The selected episode's evidence docks inside the Sheet as the
+  shared side sheet rather than holding a third panel. Workflow and Curation
+  share one document bar, state chip, switcher, and run strip.
 - One playhead synchronizes every representation of an episode.
 - Compact 12px type, 24px controls, 32px panel tabs, small radii, and hairlines.
 - Monospace tabular figures for elapsed time, rates, durations, counts, and IDs.
@@ -405,7 +457,14 @@ small set of semantic, arm, axis, and signal accents.
   Washes for repeated string values in a result table, assigned by a value's
   rank within that result. The wash is the hue at 13%; chip text mixes the hue
   55% toward ink so it clears 4.5:1 on its own wash. The same six hues never
-  encode health, and a chip's text is always the stored value itself.
+  encode health, and a chip's text is always the stored value itself. Curation
+  deals the same six washes to exclusion rules in recipe order as
+  `category-2, 4, 3, 5, 6, 1`, so the first rules sit far from role blue and
+  a lit tile ring is never mistaken for the selected tile's accent ring. A
+  rule's tint paints its 6px mark in the recipe, the reason chip on every
+  tile it struck (same 13% wash / 55% ink-mix recipe), a struck tile's
+  hairline mixed 45% toward the hairline, and the inset ring of the hover
+  sweep.
 - **Joint signal slots** (`{colors.signal-1}` through `{colors.signal-6}`):
   Assigned by joint name in kinematic order so the same joint keeps the same
   trace colour across arms. Every plotted value must also be available as text;
@@ -456,6 +515,11 @@ semantic training-series roles. The panel crate maps its `--rp-*` roles to
 those tokens. Renderer-owned arm and signal colours remain centralized with
 the code that paints them; components do not restate their literals.
 
+**The Blue-Comes-Last Rule.** Identity tints dealt from the category washes
+start away from role blue and reach it last, because the accent already
+means selection. A tint that could be confused with the selection ring is
+never the first one dealt.
+
 **The One-Action-Language Rule.** Product surfaces choose a typed action verb
 from `spiral-robotics-ui`. The shared layer owns interaction state,
 confirmation, focus movement, and target sizing; a feature owns only placement
@@ -505,16 +569,16 @@ tracked kickers, decorative display faces, or all-caps panel titles.
 The first viewport is a full-height application shell:
 
 - a 60px activity rail spanning the body, with
-  Live/Data/Workflow/Training/Rollout at the top and Settings anchored at the
-  bottom;
+  Live/Data/Workflow/Curation/Training/Rollout at the top and Settings
+  anchored at the bottom;
 - the remaining body area owned by one `PanelWorkspace`, without a separate top
   menu row;
 - a 20px bottom status bar for connection, environment, activity, recording,
   torque, rate, and issues;
 - transient notices floating above the shell rather than inserting a new row.
 
-Live, Data, Workflow, Training, and Rollout are activity changes, not panel
-tabs. Each activity registers its own panel set and uses an independent session
+Live, Data, Workflow, Curation, Training, and Rollout are activity changes,
+not panel tabs. Each activity registers its own panel set and uses an independent session
 layout scope. Switching activity therefore changes both the operating
 content and its visualization without moving Live camera tabs into Data, or
 vice versa.
@@ -581,6 +645,32 @@ expanding a data stream exposes its fields for one-by-one selection, and
 clicking a stream name selects it for Messages. Cameras, Plots, the ruler,
 and the stream rows share one playhead and one visible span.
 
+Curation is a contact sheet. Under the same 36px document bar Workflow uses
+(glyph · name ▾ · state chip · Discard Save ▶Run), the `curation-sheet-v2`
+layout scope opens as two tiles: a 26% Recipe column beside the Sheet. There
+is no third panel; the selected episode's evidence docks at the Sheet's
+right edge as the shared 320px side sheet while one is open, so nothing sits
+empty at rest and the whole dataset keeps the height. Workflow and Curation
+share the document bar, state chip, rename form, switcher popover, and run
+strip as one `document-*` / `run-*` class family, so the two document
+activities keep one chrome in the same place. The canonical first-open
+Curation layout is:
+
+```text
+┌── 26% ──┬──────────────── 74% ────────────────┐
+│ Recipe  │ Sheet — run strip over the tile grid │
+│ Source  │                                      │
+│ Measure │  tiles …            ┊ Episode N of M │
+│ Rules   │                     ┊ (side sheet,   │
+│ Transf. │                     ┊  while open)   │
+└─────────┴──────────────────────────────────────┘
+```
+
+Both Curation tiles are dockable workbench panels with a leading tab icon.
+The grid is `repeat(auto-fill, minmax(11rem, 1fr))` with a 6px gap and
+12px sheet padding, so the number of columns follows the tile's width rather
+than a breakpoint; at 1100px the sheet still shows the whole dataset.
+
 Training is curve-first: its first-open composition gives the learning curve
 the dominant visualization area, keeps the literal data path beside it, and
 places resource lanes below. The run builder remains a peer panel at left, and
@@ -639,12 +729,14 @@ StudioShell
 │       │   ├── LiveWorkbench                operate / record semantics
 │       │   ├── DataWorkbench                episode / query semantics
 │       │   ├── WorkflowInspectorPanels       saved graph / node-edit semantics
+│       │   ├── CurationRecipe               recipe / rule semantics
 │       │   ├── TrainingWorkbench            train / observe semantics
 │       │   └── RolloutWorkbench             fixed-follower policy semantics
 │       ├── PrimaryVisualizationPanel
 │       │   ├── Scene
 │       │   ├── QueryResult
 │       │   ├── WorkflowCanvas
+│       │   ├── CurationSheet                tiles; hosts EpisodeSheet in a SideSheet
 │       │   ├── TrainingEvidence
 │       │   └── EmptyOrLoadingState
 │       ├── CameraPanel(s)
@@ -655,6 +747,13 @@ StudioShell
 ├── StatusBar
 └── OverlayLayer                             settings / notices / confirmations
 ```
+
+`SideSheet` is a shared component, not a panel: the docked inspector that
+opens beside a table or grid for the one selected item. It owns the heading,
+the previous / next / close controls, the keyboard (Escape closes, ↑ and ↓
+step), and the entering motion; the caller owns the body. Data's
+`QueryResult` mounts it as the row inspector and `CurationSheet` mounts it
+as `EpisodeSheet`, one episode's facts, verdicts, and frames.
 
 `StudioShell` owns the application frame. `ActivityRail` chooses the active
 activity and owns the bottom-anchored Settings entry. `PanelWorkspace` owns
@@ -789,6 +888,7 @@ physical motion is sent only for the committed seek.
 | Episode catalog, selected episode with attached full data, Data tool, and query | Data Activity Controller | Data Workbench and the complete Data projection |
 | Workflow saved graph, local draft, typed feature definitions, source-derived cache metadata, run snapshot, and terminal result | Workflow Activity Controller, reconciled with backend truth | Node panel, Workflow canvas, Results panel, Assistant, Status Bar |
 | Workflow Assistant readiness, bounded project-scoped conversations, active selection/turn, and typed tool summaries/receipts | Backend Workflow agent, reconciled by the Workflow Activity Controller | Assistant panel; canvas and Results consume only authoritative Workflow state |
+| Curation saved recipe, local draft, judged run outcome, hovered rule, sheet filter, lens and order, and selected episode | Curation Activity Controller, reconciled with backend truth | Recipe, Sheet (with the docked EpisodeSheet), document bar, Status Bar |
 | Rollout checkpoint, execution inputs, fixed follower, and readiness | Rollout Activity Controller, reconciled with backend truth | Rollout Workbench, live Scene, follower Camera, Inference lane |
 | Timeline subject, playhead, preview playback, and Follow Live | Timeline Controller within the active activity | Scene, Cameras, Signals, Timeline |
 | Panel geometry and active tab | `PanelWorkspace` | Panel chrome and persisted layout only |
@@ -889,7 +989,9 @@ reserved for an object that genuinely floats above the shell.
 - **Floating notice** (`0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1)`):
   Settings-adjacent popovers and bottom notices only.
 - **Inset state** (`inset 0 0 0 1px currentColor`): Selection and disabled
-  state, not elevation.
+  state, not elevation. The contact sheet uses the same 1px inset ring in
+  the accent for the selected tile and in the hovered rule's tint
+  (`inset 0 0 0 1px var(--tile-tone)`) for every tile that rule struck.
 
 ### Named Rules
 
@@ -1015,15 +1117,36 @@ This is the signature component system.
 - **Reduced motion:** All panel transitions and entry animations are removed
   under `prefers-reduced-motion`.
 
+### Side Sheet
+
+The docked inspector shared by Data's row inspector and Curation's episode
+evidence (`.side-sheet`, `components/side_sheet.rs`). One component, two
+callers; the callers own only the body.
+
+- **Geometry:** 320px wide, at most 45% of its tile, `shrink-0`, a left
+  hairline, paper surface, its own vertical scroll. It sits at the right edge
+  of the table or grid it inspects and takes width from it; it never overlays.
+- **Heading:** Sticky, 36px minimum, hairline below, 12px/6px padding:
+  a 12px semibold tabular title ("Row N", "Episode N") with the detail
+  ("of M") in regular weight and faint ink, then a `↑ ↓ ×` icon-action group
+  at 1px gaps. Focus lands on the title when the sheet opens (2px accent
+  outline at 3px offset); the step actions disable at either end.
+- **Keyboard:** Escape closes and returns focus to the invoking tile or row;
+  ↑ and ↓ step to the neighbour. The same keys are on the actions' tooltips.
+- **Motion:** Enters over 180ms on `--ease-out-expo` from 6px right;
+  removed under `prefers-reduced-motion`.
+
 ### Application Chrome
 
 - **Activity rail:** 60px wide on desktop and the only global navigation
-  surface. Live, Data, Workflow, Training, and Rollout stay at the top, in that
-  order; Settings stays at the bottom. Active activities use blue ink, a paper
+  surface. Live, Data, Workflow, Curation, Training, and Rollout stay at the
+  top, in that order; Settings stays at the bottom. Active activities use blue ink, a paper
   surface, and a 2px left edge. There is no separate top menu.
 - **Status bar:** 20px, 10px type, hairline-separated facts. It owns global
   connection, environment, current activity, recording, holding, rate, and
-  issue truth.
+  issue truth. In Curation it reads connection · dataset · the run phase only
+  while it is news (Running or Failed; hidden when idle or complete) · the
+  verdict "N of M kept" in the accent.
 
 ### Workbench Sections
 
@@ -1059,8 +1182,11 @@ from a tall column at the side.
   about five rows of previews. The `workflow-investigation-v12` layout scope
   applies this arrangement; every tile remains a dockable, resizable workbench
   panel with a leading tab icon.
-- **Document bar:** A 36px paper line with a lower hairline. After the glyph
-  and the view switch, the name as a quiet 12px semibold button with a 12px
+- **Document bar:** A 36px paper line with a lower hairline, shared with
+  Curation as the `document-bar` family (identity, glyph, title, name, state
+  chip, actions, rename form, run action, switcher, and backdrop) and the
+  `run-strip` family (phase, select, count, duration, elapsed, executed SQL).
+  After the glyph and the view switch, the name as a quiet 12px semibold button with a 12px
   chevron that turns when open, and a keyed 11px state chip with a 6px dot
   (Saved · green dot, Unsaved changes · ochre, Changed in another session ·
   red) sit at left; Discard, Save, and the filled Run with a play glyph sit at
@@ -1168,11 +1294,13 @@ from a tall column at the side.
   timestamps read as `YYYY-MM-DD HH:MM:SS.mmm` UTC in soft ink with the raw
   value in the tooltip; identifiers and paths sit last in faint mono. Rows
   enter 260ms each and 14ms apart, hover washes the row, and any cell click
-  opens the inspector. The inspector is a 320px side sheet (at most 45% of the
-  tile) that enters over 180ms: a sticky "Row N of M" heading, previous/next/
-  close, images at 16:9, then exact values in 11px mono under 10px mono field
-  names. Up and Down arrows step rows; Escape closes and returns focus to the
-  invoking action. No count, class, or total is inferred by the presentation.
+  opens the inspector. The inspector is the shared side sheet (see "Side
+  Sheet" above) headed "Row N" with a faint "of M": images at 16:9
+  (`query-row-inspector-media`), then exact values in 11px mono under 10px
+  mono field names (`query-row-inspector-facts`); those two body classes
+  remain Data's. Up and Down arrows step rows; Escape closes and returns
+  focus to the invoking action. No count, class, or total is inferred by the
+  presentation.
 - **Empty workflow:** The Assistant does the teaching ("What should we find?"
   with two example asks); Graph, Details, and Results each show one faint
   11px line saying what will appear there, with no icon or title, so a new
@@ -1216,6 +1344,124 @@ from a tall column at the side.
   activity, and presence dots, the 700ms edge dashes, the 1.4s skeleton
   shimmer, and the 900ms spinner. All of it is removed under
   `prefers-reduced-motion`.
+
+### Curation Workbench
+
+**Mark the contact sheet.** The whole dataset is visible at once; the recipe
+says in words why an episode leaves, and the sheet shows the consequence.
+Rule identity is one of the six category washes and is never the only
+carrier: every reason chip prints the rule's own words. Nothing on the
+surface is said twice.
+
+- **Composition:** The shared 36px document bar (glyph, name ▾, state chip,
+  Discard while dirty, Save, filled ▶Run), then the `curation-sheet-v2`
+  scope: the 26% Recipe column beside the Sheet. Recipe holds Source,
+  Measurements, Rules, and Transforms as hairline-separated sections; the
+  Sheet is a run strip over the tile grid, with the selected episode's
+  evidence docked at its right edge in the shared side sheet. There is no
+  dataset chip in the bar: the dataset is named once, in Source.
+- **Document actions:** Save is disabled only when there is nothing to save
+  (tooltip "Everything is saved."), while loading, or on a revision
+  conflict, which swaps Discard for an outline "Reload current". Run stays
+  enabled while the recipe is merely incomplete; pressing it reports what is
+  missing in the status bar and the same words sit on Run's tooltip. Run
+  disables only for a load error, a pending command, or a run in progress
+  (spinner + "Judging"). ⌘/Ctrl+Enter runs from anywhere in the workspace.
+- **Recipe section:** An 11px medium soft-ink title with the count in 10px
+  faint mono at the right, 10px/12px/12px padding, a lower hairline. A
+  section's one add control is a 24px select ("Add a measurement…"), so a
+  section grows by one line rather than a row of buttons; Rules alone adds
+  with an outline "Add rule". Notes are 11px faint at 16px leading; an alert
+  note turns brick red. Source's facts (episode count, recorded time) are
+  one 10px soft-ink mono line; the source caution ("Dataset list unavailable
+  · type its catalog name") is one truncating 10px ochre line. The Transforms
+  note shows only while the section is empty.
+- **Measurement and transform rows:** One line each (`curation-fact`),
+  separated by hairlines, 6px vertical padding: a 12px chevron, the 12px
+  medium label, then what tells it from another of its kind in 10px faint
+  mono (`curation-fact-detail`, truncating), and the remove action at the
+  right. No kind chip. The row opens when it still needs something or when
+  the operator asks; the open body is an `auto minmax(0,1fr)` label/value
+  grid in 11px soft ink over 24px fields.
+- **Rule sentence:** Two lines (`curation-rule`, 6px padding, 4px gap). Line
+  one: the mark · "If" · fact select (≥ 5.5rem, grows) · the comparison
+  grouped in `curation-condition-test` (op ≤ 7.5rem, value 3.5rem) so a
+  wrap breaks before the comparison, never inside it. Line two: "exclude
+  as" · reason input (≥ 6rem, grows) · the count ("N removed", 11px
+  semibold mono over 10px faint) · remove. Words are 11px faint ink; blanks
+  are 24px fields. Every builtin fact sits in the fact select under "Every
+  episode"; nothing lists them elsewhere.
+- **Rule mark:** A 16px round transparent button (`curation-rule-mark`) is
+  the rule's handle and its switch. It holds a 6px dot filled in the rule's
+  tint with a 1px ring of the same tint; `aria-pressed` reports the rule
+  active. A paused rule keeps the ring and loses the fill, and its words
+  fade to 0.55. Hover scales the dot 1.35 over 120ms. Hovering or focusing
+  the mark, or the "N removed" count, lights the rule's tiles on the sheet
+  and washes the rule row with the hover tone over 100ms; the words beside
+  the mark do not light anything, so editing leaves the sheet alone.
+- **Run strip:** Phase with its dot; a `run-select` of runs only when there
+  is more than one; the All · Kept · Excluded filter as Workflow's 22px
+  compact segments, each carrying its total as a `strong` 11px semibold mono
+  count, so the strip has no separate totals line; the lens "Tiles
+  ⟨measurement ▾⟩" (`curation-lens`, faint word + `run-select`) beside a
+  three-state quiet order button (`curation-order`: Dataset order · Lowest
+  first · Highest first); Spiral's judging time; a caution chip "Sheet
+  truncated" when the list is bounded; the executed SQL. A stale run keeps
+  Workflow's "Previous run" notice.
+- **Contact-sheet tile:** `minmax(11rem, 1fr)` grid, 6px gap, paper with a
+  1px hairline, 4px radius, 6px/8px padding, 4px internal gap. Head: the
+  ordinal in 11px medium soft-ink mono (2ch minimum; the one certain
+  identity on a sheet where task names repeat), then the 12px medium name
+  clamped to two lines. Line: the 10px soft mono clock at the left and the
+  lensed value at the right (≤ 62%, truncating). Duration is the tile's own
+  baseline: a 2px strong-line rule along the bottom edge whose width is the
+  episode's fill against the sheet's longest, drawn on kept tiles only and
+  animating its width over 260ms. Hover darkens the hairline to strong-line;
+  the selected tile takes the accent hairline and a 1px inset accent ring.
+- **Struck tile:** On the recess with faint ink for name and clock, the name
+  at regular weight, the hairline mixed 45% toward the rule's tint, no
+  baseline, and the reason chip given the whole second line so it may wrap.
+  A struck tile keeps its name legible: exclusion is a decision, not an
+  error.
+- **Reason chip:** 10px medium, 4px radius, 1px/6px padding, the rule's hue
+  at 13% wash with text mixed 55% toward ink (the result-chip recipe). More
+  than one reason adds a "+N" in faint mono.
+- **Hover sweep:** While a rule's mark or count is hovered, the tiles it
+  struck take a 1px inset ring in its tint and every other tile fades to
+  opacity 0.32, so the sheet becomes the rule's answer.
+- **Skeletons:** Tiles of 3.5rem minimum height shimmering recess → hover →
+  recess over 1.4s, entering 40ms apart, until the run answers.
+- **Episode evidence:** Inside the shared side sheet headed "Episode N" with
+  a faint "of M", the body (`curation-episode`, 12px padding, 12px gaps) is:
+  a 6px status dot (connection green for kept, faint ink for excluded) with
+  the 11px medium verdict word, the task label as a 12px semibold `h4`, the
+  source path in 10px faint mono; a stat grid (`minmax(6.5rem, 1fr)`) with
+  10px faint terms and 12px mono values; then evidence blocks under 11px
+  medium soft-ink titles: Measurements as an `auto minmax(0,1fr)` key–value
+  list where the key never truncates and the mono value truncates at the
+  right; Rules as verdict rows led by the rule dot, ink when fired and faint
+  when clear, with "excluded" / "clear" in 10px mono; Transforms the same
+  way ("applies" / "skipped" / "not kept"). Sampled frames load the moment
+  the sheet opens (a spinner line "Decoding N sampled frames…" while they
+  decode) as full-width 16:9 figures on the camera mat with 10px mono
+  captions.
+- **Status bar:** connection · dataset · phase only while Running or Failed
+  · the accent verdict "N of M kept".
+- **Motion:** Tiles enter over 260ms on `--ease-out-expo` with a 3px rise,
+  staggered 12ms; opacity, ring, and hairline changes settle in 160ms on the
+  same easing; the dot's fill and scale in 120ms; only the skeleton shimmer
+  loops; all of it is removed under `prefers-reduced-motion`.
+
+**The Struck-Not-Erased Rule.** An excluded episode stays on the sheet with
+its name legible and the reason in words. Exclusion dims and tints; it never
+hides, shrinks, or strikes the text through.
+
+**The Said-Once Rule.** A fact has one home on the Curation surface. The
+dataset is named in Source, not in the document bar or a chip; the totals
+live in the filter segments, not in a count line; the phase appears in the
+status bar only while it is news and yields to the verdict when the run
+completes; a run is numbered only once there is more than one. Do not add a
+second reading of a value that is already on the page.
 
 ### Timeline
 
@@ -1518,9 +1764,9 @@ in progress; and every animation is removed under `prefers-reduced-motion`.
 - **Do** render exceptional status only when it helps the operator act.
 - **Do** put disabled-action reasons and physical consequences on the page.
 - **Do** move robot and destination configuration into Settings.
-- **Do** keep Live, Data, Workflow, Training, and Rollout layout state independent, and
-  keep episode selection and camera ownership activity-scoped so switching
-  cannot move content between them.
+- **Do** keep Live, Data, Workflow, Curation, Training, and Rollout layout
+  state independent, and keep episode selection and camera ownership
+  activity-scoped so switching cannot move content between them.
 - **Do** make Workflow relation-first: multiple Spiral Table roots may converge
   through Query and Model nodes; each Model consumes a visible SQL candidate
   cohort and owns a visible source-derived Studio feature cache.
@@ -1539,6 +1785,11 @@ in progress; and every animation is removed under `prefers-reduced-motion`.
   category chips at 13% wash, 2px measure bars anchored at zero when a column
   crosses it, UTC clock time, faint mono identity, and one syntax palette for
   SQL and rendered expressions.
+- **Do** keep Curation a contact sheet: a 26% Recipe column beside the
+  Sheet, one tile per episode in a `minmax(11rem, 1fr)` grid, struck tiles
+  on the recess with the rule's words in the rule's tint, the selected
+  episode's evidence docked in the shared side sheet, and the shared document
+  bar and run strip in the same place as Workflow's.
 - **Do** route workbench, Timeline, panel-focus, and backend events through one
   activity controller that derives the complete visible projection.
 - **Do** represent Live, Recorded Loading, Recorded Ready, Recorded Unavailable,
@@ -1573,8 +1824,8 @@ in progress; and every animation is removed under `prefers-reduced-motion`.
   presentation such as `Button`; name the action's domain intent or the layout
   responsibility.
 - **Don't** turn every tool into primary navigation. Live, Data, Workflow,
-  Training, and Rollout are activities; panel tabs are spatial grouping inside
-  them.
+  Curation, Training, and Rollout are activities; panel tabs are spatial
+  grouping inside them.
 - **Don't** put Hugging Face, MCAP, URLs, repository selectors, or import
   controls on the Workflow canvas. Import into Spiral first, then read the
   resulting Table relations.
@@ -1629,3 +1880,7 @@ in progress; and every animation is removed under `prefers-reduced-motion`.
 - **Don't** add a second easing curve, a looping animation that outlives the
   work it reports, or a resting shadow on anything that is not standing on the
   graph bench.
+- **Don't** rebuild Curation as a query builder over a results table, hide
+  excluded episodes from the sheet, deal a rule tint that reads as role blue
+  first, let a tint stand without the rule's words on the tile, or give the
+  selected episode a third panel that sits empty at rest.

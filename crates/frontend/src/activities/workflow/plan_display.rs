@@ -43,7 +43,7 @@ pub(super) fn WorkflowPlanDisplay(
             match WorkflowGraph::from_plan(report.logical()) {
                 Ok(graph) => rsx! { WorkflowPlanGraph { graph, report, active, focus_stage, on_select } },
                 Err(error) => rsx! {
-                    div { class: "workflow-panel-empty", role: "alert",
+                    div { class: "panel-empty", role: "alert",
                         strong { "The graph needs native expression metadata" }
                         p { "{error}" }
                     }
@@ -366,7 +366,7 @@ fn WorkflowOverview(report: SpiralPlanReport, focus_stage: Signal<Option<String>
     let graph = WorkflowGraph::from_plan(report.logical()).ok();
     let Some(graph) = graph else {
         return rsx! {
-            div { class: "workflow-panel-empty",
+            div { class: "panel-empty",
                 strong { "Select a stage" }
                 p { "Each stage explains what it does, what it reads or requires, and the columns it adds." }
             }
@@ -521,7 +521,7 @@ pub(super) fn WorkflowGraphInspector(
                 None => match report {
                     Some(report) => rsx! { WorkflowOverview { report, focus_stage } },
                     None => rsx! {
-                        div { class: "workflow-panel-empty is-quiet",
+                        div { class: "panel-empty is-quiet",
                             p { "Stage details appear here once the graph exists: what each stage reads, requires, and produces." }
                         }
                     },

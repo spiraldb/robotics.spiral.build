@@ -24,6 +24,7 @@ impl DatasetQueryEndpoints {
         routes.post("/datasets/topic-coverage", Self::topic_coverage);
         routes.get("/relations", Self::relation_catalog);
         routes.post("/queries", Self::run_spiral_query);
+        routes.post("/queries/episode", Self::run_episode_query);
         routes.post(
             "/datasets/hugging-face/inspect",
             Self::inspect_hugging_face_dataset,
@@ -85,6 +86,12 @@ impl DatasetQueryEndpoints {
         let (statement, max_rows) = request.into_parts();
         let result = commands.query(statement, max_rows).await?;
         Ok(Json(result))
+    }
+    async fn run_episode_query(
+        ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,
+        ApiJson(request): ApiJson<spiral_robotics_common::relations::EpisodeQueryRequest>,
+    ) -> Result<Json<SpiralQuerySnapshot>, HttpFailure> {
+        Ok(Json(commands.query_for_episode(request).await?))
     }
     async fn inspect_hugging_face_dataset(
         ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,

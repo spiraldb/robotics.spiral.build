@@ -60,6 +60,19 @@ pub(crate) fn WorkflowIcon() -> Element {
     }
 }
 
+/// A contact sheet with one frame struck out: keep most, exclude some.
+#[component]
+pub(crate) fn CurationIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            rect { x: "2.5", y: "2.5", width: "4.5", height: "4.5", rx: "0.75" }
+            rect { x: "9", y: "2.5", width: "4.5", height: "4.5", rx: "0.75" }
+            rect { x: "2.5", y: "9", width: "4.5", height: "4.5", rx: "0.75" }
+            path { d: "M9.75 9.75l3 3M12.75 9.75l-3 3" }
+        }
+    }
+}
+
 #[component]
 pub(crate) fn TableNodeIcon() -> Element {
     rsx! {

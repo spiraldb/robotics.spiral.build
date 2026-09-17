@@ -3,6 +3,8 @@
 // SeaORM's derives require public fields/types; entities stay private to storage.
 #[allow(unreachable_pub)]
 mod backend_settings;
+#[allow(unreachable_pub)]
+pub(crate) mod curations;
 mod migrations;
 #[allow(unreachable_pub)]
 pub(crate) mod robots;

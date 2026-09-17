@@ -14,6 +14,7 @@ pub(crate) enum CatalogLeaseOwner {
     Recording,
     DatasetImport,
     WorkflowStart,
+    CurationStart,
     StudioCatalogRead,
 }
 

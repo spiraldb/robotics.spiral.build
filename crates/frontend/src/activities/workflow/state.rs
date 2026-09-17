@@ -1,13 +1,14 @@
 //! Browser-owned workflow document, authoring state, and run observations.
 use crate::activities::workflow::WorkflowClient;
 use crate::client::queries::{QueryDomain, QueryPolicy, QueryRefresh};
+use crate::client::runs::RunLedger;
 use std::collections::BTreeMap;
 
 use dioxus::prelude::*;
 use dioxus_workbench::PanelId;
 use spiral_robotics_common::workflow::{
-    WorkflowAgentArtifactReceipt, WorkflowRunPhase, WorkflowRunSnapshot, WorkflowSpec,
-    WorkflowSummary, WorkflowValidationReport,
+    WorkflowAgentArtifactReceipt, WorkflowRunSnapshot, WorkflowSpec, WorkflowSummary,
+    WorkflowValidationReport,
 };
 
 use super::agent::{WorkflowAgentState, WorkflowAssistant};
@@ -164,8 +165,8 @@ impl WorkflowController {
     pub(crate) fn executed_query(&self) -> Option<WorkflowSpec> {
         self.visible_run().map(|run| run.workflow().clone())
     }
-    pub(super) fn observe_run(self, run: WorkflowRun) {
-        self.accept_runs(vec![run]);
+    pub(super) fn observe_run(mut self, run: WorkflowRun) {
+        self.document.runs.accept_runs(vec![run]);
     }
     pub(super) async fn submit_query(
         mut self,
@@ -686,85 +687,7 @@ impl WorkflowController {
         self,
         runs: Resource<Result<Vec<WorkflowRun>, crate::client::CommandError>>,
     ) {
-        use_effect(move || {
-            // Subscribe even while the first request is pending; finished() is nonreactive.
-            let records = runs.read();
-            if runs.finished()
-                && let Some(Ok(records)) = records.as_ref()
-            {
-                self.accept_runs(records.clone());
-            }
-        });
-    }
-    fn accept_runs(mut self, incoming: Vec<WorkflowRun>) {
-        let changed = incoming.iter().any(|run| {
-            self.document
-                .runs
-                .peek()
-                .iter()
-                .find(|current| current.snapshot().run_id() == run.snapshot().run_id())
-                .is_none_or(|current| current != run && current.snapshot().accepts(run.snapshot()))
-        });
-        if !changed {
-            return;
-        }
-        let mut runs = self.document.runs.write();
-        for run in incoming {
-            match runs
-                .iter_mut()
-                .find(|current| current.snapshot().run_id() == run.snapshot().run_id())
-            {
-                Some(current) if current.snapshot().accepts(run.snapshot()) => *current = run,
-                Some(_) => {}
-                None => runs.push(run),
-            }
-        }
-        drop(runs);
-    }
-}
-
-trait WorkflowSnapshotReconciliation {
-    fn accepts(&self, incoming: &WorkflowRunSnapshot) -> bool;
-}
-
-impl WorkflowSnapshotReconciliation for WorkflowRunSnapshot {
-    fn accepts(&self, incoming: &WorkflowRunSnapshot) -> bool {
-        if incoming.workflow_id() != self.workflow_id()
-            || incoming.workflow_revision() != self.workflow_revision()
-        {
-            return false;
-        }
-
-        if incoming.run_id() != self.run_id() {
-            return match (&self.run_id(), &incoming.run_id()) {
-                (None, Some(_)) => true,
-                (Some(_), None) => false,
-                (Some(_), Some(_)) => incoming.started_ms() > self.started_ms(),
-                (None, None) => true,
-            };
-        }
-        if incoming.updated_ms() != self.updated_ms() {
-            return incoming.updated_ms() > self.updated_ms();
-        }
-
-        incoming.phase().monotonic_rank() >= self.phase().monotonic_rank()
-    }
-}
-
-trait WorkflowRunPhaseReconciliation {
-    fn monotonic_rank(self) -> u8;
-}
-
-impl WorkflowRunPhaseReconciliation for WorkflowRunPhase {
-    fn monotonic_rank(self) -> u8 {
-        match self {
-            WorkflowRunPhase::Idle => 0,
-            WorkflowRunPhase::Validating => 1,
-            WorkflowRunPhase::Running => 2,
-            WorkflowRunPhase::Completed
-            | WorkflowRunPhase::Failed
-            | WorkflowRunPhase::Interrupted => 4,
-        }
+        self.document.runs.observe(runs);
     }
 }
 
@@ -819,6 +742,7 @@ mod run_observation_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use spiral_robotics_common::workflow::WorkflowRunPhase;
 
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn an_inflight_save_updates_the_baseline_version_without_losing_new_edits() {

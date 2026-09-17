@@ -1356,77 +1356,77 @@
     min-height: 0;
   }
 
-  /* Document bar: identity on the left, the three document actions on the
-     right, one 36px line. Switching, creating, and renaming open behind the
-     title so the bar never grows a second row of controls. */
+  /* Document bar (shared by Workflow and Curation): identity on the left,
+     the activity's actions on the right, one 36px line. Switching, creating,
+     and renaming open behind the title so the bar never grows a second row. */
   /* The bar sits above the workbench so its popover clears the panels'
      own layers (the graph's node and edge tiles are z-indexed). */
-  .workflow-document-bar {
+  .document-bar {
     @apply relative z-30 flex min-h-9 shrink-0 items-center gap-2 border-b border-line bg-surface pl-3 pr-2;
   }
 
-  .workflow-document-identity {
+  .document-identity {
     @apply relative flex min-w-0 flex-1 items-center gap-1;
   }
 
-  .workflow-document-glyph {
+  .document-glyph {
     @apply inline-flex size-6 shrink-0 items-center justify-center text-ink-faint;
   }
 
-  .workflow-document-title {
+  .document-title {
     @apply min-w-0 max-w-[40rem] gap-1 px-1.5 text-[12px] font-semibold tracking-[-0.01em] text-ink;
   }
 
   /* The chevron points where the switcher will open, and turns when it has. */
-  .workflow-document-title .ui-icon {
+  .document-title .ui-icon {
     @apply size-3 shrink-0 text-ink-faint;
     rotate: 90deg;
     transition: rotate 160ms var(--ease-out-expo);
   }
 
-  .workflow-document-title[aria-expanded="true"] .ui-icon {
+  .document-title[aria-expanded="true"] .ui-icon {
     rotate: -90deg;
   }
 
-  .workflow-document-name {
+  .document-name {
     @apply truncate;
   }
 
-  .workflow-rename {
+  .document-rename {
     @apply flex min-w-0 items-center gap-1;
   }
 
-  .workflow-name-input {
+  .document-name-input {
     @apply h-6 w-72 max-w-full rounded border border-line bg-surface px-1.5 text-[12px] font-semibold text-ink outline-none focus-visible:border-accent focus-visible:ring-2 focus-visible:ring-accent/15;
   }
 
-  .workflow-document-state {
+  .document-state {
     @apply inline-flex min-h-6 shrink-0 items-center gap-1.5 px-1.5 text-[11px] text-ink-faint;
     animation: workflow-settle 220ms var(--ease-out-expo) both;
   }
 
-  .workflow-document-state-dot {
+  .document-state-dot {
     @apply size-1.5 rounded-full;
     background: var(--tone-ink-faint);
   }
 
-  .workflow-document-state.is-saved .workflow-document-state-dot {
+  .document-state.is-saved .document-state-dot {
     background: var(--tone-good);
   }
 
-  .workflow-document-state.is-draft {
+  .document-state.is-draft {
     @apply text-caution;
   }
 
-  .workflow-document-state.is-draft .workflow-document-state-dot {
+  .document-state.is-draft .document-state-dot {
     background: var(--tone-caution);
   }
 
-  .workflow-document-state.is-conflict {
+  .document-state.is-conflict {
     @apply text-danger;
   }
 
-  .workflow-document-state.is-conflict .workflow-document-state-dot {
+  .document-state.is-conflict .document-state-dot {
     background: var(--tone-danger);
   }
 
@@ -1444,29 +1444,29 @@
     }
   }
 
-  .workflow-document-actions {
+  .document-actions {
     @apply ml-auto flex shrink-0 items-center gap-1;
   }
 
-  .workflow-run-action {
+  .document-run-action {
     @apply min-w-[4.5rem] gap-1.5 pl-2 pr-2.5;
   }
 
-  .workflow-run-action .ui-icon {
+  .document-run-action .ui-icon {
     @apply size-3;
   }
 
-  .workflow-run-action .ui-icon:not(.ui-icon--spin) {
+  .document-run-action .ui-icon:not(.ui-icon--spin) {
     fill: currentColor;
     stroke-width: 1;
   }
 
   /* The switcher floats from the title. A transparent backdrop closes it. */
-  .workflow-popover-backdrop {
+  .popover-backdrop {
     @apply fixed inset-0 z-30;
   }
 
-  .workflow-switcher {
+  .document-switcher {
     @apply absolute left-0 top-full z-40 mt-1.5 flex w-80 flex-col overflow-hidden rounded-md border border-line bg-surface;
     max-width: calc(100vw - 6rem);
     box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
@@ -1480,34 +1480,34 @@
     }
   }
 
-  .workflow-switcher-list {
+  .document-switcher-list {
     @apply max-h-72 overflow-y-auto p-1;
   }
 
-  .workflow-switcher-option {
+  .document-switcher-option {
     @apply w-full gap-2 pr-2 text-[12px];
   }
 
-  .workflow-switcher-option .ui-icon {
+  .document-switcher-option .ui-icon {
     @apply ml-auto size-3.5 shrink-0;
   }
 
-  .workflow-switcher-name {
+  .document-switcher-name {
     @apply min-w-0 truncate;
   }
 
-  .workflow-switcher-empty,
-  .workflow-switcher-note {
+  .document-switcher-empty,
+  .document-switcher-note {
     @apply px-3 py-2 text-[11px] text-ink-faint;
   }
 
   /* Why the list below is disabled, said once at the top of the popover
      instead of permanently in the bar. */
-  .workflow-switcher-note.is-blocking {
+  .document-switcher-note.is-blocking {
     @apply border-b border-line bg-caution-soft text-caution;
   }
 
-  .workflow-switcher-actions {
+  .document-switcher-actions {
     @apply grid gap-2 border-t border-line p-2;
   }
 
@@ -1523,38 +1523,38 @@
     @apply h-6 min-w-0 flex-1 rounded border border-line bg-surface px-1.5 text-[12px] text-ink outline-none focus-visible:border-accent;
   }
 
-  .workflow-switcher-rename {
+  .document-switcher-rename {
     @apply justify-self-start;
   }
 
   /* Shared empty and pending states inside any workflow tile. */
-  .workflow-panel-empty {
+  .panel-empty {
     @apply flex h-full min-h-0 flex-1 flex-col items-center justify-center gap-1 px-6 py-6 text-center;
   }
 
-  .workflow-panel-empty > .ui-icon {
+  .panel-empty > .ui-icon {
     @apply mb-1 size-5 text-ink-faint;
   }
 
-  .workflow-panel-empty strong {
+  .panel-empty strong {
     @apply text-[12px] font-semibold text-ink;
   }
 
-  .workflow-panel-empty p {
+  .panel-empty p {
     @apply max-w-[46ch] text-[11px] leading-4 text-ink-faint;
   }
 
-  .workflow-panel-empty .ui-action {
+  .panel-empty .ui-action {
     @apply mt-2;
   }
 
   /* Before a workflow exists the Assistant does the teaching; the other
      panes only say what will appear in them. */
-  .workflow-panel-empty.is-quiet p {
+  .panel-empty.is-quiet p {
     @apply max-w-[40ch] text-ink-faint;
   }
 
-  .workflow-inline-error {
+  .inline-error {
     @apply shrink-0 border-b border-line bg-danger-soft px-3 py-1.5 text-[11px] leading-4 text-danger;
     overflow-wrap: anywhere;
   }
@@ -1877,100 +1877,144 @@
     @apply flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden bg-surface text-ink;
   }
 
-  .workflow-run-strip {
+  .run-strip {
     @apply flex min-h-8 shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-line bg-surface px-3 py-1 text-[11px] text-ink-soft;
   }
 
-  .workflow-run-phase {
+  .run-phase {
     @apply inline-flex items-center gap-1.5 font-medium text-ink;
   }
 
-  .workflow-run-phase-dot {
+  .run-phase-dot {
     @apply size-1.5 shrink-0 rounded-full;
     background: var(--tone-ink-faint);
   }
 
-  .workflow-run-phase.is-complete .workflow-run-phase-dot {
+  .run-phase.is-complete .run-phase-dot {
     background: var(--tone-good);
   }
 
-  .workflow-run-phase.is-running .workflow-run-phase-dot,
-  .workflow-run-phase.is-validating .workflow-run-phase-dot {
+  .run-phase.is-running .run-phase-dot,
+  .run-phase.is-validating .run-phase-dot {
     background: var(--tone-accent);
     animation: workflow-pulse 900ms ease-in-out infinite;
   }
 
-  .workflow-run-phase.is-failed .workflow-run-phase-dot {
+  .run-phase.is-failed .run-phase-dot {
     background: var(--tone-danger);
   }
 
-  .workflow-run-phase.is-interrupted .workflow-run-phase-dot {
+  .run-phase.is-interrupted .run-phase-dot {
     background: var(--tone-caution);
   }
 
-  .workflow-run-select {
+  .run-select {
     @apply h-6 max-w-56 rounded border border-line bg-surface px-1.5 text-[11px] text-ink outline-none focus-visible:border-accent focus-visible:ring-2 focus-visible:ring-accent/15;
   }
 
-  .workflow-run-single {
+  .run-single {
     @apply text-ink-faint;
   }
 
-  .workflow-run-count {
+  .run-count {
     @apply inline-flex items-baseline gap-1 text-ink-soft;
   }
 
-  .workflow-run-count strong {
+  .run-count strong {
     @apply font-mono text-[12px] font-semibold text-ink tabular-nums;
   }
 
-  .workflow-run-duration,
-  .workflow-run-elapsed {
+  .run-duration,
+  .run-elapsed {
     @apply font-mono text-[11px] text-ink-faint tabular-nums;
   }
 
-  .workflow-run-elapsed {
+  .run-elapsed {
     @apply text-accent;
   }
 
-  .workflow-executed-sql {
+  .executed-sql {
     @apply ml-auto min-w-0 text-[11px];
   }
 
-  .workflow-executed-sql > summary {
+  .executed-sql > summary {
     @apply inline-flex min-h-6 cursor-pointer select-none items-center gap-1 rounded px-1.5 text-ink-soft hover:bg-hover hover:text-ink;
     list-style: none;
   }
 
-  .workflow-executed-sql > summary::-webkit-details-marker {
+  .executed-sql > summary::-webkit-details-marker {
     display: none;
   }
 
-  .workflow-executed-sql > summary:focus-visible {
+  .executed-sql > summary:focus-visible {
     outline: 2px solid var(--tone-accent);
     outline-offset: 1px;
   }
 
-  .workflow-executed-sql > summary .ui-icon {
+  .executed-sql > summary .ui-icon {
     @apply size-3;
   }
 
-  .workflow-executed-sql[open] {
+  .executed-sql[open] {
     flex-basis: 100%;
   }
 
-  .workflow-executed-sql pre {
+  .executed-sql pre {
     @apply mt-1 max-h-40 overflow-auto rounded border border-line bg-sunken px-2.5 py-2 font-mono text-[10px] leading-4 text-ink;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
   }
 
-  .workflow-results-stale {
+  .results-stale {
     @apply flex shrink-0 flex-wrap items-baseline gap-x-2 border-b border-line bg-caution-soft px-3 py-1.5 text-[10px] text-caution;
   }
 
-  .workflow-results-stale strong {
+  .results-stale strong {
     @apply font-medium;
+  }
+
+  /* Side sheet (shared by Data's row inspector and Curation's episode
+     sheet): a 320px docked inspector beside a table or grid, at most 45% of
+     its tile. A sticky heading carries the position and the step / close
+     controls; Escape closes, ↑ and ↓ step. */
+  .side-sheet {
+    @apply flex w-80 max-w-[45%] shrink-0 flex-col overflow-y-auto border-l border-line bg-surface;
+    animation: side-sheet-enter 180ms var(--ease-out-expo) both;
+  }
+
+  @keyframes side-sheet-enter {
+    from {
+      opacity: 0;
+      translate: 6px 0;
+    }
+  }
+
+  .side-sheet-heading {
+    @apply sticky top-0 z-[1] flex min-h-9 shrink-0 items-center justify-between gap-2 border-b border-line bg-surface pl-3 pr-1.5;
+  }
+
+  .side-sheet-heading h3 {
+    @apply m-0 min-w-0 truncate text-[12px] font-semibold tabular-nums;
+  }
+
+  .side-sheet-heading h3:focus-visible {
+    outline: 2px solid var(--tone-accent);
+    outline-offset: 3px;
+    border-radius: 4px;
+  }
+
+  .side-sheet-count {
+    @apply font-normal text-ink-faint;
+  }
+
+  .side-sheet-nav {
+    @apply flex shrink-0 items-center gap-px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .side-sheet {
+      animation: none;
+    }
   }
 
   .workflow-result-body {
@@ -2490,12 +2534,12 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .workflow-document-state,
-    .workflow-switcher,
+    .document-state,
+    .document-switcher,
     .workflow-stage-card,
     .workflow-inspector-body,
     .workflow-assistant-jump .ui-action,
-    .workflow-run-phase-dot,
+    .run-phase-dot,
     .workflow-activity-dot,
     .workflow-tool-step-dot,
     .workflow-assistant-presence::before {
@@ -2504,7 +2548,7 @@
 
     .workflow-stage-card,
     .workflow-composer-field,
-    .workflow-document-title .ui-icon {
+    .document-title .ui-icon {
       transition: none;
     }
 
@@ -3053,40 +3097,6 @@
     background: var(--tone-ink-faint);
   }
 
-  .query-row-inspector {
-    @apply flex w-80 max-w-[45%] shrink-0 flex-col overflow-y-auto border-l border-line bg-surface;
-    animation: query-inspector-enter 180ms var(--ease-out-expo) both;
-  }
-
-  @keyframes query-inspector-enter {
-    from {
-      opacity: 0;
-      translate: 6px 0;
-    }
-  }
-
-  .query-row-inspector-heading {
-    @apply sticky top-0 z-[1] flex min-h-9 items-center justify-between gap-2 border-b border-line bg-surface pl-3 pr-1.5;
-  }
-
-  .query-row-inspector-heading h3 {
-    @apply text-[12px] font-semibold tabular-nums;
-  }
-
-  .query-row-inspector-heading h3:focus-visible {
-    outline: 2px solid var(--tone-accent);
-    outline-offset: 3px;
-    border-radius: 4px;
-  }
-
-  .query-row-inspector-count {
-    @apply font-normal text-ink-faint;
-  }
-
-  .query-row-inspector-nav {
-    @apply flex items-center gap-px;
-  }
-
   .query-row-inspector-media {
     @apply grid gap-2 px-3 pt-3;
   }
@@ -3181,8 +3191,7 @@
   @media (prefers-reduced-motion: reduce) {
     .query-table tbody tr,
     .query-skeleton-row,
-    .query-skeleton-row > span,
-    .query-row-inspector {
+    .query-skeleton-row > span {
       animation: none;
     }
 
@@ -4990,4 +4999,585 @@
   .data-sql-results {
     @apply min-h-0;
   }
+}
+
+@layer components {
+  /* Curation ------------------------------------------------------------
+     A contact sheet. The recipe stands in a tall column at the left; every
+     episode is a tile on the sheet; the selected episode's evidence docks
+     beside the tiles in the shared side sheet. Document chrome (bar,
+     switcher, run strip, empty states) reuses Workflow's classes so both
+     activities keep one document language in the same place. Rule identity
+     is one of the six category washes, dealt in recipe order, and it is
+     never the only carrier: every reason chip prints the rule's words. */
+  .curation-workspace {
+    @apply flex h-full min-h-0 min-w-0 flex-col;
+  }
+
+  .curation-panels {
+    @apply min-h-0 min-w-0 flex-1;
+  }
+
+  .curation-recipe-editor,
+  .curation-sheet-editor {
+    min-width: 0;
+    min-height: 0;
+  }
+
+  /* Recipe column ------------------------------------------------------- */
+  .curation-recipe {
+    @apply flex h-full min-h-0 flex-col overflow-y-auto bg-surface text-[12px] text-ink;
+  }
+
+  .curation-section {
+    @apply flex flex-col gap-1.5 border-b border-line px-3 pb-3 pt-2.5;
+  }
+
+  .curation-section-title {
+    @apply flex items-baseline justify-between text-[11px] font-medium text-ink-soft;
+  }
+
+  .curation-section-count {
+    @apply font-mono text-[10px] text-ink-faint tabular-nums;
+  }
+
+  .curation-section-note {
+    @apply text-[11px] leading-4 text-ink-faint;
+  }
+
+  .curation-section-note.is-alert {
+    @apply text-danger;
+  }
+
+  .curation-source-facts {
+    @apply font-mono text-[10px] text-ink-soft tabular-nums;
+  }
+
+  .curation-select,
+  .curation-input {
+    @apply h-6 min-w-0 rounded border border-line bg-surface px-1.5 text-[12px] text-ink outline-none;
+    @apply placeholder:text-ink-faint focus-visible:border-accent focus-visible:ring-2 focus-visible:ring-accent/15;
+  }
+
+  .curation-select {
+    @apply cursor-pointer;
+  }
+
+  .curation-input {
+    @apply w-full;
+  }
+
+  .curation-mono {
+    @apply font-mono text-[11px] tabular-nums;
+  }
+
+  .curation-textarea {
+    @apply min-h-16 w-full rounded border border-line bg-surface px-1.5 py-1 font-mono text-[11px] leading-4 text-ink outline-none;
+    @apply placeholder:text-ink-faint focus-visible:border-accent focus-visible:ring-2 focus-visible:ring-accent/15;
+    resize: vertical;
+  }
+
+  .curation-inline-form {
+    @apply flex items-center gap-1;
+  }
+
+  .curation-dimension {
+    @apply w-16;
+  }
+
+  /* The one add control per section is a select, so a section grows by one
+     line, not by a row of buttons. */
+  .curation-add {
+    @apply mt-0.5 w-full text-ink-soft;
+  }
+
+  .curation-add-action {
+    @apply mt-0.5 self-start;
+  }
+
+  /* Measurements and transforms rest as one line each, separated by
+     hairlines like every other row in the column: the name, then what tells
+     it from another of its kind. A row opens when it still needs something
+     or when the operator asks. */
+  .curation-fact {
+    @apply flex flex-col gap-1.5 py-1.5;
+  }
+
+  .curation-fact + .curation-fact {
+    border-top: 1px solid var(--tone-line);
+  }
+
+  .curation-fact-summary {
+    @apply -mx-1.5 flex items-center gap-1;
+  }
+
+  .curation-fact-summary-label {
+    @apply min-w-0 shrink truncate text-[12px] font-medium text-ink;
+  }
+
+  .curation-fact-detail {
+    @apply min-w-0 flex-1 truncate font-mono text-[10px] text-ink-faint;
+  }
+
+  .curation-fact-label {
+    @apply h-6 min-w-0 flex-1 border-transparent px-1 font-medium hover:border-line focus-visible:border-accent;
+  }
+
+  .curation-source-caution {
+    @apply truncate text-[10px] leading-4 text-caution;
+  }
+
+  .curation-field-grid {
+    @apply grid items-center gap-x-2 gap-y-1 text-[11px] text-ink-soft;
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .curation-field-grid > label {
+    @apply whitespace-nowrap;
+  }
+
+  /* Rules read as two lines: "If ⟨fact⟩ ⟨is below⟩ ⟨5⟩", then "exclude as
+     ⟨reason⟩" with the count and remove at the right. The mark leading the
+     sentence is the rule's handle: hover it to light the tiles the rule
+     struck, press it to pause the rule. */
+  .curation-rule {
+    @apply -mx-1.5 flex flex-col gap-1 rounded px-1.5 py-1.5;
+    transition: background-color 100ms ease-out;
+  }
+
+  .curation-rule[data-hovered="true"] {
+    background: var(--tone-hover);
+  }
+
+  .curation-rule[data-enabled="false"] .curation-rule-line > :not(.curation-rule-mark) {
+    opacity: 0.55;
+  }
+
+  .curation-rule-line {
+    @apply flex flex-wrap items-center gap-1.5;
+  }
+
+  .curation-rule-mark {
+    @apply inline-flex size-4 shrink-0 cursor-pointer items-center justify-center rounded-full border-0 bg-transparent p-0;
+  }
+
+  .curation-rule-mark:focus-visible {
+    outline: 2px solid var(--tone-accent);
+    outline-offset: 1px;
+  }
+
+  .curation-rule-dot {
+    @apply block size-1.5 shrink-0 rounded-full;
+    background: var(--rule-tone, var(--tone-ink-faint));
+    box-shadow: 0 0 0 1px var(--rule-tone, var(--tone-ink-faint));
+    transition: background-color 120ms var(--ease-out-expo), scale 120ms var(--ease-out-expo);
+  }
+
+  /* A paused rule keeps its ring and loses its fill. */
+  .curation-rule-mark[aria-pressed="false"] .curation-rule-dot {
+    background: transparent;
+  }
+
+  .curation-rule-mark:hover .curation-rule-dot {
+    scale: 1.35;
+  }
+
+  .curation-rule-word {
+    @apply text-[11px] text-ink-faint;
+  }
+
+  .curation-condition-fact {
+    @apply min-w-[5.5rem] flex-1;
+  }
+
+  .curation-condition-test {
+    @apply inline-flex shrink-0 items-center gap-1.5;
+  }
+
+  .curation-condition-op {
+    @apply w-auto max-w-[7.5rem];
+  }
+
+  .curation-condition-value {
+    @apply w-[3.5rem] flex-none;
+  }
+
+  .curation-rule-label {
+    @apply h-6 min-w-[6rem] flex-1;
+  }
+
+  .curation-rule-count {
+    @apply inline-flex cursor-default items-baseline gap-1 whitespace-nowrap text-[10px] text-ink-faint;
+  }
+
+  .curation-rule-count strong {
+    @apply font-mono text-[11px] font-semibold text-ink tabular-nums;
+  }
+
+  .curation-rule-invalid {
+    @apply text-[10px] leading-4 text-caution;
+  }
+
+  /* Sheet --------------------------------------------------------------- */
+  .curation-sheet {
+    @apply flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden bg-surface text-ink;
+  }
+
+  /* The filter segments carry the totals, so the strip needs no count line. */
+  .curation-sheet-filter strong {
+    @apply ml-0.5 font-mono font-semibold tabular-nums;
+  }
+
+  /* Which measurement the tiles print, and the order the sheet reads in. */
+  .curation-lens {
+    @apply inline-flex items-center gap-1;
+  }
+
+  .curation-lens-word {
+    @apply text-ink-faint;
+  }
+
+  .curation-order {
+    @apply min-h-6 px-1.5 text-[11px] text-ink-soft;
+  }
+
+  .curation-sheet-stage {
+    @apply flex min-h-0 min-w-0 flex-1;
+  }
+
+  .curation-sheet-body {
+    @apply flex min-h-0 min-w-0 flex-1 flex-col overflow-auto p-3;
+  }
+
+  .curation-error-detail {
+    @apply max-w-[48rem] font-mono text-[10px] leading-4;
+    overflow-wrap: anywhere;
+  }
+
+  .curation-sheet-grid {
+    @apply m-0 grid list-none gap-1.5 p-0;
+    grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+    align-content: start;
+  }
+
+  /* One tile per episode. Kept tiles sit on paper in full ink; excluded
+     tiles recede onto the sunken recess and carry their reason. A struck
+     tile keeps its name legible: exclusion is a decision, not an error. */
+  .curation-tile {
+    @apply relative min-w-0 overflow-hidden rounded border border-line bg-surface;
+    animation: curation-tile-enter 260ms var(--ease-out-expo) both;
+    animation-delay: calc(var(--tile, 0) * 12ms);
+    transition: opacity 160ms var(--ease-out-expo), box-shadow 160ms var(--ease-out-expo),
+      border-color 160ms var(--ease-out-expo);
+  }
+
+  @keyframes curation-tile-enter {
+    from {
+      opacity: 0;
+      translate: 0 3px;
+    }
+  }
+
+  .curation-tile:hover {
+    border-color: var(--tone-line-strong);
+  }
+
+  /* Struck: the recess behind it, faint ink on its name and clock, its
+     hairline tinted by the removing rule, and the reason given a whole line. */
+  .curation-tile[data-kept="false"] {
+    background: var(--tone-sunken);
+    border-color: color-mix(in srgb, var(--tile-tone) 45%, var(--tone-line));
+  }
+
+  .curation-tile[data-kept="false"] .curation-tile-clock,
+  .curation-tile[data-kept="false"] .curation-tile-fact {
+    @apply text-ink-faint;
+  }
+
+  .curation-tile[data-selected="true"] {
+    border-color: var(--tone-accent);
+    box-shadow: inset 0 0 0 1px var(--tone-accent);
+  }
+
+  /* The rule under the pointer: its tiles rise in its tint, the rest fall
+     back, and the sheet itself becomes the rule's answer. */
+  .curation-tile[data-highlight="lit"] {
+    border-color: var(--tile-tone);
+    box-shadow: inset 0 0 0 1px var(--tile-tone);
+  }
+
+  .curation-tile[data-highlight="faded"] {
+    opacity: 0.32;
+  }
+
+  .curation-tile-head {
+    @apply flex min-w-0 items-baseline gap-1.5;
+  }
+
+  /* The ordinal is the tile's one certain identity on a sheet where task
+     names repeat, so it reads in ink, not in the margin. */
+  .curation-tile-ordinal {
+    @apply shrink-0 font-mono text-[11px] font-medium text-ink-soft tabular-nums;
+    min-width: 2ch;
+  }
+
+  .curation-tile-name {
+    @apply min-w-0 text-[12px] font-medium leading-4 text-ink;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+  }
+
+  .curation-tile[data-kept="false"] .curation-tile-name {
+    @apply font-normal text-ink-faint;
+  }
+
+  .curation-tile-line {
+    @apply flex min-w-0 items-baseline justify-between gap-1.5 font-mono text-[10px] text-ink-soft tabular-nums;
+  }
+
+  .curation-tile-clock {
+    @apply shrink-0;
+  }
+
+  .curation-tile-fact {
+    @apply min-w-0 max-w-[62%] truncate text-right leading-4;
+  }
+
+  .curation-tile-reasons {
+    @apply flex min-w-0 items-start gap-1;
+  }
+
+  /* The rule's words in the rule's wash, the same recipe as a result chip:
+     text mixed 55% toward ink so it clears 4.5:1 on its 13% wash. */
+  .curation-reason {
+    @apply inline-block min-w-0 flex-1 rounded px-1.5 py-px text-[10px] font-medium leading-4;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    color: color-mix(in srgb, var(--hue) 55%, var(--tone-ink));
+    background: color-mix(in srgb, var(--hue) 13%, transparent);
+  }
+
+  .curation-reason-more {
+    @apply shrink-0 font-mono text-[10px] text-ink-faint tabular-nums;
+  }
+
+  .curation-tile.is-skeleton {
+    @apply min-h-[3.5rem] border-line;
+    background: linear-gradient(90deg, var(--tone-sunken) 0%, var(--tone-hover) 50%, var(--tone-sunken) 100%);
+    background-size: 200% 100%;
+    animation: curation-tile-enter 260ms var(--ease-out-expo) both,
+      curation-shimmer 1.4s ease-in-out infinite;
+    animation-delay: calc(var(--tile, 0) * 40ms), 0s;
+  }
+
+  @keyframes curation-shimmer {
+    from {
+      background-position: 100% 0;
+    }
+    to {
+      background-position: -100% 0;
+    }
+  }
+
+  /* Episode evidence, inside the shared side sheet ---------------------- */
+  .curation-episode {
+    @apply flex flex-col gap-3 p-3 text-[12px] text-ink;
+  }
+
+  .curation-episode-head {
+    @apply flex min-w-0 flex-col gap-0.5;
+  }
+
+  .curation-episode-title {
+    @apply m-0 min-w-0 text-[12px] font-semibold leading-4 tracking-[-0.01em] text-ink;
+    overflow-wrap: anywhere;
+  }
+
+  .curation-episode-status {
+    @apply inline-flex shrink-0 items-center gap-1.5 text-[11px] font-medium text-ink-soft;
+  }
+
+  .curation-episode-dot {
+    @apply size-1.5 rounded-full;
+    background: var(--tone-ink-faint);
+  }
+
+  .curation-episode-status[data-kept="true"] .curation-episode-dot {
+    background: var(--tone-good);
+  }
+
+  .curation-episode-path {
+    @apply m-0 font-mono text-[10px] leading-4 text-ink-faint;
+    overflow-wrap: anywhere;
+  }
+
+  .curation-stat-grid {
+    @apply m-0 grid gap-2;
+    grid-template-columns: repeat(auto-fit, minmax(6.5rem, 1fr));
+  }
+
+  .curation-stat {
+    @apply flex flex-col gap-0.5;
+  }
+
+  .curation-stat dt {
+    @apply text-[10px] text-ink-faint;
+  }
+
+  .curation-stat dd {
+    @apply m-0 font-mono text-[12px] text-ink tabular-nums;
+  }
+
+  .curation-evidence {
+    @apply flex min-w-0 flex-col gap-1.5;
+  }
+
+  .curation-evidence-title {
+    @apply m-0 text-[11px] font-medium text-ink-soft;
+  }
+
+  /* The measurement's name is never the thing that gives way: a long text
+     value truncates at the right, the key stays whole. */
+  .curation-kv {
+    @apply m-0 grid gap-x-3 gap-y-1 text-[11px];
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .curation-kv dt {
+    @apply whitespace-nowrap text-ink-soft;
+  }
+
+  .curation-kv dd {
+    @apply m-0 min-w-0 truncate text-right font-mono text-ink tabular-nums;
+  }
+
+  .curation-verdict-list {
+    @apply m-0 flex list-none flex-col gap-1 p-0 text-[11px];
+  }
+
+  .curation-verdict-row {
+    @apply flex items-center gap-1.5 text-ink-faint;
+  }
+
+  .curation-verdict-row[data-fired="true"] {
+    @apply text-ink;
+  }
+
+  .curation-verdict-text {
+    @apply min-w-0 flex-1 truncate;
+  }
+
+  .curation-verdict-word {
+    @apply shrink-0 font-mono text-[10px] text-ink-faint;
+  }
+
+  .curation-verdict-row[data-fired="true"] .curation-verdict-word {
+    @apply text-ink-soft;
+  }
+
+  .curation-frames {
+    @apply flex flex-col gap-2;
+  }
+
+  .curation-frames-loading {
+    @apply inline-flex items-center gap-1.5;
+  }
+
+  .curation-frames-loading .ui-icon {
+    @apply size-3;
+  }
+
+  /* Camera pixels alone keep the dark mat. */
+  .curation-frame {
+    @apply m-0 flex w-full flex-col gap-0.5;
+  }
+
+  .curation-frame img {
+    @apply block aspect-video w-full rounded object-contain;
+    background: var(--tone-camera);
+  }
+
+  .curation-frame figcaption {
+    @apply font-mono text-[10px] text-ink-faint tabular-nums;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .curation-tile,
+    .curation-tile.is-skeleton {
+      animation: none;
+    }
+
+    .curation-rule-dot {
+      transition: none;
+    }
+  }
+}
+
+/* Unlayered on purpose, like the activity rail: `ui.css` ships unlayered, so
+   the shared action's inline-flex centring and nowrap would beat any layered
+   rule however specific. A tile is a whole small document, not a button
+   label; the filter is Workflow's compact segment in the same geometry. */
+.curation-tile .curation-tile-face {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  width: 100%;
+  min-width: 0;
+  gap: 4px;
+  padding: 6px 8px;
+  text-align: left;
+  white-space: normal;
+}
+
+/* Duration drawn as the tile's own baseline against the longest episode on
+   the sheet, so length is read across tiles without spending a line. */
+.curation-tile[data-kept="true"] .curation-tile-face::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 2px;
+  width: var(--fill, 0%);
+  background: var(--tone-line-strong);
+  transition: width 260ms var(--ease-out-expo);
+}
+
+.curation-recipe .curation-fact-disclosure {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  justify-content: flex-start;
+  gap: 6px;
+  padding-inline: 4px 6px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.curation-recipe .curation-fact-disclosure > .ui-icon {
+  flex-shrink: 0;
+  width: 0.75rem;
+  height: 0.75rem;
+  color: var(--tone-ink-faint);
+}
+
+.curation-inline-form .ui-action {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.curation-sheet-filter {
+  flex-shrink: 0;
+  grid-auto-flow: column;
+  grid-auto-columns: max-content;
+}
+
+.curation-sheet-filter .ui-action--segment {
+  min-height: 22px;
+  padding-inline: 9px;
+  font-size: 11px;
 }

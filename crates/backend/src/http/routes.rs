@@ -13,6 +13,7 @@ impl StudioApi {
         crate::recording::http::RecordingEndpoints::register(&mut routes);
         crate::training::http::TrainingEndpoints::register(&mut routes);
         crate::workflow::http::WorkflowEndpoints::register(&mut routes);
+        crate::curation::http::CurationEndpoints::register(&mut routes);
         crate::robots::http::RobotEndpoints::register(&mut routes);
         crate::data::settings_http::SettingsEndpoints::register(&mut routes);
         crate::data::http::DatasetQueryEndpoints::register(&mut routes);

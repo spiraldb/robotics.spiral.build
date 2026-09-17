@@ -51,8 +51,8 @@ pub(super) fn WorkflowComparison(
     };
     rsx! {
         section { class: "episode-comparison comparison-workspace", "aria-label": "Workflow comparison",
-            header { class: "workflow-document-bar comparison-pair-bar",
-                span { class: "workflow-document-glyph", "aria-hidden": "true", WorkflowIcon {} }
+            header { class: "document-bar comparison-pair-bar",
+                span { class: "document-glyph", "aria-hidden": "true", WorkflowIcon {} }
                 super::workspace::WorkflowViewSwitch { comparing }
                 div { class: "comparison-pair", role: "group", "aria-label": "Workflows to compare",
                     label { class: "comparison-side",
@@ -91,10 +91,10 @@ pub(super) fn WorkflowComparison(
                         }
                     }
                 }
-                div { class: "workflow-document-actions",
+                div { class: "document-actions",
                     Action {
                         purpose: ActionPurpose::Start, variant: ActionVariant::Solid,
-                        class: "comparison-primary workflow-run-action",
+                        class: "comparison-primary document-run-action",
                         disabled: busy || !valid_left, aria_busy: busy,
                         title: if !valid_left { "Choose a saved workflow for A" } else { "Run both workflows and measure their episodes" },
                         onclick: move |_| {

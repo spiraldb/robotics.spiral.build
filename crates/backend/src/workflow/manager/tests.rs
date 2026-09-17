@@ -144,7 +144,7 @@ async fn independent_workflows_run_concurrently_and_shutdown_waits_for_both() {
         .manager
         .start(WorkflowSpec::new("second", "Second query").with_sql("SELECT 43 AS answer"))
         .unwrap();
-    assert_eq!(fixture.manager.inner.runs.recover_lock().active.len(), 2);
+    assert_eq!(fixture.manager.inner.runs.active_count(), 2);
     let duplicate = fixture.manager.start(WorkflowFixture::query()).unwrap_err();
     assert!(
         duplicate

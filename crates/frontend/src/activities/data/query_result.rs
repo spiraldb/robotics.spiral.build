@@ -3,6 +3,7 @@
 use crate::components::interaction::{
     Action, ActionAuxiliaryHandlers, ActionPurpose, ActionVariant, BrowserFocus, CloseIcon,
 };
+use crate::components::side_sheet::SheetPosition;
 use dioxus::prelude::*;
 use spiral_robotics_common::relations::{QueryColumn, SpiralQuerySnapshot};
 
@@ -375,29 +376,17 @@ struct QueryCellContext<'a> {
     row_count: usize,
 }
 
-#[derive(Clone, Copy, PartialEq)]
-struct QueryRowPosition {
-    index: usize,
-    count: usize,
-}
-
-impl QueryRowPosition {
-    const fn new(index: usize, count: usize) -> Self {
-        Self { index, count }
-    }
-}
-
 impl<'a> QueryCellContext<'a> {
     const fn new(
         column: &'a QueryColumn,
         row: &'a serde_json::Map<String, serde_json::Value>,
-        position: QueryRowPosition,
+        position: SheetPosition,
     ) -> Self {
         Self {
             column,
             row,
-            row_index: position.index,
-            row_count: position.count,
+            row_index: position.index(),
+            row_count: position.count(),
         }
     }
 
@@ -532,7 +521,7 @@ mod tests {
             ("wrist_frame_index".to_owned(), serde_json::json!(42)),
         ]);
         assert_eq!(
-            QueryCellContext::new(&column, &row, QueryRowPosition::new(2, 18)).image_alt(),
+            QueryCellContext::new(&column, &row, SheetPosition::new(2, 18)).image_alt(),
             "Wrist for episode take-12, stream follower/wrist, frame 42; result 3 of 18"
         );
     }

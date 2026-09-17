@@ -2,7 +2,7 @@
 use crate::client::project::ProjectClient;
 use crate::client::transport::{CommandError, HttpRequest};
 use spiral_robotics_common::datasets::{DatasetInspection, DatasetSelection, ProjectResource};
-use spiral_robotics_common::relations::{QueryRequest, SpiralQuerySnapshot};
+use spiral_robotics_common::relations::{EpisodeQueryRequest, QueryRequest, SpiralQuerySnapshot};
 use std::future::Future;
 
 pub(crate) struct DatasetClient {
@@ -97,5 +97,13 @@ impl DatasetClient {
         self.project.request(
             HttpRequest::new("POST", "/api/queries").json(&QueryRequest::new(statement, max_rows)),
         )
+    }
+    /// A read-only query over one exact episode; `$1` binds its UUID.
+    pub(crate) fn run_episode_query(
+        &self,
+        request: &EpisodeQueryRequest,
+    ) -> impl Future<Output = Result<SpiralQuerySnapshot, CommandError>> + use<> {
+        self.project
+            .request(HttpRequest::new("POST", "/api/queries/episode").json(request))
     }
 }

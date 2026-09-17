@@ -10,6 +10,7 @@ use spiral_robotics_common::relations::{RelationCatalog, SpiralQuerySnapshot};
 use spiral_robotics_common::rollout::RolloutSnapshot;
 use spiral_robotics_common::training::{TrainingRun, TrainingSnapshot};
 
+use crate::curations::{CurationPersistence, StoredCurationDocument};
 use crate::db::ProjectDatabasePersistence;
 use crate::db::ProjectQueries;
 use crate::db::ProjectStore;
@@ -126,6 +127,26 @@ impl StorageManager {
             .await
     }
 
+    pub async fn curations(
+        &self,
+    ) -> Result<Vec<spiral_robotics_common::curation::CurationSummary>, String> {
+        CurationPersistence::new(&self.studio).list().await
+    }
+
+    pub async fn load_curation(
+        &self,
+        curation_id: &str,
+    ) -> Result<Option<StoredCurationDocument>, String> {
+        CurationPersistence::new(&self.studio)
+            .load(curation_id)
+            .await
+    }
+
+    /// Persist one saved recipe revision; false when another save won.
+    pub async fn save_curation(&self, document: &StoredCurationDocument) -> Result<bool, String> {
+        CurationPersistence::new(&self.studio).save(document).await
+    }
+
     pub async fn load_studio_preferences(&self) -> Result<StoredStudioPreferences, String> {
         StudioPreferencePersistence::new(&self.studio).load().await
     }
@@ -163,6 +184,15 @@ impl StorageManager {
     pub async fn query(&self, sql: &str, max_rows: usize) -> Result<SpiralQuerySnapshot, String> {
         ProjectQueries::new(&self.project_store)
             .query(sql, max_rows)
+            .await
+    }
+
+    pub async fn query_for_episode(
+        &self,
+        request: &spiral_robotics_common::relations::EpisodeQueryRequest,
+    ) -> Result<SpiralQuerySnapshot, String> {
+        ProjectQueries::new(&self.project_store)
+            .query_for_episode(request)
             .await
     }
 

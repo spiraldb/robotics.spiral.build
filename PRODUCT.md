@@ -187,7 +187,7 @@ never becomes the motor-control runtime.
 
 **Shipped today**
 
-- A fullstack Dioxus Studio with five primary operating activities:
+- A fullstack Dioxus Studio with six primary operating activities:
   - **Live** owns recording, arm selection, Hold / Release / Teleop, joint
     control, health, and camera status.
   - **Data** owns datasets and their episodes. A rail lists each dataset's
@@ -235,6 +235,19 @@ never becomes the motor-control runtime.
     ordinary result format.
     Workflow still has no ingestion controls. Hugging Face is used here only to
     resolve the pinned model artifacts.
+  - **Curation** owns saved recipes that judge one dataset's episodes for
+    training: builtin episode statistics plus declared measurements (camera
+    brightness, camera score, a folded topic field, or read-only SQL), rules
+    of the form *if fact · operator · value then exclude as reason*, and
+    transforms (camera colour profile, camera resize, time trim) recorded for
+    the kept episodes. A recipe compiles to one read-only Spiral query with
+    positional aliases and runs through the same native executor and run
+    polling as Workflow; the sheet lays every episode out as a tile, kept in
+    full ink and excluded dimmed under the removing rule's words, with exact
+    totals even when the listed roster is bounded, and docks the selected
+    episode's evidence beside the tiles. Recipes persist in the
+    Studio SQLite `curations` table with optimistic revisions and travel in
+    project bundles. Kept episodes are not yet materialized as a dataset.
   - **Training** retains remote HTTP runtime selection, vision ACT
     configuration, historical learning/resource telemetry, and checkpoint
     inspection/downloads. Starting MCAP camera training is disabled until
@@ -324,9 +337,10 @@ today, and nothing below may be presented as existing behavior:
   interfaces extend the shipped native MCAP ingestion path.
 - **Data as the home activity.** The activity rail leads with Data and the
   Studio opens there; Live remains the collection surface.
-- **Curation as a consumer.** Materializing a query or a curated selection as
-  a new derived dataset, so filtering and shaping training sets happens in the
-  Studio instead of external scripts.
+- **Curated datasets.** Materializing a curation's kept episodes, with their
+  recorded transforms, as a new derived dataset. The Curation activity ships
+  the recipe, the judgement, and the sheet; the derived dataset does not
+  exist yet.
 - **Generalized episodes.** Episode schema loosened so robot-specific
   semantics (arms, follow error, replay) are optional capabilities rather
   than required fields.
@@ -388,7 +402,7 @@ today, and nothing below may be presented as existing behavior:
 **Terminology:** *robot instance* (one arm), *leader* / *follower*, *joint*,
 *calibration*, *travel*, *torque*, *Hold* / *Release* / *Teleop*, *Studio*
 (the browser interface),
-*workbench* (Live, Data, Workflow, Training, or Rollout operating panel),
+*workbench* (Live, Data, Workflow, Curation, Training, or Rollout operating panel),
 *panel* (one registered content surface), *tile* (a tab group in the layout
 tree), *dataset* (a collection of episodes), *episode* / *take* (one kept
 multi-stream trajectory, recorded or ingested; *episode* is canonical in data
@@ -405,7 +419,8 @@ rollout, replay, export), *ingestion*
   Studio**.
 - The interface follows a compact, information-dense Notion/Rerun direction,
   while its panel mechanics use familiar VS Code tab-and-tile behavior. Live,
-  Data, Workflow, Training, and Rollout are the primary activities; panels are
+  Data, Workflow, Curation, Training, and Rollout are the primary activities;
+  panels are
   spatial composition, not a proliferation of navigation modes.
 - **Distribution:** public open source eventually, but not on the current
   timeline. Keep code and configuration honest for strangers without inventing
@@ -432,6 +447,9 @@ Real, in-repo:
   pinned SigLIP runner, SQL-candidate contract, source-derived feature cache,
   Studio feature registry, atomic publication, bounded pipeline, quarantine,
   cancellation, and cross-workflow reuse.
+- `crates/common/src/curation/compile.rs` — the recipe-to-SQL compiler and
+  verdict reader, with `crates/backend/src/curation/manager.rs` owning saved
+  recipes and judged runs.
 - `crates/backend/src/workflow/agent.rs` and
   `crates/backend/src/workflow/provider.rs` — the bounded relation-first tool loop, project-scoped durable
   session, long-run continuation, and OpenAI-compatible streaming transport.

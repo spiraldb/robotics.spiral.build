@@ -9,17 +9,19 @@ pub(crate) enum Activity {
     Live,
     Data,
     Workflow,
+    Curation,
     Training,
     Rollout,
     Settings,
 }
 
 impl Activity {
-    pub(crate) const fn all() -> [Self; 6] {
+    pub(crate) const fn all() -> [Self; 7] {
         [
             Self::Live,
             Self::Data,
             Self::Workflow,
+            Self::Curation,
             Self::Training,
             Self::Rollout,
             Self::Settings,
@@ -31,6 +33,7 @@ impl Activity {
             Self::Live => "Live",
             Self::Data => "Data",
             Self::Workflow => "Workflow",
+            Self::Curation => "Curation",
             Self::Training => "Training",
             Self::Rollout => "Rollout",
             Self::Settings => "Settings",

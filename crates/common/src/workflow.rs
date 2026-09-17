@@ -257,26 +257,24 @@ impl WorkflowRunSnapshot {
     }
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkflowRunPhase {
-    #[default]
-    Idle,
-    Validating,
-    Running,
-    Completed,
-    Failed,
-    Interrupted,
-}
+/// Workflow runs share the one native run lifecycle.
+pub use crate::runs::RunPhase as WorkflowRunPhase;
 
-impl WorkflowRunPhase {
-    pub const fn active(self) -> bool {
-        matches!(self, Self::Validating | Self::Running)
+impl crate::runs::RunObservation for WorkflowRunSnapshot {
+    fn document(&self) -> (&str, u64) {
+        (&self.identity.workflow_id, self.identity.workflow_revision)
     }
-
-    pub const fn terminal(self) -> bool {
-        matches!(self, Self::Completed | Self::Failed | Self::Interrupted)
+    fn run_id(&self) -> Option<&str> {
+        self.identity.run_id.as_deref()
+    }
+    fn phase(&self) -> WorkflowRunPhase {
+        self.execution.phase
+    }
+    fn started_ms(&self) -> u64 {
+        self.timing.started_ms
+    }
+    fn updated_ms(&self) -> u64 {
+        self.timing.updated_ms
     }
 }
 

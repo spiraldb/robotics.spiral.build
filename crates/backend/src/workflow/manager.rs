@@ -1,21 +1,15 @@
 //! Saved documents and independent native query executions. No selected workflow or editor draft.
 use super::query::WorkflowQuery;
-use crate::{OperationError, clock::SystemTimeMillis, sync::MutexRecovery};
+use crate::run_registry::{RunAdmission, RunRegistry};
+use crate::{OperationError, clock::SystemTimeMillis};
 use serde::{Deserialize, Serialize};
-use spiral_robotics_common::{
-    relations::SpiralQuerySnapshot,
-    workflow::{
-        WorkflowRunPhase, WorkflowRunSnapshot, WorkflowSpec, WorkflowSummary,
-        conversation::WorkflowConversation,
-        document::{WorkflowDocument, WorkflowPlan, WorkflowRun, WorkflowSqlPlan},
-    },
+use spiral_robotics_common::workflow::{
+    WorkflowRunPhase, WorkflowRunSnapshot, WorkflowSpec, WorkflowSummary,
+    conversation::WorkflowConversation,
+    document::{WorkflowDocument, WorkflowPlan, WorkflowRun, WorkflowSqlPlan},
 };
 use spiral_robotics_storage::{StorageManager, workflows::WorkflowJson};
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, Mutex},
-    time::SystemTime,
-};
+use std::{sync::Arc, time::SystemTime};
 const WORKFLOW_ENCODING_VERSION: u32 = 4;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -63,18 +57,9 @@ pub(crate) struct WorkflowManager {
 }
 struct WorkflowRuntime {
     storage: Arc<StorageManager>,
-    runs: Mutex<WorkflowRuns>,
+    runs: RunRegistry<WorkflowRun>,
     saves: tokio::sync::Mutex<()>,
     comparisons: super::comparison_inputs::ComparisonInputs,
-}
-#[derive(Default)]
-struct WorkflowRuns {
-    snapshots: BTreeMap<String, WorkflowRun>,
-    active: BTreeMap<String, ActiveRun>,
-}
-struct ActiveRun {
-    workflow_id: String,
-    task: Option<tokio::task::JoinHandle<()>>,
 }
 impl WorkflowManager {
     pub(crate) fn new(storage: Arc<StorageManager>) -> Self {
@@ -84,7 +69,7 @@ impl WorkflowManager {
                     storage.workflow_store(),
                 ),
                 storage,
-                runs: Mutex::new(WorkflowRuns::default()),
+                runs: RunRegistry::new(),
                 saves: tokio::sync::Mutex::new(()),
             }),
         }
@@ -193,24 +178,15 @@ impl WorkflowManager {
         }
     }
     pub(crate) fn is_active(&self) -> bool {
-        !self.inner.runs.recover_lock().active.is_empty()
+        self.inner.runs.is_active()
     }
     pub(crate) fn runs(&self) -> Vec<WorkflowRun> {
-        self.inner
-            .runs
-            .recover_lock()
-            .snapshots
-            .values()
-            .cloned()
-            .collect()
+        self.inner.runs.all()
     }
     pub(crate) fn run(&self, id: &str) -> Result<WorkflowRun, OperationError> {
         self.inner
             .runs
-            .recover_lock()
-            .snapshots
             .get(id)
-            .cloned()
             .ok_or_else(|| OperationError::InvalidInput("Unknown workflow run.".into()))
     }
     pub(crate) fn start(&self, workflow: WorkflowSpec) -> Result<WorkflowRun, OperationError> {
@@ -219,89 +195,55 @@ impl WorkflowManager {
                 "Fix SQL validation errors before running.".into(),
             ));
         }
-        let mut runs = self.inner.runs.recover_lock();
-        if let Some((id, _)) = runs
-            .active
-            .iter()
-            .find(|(_, active)| active.workflow_id == workflow.id())
-        {
-            return Err(OperationError::Conflict(format!(
-                "Workflow '{}' already has an active run: {id}.",
-                workflow.name()
-            )));
-        }
         let id = format!("run-{}", uuid::Uuid::new_v4());
         let snapshot = WorkflowRunSnapshot::started(&workflow, id.clone())
             .with_started_ms(SystemTime::now().unix_millis());
         let record = WorkflowRun::new(workflow.clone(), snapshot);
-        runs.snapshots.insert(id.clone(), record.clone());
         let manager = self.clone();
         let task_id = id.clone();
-        let workflow_id = workflow.id().to_owned();
-        let task = tokio::spawn(async move {
-            manager.execute(task_id, workflow).await;
-        });
-        runs.active.insert(
-            id,
-            ActiveRun {
-                workflow_id,
-                task: Some(task),
-            },
-        );
+        let submitted = workflow.clone();
+        self.inner
+            .runs
+            .admit(
+                RunAdmission::new(id, workflow.id().to_owned(), record.clone()),
+                move || tokio::spawn(async move { manager.execute(task_id, submitted).await }),
+            )
+            .map_err(|existing| {
+                OperationError::Conflict(format!(
+                    "Workflow '{}' already has an active run: {existing}.",
+                    workflow.name()
+                ))
+            })?;
         Ok(record)
     }
     pub(crate) async fn shutdown(&self) {
-        let tasks = {
-            let mut runs = self.inner.runs.recover_lock();
-            runs.active
-                .values_mut()
-                .filter_map(|active| active.task.take())
-                .collect::<Vec<_>>()
-        };
-        for task in tasks {
-            let _ = task.await;
-        }
+        self.inner.runs.shutdown().await;
     }
     async fn execute(&self, id: String, workflow: WorkflowSpec) {
-        self.update(&id, |snapshot| {
-            snapshot.set_phase(WorkflowRunPhase::Running)
+        self.inner.runs.update(&id, |record| {
+            let snapshot = record.snapshot_mut();
+            snapshot.set_phase(WorkflowRunPhase::Running);
+            snapshot.set_updated_ms(SystemTime::now().unix_millis());
         });
         let result = WorkflowQuery::new(self.inner.storage.workflow_store())
             .run(&workflow)
             .await;
-        self.finish(&id, result);
-    }
-    fn update(&self, id: &str, change: impl FnOnce(&mut WorkflowRunSnapshot)) {
-        if let Some(record) = self.inner.runs.recover_lock().snapshots.get_mut(id) {
+        self.inner.runs.finish(&id, |record| {
             let snapshot = record.snapshot_mut();
-            change(snapshot);
-            snapshot.set_updated_ms(SystemTime::now().unix_millis());
-        }
-    }
-    fn finish(&self, id: &str, result: Result<SpiralQuerySnapshot, String>) {
-        let mut runs = self.inner.runs.recover_lock();
-        if !runs.active.contains_key(id) {
-            return;
-        }
-        let snapshot = runs
-            .snapshots
-            .get_mut(id)
-            .expect("active run has a snapshot")
-            .snapshot_mut();
-        match result {
-            Ok(result) => {
-                snapshot.set_phase(WorkflowRunPhase::Completed);
-                snapshot.set_result(Some(result));
+            match result {
+                Ok(result) => {
+                    snapshot.set_phase(WorkflowRunPhase::Completed);
+                    snapshot.set_result(Some(result));
+                }
+                Err(error) => {
+                    snapshot.set_phase(WorkflowRunPhase::Failed);
+                    snapshot.set_error(Some(error));
+                }
             }
-            Err(error) => {
-                snapshot.set_phase(WorkflowRunPhase::Failed);
-                snapshot.set_error(Some(error));
-            }
-        }
-        let now = SystemTime::now().unix_millis();
-        snapshot.set_finished_ms(now);
-        snapshot.set_updated_ms(now);
-        runs.active.remove(id);
+            let now = SystemTime::now().unix_millis();
+            snapshot.set_finished_ms(now);
+            snapshot.set_updated_ms(now);
+        });
     }
 }
 

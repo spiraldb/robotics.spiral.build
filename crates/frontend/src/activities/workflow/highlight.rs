@@ -331,7 +331,7 @@ impl Tokens {
 
 /// SQL text with keywords, functions, strings, and numbers coloured.
 #[component]
-pub(super) fn SqlHighlight(sql: String) -> Element {
+pub(crate) fn SqlHighlight(sql: String) -> Element {
     let tokens = Tokens::sql(&sql);
     rsx! { code { class: "workflow-code", {tokens.render()} } }
 }

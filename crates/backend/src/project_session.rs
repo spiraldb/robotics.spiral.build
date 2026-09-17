@@ -23,6 +23,7 @@ use spiral_robotics_storage::{
 use tokio::sync::{Mutex, watch};
 
 use crate::OperationError;
+use crate::curation::manager::CurationManager;
 use crate::data::catalog_lease::CatalogMutationLease;
 use crate::data::settings::{DataSettingsUpdate, UpdateDataSettingsCommand};
 use crate::project_admission::{ProjectActivity, ProjectAdmissionGate, ProjectTransition};
@@ -124,6 +125,7 @@ struct ProjectActivities {
     training: Arc<TrainingManager>,
     rollout: Arc<RolloutManager>,
     workflow: Arc<WorkflowManager>,
+    curation: Arc<CurationManager>,
 }
 
 pub(crate) struct ProjectHardware {
@@ -204,6 +206,7 @@ impl ProjectSessionFactory {
             self.admission.clone(),
         ));
         let workflow = Arc::new(WorkflowManager::new(storage.clone()));
+        let curation = Arc::new(CurationManager::new(storage.clone()));
         let rollout = RolloutManager::new(
             storage.clone(),
             RolloutHardwareResources::new(
@@ -226,6 +229,7 @@ impl ProjectSessionFactory {
                 training,
                 rollout,
                 workflow,
+                curation,
             },
             preferences,
             recording,
@@ -285,6 +289,9 @@ impl ProjectSession {
     }
     pub(crate) fn workflow(&self) -> &Arc<WorkflowManager> {
         &self.activities.workflow
+    }
+    pub(crate) fn curation(&self) -> &Arc<CurationManager> {
+        &self.activities.curation
     }
 
     pub(crate) async fn settings(&self) -> Result<DataSettings, OperationError> {
@@ -349,6 +356,7 @@ impl ProjectSession {
 
     pub(crate) async fn shutdown(&self) {
         self.workflow().shutdown().await;
+        self.curation().shutdown().await;
         self.training().shutdown().await;
         self.rollout().shutdown().await;
     }

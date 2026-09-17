@@ -17,11 +17,12 @@ pub(crate) enum QueryDomain {
     Settings,
     Catalog,
     Data,
+    Curation,
 }
 
 #[derive(Clone, Copy)]
 pub(crate) struct QueryRefresh {
-    revisions: [Signal<u64>; 11],
+    revisions: [Signal<u64>; 12],
 }
 impl QueryRefresh {
     pub(crate) fn use_provider() -> Self {

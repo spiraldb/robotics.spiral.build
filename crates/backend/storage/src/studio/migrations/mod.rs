@@ -8,6 +8,7 @@ impl MigratorTrait for Migrator {
         vec![
             Box::new(InitialStudioSchema),
             Box::new(RemoveLegacyRegistry),
+            Box::new(CreateCurations),
         ]
     }
 }
@@ -49,6 +50,28 @@ impl MigrationTrait for RemoveLegacyRegistry {
         manager
             .get_connection()
             .execute_unprepared(include_str!("m20260915_000002_remove_legacy_registry.sql"))
+            .await?;
+        Ok(())
+    }
+    async fn down(&self, _: &SchemaManager) -> Result<(), DbErr> {
+        Err(DbErr::Migration(
+            "Studio schema downgrades require restoring a backup".into(),
+        ))
+    }
+}
+
+struct CreateCurations;
+impl MigrationName for CreateCurations {
+    fn name(&self) -> &str {
+        "m20260916_000003_curations"
+    }
+}
+#[async_trait::async_trait]
+impl MigrationTrait for CreateCurations {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared(include_str!("m20260916_000003_curations.sql"))
             .await?;
         Ok(())
     }

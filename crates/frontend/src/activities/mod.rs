@@ -1,5 +1,6 @@
 //! Top-level operator activities and their colocated state and actions.
 
+pub(crate) mod curation;
 pub(crate) mod data;
 pub(crate) mod live;
 pub(crate) mod rollout;

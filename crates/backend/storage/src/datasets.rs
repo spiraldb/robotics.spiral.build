@@ -404,7 +404,7 @@ struct McapTopicLocator {
     variant: String,
 }
 
-struct EpisodeTopicQuery {
+pub(crate) struct EpisodeTopicQuery {
     statement: crate::db::SqlStatement,
 }
 
@@ -413,7 +413,7 @@ impl EpisodeTopicQuery {
         Self::for_episode(request.dataset(), request.episode_id(), sql)
     }
 
-    fn for_episode(
+    pub(crate) fn for_episode(
         dataset: &DatasetSelection,
         episode_id: &str,
         sql: String,
@@ -438,6 +438,9 @@ impl EpisodeTopicQuery {
             .with_parameters(parameters)
             .map(|statement| Self { statement })
             .map_err(|error| error.to_string())
+    }
+    pub(crate) fn into_statement(self) -> crate::db::SqlStatement {
+        self.statement
     }
 }
 

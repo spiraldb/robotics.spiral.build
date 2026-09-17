@@ -22,7 +22,8 @@ use image::codecs::jpeg::JpegEncoder;
 use image::{DynamicImage, ImageFormat};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use spiral_robotics_common::relations::{
-    CatalogRelation as ApiCatalogRelation, QueryColumn, RelationCatalog, SpiralQuerySnapshot,
+    CatalogRelation as ApiCatalogRelation, EpisodeQueryRequest, QueryColumn, RelationCatalog,
+    SpiralQuerySnapshot,
 };
 use spiral_robotics_common::sql::QualifiedRelation;
 
@@ -52,14 +53,21 @@ impl QueryLimits {
     }
 }
 
-struct QueryExecution<'a> {
-    sql: &'a str,
+struct QueryExecution {
+    statement: SqlStatement,
     limits: QueryLimits,
 }
 
-impl<'a> QueryExecution<'a> {
-    const fn new(sql: &'a str, limits: QueryLimits) -> Self {
-        Self { sql, limits }
+impl QueryExecution {
+    fn new(sql: &str, limits: QueryLimits) -> Self {
+        Self {
+            statement: SqlStatement::from(sql.trim()),
+            limits,
+        }
+    }
+    /// A statement that already carries its bound parameters.
+    const fn bound(statement: SqlStatement, limits: QueryLimits) -> Self {
+        Self { statement, limits }
     }
 }
 
@@ -185,6 +193,31 @@ impl<'a> ProjectQueries<'a> {
         QueryExecution::new(
             sql,
             QueryLimits::new(max_rows.clamp(1, MAX_QUERY_ROWS), MAX_QUERY_RESPONSE_BYTES),
+        )
+        .run_async(&mut connection)
+        .await
+    }
+
+    /// The same bounded read, scoped to one exact dataset member through a
+    /// bound UUID parameter (`$1`).
+    pub(crate) async fn query_for_episode(
+        &self,
+        request: &EpisodeQueryRequest,
+    ) -> Result<SpiralQuerySnapshot, String> {
+        SpiralSql::ensure_read_only(request.statement(), ReadOnlyQueryMode::Preview)?;
+        let statement = crate::datasets::EpisodeTopicQuery::for_episode(
+            request.episode().dataset(),
+            request.episode().episode_id(),
+            request.statement().trim().to_owned(),
+        )?
+        .into_statement();
+        let mut connection = self.project_store.connect().await?;
+        QueryExecution::bound(
+            statement,
+            QueryLimits::new(
+                request.max_rows().clamp(1, MAX_QUERY_ROWS),
+                MAX_QUERY_RESPONSE_BYTES,
+            ),
         )
         .run_async(&mut connection)
         .await
@@ -387,12 +420,12 @@ impl ProjectConnection {
     }
 }
 
-impl QueryExecution<'_> {
+impl QueryExecution {
     async fn run_async(
         self,
         connection: &mut dyn DatabaseSession,
     ) -> Result<SpiralQuerySnapshot, String> {
-        let sql = self.sql.trim();
+        let sql = self.statement.as_str().trim();
         if sql.is_empty() {
             return Err("Spiral query cannot be empty".to_owned());
         }
@@ -400,9 +433,8 @@ impl QueryExecution<'_> {
             return Err("Spiral query is too large".to_owned());
         }
         let started = Instant::now();
-        let statement = SqlStatement::from(sql);
         let records = connection
-            .query(statement)
+            .query(self.statement)
             .await
             .map_err(|error| format!("executing Spiral query: {error}"))?;
         self.limits.collect(records).await.map(|result| {

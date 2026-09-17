@@ -30,10 +30,12 @@ use crate::activities::workflow::state::{
     ASSISTANT_PANEL_ID, AgentDraftKey, AgentPendingCommand, CANVAS_PANEL_ID, NODE_PANEL_ID,
     RESULTS_PANEL_ID,
 };
+use crate::components::document_bar::ExecutedSql;
 use crate::components::icons::{
     ConversationIcon, DetailsIcon, ResultNodeIcon, SendIcon, SpinnerIcon, SqlIcon, StopIcon,
     WorkflowIcon,
 };
+use crate::components::run_phase::RunPhasePresentation;
 use crate::shell::state::StudioProjectState;
 
 use super::highlight::SqlHighlight;
@@ -607,28 +609,28 @@ fn WorkflowCanvas(
     rsx! {
         section { class: "workflow-canvas", "aria-label": "Workflow graph",
             if let Some(error) = controller.load_error() {
-                div { class: "workflow-inline-error", role: "alert", "{error}" }
+                div { class: "inline-error", role: "alert", "{error}" }
             } else if !controller.loaded() {
-                div { class: "workflow-panel-empty", role: "status",
+                div { class: "panel-empty", role: "status",
                     SpinnerIcon {}
                     strong { "Loading workflow…" }
                 }
             } else if spec.sql().trim().is_empty() {
-                div { class: "workflow-panel-empty is-quiet",
+                div { class: "panel-empty is-quiet",
                     p { "The graph appears here once the workflow has SQL: one stage per step, reads at the left, the result at the right." }
                 }
             } else {
                 match current {
                     None => rsx! {
-                        div { class: "workflow-panel-empty", role: "status",
+                        div { class: "panel-empty", role: "status",
                             SpinnerIcon {}
                             strong { "Planning SQL…" }
                         }
                     },
-                    Some(Err(error)) => rsx! { div { class: "workflow-inline-error", role: "alert", "{error}" } },
+                    Some(Err(error)) => rsx! { div { class: "inline-error", role: "alert", "{error}" } },
                     Some(Ok(Some(plan))) => rsx! {
                         if let Some(error) = plan.error() {
-                            div { class: "workflow-inline-error", role: "alert", "{error}" }
+                            div { class: "inline-error", role: "alert", "{error}" }
                         }
                         if let Some(report) = plan.report() {
                             super::plan_display::WorkflowPlanDisplay {
@@ -698,7 +700,7 @@ fn WorkflowRunElapsed(started_ms: u64) -> Element {
     });
     let elapsed = now().saturating_sub(started_ms) / 1000;
     rsx! {
-        span { class: "workflow-run-elapsed", title: "Time since Spiral admitted this run",
+        span { class: "run-elapsed", title: "Time since Spiral admitted this run",
             "{elapsed / 60}m {elapsed % 60:02}s"
         }
     }
@@ -777,14 +779,14 @@ fn WorkflowResults(controller: super::state::WorkflowController) -> Element {
     rsx! {
         section { class: "workflow-results", "aria-label": "Workflow results",
             if !runs.is_empty() {
-                div { class: "workflow-run-strip",
-                    span { class: "workflow-run-phase {snapshot.phase().class_name()}", role: "status",
-                        span { class: "workflow-run-phase-dot", "aria-hidden": "true" }
+                div { class: "run-strip",
+                    span { class: "run-phase {snapshot.phase().class_name()}", role: "status",
+                        span { class: "run-phase-dot", "aria-hidden": "true" }
                         "{snapshot.phase().run_label()}"
                     }
                     if runs.len() > 1 {
                         label { r#for: "workflow-result-run", class: "sr-only", "Run" }
-                        select { id: "workflow-result-run", class: "workflow-run-select",
+                        select { id: "workflow-result-run", class: "run-select",
                             value: snapshot.run_id().unwrap_or_default(),
                             onchange: move |event| controller.select_run(event.value()),
                             for (index, run) in runs.iter().enumerate() {
@@ -799,14 +801,14 @@ fn WorkflowResults(controller: super::state::WorkflowController) -> Element {
                             }
                         }
                     } else {
-                        span { class: "workflow-run-single", "Run {selected_position}" }
+                        span { class: "run-single", "Run {selected_position}" }
                     }
                     if let Some(result) = snapshot.result() {
-                        span { class: "workflow-run-count",
+                        span { class: "run-count",
                             strong { "{result.rows().len()}" }
                             if result.truncated() { " preview rows" } else if result.rows().len() == 1 { " row" } else { " rows" }
                         }
-                        span { class: "workflow-run-duration", title: "Spiral execution time",
+                        span { class: "run-duration", title: "Spiral execution time",
                             "{RunDuration(result.elapsed_ms()).display()}"
                         }
                         if result.truncated() {
@@ -816,35 +818,32 @@ fn WorkflowResults(controller: super::state::WorkflowController) -> Element {
                     if snapshot.phase().active() {
                         WorkflowRunElapsed { started_ms: snapshot.started_ms() }
                     }
-                    details { class: "workflow-executed-sql",
-                        summary { SqlIcon {} "Executed SQL" }
-                        pre { SqlHighlight { sql: sql.clone() } }
-                    }
+                    ExecutedSql { sql: sql.clone() }
                 }
             }
             if snapshot.result_stale() {
-                div { class: "workflow-results-stale", role: "status",
+                div { class: "results-stale", role: "status",
                     strong { "Previous run" }
                     span { "{snapshot.phase().stale_result_copy()}" }
                 }
             }
             if snapshot.result().is_some() && snapshot.error().is_some() {
-                div { class: "workflow-inline-error", role: "alert", "{snapshot.error().clone().unwrap_or_default()}" }
+                div { class: "inline-error", role: "alert", "{snapshot.error().clone().unwrap_or_default()}" }
             }
             div { key: "{snapshot.run_id().unwrap_or_default()}", class: "workflow-result-body",
                 if !controller.loaded() && controller.load_error().is_none() {
-                    div { class: "workflow-panel-empty", role: "status",
+                    div { class: "panel-empty", role: "status",
                         SpinnerIcon {}
                         strong { "Loading workflow…" }
                     }
                 } else if let Some(model) = result_model.or(transient_model) {
                     {model.render()}
                 } else if empty_workflow {
-                    div { class: "workflow-panel-empty is-quiet",
+                    div { class: "panel-empty is-quiet",
                         p { "{empty_detail}" }
                     }
                 } else {
-                    div { class: "workflow-panel-empty",
+                    div { class: "panel-empty",
                         ResultNodeIcon {}
                         strong { "{empty_title}" }
                         p { "{empty_detail}" }
@@ -870,8 +869,6 @@ trait WorkflowRunPresentation {
         empty_workflow: bool,
     ) -> (&'static str, &'static str);
     fn stale_result_copy(self) -> &'static str;
-    fn run_label(self) -> &'static str;
-    fn class_name(self) -> &'static str;
 }
 
 impl WorkflowRunPresentation for WorkflowRunPhase {
@@ -927,28 +924,6 @@ impl WorkflowRunPresentation for WorkflowRunPhase {
             _ => {
                 "These rows were produced by different SQL. Run the current SQL to refresh the results."
             }
-        }
-    }
-
-    fn run_label(self) -> &'static str {
-        match self {
-            WorkflowRunPhase::Idle => "Ready",
-            WorkflowRunPhase::Validating => "Validating",
-            WorkflowRunPhase::Running => "Running",
-            WorkflowRunPhase::Completed => "Complete",
-            WorkflowRunPhase::Failed => "Failed",
-            WorkflowRunPhase::Interrupted => "Interrupted",
-        }
-    }
-
-    fn class_name(self) -> &'static str {
-        match self {
-            WorkflowRunPhase::Idle => "is-idle",
-            WorkflowRunPhase::Validating => "is-validating",
-            WorkflowRunPhase::Running => "is-running",
-            WorkflowRunPhase::Completed => "is-complete",
-            WorkflowRunPhase::Failed => "is-failed",
-            WorkflowRunPhase::Interrupted => "is-interrupted",
         }
     }
 }

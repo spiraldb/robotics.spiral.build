@@ -7,8 +7,8 @@
 
 use super::cells::ResultColumn;
 use super::*;
-use crate::components::icons::{ArrowDownIcon, ArrowUpIcon};
 use crate::components::interaction::Toggle;
+use crate::components::side_sheet::{SheetHeading, SheetPosition, SideSheet};
 
 const STAGGERED_ROWS: usize = 24;
 
@@ -81,7 +81,7 @@ pub(super) fn QueryResultTable(result: SpiralQuerySnapshot) -> Element {
                                                         BrowserFocus::after_render(inspector_id.clone());
                                                     } },
                                                     if let Some(src) = column.column().image_src(value) {
-                                                        img { class: "query-image-preview", src, alt: QueryCellContext::new(column.column(), row, QueryRowPosition::new(index, row_count)).image_alt(), loading: "lazy", decoding: "async", draggable: "false" }
+                                                        img { class: "query-image-preview", src, alt: QueryCellContext::new(column.column(), row, SheetPosition::new(index, row_count)).image_alt(), loading: "lazy", decoding: "async", draggable: "false" }
                                                     } else { span { class: "query-image-unavailable", "No image" } }
                                                 }
                                             } }
@@ -122,7 +122,7 @@ pub(super) fn QueryResultTable(result: SpiralQuerySnapshot) -> Element {
                         key: "{index}",
                         row: result.rows()[index].clone(),
                         columns: columns.clone(),
-                        position: QueryRowPosition::new(index, row_count),
+                        position: SheetPosition::new(index, row_count),
                         ids: InspectorIds { inspector: inspector_id.clone(), prefix: prefix.clone() },
                         selected,
                     }
@@ -142,57 +142,22 @@ struct InspectorIds {
 fn QueryRowInspector(
     row: serde_json::Map<String, serde_json::Value>,
     columns: Vec<ResultColumn>,
-    position: QueryRowPosition,
+    position: SheetPosition,
     ids: InspectorIds,
     selected: Signal<Option<RowInspection>>,
 ) -> Element {
-    let index = position.index;
-    let count = position.count;
-    let step = {
-        let ids = ids.clone();
-        move |delta: isize| RowInspection::step(selected, position, delta, &ids)
-    };
-    let step_from_keys = step.clone();
-    let step_previous = step.clone();
-    let step_next = step;
+    let heading = SheetHeading::new(
+        ids.inspector.clone(),
+        format!("Row {}", position.index() + 1),
+        "row",
+    )
+    .with_detail(format!("of {}", position.count()));
     rsx! {
-        aside { class: "query-row-inspector", "aria-label": "Row {index + 1} details",
-            onkeydown: move |event: KeyboardEvent| {
-                match event.key() {
-                    Key::Escape => {
-                        event.prevent_default();
-                        RowInspection::close(selected);
-                    }
-                    Key::ArrowUp => {
-                        event.prevent_default();
-                        step_from_keys(-1);
-                    }
-                    Key::ArrowDown => {
-                        event.prevent_default();
-                        step_from_keys(1);
-                    }
-                    _ => {}
-                }
-            },
-            header { class: "query-row-inspector-heading",
-                h3 { id: "{ids.inspector}", tabindex: "-1",
-                    "Row {index + 1}"
-                    span { class: "query-row-inspector-count", " of {count}" }
-                }
-                div { class: "query-row-inspector-nav", role: "group", "aria-label": "Step between rows",
-                    Action { purpose: ActionPurpose::Navigate, variant: ActionVariant::Icon,
-                        aria_label: "Previous row", title: "Previous row · ↑",
-                        disabled: index == 0,
-                        onclick: move |_| step_previous(-1), ArrowUpIcon {} }
-                    Action { purpose: ActionPurpose::Navigate, variant: ActionVariant::Icon,
-                        aria_label: "Next row", title: "Next row · ↓",
-                        disabled: index + 1 >= count,
-                        onclick: move |_| step_next(1), ArrowDownIcon {} }
-                    Action { purpose: ActionPurpose::Close, variant: ActionVariant::Icon,
-                        aria_label: "Close row details", title: "Close · Esc",
-                        onclick: move |_| RowInspection::close(selected), CloseIcon {} }
-                }
-            }
+        SideSheet {
+            heading,
+            position,
+            on_step: move |delta| if let Some(next) = position.stepped(delta) { RowInspection::step(selected, next, &ids) },
+            on_close: move |_| RowInspection::close(selected),
             div { class: "query-row-inspector-media",
                 for column in columns.iter().filter(|column| column.is_image()) {
                     figure { key: "{column.column().name()}",
@@ -249,19 +214,12 @@ impl RowInspection {
 
     /// Move the inspection to a neighbouring row. Focus returns to the new
     /// row's own action when the inspector closes.
-    fn step(
-        mut selected: Signal<Option<Self>>,
-        position: QueryRowPosition,
-        delta: isize,
-        ids: &InspectorIds,
-    ) {
-        let Some(next) = position.index.checked_add_signed(delta) else {
-            return;
-        };
-        if next >= position.count {
-            return;
-        }
-        selected.set(Some(Self::new(next, format!("{}-row-{next}", ids.prefix))));
+    fn step(mut selected: Signal<Option<Self>>, next: SheetPosition, ids: &InspectorIds) {
+        let index = next.index();
+        selected.set(Some(Self::new(
+            index,
+            format!("{}-row-{index}", ids.prefix),
+        )));
         BrowserFocus::after_render(ids.inspector.clone());
     }
 }

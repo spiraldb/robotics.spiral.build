@@ -11,7 +11,7 @@ mod document_controls;
 mod plan_display;
 
 mod assistant_content;
-mod highlight;
+pub(crate) mod highlight;
 
 mod comparison;
 

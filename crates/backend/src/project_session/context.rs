@@ -1,5 +1,6 @@
 //! Resources and admission for one immutable project identity, independent of delivery.
 use super::ProjectReadiness;
+use crate::curation::manager::CurationManager;
 use crate::data::catalog_lease::CatalogMutationLease;
 use crate::recording_session::RecordingSessionManager;
 use crate::robotics::cameras::CameraManager;
@@ -118,6 +119,9 @@ impl ProjectContext {
     }
     pub(crate) fn workflow(&self) -> &Arc<WorkflowManager> {
         self.project.workflow()
+    }
+    pub(crate) fn curation(&self) -> &Arc<CurationManager> {
+        self.project.curation()
     }
     pub(crate) fn rollout(&self) -> &Arc<RolloutManager> {
         self.project.rollout()

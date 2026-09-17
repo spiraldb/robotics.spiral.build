@@ -322,6 +322,34 @@ impl DataCommands {
             .await?
     }
 
+    /// One exact dataset member's read-only query, with `$1` bound to its UUID.
+    pub(crate) async fn query_for_episode(
+        &self,
+        request: spiral_robotics_common::relations::EpisodeQueryRequest,
+    ) -> Result<SpiralQuerySnapshot, BackendCommandError> {
+        let commands = self.clone();
+        self.state
+            .tasks()
+            .execute(async move {
+                let _activity = commands.state.admit()?;
+                commands.require_catalog_ready()?;
+                let command =
+                    QueryCommand::new(request.statement(), request.max_rows()).validated()?;
+                let request = spiral_robotics_common::relations::EpisodeQueryRequest::new(
+                    request.episode().clone(),
+                    command.statement().to_owned(),
+                    command.max_rows(),
+                );
+                commands
+                    .state
+                    .storage()
+                    .query_for_episode(&request)
+                    .await
+                    .map_err(Into::into)
+            })
+            .await?
+    }
+
     async fn query_in_project(
         &self,
         statement: String,

@@ -253,6 +253,7 @@ resources. These return distinct `RecordingDatasetSummary` and `DatasetSummary` 
 | POST | `/datasets/topic-coverage` | TopicCoverageRequest (MessageRead with a plain window, `buckets` 8–2048) | TopicCoverage (message total, first/last log time as strings, one count per bucket) |
 | GET | `/relations` | — | RelationCatalog |
 | POST | `/queries` | QueryRequest | SpiralQuerySnapshot |
+| POST | `/queries/episode` | EpisodeQueryRequest (episode selection, statement with `$1` bound to the episode UUID, max_rows) | SpiralQuerySnapshot |
 | POST | `/datasets/hugging-face/inspect` | HuggingFaceDatasetSource | HuggingFaceDatasetInspection |
 | POST | `/datasets/hugging-face/import` | HuggingFaceDatasetSource | HuggingFaceDatasetImportSummary |
 
@@ -283,6 +284,22 @@ separate Studio dataset registry. Project snapshot restore is a separate operati
 | GET | `/models/status` | — | WorkflowAgentReadiness |
 | GET | `/models/capabilities` | — | SpiralQuerySnapshot (native AI catalog) |
 | POST | `/models/complete` | ModelRequest | ModelEvent NDJSON stream |
+
+### Curation
+
+| Method | Path | Body or query | Response |
+| --- | --- | --- | --- |
+| GET | `/curations` | — | CurationSummary[] |
+| GET | `/curations/{id}` | — | CurationSpec |
+| POST | `/curations/save` | CurationSpec (stored revision) | CurationSpec (next revision) |
+| GET | `/curation-runs` | — | CurationRun[] |
+| POST | `/curation-runs` | CurationSpec | CurationRun (validating) |
+| GET | `/curation-runs/{id}` | — | CurationRun |
+
+A curation is a typed recipe over one dataset (measurements, exclusion rules,
+transforms) compiled to one read-only query; see [curation](curation.md).
+Runs are in-memory and polled like workflow runs; Save is the only write and
+uses optimistic revisions.
 
 ## Files and media
 

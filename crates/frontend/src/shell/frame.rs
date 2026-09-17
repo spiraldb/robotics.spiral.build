@@ -1,5 +1,6 @@
 //! Low-frequency Studio chrome around the activity workspaces.
 
+use crate::activities::curation::state::CurationEditorStatus;
 use crate::activities::workflow::state::WorkflowEditorStatus;
 use crate::components::interaction::{Action, ActionPurpose, ActionVariant, BrowserFocus};
 use dioxus::prelude::*;
@@ -7,8 +8,8 @@ use spiral_robotics_common::status::BackendReadinessState;
 use spiral_robotics_common::workflow::WorkflowRunPhase;
 
 use crate::components::icons::{
-    DataIcon, NotificationIcon, RobotPanelIcon, RolloutIcon, SettingsIcon, TrainingIcon,
-    WorkflowIcon,
+    CurationIcon, DataIcon, NotificationIcon, RobotPanelIcon, RolloutIcon, SettingsIcon,
+    TrainingIcon, WorkflowIcon,
 };
 use crate::format::ClockPresentation;
 use crate::shell::activity::Activity;
@@ -43,6 +44,15 @@ pub(crate) fn ActivityRail(activity: Activity, on_activity: EventHandler<Activit
                 onclick: move |_| on_activity.call(Activity::Workflow),
                 WorkflowIcon {}
                 span { "Workflow" }
+            }
+            Action {
+                purpose: ActionPurpose::Navigate,
+                variant: ActionVariant::Row,
+                class: if activity == Activity::Curation { "activity-rail-item activity-rail-item-active" } else { "activity-rail-item" },
+                aria_pressed: activity == Activity::Curation,
+                onclick: move |_| on_activity.call(Activity::Curation),
+                CurationIcon {}
+                span { "Curation" }
             }
             Action {
                 purpose: ActionPurpose::Navigate,
@@ -86,6 +96,7 @@ pub(crate) enum WorkspaceStatus {
     Hardware(crate::robots::HardwareViewState),
     Training(crate::activities::training::history::TrainingHistory),
     Workflow(Memo<Option<WorkflowEditorStatus>>),
+    Curation(Memo<Option<CurationEditorStatus>>),
 }
 
 /// Workspace content stays mounted; only the active workspace supplies shell chrome.
@@ -141,6 +152,10 @@ fn StatusBar(route: crate::shell::routes::StudioRoute, status: WorkspaceStatus) 
         WorkspaceStatus::Workflow(snapshot) => {
             snapshot.read().as_ref().map(WorkflowStatusProjection::from)
         }
+        _ => None,
+    };
+    let curation = match status {
+        WorkspaceStatus::Curation(snapshot) => snapshot.read().clone(),
         _ => None,
     };
     let backend_connected = (studio.live())();
@@ -343,6 +358,38 @@ fn StatusBar(route: crate::shell::routes::StudioRoute, status: WorkspaceStatus) 
                     if let Some(phase) = training_phase { span { class: "status-bar-item", "{phase}" } }
                     if let Some(step) = training_step { span { class: "status-bar-item", "{step}" } }
                     span { class: "status-bar-item", "{training_problems_label}" }
+                    NotificationTrigger { unread, open: center_open }
+                }
+            }
+        } else if mode == Activity::Curation {
+            footer { class: "studio-status-bar",
+                div { class: "status-bar-group",
+                    span { class: "status-bar-item",
+                        title: "{readiness.detail()}",
+                        span { class: "status-dot", style: service_style }
+                        "{service_label}"
+                    }
+                    span { class: "status-bar-item",
+                        {curation.as_ref().map_or_else(|| "Loading curations…".to_owned(), CurationEditorStatus::dataset_label)}
+                    }
+                    // The phase is news only while a run is under way or has failed.
+                    if let Some(phase) = curation.as_ref().map(CurationEditorStatus::phase_label).filter(|phase| !phase.is_empty()) {
+                        span { class: "status-bar-item", "{phase}" }
+                    }
+                }
+                if let Some(message) = latest.clone() {
+                    span {
+                        class: "status-bar-message {message.severity().class_name()}",
+                        title: "{message.text()}",
+                        role: if message.severity() == crate::shell::notifications::MessageSeverity::Error { "alert" } else { "status" },
+                        "aria-live": if message.severity() == crate::shell::notifications::MessageSeverity::Error { "assertive" } else { "polite" },
+                        "{message.text()}"
+                    }
+                }
+                div { class: "status-bar-group status-bar-group-right",
+                    span { class: "status-bar-item status-bar-accent",
+                        {curation.as_ref().map_or_else(|| "Curation".to_owned(), CurationEditorStatus::verdict_label)}
+                    }
                     NotificationTrigger { unread, open: center_open }
                 }
             }

@@ -194,4 +194,4 @@ impl SpiralQuerySnapshot {
 }
 
 mod requests;
-pub use requests::QueryRequest;
+pub use requests::{EpisodeQueryRequest, QueryRequest};

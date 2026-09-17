@@ -1,5 +1,6 @@
 //! SQLite Studio state and Spiral data access, ingestion, and portable transfer.
 
+pub mod curations;
 mod datasets;
 mod db;
 pub mod episodes;
