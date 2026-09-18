@@ -406,12 +406,6 @@ impl CurationFact {
     pub const fn kind(&self) -> FactKind {
         self.measure.kind()
     }
-    pub fn set_label(&mut self, label: impl Into<String>) {
-        self.label = label.into();
-    }
-    pub fn set_measure(&mut self, measure: FactMeasure) {
-        self.measure = measure;
-    }
     pub fn validate(&self) -> Result<(), String> {
         FactKey(&self.key).validate()?;
         if self.label.trim().is_empty() {
@@ -420,27 +414,6 @@ impl CurationFact {
         self.measure
             .validate()
             .map_err(|message| format!("Measurement “{}” {message}.", self.label))
-    }
-    /// A key derived from a label: lowercase words joined by underscores.
-    pub fn key_from_label(label: &str) -> String {
-        let mut key = String::new();
-        for character in label.chars() {
-            if character.is_ascii_alphanumeric() {
-                key.push(character.to_ascii_lowercase());
-            } else if !key.is_empty() && !key.ends_with('_') {
-                key.push('_');
-            }
-        }
-        let key = key.trim_end_matches('_').to_owned();
-        if key
-            .chars()
-            .next()
-            .is_none_or(|first| !first.is_ascii_alphabetic())
-        {
-            format!("fact_{key}")
-        } else {
-            key
-        }
     }
 }
 

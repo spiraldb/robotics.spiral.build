@@ -1,6 +1,7 @@
 //! Browser-owned recipe draft, saved baseline, run observations, and the
 //! sheet's selection state.
 use super::CurationClient;
+use super::pipeline::PipelineSelection;
 use crate::client::queries::{QueryDomain, QueryPolicy, QueryRefresh};
 use crate::client::runs::RunLedger;
 use crate::components::run_phase::RunPhasePresentation;
@@ -116,6 +117,7 @@ struct CurationViewSignals {
     /// The measurement every tile prints; `None` means the first declared one.
     lens: Signal<Option<String>>,
     order: Signal<SheetOrder>,
+    pipeline_selection: Signal<PipelineSelection>,
 }
 
 impl CurationController {
@@ -144,6 +146,7 @@ impl CurationController {
                 filter: Signal::new(SheetFilter::All),
                 lens: Signal::new(None),
                 order: Signal::new(SheetOrder::Recorded),
+                pipeline_selection: Signal::new(PipelineSelection::Source),
             },
         })
     }
@@ -282,6 +285,15 @@ impl CurationController {
             self.view.hovered_rule.set(id);
         }
     }
+    pub(super) fn pipeline_selection(&self) -> PipelineSelection {
+        self.view.pipeline_selection.read().clone()
+    }
+    pub(super) fn select_pipeline(mut self, selection: PipelineSelection) {
+        if *self.view.pipeline_selection.peek() != selection {
+            self.view.pipeline_selection.set(selection);
+            self.view.filter.set(SheetFilter::All);
+        }
+    }
     pub(crate) fn filter(&self) -> SheetFilter {
         *self.view.filter.read()
     }
@@ -381,6 +393,7 @@ impl CurationController {
         self.view.filter.set(SheetFilter::All);
         self.view.lens.set(None);
         self.view.order.set(SheetOrder::Recorded);
+        self.view.pipeline_selection.set(PipelineSelection::Source);
         self.lifecycle.loaded.set(true);
         self.lifecycle.load_error.set(None);
     }

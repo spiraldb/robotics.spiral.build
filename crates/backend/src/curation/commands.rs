@@ -9,6 +9,39 @@ pub(crate) struct CurationCommands {
     state: ProjectContext,
 }
 impl CurationCommands {
+    pub(crate) async fn score_episode(
+        &self,
+        request: spiral_robotics_common::curation::progress::ProgressScoreRequest,
+    ) -> Result<spiral_robotics_common::curation::progress::ProgressScoreResult, BackendCommandError>
+    {
+        let _activity = self.state.admit()?;
+        self.state
+            .curation()
+            .score_episode(request)
+            .await
+            .map_err(Into::into)
+    }
+    pub(crate) async fn preview(
+        &self,
+        curation: CurationSpec,
+    ) -> Result<spiral_robotics_common::curation::run::CurationOutcome, BackendCommandError> {
+        let _activity = self.state.admit()?;
+        self.state
+            .curation()
+            .preview(&curation)
+            .await
+            .map_err(Into::into)
+    }
+    pub(crate) async fn interpret(
+        &self,
+        request: spiral_robotics_common::curation::interpretation::InterpretationRequest,
+    ) -> Result<spiral_robotics_common::curation::interpretation::RuleProposal, BackendCommandError>
+    {
+        let _activity = self.state.admit()?;
+        super::interpretation::RuleInterpreter::interpret(request)
+            .await
+            .map_err(|message| crate::OperationError::InvalidInput(message).into())
+    }
     pub(crate) async fn list(&self) -> Result<Vec<CurationSummary>, BackendCommandError> {
         let _activity = self.state.admit()?;
         self.state.curation().list().await.map_err(Into::into)

@@ -246,10 +246,18 @@ impl RuleCondition {
 #[serde(deny_unknown_fields)]
 pub struct CurationRule {
     id: String,
+    #[serde(default)]
     label: String,
-    #[serde(default = "CurationRule::enabled_by_default")]
-    enabled: bool,
+    #[serde(
+        default,
+        rename = "enabled",
+        deserialize_with = "CurationRule::ignore_legacy_enabled",
+        skip_serializing
+    )]
+    legacy_enabled: (),
     condition: RuleCondition,
+    #[serde(default)]
+    order: usize,
 }
 
 impl CurationRule {
@@ -257,21 +265,21 @@ impl CurationRule {
         Self {
             id: id.into(),
             label: label.into(),
-            enabled: true,
+            legacy_enabled: (),
             condition,
+            order: 0,
         }
     }
-    const fn enabled_by_default() -> bool {
-        true
+    fn ignore_legacy_enabled<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<(), D::Error> {
+        bool::deserialize(deserializer).map(|_| ())
     }
     pub fn id(&self) -> &str {
         &self.id
     }
     pub fn label(&self) -> &str {
         &self.label
-    }
-    pub const fn enabled(&self) -> bool {
-        self.enabled
     }
     pub const fn condition(&self) -> &RuleCondition {
         &self.condition
@@ -282,22 +290,21 @@ impl CurationRule {
     pub fn set_label(&mut self, label: impl Into<String>) {
         self.label = label.into();
     }
-    pub fn set_enabled(&mut self, enabled: bool) {
-        self.enabled = enabled;
+    pub const fn order(&self) -> usize {
+        self.order
     }
-    /// The reason shown on an excluded episode: the label when the author
-    /// wrote one, otherwise the condition itself.
+    pub(super) fn set_order(&mut self, order: usize) {
+        self.order = order;
+    }
+    /// Explanations use the executable condition; legacy custom labels do not
+    /// override what the rule actually tests.
     pub fn reason(&self, catalog: &FactCatalog) -> String {
-        if self.label.trim().is_empty() {
-            self.condition.sentence(catalog)
-        } else {
-            self.label.clone()
-        }
+        self.condition.sentence(catalog)
     }
     /// Whether this rule judges every episode as `other` does: the same
     /// condition under the same identity, whatever it is called.
     pub fn judges_like(&self, other: &Self) -> bool {
-        self.id == other.id && self.enabled == other.enabled && self.condition == other.condition
+        self.id == other.id && self.condition == other.condition
     }
 }
 
@@ -306,6 +313,9 @@ impl CurationRule {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TransformOperation {
+    SelectProgressChunks {
+        selection: super::progress::ProgressSelection,
+    },
     /// Scale one camera's frames to a fixed size.
     ResizeCamera {
         topic: TopicRef,
@@ -337,6 +347,7 @@ impl TransformOperation {
     ];
     pub const fn kind_key(&self) -> &'static str {
         match self {
+            Self::SelectProgressChunks { .. } => "select_progress_chunks",
             Self::ResizeCamera { .. } => "resize_camera",
             Self::CameraColorProfile { .. } => "camera_color_profile",
             Self::TrimTime { .. } => "trim_time",
@@ -344,6 +355,7 @@ impl TransformOperation {
     }
     pub const fn kind_label(&self) -> &'static str {
         match self {
+            Self::SelectProgressChunks { .. } => "Select progress chunks",
             Self::ResizeCamera { .. } => "Resize camera",
             Self::CameraColorProfile { .. } => "Camera colour profile",
             Self::TrimTime { .. } => "Trim time",
@@ -351,6 +363,11 @@ impl TransformOperation {
     }
     pub fn summary(&self) -> String {
         match self {
+            Self::SelectProgressChunks { selection } => format!(
+                "Keep {}-frame chunks with mean WARP velocity at least {}",
+                selection.chunk_frames(),
+                selection.minimum_velocity()
+            ),
             Self::ResizeCamera {
                 topic,
                 width,
@@ -380,11 +397,12 @@ impl TransformOperation {
             Self::ResizeCamera { topic, .. } | Self::CameraColorProfile { topic, .. } => {
                 Some(topic)
             }
-            Self::TrimTime { .. } => None,
+            Self::TrimTime { .. } | Self::SelectProgressChunks { .. } => None,
         }
     }
     pub fn validate(&self) -> Result<(), String> {
         match self {
+            Self::SelectProgressChunks { selection } => selection.validate(),
             Self::ResizeCamera {
                 topic,
                 width,
@@ -417,6 +435,24 @@ impl TransformOperation {
             }
         }
     }
+    /// Native SQL over an already-decoded image, used by both evidence and
+    /// derived-frame execution so preview and output have identical semantics.
+    pub fn image_sql(&self, image: &str) -> Result<String, String> {
+        self.validate()?;
+        match self {
+            Self::ResizeCamera { width, height, .. } => {
+                Ok(format!("spql.image.resize({image}, CAST({width} AS UINT32), CAST({height} AS UINT32))"))
+            }
+            Self::CameraColorProfile { profile, .. } => Ok(format!(
+                "spql.image.to_rgb({image}, {})",
+                SqlLiteral::text(profile)
+            )),
+            Self::SelectProgressChunks { .. } => {
+                Err("A progress selection selects training chunks, not image pixels.".into())
+            }
+            Self::TrimTime { .. } => Err("A time trim selects messages, not image pixels.".into()),
+        }
+    }
 }
 
 /// A transform in the recipe, applied to every kept episode or only to the
@@ -426,12 +462,20 @@ impl TransformOperation {
 #[serde(deny_unknown_fields)]
 pub struct CurationTransform {
     id: String,
+    #[serde(default)]
     label: String,
-    #[serde(default = "CurationRule::enabled_by_default")]
-    enabled: bool,
+    #[serde(
+        default,
+        rename = "enabled",
+        deserialize_with = "CurationRule::ignore_legacy_enabled",
+        skip_serializing
+    )]
+    legacy_enabled: (),
     #[serde(default, skip_serializing_if = "Option::is_none")]
     condition: Option<RuleCondition>,
     operation: TransformOperation,
+    #[serde(default)]
+    order: usize,
 }
 
 impl CurationTransform {
@@ -443,9 +487,10 @@ impl CurationTransform {
         Self {
             id: id.into(),
             label: label.into(),
-            enabled: true,
+            legacy_enabled: (),
             condition: None,
             operation,
+            order: 0,
         }
     }
     pub fn with_condition(mut self, condition: Option<RuleCondition>) -> Self {
@@ -458,11 +503,16 @@ impl CurationTransform {
     pub fn label(&self) -> &str {
         &self.label
     }
-    pub const fn enabled(&self) -> bool {
-        self.enabled
-    }
     pub const fn condition(&self) -> Option<&RuleCondition> {
         self.condition.as_ref()
+    }
+    pub(super) fn resolve_progress_source(
+        &mut self,
+        dataset: Option<&crate::datasets::DatasetSelection>,
+    ) {
+        if let TransformOperation::SelectProgressChunks { selection } = &mut self.operation {
+            selection.resolve_dataset(dataset);
+        }
     }
     pub const fn operation(&self) -> &TransformOperation {
         &self.operation
@@ -470,14 +520,17 @@ impl CurationTransform {
     pub fn set_label(&mut self, label: impl Into<String>) {
         self.label = label.into();
     }
-    pub fn set_enabled(&mut self, enabled: bool) {
-        self.enabled = enabled;
-    }
     pub fn set_condition(&mut self, condition: Option<RuleCondition>) {
         self.condition = condition;
     }
     pub fn set_operation(&mut self, operation: TransformOperation) {
         self.operation = operation;
+    }
+    pub const fn order(&self) -> usize {
+        self.order
+    }
+    pub(super) fn set_order(&mut self, order: usize) {
+        self.order = order;
     }
     pub fn validate(&self, catalog: &FactCatalog) -> Result<(), String> {
         self.operation.validate()?;
@@ -498,9 +551,9 @@ impl CurationTransform {
     /// operation as `other`, whatever it is called.
     pub fn judges_like(&self, other: &Self) -> bool {
         self.id == other.id
-            && self.enabled == other.enabled
             && self.condition == other.condition
             && self.operation == other.operation
+            && self.order == other.order
     }
 }
 

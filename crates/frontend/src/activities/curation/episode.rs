@@ -4,10 +4,10 @@
 //! judged. ↑ and ↓ step through the tiles on view; Escape returns to the tile.
 
 use dioxus::prelude::*;
-use spiral_robotics_common::curation::CurationSpec;
 use spiral_robotics_common::curation::facts::CameraSample;
+use spiral_robotics_common::curation::{CurationSpec, rules::TransformOperation};
 use spiral_robotics_common::datasets::{DatasetSelection, EpisodeSelection};
-use spiral_robotics_common::relations::EpisodeQueryRequest;
+use spiral_robotics_common::relations::{EpisodeQueryRequest, QueryColumn};
 
 use super::sheet::{EPISODE_HEADING_ID, FactValueText, RuleTone, SheetTile};
 use crate::activities::data::DatasetClient;
@@ -22,6 +22,8 @@ use crate::format::{
 pub(super) fn EpisodeSheet(
     tile: SheetTile,
     judged: CurationSpec,
+    #[props(default)] selected_stage: Option<String>,
+    #[props(default)] inline: bool,
     position: SheetPosition,
     on_step: EventHandler<isize>,
     on_close: EventHandler<()>,
@@ -36,15 +38,15 @@ pub(super) fn EpisodeSheet(
         "episode",
     )
     .with_detail(format!("of {}", position.count()));
-    rsx! {
-        SideSheet { heading, position, on_step, on_close,
+    let body = rsx! {
             article { class: "curation-episode", "aria-label": "Episode evidence",
+                if !inline || selected_stage.is_none() {
                 header { class: "curation-episode-head",
                     span { class: "curation-episode-status", "data-kept": verdict.kept(),
                         span { class: "curation-episode-dot", "aria-hidden": "true" }
                         if verdict.kept() { "Kept" } else { "Excluded" }
                     }
-                    h4 { class: "curation-episode-title", "{tile.label()}" }
+                    h4 { id: inline.then_some(EPISODE_HEADING_ID), tabindex: "-1", class: "curation-episode-title", "{tile.label()}" }
                     if let Some(uri) = episode.source_uri() {
                         p { class: "curation-episode-path", "{uri}" }
                     }
@@ -70,11 +72,11 @@ pub(super) fn EpisodeSheet(
                 }
                 section { class: "curation-evidence",
                     h5 { class: "curation-evidence-title", "Rules" }
-                    if judged.rules().iter().all(|rule| !rule.enabled()) {
-                        p { class: "curation-section-note", "No rule was active; every episode was kept." }
+                    if judged.rules().is_empty() {
+                        p { class: "curation-section-note", "This recipe has no filters; every episode was kept." }
                     }
                     ul { class: "curation-verdict-list",
-                        for (index, rule) in judged.rules().iter().enumerate().filter(|(_, rule)| rule.enabled()) {
+                        for (index, rule) in judged.rules().iter().enumerate() {
                             li { class: "curation-verdict-row",
                                 "data-fired": verdict.excluded_by().iter().any(|fired| fired == rule.id()),
                                 style: "--rule-tone: {RuleTone::at(index).css()}",
@@ -87,11 +89,11 @@ pub(super) fn EpisodeSheet(
                         }
                     }
                 }
-                if judged.transforms().iter().any(|transform| transform.enabled()) {
+                if !judged.transforms().is_empty() {
                     section { class: "curation-evidence",
                         h5 { class: "curation-evidence-title", "Transforms" }
                         ul { class: "curation-verdict-list",
-                            for transform in judged.transforms().iter().filter(|transform| transform.enabled()) {
+                            for transform in judged.transforms().iter() {
                                 li { class: "curation-verdict-row",
                                     "data-fired": verdict.transforms().iter().any(|applied| applied == transform.id()),
                                     span { class: "curation-verdict-text", "{transform.title()}" }
@@ -105,7 +107,36 @@ pub(super) fn EpisodeSheet(
                         }
                     }
                 }
+                }
                 if let Some(dataset) = dataset {
+                    for transform in judged.transforms().iter().filter(|transform| selected_stage.as_deref() == Some(transform.id())) {
+                        match tile.opened_episode(dataset.clone()) {
+                            Ok(opened) => match transform.operation() {
+                                TransformOperation::SelectProgressChunks { selection } => rsx! {
+                                    super::progress::ProgressEvidence {
+                                        key: "{transform.id()}:{episode.id()}:{selection.scorer().model()}:{selection.sources_relation()}",
+                                        episode: opened, selection: selection.clone(),
+                                    }
+                                },
+                                TransformOperation::ResizeCamera { .. } => rsx! {},
+                                _ => rsx! { TransformEpisodeEvidence { key: "{transform.id()}:{episode.id()}", episode: opened } },
+                            },
+                            Err(error) => rsx! { p { role: "alert", class: "curation-section-note", "{error}" } },
+                        }
+                    }
+                    for transform in judged.transforms().iter().filter(|transform| selected_stage.as_deref().is_none_or(|id| id == transform.id()) && judged.reaches_step(verdict, transform.id()) && verdict.eligible_transforms().iter().any(|id| id == transform.id())) {
+                        if let Some(topic) = transform.operation().topic() {
+                            FrameEvidence {
+                                key: "transform-{transform.id()}",
+                                title: transform.title(),
+                                show_heading: selected_stage.is_none(),
+                                camera: CameraSample::new(topic.clone()),
+                                dataset: dataset.clone(),
+                                episode_id: episode.id().to_owned(),
+                                operations: judged.transforms().iter().take_while(|prior| prior.id() != transform.id()).filter(|prior| prior.operation().topic() == Some(topic) && verdict.eligible_transforms().iter().any(|id| id == prior.id())).map(|prior| prior.operation().clone()).chain(std::iter::once(transform.operation().clone())).collect::<Vec<_>>(),
+                            }
+                        }
+                    }
                     for fact in judged.facts().iter().filter(|fact| fact.measure().camera().is_some()) {
                         if let Some(camera) = fact.measure().camera() {
                             FrameEvidence {
@@ -119,8 +150,41 @@ pub(super) fn EpisodeSheet(
                     }
                 }
             }
-        }
+    };
+    if inline {
+        body
+    } else {
+        rsx! { SideSheet { heading, position, on_step, on_close, {body} } }
     }
+}
+
+impl SheetTile {
+    fn opened_episode(
+        &self,
+        dataset: DatasetSelection,
+    ) -> Result<crate::activities::data::OpenedEpisode, String> {
+        let episode = self.verdict().episode();
+        let serde_json::Value::Object(mut row) =
+            serde_json::to_value(episode).map_err(|error| error.to_string())?
+        else {
+            return Err("Episode metadata is not a record.".into());
+        };
+        if let (Some(start), Some(duration)) = (episode.message_start_time(), episode.duration_ns())
+        {
+            let end = start
+                .checked_add(duration)
+                .ok_or("Episode time range overflows.")?;
+            row.insert("message_end_time".into(), end.into());
+        }
+        crate::activities::data::OpenedEpisode::from_row(dataset, row)
+    }
+}
+
+#[component]
+fn TransformEpisodeEvidence(episode: crate::activities::data::OpenedEpisode) -> Element {
+    use crate::activities::data::{EpisodeReview, EpisodeTransport};
+    let transport = EpisodeTransport::use_opened_episode(&episode);
+    rsx! { EpisodeReview { episode, transport } }
 }
 
 /// The frames a camera measurement decoded for this episode. They load as
@@ -132,15 +196,32 @@ fn FrameEvidence(
     camera: CameraSample,
     dataset: DatasetSelection,
     episode_id: String,
+    #[props(default)] operations: Vec<TransformOperation>,
+    #[props(default = true)] show_heading: bool,
 ) -> Element {
-    let request = EpisodeQueryRequest::new(
-        EpisodeSelection::new(dataset.clone(), episode_id),
-        camera.sample_sql(&dataset.sql_name()),
-        16,
-    );
-    let mut frames = use_resource(move || {
-        let request = request.clone();
-        async move {
+    let original_sql = camera.sample_sql(&dataset.sql_name());
+    let mut input = "image".to_owned();
+    for operation in operations.iter().take(operations.len().saturating_sub(1)) {
+        if let Ok(expression) = operation.image_sql(&input) {
+            input = expression;
+        }
+    }
+    let sql = match operations
+        .last()
+        .and_then(|operation| operation.image_sql(&input).ok())
+    {
+        Some(derived) => format!(
+            "SELECT *, spql.image.width(image) AS image_width, spql.image.height(image) AS image_height, spql.image.width(adjusted_image) AS adjusted_image_width, spql.image.height(adjusted_image) AS adjusted_image_height FROM (SELECT id, {input} AS image, {derived} AS adjusted_image FROM ({original_sql}) samples) compared"
+        ),
+        None => format!(
+            "SELECT *, spql.image.width(image) AS image_width, spql.image.height(image) AS image_height FROM ({original_sql}) samples"
+        ),
+    };
+    let query_episode = EpisodeSelection::new(dataset, episode_id);
+    let mut frames = use_resource(use_reactive(
+        (&query_episode, &sql),
+        move |(episode, sql)| async move {
+            let request = EpisodeQueryRequest::new(episode, sql, 16);
             DatasetClient::current()
                 .run_episode_query(&request)
                 .await
@@ -152,11 +233,21 @@ fn FrameEvidence(
                         .find(|column| column.name() == "image")
                         .cloned()
                         .ok_or("The frame query returned no image column.")?;
+                    let adjusted = snapshot
+                        .columns()
+                        .iter()
+                        .find(|column| column.name() == "adjusted_image");
                     let images = snapshot
                         .rows()
                         .iter()
                         .filter_map(|row| {
-                            column.image_data_url(row.get("image")).map(str::to_owned)
+                            EvidenceImage::from_row(&column, row).map(|original| {
+                                (
+                                    original,
+                                    adjusted
+                                        .and_then(|column| EvidenceImage::from_row(column, row)),
+                                )
+                            })
                         })
                         .collect::<Vec<_>>();
                     if images.is_empty() {
@@ -166,19 +257,25 @@ fn FrameEvidence(
                     }
                     Ok(images)
                 })
-        }
-    });
+        },
+    ));
     let frame_count = camera.frames().len();
     rsx! {
-        section { class: "curation-evidence",
-            h5 { class: "curation-evidence-title", "{title} · {camera.topic().topic()}" }
+        section { class: "curation-evidence", "aria-label": "{title} · {camera.topic().topic()}",
+            if show_heading { h5 { class: "curation-evidence-title", "{title} · {camera.topic().topic()}" } }
             match frames.read().as_ref() {
                 Some(Ok(images)) => rsx! {
                     div { class: "curation-frames",
-                        for (index, image) in images.iter().enumerate() {
+                        for (index, (image, adjusted)) in images.iter().enumerate() {
                             figure { class: "curation-frame",
-                                img { src: "{image}", alt: "{title}, sampled frame {index + 1}" }
-                                figcaption { "frame {camera.frames().get(index).copied().unwrap_or(index as u32)}" }
+                                img { src: "{image.url}", alt: "Original {title}, sampled frame {index + 1}" }
+                                figcaption { "Before · {image.dimensions()} · frame {camera.frames().get(index).copied().unwrap_or(index as u32)}" }
+                            }
+                            if let Some(adjusted) = adjusted {
+                                figure { class: "curation-frame",
+                                    img { src: "{adjusted.url}", alt: "Adjusted {title}, sampled frame {index + 1}" }
+                                    figcaption { "After · {adjusted.dimensions()} · same frame" }
+                                }
                             }
                         }
                     }
@@ -195,5 +292,33 @@ fn FrameEvidence(
                 },
             }
         }
+    }
+}
+
+/// Dimensions come from the native image value, independent of CSS display size.
+struct EvidenceImage {
+    url: String,
+    size: Option<(u64, u64)>,
+}
+
+impl EvidenceImage {
+    fn from_row(
+        column: &QueryColumn,
+        row: &serde_json::Map<String, serde_json::Value>,
+    ) -> Option<Self> {
+        let url = column.image_data_url(row.get(column.name()))?.to_owned();
+        let size = row
+            .get(&format!("{}_width", column.name()))
+            .and_then(serde_json::Value::as_u64)
+            .zip(
+                row.get(&format!("{}_height", column.name()))
+                    .and_then(serde_json::Value::as_u64),
+            );
+        Some(Self { url, size })
+    }
+    fn dimensions(&self) -> String {
+        self.size
+            .map(|(width, height)| format!("{width}×{height} px"))
+            .unwrap_or_else(|| "Dimensions unavailable".into())
     }
 }

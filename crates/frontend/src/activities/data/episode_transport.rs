@@ -48,6 +48,7 @@ struct PlaybackClock {
     duration: f64,
     speed: f64,
     looping: bool,
+    stop_at: Option<f64>,
 }
 impl PlaybackClock {
     fn new(duration: f64) -> Self {
@@ -57,12 +58,23 @@ impl PlaybackClock {
             duration: duration.max(0.0),
             speed: 1.0,
             looping: false,
+            stop_at: None,
         }
     }
     fn seek(&mut self, seconds: f64) {
         if seconds.is_finite() {
+            self.stop_at = None;
             self.seconds = seconds.clamp(0.0, self.duration);
         }
+    }
+    fn play_interval(&mut self, start: f64, end: f64) {
+        if !start.is_finite() || !end.is_finite() || end <= start {
+            return;
+        }
+        self.seek(start);
+        let end = end.clamp(self.seconds, self.duration);
+        self.stop_at = Some(end);
+        self.playing = end > self.seconds;
     }
     fn toggle(&mut self) {
         if self.duration <= 0.0 {
@@ -78,7 +90,11 @@ impl PlaybackClock {
             .advance(0.0, elapsed)
             * self.speed;
         let next = self.seconds + step;
-        if next >= self.duration {
+        if let Some(end) = self.stop_at.filter(|end| next >= *end) {
+            self.seconds = end;
+            self.playing = false;
+            self.stop_at = None;
+        } else if next >= self.duration {
             if self.looping && self.duration > 0.0 {
                 self.seconds = next % self.duration;
             } else {
@@ -180,7 +196,7 @@ pub(super) struct TimeTick {
     label: String,
 }
 impl TimeTick {
-    pub(super) fn seconds(&self) -> f64 {
+    pub(crate) fn seconds(&self) -> f64 {
         self.seconds
     }
     pub(super) fn position(&self) -> f64 {
@@ -253,7 +269,7 @@ impl EpisodeMedia {
 }
 
 #[derive(Clone)]
-pub(super) struct EpisodeTransport {
+pub(crate) struct EpisodeTransport {
     clock: Signal<PlaybackClock>,
     view: Signal<ViewWindow>,
     range: Signal<EpisodeTimeRange>,
@@ -266,11 +282,33 @@ impl PartialEq for EpisodeTransport {
     }
 }
 impl EpisodeTransport {
+    /// One caller-owned clock for an inline episode camera and its timeline.
+    pub(crate) fn use_opened_episode(episode: &super::episode_list::OpenedEpisode) -> Self {
+        let range = episode
+            .record()
+            .time_range()
+            .unwrap_or_else(|| EpisodeTimeRange::new(0, 0));
+        let transport = Self::use_range(range);
+        let mut updating = transport.clone();
+        use_effect(use_reactive(&range, move |range| {
+            if updating.range() != range {
+                updating.load(range);
+            }
+        }));
+        transport
+    }
+
+    pub(super) fn play_interval(&mut self, start: f64, end: f64) {
+        self.clock.write().play_interval(start, end);
+    }
     /// One transport per Data workspace; `load` points it at an episode.
     pub(super) fn use_transport() -> Self {
-        let clock = use_signal(|| PlaybackClock::new(0.0));
-        let view = use_signal(|| ViewWindow::full(0.0));
-        let range = use_signal(|| EpisodeTimeRange::new(0, 0));
+        Self::use_range(EpisodeTimeRange::new(0, 0))
+    }
+    fn use_range(initial: EpisodeTimeRange) -> Self {
+        let clock = use_signal(|| PlaybackClock::new(initial.duration()));
+        let view = use_signal(|| ViewWindow::full(initial.duration()));
+        let range = use_signal(|| initial);
         let feeds = use_signal(BTreeMap::new);
         let media = use_hook(|| {
             Rc::new(EpisodeMedia {
@@ -341,7 +379,7 @@ impl EpisodeTransport {
     pub(super) fn duration(&self) -> f64 {
         self.clock.read().duration
     }
-    pub(super) fn seconds(&self) -> f64 {
+    pub(crate) fn seconds(&self) -> f64 {
         self.clock.read().seconds
     }
     /// The playhead as an absolute log time, for latest-message lookups.
@@ -461,6 +499,20 @@ impl EpisodeTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn interval_review_stops_exactly_and_manual_seek_clears_boundary() {
+        let mut clock = PlaybackClock::new(30.0);
+        clock.looping = true;
+        clock.play_interval(23.9, 24.0);
+        clock.advance(0.2);
+        assert_eq!(clock.seconds, 24.0);
+        assert!(!clock.playing);
+        clock.play_interval(23.0, 24.0);
+        clock.seek(25.0);
+        assert_eq!(clock.stop_at, None);
+        clock.advance(0.2);
+        assert!(clock.seconds > 25.0);
+    }
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn one_clock_clamps_seeks_loops_and_honours_speed() {
         let mut clock = PlaybackClock::new(2.0);

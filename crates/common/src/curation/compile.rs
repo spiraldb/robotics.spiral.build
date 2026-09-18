@@ -1,5 +1,5 @@
 //! One recipe becomes one read-only query: the episode population, each
-//! measured fact joined by episode, every enabled rule and transform judged
+//! measured fact joined by episode, every rule and transform judged
 //! as a boolean column, and `kept` as the verdict.
 use super::CurationSpec;
 use super::facts::{BuiltinFact, SqlLiteral};
@@ -52,7 +52,7 @@ impl CurationSpec {
         let expressions = FactExpressions::for_spec(self);
         let mut judged_columns = Vec::new();
         let mut rule_ids = Vec::new();
-        for rule in self.rules().iter().filter(|rule| rule.enabled()) {
+        for rule in self.rules().iter() {
             let index = rule_ids.len();
             judged_columns.push(format!(
                 "{} AS rule_{index}",
@@ -62,11 +62,7 @@ impl CurationSpec {
             rule_ids.push(rule.id().to_owned());
         }
         let mut transform_ids = Vec::new();
-        for transform in self
-            .transforms()
-            .iter()
-            .filter(|transform| transform.enabled())
-        {
+        for transform in self.transforms().iter() {
             let index = transform_ids.len();
             let predicate = match transform.condition() {
                 Some(condition) => condition.sql(&expressions.resolve(condition.fact())?)?,
@@ -128,6 +124,100 @@ impl CurationSpec {
 }
 
 impl CompiledCuration {
+    /// Materialize the full judged population, including excluded rows and
+    /// the exact submitted recipe. Preview limits never define training data.
+    pub fn materialize_sql(&self, relation: &str, recipe: &CurationSpec) -> Result<String, String> {
+        let definition = serde_json::to_string(recipe).map_err(|error| error.to_string())?;
+        Ok(format!(
+            "CREATE TABLE \"{}\" AS SELECT judged.*, {} AS curation_recipe FROM ({}) judged",
+            relation.replace('"', "\"\""),
+            SqlLiteral::text(&definition),
+            self.roster_sql
+        ))
+    }
+    pub fn output_roster_sql(&self, relation: &str) -> String {
+        format!(
+            "SELECT * FROM \"{}\" ORDER BY message_start_time, source_uri, id",
+            relation.replace('"', "\"\"")
+        )
+    }
+    pub fn output_totals_sql(&self, relation: &str) -> String {
+        let select = self
+            .totals_sql
+            .rsplit_once("\nSELECT ")
+            .map(|(_, select)| select)
+            .expect("compiled totals end in a SELECT");
+        format!(
+            "SELECT {}",
+            select.replace(
+                "FROM verdicts",
+                &format!("FROM \"{}\"", relation.replace('"', "\"\""))
+            )
+        )
+    }
+    pub fn stage_totals_sql(&self, relation: &str, recipe: &CurationSpec) -> String {
+        let mut retained = "true".to_owned();
+        let mut columns = Vec::new();
+        for (index, step) in recipe.steps().iter().enumerate() {
+            columns.push(format!(
+                "sum(CASE WHEN {retained} THEN 1 ELSE 0 END) AS stage_{index}_incoming"
+            ));
+            if let super::CurationStep::Transform(transform) = step {
+                if let Some(transform_index) =
+                    self.transforms.iter().position(|id| id == transform.id())
+                {
+                    columns.push(format!("sum(CASE WHEN {retained} AND COALESCE(transform_{transform_index},false) THEN 1 ELSE 0 END) AS stage_{index}_affected"));
+                }
+            }
+            if let super::CurationStep::Filter(rule) = step {
+                if let Some(rule_index) = self.rules.iter().position(|id| id == rule.id()) {
+                    retained = format!("{retained} AND NOT COALESCE(rule_{rule_index},false)");
+                }
+            }
+            columns.push(format!(
+                "sum(CASE WHEN {retained} THEN 1 ELSE 0 END) AS stage_{index}_retained"
+            ));
+        }
+        if columns.is_empty() {
+            columns.push("count(*) AS episodes".into());
+        }
+        format!(
+            "SELECT {} FROM {}",
+            columns.join(", "),
+            CurationSpec::quoted_relation(relation)
+        )
+    }
+    pub fn stage_impacts(
+        &self,
+        recipe: &CurationSpec,
+        totals: &SpiralQuerySnapshot,
+    ) -> Result<Vec<super::run::CurationStageImpact>, String> {
+        let row = totals
+            .rows()
+            .first()
+            .ok_or("The stage totals returned no row.")?;
+        Ok(recipe
+            .steps()
+            .iter()
+            .enumerate()
+            .map(|(index, step)| {
+                let count = |suffix| {
+                    row.get(&format!("stage_{index}_{suffix}"))
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0)
+                };
+                let mut impact = super::run::CurationStageImpact::new(
+                    step.id().to_owned(),
+                    count("incoming"),
+                    count("retained"),
+                );
+                if matches!(step, super::CurationStep::Transform(_)) {
+                    impact.set_affected_episodes(count("affected"));
+                }
+                impact
+            })
+            .collect())
+    }
     /// One row per episode, bounded by the result preview limit.
     pub fn roster_sql(&self) -> &str {
         &self.roster_sql
@@ -168,9 +258,10 @@ impl CompiledCuration {
                 verdict = verdict.with_exclusion(id.clone());
             }
         }
-        if verdict.kept() {
-            for (index, id) in self.transforms.iter().enumerate() {
-                if column(&format!("transform_{index}")).as_bool() == Some(true) {
+        for (index, id) in self.transforms.iter().enumerate() {
+            if column(&format!("transform_{index}")).as_bool() == Some(true) {
+                verdict = verdict.with_eligible_transform(id.clone());
+                if verdict.kept() {
                     verdict = verdict.with_transform(id.clone());
                 }
             }

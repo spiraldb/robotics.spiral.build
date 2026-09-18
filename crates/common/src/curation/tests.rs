@@ -5,6 +5,49 @@ use super::rules::{
 use super::*;
 use crate::relations::{QueryColumn, SpiralQuerySnapshot};
 
+#[test]
+fn rule_order_survives_serialization_and_moves_across_transform_boundaries() {
+    let mut spec = recipe();
+    spec.move_step("profile", StepDirection::Earlier);
+    assert_eq!(
+        spec.steps()
+            .iter()
+            .map(CurationStep::id)
+            .collect::<Vec<_>>(),
+        ["short", "profile", "dim"]
+    );
+    let mut restored: CurationSpec =
+        serde_json::from_value(serde_json::to_value(&spec).unwrap()).unwrap();
+    assert_eq!(
+        restored
+            .steps()
+            .iter()
+            .map(CurationStep::id)
+            .collect::<Vec<_>>(),
+        ["short", "profile", "dim"]
+    );
+    restored.move_step("short", StepDirection::Earlier);
+    restored.move_step("dim", StepDirection::Later);
+    assert_eq!(
+        restored
+            .steps()
+            .iter()
+            .map(CurationStep::id)
+            .collect::<Vec<_>>(),
+        ["short", "profile", "dim"]
+    );
+    restored.add_rule(CurationRule::new(
+        "last",
+        "",
+        RuleCondition::new(
+            "duration_s",
+            ConditionOp::Above,
+            ConditionValue::Number(10.0),
+        ),
+    ));
+    assert_eq!(restored.steps().last().unwrap().id(), "last");
+}
+
 fn dataset() -> DatasetSelection {
     DatasetSelection::new(vec!["dataset_abc".into()]).unwrap()
 }
@@ -90,16 +133,22 @@ fn a_recipe_compiles_to_one_population_query_with_positional_aliases() {
 }
 
 #[test]
-fn disabled_rules_leave_the_query_and_sql_facts_are_read_only() {
-    let mut spec = recipe();
-    spec.rule_mut("short").unwrap().set_enabled(false);
+fn legacy_disabled_rules_apply_and_sql_facts_are_read_only() {
+    let mut serialized = serde_json::to_value(recipe()).unwrap();
+    serialized["rules"][0]["enabled"] = false.into();
+    let spec: CurationSpec = serde_json::from_value(serialized).unwrap();
+    assert!(
+        serde_json::to_value(&spec).unwrap()["rules"][0]
+            .get("enabled")
+            .is_none()
+    );
     let compiled = spec.compile().unwrap();
     assert!(
-        !compiled
+        compiled
             .roster_sql()
             .contains("duration_ns / 1000000000.0 <")
     );
-    assert!(compiled.roster_sql().contains("(fact_0 < 0.08) AS rule_0"));
+    assert!(compiled.roster_sql().contains("(fact_0 < 0.08) AS rule_1"));
     let mut spec = recipe();
     spec.add_fact(CurationFact::new(
         "written",
@@ -235,9 +284,6 @@ fn recipe_edits_invalidate_verdicts_but_renaming_does_not() {
         ),
     );
     assert!(renamed.accepts_output_from(&executed));
-    let mut paused = executed.clone();
-    paused.rule_mut("dim").unwrap().set_enabled(false);
-    assert!(!paused.accepts_output_from(&executed));
     let mut edited = executed.clone();
     edited
         .rule_mut("dim")
@@ -248,12 +294,7 @@ fn recipe_edits_invalidate_verdicts_but_renaming_does_not() {
 }
 
 #[test]
-fn keys_and_sentences_read_the_way_an_operator_would_write_them() {
-    assert_eq!(
-        CurationFact::key_from_label("Top camera brightness"),
-        "top_camera_brightness"
-    );
-    assert_eq!(CurationFact::key_from_label("  90% done!"), "fact_90_done");
+fn sentences_read_the_way_an_operator_would_write_them() {
     let spec = recipe();
     let catalog = spec.catalog();
     assert_eq!(catalog.entries().len(), 7);
@@ -263,7 +304,10 @@ fn keys_and_sentences_read_the_way_an_operator_would_write_them() {
         spec.rules()[1].reason(&catalog),
         "Top camera brightness is below 0.08"
     );
-    assert_eq!(spec.rules()[0].reason(&catalog), "Too short");
+    assert_eq!(
+        spec.rules()[0].reason(&catalog),
+        spec.rules()[0].condition().sentence(&catalog)
+    );
     assert_eq!(
         spec.transforms()[0].title(),
         "Convert /top-camera as bt709_limited"
@@ -278,4 +322,44 @@ fn keys_and_sentences_read_the_way_an_operator_would_write_them() {
     let json = serde_json::to_string(&spec).unwrap();
     let restored: CurationSpec = serde_json::from_str(&json).unwrap();
     assert_eq!(restored, spec);
+}
+
+#[test]
+fn durable_outputs_include_full_recipe_and_conditioned_native_resize() {
+    let mut spec = recipe();
+    spec.add_transform(CurationTransform::new(
+        "resize",
+        "",
+        TransformOperation::ResizeCamera {
+            topic: TopicRef::new("/top-camera"),
+            width: 224,
+            height: 224,
+        },
+    ));
+    let compiled = spec.compile().unwrap();
+    let materialized = compiled.materialize_sql("run_1", &spec).unwrap();
+    assert!(materialized.starts_with("CREATE TABLE \"run_1\" AS"));
+    assert!(materialized.contains("curation_recipe"));
+    assert!(!materialized.contains("LIMIT"));
+    let derived = spec.derived_outputs("run_1").unwrap();
+    assert_eq!(derived.len(), 1);
+    assert_eq!(derived[0].relation(), "run_1_camera_0");
+    let sql = derived[0].statement();
+    assert!(sql.contains("WHERE v.kept"));
+    assert!(sql.contains("COALESCE(v.transform_1, false)"));
+    assert!(sql.contains("spql.image.resize(CASE WHEN COALESCE(v.transform_0"));
+    assert!(sql.contains("CAST(224 AS UINT32), CAST(224 AS UINT32)"));
+    assert!(
+        compiled
+            .output_totals_sql("run_1")
+            .ends_with("FROM \"run_1\"")
+    );
+    let mut serialized = serde_json::to_value(&spec).unwrap();
+    serialized["transforms"][1]["enabled"] = false.into();
+    let migrated: CurationSpec = serde_json::from_value(serialized).unwrap();
+    assert!(
+        migrated.derived_outputs("run_1").unwrap()[0]
+            .statement()
+            .contains("spql.image.resize")
+    );
 }

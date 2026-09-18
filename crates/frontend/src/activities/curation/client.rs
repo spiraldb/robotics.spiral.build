@@ -11,6 +11,30 @@ pub(crate) struct CurationClient {
     project: ProjectClient,
 }
 impl CurationClient {
+    pub(crate) async fn preview(
+        &self,
+        curation: &CurationSpec,
+    ) -> Result<spiral_robotics_common::curation::run::CurationOutcome, CommandError> {
+        self.project
+            .request(HttpRequest::new("POST", "/api/curations/preview").json(curation))
+            .await
+    }
+    pub(crate) async fn score_episode(
+        &self,
+        request: &spiral_robotics_common::curation::progress::ProgressScoreRequest,
+    ) -> Result<spiral_robotics_common::curation::progress::ProgressScoreResult, CommandError> {
+        self.project
+            .request(HttpRequest::new("POST", "/api/curations/progress-score").json(request))
+            .await
+    }
+    pub(crate) async fn interpret(
+        &self,
+        request: &spiral_robotics_common::curation::interpretation::InterpretationRequest,
+    ) -> Result<spiral_robotics_common::curation::interpretation::RuleProposal, CommandError> {
+        self.project
+            .request(HttpRequest::new("POST", "/api/curations/interpret").json(request))
+            .await
+    }
     pub(crate) fn current() -> Self {
         Self {
             project: ProjectClient::current(),

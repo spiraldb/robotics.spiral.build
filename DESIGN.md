@@ -1369,9 +1369,19 @@ surface is said twice.
 - **Composition:** The shared 36px document bar (glyph, name ▾, then at
   right the state chip, Discard while dirty, Save, filled ▶Run), then the `curation-sheet-v2`
   scope: the 26% Recipe column beside the Sheet. Recipe holds Source,
-  Measurements, Rules, and Transforms as hairline-separated sections; the
-  Sheet is a run strip over the tile grid, with the selected episode's
-  evidence docked at its right edge in the shared side sheet. There is no
+  an ordered rule list, and one Add a rule composer with natural-language
+  entry and a folded manual builder. The Sheet presents the horizontal
+  pipeline above episode evidence. The selected transform's compact header
+  combines its title, episode picker, and eligible count. WARP shows three
+  recorded camera feeds followed by the shared timeline and its numeric track.
+  Its camera row takes the remaining panel height after reserving the timeline;
+  the feeds use contain sizing and the progress track stays visible without scrolling.
+  Pipeline height stays constant across selections. The timeline has no redundant
+  frame/progress readout or explanatory footer below it. Curation camera feeds
+  omit individual frame/age footers; playback time belongs to the shared timeline.
+  Resize shows only the original and native resized frame side by side, with
+  pixel dimensions. Curated output keeps the graph above an equal-width
+  episode list and inline episode details. There is no
   dataset chip in the bar: the dataset is named once, in Source.
 - **Document actions:** Save is disabled only when there is nothing to save
   (tooltip "Everything is saved."), while loading, or on a revision
@@ -1380,38 +1390,24 @@ surface is said twice.
   missing in the status bar and the same words sit on Run's tooltip. Run
   disables only for a load error, a pending command, or a run in progress
   (spinner + "Judging"). ⌘/Ctrl+Enter runs from anywhere in the workspace.
-- **Recipe section:** An 11px medium soft-ink title with the count in 10px
-  faint mono at the right, 10px/12px/12px padding, a lower hairline. A
-  section's one add control is a 24px select ("Add a measurement…"), so a
-  section grows by one line rather than a row of buttons; Rules alone adds
-  with an outline "Add rule". Notes are 11px faint at 16px leading; an alert
-  note turns brick red. Source's facts (episode count, recorded time) are
-  one 10px soft-ink mono line; the source caution ("Dataset list unavailable
-  · type its catalog name") is one truncating 10px ochre line. The Transforms
-  note shows only while the section is empty.
-- **Measurement and transform rows:** One line each (`curation-fact`),
-  separated by hairlines, 6px vertical padding: a 12px chevron, the 12px
-  medium label, then what tells it from another of its kind in 10px faint
-  mono (`curation-fact-detail`, truncating), and the remove action at the
-  right. No kind chip. The row opens when it still needs something or when
-  the operator asks; the open body is an `auto minmax(0,1fr)` label/value
-  grid in 11px soft ink over 24px fields.
-- **Rule sentence:** Two lines (`curation-rule`, 6px padding, 4px gap). Line
-  one: the mark · "If" · fact select (≥ 5.5rem, grows) · the comparison
-  grouped in `curation-condition-test` (op ≤ 7.5rem, value 3.5rem) so a
-  wrap breaks before the comparison, never inside it. Line two: "exclude
-  as" · reason input (≥ 6rem, grows) · the count ("N removed", 11px
-  semibold mono over 10px faint) · remove. Words are 11px faint ink; blanks
-  are 24px fields. Every builtin fact sits in the fact select under "Every
-  episode"; nothing lists them elsewhere.
-- **Rule mark:** A 16px round transparent button (`curation-rule-mark`) is
-  the rule's handle and its switch. It holds a 6px dot filled in the rule's
-  tint with a 1px ring of the same tint; `aria-pressed` reports the rule
-  active. A paused rule keeps the ring and loses the fill, and its words
-  fade to 0.55. Hover scales the dot 1.35 over 120ms. Hovering or focusing
-  the mark, or the "N removed" count, lights the rule's tiles on the sheet
-  and washes the rule row with the hover tone over 100ms; the words beside
-  the mark do not light anything, so editing leaves the sheet alone.
+- **Recipe section:** An 11px medium soft-ink title, a compact count, and
+  hairline separation. Source's episode count and recorded time share one
+  quiet readout. Rule creation has one owner: the Add a rule composer and
+  its folded manual builder. There is no separate measurement or transform
+  authoring section. Recorded camera suggestions are shared by the composer
+  and existing transform editors.
+- **Ordered rules:** Each rule has a numbered kind, a drag handle with keyboard
+  reordering, and a remove action. Filter editors show the condition itself;
+  there is no enabled switch or exclusion-name field. Transform rows disclose
+  their existing operation-specific fields in place. WARP exposes only Cutoff
+  unless an existing condition also needs to remain visible.
+- **Rule sentence:** The mark, fact, comparison, and value share a compact
+  wrapping row. The comparison and its value stay together. Builtin and
+  recorded facts remain in the same fact catalog; removing a legacy editor
+  does not change saved measurement definitions or their execution.
+- **Rule feedback:** Hovering a condition's mark or its measured exclusion
+  count lights matching tiles. Selected rules receive the same restrained
+  outline as their pipeline node. Every present rule applies.
 - **Run strip:** Phase with its dot; a `run-select` of runs only when there
   is more than one; the All · Kept · Excluded filter as Workflow's 22px
   compact segments, each carrying its total as a `strong` 11px semibold mono
@@ -1444,9 +1440,10 @@ surface is said twice.
   opacity 0.32, so the sheet becomes the rule's answer.
 - **Skeletons:** Tiles of 3.5rem minimum height shimmering recess → hover →
   recess over 1.4s, entering 40ms apart, until the run answers.
-- **Episode evidence:** Inside the shared side sheet headed "Episode N" with
-  a faint "of M", the body (`curation-episode`, 12px padding, 12px gaps) is:
-  a 6px status dot (connection green for kept, faint ink for excluded) with
+- **Episode evidence:** Source and filter inspection use the shared side sheet
+  headed "Episode N" with a faint "of M". Curated output embeds the same body
+  inline in the right half below the graph, without a drawer. The body (`curation-episode`, 12px padding, 12px gaps) is:
+  a 6px status dot (theme blue for kept, faint ink for excluded) with
   the 11px medium verdict word, the task label as a 12px semibold `h4`, the
   source path in 10px faint mono; a stat grid (`minmax(6.5rem, 1fr)`) with
   10px faint terms and 12px mono values; then evidence blocks under 11px

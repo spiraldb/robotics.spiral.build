@@ -10,11 +10,36 @@ pub(crate) struct CurationEndpoints;
 impl CurationEndpoints {
     pub(crate) fn register(routes: &mut ApiRoutes) {
         routes.get("/curations", Self::list);
+        routes.post("/curations/interpret", Self::interpret);
+        routes.post("/curations/preview", Self::preview);
+        routes.post("/curations/progress-score", Self::score_episode);
         routes.get("/curations/{id}", Self::load);
         routes.post("/curations/save", Self::save);
         routes.get("/curation-runs", Self::runs);
         routes.post("/curation-runs", Self::start);
         routes.get("/curation-runs/{id}", Self::run);
+    }
+    async fn score_episode(
+        ScopedProject(commands): ScopedProject<CurationCommands>,
+        ApiJson(request): ApiJson<spiral_robotics_common::curation::progress::ProgressScoreRequest>,
+    ) -> Result<Json<spiral_robotics_common::curation::progress::ProgressScoreResult>, HttpFailure>
+    {
+        Ok(Json(commands.score_episode(request).await?))
+    }
+    async fn preview(
+        ScopedProject(commands): ScopedProject<CurationCommands>,
+        ApiJson(curation): ApiJson<CurationSpec>,
+    ) -> Result<Json<spiral_robotics_common::curation::run::CurationOutcome>, HttpFailure> {
+        Ok(Json(commands.preview(curation).await?))
+    }
+    async fn interpret(
+        ScopedProject(commands): ScopedProject<CurationCommands>,
+        ApiJson(request): ApiJson<
+            spiral_robotics_common::curation::interpretation::InterpretationRequest,
+        >,
+    ) -> Result<Json<spiral_robotics_common::curation::interpretation::RuleProposal>, HttpFailure>
+    {
+        Ok(Json(commands.interpret(request).await?))
     }
     async fn list(
         ScopedProject(commands): ScopedProject<CurationCommands>,

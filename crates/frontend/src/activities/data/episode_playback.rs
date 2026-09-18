@@ -28,6 +28,7 @@ pub(super) fn EpisodeCamera(
     request: MessageRead,
     timeline: EpisodeTimeRange,
     transport: EpisodeTransport,
+    #[props(default = true)] show_frame_timing: bool,
 ) -> Element {
     let media = transport.media();
     let load_request = request.clone();
@@ -76,7 +77,7 @@ pub(super) fn EpisodeCamera(
         div { class: "episode-camera-panel",
             if pending { p { class: "episode-camera-message", role: "status", "Loading recorded camera…" } }
             else { match &*video.read() {
-                Some(Ok(camera)) => rsx! { CameraFrames { camera: camera.clone(), transport, topic: format!("{} · {}", request.topic().topic(), request.revision().variant()) } },
+                Some(Ok(camera)) => rsx! { CameraFrames { camera: camera.clone(), transport, show_frame_timing, topic: format!("{} · {}", request.topic().topic(), request.revision().variant()) } },
                 Some(Err(error)) => rsx! { div { class: "episode-camera-message", role: "alert",
                     p { "{error}" }
                     button { class: "data-text-action", onclick: move |_| video.restart(), "Retry camera" }
@@ -99,7 +100,12 @@ const QUIET_RESTART_PACKETS: usize = 15;
 const UNCOVERED_RETRIES: u8 = 8;
 
 #[component]
-fn CameraFrames(camera: Rc<LoadedCamera>, transport: EpisodeTransport, topic: String) -> Element {
+fn CameraFrames(
+    camera: Rc<LoadedCamera>,
+    transport: EpisodeTransport,
+    topic: String,
+    show_frame_timing: bool,
+) -> Element {
     let mut canvas = use_signal(|| None::<web_sys::HtmlCanvasElement>);
     let mut failure = use_signal(|| None::<String>);
     let mut covered = use_signal(|| false);
@@ -213,10 +219,12 @@ fn CameraFrames(camera: Rc<LoadedCamera>, transport: EpisodeTransport, topic: St
                 }
             }
         }
+        if show_frame_timing {
         div { class: "episode-camera-time",
             if let Some(sample) = sample.filter(|_| !uncovered) {
                 {format!("Frame {} · age {:.3} s", sample.precise_clock_label(), (seconds - sample).max(0.0))}
             } else { "Recorded camera" }
+        }
         }
     }
 }

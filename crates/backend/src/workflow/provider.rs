@@ -28,6 +28,21 @@ pub(crate) struct ProviderConfig {
 }
 
 impl ProviderConfig {
+    /// Jev's Decisions API is separate from Chat Completions. Reuse the
+    /// private credential loader without exposing credentials to callers.
+    pub(crate) fn decisions_request(
+        &self,
+        client: &Client,
+    ) -> Result<reqwest::RequestBuilder, String> {
+        if self.base_url.host_str() != Some("openrouter.ai") {
+            return Err(
+                "Rule interpretation requires an OpenRouter provider configuration.".into(),
+            );
+        }
+        Ok(client
+            .post("https://openrouter.ai/api/alpha/decisions")
+            .bearer_auth(&self.api_key))
+    }
     pub(crate) fn from_env() -> Result<Option<Self>, String> {
         Self::from_lookup_and_local(
             |name| std::env::var(name).ok(),

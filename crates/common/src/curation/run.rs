@@ -23,6 +23,10 @@ struct RunExecution {
     error: Option<String>,
     #[serde(default)]
     result_stale: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    output_relation: Option<String>,
+    #[serde(default)]
+    derived_relations: Vec<String>,
 }
 
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
@@ -86,6 +90,18 @@ impl CurationRunSnapshot {
     }
     pub fn error(&self) -> Option<&str> {
         self.execution.error.as_deref()
+    }
+    pub fn output_relation(&self) -> Option<&str> {
+        self.execution.output_relation.as_deref()
+    }
+    pub fn set_output_relation(&mut self, relation: String) {
+        self.execution.output_relation = Some(relation);
+    }
+    pub fn derived_relations(&self) -> &[String] {
+        &self.execution.derived_relations
+    }
+    pub fn set_derived_relations(&mut self, relations: Vec<String>) {
+        self.execution.derived_relations = relations;
     }
     pub const fn result_stale(&self) -> bool {
         self.execution.result_stale
@@ -250,6 +266,8 @@ pub struct CurationVerdict {
     excluded_by: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     transforms: Vec<String>,
+    #[serde(default)]
+    eligible_transforms: Vec<String>,
 }
 
 impl CurationVerdict {
@@ -283,6 +301,13 @@ impl CurationVerdict {
     pub fn excluded_by(&self) -> &[String] {
         &self.excluded_by
     }
+    pub fn with_eligible_transform(mut self, id: String) -> Self {
+        self.eligible_transforms.push(id);
+        self
+    }
+    pub fn eligible_transforms(&self) -> &[String] {
+        &self.eligible_transforms
+    }
     pub fn transforms(&self) -> &[String] {
         &self.transforms
     }
@@ -304,6 +329,8 @@ pub struct CurationOutcome {
     verdicts: Vec<CurationVerdict>,
     #[serde(default)]
     elapsed_ms: u64,
+    #[serde(default)]
+    stage_impacts: Vec<CurationStageImpact>,
 }
 
 impl CurationOutcome {
@@ -314,7 +341,15 @@ impl CurationOutcome {
             transform_counts: BTreeMap::new(),
             verdicts,
             elapsed_ms: 0,
+            stage_impacts: Vec::new(),
         }
+    }
+    pub fn stage_impacts(&self) -> &[CurationStageImpact] {
+        &self.stage_impacts
+    }
+    pub fn with_stage_impacts(mut self, impacts: Vec<CurationStageImpact>) -> Self {
+        self.stage_impacts = impacts;
+        self
     }
     pub fn with_counts(
         mut self,
@@ -376,5 +411,77 @@ impl ObservedRun for CurationRun {
     type Snapshot = CurationRunSnapshot;
     fn snapshot(&self) -> &CurationRunSnapshot {
         &self.snapshot
+    }
+}
+
+/// Exact sequential impact, measured over the population entering this node.
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct CurationStageImpact {
+    id: String,
+    incoming: u64,
+    retained: u64,
+    #[serde(default)]
+    time: Option<StageTimeImpact>,
+    #[serde(default)]
+    affected_episodes: Option<u64>,
+    #[serde(default)]
+    scored_episode_ids: Option<Vec<String>>,
+}
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+struct StageTimeImpact {
+    retained_ns: u64,
+    excluded_ns: u64,
+}
+impl CurationStageImpact {
+    pub fn new(id: String, incoming: u64, retained: u64) -> Self {
+        Self {
+            id,
+            incoming,
+            retained,
+            time: None,
+            affected_episodes: None,
+            scored_episode_ids: None,
+        }
+    }
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+    pub const fn incoming(&self) -> u64 {
+        self.incoming
+    }
+    pub const fn retained(&self) -> u64 {
+        self.retained
+    }
+    pub fn excluded(&self) -> u64 {
+        self.incoming.saturating_sub(self.retained)
+    }
+    pub fn retained_ns(&self) -> Option<u64> {
+        self.time.as_ref().map(|time| time.retained_ns)
+    }
+    pub fn excluded_ns(&self) -> Option<u64> {
+        self.time.as_ref().map(|time| time.excluded_ns)
+    }
+    pub fn affected_episodes(&self) -> Option<u64> {
+        self.affected_episodes
+    }
+    pub fn set_affected_episodes(&mut self, count: u64) {
+        self.affected_episodes = Some(count);
+    }
+    pub fn scored_episodes(&self) -> Option<u64> {
+        self.scored_episode_ids.as_ref().map(|ids| ids.len() as u64)
+    }
+    pub fn scored_episode_ids(&self) -> &[String] {
+        self.scored_episode_ids.as_deref().unwrap_or_default()
+    }
+    pub fn set_scored_episode_ids(&mut self, ids: Vec<String>) {
+        self.scored_episode_ids = Some(ids);
+    }
+    pub fn set_time(&mut self, retained_ns: u64, excluded_ns: u64) {
+        self.time = Some(StageTimeImpact {
+            retained_ns,
+            excluded_ns,
+        });
     }
 }

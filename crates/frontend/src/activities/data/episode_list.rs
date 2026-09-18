@@ -165,7 +165,7 @@ impl ListedEpisode {
 
 /// The episode the workspace is inspecting, with the label the rail showed.
 #[derive(Clone, Debug, PartialEq)]
-pub(super) struct OpenedEpisode {
+pub(crate) struct OpenedEpisode {
     dataset: DatasetSelection,
     listed: ListedEpisode,
     label: SourceLabel,
@@ -180,6 +180,13 @@ impl OpenedEpisode {
             .remove("episode_id")
             .ok_or("Comparison evidence has no episode identity.")?;
         row.insert("id".into(), id);
+        Self::from_row(dataset, row)
+    }
+
+    pub(crate) fn from_row(
+        dataset: DatasetSelection,
+        row: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<Self, String> {
         let record: EpisodeRecord = serde_json::from_value(serde_json::Value::Object(row))
             .map_err(|error| format!("Reading episode identity: {error}"))?;
         let label = SourceLabel::split(record.file_name());
@@ -213,7 +220,7 @@ impl OpenedEpisode {
     pub(super) fn label(&self) -> &SourceLabel {
         &self.label
     }
-    pub(super) fn selection(&self) -> EpisodeSelection {
+    pub(crate) fn selection(&self) -> EpisodeSelection {
         self.listed.record.selection(&self.dataset)
     }
 }

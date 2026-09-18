@@ -55,7 +55,6 @@ pub(super) fn CurationDocumentBar(controller: CurationController) -> Element {
                         expanded: switching(),
                         on_toggle: move |_| switching.toggle(),
                     }
-                    DocumentStateChip { state }
                 }
                 if switching() {
                     DocumentSwitcher {
@@ -71,13 +70,14 @@ pub(super) fn CurationDocumentBar(controller: CurationController) -> Element {
                     }
                 }
             }
-            CurationDocumentActions { controller }
+            CurationDocumentActions { controller, state }
         }
     }
 }
 
+/// The state chip stands with the actions that change it, as in Workflow.
 #[component]
-fn CurationDocumentActions(controller: CurationController) -> Element {
+fn CurationDocumentActions(controller: CurationController, state: DocumentState) -> Element {
     let studio = StudioProjectState::current();
     let dirty = controller.unsaved_changes();
     let command = controller.command();
@@ -88,6 +88,7 @@ fn CurationDocumentActions(controller: CurationController) -> Element {
         controller.snapshot().phase().active() || command == Some(CurationPendingCommand::Starting);
     rsx! {
         div { class: "document-actions",
+            DocumentStateChip { state }
             if controller.revision_conflict() {
                 Action { purpose: ActionPurpose::Sync, variant: ActionVariant::Outline,
                     onclick: move |_| controller.reload_current(), "Reload current" }

@@ -19,21 +19,116 @@ const ROSTER_ROWS: usize = 1_000;
 pub(crate) struct CurationManager {
     inner: Arc<CurationRuntime>,
 }
+struct JudgedRun {
+    outcome: CurationOutcome,
+    derived_relations: Vec<String>,
+}
 struct CurationRuntime {
     storage: Arc<StorageManager>,
     runs: RunRegistry<CurationRun>,
     saves: tokio::sync::Mutex<()>,
+    episode_progress: super::episode_progress::EpisodeProgress,
 }
 
 impl CurationManager {
     pub(crate) fn new(storage: Arc<StorageManager>) -> Self {
         Self {
             inner: Arc::new(CurationRuntime {
+                episode_progress: super::episode_progress::EpisodeProgress::new(storage.clone()),
                 storage,
                 runs: RunRegistry::new(),
                 saves: tokio::sync::Mutex::new(()),
             }),
         }
+    }
+    pub(crate) async fn score_episode(
+        &self,
+        request: spiral_robotics_common::curation::progress::ProgressScoreRequest,
+    ) -> Result<spiral_robotics_common::curation::progress::ProgressScoreResult, OperationError>
+    {
+        self.inner
+            .episode_progress
+            .score(request)
+            .await
+            .map_err(OperationError::External)
+    }
+    pub(crate) async fn preview(
+        &self,
+        curation: &CurationSpec,
+    ) -> Result<CurationOutcome, OperationError> {
+        let compiled = curation.compile().map_err(OperationError::InvalidInput)?;
+        let mut connection = self
+            .inner
+            .storage
+            .workflow_store()
+            .connect()
+            .await
+            .map_err(OperationError::External)?;
+        let roster = connection
+            .execute_query(compiled.roster_sql())
+            .await
+            .map_err(OperationError::External)?
+            .into_preview_drained(ROSTER_ROWS)
+            .await
+            .map_err(OperationError::External)?;
+        let totals = if roster.truncated() {
+            Some(
+                connection
+                    .execute_query(compiled.totals_sql())
+                    .await
+                    .map_err(OperationError::External)?
+                    .into_preview_drained(1)
+                    .await
+                    .map_err(OperationError::External)?,
+            )
+        } else {
+            None
+        };
+        let outcome = compiled
+            .outcome(&roster, totals.as_ref())
+            .map_err(OperationError::External)?;
+        if outcome.totals().truncated() {
+            return Ok(outcome);
+        }
+        let mut entering = outcome.verdicts().iter().collect::<Vec<_>>();
+        let mut impacts = Vec::new();
+        for step in curation.steps() {
+            let incoming = entering.len() as u64;
+            match step {
+                spiral_robotics_common::curation::CurationStep::Filter(rule) => {
+                    entering
+                        .retain(|verdict| !verdict.excluded_by().iter().any(|id| id == rule.id()));
+                    impacts.push(
+                        spiral_robotics_common::curation::run::CurationStageImpact::new(
+                            rule.id().to_owned(),
+                            incoming,
+                            entering.len() as u64,
+                        ),
+                    );
+                }
+                spiral_robotics_common::curation::CurationStep::Transform(transform) => {
+                    let mut impact =
+                        spiral_robotics_common::curation::run::CurationStageImpact::new(
+                            transform.id().to_owned(),
+                            incoming,
+                            incoming,
+                        );
+                    impact.set_affected_episodes(
+                        entering
+                            .iter()
+                            .filter(|verdict| {
+                                verdict
+                                    .eligible_transforms()
+                                    .iter()
+                                    .any(|id| id == transform.id())
+                            })
+                            .count() as u64,
+                    );
+                    impacts.push(impact);
+                }
+            }
+        }
+        Ok(outcome.with_stage_impacts(impacts))
     }
     pub(crate) async fn list(&self) -> Result<Vec<CurationSummary>, OperationError> {
         self.inner
@@ -64,7 +159,9 @@ impl CurationManager {
                 "The saved recipe belongs to a different curation.".into(),
             ));
         }
-        Ok(stored.into_curation())
+        let mut curation = stored.into_curation();
+        curation.set_source(curation.source().cloned());
+        Ok(curation)
     }
     /// Save one recipe revision. The submitted revision must equal the stored
     /// one; the saved copy carries the next.
@@ -72,6 +169,7 @@ impl CurationManager {
         &self,
         mut curation: CurationSpec,
     ) -> Result<CurationSpec, OperationError> {
+        curation.set_source(curation.source().cloned());
         if curation.id().is_empty() || curation.id().len() > 128 {
             return Err(OperationError::InvalidInput(
                 "Curation identity must contain 1–128 characters.".into(),
@@ -125,7 +223,8 @@ impl CurationManager {
     }
     /// Admit one run of the submitted recipe, unsaved edits included. The
     /// recipe is compiled up front so an invalid one never becomes a run.
-    pub(crate) fn start(&self, curation: CurationSpec) -> Result<CurationRun, OperationError> {
+    pub(crate) fn start(&self, mut curation: CurationSpec) -> Result<CurationRun, OperationError> {
+        curation.set_source(curation.source().cloned());
         let compiled = curation.compile().map_err(OperationError::InvalidInput)?;
         let id = format!("curation-run-{}", uuid::Uuid::new_v4());
         let mut snapshot = CurationRunSnapshot::started(&curation, id.clone())
@@ -158,13 +257,19 @@ impl CurationManager {
             snapshot.set_phase(RunPhase::Running);
             snapshot.set_updated_ms(SystemTime::now().unix_millis());
         });
-        let result = self.judge(&curation).await;
+        let output_relation = format!(
+            "curation_{}",
+            id.trim_start_matches("curation-run-").replace('-', "")
+        );
+        let result = self.judge(&curation, &output_relation).await;
         self.inner.runs.finish(&id, |record| {
             let snapshot = record.snapshot_mut();
             match result {
-                Ok(outcome) => {
+                Ok(result) => {
                     snapshot.set_phase(RunPhase::Completed);
-                    snapshot.set_outcome(Some(outcome));
+                    snapshot.set_outcome(Some(result.outcome));
+                    snapshot.set_derived_relations(result.derived_relations);
+                    snapshot.set_output_relation(output_relation);
                 }
                 Err(error) => {
                     snapshot.set_phase(RunPhase::Failed);
@@ -177,20 +282,39 @@ impl CurationManager {
         });
     }
     /// Run the roster query; when Spiral bounded it, run the exact totals too.
-    async fn judge(&self, curation: &CurationSpec) -> Result<CurationOutcome, String> {
+    async fn judge(&self, curation: &CurationSpec, output: &str) -> Result<JudgedRun, String> {
         let compiled = curation.compile()?;
         let started = Instant::now();
         let store = self.inner.storage.workflow_store();
         let mut connection = store.connect().await?;
+        let progress = super::progress::ProgressOutput::for_spec(curation)?;
+        let camera_outputs = curation.derived_outputs(output)?;
+        let mut derived_relations = camera_outputs
+            .iter()
+            .map(|derived| derived.relation().to_owned())
+            .collect::<Vec<_>>();
+        connection.begin_transaction().await?;
+        connection
+            .execute_update_sql(&compiled.materialize_sql(output, curation)?)
+            .await?;
+        for selection in &progress {
+            connection
+                .execute_update_sql(&selection.materialize_sql(output, curation))
+                .await?;
+            derived_relations.push(selection.relation(output));
+        }
+        for derived in camera_outputs {
+            connection.execute_update_sql(derived.statement()).await?;
+        }
         let roster = connection
-            .execute_query(compiled.roster_sql())
+            .execute_query(&compiled.output_roster_sql(output))
             .await?
             .into_preview_drained(ROSTER_ROWS)
             .await?;
         let totals = if roster.truncated() {
             Some(
                 connection
-                    .execute_query(compiled.totals_sql())
+                    .execute_query(&compiled.output_totals_sql(output))
                     .await?
                     .into_preview_drained(1)
                     .await?,
@@ -198,8 +322,62 @@ impl CurationManager {
         } else {
             None
         };
-        let outcome = compiled.outcome(&roster, totals.as_ref())?;
-        Ok(outcome.with_elapsed_ms(started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)))
+        let stage_totals = connection
+            .execute_query(&compiled.stage_totals_sql(output, curation))
+            .await?
+            .into_preview_drained(1)
+            .await?;
+        let mut impacts = compiled.stage_impacts(curation, &stage_totals)?;
+        for selection in &progress {
+            let effect = connection
+                .execute_query(&selection.effect_sql(output))
+                .await?
+                .into_preview_drained(1)
+                .await?;
+            let coverage = connection
+                .execute_query(&selection.coverage_sql(output))
+                .await?
+                .into_preview_drained(10_000)
+                .await?;
+            if coverage.truncated() {
+                return Err(
+                    "The scored episode coverage exceeded the validated source limit.".into(),
+                );
+            }
+            if let (Some(row), Some(impact)) = (
+                effect.rows().first(),
+                impacts
+                    .iter_mut()
+                    .find(|impact| impact.id() == selection.transform_id()),
+            ) {
+                let count = |name| {
+                    row.get(name)
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0)
+                };
+                impact.set_time(count("retained_ns"), count("excluded_ns"));
+                impact.set_scored_episode_ids(
+                    coverage
+                        .rows()
+                        .iter()
+                        .filter_map(|row| {
+                            row.get("id")
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::to_owned)
+                        })
+                        .collect(),
+                );
+            }
+        }
+        let outcome = compiled
+            .outcome(&roster, totals.as_ref())?
+            .with_stage_impacts(impacts);
+        connection.commit().await?;
+        Ok(JudgedRun {
+            outcome: outcome
+                .with_elapsed_ms(started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)),
+            derived_relations,
+        })
     }
 }
 

@@ -3,6 +3,9 @@
 //! specialization of a workflow whose input and output are episodes.
 pub mod compile;
 pub mod facts;
+pub mod interpretation;
+pub mod outputs;
+pub mod progress;
 pub mod rules;
 pub mod run;
 
@@ -47,7 +50,7 @@ impl CurationSpec {
         }
     }
     pub fn with_source(mut self, source: DatasetSelection) -> Self {
-        self.source = Some(source);
+        self.set_source(Some(source));
         self
     }
     pub fn with_revision(mut self, revision: u64) -> Self {
@@ -59,11 +62,11 @@ impl CurationSpec {
         self
     }
     pub fn with_rule(mut self, rule: CurationRule) -> Self {
-        self.rules.push(rule);
+        self.add_rule(rule);
         self
     }
     pub fn with_transform(mut self, transform: CurationTransform) -> Self {
-        self.transforms.push(transform);
+        self.add_transform(transform);
         self
     }
     pub fn id(&self) -> &str {
@@ -84,6 +87,46 @@ impl CurationSpec {
     pub fn rules(&self) -> &[CurationRule] {
         &self.rules
     }
+    pub fn reaches_step(&self, verdict: &run::CurationVerdict, step_id: &str) -> bool {
+        for step in self.steps() {
+            if step.id() == step_id {
+                return true;
+            }
+            if let CurationStep::Filter(rule) = step {
+                if verdict.excluded_by().iter().any(|id| id == rule.id()) {
+                    return false;
+                }
+            }
+        }
+        false
+    }
+    /// Episode-level input predicate for a node over a saved roster aliased v.
+    pub fn episode_predicate_before(&self, step_id: &str) -> String {
+        let rule_ids = self
+            .rules()
+            .iter()
+            .map(|rule| rule.id())
+            .collect::<Vec<_>>();
+        let clauses = self
+            .steps()
+            .iter()
+            .take_while(|step| step.id() != step_id)
+            .filter_map(|step| {
+                let CurationStep::Filter(rule) = step else {
+                    return None;
+                };
+                rule_ids
+                    .iter()
+                    .position(|id| *id == rule.id())
+                    .map(|index| format!("NOT COALESCE(v.rule_{index},false)"))
+            })
+            .collect::<Vec<_>>();
+        if clauses.is_empty() {
+            "true".into()
+        } else {
+            clauses.join(" AND ")
+        }
+    }
     pub fn transforms(&self) -> &[CurationTransform] {
         &self.transforms
     }
@@ -95,6 +138,9 @@ impl CurationSpec {
     }
     pub fn set_source(&mut self, source: Option<DatasetSelection>) {
         self.source = source;
+        for transform in &mut self.transforms {
+            transform.resolve_progress_source(self.source.as_ref());
+        }
     }
     pub fn add_fact(&mut self, fact: CurationFact) {
         self.facts.push(fact);
@@ -104,10 +150,9 @@ impl CurationSpec {
             *existing = fact;
         }
     }
-    pub fn remove_fact(&mut self, key: &str) {
-        self.facts.retain(|fact| fact.key() != key);
-    }
-    pub fn add_rule(&mut self, rule: CurationRule) {
+    pub fn add_rule(&mut self, mut rule: CurationRule) {
+        self.normalize_order();
+        rule.set_order(self.rules.len() + self.transforms.len());
         self.rules.push(rule);
     }
     pub fn rule_mut(&mut self, id: &str) -> Option<&mut CurationRule> {
@@ -116,7 +161,10 @@ impl CurationSpec {
     pub fn remove_rule(&mut self, id: &str) {
         self.rules.retain(|rule| rule.id() != id);
     }
-    pub fn add_transform(&mut self, transform: CurationTransform) {
+    pub fn add_transform(&mut self, mut transform: CurationTransform) {
+        transform.resolve_progress_source(self.source.as_ref());
+        self.normalize_order();
+        transform.set_order(self.rules.len() + self.transforms.len());
         self.transforms.push(transform);
     }
     pub fn transform_mut(&mut self, id: &str) -> Option<&mut CurationTransform> {
@@ -126,6 +174,60 @@ impl CurationSpec {
     }
     pub fn remove_transform(&mut self, id: &str) {
         self.transforms.retain(|transform| transform.id() != id);
+    }
+    /// Filters and transforms share one authored sequence. Legacy documents
+    /// without positions retain their original filter-then-transform order.
+    pub fn steps(&self) -> Vec<CurationStep<'_>> {
+        let mut steps = self
+            .rules
+            .iter()
+            .map(CurationStep::Filter)
+            .chain(self.transforms.iter().map(CurationStep::Transform))
+            .collect::<Vec<_>>();
+        steps.sort_by_key(CurationStep::order);
+        steps
+    }
+    pub fn move_step(&mut self, id: &str, direction: StepDirection) {
+        let mut ids = self
+            .steps()
+            .iter()
+            .map(|step| step.id().to_owned())
+            .collect::<Vec<_>>();
+        let Some(index) = ids.iter().position(|candidate| candidate == id) else {
+            return;
+        };
+        let target = match direction {
+            StepDirection::Earlier => index.checked_sub(1),
+            StepDirection::Later => index.checked_add(1).filter(|next| *next < ids.len()),
+        };
+        if let Some(target) = target {
+            ids.swap(index, target);
+            self.apply_order(&ids);
+        }
+    }
+    fn normalize_order(&mut self) {
+        let ids = self
+            .steps()
+            .iter()
+            .map(|step| step.id().to_owned())
+            .collect::<Vec<_>>();
+        self.apply_order(&ids);
+    }
+    fn apply_order(&mut self, ids: &[String]) {
+        for (order, id) in ids.iter().enumerate() {
+            if let Some(rule) = self.rules.iter_mut().find(|rule| rule.id() == id) {
+                rule.set_order(order);
+            }
+            if let Some(transform) = self
+                .transforms
+                .iter_mut()
+                .find(|transform| transform.id() == id)
+            {
+                transform.set_order(order);
+            }
+        }
+        self.rules.sort_by_key(CurationRule::order);
+        self.transforms.sort_by_key(CurationTransform::order);
     }
     /// Every fact a rule may name: the builtin episode statistics followed by
     /// the declared measurements, in authoring order.
@@ -235,6 +337,32 @@ impl CurationSpec {
             }
         }
         report
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum StepDirection {
+    Earlier,
+    Later,
+}
+
+#[derive(Clone, Copy)]
+pub enum CurationStep<'a> {
+    Filter(&'a CurationRule),
+    Transform(&'a CurationTransform),
+}
+impl CurationStep<'_> {
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Filter(rule) => rule.id(),
+            Self::Transform(transform) => transform.id(),
+        }
+    }
+    fn order(&self) -> usize {
+        match self {
+            Self::Filter(rule) => rule.order(),
+            Self::Transform(transform) => transform.order(),
+        }
     }
 }
 

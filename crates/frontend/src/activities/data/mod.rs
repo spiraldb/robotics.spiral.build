@@ -26,3 +26,13 @@ pub(crate) use client::DatasetClient;
 
 mod comparison_episode;
 pub(crate) use comparison_episode::ComparisonEpisodeInspector;
+
+pub(crate) use episode_transport::EpisodeTransport;
+mod timeline_tracks;
+pub(crate) use timeline_tracks::{
+    NumericTrack, TimelineInterval, TimelineSample, TimelineTrack, TimelineTrackState,
+};
+
+pub(crate) use episode_list::OpenedEpisode;
+mod episode_review;
+pub(crate) use episode_review::EpisodeReview;

@@ -9,7 +9,9 @@ use spiral_robotics_common::curation::facts::{CurationFact, FactKind};
 use spiral_robotics_common::curation::run::{CurationOutcome, CurationVerdict};
 use spiral_robotics_common::runs::RunPhase;
 
+use super::client::CurationClient;
 use super::episode::EpisodeSheet;
+use super::pipeline::{Pipeline, PipelineSelection, StageDistribution};
 use super::state::{CurationController, SheetFilter, SheetOrder};
 use crate::components::document_bar::ExecutedSql;
 use crate::components::icons::{CurationIcon, ResultNodeIcon, SpinnerIcon};
@@ -54,8 +56,45 @@ pub(super) fn SheetPanel(controller: CurationController) -> Element {
     let studio = StudioProjectState::current();
     let spec = controller.spec();
     let snapshot = controller.snapshot();
-    let outcome = controller.outcome();
-    let judged = controller.judged_spec();
+    let eligibility = spec.source().map(|_| EpisodeEligibility(spec.clone()));
+    let mut metadata = use_resource(use_reactive(
+        (&eligibility,),
+        move |(eligibility,)| async move {
+            match eligibility {
+                Some(eligibility) => CurationClient::current()
+                    .preview(&eligibility.0)
+                    .await
+                    .map(Some)
+                    .map_err(|error| error.to_string()),
+                None => Ok(None),
+            }
+        },
+    ));
+    let preview = if *metadata.state().read() == UseResourceState::Pending {
+        EligibilityState::Pending
+    } else {
+        match metadata.read().as_ref() {
+            Some(Ok(Some(outcome))) => EligibilityState::Ready(outcome.clone()),
+            Some(Err(error)) => EligibilityState::Failed(error.clone()),
+            _ => EligibilityState::Empty,
+        }
+    };
+    let run_outcome = controller.outcome();
+    let run_spec = controller.judged_spec();
+    let current_run = !snapshot.result_stale()
+        && run_spec
+            .as_ref()
+            .is_some_and(|judged| spec.accepts_output_from(judged));
+    let outcome = run_outcome
+        .filter(|_| current_run)
+        .or_else(|| preview.outcome().cloned());
+    let judged = outcome.as_ref().map(|_| {
+        if current_run {
+            run_spec.clone().unwrap_or_else(|| spec.clone())
+        } else {
+            spec.clone()
+        }
+    });
     let runs = controller.curation_runs();
     let filter = controller.filter();
     let order = controller.order();
@@ -63,10 +102,24 @@ pub(super) fn SheetPanel(controller: CurationController) -> Element {
     let selected = controller.selected_episode();
     let phase = snapshot.phase();
     let lens = judged.as_ref().and_then(|judged| controller.lens(judged));
+    let selection = controller.pipeline_selection();
     let roster = Roster::new(outcome.as_ref(), filter, lens.as_ref(), order);
-    // Opening a tile moves focus into its evidence; opening it again closes.
+    let roster = match (judged.as_ref(), outcome.as_ref()) {
+        (Some(spec), Some(_)) => roster.for_stage(&selection, spec),
+        _ => roster,
+    };
+    let transform_stage = match &selection {
+        PipelineSelection::Step(id) => spec
+            .transforms()
+            .iter()
+            .find(|transform| transform.id() == id)
+            .map(|transform| transform.id().to_owned()),
+        _ => None,
+    };
+    let output_selected = selection == PipelineSelection::Output;
+    // Output keeps its inline selection; other stages toggle the side sheet.
     let select = move |id: String| {
-        if controller.selected_episode().as_deref() == Some(id.as_str()) {
+        if !output_selected && controller.selected_episode().as_deref() == Some(id.as_str()) {
             controller.select_episode(None);
         } else {
             controller.select_episode(Some(id));
@@ -103,6 +156,7 @@ pub(super) fn SheetPanel(controller: CurationController) -> Element {
                     if let (Some(outcome), Some(judged)) = (outcome.as_ref(), judged.as_ref()) {
                         // The filter carries the totals: each segment says how
                         // many tiles it shows, so no separate count line is needed.
+                        if selection == PipelineSelection::Source {
                         ModeGroup { label: "Show".to_owned(), class: "curation-sheet-filter".to_owned(),
                             for (option, count) in [
                                 (SheetFilter::All, outcome.totals().episodes()),
@@ -113,6 +167,7 @@ pub(super) fn SheetPanel(controller: CurationController) -> Element {
                                     onclick: move |_| controller.set_filter(option),
                                     "{option.label()} " strong { "{count}" } }
                             }
+                        }
                         }
                         if !judged.facts().is_empty() {
                             SheetLens { controller, judged: judged.clone(), lens: lens.clone(), order }
@@ -130,14 +185,38 @@ pub(super) fn SheetPanel(controller: CurationController) -> Element {
                     }
                 }
             }
-            if snapshot.result_stale() && outcome.is_some() {
+            if snapshot.result_stale() && preview.outcome().is_none() && outcome.is_some() {
                 div { class: "results-stale", role: "status",
                     strong { "Previous run" }
                     span { "The recipe has changed since these verdicts. Run again." }
                 }
             }
+            if let Some(relation) = snapshot.output_relation() {
+                details { class: "curation-output-note",
+                    summary { "Saved selection and derived outputs" }
+                    p { "Episode selection: " code { "{relation}" } " · filter by kept" }
+                    for derived in snapshot.derived_relations() { p { "Derived output: " code { "{derived}" } } }
+                    p { "The exact recipe is stored with every verdict. Source recordings remain unchanged." }
+                }
+            }
             div { class: "curation-sheet-stage",
                 div { class: "curation-sheet-body",
+                    Pipeline { controller, preview: preview.outcome().cloned() }
+                    StageDistribution { controller, preview: preview.outcome().cloned() }
+                    if let Some(stage_id) = transform_stage.as_ref() {
+                        TransformStagePreview { controller, spec: spec.clone(), stage_id: stage_id.clone(), preview: preview.clone(), on_retry: move |_| metadata.restart() }
+                    } else {
+                    div { class: if output_selected { "curation-output-inspection" } else { "contents" },
+                    section { class: if output_selected { "curation-output-list" } else { "contents" }, "aria-label": "Episode list",
+                    if let (Some(judged), Some(_)) = (judged.as_ref(), outcome.as_ref()) {
+                        div { class: "curation-evidence-heading",
+                            strong { "{selection.evidence_label(judged)}" }
+                            span { "{roster.len()} shown" }
+                            if selection != PipelineSelection::Source {
+                                Action { purpose: ActionPurpose::Select, variant: ActionVariant::Quiet, onclick: move |_| controller.select_pipeline(PipelineSelection::Source), "Show source" }
+                            }
+                        }
+                    }
                     if !controller.loaded() && controller.load_error().is_none() {
                         div { class: "panel-empty", role: "status", SpinnerIcon {} strong { "Loading curation…" } }
                     } else if let Some(error) = controller.load_error() {
@@ -147,12 +226,23 @@ pub(super) fn SheetPanel(controller: CurationController) -> Element {
                             Action { purpose: ActionPurpose::Retry, variant: ActionVariant::Outline, onclick: move |_| controller.reload_current(), "Try again" }
                         }
                     } else if let Some(judged) = judged.as_ref().filter(|_| outcome.is_some()) {
+                        if roster.len() == 0 && selection != PipelineSelection::Source {
+                            p { class: "curation-section-note", if output_selected { "No episodes are retained by the current recipe." } else { "No episodes in the visible run were affected at this stage." } }
+                        } else {
                         TileGrid {
                             roster: roster.clone(), judged: judged.clone(), lens: lens.clone(),
                             filter, hovered, selected: selected.clone(), on_select: select,
                         }
-                    } else if phase.active() {
+                        }
+                    } else if phase.active() || preview == EligibilityState::Pending {
                         SheetSkeleton {}
+                    } else if let EligibilityState::Failed(error) = &preview {
+                        div { class: "panel-empty", role: "alert",
+                            strong { "Could not read episode metadata" }
+                            p { class: "curation-error-detail", "{error}" }
+                            Action { purpose: ActionPurpose::Retry, variant: ActionVariant::Outline,
+                                onclick: move |_| metadata.restart(), "Try again" }
+                        }
                     } else if phase == RunPhase::Failed {
                         div { class: "panel-empty", role: "alert",
                             strong { "Run failed" }
@@ -174,13 +264,41 @@ pub(super) fn SheetPanel(controller: CurationController) -> Element {
                             p { "Run the recipe to lay the episodes out." }
                         }
                     }
+                    }
+                    if output_selected {
+                        section { class: "curation-output-detail", "aria-label": "Selected curated episode",
+                            if let (Some(position), Some(judged)) = (open, judged.as_ref()) {
+                                if let Some(tile) = roster.get(position.index()) {
+                                    EpisodeSheet {
+                                        key: "output-{tile.verdict().episode().id()}",
+                                        tile: tile.clone(), judged: judged.clone(), inline: true, position,
+                                        on_step: {
+                                            let roster = roster.clone();
+                                            move |delta: isize| {
+                                                if let Some(next) = position.stepped(delta).and_then(|next| roster.get(next.index())) {
+                                                    controller.select_episode(Some(next.verdict().episode().id().to_owned()));
+                                                }
+                                            }
+                                        },
+                                        on_close: move |_| controller.select_episode(None),
+                                    }
+                                }
+                            } else {
+                                p { class: "curation-output-empty", "Select a curated episode to inspect its details." }
+                            }
+                        }
+                    }
+                    }
+                    }
                 }
+                if transform_stage.is_none() && !output_selected {
                 if let (Some(position), Some(judged)) = (open, judged.as_ref()) {
                     if let Some(tile) = roster.get(position.index()) {
                         EpisodeSheet {
                             key: "{tile.verdict().episode().id()}",
                             tile: tile.clone(),
                             judged: judged.clone(),
+                            selected_stage: match &selection { PipelineSelection::Step(id) => Some(id.clone()), _ => None },
                             position,
                             on_step: {
                                 let roster = roster.clone();
@@ -198,6 +316,169 @@ pub(super) fn SheetPanel(controller: CurationController) -> Element {
                                     BrowserFocus::after_render(SheetTile::element_id(ordinal));
                                 }
                             },
+                        }
+                    }
+                }
+                }
+            }
+        }
+    }
+}
+
+/// Model parameters do not change episode eligibility. Keeping this query key
+/// independent of them preserves the mounted viewer and its frame scores when
+/// the user adjusts a chunk threshold or camera transform.
+#[derive(Clone)]
+struct EpisodeEligibility(CurationSpec);
+
+impl PartialEq for EpisodeEligibility {
+    fn eq(&self, other: &Self) -> bool {
+        let (left, right) = (&self.0, &other.0);
+        left.source() == right.source()
+            && left.facts() == right.facts()
+            && left.rules().len() == right.rules().len()
+            && left
+                .rules()
+                .iter()
+                .zip(right.rules())
+                .all(|(left, right)| left.judges_like(right))
+            && left.transforms().len() == right.transforms().len()
+            && left
+                .transforms()
+                .iter()
+                .zip(right.transforms())
+                .all(|(left, right)| {
+                    left.id() == right.id()
+                        && left.order() == right.order()
+                        && left.condition() == right.condition()
+                })
+    }
+}
+
+#[derive(Clone, PartialEq)]
+enum EligibilityState {
+    Empty,
+    Pending,
+    Ready(CurationOutcome),
+    Failed(String),
+}
+
+impl EligibilityState {
+    fn outcome(&self) -> Option<&CurationOutcome> {
+        match self {
+            Self::Ready(outcome) => Some(outcome),
+            _ => None,
+        }
+    }
+}
+
+/// Read-only upstream eligibility supplies the episode picker before any run.
+/// Model execution belongs to the selected episode's evidence component.
+#[component]
+fn TransformStagePreview(
+    controller: CurationController,
+    spec: CurationSpec,
+    stage_id: String,
+    preview: EligibilityState,
+    on_retry: EventHandler<()>,
+) -> Element {
+    let roster = use_memo(use_reactive(
+        (&spec, &stage_id, &preview),
+        move |(spec, stage_id, preview)| {
+            Roster::new(
+                preview.outcome(),
+                SheetFilter::All,
+                None,
+                SheetOrder::Recorded,
+            )
+            .for_stage(&PipelineSelection::Step(stage_id), &spec)
+        },
+    ));
+    use_effect(move || {
+        let roster = roster.read();
+        if roster.len() == 0 {
+            return;
+        }
+        let selected = controller.selected_episode();
+        if selected
+            .as_deref()
+            .and_then(|id| roster.position_of(id))
+            .is_none()
+        {
+            controller.select_episode(
+                roster
+                    .get(0)
+                    .map(|tile| tile.verdict().episode().id().to_owned()),
+            );
+        }
+    });
+    let roster = roster.read();
+    let title = spec
+        .transforms()
+        .iter()
+        .find(|transform| transform.id() == stage_id)
+        .map(|transform| match transform.operation() {
+            spiral_robotics_common::curation::rules::TransformOperation::SelectProgressChunks {
+                ..
+            } => "WARP progress".to_owned(),
+            _ => transform.title(),
+        })
+        .unwrap_or_else(|| "Episode review".to_owned());
+    let selected = controller.selected_episode();
+    let position = selected
+        .as_deref()
+        .and_then(|id| roster.position_of(id))
+        .map(|index| SheetPosition::new(index, roster.len()));
+    rsx! {
+        section { class: "curation-stage-preview", "aria-label": "Transform episode investigation",
+            if preview == EligibilityState::Pending {
+                div { class: "curation-preview-status", role: "status", SpinnerIcon {} "Reading eligible episodes…" }
+            } else if let EligibilityState::Failed(error) = &preview {
+                div { class: "curation-preview-status", role: "alert",
+                    p { "Could not read eligible episodes: {error}" }
+                    Action { purpose: ActionPurpose::Retry, variant: ActionVariant::Outline,
+                        onclick: move |_| on_retry.call(()), "Try again" }
+                }
+            } else if roster.len() == 0 {
+                p { class: "curation-section-note", "No episodes reach this transform with the current conditions." }
+            } else {
+                div { class: "curation-episode-picker",
+                    h4 { class: "curation-inspector-title", "{title}" }
+                    label { r#for: "curation-preview-episode", class: "sr-only", "Episode" }
+                    select { id: "curation-preview-episode", class: "run-select",
+                        title: selected.clone().unwrap_or_default(),
+                        value: selected.clone().unwrap_or_default(),
+                        onchange: move |event| controller.select_episode(Some(event.value())),
+                        for tile in &roster.tiles {
+                            option { key: "{tile.verdict().episode().id()}", value: tile.verdict().episode().id(),
+                                selected: selected.as_deref() == Some(tile.verdict().episode().id()),
+                                "{tile.ordinal()}. {tile.label()} · {tile.verdict().episode().duration_seconds().map_or_else(|| \"—\".into(), ClockPresentation::clock_label)}"
+                            }
+                        }
+                    }
+                    span { class: "curation-section-note", "{roster.len()} eligible" }
+                }
+                if let Some(outcome) = preview.outcome() {
+                    if outcome.totals().truncated() {
+                        p { class: "curation-section-note", "Showing the first {outcome.totals().listed()} source episodes; the picker may omit later eligible episodes." }
+                    }
+                }
+                if let Some(position) = position {
+                    if let Some(tile) = roster.get(position.index()) {
+                        EpisodeSheet {
+                            key: "{tile.verdict().episode().id()}",
+                            tile: tile.clone(), judged: spec.clone(), selected_stage: Some(stage_id.clone()),
+                            inline: true,
+                            position,
+                            on_step: {
+                                let roster = roster.clone();
+                                move |delta: isize| {
+                                    if let Some(next) = position.stepped(delta).and_then(|next| roster.get(next.index())) {
+                                        controller.select_episode(Some(next.verdict().episode().id().to_owned()));
+                                    }
+                                }
+                            },
+                            on_close: move |_| controller.select_pipeline(PipelineSelection::Source),
                         }
                     }
                 }
@@ -284,6 +565,11 @@ impl Roster {
             });
         }
         Self { tiles }
+    }
+    fn for_stage(mut self, selection: &PipelineSelection, spec: &CurationSpec) -> Self {
+        self.tiles
+            .retain(|tile| selection.admits(tile.verdict(), spec));
+        self
     }
     fn len(&self) -> usize {
         self.tiles.len()

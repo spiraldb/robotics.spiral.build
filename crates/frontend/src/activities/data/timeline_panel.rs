@@ -13,6 +13,7 @@ use super::{
     },
     episode_transport::{EpisodeTransport, KeyboardFocus, PLAYBACK_SPEEDS},
     message_buffer::MessageField,
+    timeline_tracks::{NumericTrackRow, TimelineTrack},
 };
 use crate::components::icons::{
     CameraStreamIcon, FitTimeIcon, PauseIcon, PlayIcon, SignalStreamIcon, SkipToEndIcon,
@@ -29,19 +30,28 @@ use std::collections::BTreeSet;
 pub(super) struct TimelineSubject {
     episode: OpenedEpisode,
     streams: EpisodeStreams,
+    choices: StreamChoices,
 }
 
 impl TimelineSubject {
-    pub(super) fn new(episode: OpenedEpisode, streams: EpisodeStreams) -> Self {
-        Self { episode, streams }
+    pub(super) fn new(
+        episode: OpenedEpisode,
+        streams: EpisodeStreams,
+        choices: StreamChoices,
+    ) -> Self {
+        Self {
+            episode,
+            streams,
+            choices,
+        }
     }
 }
 
 #[component]
 pub(super) fn TimelinePanel(
-    subject: Option<TimelineSubject>,
     transport: EpisodeTransport,
-    choices: StreamChoices,
+    #[props(default)] subject: Option<TimelineSubject>,
+    #[props(default)] tracks: Vec<TimelineTrack>,
 ) -> Element {
     let mut keyboard = transport.clone();
     rsx! {
@@ -55,18 +65,14 @@ pub(super) fn TimelinePanel(
                     event.stop_propagation();
                 }
             },
-            match subject {
-                None => rsx! {
-                    TransportBar { transport, identity: None }
-                    div { class: "data-timeline-empty",
-                        strong { "No episode open" }
-                        span { "Choose an episode under Datasets to see its streams on this clock." }
-                    }
-                },
-                Some(subject) => rsx! {
-                    TransportBar { transport: transport.clone(), identity: Some(subject.episode) }
-                    StreamRows { streams: subject.streams, transport, choices }
-                },
+            TransportBar { transport: transport.clone(), identity: subject.as_ref().map(|subject| subject.episode.clone()) }
+            if subject.is_none() && transport.duration() <= 0.0 && tracks.is_empty() {
+                div { class: "data-timeline-empty",
+                    strong { "No episode open" }
+                    span { "Choose an episode under Datasets to see its streams on this clock." }
+                }
+            } else {
+                TimelineRows { subject, transport, tracks }
             }
         }
     }
@@ -165,10 +171,10 @@ fn TransportBar(transport: EpisodeTransport, identity: Option<OpenedEpisode>) ->
 }
 
 #[component]
-fn StreamRows(
-    streams: EpisodeStreams,
+fn TimelineRows(
+    subject: Option<TimelineSubject>,
     transport: EpisodeTransport,
-    mut choices: StreamChoices,
+    tracks: Vec<TimelineTrack>,
 ) -> Element {
     let mut filter = use_signal(String::new);
     let mut expanded = use_signal(BTreeSet::<String>::new);
@@ -178,97 +184,96 @@ fn StreamRows(
     let playhead = view.percent(seconds);
     let mut seek = transport.clone();
     let mut wheel = transport.clone();
-    match streams {
-        EpisodeStreams::Loading => rsx! {
-            div { class: "data-timeline-empty", role: "status", span { "Finding recorded streams…" } }
-        },
-        EpisodeStreams::Failed(error) => rsx! {
-            div { class: "data-timeline-empty", role: "alert",
-                strong { "Could not read this episode's streams" }
-                span { "{error}" }
+    let catalog = subject.as_ref().and_then(|subject| match &subject.streams {
+        EpisodeStreams::Ready(catalog) => Some(catalog),
+        _ => None,
+    });
+    let needle = filter().to_lowercase();
+    let rows = catalog
+        .into_iter()
+        .flat_map(|catalog| catalog.streams())
+        .filter(|stream| needle.is_empty() || stream.label().to_lowercase().contains(&needle))
+        .cloned()
+        .collect::<Vec<_>>();
+    let total = catalog.map_or(0, |catalog| catalog.streams().len());
+    rsx! {
+        div { class: "data-timeline-body", style: "--playhead: {playhead / 100.0:.6}",
+            onwheel: move |event: WheelEvent| {
+                let modifiers = event.modifiers();
+                let (dx, dy) = match event.delta() {
+                    WheelDelta::Pixels(delta) => (delta.x, delta.y),
+                    WheelDelta::Lines(delta) => (delta.x * 16.0, delta.y * 16.0),
+                    WheelDelta::Pages(delta) => (delta.x * 400.0, delta.y * 400.0),
+                };
+                if modifiers.ctrl() || modifiers.meta() {
+                    event.prevent_default();
+                    let anchor = wheel.seconds();
+                    wheel.zoom(if dy > 0.0 { 1.25 } else { 0.8 }, anchor);
+                } else if modifiers.shift() || dx.abs() > dy.abs() {
+                    event.prevent_default();
+                    let delta = if modifiers.shift() { dy } else { dx };
+                    let span = wheel.view().span();
+                    wheel.pan(delta / 800.0 * span);
+                }
+            },
+            div { class: "data-timeline-ruler",
+                div { class: "data-timeline-corner",
+                    if subject.is_some() {
+                        input { class: "field data-stream-filter", r#type: "search",
+                            placeholder: "Filter {total} streams", "aria-label": "Filter streams",
+                            value: filter(), oninput: move |event| filter.set(event.value()) }
+                    } else { span { class: "text-ink-soft text-[11px]", "Tracks" } }
+                }
+                div { class: "data-timeline-scale",
+                    for tick in view.ticks() {
+                        div { key: "{tick.seconds()}", class: "data-time-tick", style: "left: {tick.position():.4}%",
+                            span { "{tick.label()}" }
+                        }
+                    }
+                    input { r#type: "range", class: "data-time-scrub",
+                        min: "{view.start()}", max: "{view.end()}", step: "0.001", value: "{seconds}", disabled: duration <= 0.0,
+                        "aria-label": "Playhead", "aria-valuetext": "{seconds.precise_clock_label()} of {duration.precise_clock_label()}",
+                        oninput: move |event| if let Ok(value) = event.value().parse::<f64>() { seek.seek(value); } }
+                    div { class: "data-timeline-handle", style: "left: {playhead:.4}%", "aria-hidden": "true" }
+                }
             }
-        },
-        EpisodeStreams::Ready(catalog) => {
-            let needle = filter().to_lowercase();
-            let rows = catalog
-                .streams()
-                .iter()
-                .filter(|stream| {
-                    needle.is_empty() || stream.label().to_lowercase().contains(&needle)
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            let total = catalog.streams().len();
-            rsx! {
-                div { class: "data-timeline-body", style: "--playhead: {playhead / 100.0:.6}",
-                    onwheel: move |event: WheelEvent| {
-                        let modifiers = event.modifiers();
-                        let (dx, dy) = match event.delta() {
-                            WheelDelta::Pixels(delta) => (delta.x, delta.y),
-                            WheelDelta::Lines(delta) => (delta.x * 16.0, delta.y * 16.0),
-                            WheelDelta::Pages(delta) => (delta.x * 400.0, delta.y * 400.0),
-                        };
-                        if modifiers.ctrl() || modifiers.meta() {
-                            event.prevent_default();
-                            let anchor = wheel.seconds();
-                            wheel.zoom(if dy > 0.0 { 1.25 } else { 0.8 }, anchor);
-                        } else if modifiers.shift() || dx.abs() > dy.abs() {
-                            event.prevent_default();
-                            let delta = if modifiers.shift() { dy } else { dx };
-                            let span = wheel.view().span();
-                            wheel.pan(delta / 800.0 * span);
-                        }
-                    },
-                    div { class: "data-timeline-ruler",
-                        div { class: "data-timeline-corner",
-                            input { class: "field data-stream-filter", r#type: "search",
-                                placeholder: "Filter {total} streams", "aria-label": "Filter streams",
-                                value: filter(), oninput: move |event| filter.set(event.value()) }
-                        }
-                        div { class: "data-timeline-scale",
-                            for tick in view.ticks() {
-                                div { key: "{tick.seconds()}", class: "data-time-tick", style: "left: {tick.position():.4}%",
-                                    span { "{tick.label()}" }
+            div { class: "data-timeline-rows",
+                for track in tracks {
+                    NumericTrackRow { key: "{track.id()}", track, transport: transport.clone() }
+                }
+                if let Some(subject) = subject {
+                    match subject.streams {
+                        EpisodeStreams::Loading => rsx! { div { class: "data-timeline-none", role: "status", "Finding recorded streams…" } },
+                        EpisodeStreams::Failed(error) => rsx! { div { class: "data-timeline-none", role: "alert", "Could not read this episode's streams: {error}" } },
+                        EpisodeStreams::Ready(catalog) => rsx! {
+                            if rows.is_empty() {
+                                p { class: "data-timeline-none", if catalog.is_empty() { "This episode has no readable streams." } else { "No streams match the filter." } }
+                            }
+                            for stream in rows {
+                                StreamRow { key: "{stream.key()}", stream: stream.clone(), transport: transport.clone(), choices: subject.choices,
+                                    expanded: expanded.read().contains(stream.key()),
+                                    on_expand: move |open: bool| {
+                                        if open { expanded.write().insert(stream.key().to_owned()); let mut choices = subject.choices; choices.ensure_schema(&stream); }
+                                        else { expanded.write().remove(stream.key()); }
+                                    },
                                 }
                             }
-                            input { r#type: "range", class: "data-time-scrub",
-                                min: "{view.start()}", max: "{view.end()}", step: "0.001", value: "{seconds}",
-                                disabled: duration <= 0.0,
-                                "aria-label": "Playhead",
-                                "aria-valuetext": "{seconds.precise_clock_label()} of {duration.precise_clock_label()}",
-                                oninput: move |event| if let Ok(value) = event.value().parse::<f64>() { seek.seek(value); } }
-                            div { class: "data-timeline-handle", style: "left: {playhead:.4}%", "aria-hidden": "true" }
-                        }
-                    }
-                    div { class: "data-timeline-rows",
-                        if rows.is_empty() {
-                            p { class: "data-timeline-none",
-                                if catalog.is_empty() { "This episode has no readable streams." } else { "No streams match the filter." }
-                            }
-                        }
-                        for stream in rows {
-                            StreamRow {
-                                key: "{stream.key()}",
-                                stream: stream.clone(),
-                                transport: transport.clone(),
-                                choices,
-                                expanded: expanded.read().contains(stream.key()),
-                                on_expand: move |open: bool| {
-                                    if open {
-                                        expanded.write().insert(stream.key().to_owned());
-                                        choices.ensure_schema(&stream);
-                                    } else {
-                                        expanded.write().remove(stream.key());
-                                    }
-                                },
-                            }
-                        }
-                        div { class: "data-timeline-cursor", "aria-hidden": "true" }
+                        },
                     }
                 }
+                div { class: "data-timeline-cursor", "aria-hidden": "true" }
             }
         }
     }
+}
+
+/// Stream density and additional numeric rows seek through the same input.
+#[component]
+pub(super) fn TrackScrubber(mut transport: EpisodeTransport) -> Element {
+    let view = transport.view();
+    rsx! { input { r#type: "range", class: "data-track-scrub", tabindex: "-1", "aria-hidden": "true",
+    min: "{view.start()}", max: "{view.end()}", step: "0.001", value: "{transport.seconds()}",
+    oninput: move |event| if let Ok(value) = event.value().parse::<f64>() { transport.seek(value); } } }
 }
 
 #[component]
@@ -303,9 +308,6 @@ fn StreamRow(
     let schemas = stream.schemas().join(", ");
     let toggle_stream = stream.clone();
     let select_key = key.clone();
-    let seconds = transport.seconds();
-    let view = transport.view();
-    let mut seek = transport.clone();
     rsx! {
         div { class: "data-stream", "data-selected": selected, "data-kind": if kind == StreamKind::Video { "video" } else { "data" },
             div { class: "data-stream-name",
@@ -333,9 +335,8 @@ fn StreamRow(
             }
             div { class: "data-stream-track",
                 DensityTrack { coverage: choices.coverage(stream.key()), transport: transport.clone() }
-                input { r#type: "range", class: "data-track-scrub", tabindex: "-1", "aria-hidden": "true",
-                    min: "{view.start()}", max: "{view.end()}", step: "0.001", value: "{seconds}",
-                    oninput: move |event| if let Ok(value) = event.value().parse::<f64>() { seek.seek(value); } }
+                TrackScrubber { transport }
+
             }
         }
         if expanded {

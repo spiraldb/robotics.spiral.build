@@ -4430,7 +4430,7 @@
   .data-stream,
   .data-field {
     @apply grid;
-    grid-template-columns: var(--data-name-w) minmax(12rem, 1fr);
+    grid-template-columns: var(--data-name-w, 16rem) minmax(12rem, 1fr);
   }
 
   .data-timeline-ruler {
@@ -4488,7 +4488,7 @@
 
   .data-timeline-cursor {
     @apply pointer-events-none absolute bottom-0 top-0 z-20 w-px;
-    left: calc(var(--data-name-w) + (100% - var(--data-name-w)) * var(--playhead, 0));
+    left: calc(var(--data-name-w, 16rem) + (100% - var(--data-name-w, 16rem)) * var(--playhead, 0));
     background: var(--tone-accent);
     opacity: 0.85;
   }
@@ -4909,10 +4909,6 @@
     @apply flex items-baseline justify-between text-[11px] font-medium text-ink-soft;
   }
 
-  .curation-section-count {
-    @apply font-mono text-[10px] text-ink-faint tabular-nums;
-  }
-
   .curation-section-note {
     @apply text-[11px] leading-4 text-ink-faint;
   }
@@ -4943,12 +4939,6 @@
     @apply font-mono text-[11px] tabular-nums;
   }
 
-  .curation-textarea {
-    @apply min-h-16 w-full rounded border border-line bg-surface px-1.5 py-1 font-mono text-[11px] leading-4 text-ink outline-none;
-    @apply placeholder:text-ink-faint focus-visible:border-accent focus-visible:ring-2 focus-visible:ring-accent/15;
-    resize: vertical;
-  }
-
   .curation-inline-form {
     @apply flex items-center gap-1;
   }
@@ -4957,26 +4947,9 @@
     @apply w-16;
   }
 
-  /* The one add control per section is a select, so a section grows by one
-     line, not by a row of buttons. */
-  .curation-add {
-    @apply mt-0.5 w-full text-ink-soft;
-  }
-
-  .curation-add-action {
-    @apply mt-0.5 self-start;
-  }
-
-  /* Measurements and transforms rest as one line each, separated by
-     hairlines like every other row in the column: the name, then what tells
-     it from another of its kind. A row opens when it still needs something
-     or when the operator asks. */
+  /* Existing transforms disclose their operation-specific fields in place. */
   .curation-fact {
     @apply flex flex-col gap-1.5 py-1.5;
-  }
-
-  .curation-fact + .curation-fact {
-    border-top: 1px solid var(--tone-line);
   }
 
   .curation-fact-summary {
@@ -4985,10 +4958,6 @@
 
   .curation-fact-summary-label {
     @apply min-w-0 shrink truncate text-[12px] font-medium text-ink;
-  }
-
-  .curation-fact-detail {
-    @apply min-w-0 flex-1 truncate font-mono text-[10px] text-ink-faint;
   }
 
   .curation-fact-label {
@@ -5008,10 +4977,7 @@
     @apply whitespace-nowrap;
   }
 
-  /* Rules read as two lines: "If ⟨fact⟩ ⟨is below⟩ ⟨5⟩", then "exclude as
-     ⟨reason⟩" with the count and remove at the right. The mark leading the
-     sentence is the rule's handle: hover it to light the tiles the rule
-     struck, press it to pause the rule. */
+  /* A rule exposes its condition, measured exclusions, and removal. */
   .curation-rule {
     @apply -mx-1.5 flex flex-col gap-1 rounded px-1.5 py-1.5;
     transition: background-color 100ms ease-out;
@@ -5021,21 +4987,8 @@
     background: var(--tone-hover);
   }
 
-  .curation-rule[data-enabled="false"] .curation-rule-line > :not(.curation-rule-mark) {
-    opacity: 0.55;
-  }
-
   .curation-rule-line {
     @apply flex flex-wrap items-center gap-1.5;
-  }
-
-  .curation-rule-mark {
-    @apply inline-flex size-4 shrink-0 cursor-pointer items-center justify-center rounded-full border-0 bg-transparent p-0;
-  }
-
-  .curation-rule-mark:focus-visible {
-    outline: 2px solid var(--tone-accent);
-    outline-offset: 1px;
   }
 
   .curation-rule-dot {
@@ -5043,15 +4996,6 @@
     background: var(--rule-tone, var(--tone-ink-faint));
     box-shadow: 0 0 0 1px var(--rule-tone, var(--tone-ink-faint));
     transition: background-color 120ms var(--ease-out-expo), scale 120ms var(--ease-out-expo);
-  }
-
-  /* A paused rule keeps its ring and loses its fill. */
-  .curation-rule-mark[aria-pressed="false"] .curation-rule-dot {
-    background: transparent;
-  }
-
-  .curation-rule-mark:hover .curation-rule-dot {
-    scale: 1.35;
   }
 
   .curation-rule-word {
@@ -5072,10 +5016,6 @@
 
   .curation-condition-value {
     @apply w-[3.5rem] flex-none;
-  }
-
-  .curation-rule-label {
-    @apply h-6 min-w-[6rem] flex-1;
   }
 
   .curation-rule-count {
@@ -5278,7 +5218,7 @@
   }
 
   .curation-episode-status[data-kept="true"] .curation-episode-dot {
-    background: var(--tone-good);
+    background: var(--tone-accent);
   }
 
   .curation-episode-path {
@@ -5446,12 +5386,143 @@
   @apply flex items-center gap-1 text-[10px] text-ink-soft;
 }
 .curation-rule-order > span { @apply mr-auto; }
-.curation-ordered-rule + .curation-ordered-rule { @apply mt-2 border-t border-line pt-2; }
+.curation-ordered-rule + .curation-ordered-rule { @apply mt-1 border-t border-line pt-1; }
 .curation-rule-prompt { @apply min-h-20 w-full resize-y leading-5; }
-.curation-advanced > summary,
 .curation-manual-builder > summary { @apply cursor-pointer py-2 text-[11px] text-ink-soft; }
-.curation-advanced > summary { @apply px-3; }
 .curation-proposal { @apply flex flex-col gap-2; }
 .curation-proposal label { @apply flex flex-col gap-1 text-[11px] text-ink-soft; }
 .curation-proposal input,
 .curation-proposal select { @apply w-full; }
+
+.curation-output-note { @apply border-b border-line px-4 py-2 text-xs text-ink-soft; overflow-wrap: anywhere; }
+.curation-output-note summary { cursor: pointer; }
+.curation-output-note p { @apply mt-2; }
+
+/* Curation's authored sequence: node widths stay readable; ribbons alone
+   encode the measured episode population on one shared scale. */
+.curation-pipeline { @apply mb-3 shrink-0; }
+.curation-pipeline-heading { @apply mb-2 flex flex-wrap items-baseline gap-x-3 gap-y-1 text-[11px] text-ink-soft; }
+.curation-pipeline-heading strong { @apply text-[12px] font-semibold text-ink; }
+.curation-pipeline-node.ui-action { @apply flex min-w-0 flex-col items-stretch justify-between gap-1 rounded border border-line p-2 text-left; }
+.curation-pipeline-node[aria-pressed="true"] { @apply border-accent bg-selected; }
+.curation-pipeline-node-copy { @apply flex min-w-0 flex-1 flex-col gap-0.5; }
+.curation-pipeline-node-copy strong { @apply flex items-center gap-2 text-[11px] font-semibold text-ink; }
+.curation-pipeline-detail { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; font-size: 12px; line-height: 15px; color: var(--tone-ink); }
+.curation-pipeline-count { @apply flex shrink-0 items-baseline gap-1 text-[10px] text-ink-soft; }
+.curation-pipeline-count strong { @apply font-mono text-[12px] font-semibold tabular-nums text-ink; }
+.curation-evidence-heading { @apply mb-2 flex flex-wrap items-center gap-2 text-[11px] text-ink-soft; }
+.curation-evidence-heading strong { @apply font-semibold text-ink; }
+.curation-evidence-heading .ui-action { @apply ml-auto min-h-6 px-1.5 text-[11px]; }
+.curation-ordered-rule[data-selected="true"] { outline: 1px solid var(--tone-accent); outline-offset: 3px; border-radius: 4px; }
+.curation-source-section[data-selected="true"] { outline: 1px solid var(--tone-accent); outline-offset: -1px; }
+.curation-distribution { @apply m-0 mb-3 shrink-0 border-b border-line pb-2; }
+.curation-distribution figcaption { @apply flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 text-[11px] text-ink-soft; }
+.curation-distribution figcaption strong { @apply font-medium text-ink; }
+.curation-distribution svg { display: block; width: 100%; max-height: 112px; margin-top: 8px; }
+.curation-distribution svg text { fill: var(--tone-ink-soft); font-size: 10px; font-variant-numeric: tabular-nums; }
+.curation-distribution-kept { fill: var(--tone-accent); background: var(--tone-accent); }
+.curation-distribution-excluded { fill: var(--tone-line-strong); background: var(--tone-line-strong); }
+.curation-distribution-axis { stroke: var(--tone-line-strong); }
+.curation-distribution-threshold { stroke: var(--tone-ink); stroke-dasharray: 3 3; }
+.curation-distribution-legend { @apply flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-ink-soft; }
+.curation-distribution-legend span { @apply inline-flex items-center gap-1; }
+.curation-distribution-legend i { display: inline-block; width: 8px; height: 8px; }
+
+.curation-pipeline-canvas { @apply relative w-full overflow-hidden rounded border border-line bg-sunken; height: 220px; }
+.curation-flow { width: 100%; height: 100%; }
+.curation-flow .df-node { padding: 0; border: none; background: transparent; box-shadow: none; }
+.curation-flow-stage { width: 100%; height: 100%; position: relative; }
+.curation-flow-stage .curation-pipeline-node.ui-action { width: 100%; height: 100%; background: var(--tone-surface); }
+.curation-flow-stage .curation-pipeline-node[aria-pressed="true"] { background: var(--tone-selected); }
+.curation-flow-stage[data-kind="excluded"] .curation-pipeline-node { background: var(--tone-sunken); border-color: var(--tone-line-strong); }
+.curation-pipeline-node-copy small { font-size: 10px; color: var(--tone-ink-soft); font-variant-numeric: tabular-nums; }
+.curation-flow .df-handle { background: var(--tone-line-strong); border-color: var(--tone-surface); width: 6px; height: 6px; }
+.curation-progress-settings { @apply flex flex-col gap-2; }
+.curation-progress-settings label { @apply flex flex-col gap-1 text-[11px] text-ink-soft; }
+
+#curation-ordered-rules { position: relative; }
+.curation-ordered-rule { position: relative; background: var(--tone-surface); }
+.curation-ordered-rule[data-dragging="true"] { z-index: 3; box-shadow: 0 8px 20px rgb(0 0 0 / 0.12); border-radius: 4px; }
+.curation-reorder-handle { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; margin-left: auto; border: 0; border-radius: 4px; color: var(--tone-ink-faint); background: transparent; cursor: grab; touch-action: none; user-select: none; }
+.curation-reorder-handle:hover, .curation-reorder-handle[aria-pressed="true"] { background: var(--tone-hover); color: var(--tone-ink); }
+.curation-reorder-handle[aria-pressed="true"] { cursor: grabbing; }
+.curation-reorder-handle:focus-visible { outline: 2px solid var(--tone-accent); outline-offset: 1px; }
+.curation-rule-insertion { display: none; position: absolute; left: 12px; right: 12px; height: 2px; z-index: 4; pointer-events: none; background: var(--tone-accent); }
+
+.curation-stage-preview { @apply min-w-0; }
+.curation-episode-picker { @apply flex min-h-9 flex-wrap items-center gap-x-2 gap-y-1 pb-1 text-[11px] text-ink-soft; }
+.curation-inspector-title { @apply m-0 min-w-0 truncate text-[12px] font-medium text-ink; max-width: 18rem; }
+.curation-episode-picker select { @apply min-w-0 max-w-full; }
+.curation-preview-status { @apply flex items-center gap-2 py-4 text-[11px] text-ink-soft; }
+.curation-preview-status svg { @apply h-4 w-4; }
+
+/* The graph scrolls with the sheet so evidence keeps the full review height. */
+
+/* Derived series extend the existing episode ruler and stream grid. */
+.data-numeric-track .data-numeric-name { height: auto; flex-direction: column; align-items: flex-start; justify-content: center; padding: 8px 12px; gap: 4px; }
+.data-numeric-name strong { font-size: 11px; font-weight: 500; }
+.data-numeric-name output { font-size: 12px; font-variant-numeric: tabular-nums; }
+.data-numeric-name span { font-size: 10px; color: var(--tone-ink-soft); }
+.data-stream-track.data-numeric-plot { height: 104px; overflow: hidden; }
+.data-numeric-plot svg { display: block; width: 100%; height: 100%; }
+.data-numeric-line { fill: none; stroke: var(--tone-accent); stroke-width: 1.5; }
+.data-numeric-cutoff { stroke: var(--tone-ink-soft); stroke-width: 1; stroke-dasharray: 4 3; }
+.data-numeric-overlay { fill: var(--tone-danger-soft); }
+.data-numeric-overlay[data-kind="unknown"] { fill: var(--tone-caution-soft); }
+.data-numeric-interval { position: absolute; bottom: 0; height: 12px; padding: 0; border: 0; border-top: 1px solid var(--tone-danger); background: var(--tone-danger-soft); cursor: pointer; }
+.data-numeric-interval[data-kind="unknown"] { border-color: var(--tone-caution); background: var(--tone-caution-soft); }
+.data-numeric-interval:hover, .data-numeric-interval:focus-visible { height: 18px; outline: 1px solid var(--tone-accent); outline-offset: -1px; }
+.data-numeric-status { margin: 0; padding: 12px; font-size: 11px; color: var(--tone-ink-soft); }
+.data-numeric-status[role="alert"] { color: var(--tone-danger); }
+
+/* A compact authored sequence above one uninterrupted evidence surface. */
+.curation-flow-stage[data-kind="excluded"] .curation-pipeline-node { justify-content: center; padding: 4px 8px; }
+.curation-flow-stage[data-kind="excluded"] .curation-pipeline-node-copy { flex: none; }
+.curation-flow .df-node { animation: none; }
+.curation-flow .workflow-canvas-controls { bottom: 8px; left: 8px; }
+.curation-rule-order .ui-action { flex-shrink: 0; }
+.curation-ordered-rule .curation-rule { padding-block: 4px 8px; }
+.curation-ordered-rule .curation-condition-op { max-width: 7rem; }
+.curation-stage-preview > .curation-episode { padding: 0; }
+.curation-progress-evidence { gap: 8px; }
+.curation-episode-picker > select { flex: 0 1 20rem; width: 20rem; text-overflow: ellipsis; }
+.curation-episode-picker > span { white-space: nowrap; }
+
+/* A recorded-camera row and the existing shared timeline, on one clock. */
+.episode-review { display: flex; min-width: 0; flex-direction: column; gap: 8px; }
+.episode-review-cameras { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr)); align-items: start; gap: 8px; }
+.episode-review-feed { min-width: 0; overflow: hidden; border: 1px solid var(--tone-line); border-radius: 4px; }
+.episode-review-feed h5 { margin: 0; padding: 6px 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 500; color: var(--tone-ink); }
+.episode-review-feed .episode-camera-panel { flex: none; position: relative; min-height: 164px; }
+.episode-review-feed .episode-camera-image { flex: none; min-height: 140px; }
+.episode-review-feed .episode-camera-canvas { display: block; width: 100%; height: auto; max-height: 240px; object-fit: contain; }
+.episode-review .data-timeline { --data-name-w: 9rem; height: auto; min-height: 72px; overflow: hidden; border: 1px solid var(--tone-line); border-radius: 4px; }
+.episode-review .data-transport { flex-wrap: wrap; }
+.episode-review-status { margin: 0; padding: 12px; font-size: 11px; color: var(--tone-ink-soft); }
+.episode-review-status[role="alert"] { color: var(--tone-danger); }
+
+.curation-stage-preview .curation-frames { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr)); gap: 12px; }
+.curation-stage-preview .curation-frame img { height: clamp(140px, 22vh, 224px); aspect-ratio: auto; }
+
+/* Output inspection shares the lower surface instead of opening a drawer. */
+.curation-output-inspection { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); flex: 1; min-height: 0; min-width: 0; gap: 12px; }
+.curation-output-list, .curation-output-detail { min-width: 0; min-height: 0; overflow-y: auto; }
+.curation-output-detail { border-left: 1px solid var(--tone-line); }
+.curation-output-list .curation-sheet-grid { grid-template-columns: minmax(0, 1fr); }
+.curation-output-empty { margin: 0; padding: 12px; font-size: 11px; color: var(--tone-ink-soft); }
+
+/* WARP reserves the shared timeline before allocating camera height. */
+.curation-sheet-body:has(.curation-progress-evidence) { overflow: hidden; }
+.curation-stage-preview:has(.curation-progress-evidence) { display: flex; flex: 1; flex-direction: column; min-height: 0; }
+.curation-stage-preview:has(.curation-progress-evidence) > .curation-episode-picker { flex: none; }
+.curation-stage-preview:has(.curation-progress-evidence) > .curation-episode { flex: 1; min-height: 0; gap: 4px; }
+.curation-progress-evidence { flex: 1; min-height: 0; }
+.curation-progress-evidence .episode-review { flex: 1; min-height: 0; gap: 8px; }
+.curation-progress-evidence .episode-review-cameras { flex: 1; min-height: 0; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: minmax(0, 1fr); align-items: stretch; }
+.curation-progress-evidence .episode-review-feed { display: flex; flex-direction: column; min-height: 0; }
+.curation-progress-evidence .episode-review-feed h5 { flex: none; padding: 4px 8px; }
+.curation-progress-evidence .episode-camera-panel { flex: 1; min-height: 0; }
+.curation-progress-evidence .episode-camera-image { position: relative; flex: 1; min-height: 0; }
+.curation-progress-evidence .episode-camera-canvas { position: absolute; inset: 0; width: 100%; height: 100%; max-height: none; object-fit: contain; }
+.curation-progress-evidence .data-timeline { flex: none; }
+.curation-progress-evidence .data-timeline-body { flex: none; overflow: hidden; }

@@ -377,9 +377,11 @@ pub(super) fn DataPanels(#[props(default)] initial_episode: Option<OpenedEpisode
         );
     }
     let subject = match (&episode, &streams) {
-        (Some(episode), Some(streams)) => {
-            Some(TimelineSubject::new(episode.clone(), streams.clone()))
-        }
+        (Some(episode), Some(streams)) => Some(TimelineSubject::new(
+            episode.clone(),
+            streams.clone(),
+            choices,
+        )),
         _ => None,
     };
     panels.push(
@@ -388,7 +390,7 @@ pub(super) fn DataPanels(#[props(default)] initial_episode: Option<OpenedEpisode
             "Timeline",
             "timeline",
             rsx! {
-                TimelinePanel { subject, transport: transport.clone(), choices }
+                TimelinePanel { subject, transport: transport.clone() }
             },
         )
         .with_class("timeline-editor data-timeline-panel"),
