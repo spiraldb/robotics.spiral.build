@@ -5,7 +5,6 @@ use crate::client::{
     transport::{CommandError, HttpRequest},
 };
 use spiral_robotics_common::curation::{CurationSpec, CurationSummary, run::CurationRun};
-use spiral_robotics_common::datasets::DatasetSelection;
 
 #[derive(Clone)]
 pub(crate) struct CurationClient {
@@ -51,15 +50,6 @@ impl CurationClient {
     pub(crate) async fn start(&self, curation: &CurationSpec) -> Result<CurationRun, CommandError> {
         self.project
             .request(HttpRequest::new("POST", "/api/curation-runs").json(curation))
-            .await
-    }
-    /// The dataset's recorded camera topics, for suggesting a measurement's topic.
-    pub(crate) async fn cameras(
-        &self,
-        dataset: &DatasetSelection,
-    ) -> Result<serde_json::Value, CommandError> {
-        self.project
-            .request(HttpRequest::new("POST", "/api/datasets/cameras").json(dataset))
             .await
     }
 }

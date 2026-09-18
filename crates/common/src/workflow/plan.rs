@@ -68,9 +68,6 @@ impl SpiralPlanReport {
     pub fn logical(&self) -> &DiagnosticPlan {
         &self.logical_plan
     }
-    pub fn optimized(&self) -> &DiagnosticPlan {
-        &self.optimized_logical_plan
-    }
     pub fn physical(&self) -> Option<&DiagnosticPlan> {
         self.physical_plan.as_ref()
     }

@@ -3,49 +3,13 @@
 use super::playback::LiveTimeline;
 use super::session::LiveSession;
 use super::workbench::LiveWorkbench;
-use crate::panels::camera_panel::{AssignedCamera, CameraPanelRows};
+use crate::panels::camera_panel::{AssignedCamera, CameraWorkspaceLayout};
 use crate::panels::scene::{Viewport, ViewportPresentation};
 use crate::robots::{HardwareViewState, RobotSelection};
 use crate::shell::frame::WorkspaceFrame;
 use crate::shell::{project::ProjectSessionSignals, state::StudioProjectState};
 use dioxus::prelude::*;
-use dioxus_workbench::{LayoutNode, Panel, PanelId, PanelLayout, PanelWorkspace, SplitAxis};
-
-struct LiveLayout;
-impl LiveLayout {
-    fn initial(panels: &[Panel]) -> PanelLayout {
-        let camera_ids = panels
-            .iter()
-            .filter(|panel| panel.home.as_str() == "cameras")
-            .map(|panel| panel.id.clone())
-            .collect::<Vec<_>>();
-        let primary = LayoutNode::tile("primary", ["scene".to_owned()]);
-        let editors = match camera_ids.camera_rows() {
-            Some(cameras) => LayoutNode::split(
-                "editor-columns",
-                SplitAxis::Horizontal,
-                2.0 / 3.0,
-                primary,
-                cameras,
-            ),
-            None => primary,
-        };
-        let visualization = LayoutNode::split(
-            "visualization-rows",
-            SplitAxis::Vertical,
-            0.58,
-            editors,
-            LayoutNode::tile("timeline", ["timeline".to_owned()]),
-        );
-        PanelLayout::new(LayoutNode::split(
-            "studio-columns",
-            SplitAxis::Horizontal,
-            0.29,
-            LayoutNode::tile("workbench", ["workbench".to_owned()]),
-            visualization,
-        ))
-    }
-}
+use dioxus_workbench::{Panel, PanelId, PanelWorkspace};
 
 #[component]
 pub(crate) fn LiveWorkspace(is_active: ReadSignal<bool>) -> Element {
@@ -95,7 +59,7 @@ fn LivePanels(session: LiveSession) -> Element {
         Panel::new("timeline", "Timeline", "timeline", timeline.render())
             .with_class("timeline-editor"),
     );
-    let initial_layout = LiveLayout::initial(&panels);
+    let initial_layout = CameraWorkspaceLayout::initial(&panels, "timeline", 0.29);
     rsx! {
         div { class: "min-h-0 min-w-0 overflow-hidden", tabindex: "-1", onkeydown: move |event| actions.on_key(event),
             PanelWorkspace {
@@ -118,7 +82,7 @@ mod tests {
             Panel::new("camera:follower:wrist", "Wrist", "cameras", rsx! {}),
             Panel::new("camera:follower:top", "Top", "cameras", rsx! {}),
         ];
-        let layout = LiveLayout::initial(&panels);
+        let layout = CameraWorkspaceLayout::initial(&panels, "timeline", 0.29);
         assert_eq!(
             layout
                 .tile_for_panel(&PanelId::from("camera:follower:wrist"))
@@ -147,7 +111,7 @@ mod tests {
                 .as_str(),
             "timeline"
         );
-        let mut restored: PanelLayout =
+        let mut restored: dioxus_workbench::PanelLayout =
             serde_json::from_str(&serde_json::to_string(&layout).unwrap()).unwrap();
         restored.reconcile(&[
             dioxus_workbench::PanelPlacement::new("workbench", "workbench"),

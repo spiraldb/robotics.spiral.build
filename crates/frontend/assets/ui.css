@@ -8,7 +8,7 @@
   /* One step past hover, for the moment a control is held down and for the
      hover of something already selected. Without it a pressed toggle lightened
      on hover instead of darkening, which reads as the selection letting go. */
-  --ui-pressed: rgb(55 53 47 / 0.11);
+  --ui-pressed: var(--tone-pressed, rgb(55 53 47 / 0.11));
   --ui-line: var(--tone-line, #e8e8e6);
   --ui-accent: var(--tone-accent, #0868b8);
   --ui-accent-ink: var(--tone-accent-ink, #ffffff);
@@ -75,15 +75,11 @@
   background: var(--ui-pressed);
 }
 
-.ui-action:focus-visible {
-  outline: 2px solid var(--ui-accent);
-  outline-offset: 1px;
-}
-
 /* Only for the actions that wrap a real control — the file picker hides its
    input inside the label, so the label has to carry that input's focus. A bare
    button never matches, which is what stopped a ring appearing on a button
    merely because something inside it was focused. */
+.ui-action:focus-visible,
 .ui-action:has(input):focus-within {
   outline: 2px solid var(--ui-accent);
   outline-offset: 1px;

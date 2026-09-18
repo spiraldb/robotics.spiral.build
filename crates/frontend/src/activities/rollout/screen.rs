@@ -1,7 +1,7 @@
 //! Rollout owns follower scene, checkpoint cameras, controls, and inference docking.
 
 use super::workspace::{InferencePanel, RobotFleet, RolloutWorkbench, TrainingSnapshotRollout};
-use crate::panels::camera_panel::{AssignedCamera, CameraPanelRows};
+use crate::panels::camera_panel::{AssignedCamera, CameraWorkspaceLayout};
 use crate::panels::scene::SceneSource;
 use crate::panels::scene::{Viewport, ViewportPresentation};
 use crate::robots::{HardwareViewState, RobotSelection};
@@ -9,43 +9,7 @@ use crate::shell::{
     frame::WorkspaceFrame, project::ProjectSessionSignals, state::StudioProjectState,
 };
 use dioxus::prelude::*;
-use dioxus_workbench::{LayoutNode, Panel, PanelId, PanelLayout, PanelWorkspace, SplitAxis};
-
-struct RolloutLayout;
-impl RolloutLayout {
-    fn initial(panels: &[Panel]) -> PanelLayout {
-        let camera_ids = panels
-            .iter()
-            .filter(|panel| panel.home.as_str() == "cameras")
-            .map(|panel| panel.id.clone())
-            .collect::<Vec<_>>();
-        let primary = LayoutNode::tile("primary", ["scene".to_owned()]);
-        let editors = match camera_ids.camera_rows() {
-            Some(cameras) => LayoutNode::split(
-                "editor-columns",
-                SplitAxis::Horizontal,
-                2.0 / 3.0,
-                primary,
-                cameras,
-            ),
-            None => primary,
-        };
-        let visualization = LayoutNode::split(
-            "visualization-rows",
-            SplitAxis::Vertical,
-            0.58,
-            editors,
-            LayoutNode::tile("timeline", ["rollout-inference".to_owned()]),
-        );
-        PanelLayout::new(LayoutNode::split(
-            "studio-columns",
-            SplitAxis::Horizontal,
-            0.27,
-            LayoutNode::tile("workbench", ["workbench".to_owned()]),
-            visualization,
-        ))
-    }
-}
+use dioxus_workbench::{Panel, PanelId, PanelWorkspace};
 
 struct RolloutCameras;
 impl RolloutCameras {
@@ -143,7 +107,7 @@ fn RolloutPanels(
         )
         .with_class("rollout-inference-editor"),
     );
-    let initial_layout = RolloutLayout::initial(&panels);
+    let initial_layout = CameraWorkspaceLayout::initial(&panels, "rollout-inference", 0.27);
     rsx! {
         div { class: "min-h-0 min-w-0 overflow-hidden", tabindex: "-1",
             PanelWorkspace {
@@ -200,7 +164,7 @@ mod tests {
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn rollout_layout_docks_inference_without_registering_a_recording_timeline() {
         let cameras = [AssignedCamera::unassigned_panel()];
-        let layout = RolloutLayout::initial(&cameras);
+        let layout = CameraWorkspaceLayout::initial(&cameras, "rollout-inference", 0.27);
         assert_eq!(
             layout
                 .tile_for_panel(&PanelId::from("rollout-inference"))

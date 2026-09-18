@@ -77,11 +77,6 @@ impl RelationCatalog {
         }
     }
 
-    pub fn with_scope(mut self, scope_id: impl Into<String>) -> Self {
-        self.scope_id = scope_id.into();
-        self
-    }
-
     pub fn with_limitation(mut self, limitation: Option<String>) -> Self {
         self.limitation = limitation;
         self

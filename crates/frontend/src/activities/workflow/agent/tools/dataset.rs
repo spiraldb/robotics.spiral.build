@@ -24,9 +24,6 @@ impl WorkflowTool for InspectDataset {
             "inspect dataset cameras",
         )
     }
-    fn available(&self, _workflow: &WorkflowSpec) -> bool {
-        true
-    }
     fn call<'a>(
         &'a self,
         invocation: ToolInvocation<'a>,
@@ -34,12 +31,13 @@ impl WorkflowTool for InspectDataset {
         Box::pin(async move {
             let arguments: DatasetArguments = invocation.arguments()?;
             let Some(path) = arguments.path.filter(|path| !path.is_empty()) else {
-                return Ok(json!({"datasets": WorkflowClient::current().query::<Vec<spiral_robotics_common::datasets::DatasetSummary>>(HttpRequest::new("GET", "/api/datasets")).await?}).to_string());
+                return Ok(
+                    json!({"datasets": DatasetClient::current().list_datasets().await?})
+                        .to_string(),
+                );
             };
             let selection = spiral_robotics_common::datasets::DatasetSelection::new(path)?;
-            let inspection: Value = WorkflowClient::current()
-                .query(HttpRequest::new("POST", "/api/datasets/cameras").json(&selection))
-                .await?;
+            let inspection = DatasetClient::current().dataset_cameras(&selection).await?;
             Ok(json!({
                 "dataset": inspection["dataset"],
                 "cameras": inspection["cameras"],

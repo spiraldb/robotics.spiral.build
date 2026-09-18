@@ -23,13 +23,8 @@ class TrainingJob:
     """A worker-owned data/model/checkpoint lifecycle with replayable state."""
 
     def __init__(self, request: dict[str, Any]) -> None:
-        job_id = request.get("job_id")
-        if not isinstance(job_id, str) or not job_id.strip():
-            raise RuntimeRequestError("training job_id must be non-empty", 422)
-        self.job_id = job_id
-        self.request_digest = hashlib.sha256(
-            json.dumps(request, sort_keys=True, separators=(",", ":")).encode()
-        ).digest()
+        self.job_id = self.request_id(request)
+        self.request_digest = self._request_digest(request)
         self.lock = threading.Lock()
         self.stop_event = threading.Event()
         self.phase = "starting"
@@ -46,17 +41,26 @@ class TrainingJob:
         self.next_log_offset = 1
         self.secret = str(request.get("spiral", {}).get("client_secret") or "")
         self.thread = threading.Thread(
-            target=self._run, args=(request,), name=f"training-{job_id}", daemon=True
+            target=self._run, args=(request,), name=f"training-{self.job_id}", daemon=True
         )
 
     def start(self) -> None:
         self.thread.start()
 
+    @staticmethod
+    def request_id(request: dict[str, Any]) -> str:
+        job_id = request.get("job_id")
+        if not isinstance(job_id, str) or not job_id.strip():
+            raise RuntimeRequestError("training job_id must be non-empty", 422)
+        return job_id
+
+    @staticmethod
+    def _request_digest(request: dict[str, Any]) -> bytes:
+        canonical = json.dumps(request, sort_keys=True, separators=(",", ":")).encode()
+        return hashlib.sha256(canonical).digest()
+
     def matches(self, request: dict[str, Any]) -> bool:
-        digest = hashlib.sha256(
-            json.dumps(request, sort_keys=True, separators=(",", ":")).encode()
-        ).digest()
-        return digest == self.request_digest
+        return self._request_digest(request) == self.request_digest
 
     def stop(self) -> None:
         self.stop_event.set()

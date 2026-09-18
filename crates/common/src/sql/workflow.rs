@@ -33,10 +33,9 @@ impl<'a> TryFrom<&'a str> for QualifiedRelation<'a> {
                 "Spiral relation names cannot contain surrounding whitespace or NUL bytes",
             ));
         }
-        let segments = relation.split('.').collect::<Vec<_>>();
-        if segments
-            .iter()
-            .any(|segment| UnquotedSqlIdentifier::try_from(*segment).is_err())
+        if relation
+            .split('.')
+            .any(|segment| UnquotedSqlIdentifier::try_from(segment).is_err())
         {
             return Err(WorkflowSyntaxError::new(
                 "Spiral relations must contain safe identifiers separated by dots",

@@ -104,8 +104,8 @@ pub struct SpiralSettings {
 impl Default for SpiralSettings {
     fn default() -> Self {
         Self {
-            endpoint: DEFAULT_SPIRAL_ENDPOINT.to_owned(),
-            spfs_endpoint: DEFAULT_SPIRAL_SPFS_ENDPOINT.to_owned(),
+            endpoint: Self::default_endpoint(),
+            spfs_endpoint: Self::default_spfs_endpoint(),
             project_id: String::new(),
             client_id: String::new(),
             client_secret_configured: false,
@@ -116,6 +116,10 @@ impl Default for SpiralSettings {
 }
 
 impl SpiralSettings {
+    fn default_endpoint() -> String {
+        DEFAULT_SPIRAL_ENDPOINT.to_owned()
+    }
+
     fn default_spfs_endpoint() -> String {
         DEFAULT_SPIRAL_SPFS_ENDPOINT.to_owned()
     }
@@ -217,9 +221,9 @@ impl VideoSettings {
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SpiralConnectionUpdate {
-    #[serde(default = "SpiralConnectionUpdate::default_spiral_endpoint")]
+    #[serde(default = "SpiralSettings::default_endpoint")]
     spiral_endpoint: String,
-    #[serde(default = "SpiralConnectionUpdate::default_spiral_spfs_endpoint")]
+    #[serde(default = "SpiralSettings::default_spfs_endpoint")]
     spiral_spfs_endpoint: String,
     #[serde(default)]
     project_id: String,
@@ -235,14 +239,6 @@ pub struct SpiralConnectionUpdate {
 }
 
 impl SpiralConnectionUpdate {
-    fn default_spiral_endpoint() -> String {
-        DEFAULT_SPIRAL_ENDPOINT.to_owned()
-    }
-
-    fn default_spiral_spfs_endpoint() -> String {
-        DEFAULT_SPIRAL_SPFS_ENDPOINT.to_owned()
-    }
-
     pub fn new(
         spiral_endpoint: impl Into<String>,
         spiral_spfs_endpoint: impl Into<String>,
@@ -316,8 +312,8 @@ impl std::fmt::Debug for SpiralConnectionUpdate {
 impl Default for SpiralConnectionUpdate {
     fn default() -> Self {
         Self::new(
-            Self::default_spiral_endpoint(),
-            Self::default_spiral_spfs_endpoint(),
+            SpiralSettings::default_endpoint(),
+            SpiralSettings::default_spfs_endpoint(),
             String::new(),
         )
     }

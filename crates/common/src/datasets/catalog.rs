@@ -271,20 +271,6 @@ impl EpisodeVideo {
     pub fn packets(&self) -> &[VideoPacket] {
         &self.packets
     }
-
-    pub fn relative_to(mut self, origin_ns: u64) -> Result<Self, String> {
-        for packet in &mut self.packets {
-            let timestamp = packet
-                .timestamp_ns
-                .parse::<u64>()
-                .map_err(|_| "Invalid video timestamp")?;
-            packet.timestamp_ns = timestamp
-                .checked_sub(origin_ns)
-                .ok_or("Camera timestamp precedes recording start")?
-                .to_string();
-        }
-        Ok(self)
-    }
 }
 
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]

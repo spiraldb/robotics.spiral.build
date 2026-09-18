@@ -32,12 +32,7 @@ impl WorkflowTool for ListRelations {
     ) -> LocalBoxFuture<'a, Result<String, String>> {
         Box::pin(async move {
             let _: NoArguments = invocation.arguments()?;
-            let response = WorkflowClient::current()
-                .query::<spiral_robotics_common::relations::RelationCatalog>(HttpRequest::new(
-                    "GET",
-                    "/api/relations",
-                ))
-                .await?;
+            let response = WorkflowClient::current().relations().await?;
             Ok(json!({
                 "relations": response.relations().iter().map(|relation| relation.name()).collect::<Vec<_>>(),
                 "complete": response.complete(),
@@ -77,12 +72,7 @@ impl WorkflowTool for DescribeRelations {
             if arguments.relations.len() > 20 {
                 return Err("Describe at most 20 relations per tool call.".into());
             }
-            let discovered = WorkflowClient::current()
-                .query::<spiral_robotics_common::relations::RelationCatalog>(HttpRequest::new(
-                    "GET",
-                    "/api/relations",
-                ))
-                .await?;
+            let discovered = WorkflowClient::current().relations().await?;
             let relations = discovered
                 .relations()
                 .iter()

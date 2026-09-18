@@ -3,8 +3,6 @@
 use spiral_robotics_common::datasets::{
     DatasetInspection, DatasetSelection, DatasetSummary, ProjectResource,
 };
-use std::sync::Arc;
-
 use spiral_robotics_common::datasets::{
     HuggingFaceDatasetImportSummary, HuggingFaceDatasetInspection, HuggingFaceDatasetSource,
     ProjectImportSummary,
@@ -15,25 +13,13 @@ use spiral_robotics_hardware::{HardwareState, ModeSelection as HardwareModeSelec
 use spiral_robotics_storage::ingestion::HuggingFaceDatasetDiscovery as _;
 
 use crate::BackendCommandError;
-use crate::data::catalog_lease::{CatalogLeaseOwner, CatalogLeaseToken, CatalogMutationLease};
+use crate::data::catalog_lease::CatalogLeaseOwner;
 use crate::data::query::QueryCommand;
 use crate::data::settings::UpdateDataSettingsCommand;
 use crate::project_session::context::ProjectContext;
 
 pub(crate) const MAX_PROJECT_IMPORT_BYTES: usize =
     spiral_robotics_storage::bundle::ProjectBundle::MAX_BYTES;
-
-struct CatalogLeaseReservation {
-    lease: Arc<CatalogMutationLease>,
-    token: CatalogLeaseToken,
-}
-
-impl Drop for CatalogLeaseReservation {
-    fn drop(&mut self) {
-        let released = self.lease.release(self.token);
-        debug_assert!(released, "catalog operation releases its exact lease once");
-    }
-}
 
 /// Project-bound data operations, independent of HTTP delivery.
 #[derive(Clone)]
@@ -290,19 +276,15 @@ impl DataCommands {
     async fn relations_in_project(&self) -> Result<RelationCatalog, BackendCommandError> {
         let _activity = self.state.admit()?;
         self.require_catalog_ready()?;
-        let token = self
+        let _reservation = self
             .state
             .catalog_lease()
-            .try_acquire(CatalogLeaseOwner::StudioCatalogRead)
+            .try_reserve(CatalogLeaseOwner::StudioCatalogRead)
             .ok_or_else(|| {
                 BackendCommandError::conflict(
                     "Wait for the current recording or catalog change before loading Studio relations",
                 )
             })?;
-        let _reservation = CatalogLeaseReservation {
-            lease: self.state.catalog_lease().clone(),
-            token,
-        };
         self.state
             .storage()
             .relation_catalog()
@@ -414,19 +396,15 @@ impl DataCommands {
         let inspection = HuggingFaceDatasetInspection::discover(request)
             .await
             .map_err(BackendCommandError::from)?;
-        let token = self
+        let _reservation = self
             .state
             .catalog_lease()
-            .try_acquire(CatalogLeaseOwner::DatasetImport)
+            .try_reserve(CatalogLeaseOwner::DatasetImport)
             .ok_or_else(|| {
                 BackendCommandError::conflict(
                     "Wait for the current recording or catalog change before importing a dataset",
                 )
             })?;
-        let _reservation = CatalogLeaseReservation {
-            lease: self.state.catalog_lease().clone(),
-            token,
-        };
         self.require_import_idle("a dataset")?;
         self.state
             .storage()

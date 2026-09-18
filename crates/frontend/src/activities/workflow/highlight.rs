@@ -176,11 +176,6 @@ impl Tokens {
         Self::lex(text, Vocabulary::Expression)
     }
 
-    #[cfg(test)]
-    pub(super) fn tokens(&self) -> &[Token] {
-        &self.0
-    }
-
     /// Escaped HTML with one span per coloured token, for markdown output that
     /// is sanitized before it renders.
     pub(super) fn html(&self) -> String {
@@ -349,7 +344,7 @@ mod tests {
 
     fn kinds(tokens: &Tokens) -> Vec<(TokenKind, &str)> {
         tokens
-            .tokens()
+            .0
             .iter()
             .filter(|token| token.kind != TokenKind::Plain)
             .map(|token| (token.kind, token.text.as_str()))
@@ -360,11 +355,7 @@ mod tests {
     fn sql_lexing_reproduces_the_text_and_names_functions_strings_and_comments() {
         let sql = "SELECT spql.ai.score(image, 'a gripper') AS s -- note\nFROM t WHERE x >= -0.5";
         let tokens = Tokens::sql(sql);
-        let joined: String = tokens
-            .tokens()
-            .iter()
-            .map(|token| token.text.as_str())
-            .collect();
+        let joined: String = tokens.0.iter().map(|token| token.text.as_str()).collect();
         assert_eq!(joined, sql);
         let coloured = kinds(&tokens);
         assert_eq!(coloured[0], (TokenKind::Keyword, "SELECT"));

@@ -74,26 +74,6 @@ pub(crate) fn CurationIcon() -> Element {
 }
 
 #[component]
-pub(crate) fn TableNodeIcon() -> Element {
-    rsx! {
-        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
-            rect { x: "2.5", y: "2.5", width: "11", height: "11", rx: "1" }
-            path { d: "M2.5 6h11M6 6v7.5M10 6v7.5" }
-        }
-    }
-}
-
-#[component]
-pub(crate) fn ModelNodeIcon() -> Element {
-    rsx! {
-        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
-            path { d: "m8 2.25 5 2.8v5.9l-5 2.8-5-2.8v-5.9l5-2.8Z" }
-            path { d: "m3.25 5.2 4.75 2.7 4.75-2.7M8 7.9v5.55" }
-        }
-    }
-}
-
-#[component]
 pub(crate) fn QueryNodeIcon() -> Element {
     rsx! {
         svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
@@ -353,16 +333,6 @@ pub(crate) fn StepForwardIcon() -> Element {
     rsx! {
         svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
             path { d: "M5.5 4 9.5 8l-4 4M11 4v8" }
-        }
-    }
-}
-
-/// Transport: start over when the episode ends.
-#[component]
-pub(crate) fn LoopIcon() -> Element {
-    rsx! {
-        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
-            path { d: "M3 8a5 5 0 0 1 8.5-3.6L13 6M13 2.5V6H9.5M13 8a5 5 0 0 1-8.5 3.6L3 10M3 13.5V10h3.5" }
         }
     }
 }

@@ -14,16 +14,12 @@ pub(crate) struct WorkflowCommands {
     state: ProjectContext,
 }
 impl WorkflowCommands {
-    fn admit(&self) -> Result<crate::project_admission::ProjectActivity, BackendCommandError> {
-        let activity = self.state.admit()?;
-        Ok(activity)
-    }
     pub(crate) async fn list(&self) -> Result<Vec<WorkflowSummary>, BackendCommandError> {
-        let _activity = self.admit()?;
+        let _activity = self.state.admit()?;
         self.state.workflow().list().await.map_err(Into::into)
     }
     pub(crate) async fn load(&self, id: &str) -> Result<WorkflowDocument, BackendCommandError> {
-        let _activity = self.admit()?;
+        let _activity = self.state.admit()?;
         self.state.workflow().load(id).await.map_err(Into::into)
     }
     pub(crate) async fn save(
@@ -40,31 +36,28 @@ impl WorkflowCommands {
         &self,
         workflow: WorkflowSpec,
     ) -> Result<WorkflowPlan, BackendCommandError> {
-        let _activity = self.admit()?;
+        let _activity = self.state.admit()?;
         Ok(self.state.workflow().plan(&workflow).await)
     }
     pub(crate) fn runs(&self) -> Result<Vec<WorkflowRun>, BackendCommandError> {
-        let _activity = self.admit()?;
+        let _activity = self.state.admit()?;
         Ok(self.state.workflow().runs())
     }
     pub(crate) fn run(&self, id: &str) -> Result<WorkflowRun, BackendCommandError> {
-        let _activity = self.admit()?;
+        let _activity = self.state.admit()?;
         self.state.workflow().run(id).map_err(Into::into)
     }
     pub(crate) fn start(&self, workflow: WorkflowSpec) -> Result<WorkflowRun, BackendCommandError> {
-        let _activity = self.admit()?;
+        let _activity = self.state.admit()?;
         let lease = self.state.catalog_lease();
-        let token = lease
-            .try_acquire(CatalogLeaseOwner::WorkflowStart)
+        let _reservation = lease
+            .try_reserve(CatalogLeaseOwner::WorkflowStart)
             .ok_or_else(|| {
                 BackendCommandError::conflict(
                     "Wait for recording or catalog changes before running a workflow.",
                 )
             })?;
-        let result = self.state.workflow().start(workflow);
-        let released = lease.release(token);
-        debug_assert!(released);
-        result.map_err(Into::into)
+        self.state.workflow().start(workflow).map_err(Into::into)
     }
     pub(crate) async fn capture_comparison(
         &self,
@@ -103,14 +96,14 @@ impl WorkflowCommands {
             .await
     }
     pub(crate) fn release_comparison(&self, id: &str) -> Result<bool, BackendCommandError> {
-        let _activity = self.admit()?;
+        let _activity = self.state.admit()?;
         self.state.workflow().comparisons().release(id);
         Ok(true)
     }
     pub(crate) async fn capabilities(
         &self,
     ) -> Result<spiral_robotics_common::relations::SpiralQuerySnapshot, BackendCommandError> {
-        let _activity = self.admit()?;
+        let _activity = self.state.admit()?;
         super::query::WorkflowQuery::new(self.state.storage().workflow_store())
             .capabilities()
             .await
@@ -121,7 +114,7 @@ impl WorkflowCommands {
         &self,
         selection: DatasetSelection,
     ) -> Result<serde_json::Value, BackendCommandError> {
-        let _activity = self.admit()?;
+        let _activity = self.state.admit()?;
         let inspection = self
             .state
             .storage()

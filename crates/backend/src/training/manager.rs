@@ -981,11 +981,11 @@ impl TrainingManager {
         let spiral_ready = connection.0;
         let blocker = spiral_robotics_common::training::TrainingPolicy::Act.mcap_training_blocker();
         let ready = spiral_ready && backend.is_ok() && blocker.is_none();
-        let summary = match (connection, backend) {
-            ((false, message), _) => format!("Spiral is not ready for training: {message}"),
-            (_, Err(error)) => format!("Training runtime is not ready: {error}"),
-            (_, Ok(_)) if blocker.is_some() => blocker.unwrap().to_owned(),
-            (_, Ok(backend)) => format!(
+        let summary = match (connection, backend, blocker) {
+            ((false, message), _, _) => format!("Spiral is not ready for training: {message}"),
+            (_, Err(error), _) => format!("Training runtime is not ready: {error}"),
+            (_, Ok(_), Some(blocker)) => blocker.to_owned(),
+            (_, Ok(backend), None) => format!(
                 "Runtime ready · {probe} · Spiral project {} · namespace {} · query checked at run start",
                 self.inner.storage.project_id(),
                 self.inner.storage.table_prefix(),

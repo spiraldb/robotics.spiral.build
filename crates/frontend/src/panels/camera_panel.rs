@@ -3,7 +3,7 @@
 use super::camera::{CameraEditor, CameraEditorSource, RecordedCameraSourceRequest};
 use crate::robots::Selection;
 use dioxus::prelude::*;
-use dioxus_workbench::{DockZone, LayoutNode, Panel, PanelId, SplitAxis};
+use dioxus_workbench::{DockZone, LayoutNode, Panel, PanelId, PanelLayout, SplitAxis};
 use spiral_robotics_common::robots::{CameraBinding, RobotSummary};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -111,6 +111,48 @@ pub(crate) trait CameraPanelRows {
 impl CameraPanelRows for [PanelId] {
     fn camera_rows(&self) -> Option<LayoutNode> {
         CameraRows::new(self).map(|rows| rows.layout(0))
+    }
+}
+
+/// Standard workbench, scene/cameras, and lower visualization arrangement.
+pub(crate) struct CameraWorkspaceLayout;
+
+impl CameraWorkspaceLayout {
+    pub(crate) fn initial(
+        panels: &[Panel],
+        lower_panel: impl Into<PanelId>,
+        workbench_fraction: f64,
+    ) -> PanelLayout {
+        let camera_ids = panels
+            .iter()
+            .filter(|panel| panel.home.as_str() == "cameras")
+            .map(|panel| panel.id.clone())
+            .collect::<Vec<_>>();
+        let primary = LayoutNode::tile("primary", ["scene".to_owned()]);
+        let editors = match camera_ids.camera_rows() {
+            Some(cameras) => LayoutNode::split(
+                "editor-columns",
+                SplitAxis::Horizontal,
+                2.0 / 3.0,
+                primary,
+                cameras,
+            ),
+            None => primary,
+        };
+        let visualization = LayoutNode::split(
+            "visualization-rows",
+            SplitAxis::Vertical,
+            0.58,
+            editors,
+            LayoutNode::tile("timeline", [lower_panel.into()]),
+        );
+        PanelLayout::new(LayoutNode::split(
+            "studio-columns",
+            SplitAxis::Horizontal,
+            workbench_fraction,
+            LayoutNode::tile("workbench", ["workbench".to_owned()]),
+            visualization,
+        ))
     }
 }
 

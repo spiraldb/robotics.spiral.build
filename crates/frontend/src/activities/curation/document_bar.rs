@@ -51,7 +51,7 @@ pub(super) fn CurationDocumentBar(controller: CurationController) -> Element {
                     DocumentTitle {
                         id: TITLE_ID.to_owned(),
                         name: curation.name().to_owned(),
-                        hint: title_hint.clone(),
+                        hint: title_hint,
                         expanded: switching(),
                         on_toggle: move |_| switching.toggle(),
                     }
@@ -64,7 +64,7 @@ pub(super) fn CurationDocumentBar(controller: CurationController) -> Element {
                         entries,
                         current: DocumentEntry::new(curation.id(), curation.name()),
                         copy: SwitcherCopy::new("Saved curations", "No saved curations yet.", "New curation", "Rename this curation"),
-                        gate: SwitcherGate::new(reason.clone(), rename_disabled),
+                        gate: SwitcherGate::new(reason, rename_disabled),
                         on_select: move |id: Option<String>| controller.select_curation(id),
                         on_rename: move |_| { switching.set(false); renaming.set(true); },
                         on_close: move |_| switching.set(false),

@@ -226,9 +226,6 @@ impl WorkflowRunSnapshot {
     pub const fn updated_ms(&self) -> u64 {
         self.timing.updated_ms
     }
-    pub const fn set_workflow_revision(&mut self, revision: u64) {
-        self.identity.workflow_revision = revision;
-    }
     pub const fn set_phase(&mut self, phase: WorkflowRunPhase) {
         self.execution.phase = phase;
     }
@@ -250,10 +247,6 @@ impl WorkflowRunSnapshot {
     #[cfg(any(test, feature = "test-support"))]
     pub fn set_run_id(&mut self, run_id: Option<String>) {
         self.identity.run_id = run_id;
-    }
-    #[cfg(any(test, feature = "test-support"))]
-    pub const fn set_started_ms(&mut self, started_ms: u64) {
-        self.timing.started_ms = started_ms;
     }
 }
 
@@ -412,12 +405,6 @@ impl WorkflowAgentMessage {
         self
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn with_run_id(mut self, run_id: Option<String>) -> Self {
-        self.content.run_id = run_id;
-        self
-    }
-
     pub fn id(&self) -> &str {
         &self.identity.id
     }
@@ -447,11 +434,6 @@ impl WorkflowAgentMessage {
     }
     pub fn set_run_id(&mut self, run_id: Option<String>) {
         self.content.run_id = run_id;
-    }
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn with_tools(mut self, tools: Vec<WorkflowAgentToolSummary>) -> Self {
-        self.content.tools = tools;
-        self
     }
 }
 
@@ -528,10 +510,6 @@ impl WorkflowAgentSession {
         }
     }
 
-    pub const fn with_updated_ms(mut self, updated_ms: u64) -> Self {
-        self.identity.updated_ms = updated_ms;
-        self
-    }
     pub fn workflow_id(&self) -> &str {
         &self.identity.workflow_id
     }
@@ -579,15 +557,6 @@ impl WorkflowAgentSession {
     pub const fn with_revision(mut self, revision: u64) -> Self {
         self.identity.revision = revision;
         self
-    }
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn with_messages(mut self, messages: Vec<WorkflowAgentMessage>) -> Self {
-        self.activity.messages = messages;
-        self
-    }
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn set_workflow_id(&mut self, workflow_id: impl Into<String>) {
-        self.identity.workflow_id = workflow_id.into();
     }
 }
 

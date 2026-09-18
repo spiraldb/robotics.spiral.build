@@ -1,9 +1,9 @@
 /* Dioxus.toml declares this as the Tailwind input, so DX watches and compiles
    it for both development and release builds. */
-@import "tailwindcss";
+@import "tailwindcss" source(none);
 
-/* Tailwind discovers utility classes by scanning source text, and the UI is
-   written in Rust rather than the templates it looks at by default. */
+/* Only frontend Rust emits utility classes. Keep scanning explicit so prose,
+   backend code, and viewport math cannot add unrelated CSS utilities. */
 @source "./src/**/*.rs";
 
 /*
@@ -253,7 +253,8 @@
     @apply absolute inset-y-0 border-l border-line;
   }
 
-  .timeline-time-tick span {
+  .timeline-time-tick span,
+  .data-time-tick span {
     @apply absolute left-1 top-1 whitespace-nowrap font-mono text-[10px] tabular-nums text-ink-faint;
   }
 
@@ -328,7 +329,8 @@
     @apply h-2 w-2 shrink-0 rounded-full;
   }
 
-  .live-robot-copy {
+  .live-robot-copy,
+  .device-copy {
     @apply flex min-w-0 flex-1 items-baseline gap-1.5;
   }
 
@@ -821,7 +823,9 @@
     @apply mb-2 flex min-w-0 items-center gap-2;
   }
 
-  .training-form-heading h3 {
+  .training-form-heading h3,
+  .training-subpanel-heading h3,
+  .rollout-section-heading h3 {
     @apply min-w-0 flex-1 text-[11px] font-semibold;
   }
 
@@ -837,7 +841,8 @@
     grid-template-columns: minmax(0, 1fr) 6.5rem;
   }
 
-  .training-field {
+  .training-field,
+  .rollout-field {
     @apply flex min-w-0 flex-col gap-1 text-[10px] text-ink-soft;
   }
 
@@ -853,7 +858,9 @@
 
   .training-field input:focus,
   .training-field select:focus,
-  .training-query-section textarea:focus {
+  .training-query-section textarea:focus,
+  .rollout-field input:focus,
+  .rollout-field select:focus {
     border-color: var(--tone-accent);
     box-shadow: 0 0 0 1px var(--tone-accent);
   }
@@ -1035,10 +1042,6 @@
 
   .training-subpanel-heading {
     @apply flex min-h-8 shrink-0 items-center gap-2 border-b border-line bg-sunken px-2.5;
-  }
-
-  .training-subpanel-heading h3 {
-    @apply min-w-0 flex-1 text-[11px] font-semibold;
   }
 
   .training-subpanel-body {
@@ -1757,27 +1760,15 @@
     overflow-wrap: anywhere;
   }
 
-  .workflow-inspector-expression {
-    @apply mt-2 rounded bg-sunken px-2 py-1.5 font-mono text-[10px] leading-4 text-ink-soft;
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-  }
-
   .workflow-inspector-body h4 {
     @apply mb-1.5 mt-4 text-[11px] font-semibold text-ink;
   }
 
-  .workflow-inspector-inputs,
   .workflow-stage-steps {
-    @apply grid gap-1 pl-4 text-[11px] text-ink-soft;
+    @apply grid gap-2 pl-4 text-[11px] text-ink-soft;
     list-style: decimal;
   }
 
-  .workflow-stage-steps {
-    @apply gap-2;
-  }
-
-  .workflow-inspector-inputs li::marker,
   .workflow-stage-steps li::marker {
     color: var(--tone-ink-faint);
     font-variant-numeric: tabular-nums;
@@ -1866,10 +1857,6 @@
 
   .workflow-inspector-note {
     @apply text-[11px] text-ink-faint;
-  }
-
-  .workflow-inspector-code {
-    @apply font-mono text-[10px];
   }
 
   /* Results --------------------------------------------------------------- */
@@ -2446,10 +2433,6 @@
       grid-template-columns: minmax(0, 1fr);
     }
 
-    .workflow-facts dt {
-      padding-top: 6px;
-    }
-
     .workflow-facts > div:first-child dt {
       padding-top: 0;
     }
@@ -2579,10 +2562,6 @@
     @apply mb-2 flex min-h-5 items-center gap-2;
   }
 
-  .rollout-section-heading h3 {
-    @apply min-w-0 flex-1 text-[11px] font-semibold;
-  }
-
   .rollout-state {
     @apply inline-flex min-h-5 items-center rounded px-1.5 text-[10px] font-medium;
     background: var(--tone-caution-soft);
@@ -2594,19 +2573,9 @@
     color: var(--tone-good);
   }
 
-  .rollout-field {
-    @apply flex min-w-0 flex-col gap-1 text-[10px] text-ink-soft;
-  }
-
   .rollout-field input,
   .rollout-field select {
     @apply min-h-7 w-full rounded border border-line bg-surface px-2 text-[11px] text-ink outline-none transition-colors disabled:cursor-not-allowed disabled:bg-sunken disabled:text-ink-faint;
-  }
-
-  .rollout-field input:focus,
-  .rollout-field select:focus {
-    border-color: var(--tone-accent);
-    box-shadow: 0 0 0 1px var(--tone-accent);
   }
 
   .rollout-field-grid {
@@ -2824,13 +2793,6 @@
   border-color: var(--tone-accent);
   outline: 2px solid rgb(8 104 184 / 0.15);
   outline-offset: 1px;
-}
-
-.data-error {
-  margin-top: 0.375rem;
-  color: var(--tone-danger);
-  font-size: 0.6875rem;
-  overflow-wrap: anywhere;
 }
 
 /* Query results ----------------------------------------------------------
@@ -3064,14 +3026,11 @@
      spans the smallest to the largest value among the rows returned. */
   .query-measure {
     @apply inline-grid w-full min-w-[5.5rem] justify-items-end gap-0.5;
+    --measure-tone: color-mix(in srgb, var(--tone-accent) 55%, transparent);
   }
 
   .query-measure-text {
     @apply leading-4;
-  }
-
-  .query-measure {
-    --measure-tone: color-mix(in srgb, var(--tone-accent) 55%, transparent);
   }
 
   .query-measure.is-negative {
@@ -3712,7 +3671,7 @@
      last gesture behind a solid panel — the reader could not tell whether the
      sentence had ended or been covered. */
   .viewport-help {
-    @apply pointer-events-none absolute bottom-1.5 left-2 right-24 truncate text-[10px];
+    @apply pointer-events-none absolute bottom-1.5 left-2 right-24 truncate text-[10px] text-ink-faint;
   }
 
   .scene-source-note {
@@ -3724,7 +3683,7 @@
   }
 
   .viewport-action {
-    @apply inline-flex min-h-6 items-center rounded px-1.5 text-[11px];
+    @apply inline-flex min-h-6 items-center rounded border border-transparent px-1.5 text-[11px];
   }
 
   .viewport-legend {
@@ -3732,11 +3691,11 @@
   }
 
   .viewport-legend-row {
-    @apply flex min-h-5 items-center gap-1 rounded px-1 text-[11px];
+    @apply flex min-h-5 items-center gap-1 rounded px-1 text-[11px] text-ink-soft;
   }
 
   .view-cube {
-    @apply absolute right-1.5 bottom-1.5 flex w-20 flex-col gap-px overflow-hidden rounded border text-[10px] shadow-sm;
+    @apply absolute right-1.5 bottom-1.5 flex w-20 flex-col gap-px overflow-hidden rounded border border-line bg-surface/90 text-[10px] text-ink-soft shadow-sm backdrop-blur-none;
   }
 
   /* The faces spell their view out. Abbreviating them to `F` and `R` put a key
@@ -3747,12 +3706,12 @@
   }
 
   .view-cube-row {
-    @apply grid grid-cols-2 gap-px border-t;
+    @apply grid grid-cols-2 gap-px border-t border-line;
   }
 
   /* The last row of the cube rather than a seventh floating box above it. */
   .viewport-axis-key {
-    @apply pointer-events-none flex justify-center gap-2 border-t px-1 font-mono text-[10px];
+    @apply pointer-events-none flex justify-center gap-2 border-t border-line px-1 font-mono text-[10px];
   }
 
   /* Darker than the vivid scene accents so a 10px glyph clears 4.5:1 on the
@@ -3835,33 +3794,6 @@
   into parallel workflows.
 */
 @layer components {
-  /* Light 3D stage chrome. */
-  .viewport-help {
-    @apply text-ink-faint;
-  }
-
-  .viewport-action {
-    @apply border border-transparent;
-  }
-
-  .viewport-legend-row {
-    @apply text-ink-soft;
-  }
-
-  .view-cube {
-    @apply border-line bg-surface/90 text-ink-soft backdrop-blur-none;
-  }
-
-  .view-cube-row {
-    @apply border-line;
-  }
-
-  /* Inside the cube now, so it takes the cube's own surface and needs only the
-     rule that separates it from the face buttons above. */
-  .viewport-axis-key {
-    @apply border-line;
-  }
-
   /* Device hierarchy: identity and readiness first, setup details second, file
      maintenance last. */
   .device-entry {
@@ -3897,12 +3829,9 @@
     @apply flex min-w-0 flex-1 items-baseline gap-1.5 py-0 text-left;
   }
 
-  .device-accent {
+  .device-accent,
+  .device-connection-dot {
     @apply h-1.5 w-1.5 shrink-0 self-center rounded-full;
-  }
-
-  .device-copy {
-    @apply flex min-w-0 flex-1 items-baseline gap-1.5;
   }
 
   .device-copy strong {
@@ -3921,10 +3850,6 @@
 
   .device-state-needed {
     @apply text-caution;
-  }
-
-  .device-connection-dot {
-    @apply h-1.5 w-1.5 shrink-0 self-center rounded-full;
   }
 
   .device-setup {
@@ -4043,20 +3968,20 @@
   --df-minimap-mask: var(--tone-selected);
 }
 
-/* The library's own entrance is replaced by the stage's staggered one. */
+/* The library's node entrance is replaced by the stage's staggered one. */
 .workflow-flow .df-node {
   animation: none;
   cursor: pointer;
+}
+
+.workflow-flow .df-edge {
+  animation: none;
 }
 
 .workflow-flow .df-node:focus-visible {
   border-radius: 4px;
   outline-width: 2px;
   outline-offset: 2px;
-}
-
-.workflow-flow .df-edge {
-  animation: workflow-edge-enter 360ms cubic-bezier(0.16, 1, 0.3, 1) 180ms both;
 }
 
 .workflow-flow .df-edge-path {
@@ -4102,10 +4027,6 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .workflow-flow .df-edge {
-    animation: none;
-  }
-
   .workflow-stage-card .df-handle {
     transition: none;
   }
@@ -4115,12 +4036,14 @@
 /* Build | Compare lives in the document bar as a 22px segmented control. The
    shared segment primitive is sized for the Live transport, so its 32px floor
    is overridden here, unlayered, where the primitive's own rule can be met. */
-.workflow-view-switch {
+.workflow-view-switch,
+.curation-sheet-filter {
   flex-shrink: 0;
   grid-auto-flow: column;
   grid-auto-columns: max-content;
 }
-.workflow-view-switch .ui-action--segment {
+.workflow-view-switch .ui-action--segment,
+.curation-sheet-filter .ui-action--segment {
   min-height: 22px;
   padding-inline: 9px;
   font-size: 11px;
@@ -4241,9 +4164,6 @@
 .comparison-episode-link { display:block; max-width:240px; overflow:hidden; text-overflow:ellipsis; color:var(--tone-ink); text-align:left; font-weight:500; }
 .comparison-episode-link:hover { color:var(--tone-accent); }
 .comparison-episode-id { display:block; color:var(--tone-ink-faint); font-family:var(--font-mono); font-size:10px; margin-top:3px; }
-.comparison-decision { display:inline-block; padding:2px 6px; border-radius:4px; background:var(--tone-sunken); color:var(--tone-ink-soft); font-size:10px; }
-.comparison-decision.is-selected { color:var(--tone-accent); background:var(--tone-selected); }
-.comparison-decision.is-unknown { color:var(--tone-caution); background:var(--tone-caution-soft); }
 .comparison-numeric { font-variant-numeric:tabular-nums; }
 .comparison-evidence-pagination { display:flex; justify-content:space-between; gap:12px; padding-top:10px; color:var(--tone-ink-soft); font-size:10px; }
 .comparison-evidence-pagination > div { display:flex; gap:16px; }
@@ -4335,7 +4255,8 @@
     @apply text-accent;
   }
 
-  .data-dataset-count {
+  .data-dataset-count,
+  .data-stream-count {
     @apply shrink-0 font-mono text-[10px] tabular-nums text-ink-faint;
   }
 
@@ -4573,10 +4494,6 @@
     @apply pointer-events-none absolute inset-y-0 border-l border-line;
   }
 
-  .data-time-tick span {
-    @apply absolute left-1 top-1 whitespace-nowrap font-mono text-[10px] tabular-nums text-ink-faint;
-  }
-
   .data-time-scrub,
   .data-track-scrub,
   .data-plot-scrub {
@@ -4658,10 +4575,6 @@
 
   .data-stream-label[aria-pressed="true"] {
     @apply font-medium text-accent;
-  }
-
-  .data-stream-count {
-    @apply shrink-0 font-mono text-[10px] tabular-nums text-ink-faint;
   }
 
   .data-show-check {
@@ -5568,16 +5481,4 @@
 .curation-inline-form .ui-action {
   flex-shrink: 0;
   white-space: nowrap;
-}
-
-.curation-sheet-filter {
-  flex-shrink: 0;
-  grid-auto-flow: column;
-  grid-auto-columns: max-content;
-}
-
-.curation-sheet-filter .ui-action--segment {
-  min-height: 22px;
-  padding-inline: 9px;
-  font-size: 11px;
 }

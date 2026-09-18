@@ -30,9 +30,7 @@ class RuntimeState:
         self.policies: dict[str, PolicySession] = {}
 
     def add_job(self, request: dict[str, Any]) -> TrainingJob:
-        job_id = request.get("job_id")
-        if not isinstance(job_id, str) or not job_id:
-            raise RuntimeRequestError("training job_id must be non-empty", 422)
+        job_id = TrainingJob.request_id(request)
         with self.lock:
             self._prune_jobs_locked()
             existing = self.jobs.get(job_id)

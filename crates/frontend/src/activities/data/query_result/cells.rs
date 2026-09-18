@@ -274,11 +274,6 @@ impl ResultColumn {
         &self.column
     }
 
-    #[cfg(test)]
-    pub(super) fn kind(&self) -> &CellKind {
-        &self.kind
-    }
-
     pub(super) fn is_image(&self) -> bool {
         self.kind == CellKind::Image
     }
@@ -491,7 +486,7 @@ mod tests {
         let column = QueryColumn::new("log_time", "Int64", false);
         let times = rows("log_time", vec![json!(1786639677057000000_i64)]);
         let result = ResultColumn::analyze(&column, &times);
-        assert_eq!(result.kind(), &CellKind::Timestamp(TimeUnit::Nanoseconds));
+        assert_eq!(result.kind, CellKind::Timestamp(TimeUnit::Nanoseconds));
         let value = times[0].get("log_time");
         assert_eq!(result.display(value), "2026-08-13 16:47:57.057");
         assert_eq!(
@@ -507,7 +502,7 @@ mod tests {
         let column = QueryColumn::new("captured", "Timestamp(Millisecond, None)", true);
         let captured = rows("captured", vec![json!(0_i64), json!(4102444800000_i64)]);
         let result = ResultColumn::analyze(&column, &captured);
-        assert_eq!(result.kind(), &CellKind::Timestamp(TimeUnit::Milliseconds));
+        assert_eq!(result.kind, CellKind::Timestamp(TimeUnit::Milliseconds));
         assert_eq!(
             result.display(captured[1].get("captured")),
             "2100-01-01 00:00:00.000"
@@ -519,15 +514,12 @@ mod tests {
         let offsets = rows("chunk_start_offset", vec![json!(1), json!(2034583)]);
         let column = QueryColumn::new("chunk_start_offset", "Int64", false);
         assert_eq!(
-            ResultColumn::analyze(&column, &offsets).kind(),
-            &CellKind::Number
+            ResultColumn::analyze(&column, &offsets).kind,
+            CellKind::Number
         );
         let ids = rows("episode_id", vec![json!(7), json!(9)]);
         let column = QueryColumn::new("episode_id", "Int64", false);
-        assert_eq!(
-            ResultColumn::analyze(&column, &ids).kind(),
-            &CellKind::Number
-        );
+        assert_eq!(ResultColumn::analyze(&column, &ids).kind, CellKind::Number);
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]
@@ -539,8 +531,8 @@ mod tests {
         );
         let result = ResultColumn::analyze(&column, &luminance);
         assert_eq!(
-            result.kind(),
-            &CellKind::Measure {
+            result.kind,
+            CellKind::Measure {
                 min: 0.02,
                 max: 0.1
             }
@@ -578,8 +570,8 @@ mod tests {
         let constant = rows("score", vec![json!(1.5), json!(1.5)]);
         let column = QueryColumn::new("score", "Float64", false);
         assert_eq!(
-            ResultColumn::analyze(&column, &constant).kind(),
-            &CellKind::Number
+            ResultColumn::analyze(&column, &constant).kind,
+            CellKind::Number
         );
     }
 
@@ -592,7 +584,7 @@ mod tests {
         );
         let result = ResultColumn::analyze(&column, &decisions);
         assert!(
-            matches!(result.kind(), CellKind::Category { values } if values == &["excluded", "retained"])
+            matches!(&result.kind, CellKind::Category { values } if values == &["excluded", "retained"])
         );
         assert_eq!(result.category_hue(decisions[0].get("decision")), Some(2));
         assert_eq!(result.category_hue(decisions[1].get("decision")), Some(1));
@@ -601,24 +593,21 @@ mod tests {
         let column = QueryColumn::new("topic", "Utf8", false);
         let repeated = rows("topic", vec![json!("/camera"); 6]);
         assert!(matches!(
-            ResultColumn::analyze(&column, &repeated).kind(),
+            ResultColumn::analyze(&column, &repeated).kind,
             CellKind::Category { .. }
         ));
 
         let column = QueryColumn::new("source_path", "Utf8", false);
         let paths = rows("source_path", vec![json!("/a"); 6]);
         assert_eq!(
-            ResultColumn::analyze(&column, &paths).kind(),
-            &CellKind::Identity
+            ResultColumn::analyze(&column, &paths).kind,
+            CellKind::Identity
         );
         assert_eq!(ResultColumn::analyze(&column, &paths).priority(), 4);
 
         let column = QueryColumn::new("note", "Utf8", false);
         let unique = rows("note", vec![json!("a"), json!("b"), json!("c")]);
-        assert_eq!(
-            ResultColumn::analyze(&column, &unique).kind(),
-            &CellKind::Text
-        );
+        assert_eq!(ResultColumn::analyze(&column, &unique).kind, CellKind::Text);
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]

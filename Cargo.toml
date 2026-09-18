@@ -24,9 +24,6 @@ unreachable_pub = "deny"
 adbc_core = "0.24.0"
 adbc_driver_manager = "0.24.0"
 base64 = "0.22"
-candle-core = "=0.11.0"
-candle-nn = "=0.11.0"
-candle-transformers = "=0.11.0"
 spiral-robotics-common = { path = "crates/common" }
 spiral-robotics-inference = { path = "crates/backend/inference", default-features = false }
 spiral-robotics-hardware = { path = "crates/backend/hardware" }
@@ -39,14 +36,12 @@ dioxus-flow = "0.1.2"
 dioxus-workbench = { git = "https://github.com/XiangpengHao/dioxus-workbench", rev = "69cb3a26d7d5f3d0400a989f7e9295a91b965254" }
 glam = { version = "0.33", default-features = false, features = ["std"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
-hf-hub = { version = "=0.4.3", default-features = false, features = ["ureq", "native-tls"] }
 nokhwa = { version = "0.10.11", default-features = false, features = ["decoding", "input-native", "serialize"] }
 roxmltree = "0.21"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serialport = { version = "4.9", default-features = false }
 tempfile = "3.27"
-tokenizers = { version = "=0.22.2", default-features = false, features = ["onig"] }
 
 [profile.dev]
 # The Studio's native half is large enough that full DWARF dominates compile,

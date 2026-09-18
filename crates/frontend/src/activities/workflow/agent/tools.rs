@@ -2,7 +2,7 @@
 
 use super::super::WorkflowClient;
 use super::{super::state::WorkflowController, ToolPublicText};
-use crate::client::transport::HttpRequest;
+use crate::activities::data::DatasetClient;
 use futures_util::future::LocalBoxFuture;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};

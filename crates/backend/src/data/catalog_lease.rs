@@ -5,7 +5,7 @@
 //! accidentally release somebody else's mutation. This lease uses an opaque
 //! generation token: only the exact acquisition may release its slot.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crate::sync::MutexRecovery;
 
@@ -39,7 +39,33 @@ pub(crate) struct CatalogMutationLease {
     state: Mutex<LeaseState>,
 }
 
+/// Releases one short-lived catalog acquisition when its command scope ends.
+/// Recording keeps the token directly because its lease spans several state
+/// transitions; ordinary catalog operations should use this guard.
+pub(crate) struct CatalogLeaseReservation {
+    lease: Arc<CatalogMutationLease>,
+    token: CatalogLeaseToken,
+}
+
+impl Drop for CatalogLeaseReservation {
+    fn drop(&mut self) {
+        let released = self.lease.release(self.token);
+        debug_assert!(released, "catalog operation releases its exact lease once");
+    }
+}
+
 impl CatalogMutationLease {
+    pub(crate) fn try_reserve(
+        self: &Arc<Self>,
+        owner: CatalogLeaseOwner,
+    ) -> Option<CatalogLeaseReservation> {
+        self.try_acquire(owner)
+            .map(|token| CatalogLeaseReservation {
+                lease: Arc::clone(self),
+                token,
+            })
+    }
+
     pub(crate) fn try_acquire(&self, owner: CatalogLeaseOwner) -> Option<CatalogLeaseToken> {
         let mut state = self.state.recover_lock();
         if state.holder.is_some() {
@@ -101,6 +127,18 @@ mod tests {
         );
         assert!(lease.is_held());
         assert!(lease.release(dataset));
+        assert!(!lease.is_held());
+    }
+
+    #[test]
+    fn short_lived_reservation_releases_on_scope_exit() {
+        let lease = Arc::new(CatalogMutationLease::default());
+        {
+            let _reservation = lease
+                .try_reserve(CatalogLeaseOwner::DatasetImport)
+                .expect("the empty catalog can be reserved");
+            assert!(lease.is_held());
+        }
         assert!(!lease.is_held());
     }
 

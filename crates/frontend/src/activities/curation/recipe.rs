@@ -13,7 +13,6 @@ use spiral_robotics_common::curation::rules::{
 };
 use spiral_robotics_common::datasets::DatasetSelection;
 
-use super::CurationClient;
 use super::sheet::RuleTone;
 use super::state::CurationController;
 use crate::activities::data::DatasetClient;
@@ -175,8 +174,8 @@ fn MeasurementsSection(controller: CurationController) -> Element {
         let source = source.clone();
         async move {
             let source = source?;
-            CurationClient::current()
-                .cameras(&source)
+            DatasetClient::current()
+                .dataset_cameras(&source)
                 .await
                 .ok()
                 .map(|value| CameraTopics::from_response(&value))

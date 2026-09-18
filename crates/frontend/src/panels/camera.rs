@@ -196,9 +196,14 @@ impl<'a> RecordedCameraSourceRequest<'a> {
 
     pub(crate) fn for_stream(self, stream_id: &str, label: &str) -> CameraEditorSource {
         let at = self.at;
-        CameraEditorSource::Recorded(
-            self.map_camera(|preview| RecordedCameraStream::new(preview, stream_id, label).at(at)),
-        )
+        CameraEditorSource::Recorded(self.map_camera(|preview| {
+            Some(RecordedCamera {
+                episode: preview.episode().to_owned(),
+                stream: stream_id.into(),
+                label: label.into(),
+                episode_seconds: at.max(0.0),
+            })
+        }))
     }
 
     fn map_camera(
@@ -230,29 +235,6 @@ impl<'a> RecordedCameraSourceRequest<'a> {
             },
         };
         RecordedSource::new(source.episode(), source.seconds(), state)
-    }
-}
-
-struct RecordedCameraStream<'a> {
-    preview: &'a EpisodePreview,
-    stream_id: &'a str,
-    label: &'a str,
-}
-impl<'a> RecordedCameraStream<'a> {
-    const fn new(preview: &'a EpisodePreview, stream_id: &'a str, label: &'a str) -> Self {
-        Self {
-            preview,
-            stream_id,
-            label,
-        }
-    }
-    fn at(self, seconds: f64) -> Option<RecordedCamera> {
-        Some(RecordedCamera {
-            episode: self.preview.episode().to_owned(),
-            stream: self.stream_id.into(),
-            label: self.label.into(),
-            episode_seconds: seconds.max(0.0),
-        })
     }
 }
 

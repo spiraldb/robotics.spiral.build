@@ -94,8 +94,10 @@ impl MotorSpec {
     }
 }
 
-impl MotorCalibration {
-    fn validate_name(&self, name: &str) -> Result<(), CalibrationError> {
+struct MotorName;
+
+impl MotorName {
+    fn validate(name: &str) -> Result<(), CalibrationError> {
         if name.is_empty()
             || name
                 .chars()
@@ -408,7 +410,7 @@ impl<'a> TryFrom<&'a BTreeMap<String, MotorSpec>> for MotorSpecifications<'a> {
 
         let mut ids = BTreeMap::<u32, &str>::new();
         for (name, specification) in specifications {
-            specification.validate_name(name)?;
+            MotorName::validate(name)?;
             if let Some(first) = ids.insert(specification.id, name) {
                 return Err(CalibrationError::DuplicateMotorId {
                     id: specification.id,
@@ -452,20 +454,6 @@ impl MotorSpec {
     /// calibration and control.
     pub fn validate_set(specifications: &BTreeMap<String, Self>) -> Result<(), CalibrationError> {
         MotorSpecifications::try_from(specifications).map(|_| ())
-    }
-
-    fn validate_name(&self, name: &str) -> Result<(), CalibrationError> {
-        if name.is_empty()
-            || name
-                .chars()
-                .any(|character| character.is_whitespace() || character.is_control())
-        {
-            Err(CalibrationError::InvalidMotorName {
-                name: name.to_owned(),
-            })
-        } else {
-            Ok(())
-        }
     }
 }
 
@@ -518,7 +506,7 @@ impl Calibration {
 
         let mut ids = BTreeMap::<u32, &str>::new();
         for (name, motor) in &calibration.motors {
-            motor.validate_name(name)?;
+            MotorName::validate(name)?;
             if let Some(first) = ids.insert(motor.id, name) {
                 return Err(CalibrationError::DuplicateMotorId {
                     id: motor.id,

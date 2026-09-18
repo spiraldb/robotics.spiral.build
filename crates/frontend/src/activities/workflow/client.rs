@@ -4,6 +4,7 @@ use crate::client::{
     project::ProjectClient,
     transport::{CommandError, HttpRequest},
 };
+use spiral_robotics_common::relations::RelationCatalog;
 use spiral_robotics_common::workflow::{
     WorkflowAgentReadiness, WorkflowSpec, WorkflowSummary,
     conversation::ProviderMessage,
@@ -76,6 +77,11 @@ impl WorkflowClient {
             .request(HttpRequest::new("GET", "/api/models/status"))
             .await
     }
+    pub(super) async fn relations(&self) -> Result<RelationCatalog, CommandError> {
+        self.project
+            .request(HttpRequest::new("GET", "/api/relations"))
+            .await
+    }
     pub(crate) async fn complete(
         &self,
         request: ModelRequest,
@@ -102,11 +108,5 @@ impl WorkflowClient {
             return Err(error);
         }
         completed.ok_or_else(|| "The model connection ended before completing its response.".into())
-    }
-    pub(super) async fn query<T: serde::de::DeserializeOwned + 'static>(
-        &self,
-        request: HttpRequest,
-    ) -> Result<T, String> {
-        self.project.request(request).await.map_err(Into::into)
     }
 }

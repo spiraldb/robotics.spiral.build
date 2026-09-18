@@ -216,6 +216,10 @@ impl TrainingBackendError {
             message: message.into(),
         }
     }
+
+    fn unsupported_worker_jobs() -> Self {
+        Self::new("this training backend does not support worker-owned jobs")
+    }
 }
 
 /// Factory and health boundary owned by Studio as `Arc<dyn TrainingBackend>`.
@@ -229,9 +233,7 @@ pub trait TrainingBackend: Send + Sync {
         &self,
         _request: TrainingJobRequest,
     ) -> Result<TrainingJobSnapshot, TrainingBackendError> {
-        Err(TrainingBackendError::new(
-            "this training backend does not support worker-owned jobs",
-        ))
+        Err(TrainingBackendError::unsupported_worker_jobs())
     }
 
     fn job_snapshot(
@@ -239,9 +241,7 @@ pub trait TrainingBackend: Send + Sync {
         _job_id: &str,
         _cursor: TrainingJobCursor,
     ) -> Result<TrainingJobSnapshot, TrainingBackendError> {
-        Err(TrainingBackendError::new(
-            "this training backend does not support worker-owned jobs",
-        ))
+        Err(TrainingBackendError::unsupported_worker_jobs())
     }
 
     fn stop_job(
@@ -249,9 +249,7 @@ pub trait TrainingBackend: Send + Sync {
         _job_id: &str,
         _cursor: TrainingJobCursor,
     ) -> Result<TrainingJobSnapshot, TrainingBackendError> {
-        Err(TrainingBackendError::new(
-            "this training backend does not support worker-owned jobs",
-        ))
+        Err(TrainingBackendError::unsupported_worker_jobs())
     }
 }
 

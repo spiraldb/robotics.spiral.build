@@ -14,11 +14,6 @@ fi
 
 python3 -c 'import sys; assert (3, 12) <= sys.version_info[:2] < (3, 13), sys.version'
 
-if ! command -v ffmpeg >/dev/null 2>&1; then
-    echo "bootstrap-lambda.sh requires ffmpeg for Spiral MP4 fallback decoding" >&2
-    exit 1
-fi
-
 if command -v uv >/dev/null 2>&1; then
     uv_bin="$(command -v uv)"
 else

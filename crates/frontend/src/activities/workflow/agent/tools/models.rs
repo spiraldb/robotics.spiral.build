@@ -18,9 +18,6 @@ impl WorkflowTool for ListModelCapabilities {
             "check model support",
         )
     }
-    fn available(&self, _workflow: &WorkflowSpec) -> bool {
-        true
-    }
     fn completion(&self, output: &Value) -> ToolCompletion {
         ToolCompletion::count(output, "functions", "native AI functions")
     }
