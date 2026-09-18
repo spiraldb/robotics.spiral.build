@@ -259,7 +259,30 @@ struct NamespaceEntry {
 )]
 enum NamespaceParent {
     ProjectRoot,
-    Resource { resource_id: String },
+    Resource {
+        resource_id: String,
+    },
+    /// Implicit name segments relative to the project root or a resource.
+    Prefix {
+        resource_id: Option<String>,
+        path: Vec<String>,
+    },
+}
+impl NamespaceParent {
+    fn resource_id(&self) -> Option<&str> {
+        match self {
+            Self::ProjectRoot => None,
+            Self::Resource { resource_id } => Some(resource_id),
+            Self::Prefix { resource_id, .. } => resource_id.as_deref(),
+        }
+    }
+
+    fn path(&self) -> &[String] {
+        match self {
+            Self::ProjectRoot | Self::Resource { .. } => &[],
+            Self::Prefix { path, .. } => path,
+        }
+    }
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -287,16 +310,11 @@ impl DatasetNamespace {
         let mut datasets = Vec::new();
         while let Some((parent, prefix)) = queue.pop_front() {
             for entry in &self.entries {
-                let matches = match &entry.parent {
-                    NamespaceParent::ProjectRoot => parent.is_none(),
-                    NamespaceParent::Resource { resource_id } => {
-                        parent.as_ref() == Some(resource_id)
-                    }
-                };
-                if !matches {
+                if entry.parent.resource_id() != parent.as_deref() {
                     continue;
                 }
                 let mut path = prefix.clone();
+                path.extend_from_slice(entry.parent.path());
                 path.push(entry.name.clone());
                 if path.len() > 32 {
                     return Err("Dataset namespace exceeds the nesting limit".to_owned());
@@ -529,6 +547,43 @@ mod tests {
         assert_eq!(datasets[0].resource_id(), "data");
         assert_eq!(datasets[0].version_id(), "v2");
     }
+    #[test]
+    fn discovery_resolves_prefixes_from_project_roots_and_resource_anchors() {
+        let entries: Vec<NamespaceEntry> = serde_json::from_value(json!([
+            {"parent":{"kind":"prefix","resourceId":"recordings","path":["camera","left"]},"name":"frames","resource":{"descriptor":{"resourceId":"frames","kind":"dataset"},"versionId":"v2"}},
+            {"parent":{"kind":"resource","resourceId":"frames"},"name":"scores","resource":{"descriptor":{"resourceId":"scores","kind":"table"},"versionId":"v3"}},
+            {"parent":{"kind":"prefix","path":["experiments","day1"]},"name":"recordings","resource":{"descriptor":{"resourceId":"recordings","kind":"dataset"},"versionId":"v1"}},
+            {"parent":{"kind":"prefix","resourceId":null,"path":["archive"]},"name":"recordings","resource":{"descriptor":{"resourceId":"archive","kind":"dataset"},"versionId":"v4"}}
+        ])).unwrap();
+        let resources = DatasetNamespace::new(entries).resources().unwrap();
+        assert_eq!(
+            resources
+                .iter()
+                .map(|resource| resource.selection().label())
+                .collect::<Vec<_>>(),
+            [
+                "archive.recordings",
+                "experiments.day1.recordings",
+                "experiments.day1.recordings.camera.left.frames",
+                "experiments.day1.recordings.camera.left.frames.scores",
+            ]
+        );
+        let dataset = resources[2].dataset().unwrap();
+        assert_eq!(dataset.resource_id(), "frames");
+        assert_eq!(dataset.version_id(), "v2");
+    }
+
+    #[test]
+    fn discovery_counts_prefix_segments_toward_the_nesting_limit() {
+        let entries: Vec<NamespaceEntry> = serde_json::from_value(json!([
+            {"parent":{"kind":"prefix","path":vec!["nested"; 32]},"name":"recordings","resource":{"descriptor":{"resourceId":"data","kind":"dataset"},"versionId":"v1"}}
+        ])).unwrap();
+        assert_eq!(
+            DatasetNamespace::new(entries).resources().unwrap_err(),
+            "Dataset namespace exceeds the nesting limit"
+        );
+    }
+
     #[test]
     fn mcap_topic_labels_come_from_the_versioned_native_locator() {
         let observation: DatasetObservation = serde_json::from_value(json!({

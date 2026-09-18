@@ -63,7 +63,6 @@ pub(super) fn WorkflowDocumentControls(
                         expanded: switching(),
                         on_toggle: move |_| switching.toggle(),
                     }
-                    DocumentStateChip { state }
                 }
                 // The switcher hangs from the title it belongs to, wherever
                 // the title sits in the bar.
@@ -82,7 +81,7 @@ pub(super) fn WorkflowDocumentControls(
                     }
                 }
             }
-            WorkflowDocumentActions { controller }
+            WorkflowDocumentActions { controller, state }
         }
     }
 }
@@ -138,8 +137,10 @@ fn WorkflowDatasetCreation(controller: WorkflowController, oncreated: EventHandl
     }
 }
 
+/// The state chip stands with the actions that change it, so "Saved" reads
+/// beside Save rather than across the bar from it.
 #[component]
-fn WorkflowDocumentActions(controller: WorkflowController) -> Element {
+fn WorkflowDocumentActions(controller: WorkflowController, state: DocumentState) -> Element {
     let studio = StudioProjectState::current();
     let dirty = controller.unsaved_changes();
     let command = controller.command();
@@ -149,6 +150,7 @@ fn WorkflowDocumentActions(controller: WorkflowController) -> Element {
         controller.snapshot().phase().active() || command == Some(WorkflowPendingCommand::Starting);
     rsx! {
         div { class: "document-actions",
+            DocumentStateChip { state }
             if controller.revision_conflict() {
                 Action { purpose: ActionPurpose::Sync, variant: ActionVariant::Outline,
                     onclick: move |_| controller.reload_current(), "Reload current" }

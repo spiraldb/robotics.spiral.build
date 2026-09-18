@@ -278,20 +278,6 @@ impl WorkflowController {
         self.document.draft.write().set_sql(sql);
     }
 
-    /// The native report for the current draft, when one has been planned.
-    /// Reactive, so an inspector can show the workflow before any selection.
-    pub(super) fn planned_report(
-        &self,
-    ) -> Option<spiral_robotics_common::workflow::plan::SpiralPlanReport> {
-        let spec = self.document.draft.read();
-        self.document
-            .planned_sql
-            .read()
-            .as_ref()
-            .and_then(|planned| planned.for_workflow(&spec))
-            .and_then(|plan| plan.report().cloned())
-    }
-
     pub(super) fn plan_for(&self, workflow: &WorkflowSpec) -> Option<WorkflowPlan> {
         self.document
             .planned_sql

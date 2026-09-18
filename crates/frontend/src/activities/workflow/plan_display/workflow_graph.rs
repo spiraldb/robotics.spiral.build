@@ -1349,7 +1349,7 @@ mod tests {
             .iter()
             .find(|stage| stage.id == "operator-1")
             .unwrap();
-        assert_eq!(branch.content.title, "Keep matching rows");
+        assert_eq!(branch.content.title, "Filter rows");
         assert_eq!(branch.content.summary, "(rn = 1) AND (range = \"full\")");
         assert_eq!(branch.content.summary_kind, SummaryKind::Expression);
         assert_eq!(branch.footer(&graph.root), "filter");
@@ -1359,7 +1359,7 @@ mod tests {
             .iter()
             .find(|stage| stage.id == "operator-5")
             .unwrap();
-        assert_eq!(numbered.content.title, "Keep matching rows");
+        assert_eq!(numbered.content.title, "Filter rows");
         assert_eq!(numbered.content.summary, "(log_time ≥ start)");
         assert_eq!(numbered.footer(&graph.root), "filter · number");
     }

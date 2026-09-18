@@ -28,14 +28,15 @@ This cutover stores SQL literals; a separate bound-parameter editor is not imple
 
 ## Assistant investigation and plan inspection
 
-The five dockable panes are Graph, Stage details, Results, Assistant, and SQL.
-Assistant and SQL share a tall 24% column at the left. The graph owns the large
-central tile (72% of the remaining width, 60% of the height) and reads left to
-right, with Stage details beside it so selecting a node never resizes the
-canvas, including keyboard selection. Results run along the bottom 40%. SQL
-changes clear the inspection. The graph has no navigation toolbar; native panning, zooming,
-keyboard interaction, a stage-count caption, zoom/fit controls, and a minimap
-above eight stages remain available. The workbench keeps all splits resizable
+The four dockable panes are Graph, Results, Assistant, and SQL. Assistant and
+SQL share a tall 24% column at the left. The graph owns the upper tile of the
+remaining width (46% of the height) and reads left to right; selecting a node
+or an edge floats its details in a sheet beside the card instead of a separate
+pane, so selection never resizes the canvas, including keyboard selection.
+Results run along the bottom 54%. SQL changes clear the inspection. The graph
+has no navigation toolbar; native panning, zooming, keyboard interaction,
+zoom/fit controls, and a minimap when the graph does not fit at readable zoom
+remain available. The workbench keeps all splits resizable
 and all panels dockable.
 One document bar owns the workflow name (which opens the switcher, creation, and
 rename popover), the saved/draft state, Save, Discard, and Run. Results owns the
@@ -115,10 +116,10 @@ Dioxus Flow owns layout, panning, zooming, fitting, and selection. Initial zoom 
 bounded to 0.75–1.0 and refits while the dock layout settles. Large graphs begin at
 the source and remain pannable, with a native minimap above six stages. Once the
 user navigates, resizing the pane preserves graph-space center and zoom.
-Selecting a node reveals the stage in the separate Stage details pane and its
-underlying native operators. Each operator retains its stacked schema, properties,
-optional detail text, and execution identity; Full plan JSON preserves the complete
-report. New SQL resets the plan and selection. IDs belong to one graph, not to a
+Selecting a node floats the stage's sheet beside it: summary, facts, folded
+steps, the columns it hands on, and its native operators behind one disclosure.
+Each operator retains its stacked schema, properties, optional detail text, and
+execution identity. New SQL resets the plan and selection. IDs belong to one graph, not to a
 workflow revision, so an old ID cannot select an unrelated stage.
 
 Assistant activity is grouped by user request. The latest answer stays visible;

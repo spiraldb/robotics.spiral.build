@@ -14,8 +14,8 @@
 //! STORY: ask, watch the query flow across the pipeline, see rows with images
 //! arrive, read each stage's plain-language role, inspect exact values.
 //! FIRST VIEWPORT: one document bar (title ▾ · state · Discard Save ▶Run);
-//! left 24% Assistant | SQL; right: Graph (74%) beside Details (26%) over
-//! Results (54% of the height).
+//! left 24% Assistant | SQL; right: Graph over Results (54% of the height).
+//! Stage details float over the graph only while a stage is selected.
 //! FORM: graph hero with a side console and a results shelf.
 //! FINISH: unreviewed and undocumented is unfinished; this build ends with the
 //! finish review, the verdict, and DESIGN.md.
@@ -32,7 +32,7 @@ use crate::activities::workflow::state::{
 };
 use crate::components::document_bar::ExecutedSql;
 use crate::components::icons::{
-    ConversationIcon, DetailsIcon, ResultNodeIcon, SendIcon, SpinnerIcon, SqlIcon, StopIcon,
+    ArrowDownIcon, ConversationIcon, ResultNodeIcon, SendIcon, SpinnerIcon, SqlIcon, StopIcon,
     WorkflowIcon,
 };
 use crate::components::run_phase::RunPhasePresentation;
@@ -40,12 +40,10 @@ use crate::shell::state::StudioProjectState;
 
 use super::highlight::SqlHighlight;
 
-const WORKFLOW_LAYOUT_SCOPE: &str = "workflow-investigation-v12";
-const STAGE_DETAILS_PANEL_ID: &str = "workflow-stage-details";
+const WORKFLOW_LAYOUT_SCOPE: &str = "workflow-investigation-v13";
 
 #[component]
 fn WorkflowPanels(controller: super::state::WorkflowController) -> Element {
-    let mut inspection = use_signal(|| None::<WorkflowInspection>);
     let mut comparing = use_signal(|| false);
     let mut displayed_workflow = use_signal(String::new);
     use_effect(move || {
@@ -55,25 +53,6 @@ fn WorkflowPanels(controller: super::state::WorkflowController) -> Element {
             displayed_workflow.set(spec.id().to_owned());
         }
     });
-    // A stage asked for from outside the canvas: the overview list or the
-    // stage strip. The graph selects and centres it, then clears the request.
-    let focus_stage = use_signal(|| None::<String>);
-    let report = controller.planned_report();
-    use_effect(move || {
-        let query = WorkflowPlanInput(controller.spec());
-        if inspection
-            .peek()
-            .as_ref()
-            .is_some_and(|inspection| inspection.query != query)
-        {
-            inspection.set(None);
-        }
-    });
-    let selection = inspection
-        .read()
-        .as_ref()
-        .filter(|inspection| inspection.query == WorkflowPlanInput(controller.spec()))
-        .map(|inspection| inspection.details.clone());
     let panels = vec![
         Panel::new(
             RESULTS_PANEL_ID,
@@ -87,23 +66,10 @@ fn WorkflowPanels(controller: super::state::WorkflowController) -> Element {
             CANVAS_PANEL_ID,
             "Graph",
             "workflow-canvas",
-            rsx! { WorkflowCanvas { controller, focus_stage,
-                on_inspect: move |selected| {
-                    inspection.set(Some(selected));
-                    controller.activate_panel(STAGE_DETAILS_PANEL_ID.into());
-                },
-            } },
+            rsx! { WorkflowCanvas { controller } },
         )
         .with_class("workflow-canvas-editor")
         .with_tab_icon(rsx! { WorkflowIcon {} }),
-        Panel::new(
-            STAGE_DETAILS_PANEL_ID,
-            "Details",
-            "workflow-details",
-            rsx! { super::plan_display::WorkflowGraphInspector { selection, report, focus_stage } },
-        )
-        .with_class("workflow-stage-details-editor")
-        .with_tab_icon(rsx! { DetailsIcon {} }),
         Panel::new(
             ASSISTANT_PANEL_ID,
             "Assistant",
@@ -160,17 +126,11 @@ pub(super) fn WorkflowViewSwitch(comparing: Signal<bool>) -> Element {
 struct WorkflowWorkspaceLayout;
 
 impl WorkflowWorkspaceLayout {
-    /// The graph owns the large central tile with its inspector beside it,
-    /// results run along the bottom, and the Assistant and SQL share a tall
-    /// column at the left. Every tile stays dockable and resizable.
+    /// The graph owns the large central tile, results run along the bottom,
+    /// and the Assistant and SQL share a tall column at the left. Stage
+    /// details float over the graph on demand rather than holding a tile.
+    /// Every tile stays dockable and resizable.
     fn initial() -> PanelLayout {
-        let explanation = LayoutNode::split(
-            "workflow-explanation-columns",
-            SplitAxis::Horizontal,
-            0.74,
-            LayoutNode::tile("workflow-canvas", [CANVAS_PANEL_ID]),
-            LayoutNode::tile("workflow-details", [STAGE_DETAILS_PANEL_ID]),
-        );
         // A pipeline is wider than it is tall: two stacked sources and a chain
         // need about 220px of canvas, so the graph row takes 46% of the height
         // and the results shelf keeps five rows of previews.
@@ -178,7 +138,7 @@ impl WorkflowWorkspaceLayout {
             "workflow-evidence-rows",
             SplitAxis::Vertical,
             0.46,
-            explanation,
+            LayoutNode::tile("workflow-canvas", [CANVAS_PANEL_ID]),
             LayoutNode::tile("workflow-results", [RESULTS_PANEL_ID]),
         );
         PanelLayout::new(LayoutNode::split(
@@ -215,6 +175,9 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
         && command.is_none()
         && catalog_available
         && !draft.trim().is_empty();
+    // Announced to assistive technology only. On screen the field's
+    // placeholder, the send/stop control, and the thread's activity fold
+    // already say what the Assistant is doing.
     let status = if loading {
         "Loading workflow…"
     } else if !state.history_available() {
@@ -267,21 +230,6 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
             }
         });
     }));
-    let composer_hint = AssistantComposerState {
-        availability: AssistantAvailability {
-            history_available: state.history_available(),
-            studio_live: (studio.live())(),
-            agent_loaded: controller.agent_loaded(),
-            configured,
-            catalog_available,
-        },
-        activity: AssistantActivity {
-            active,
-            command,
-            draft_empty: draft.trim().is_empty(),
-        },
-    }
-    .hint();
     let query_running = controller
         .workflow_runs()
         .iter()
@@ -318,7 +266,7 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
                 if messages.is_empty() {
                     section { class: "workflow-assistant-empty",
                         h3 { "What should we find?" }
-                        p { "Describe the result you need. The Assistant inspects the data, writes and runs the SQL, and refines the rows until they answer the question. Save keeps the SQL and this conversation." }
+                        p { "Describe the rows you need. The Assistant inspects the data, writes and runs the SQL, and refines until the rows answer." }
                         if configured {
                             div { class: "workflow-assistant-examples",
                                 Action {
@@ -373,7 +321,10 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
                 div { class: "workflow-assistant-jump",
                     Action {
                         purpose: ActionPurpose::Navigate,
-                        variant: ActionVariant::Outline,
+                        variant: ActionVariant::Icon,
+                        class: "ui-action--square",
+                        aria_label: "Jump to latest",
+                        title: "Jump to latest",
                         onclick: move |_| {
                             follow_latest.set(true);
                             show_latest_action.set(false);
@@ -382,7 +333,7 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
                                 scroll.set_scroll_top(scroll.scroll_height());
                             }
                         },
-                        "Jump to latest"
+                        ArrowDownIcon {}
                     }
                 }
             }
@@ -409,7 +360,7 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
                         rows: "1",
                         maxlength: "8000",
                         disabled: composer_disabled,
-                        placeholder: if !state.history_available() { "Assistant history is unavailable" } else if active { "Assistant is working…" } else if configured { "Ask about your robotics data…" } else { "Assistant is temporarily unavailable" },
+                        placeholder: if !state.history_available() { "Assistant history is unavailable" } else if active { "Assistant is working…" } else if !catalog_available { "Connect to Spiral to ask about this project" } else if configured { "Ask about your robotics data…" } else { "Assistant is temporarily unavailable" },
                         value: "{draft}",
                         oninput: {
                             let draft_key = input_key.clone();
@@ -459,69 +410,9 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
                         }
                     }
                 }
-                div { class: "workflow-composer-meta",
-                    span {
-                        class: if active { "workflow-assistant-presence is-active" } else if configured && !loading { "workflow-assistant-presence is-ready" } else { "workflow-assistant-presence" },
-                        role: "status",
-                        "aria-live": "polite",
-                        "aria-atomic": "true",
-                        "{status}"
-                    }
-                    span { class: "workflow-composer-hint",
-                        if loading { "Loading workflow…" } else { "{composer_hint}" }
-                    }
-                }
+                span { class: "sr-only", role: "status", "aria-live": "polite", "aria-atomic": "true", "{status}" }
             }
         }
-    }
-}
-
-struct AssistantAvailability {
-    history_available: bool,
-    studio_live: bool,
-    agent_loaded: bool,
-    configured: bool,
-    catalog_available: bool,
-}
-
-struct AssistantActivity {
-    active: bool,
-    command: Option<AgentPendingCommand>,
-    draft_empty: bool,
-}
-
-struct AssistantComposerState {
-    availability: AssistantAvailability,
-    activity: AssistantActivity,
-}
-
-impl AssistantComposerState {
-    fn hint(&self) -> &'static str {
-        if !self.availability.history_available {
-            return "Assistant history needs attention.";
-        }
-        if !self.availability.studio_live {
-            return "Reconnecting to Studio…";
-        }
-        if !self.availability.agent_loaded {
-            return "Connecting to Assistant…";
-        }
-        if !self.availability.catalog_available {
-            return "Connect to Spiral to ask about this project.";
-        }
-        if !self.availability.configured {
-            return "Assistant is temporarily unavailable. Retry in a moment.";
-        }
-        if self.activity.active {
-            return "You can stop this turn at any time.";
-        }
-        if self.activity.command.is_some() {
-            return "Finishing the current Assistant action…";
-        }
-        if self.activity.draft_empty {
-            return "Enter to send · Shift+Enter for a new line";
-        }
-        "Enter to send · Shift+Enter for a new line"
     }
 }
 
@@ -562,11 +453,7 @@ fn WorkflowSqlEditor(controller: super::state::WorkflowController) -> Element {
 }
 
 #[component]
-fn WorkflowCanvas(
-    controller: super::state::WorkflowController,
-    focus_stage: Signal<Option<String>>,
-    on_inspect: EventHandler<WorkflowInspection>,
-) -> Element {
+fn WorkflowCanvas(controller: super::state::WorkflowController) -> Element {
     let spec = controller.spec();
     let active = controller.snapshot().phase().active();
     // A rename or save revision cannot change a SQL plan. Subscribe to the
@@ -617,7 +504,7 @@ fn WorkflowCanvas(
                 }
             } else if spec.sql().trim().is_empty() {
                 div { class: "panel-empty is-quiet",
-                    p { "The graph appears here once the workflow has SQL: one stage per step, reads at the left, the result at the right." }
+                    p { "Stages appear here once the workflow has SQL." }
                 }
             } else {
                 match current {
@@ -634,31 +521,13 @@ fn WorkflowCanvas(
                         }
                         if let Some(report) = plan.report() {
                             super::plan_display::WorkflowPlanDisplay {
-                                key: "{spec.id()}:{spec.execution_sql().unwrap_or_default()}", report: report.clone(), active, focus_stage,
-                                on_select: move |details| on_inspect.call(WorkflowInspection::new(spec.clone(), details)),
+                                key: "{spec.id()}:{spec.execution_sql().unwrap_or_default()}", report: report.clone(), active,
                             }
                         }
                     },
                     Some(Ok(None)) => rsx! {},
                 }
             }
-        }
-    }
-}
-
-#[derive(Clone)]
-struct WorkflowInspection {
-    query: WorkflowPlanInput,
-    details: super::plan_display::WorkflowGraphDetails,
-}
-impl WorkflowInspection {
-    fn new(
-        workflow: spiral_robotics_common::workflow::WorkflowSpec,
-        details: super::plan_display::WorkflowGraphDetails,
-    ) -> Self {
-        Self {
-            query: WorkflowPlanInput(workflow),
-            details,
         }
     }
 }
@@ -708,9 +577,7 @@ fn WorkflowRunElapsed(started_ms: u64) -> Element {
 
 #[component]
 fn WorkflowResults(controller: super::state::WorkflowController) -> Element {
-    let studio = StudioProjectState::current();
     let snapshot = controller.snapshot();
-    let run_reason = controller.run_disabled_reason();
 
     let spec = controller.spec();
     let runs = controller.workflow_runs();
@@ -729,12 +596,6 @@ fn WorkflowResults(controller: super::state::WorkflowController) -> Element {
                     .iter()
                     .any(|tool| tool.name() == "run_workflow")
             });
-    let can_run_again = (historical_results
-        || matches!(
-            snapshot.phase(),
-            WorkflowRunPhase::Interrupted | WorkflowRunPhase::Failed
-        ))
-        && run_reason.is_none();
     let executed = controller.executed_query().unwrap_or_else(|| spec.clone());
     let sql = executed.execution_sql().unwrap_or_else(|error| error);
     let max_rows = 100;
@@ -760,21 +621,16 @@ fn WorkflowResults(controller: super::state::WorkflowController) -> Element {
     } else {
         None
     };
-    let (empty_title, empty_detail) = if historical_results {
-        (
-            "Results from the saved conversation are unavailable",
-            "Save keeps SQL and conversation, but not result rows. Run the saved SQL to produce current results; earlier answers describe earlier runs.",
-        )
+    // Save keeps SQL and conversation, never rows. The bar's Run is the one
+    // way to produce them, so the empty shelf says so in a line and offers
+    // no second Run.
+    let empty_copy = if historical_results {
+        "Rows are not saved with the workflow. Run it to see current results."
     } else {
         snapshot
             .phase()
             .empty_result_copy(controller.validation().valid(), empty_workflow)
     };
-    let selected_position = runs
-        .iter()
-        .position(|run| run.snapshot().run_id() == snapshot.run_id())
-        .map(|index| index + 1)
-        .unwrap_or(runs.len());
 
     rsx! {
         section { class: "workflow-results", "aria-label": "Workflow results",
@@ -800,8 +656,6 @@ fn WorkflowResults(controller: super::state::WorkflowController) -> Element {
                                 }
                             }
                         }
-                    } else {
-                        span { class: "run-single", "Run {selected_position}" }
                     }
                     if let Some(result) = snapshot.result() {
                         span { class: "run-count",
@@ -838,23 +692,9 @@ fn WorkflowResults(controller: super::state::WorkflowController) -> Element {
                     }
                 } else if let Some(model) = result_model.or(transient_model) {
                     {model.render()}
-                } else if empty_workflow {
-                    div { class: "panel-empty is-quiet",
-                        p { "{empty_detail}" }
-                    }
                 } else {
-                    div { class: "panel-empty",
-                        ResultNodeIcon {}
-                        strong { "{empty_title}" }
-                        p { "{empty_detail}" }
-                        if can_run_again {
-                            Action {
-                                purpose: ActionPurpose::Retry,
-                                variant: ActionVariant::Outline,
-                                onclick: move |_| controller.run(studio),
-                                if historical_results { "Run saved SQL" } else { "Run again" }
-                            }
-                        }
+                    div { class: "panel-empty is-quiet",
+                        p { "{empty_copy}" }
                     }
                 }
             }
@@ -863,50 +703,30 @@ fn WorkflowResults(controller: super::state::WorkflowController) -> Element {
 }
 
 trait WorkflowRunPresentation {
-    fn empty_result_copy(
-        self,
-        configured: bool,
-        empty_workflow: bool,
-    ) -> (&'static str, &'static str);
+    /// One faint line for an empty results shelf: what will appear and what
+    /// produces it. Never a title, icon, or second Run.
+    fn empty_result_copy(self, configured: bool, empty_workflow: bool) -> &'static str;
     fn stale_result_copy(self) -> &'static str;
 }
 
 impl WorkflowRunPresentation for WorkflowRunPhase {
-    fn empty_result_copy(
-        self,
-        configured: bool,
-        empty_workflow: bool,
-    ) -> (&'static str, &'static str) {
+    fn empty_result_copy(self, configured: bool, empty_workflow: bool) -> &'static str {
         if empty_workflow {
-            return (
-                "No workflow yet",
-                "Result rows land here after the workflow runs.",
-            );
+            return "Rows appear here after the workflow runs.";
         }
         match self {
-            WorkflowRunPhase::Idle if configured => {
-                ("No results yet", "Run the workflow to see its rows here.")
+            WorkflowRunPhase::Idle if configured => "Run the workflow to see its rows here.",
+            WorkflowRunPhase::Idle => "Fix the SQL issues, then run the workflow.",
+            WorkflowRunPhase::Interrupted => {
+                "The run was interrupted before it produced rows. Run the workflow again."
             }
-            WorkflowRunPhase::Idle => (
-                "Configure the workflow",
-                "Choose qualified Spiral relations and fix SQL validation before running.",
-            ),
-            WorkflowRunPhase::Interrupted => (
-                "Run interrupted",
-                "Studio recovered an unfinished run without pretending it completed. The submitted SQL is unchanged.",
-            ),
-            WorkflowRunPhase::Failed => (
-                "Run failed",
-                "Review the SQL error, then run the query again.",
-            ),
-            WorkflowRunPhase::Completed => (
-                "No terminal payload",
-                "The run completed without publishing a Result payload.",
-            ),
-            WorkflowRunPhase::Validating | WorkflowRunPhase::Running => (
-                "Workflow in progress",
-                "Results appear when the backend publishes the terminal payload.",
-            ),
+            WorkflowRunPhase::Failed => {
+                "The run failed before it produced rows. Run the workflow again."
+            }
+            WorkflowRunPhase::Completed => "The run completed without publishing rows.",
+            WorkflowRunPhase::Validating | WorkflowRunPhase::Running => {
+                "Rows appear when the run completes."
+            }
         }
     }
 

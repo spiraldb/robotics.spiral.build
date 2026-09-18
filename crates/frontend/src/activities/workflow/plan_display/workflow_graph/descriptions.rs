@@ -30,7 +30,7 @@ impl StageContent {
                     .unwrap_or_default(),
             ),
             "Filter" => (
-                "Keep matching rows".into(),
+                "Filter rows".into(),
                 properties["predicate"].as_str().unwrap_or_default().into(),
             ),
             "Aggregate" => {
@@ -317,39 +317,19 @@ impl StageContent {
         }
     }
 
-    /// Everything worth knowing about a read, as labelled facts.
+    /// What a read is, as labelled facts: the provider and the topic. The
+    /// title already names the dataset; its identifiers, schema variant, and
+    /// revisions stay in the native operator's properties, one disclosure
+    /// away.
     fn source_facts(properties: &Value) -> Vec<StageFact> {
-        let source = &properties["source"];
         let mut facts = Vec::new();
         if let Some(provider) = properties["provider"].as_str() {
             facts.push(StageFact::prose("Provider", provider));
         }
-        for (label, value) in [
-            ("Dataset", &source["dataset"]["name"]),
-            ("Topic", &source["topic"]),
-            ("Schema variant", &source["schema_variant"]),
-            ("Dataset ID", &source["dataset"]["id"]),
-            ("Dataset version", &source["dataset"]["version_id"]),
-            ("Data revision", &source["data_revision_id"]),
-            ("Layout generation", &source["layout_generation_id"]),
-        ] {
-            if let Some(value) = value.as_str() {
-                facts.push(StageFact::prose(label, value));
-            }
+        if let Some(topic) = properties["source"]["topic"].as_str() {
+            facts.push(StageFact::prose("Topic", topic));
         }
         facts
-    }
-
-    /// What a native provider reads, in the words of the catalog rather than
-    /// the driver: video topics, message topics, and the episode roster.
-    pub(in super::super) fn provider_label(provider: &str) -> &str {
-        match provider {
-            "McapVideo" => "Video topic",
-            "McapTopic" => "Topic",
-            "McapEpisodes" | "dataset_member" => "Episodes",
-            "Table" | "table" => "Table",
-            other => other,
-        }
     }
 
     pub(super) fn function_title(function: &str) -> String {
@@ -499,10 +479,6 @@ impl WorkflowStage {
                                 ));
                             }
                         }
-                    }
-                    let kept = StageContent::projected_columns(node);
-                    if !kept.is_empty() {
-                        facts.push(StageFact::expression("Columns kept", kept));
                     }
                 }
                 "Filter" => {

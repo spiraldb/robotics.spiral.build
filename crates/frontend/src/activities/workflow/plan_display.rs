@@ -2,10 +2,10 @@
 //!
 //! The graph reads left to right like a pipeline: sources at the left, the
 //! workflow output at the right. Each stage carries a kind glyph and identity
-//! tint so the shape of a query is legible before any label is read. The
-//! inspector answers the questions a selected stage raises, in order: what it
-//! does, what it reads or requires, what it hands on, and only then how the
-//! native operators spell it.
+//! tint so the shape of a query is legible before any label is read. Details
+//! are on demand: selecting a stage floats one sheet over the canvas that
+//! answers what it does, its facts, the steps it folds, and what it hands on,
+//! with the native operators behind one disclosure.
 mod workflow_graph;
 use dioxus::prelude::*;
 use dioxus_flow::{
@@ -21,9 +21,9 @@ use workflow_graph::{
 use super::highlight::{ExpressionHighlight, SqlHighlight};
 use crate::components::icons::{
     DataIcon, FitViewIcon, JoinStageIcon, MediaStageIcon, ModelStageIcon, QueryNodeIcon,
-    ResultNodeIcon, WorkflowIcon, ZoomInIcon, ZoomOutIcon,
+    ResultNodeIcon, ZoomInIcon, ZoomOutIcon,
 };
-use crate::components::interaction::{Action, ActionPurpose, ActionVariant};
+use crate::components::interaction::{Action, ActionPurpose, ActionVariant, CloseIcon};
 
 const STAGE_WIDTH: f64 = 224.0;
 const STAGE_HEIGHT: f64 = 92.0;
@@ -34,14 +34,11 @@ pub(super) fn WorkflowPlanDisplay(
     report: SpiralPlanReport,
     /// A submitted query is executing: edges carry moving dashes while it does.
     active: bool,
-    /// A stage requested from outside the canvas, selected and centred here.
-    focus_stage: Signal<Option<String>>,
-    on_select: EventHandler<WorkflowGraphDetails>,
 ) -> Element {
     rsx! {
         div { class: "workflow-plan-display",
             match WorkflowGraph::from_plan(report.logical()) {
-                Ok(graph) => rsx! { WorkflowPlanGraph { graph, report, active, focus_stage, on_select } },
+                Ok(graph) => rsx! { WorkflowPlanGraph { graph, active } },
                 Err(error) => rsx! {
                     div { class: "panel-empty", role: "alert",
                         strong { "The graph needs native expression metadata" }
@@ -139,15 +136,6 @@ impl From<&WorkflowGraph> for PlanFlow {
     }
 }
 
-impl PlanFlow {
-    /// Stage ids in reading order: left to right, then top to bottom.
-    fn reading_order(&self) -> Vec<String> {
-        let mut nodes = self.nodes.iter().collect::<Vec<_>>();
-        nodes.sort_by_key(|node| node.data.order);
-        nodes.into_iter().map(|node| node.id.clone()).collect()
-    }
-}
-
 trait StageInputLabels {
     fn input_label(&self, index: usize) -> Option<String>;
 }
@@ -167,13 +155,7 @@ impl StageInputLabels for WorkflowStage {
     }
 }
 
-/// The graph owns interpretation; its parent owns the active inspection.
-#[derive(Clone, PartialEq)]
-pub(super) struct WorkflowGraphDetails {
-    selection: GraphSelection,
-    report: SpiralPlanReport,
-    root: String,
-}
+/// What the canvas has selected, for the popover to explain.
 #[derive(Clone, PartialEq)]
 enum GraphSelection {
     Stage {
@@ -195,6 +177,7 @@ struct StageInput {
 #[derive(Clone, PartialEq)]
 struct WorkflowEdgeDetails {
     source: WorkflowStage,
+    target: String,
     target_title: String,
 }
 impl WorkflowEdgeDetails {
@@ -203,19 +186,69 @@ impl WorkflowEdgeDetails {
         let target = nodes.iter().find(|node| node.id == edge.target)?;
         Some(Self {
             source: source.data.stage.clone(),
+            target: target.id.clone(),
             target_title: target.data.stage.content.title.clone(),
         })
     }
 }
 
+impl GraphSelection {
+    /// The stage ids the selection is drawn from, for anchoring its sheet.
+    fn anchors(&self) -> Vec<&str> {
+        match self {
+            Self::Stage { stage, .. } => vec![stage.id.as_str()],
+            Self::Edge(details) => vec![details.source.id.as_str(), details.target.as_str()],
+        }
+    }
+}
+
+/// Where the sheet sits, as inline style: left-aligned with the selected
+/// cards, below them when the pane has room, above them when only that side
+/// has room, and over them from the top of a canvas too short for either,
+/// always inside the canvas. `anchor` and `container` are both in screen
+/// pixels. Every placement names `top` and `bottom` (one of them `auto`):
+/// the style attribute is diffed property by property, so a declaration
+/// that merely disappears stays applied, and a sheet that moved from above
+/// to below would keep both edges and collapse to a line.
+fn popover_placement(anchor: Rect, container: Rect) -> String {
+    const WIDTH: f64 = 320.0;
+    const GAP: f64 = 8.0;
+    const COMFORTABLE: f64 = 240.0;
+    const MIN_HEIGHT: f64 = 120.0;
+    let left = anchor.x.min(container.width - GAP - WIDTH).max(GAP);
+    let below_top = (anchor.max_y() + GAP).max(GAP);
+    let below_space = container.height - GAP - below_top;
+    let above_bottom = (container.height - anchor.y + GAP).max(GAP);
+    let above_space = container.height - GAP - above_bottom;
+    if below_space >= COMFORTABLE || (below_space >= above_space && below_space >= MIN_HEIGHT) {
+        format!("left:{left:.0}px;top:{below_top:.0}px;bottom:auto;max-height:{below_space:.0}px")
+    } else if above_space >= MIN_HEIGHT {
+        format!(
+            "left:{left:.0}px;top:auto;bottom:{above_bottom:.0}px;max-height:{above_space:.0}px"
+        )
+    } else {
+        let space = (container.height - 2.0 * GAP).max(GAP);
+        format!("left:{left:.0}px;top:{GAP:.0}px;bottom:auto;max-height:{space:.0}px")
+    }
+}
+
+/// Closing the sheet is deselecting: the canvas and the sheet always agree
+/// on what is selected.
+fn deselect(mut nodes: Signal<Vec<Node<StageNode>>>, mut edges: Signal<Vec<Edge>>) {
+    nodes.with_mut(|nodes| {
+        for node in nodes.iter_mut() {
+            node.selected = false;
+        }
+    });
+    edges.with_mut(|edges| {
+        for edge in edges.iter_mut() {
+            edge.selected = false;
+        }
+    });
+}
+
 #[component]
-fn WorkflowPlanGraph(
-    graph: WorkflowGraph,
-    report: SpiralPlanReport,
-    active: bool,
-    focus_stage: Signal<Option<String>>,
-    on_select: EventHandler<WorkflowGraphDetails>,
-) -> Element {
+fn WorkflowPlanGraph(graph: WorkflowGraph, active: bool) -> Element {
     let initial = use_hook(|| PlanFlow::from(&graph));
     let nodes = use_signal(|| initial.nodes);
     let mut edges = use_signal(|| initial.edges);
@@ -255,48 +288,43 @@ fn WorkflowPlanGraph(
         }
     });
     let root = graph.root.clone();
-    let selection_root = root.clone();
-    use_effect(move || {
-        if let Some(selection) = selected() {
-            on_select.call(WorkflowGraphDetails {
-                selection,
-                report: report.clone(),
-                root: selection_root.clone(),
-            });
-        }
-    });
+    let card_root = root.clone();
     let stage_count = graph.stages.len();
     rsx! {
         div { class: "workflow-plan-graph",
             div { class: "workflow-flow-wrap",
+                // Escape deselects from wherever focus sits on the canvas:
+                // the pane, the selected card, or the sheet itself.
+                onkeydown: move |event| {
+                    if event.key() == Key::Escape && selected.peek().is_some() {
+                        deselect(nodes, edges);
+                    }
+                },
                 Flow { id: "workflow-native-plan", class: "workflow-flow",
                     nodes, edges, handle: flow, fit_view: false, fit_view_padding: 0.1,
                     min_zoom: 0.1, max_zoom: 1.5, nodes_draggable: false, delete_key: false,
                     is_valid_connection: move |_| false,
-                    node_view: move |ctx: NodeViewCtx<StageNode>| rsx! { PlanStageCard { ctx, root: root.clone() } },
+                    node_view: move |ctx: NodeViewCtx<StageNode>| rsx! { PlanStageCard { ctx, root: card_root.clone() } },
                     Background { variant: BackgroundVariant::Dots, gap: 22.0, size: 0.7 }
                     PlanInitialViewport { overflowing }
-                    PlanFocus { nodes, edges, focus_stage }
                     PlanCanvasControls { stage_count }
                     if overflowing() { MiniMap { width: 112.0, height: 64.0 } }
+                    if let Some(selection) = selected() {
+                        StagePopover { selection, root: root.clone(), on_close: move |_| deselect(nodes, edges) }
+                    }
                 }
             }
         }
     }
 }
 
-/// Zoom and fit live on the canvas itself, quiet until needed, with the
-/// stage count beside them so a pipeline wider than the pane still says how
-/// much of it there is.
+/// Zoom and fit live on the canvas itself, quiet until needed.
 #[component]
 fn PlanCanvasControls(stage_count: usize) -> Element {
     let core = use_flow();
     rsx! {
         div { class: "workflow-canvas-controls", role: "toolbar", "aria-label": "Graph view of {stage_count} stages",
             onpointerdown: move |event| event.stop_propagation(),
-            span { class: "workflow-canvas-count",
-                if stage_count == 1 { "1 stage" } else { "{stage_count} stages" }
-            }
             Action { purpose: ActionPurpose::Navigate, variant: ActionVariant::Icon,
                 aria_label: "Zoom in", title: "Zoom in",
                 onclick: move |_| core.zoom_in(200), ZoomInIcon {} }
@@ -310,42 +338,6 @@ fn PlanCanvasControls(stage_count: usize) -> Element {
     }
 }
 
-/// Applies a stage request from the overview: select it on the canvas,
-/// centre it, and clear the request.
-#[component]
-fn PlanFocus(
-    nodes: Signal<Vec<Node<StageNode>>>,
-    edges: Signal<Vec<Edge>>,
-    focus_stage: Signal<Option<String>>,
-) -> Element {
-    let core = use_flow();
-    use_effect(move || {
-        let Some(id) = focus_stage() else {
-            return;
-        };
-        let mut nodes = nodes;
-        nodes.with_mut(|nodes| {
-            for node in nodes.iter_mut() {
-                node.selected = node.id == id;
-            }
-        });
-        let mut edges = edges;
-        if edges.peek().iter().any(|edge| edge.selected) {
-            edges.with_mut(|edges| {
-                for edge in edges.iter_mut() {
-                    edge.selected = false;
-                }
-            });
-        }
-        if let Some(geometry) = core.geoms.peek().iter().find(|node| node.id == id) {
-            core.center_on(geometry.rect.center(), 300);
-        }
-        let mut focus_stage = focus_stage;
-        focus_stage.set(None);
-    });
-    rsx! {}
-}
-
 /// Prose that may hold a path. Breaks are offered after each slash so a
 /// topic never splits inside a word.
 #[component]
@@ -355,103 +347,6 @@ fn PathText(text: String) -> Element {
         for (index, segment) in segments.iter().enumerate() {
             if index > 0 { "/" wbr {} }
             "{segment}"
-        }
-    }
-}
-
-/// What the whole workflow does, shown while nothing is selected: the reads,
-/// the joins, what it returns, and every stage as a way in.
-#[component]
-fn WorkflowOverview(report: SpiralPlanReport, focus_stage: Signal<Option<String>>) -> Element {
-    let graph = WorkflowGraph::from_plan(report.logical()).ok();
-    let Some(graph) = graph else {
-        return rsx! {
-            div { class: "panel-empty",
-                strong { "Select a stage" }
-                p { "Each stage explains what it does, what it reads or requires, and the columns it adds." }
-            }
-        };
-    };
-    let root = graph.root.clone();
-    let order = PlanFlow::from(&graph).reading_order();
-    let stages = order
-        .iter()
-        .filter_map(|id| graph.stages.iter().find(|stage| &stage.id == id))
-        .collect::<Vec<_>>();
-    let sources = stages
-        .iter()
-        .filter(|stage| stage.kind(&root) == StageKind::Source)
-        .collect::<Vec<_>>();
-    let joins = stages
-        .iter()
-        .filter(|stage| stage.combines_inputs())
-        .collect::<Vec<_>>();
-    let output = graph.stages.iter().find(|stage| stage.id == root);
-    let columns = output
-        .map(|stage| stage.output_columns().len())
-        .unwrap_or(0);
-    let mut focus_stage = focus_stage;
-    rsx! {
-        div { class: "workflow-inspector-body workflow-overview",
-            header { class: "workflow-inspector-heading",
-                span { class: "workflow-stage-mark workflow-stage-shape", "aria-hidden": "true", WorkflowIcon {} }
-                div {
-                    h3 { "Workflow" }
-                    small {
-                        if stages.len() == 1 { "1 stage" } else { "{stages.len()} stages" }
-                        if columns > 0 { " · returns {columns} columns" }
-                    }
-                }
-            }
-            if !sources.is_empty() {
-                h4 { if sources.len() == 1 { "Reads" } else { "Reads from" } }
-                dl { class: "workflow-facts",
-                    for source in sources.iter() {
-                        div { key: "{source.id}",
-                            dt { "{StageContent::provider_label(&source.footer(&root))}" }
-                            dd {
-                                strong { "{source.content.title}" }
-                                if !source.content.summary.is_empty() {
-                                    span { class: "workflow-overview-summary", title: "{source.content.summary}",
-                                        PathText { text: source.content.summary.clone() }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            if !joins.is_empty() {
-                h4 { "Combines" }
-                dl { class: "workflow-facts",
-                    for join in joins.iter() {
-                        div { key: "{join.id}",
-                            dt { "{join.content.title}" }
-                            dd { StageText { text: join.content.summary.clone(), kind: join.content.summary_kind } }
-                        }
-                    }
-                }
-            }
-            h4 { "Stages" }
-            ol { class: "workflow-overview-stages",
-                for stage in stages.iter() {
-                    li { key: "{stage.id}", class: "workflow-stage-{stage.kind(&root).class_name()}",
-                        Action { purpose: ActionPurpose::Select, variant: ActionVariant::Row,
-                            class: "workflow-overview-stage",
-                            title: "Show {stage.content.title} on the graph",
-                            onclick: { let id = stage.id.clone(); move |_| focus_stage.set(Some(id.clone())) },
-                            span { class: "workflow-stage-mark", "aria-hidden": "true", StageKindGlyph { kind: stage.kind(&root) } }
-                            span { class: "workflow-overview-stage-copy",
-                                strong { "{stage.content.title}" }
-                                if !stage.content.summary.is_empty() {
-                                    small { StageText { text: stage.content.summary.clone(), kind: stage.content.summary_kind } }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            p { class: "workflow-inspector-note", "Select a stage on the graph or in this list to see what it reads, requires, and produces." }
         }
     }
 }
@@ -477,70 +372,67 @@ fn StageText(text: String, kind: SummaryKind) -> Element {
     }
 }
 
+/// Details on demand: one paper sheet beside the selected stage or
+/// connection, following it through pan and zoom. Pointer and wheel events
+/// stay inside it so reading the sheet never pans or zooms the graph beneath;
+/// Escape reaches the canvas wrap above and deselects.
 #[component]
-pub(super) fn WorkflowGraphInspector(
-    selection: Option<WorkflowGraphDetails>,
-    /// The current draft's plan, for the overview shown before any selection.
-    report: Option<SpiralPlanReport>,
-    focus_stage: Signal<Option<String>>,
-) -> Element {
+fn StagePopover(selection: GraphSelection, root: String, on_close: EventHandler<()>) -> Element {
+    let core = use_flow();
+    let viewport = *core.viewport.read();
+    let container = *core.container.read();
+    let anchor = {
+        let geometry = core.geoms.read();
+        selection
+            .anchors()
+            .into_iter()
+            .filter_map(|id| geometry.iter().find(|node| node.id == id))
+            .map(|node| Rect {
+                x: node.rect.x * viewport.zoom + viewport.x,
+                y: node.rect.y * viewport.zoom + viewport.y,
+                width: node.rect.width * viewport.zoom,
+                height: node.rect.height * viewport.zoom,
+            })
+            .reduce(|a, b| a.union(&b))
+            .unwrap_or(Rect::ZERO)
+    };
+    let placement = popover_placement(anchor, container);
     rsx! {
-        section { class: "workflow-stage-inspector", "aria-label": "Stage details",
+        section {
+            class: "workflow-stage-popover",
+            style: "{placement}",
+            "aria-label": "Stage details",
+            onpointerdown: move |event| event.stop_propagation(),
+            onwheel: move |event| event.stop_propagation(),
             match selection {
-                Some(WorkflowGraphDetails { selection: GraphSelection::Stage { stage, inputs }, report, root }) => rsx! {
-                    WorkflowStageInspector { key: "{stage.id}", stage, inputs, report, root }
+                GraphSelection::Stage { stage, inputs } => rsx! {
+                    StageDetails { key: "{stage.id}", stage, inputs, root, on_close }
                 },
-                Some(WorkflowGraphDetails { selection: GraphSelection::Edge(details), root, .. }) => rsx! {
-                    div { class: "workflow-inspector-body", key: "{details.source.id}:{details.target_title}",
-                        header { class: "workflow-inspector-heading",
-                            span { class: "workflow-stage-mark workflow-stage-{details.source.kind(&root).class_name()}", "aria-hidden": "true",
-                                StageKindGlyph { kind: details.source.kind(&root) }
-                            }
-                            div {
-                                h3 { "{details.source.content.title} → {details.target_title}" }
-                                small { "Connection" }
-                            }
-                        }
-                        match details.source.output() {
-                            StageOutput::Relation(output) => rsx! {
-                                h4 { "Rows carried" }
-                                PlanOutputSchema { output: output.clone(), added: Vec::new() }
-                            },
-                            StageOutput::Expression { expression, dtype } => rsx! {
-                                h4 { "Value carried" }
-                                dl { class: "workflow-facts",
-                                    if let Some(dtype) = dtype {
-                                        div { dt { "Type" } dd { ExpressionHighlight { text: dtype.clone() } } }
-                                    }
-                                    div { dt { "Call" } dd { SqlHighlight { sql: expression.clone() } } }
-                                }
-                            },
-                        }
-                    }
-                },
-                None => match report {
-                    Some(report) => rsx! { WorkflowOverview { report, focus_stage } },
-                    None => rsx! {
-                        div { class: "panel-empty is-quiet",
-                            p { "Stage details appear here once the graph exists: what each stage reads, requires, and produces." }
-                        }
-                    },
+                GraphSelection::Edge(details) => rsx! {
+                    EdgeDetails { key: "{details.source.id}:{details.target_title}", details, root, on_close }
                 },
             }
         }
     }
 }
 
+/// What a stage does, its facts, the steps it folds, and the columns it
+/// hands on. Its inputs are the edges already drawn into it.
 #[component]
-fn WorkflowStageInspector(
+fn StageDetails(
     stage: WorkflowStage,
     inputs: Vec<StageInput>,
-    report: SpiralPlanReport,
     root: String,
+    on_close: EventHandler<()>,
 ) -> Element {
     let kind = stage.kind(&root);
     let footer = stage.footer(&root);
-    let facts = stage.facts();
+    // The heading and summary already say it once.
+    let facts = stage
+        .facts()
+        .into_iter()
+        .filter(|fact| fact.value != stage.content.summary && fact.value != footer)
+        .collect::<Vec<_>>();
     let produced = stage.output_columns();
     let upstream = inputs
         .iter()
@@ -555,7 +447,6 @@ fn WorkflowStageInspector(
             .cloned()
             .collect::<Vec<_>>()
     };
-    let is_join = stage.is_join() && inputs.len() == 2;
     rsx! {
         div { class: "workflow-inspector-body",
             header { class: "workflow-inspector-heading",
@@ -566,6 +457,9 @@ fn WorkflowStageInspector(
                     h3 { "{stage.content.title}" }
                     small { "{kind.label()} · {footer}" }
                 }
+                Action { purpose: ActionPurpose::Close, variant: ActionVariant::Icon,
+                    aria_label: "Close stage details", title: "Close · Esc",
+                    onclick: move |_| on_close.call(()), CloseIcon {} }
             }
             if !stage.content.summary.is_empty() {
                 p { class: "workflow-inspector-summary",
@@ -579,23 +473,7 @@ fn WorkflowStageInspector(
                     }
                 }
             }
-            if !inputs.is_empty() {
-                h4 { if inputs.len() == 1 { "Reads from" } else { "Combines" } }
-                dl { class: "workflow-facts",
-                    for (index, input) in inputs.iter().enumerate() {
-                        div { key: "{index}",
-                            dt {
-                                if is_join { if index == 0 { "Left" } else { "Right" } }
-                                else if inputs.len() == 1 { "Stage" }
-                                else { "Input {index + 1}" }
-                            }
-                            dd { "{input.title}" }
-                        }
-                    }
-                }
-            }
             if !facts.is_empty() {
-                h4 { "Details" }
                 dl { class: "workflow-facts",
                     for (index, fact) in facts.iter().enumerate() {
                         div { key: "{index}",
@@ -615,21 +493,15 @@ fn WorkflowStageInspector(
                     }
                 }
             }
-            match stage.output() {
-                StageOutput::Relation(output) => rsx! {
-                    h4 {
-                        if produced.is_empty() { "Columns produced" }
-                        else if added.is_empty() { "Columns produced · {produced.len()}" }
-                        else if added.len() == 1 { "Columns produced · {produced.len()} · 1 new" }
-                        else { "Columns produced · {produced.len()} · {added.len()} new" }
-                    }
-                    PlanOutputSchema { output: output.clone(), added: added.clone() }
-                },
-                StageOutput::Expression { dtype: Some(dtype), .. } => rsx! {
-                    h4 { "Produces" }
-                    p { class: "workflow-inspector-note", "One value per row of type " ExpressionHighlight { text: dtype.clone() } }
-                },
-                StageOutput::Expression { dtype: None, .. } => rsx! {},
+            // A call's produced type is already among its facts.
+            if let StageOutput::Relation(output) = stage.output() {
+                h4 {
+                    if produced.is_empty() { "Columns" }
+                    else if added.is_empty() { "Columns · {produced.len()}" }
+                    else if added.len() == 1 { "Columns · {produced.len()} · 1 new" }
+                    else { "Columns · {produced.len()} · {added.len()} new" }
+                }
+                StageColumns { output: output.clone(), added: added.clone() }
             }
             details { class: "workflow-inspector-disclosure workflow-inspector-native",
                 summary {
@@ -639,10 +511,71 @@ fn WorkflowStageInspector(
                     PlanOperatorDetails { key: "{node.id()}", node: node.clone() }
                 }
             }
-            details { class: "workflow-inspector-disclosure",
-                summary { "Full plan JSON" }
-                pre { "{serde_json::to_string_pretty(&report).unwrap_or_default()}" }
+        }
+    }
+}
+
+/// What travels along a selected connection.
+#[component]
+fn EdgeDetails(details: WorkflowEdgeDetails, root: String, on_close: EventHandler<()>) -> Element {
+    let kind = details.source.kind(&root);
+    let carried = details.source.output_columns();
+    rsx! {
+        div { class: "workflow-inspector-body",
+            header { class: "workflow-inspector-heading",
+                span { class: "workflow-stage-mark workflow-stage-{kind.class_name()}", "aria-hidden": "true",
+                    StageKindGlyph { kind }
+                }
+                div {
+                    h3 { "{details.source.content.title} → {details.target_title}" }
+                    small { "Connection" }
+                }
+                Action { purpose: ActionPurpose::Close, variant: ActionVariant::Icon,
+                    aria_label: "Close connection details", title: "Close · Esc",
+                    onclick: move |_| on_close.call(()), CloseIcon {} }
             }
+            match details.source.output() {
+                StageOutput::Relation(output) => rsx! {
+                    h4 {
+                        if carried.is_empty() { "Columns carried" } else { "Columns carried · {carried.len()}" }
+                    }
+                    StageColumns { output: output.clone(), added: Vec::new() }
+                },
+                StageOutput::Expression { expression, dtype } => rsx! {
+                    dl { class: "workflow-facts",
+                        if let Some(dtype) = dtype {
+                            div { dt { "Type" } dd { ExpressionHighlight { text: dtype.clone() } } }
+                        }
+                        div { dt { "Call" } dd { SqlHighlight { sql: expression.clone() } } }
+                    }
+                },
+            }
+        }
+    }
+}
+
+/// The columns a stage hands on, as names. The type rides in the tooltip;
+/// the native disclosure keeps the full schema.
+#[component]
+fn StageColumns(output: serde_json::Value, added: Vec<String>) -> Element {
+    let fields = output
+        .pointer("/schema/fields")
+        .and_then(serde_json::Value::as_array);
+    rsx! {
+        match fields {
+            Some(fields) if !fields.is_empty() => rsx! {
+                ul { class: "workflow-columns",
+                    for field in fields {
+                        { let name = field["name"].as_str().unwrap_or_default();
+                          let dtype = field["dtype"].as_str().map(str::to_owned).unwrap_or_else(|| field["dtype"].to_string());
+                          let title = if field["nullable"].as_bool() == Some(true) { format!("{dtype} · nullable") } else { dtype };
+                          let is_new = added.iter().any(|column| column == name);
+                          rsx! { li { key: "{name}", code { class: if is_new { "is-new" }, title: "{title}", "{name}" } } } }
+                    }
+                }
+            },
+            Some(_) => rsx! { p { class: "workflow-inspector-note", "No named output columns." } },
+            None => rsx! { p { class: "workflow-inspector-note", "Schema metadata is unavailable." } },
         }
     }
 }
@@ -739,15 +672,17 @@ fn PlanStageCard(ctx: NodeViewCtx<StageNode>, root: String) -> Element {
         div { class: "workflow-stage-card workflow-stage-{kind.class_name()}",
             class: if ctx.node.selected { "is-selected" },
             style: "--stage-order: {ctx.node.data.order}",
+            // No tooltips restating the card: the sheet shows every line in
+            // full when the card is selected.
             div { class: "workflow-stage-heading",
                 span { class: "workflow-stage-mark", "aria-hidden": "true", StageKindGlyph { kind } }
-                strong { class: "workflow-stage-title", title: "{stage.content.title}", "{stage.content.title}" }
+                strong { class: "workflow-stage-title", "{stage.content.title}" }
             }
-            p { class: "workflow-stage-summary", title: "{stage.content.summary}",
+            p { class: "workflow-stage-summary",
                 if stage.content.summary.is_empty() { "{footer}" }
                 else { StageText { text: stage.content.summary.clone(), kind: stage.content.summary_kind } }
             }
-            footer { class: "workflow-stage-footer", title: "{kind.label()} · {footer}",
+            footer { class: "workflow-stage-footer",
                 span { class: "workflow-stage-kind", "{kind.label()}" }
                 if stage.content.function.is_some() {
                     code { "{footer}" }
@@ -857,6 +792,49 @@ mod tests {
             };
             assert_eq!(output["schema"]["fields"][0]["name"], name);
             assert_eq!(edge.label.as_deref(), Some(side));
+        }
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn sheet_sits_below_above_or_over_the_card_and_always_names_both_edges() {
+        let container = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1000.0,
+            height: 400.0,
+        };
+        let card = |y: f64| Rect {
+            x: 100.0,
+            y,
+            width: 168.0,
+            height: 69.0,
+        };
+        // Room below: aligned with the card, the sheet starts under it.
+        let below = popover_placement(card(20.0), container);
+        assert_eq!(below, "left:100px;top:97px;bottom:auto;max-height:295px");
+        // Room only above: the sheet ends over the card.
+        let above = popover_placement(card(300.0), container);
+        assert_eq!(above, "left:100px;top:auto;bottom:108px;max-height:284px");
+        // A canvas too short for either side: the sheet covers from the top
+        // and never leaves the canvas.
+        let short = Rect {
+            width: 1000.0,
+            height: 180.0,
+            ..container
+        };
+        let over = popover_placement(card(60.0), short);
+        assert_eq!(over, "left:100px;top:8px;bottom:auto;max-height:164px");
+        // The right edge clamps the sheet inside the canvas.
+        let clamped = popover_placement(
+            Rect {
+                x: 900.0,
+                ..card(20.0)
+            },
+            container,
+        );
+        assert!(clamped.starts_with("left:672px;"));
+        for placement in [below, above, over, clamped] {
+            assert!(placement.contains("top:") && placement.contains("bottom:"));
         }
     }
 

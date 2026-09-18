@@ -113,6 +113,18 @@
   /* The dock preview's lift, carried over verbatim from the panel stylesheet
      this crate replaced. Shadows are not part of the named palette. */
   --wb-shadow: 0 6px 18px rgb(0 0 0 / 0.08);
+  /* A splitter is a hairline, not a gutter. Drawn 8px wide in paper it read
+     as a white margin between two recessed tab bars; the pointer target stays
+     8px through the crate's own hit-area pseudo-element below. */
+  --wb-splitter-size: 1px;
+}
+
+.wb-workspace .wb-split-horizontal > .wb-splitter::before {
+  inset-inline: -3.5px;
+}
+
+.wb-workspace .wb-split-vertical > .wb-splitter::before {
+  inset-block: -3.5px;
 }
 
 /* Studio workbench v2 ----------------------------------------------------
@@ -1353,8 +1365,7 @@
   .workflow-assistant-editor,
   .workflow-node-editor,
   .workflow-canvas-editor,
-  .workflow-results-editor,
-  .workflow-stage-details-editor {
+  .workflow-results-editor {
     min-width: 0;
     min-height: 0;
   }
@@ -1449,6 +1460,12 @@
 
   .document-actions {
     @apply ml-auto flex shrink-0 items-center gap-1;
+  }
+
+  /* The state chip leads the action group: "Saved" reads beside Save, and
+     a longer state grows leftwards so Save and Run never move. */
+  .document-actions .document-state {
+    @apply mr-1;
   }
 
   .document-run-action {
@@ -1578,56 +1595,11 @@
     container-type: inline-size;
   }
 
-  /* Zoom, fit, and the stage count share one hairline group at the bottom
-     left; the canvas above them is nothing but stages. */
+  /* Zoom and fit share one hairline group at the bottom left; the canvas
+     above them is nothing but stages. */
   .workflow-canvas-controls {
     @apply absolute bottom-2 left-2 z-[5] flex items-center gap-px rounded border border-line bg-surface p-px;
     box-shadow: 0 1px 2px rgb(0 0 0 / 0.05);
-  }
-
-  .workflow-canvas-count {
-    @apply px-2 text-[10px] leading-3 text-ink-faint tabular-nums;
-  }
-
-  /* A read's column list can run to a dozen names; two lines say enough
-     here and the stage itself lists them all. */
-  .workflow-overview-summary {
-    @apply block text-ink-soft;
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-    overflow-wrap: break-word;
-  }
-
-  .workflow-facts dd strong {
-    @apply font-medium;
-    overflow-wrap: normal;
-  }
-
-  .workflow-overview-stages {
-    @apply -mx-1 grid gap-px;
-  }
-
-  .workflow-overview-stage {
-    @apply w-full gap-2 px-1.5 py-1 text-left;
-    min-height: 32px;
-  }
-
-  .workflow-overview-stage .workflow-stage-mark {
-    @apply mt-px;
-  }
-
-  .workflow-overview-stage-copy {
-    @apply grid min-w-0 gap-px;
-  }
-
-  .workflow-overview-stage-copy strong {
-    @apply truncate text-[11px] font-medium text-ink;
-  }
-
-  .workflow-overview-stage-copy small {
-    @apply truncate text-[10px] text-ink-faint;
   }
 
   /* Stage cards. Fixed 224×92 so the layered layout can place them before
@@ -1727,18 +1699,30 @@
     background: color-mix(in srgb, var(--tone-stage-output) 12%, transparent);
   }
 
-  /* Stage inspector ------------------------------------------------------- */
-  .workflow-stage-inspector {
-    @apply h-full min-h-0 w-full min-w-0 overflow-y-auto bg-surface text-ink;
+  /* Stage popover ---------------------------------------------------------
+     Details are on demand. Selecting a stage or a connection floats one
+     paper sheet beside it — below the card when the pane has room, above it
+     otherwise, following it through pan and zoom — and the canvas keeps its
+     size; deselecting or closing removes it. It carries what the card
+     cannot: the whole summary, the facts, the folded steps, the columns
+     handed on, and one disclosure for the native operators. Position and
+     height come from the canvas as inline style. */
+  .workflow-stage-popover {
+    @apply absolute z-[6] flex w-80 max-w-[calc(100%-1rem)] flex-col overflow-hidden rounded-md border border-line bg-surface text-ink;
+    box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+    animation: workflow-popover-enter 140ms var(--ease-out-expo) both;
   }
 
   .workflow-inspector-body {
-    @apply px-3 pb-4 pt-3;
-    animation: workflow-settle 200ms var(--ease-out-expo) both;
+    @apply min-h-0 overflow-y-auto px-3 pb-3 pt-2.5;
   }
 
   .workflow-inspector-heading {
     @apply flex items-start gap-2;
+  }
+
+  .workflow-inspector-heading > .ui-action {
+    @apply -mr-1.5 -mt-1 ml-auto shrink-0;
   }
 
   .workflow-inspector-heading > div {
@@ -1761,7 +1745,27 @@
   }
 
   .workflow-inspector-body h4 {
-    @apply mb-1.5 mt-4 text-[11px] font-semibold text-ink;
+    @apply mb-1 mt-3 text-[11px] font-semibold text-ink;
+  }
+
+  .workflow-inspector-body > .workflow-facts {
+    @apply mt-2;
+  }
+
+  /* The columns a stage hands on, as names. The type rides in the tooltip
+     and the native disclosure keeps the full schema; new columns wear the
+     good tint. */
+  .workflow-columns {
+    @apply flex flex-wrap gap-1;
+  }
+
+  .workflow-columns code {
+    @apply rounded bg-sunken px-1 font-mono text-[10px] leading-4 text-ink;
+  }
+
+  .workflow-columns code.is-new {
+    color: var(--tone-good);
+    background: color-mix(in srgb, var(--tone-good) 12%, transparent);
   }
 
   .workflow-stage-steps {
@@ -1897,10 +1901,6 @@
 
   .run-select {
     @apply h-6 max-w-56 rounded border border-line bg-surface px-1.5 text-[11px] text-ink outline-none focus-visible:border-accent focus-visible:ring-2 focus-visible:ring-accent/15;
-  }
-
-  .run-single {
-    @apply text-ink-faint;
   }
 
   .run-count {
@@ -2293,12 +2293,14 @@
     @apply h-px w-full;
   }
 
+  /* One round arrow at the bottom right while the reader has scrolled away
+     from the latest message; it floats over the margin, never over words. */
   .workflow-assistant-jump {
-    @apply pointer-events-none absolute inset-x-0 bottom-2 z-[3] flex justify-center;
+    @apply pointer-events-none absolute bottom-2 right-3 z-[3] flex;
   }
 
   .workflow-assistant-jump .ui-action {
-    @apply pointer-events-auto bg-surface text-[11px];
+    @apply pointer-events-auto rounded-full border border-line bg-surface text-ink-soft hover:text-ink;
     box-shadow: 0 2px 6px rgb(0 0 0 / 0.08);
     animation: workflow-settle 160ms var(--ease-out-expo) both;
   }
@@ -2336,32 +2338,6 @@
 
   .workflow-composer-send .ui-icon {
     @apply size-3.5;
-  }
-
-  .workflow-composer-meta {
-    @apply mt-1.5 flex items-center justify-between gap-3 text-[10px] leading-4 text-ink-faint;
-  }
-
-  .workflow-assistant-presence {
-    @apply inline-flex min-w-0 items-center gap-1.5 truncate;
-  }
-
-  .workflow-assistant-presence::before {
-    content: "";
-    @apply size-1.5 shrink-0 rounded-full bg-ink-faint;
-  }
-
-  .workflow-assistant-presence.is-ready::before {
-    @apply bg-good;
-  }
-
-  .workflow-assistant-presence.is-active::before {
-    @apply bg-accent;
-    animation: workflow-pulse 900ms ease-in-out infinite;
-  }
-
-  .workflow-composer-hint {
-    @apply shrink-0 truncate;
   }
 
   /* Syntax colour. Keywords carry the accent, functions the model tint,
@@ -2417,25 +2393,9 @@
     overflow-wrap: anywhere;
   }
 
-  .workflow-stage-inspector {
-    container-type: inline-size;
-  }
-
   .workflow-facts {
     @apply grid gap-y-1 text-[11px];
     grid-template-columns: minmax(4.5rem, 7rem) minmax(0, 1fr);
-  }
-
-  /* A narrow inspector stacks each label over its value instead of
-     squeezing titles and paths into a hundred pixels. */
-  @container (max-width: 300px) {
-    .workflow-facts {
-      grid-template-columns: minmax(0, 1fr);
-    }
-
-    .workflow-facts > div:first-child dt {
-      padding-top: 0;
-    }
   }
 
   .workflow-facts > div {
@@ -2520,12 +2480,11 @@
     .document-state,
     .document-switcher,
     .workflow-stage-card,
-    .workflow-inspector-body,
+    .workflow-stage-popover,
     .workflow-assistant-jump .ui-action,
     .run-phase-dot,
     .workflow-activity-dot,
-    .workflow-tool-step-dot,
-    .workflow-assistant-presence::before {
+    .workflow-tool-step-dot {
       animation: none;
     }
 
@@ -5482,3 +5441,17 @@
   flex-shrink: 0;
   white-space: nowrap;
 }
+
+.curation-rule-order {
+  @apply flex items-center gap-1 text-[10px] text-ink-soft;
+}
+.curation-rule-order > span { @apply mr-auto; }
+.curation-ordered-rule + .curation-ordered-rule { @apply mt-2 border-t border-line pt-2; }
+.curation-rule-prompt { @apply min-h-20 w-full resize-y leading-5; }
+.curation-advanced > summary,
+.curation-manual-builder > summary { @apply cursor-pointer py-2 text-[11px] text-ink-soft; }
+.curation-advanced > summary { @apply px-3; }
+.curation-proposal { @apply flex flex-col gap-2; }
+.curation-proposal label { @apply flex flex-col gap-1 text-[11px] text-ink-soft; }
+.curation-proposal input,
+.curation-proposal select { @apply w-full; }

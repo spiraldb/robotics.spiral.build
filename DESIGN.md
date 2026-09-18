@@ -388,9 +388,9 @@ put reads as a bench tool.
   is where streams are shown, plotted, and selected. Import opens as a peer
   tab in the primary tile.
 - Workflow puts the graph first: a 24% Assistant/SQL column at the left, then
-  the Graph (74%) beside Stage details (26%) over a Results shelf in the lower
-  54%. It has its own layout scope, and every tile stays a dockable workbench
-  panel.
+  the Graph over a Results shelf in the lower 54%. Stage details float over
+  the graph beside the selected card rather than holding a tile. It has its
+  own layout scope, and every tile stays a dockable workbench panel.
 - Workflow's data is vivid because its cells know what they are: image
   previews lead, repeated decisions become tinted chips, measurements carry a
   bar between the column's extremes, timestamps read as UTC clock time, and
@@ -646,7 +646,7 @@ clicking a stream name selects it for Messages. Cameras, Plots, the ruler,
 and the stream rows share one playhead and one visible span.
 
 Curation is a contact sheet. Under the same 36px document bar Workflow uses
-(glyph · name ▾ · state chip · Discard Save ▶Run), the `curation-sheet-v2`
+(glyph · name ▾ · … · state chip Discard Save ▶Run), the `curation-sheet-v2`
 layout scope opens as two tiles: a 26% Recipe column beside the Sheet. There
 is no third panel; the selected episode's evidence docks at the Sheet's
 right edge as the shared 320px side sheet while one is open, so nothing sits
@@ -1176,21 +1176,25 @@ from a tall column at the side.
   header; Build fills the rest of the bar with the document identity and
   actions, Compare with the pair of workflows and the Compare action. The left
   24% is a tall console tile holding Assistant and SQL as tabs. The right 76%
-  divides 46/54 vertically: above, the Graph (74%) beside Stage details (26%);
-  below, Results across the full width. A pipeline is wider than it is tall, so
-  the graph row is sized for two stacked sources and the results shelf keeps
-  about five rows of previews. The `workflow-investigation-v12` layout scope
+  divides 46/54 vertically: above, the Graph across the full width; below,
+  Results across the full width. A pipeline is wider than it is tall, so the
+  graph row is sized for two stacked sources and the results shelf keeps
+  about five rows of previews. The `workflow-investigation-v13` layout scope
   applies this arrangement; every tile remains a dockable, resizable workbench
-  panel with a leading tab icon.
+  panel with a leading tab icon. Tiles meet at the splitter's one-pixel rule,
+  so two recessed tab bars read as one bar interrupted by a hairline rather
+  than by a paper gutter.
 - **Document bar:** A 36px paper line with a lower hairline, shared with
   Curation as the `document-bar` family (identity, glyph, title, name, state
   chip, actions, rename form, run action, switcher, and backdrop) and the
   `run-strip` family (phase, select, count, duration, elapsed, executed SQL).
-  After the glyph and the view switch, the name as a quiet 12px semibold button with a 12px
-  chevron that turns when open, and a keyed 11px state chip with a 6px dot
-  (Saved · green dot, Unsaved changes · ochre, Changed in another session ·
-  red) sit at left; Discard, Save, and the filled Run with a play glyph sit at
-  right. Run turns
+  After the glyph and the view switch, the name as a quiet 12px semibold
+  button with a 12px chevron that turns when open sits at left. At right the
+  keyed 11px state chip with a 6px dot (Saved · green dot, Unsaved changes ·
+  ochre, Changed in another session · red) leads Discard, Save, and the
+  filled Run with a play glyph, so the state reads beside the action that
+  changes it and a longer state grows leftwards without moving Save or Run.
+  Run turns
   into a spinning "Running" while a query is admitted, keeping its 72px
   minimum width so the bar does not shift. The name button opens one popover:
   a 320px paper sheet with a 6px radius and the floating-notice shadow, holding
@@ -1229,34 +1233,34 @@ from a tall column at the side.
   While a run is admitted every edge turns accent, thickens to 1.5px, and
   carries 5/5 marching dashes on a 700ms cycle. Handles are 6px, strong-line,
   and inert; they turn accent with the card. Nothing else sits on the canvas:
-  the stage count, zoom, and fit share one hairline group with the resting
-  lift at bottom left, and the Details overview is the complete list of
-  stages, each row selecting and centring its card. Cards never render below
+  zoom in, zoom out, and fit share one hairline group with the resting lift
+  at bottom left, and the selected stage's sheet floats beside its card. The
+  stage count is not printed; the graph is the count. Cards never render below
   0.7 zoom: a graph that fits at readable zoom is fitted, and one that does
   not keeps its cards at the largest size the pane's height allows, starts at
   its sources, stays pannable, and shows a small 4px-radius minimap at bottom
   right. After the user moves the viewport, resizing preserves graph-space
   center and zoom.
-- **Stage details:** Its own tile beside the graph, so selecting a stage never
-  resizes the canvas. Provider names read as what they are ("Video topic",
-  "Episodes"), planner-internal window columns are never shown, and a read's
-  column list clamps to two lines in the overview. It answers, in order: what the stage does (heading with
-  kind tile, 12px semibold title, "Kind · footer" in 10px, the 11px summary,
-  and the full classification rule on the recess when there is one); what it
-  reads or combines (Left/Right for joins); Details as a label/value grid of
-  facts drawn from the native properties (10px faint labels, 11px ink values;
-  dataset, topic, provider, revision; join type and keys; conditions; groups
-  and order; computed columns as `name = expression`; function, call, and
-  produced type); Steps for folded stages as a decimal list with tabular
-  markers; Columns produced as an 11px schema table with a count and a green
-  "new" mark (12% wash) on every column the stage adds over its inputs, its
-  row washed 7% green; then the native operators and Full plan JSON behind
-  hairline disclosures. Selecting a connection shows what travels along it.
-  Before any selection the tile shows the workflow overview derived from the
-  same plan: what it reads (dataset, topic, provider), what it combines (join
-  type and keys), how many columns it returns, and every stage as a 32px
-  clickable row (glyph tile, 11px title, 10px summary) that selects and
-  centres it on the graph. The body settles in over 200ms.
+- **Stage details:** On demand, never a tile. Selecting a stage or a
+  connection floats one 320px paper sheet (6px radius, the popover shadow,
+  140ms enter) left-aligned with the card, below it when the pane has room,
+  above it when only that side has room, and over it from the top of a
+  canvas too short for either, always inside the canvas and following the
+  card through pan and zoom; deselecting, its close action, or Escape removes it,
+  and pointer and wheel events stay inside it so reading never pans the
+  graph. It says only what the card cannot: the heading (kind tile, 12px
+  semibold title, "Kind · footer" in 10px), the full 11px summary, the
+  classification rule on the recess when there is one, then the facts the
+  heading and summary do not already state as a label/value grid (10px faint
+  labels, 11px ink values: join type and keys, conditions, groups and order,
+  computed columns as `name = expression`, function, call, and produced type;
+  a read's provider and topic, never its identifiers), Steps for folded
+  stages as a decimal list with tabular markers, and the columns it hands on
+  as 10px mono name chips under a "Columns · N · k new" heading, the new
+  ones in the good tint and the type in the tooltip. The native operators
+  sit behind one hairline disclosure; there is no whole-plan JSON, no
+  overview, and no list of inputs, because the edges already draw them.
+  Selecting a connection shows the columns or the value it carries.
 - **Syntax colour:** One lexer paints SQL (editor, Executed SQL, and fenced
   code in the conversation) and the graph's rendered expressions (summaries,
   facts, rules), with ligatures off. Keywords take the accent at medium
@@ -1273,7 +1277,11 @@ from a tall column at the side.
   count as 12px semibold mono, Spiral's elapsed time in 11px faint mono, a
   live accent elapsed while running, the Truncated chip when it applies, and
   an Executed SQL disclosure at the right that expands inline across the
-  strip. While a run is admitted the body shows shimmering skeleton rows in
+  strip; a lone run is not numbered. An empty shelf is one faint 11px line
+  saying what will appear and what produces it, and never an icon, a title,
+  or a second Run: the document bar's Run is the one way to produce rows,
+  including when a saved conversation's rows are gone. While a run is
+  admitted the body shows shimmering skeleton rows in
   the table's own geometry: 60px rows entering 40ms apart, 10px bars sweeping
   recess-to-hairline every 1.4s, and an 88×48 block where the preview will
   land. Stale and failed observations remain visible above the rows on the
@@ -1302,9 +1310,9 @@ from a tall column at the side.
   focus to the invoking action. No count, class, or total is inferred by the
   presentation.
 - **Empty workflow:** The Assistant does the teaching ("What should we find?"
-  with two example asks); Graph, Details, and Results each show one faint
-  11px line saying what will appear there, with no icon or title, so a new
-  workflow is not four onboarding cards.
+  with two example asks); Graph and Results each show one faint 11px line
+  saying what will appear there, with no icon or title, so a new workflow is
+  not three onboarding cards.
 - **Compare:** The same 36px bar carries the switch, then "A [workflow]
   against B [workflow]" as two 24px selects with 11px keys, and the filled
   Compare action at the right (Analyzing with a spinner while it runs). The
@@ -1327,10 +1335,15 @@ from a tall column at the side.
   tool runs; inside, steps stand on a left hairline with strong-line, good,
   accent, or danger dots. The composer is one bordered field with a filled
   24px square send (an up arrow) or an outline stop at bottom right, an accent
-  border plus a 2px 15% accent ring on focus, and a 10px meta line: presence
-  dot with the Assistant's state at left, the keyboard hint at right. "Jump to
-  latest" floats above the composer with a small lift when the reader has
-  scrolled away. The empty thread offers example asks as outlined 11px chips.
+  border plus a 2px 15% accent ring on focus, and nothing beneath it: the
+  placeholder carries the Assistant's state (working, unavailable, Spiral
+  unreachable), the send control's tooltip carries the keyboard hint, and a
+  visually hidden live region announces state changes. There is no presence
+  dot, because a resting dot is a status announcing nothing. "Jump
+  to latest" is one round 24px arrow at the thread's bottom right, with the
+  hover lift, while the reader has scrolled away; it floats over the margin,
+  never over words. The empty thread offers example asks as outlined 11px
+  chips.
 - **SQL:** A full-bleed mono textarea; validation issues appear in a danger
   strip beneath it. Run submits exactly this text without saving it.
 - **Ownership:** The draft drives the graph. The selected immutable run drives
@@ -1340,8 +1353,8 @@ from a tall column at the side.
 - **Motion:** Everything in Workflow moves on one easing, `--ease-out-expo`
   (`cubic-bezier(0.16, 1, 0.3, 1)`): settle-ins of 160–220ms, the 140ms
   popover, 320ms stage entry, 360ms edge entry, 260ms row entry, 180ms
-  inspector entry. Only work in progress loops: the 900ms pulse on run,
-  activity, and presence dots, the 700ms edge dashes, the 1.4s skeleton
+  inspector entry. Only work in progress loops: the 900ms pulse on run and
+  activity dots, the 700ms edge dashes, the 1.4s skeleton
   shimmer, and the 900ms spinner. All of it is removed under
   `prefers-reduced-motion`.
 
@@ -1353,8 +1366,8 @@ Rule identity is one of the six category washes and is never the only
 carrier: every reason chip prints the rule's own words. Nothing on the
 surface is said twice.
 
-- **Composition:** The shared 36px document bar (glyph, name ▾, state chip,
-  Discard while dirty, Save, filled ▶Run), then the `curation-sheet-v2`
+- **Composition:** The shared 36px document bar (glyph, name ▾, then at
+  right the state chip, Discard while dirty, Save, filled ▶Run), then the `curation-sheet-v2`
   scope: the 26% Recipe column beside the Sheet. Recipe holds Source,
   Measurements, Rules, and Transforms as hairline-separated sections; the
   Sheet is a run strip over the tile grid, with the selected episode's
@@ -1779,8 +1792,9 @@ in progress; and every animation is removed under `prefers-reduced-motion`.
   computed/reused materialization evidence explicit. Empty Results must
   distinguish no run from real empty rows.
 - **Do** keep Workflow graph-first: a 24% Assistant/SQL console, the Graph
-  (74%) beside Stage details (26%), and Results in the lower 54%, with stage
-  cards fixed at 224×92 and result previews at 88×50.
+  across the full width with stage details as an on-demand sheet beside the
+  selected card, and Results in the lower 54%, with stage cards fixed at
+  224×92 and result previews at 88×50.
 - **Do** paint result cells by kind through the shared table and lexer:
   category chips at 13% wash, 2px measure bars anchored at zero when a column
   crosses it, UTC clock time, faint mono identity, and one syntax palette for
