@@ -30,7 +30,7 @@ pub(super) enum StreamKind {
 }
 
 #[derive(Clone, PartialEq, Debug)]
-pub(super) struct RecordedStream {
+pub(crate) struct RecordedStream {
     key: String,
     label: String,
     topic: DatasetTopic,
@@ -66,10 +66,10 @@ impl RecordedStream {
         })
     }
     /// Stable within the episode; distinct schema variants of one topic differ.
-    pub(super) fn key(&self) -> &str {
+    pub(crate) fn key(&self) -> &str {
         &self.key
     }
-    pub(super) fn label(&self) -> &str {
+    pub(crate) fn label(&self) -> &str {
         &self.label
     }
     pub(super) fn name(&self) -> &str {
@@ -93,7 +93,7 @@ impl RecordedStream {
     pub(super) fn samples(&self) -> Option<u64> {
         self.topic.samples()
     }
-    pub(super) fn read(&self) -> &MessageRead {
+    pub(crate) fn read(&self) -> &MessageRead {
         &self.read
     }
     pub(super) fn panel_id(&self) -> PanelId {
@@ -103,12 +103,12 @@ impl RecordedStream {
 
 /// Every readable stream of one episode, in topic order.
 #[derive(Clone, PartialEq, Debug, Default)]
-pub(super) struct StreamCatalog {
+pub(crate) struct StreamCatalog {
     streams: Vec<RecordedStream>,
 }
 
 impl StreamCatalog {
-    pub(super) fn new(mut topics: Vec<DatasetTopic>, episode: &EpisodeSelection) -> Self {
+    pub(crate) fn new(mut topics: Vec<DatasetTopic>, episode: &EpisodeSelection) -> Self {
         topics.sort_by(|left, right| {
             left.name().cmp(right.name()).then_with(|| {
                 left.revision()
@@ -132,7 +132,7 @@ impl StreamCatalog {
     pub(super) fn streams(&self) -> &[RecordedStream] {
         &self.streams
     }
-    pub(super) fn videos(&self) -> impl Iterator<Item = &RecordedStream> {
+    pub(crate) fn videos(&self) -> impl Iterator<Item = &RecordedStream> {
         self.streams
             .iter()
             .filter(|stream| stream.kind() == StreamKind::Video)

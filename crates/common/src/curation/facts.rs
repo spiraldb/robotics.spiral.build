@@ -1,6 +1,6 @@
 //! What a curation can know about an episode before judging it.
 use super::CurationSpec;
-use crate::sql::{ReadOnlyQuery, ReadOnlyQueryMode};
+use crate::sql::{ReadOnlyQuery, ReadOnlyQueryMode, SqlLiteral};
 use serde::{Deserialize, Serialize};
 
 const MAX_SAMPLE_FRAMES: usize = 16;
@@ -60,7 +60,7 @@ impl TopicRef {
         Ok(())
     }
     /// The native topic reader for this dataset, as a FROM clause source.
-    pub(super) fn sql_source(&self, dataset: &str) -> String {
+    pub fn sql_source(&self, dataset: &str) -> String {
         let quote = SqlLiteral::text;
         match &self.variant {
             Some(variant) => format!(
@@ -176,16 +176,6 @@ impl FieldAggregate {
             .into_iter()
             .find(|aggregate| aggregate.key() == key)
     }
-    fn sql(self, expression: &str) -> String {
-        match self {
-            Self::First => format!("spql.agg.first({expression})"),
-            Self::Last => format!("spql.agg.last({expression})"),
-            Self::Min => format!("min({expression})"),
-            Self::Max => format!("max({expression})"),
-            Self::Avg => format!("avg({expression})"),
-            Self::Count => format!("count({expression})"),
-        }
-    }
 }
 
 /// The measurement behind a declared fact.
@@ -298,48 +288,12 @@ impl FactMeasure {
                 .map_err(|error| error.to_string()),
         }
     }
-    /// The CTEs that compute this fact as `(id, value)`, named from `prefix`.
-    /// The last CTE is `prefix` itself.
-    pub(super) fn sql_ctes(&self, prefix: &str, dataset: &str) -> Vec<String> {
-        match self {
-            Self::CameraBrightness { camera } => Self::camera_ctes(
-                prefix,
-                camera.frame_ctes(prefix, dataset),
-                "spql.image.mean_luminance(image)".to_owned(),
-            ),
-            Self::CameraScore { camera, prompt } => Self::camera_ctes(
-                prefix,
-                camera.frame_ctes(prefix, dataset),
-                format!("spql.ai.score(image, {})", SqlLiteral::text(prompt)),
-            ),
-            Self::TopicField {
-                topic,
-                field,
-                aggregate,
-                ..
-            } => vec![format!(
-                "{prefix} AS (SELECT id, {} AS value FROM {} GROUP BY id)",
-                aggregate.sql(&format!("value.{field}")),
-                topic.sql_source(dataset)
-            )],
-            Self::Sql { sql, .. } => vec![format!(
-                "{prefix} AS (SELECT id, value FROM ({}) AS custom)",
-                sql.trim().trim_end_matches(';')
-            )],
-        }
-    }
-    fn camera_ctes(prefix: &str, mut ctes: Vec<String>, measurement: String) -> Vec<String> {
-        ctes.push(format!(
-            "{prefix} AS (SELECT id, avg({measurement}) AS value FROM {prefix}_frames GROUP BY id)"
-        ));
-        ctes
-    }
 }
 
 impl CameraSample {
     /// Assemble each episode's packet stream, select the sampled frames, and
     /// decode them: `prefix_frames` holds `(id, image)`.
-    fn frame_ctes(&self, prefix: &str, dataset: &str) -> Vec<String> {
+    pub fn frame_ctes(&self, prefix: &str, dataset: &str) -> Vec<String> {
         vec![
             format!(
                 "{prefix}_packets AS (SELECT r.id, r.value.data AS payload, \
@@ -463,16 +417,6 @@ impl BuiltinFact {
             Self::SourcePath => FactKind::Text,
         }
     }
-    /// The expression over the `episodes` CTE columns.
-    pub(super) const fn sql_expression(self) -> &'static str {
-        match self {
-            Self::DurationSeconds => "duration_ns / 1000000000.0",
-            Self::Messages => "message_count",
-            Self::Channels => "channel_count",
-            Self::SizeMegabytes => "source_bytes / 1048576.0",
-            Self::SourcePath => "source_uri",
-        }
-    }
     pub fn from_key(key: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|builtin| builtin.key() == key)
     }
@@ -590,16 +534,6 @@ impl FieldPath<'_> {
             return Err(format!("field path “{path}” is not a dotted identifier"));
         }
         Ok(())
-    }
-}
-
-/// Literal spelling for generated SQL. Dataset names, topics, prompts, and
-/// rule values all travel this way; nothing is interpolated raw.
-pub(super) struct SqlLiteral;
-
-impl SqlLiteral {
-    pub(super) fn text(value: &str) -> String {
-        format!("'{}'", value.replace('\'', "''"))
     }
 }
 

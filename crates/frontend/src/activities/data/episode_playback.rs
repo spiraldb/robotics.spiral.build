@@ -24,7 +24,7 @@ impl PartialEq for LoadedCamera {
 }
 
 #[component]
-pub(super) fn EpisodeCamera(
+pub(crate) fn EpisodeCamera(
     request: MessageRead,
     timeline: EpisodeTimeRange,
     transport: EpisodeTransport,

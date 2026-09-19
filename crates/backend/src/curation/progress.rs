@@ -1,4 +1,5 @@
 //! Explicit whole-recipe execution uses transient native scores and persists only final chunk decisions.
+use super::sql::CurationSql;
 use spiral_robotics_common::curation::{
     CurationSpec, progress::ProgressSelection, rules::TransformOperation,
 };
@@ -35,9 +36,10 @@ impl ProgressOutput {
     pub(super) fn materialize_sql(&self, roster: &str, spec: &CurationSpec) -> String {
         let index = self.transform_index;
         let threshold = self.selection.minimum_velocity();
-        let time = spec.time_predicate("c.start_ns", "c.end_ns");
+        let time = CurationSql::new(spec).time_predicate("c.start_ns", "c.end_ns");
         let entering = spec.episode_predicate_before(&self.transform_id);
-        let prior_time = spec.time_predicate_before(&self.transform_id, ("c.start_ns", "c.end_ns"));
+        let prior_time = CurationSql::new(spec)
+            .time_predicate_before(&self.transform_id, ("c.start_ns", "c.end_ns"));
         let prior_ids = spec
             .steps()
             .iter()

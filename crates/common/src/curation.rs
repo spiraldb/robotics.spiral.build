@@ -1,10 +1,8 @@
 //! Curation: rules that keep, exclude, and shape a dataset's episodes for
 //! training, compiled to one read-only Spiral query. A curation is a
 //! specialization of a workflow whose input and output are episodes.
-pub mod compile;
 pub mod facts;
 pub mod interpretation;
-pub mod outputs;
 pub mod progress;
 pub mod rules;
 pub mod run;
@@ -452,3 +450,6 @@ impl CurationSummary {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(any(test, feature = "test-support"))]
+mod test_recipe;

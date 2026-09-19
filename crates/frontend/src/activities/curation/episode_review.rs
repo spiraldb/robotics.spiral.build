@@ -1,7 +1,6 @@
 //! Recorded camera feeds and derived evidence on one caller-owned clock.
-use super::{
-    DatasetClient, episode_list::OpenedEpisode, episode_playback::EpisodeCamera,
-    episode_streams::StreamCatalog, episode_transport::EpisodeTransport,
+use crate::activities::data::{
+    DatasetClient, EpisodeCamera, EpisodeTransport, OpenedEpisode, StreamCatalog,
 };
 use crate::components::interaction::{Action, ActionPurpose, ActionVariant};
 use crate::components::timeline::{
@@ -11,7 +10,7 @@ use crate::components::timeline::{
 use dioxus::prelude::*;
 
 #[component]
-pub(crate) fn EpisodeReview(
+pub(super) fn EpisodeReview(
     episode: OpenedEpisode,
     transport: EpisodeTransport,
     #[props(default)] tracks: Vec<TimelineTrack>,
@@ -40,8 +39,7 @@ pub(crate) fn EpisodeReview(
         }),
     );
     let rows = rsx! { for track in tracks { NumericTrackRow { key: "{track.id()}", track, interaction: interaction.clone() } } };
-    let content =
-        TimelineContent::new(rows).with_identity(rsx! { strong { "{episode.listed().title()}" } });
+    let content = TimelineContent::new(rows).with_identity(rsx! { strong { "{episode.title()}" } });
     rsx! {
         section { class: "episode-review", "aria-label": "Recorded episode review",
             match cameras.read().as_ref() {

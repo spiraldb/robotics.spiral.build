@@ -1,4 +1,5 @@
 //! The comparison agent interprets ordinary outputs; its reasoning is never rendered.
+use super::plan::{ComparisonPlan, ComparisonSlice, DashboardMetric, SignalAnalysis};
 use super::report::ComparisonReport;
 use super::selection::{ComparisonEvidence, WorkflowSide};
 use super::timing::ComparisonTiming;
@@ -8,7 +9,6 @@ use spiral_robotics_common::{
     relations::SpiralQuerySnapshot,
     workflow::{
         comparison_inputs::ComparisonInputRequest,
-        comparison_plan::{ComparisonPlan, ComparisonSlice, DashboardMetric},
         conversation::ProviderMessage,
         document::{ModelRequest, WorkflowDocument},
     },
@@ -85,14 +85,9 @@ pub(super) enum ComparisonEvent {
     Phase(super::progress::ComparisonPhase),
     Planned(Vec<DashboardMetric>),
     PopulationReady(ComparisonResult),
-    MetricStarted(spiral_robotics_common::workflow::comparison_plan::DashboardMetric),
+    MetricStarted(DashboardMetric),
     MetricReady(ComparisonResult),
-    MetricFailed(
-        (
-            spiral_robotics_common::workflow::comparison_plan::DashboardMetric,
-            String,
-        ),
-    ),
+    MetricFailed((DashboardMetric, String)),
 }
 pub(super) struct ComparisonAgent;
 struct ComparisonSources {
@@ -264,11 +259,11 @@ struct ComparisonBatch {
 #[derive(serde::Deserialize)]
 #[serde(tag = "kind", content = "analysis", rename_all = "snake_case")]
 enum PlannedSignal {
-    Sql(spiral_robotics_common::workflow::comparison_plan::SignalAnalysis),
+    Sql(SignalAnalysis),
     Array(super::recorded_signal::RecordedArraySignal),
 }
 impl PlannedSignal {
-    fn metric(&self) -> &spiral_robotics_common::workflow::comparison_plan::DashboardMetric {
+    fn metric(&self) -> &DashboardMetric {
         match self {
             Self::Sql(signal) => signal.metric(),
             Self::Array(signal) => signal.metric(),
@@ -590,7 +585,6 @@ mod tests {
     }
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn parallel_completions_only_remove_their_own_pending_card() {
-        use spiral_robotics_common::workflow::comparison_plan::{DashboardMetric, SignalAnalysis};
         let mut dashboard = ComparisonDashboard::default();
         dashboard.start();
         let base = population();

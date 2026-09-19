@@ -1,6 +1,6 @@
 //! Live screen workbench: capture, control, and selected-arm state.
 
-use crate::activities::data::dataset_catalog::DatasetCatalogFeedback;
+use crate::activities::dataset_catalog::DatasetCatalogFeedback;
 use std::collections::BTreeSet;
 
 use crate::components::interaction::{
@@ -10,7 +10,7 @@ use crate::components::interaction::{
 use dioxus::prelude::*;
 use spiral_robotics_common::robots::ModeSelection;
 
-use crate::activities::data::dataset_catalog::DatasetChoices;
+use crate::activities::dataset_catalog::DatasetChoices;
 use crate::activities::live::actions::LiveAction;
 use crate::activities::live::control::JointPanel;
 use crate::robots::Selection;

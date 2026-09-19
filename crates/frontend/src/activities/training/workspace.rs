@@ -1,6 +1,6 @@
 //! Training setup and run monitoring.
 
-use crate::activities::data::dataset_catalog::DatasetCatalogFeedback;
+use crate::activities::dataset_catalog::DatasetCatalogFeedback;
 use std::collections::BTreeSet;
 
 use crate::components::interaction::{
@@ -35,7 +35,7 @@ const TRAINING_CHART_POINT_BUDGET: usize = 1_200;
 
 #[component]
 fn TrainingPanels(
-    data: crate::activities::data::dataset_catalog::DatasetChoices,
+    data: crate::activities::dataset_catalog::DatasetChoices,
     controller: super::state::TrainingController,
     training_history: super::history::TrainingHistory,
 ) -> Element {
@@ -180,7 +180,7 @@ fn TrainingPanels(
 
 #[component]
 fn TrainingRunControl(
-    data: crate::activities::data::dataset_catalog::DatasetChoices,
+    data: crate::activities::dataset_catalog::DatasetChoices,
     controller: super::state::TrainingController,
     training_history: super::history::TrainingHistory,
 ) -> Element {
@@ -1521,7 +1521,7 @@ pub(crate) fn TrainingWorkspace(is_active: ReadSignal<bool>) -> Element {
         crate::shell::activity::Activity::Training,
         is_active,
     );
-    let choices = crate::activities::data::dataset_catalog::DatasetChoices::use_choices();
+    let choices = crate::activities::dataset_catalog::DatasetChoices::use_choices();
     let controller = super::state::TrainingController::use_controller(&choices.selected().read());
     let history =
         super::history::TrainingHistory::use_history(is_active, move || controller.selected_run());

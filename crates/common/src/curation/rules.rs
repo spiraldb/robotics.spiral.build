@@ -1,5 +1,6 @@
 //! If this, then that: exclusion rules and conditional transforms.
-use super::facts::{FactCatalog, FactKind, SqlLiteral, TopicRef};
+use super::facts::{FactCatalog, FactKind, TopicRef};
+use crate::sql::SqlLiteral;
 use serde::{Deserialize, Serialize};
 
 /// How a fact is compared. Text facts use the text operators; numbers use
@@ -119,20 +120,6 @@ impl ConditionValue {
             Self::None => String::new(),
         }
     }
-    fn sql(&self) -> Option<String> {
-        match self {
-            Self::Number(number) => Some(NumberText(*number).to_string()),
-            Self::Text(text) => Some(SqlLiteral::text(text)),
-            Self::None => None,
-        }
-    }
-    fn like_pattern(&self) -> Option<String> {
-        match self {
-            Self::Text(text) => Some(SqlLiteral::text(&format!("%{text}%"))),
-            Self::Number(number) => Some(SqlLiteral::text(&format!("%{}%", NumberText(*number)))),
-            Self::None => None,
-        }
-    }
 }
 
 /// `fact op value`, judged per episode.
@@ -208,35 +195,6 @@ impl RuleCondition {
             }
             _ => Ok(()),
         }
-    }
-    /// A boolean SQL expression over the named fact expression. NULL facts
-    /// never fire a comparison; only `Missing` sees them.
-    pub(super) fn sql(&self, expression: &str) -> Result<String, String> {
-        let value = || {
-            self.value
-                .sql()
-                .ok_or_else(|| format!("rule on {} has no value", self.fact))
-        };
-        Ok(match self.op {
-            ConditionOp::Below => format!("({expression} < {})", value()?),
-            ConditionOp::AtMost => format!("({expression} <= {})", value()?),
-            ConditionOp::Above => format!("({expression} > {})", value()?),
-            ConditionOp::AtLeast => format!("({expression} >= {})", value()?),
-            ConditionOp::Is => format!("({expression} = {})", value()?),
-            ConditionOp::IsNot => format!("({expression} <> {})", value()?),
-            ConditionOp::Contains => format!(
-                "(CAST({expression} AS VARCHAR) ILIKE {})",
-                self.value.like_pattern().ok_or("contains needs text")?
-            ),
-            ConditionOp::Lacks => format!(
-                "(CAST({expression} AS VARCHAR) NOT ILIKE {})",
-                self.value
-                    .like_pattern()
-                    .ok_or("does not contain needs text")?
-            ),
-            ConditionOp::Missing => format!("({expression} IS NULL)"),
-            ConditionOp::Present => format!("({expression} IS NOT NULL)"),
-        })
     }
 }
 

@@ -67,10 +67,16 @@ are explicit. There is no inferred interpolation or sample-index gap rule.
 Null numeric values break traces; changing array lengths leave missing indices
 empty. Names containing punctuation remain distinct from nested field paths.
 
-The Live Timeline and Data inspector share the time-series model, chart renderer,
-extrema/null-preserving downsampling, and bounded clock arithmetic. Live hardware
-semantics remain in its source adapter. The existing query-result component
-renders message previews.
+Data, Curation, and Live compose the same controlled component in
+[`components/timeline`](../crates/frontend/src/components/timeline/mod.rs).
+`TimelineInteraction` binds a caller-owned clock projection to typed events;
+`TimelineContent` supplies rows, identity, toolbar additions, and notices.
+The component shares transport controls, ruler, keyboard/wheel handling,
+scrubbing, numeric tracks, density rendering, and playback timing. Each activity
+owns its effects: Data selects streams, Curation handles interval activation,
+and Live controls recording and permits robot motion only on committed seeks.
+Events carry the source identity; owners reject events from replaced sources.
+The existing time-series chart renderer and message-result component are reused.
 
 Cameras use a media adapter for `foxglove.CompressedVideo` H.264. They consume
 binary packets from the same message transport and reuse the Annex B parser.

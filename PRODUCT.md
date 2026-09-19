@@ -447,7 +447,7 @@ Real, in-repo:
   pinned SigLIP runner, SQL-candidate contract, source-derived feature cache,
   Studio feature registry, atomic publication, bounded pipeline, quarantine,
   cancellation, and cross-workflow reuse.
-- `crates/common/src/curation/compile.rs` — the recipe-to-SQL compiler and
+- `crates/backend/src/curation/sql.rs` — the recipe-to-SQL compiler and
   verdict reader, with `crates/backend/src/curation/manager.rs` owning saved
   recipes and judged runs.
 - `crates/backend/src/workflow/agent.rs` and

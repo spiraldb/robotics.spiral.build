@@ -1,4 +1,5 @@
 //! Saved recipes and independent judged runs. No selected curation or editor draft.
+use super::sql::CurationSql;
 use crate::run_registry::{RunAdmission, RunRegistry};
 use crate::{OperationError, clock::SystemTimeMillis};
 use spiral_robotics_common::curation::{
@@ -56,7 +57,9 @@ impl CurationManager {
         &self,
         curation: &CurationSpec,
     ) -> Result<CurationOutcome, OperationError> {
-        let compiled = curation.compile().map_err(OperationError::InvalidInput)?;
+        let compiled = CurationSql::new(curation)
+            .compile()
+            .map_err(OperationError::InvalidInput)?;
         let mut connection = self
             .inner
             .storage
@@ -225,7 +228,9 @@ impl CurationManager {
     /// recipe is compiled up front so an invalid one never becomes a run.
     pub(crate) fn start(&self, mut curation: CurationSpec) -> Result<CurationRun, OperationError> {
         curation.set_source(curation.source().cloned());
-        let compiled = curation.compile().map_err(OperationError::InvalidInput)?;
+        let compiled = CurationSql::new(&curation)
+            .compile()
+            .map_err(OperationError::InvalidInput)?;
         let id = format!("curation-run-{}", uuid::Uuid::new_v4());
         let mut snapshot = CurationRunSnapshot::started(&curation, id.clone())
             .with_started_ms(SystemTime::now().unix_millis());
@@ -283,12 +288,12 @@ impl CurationManager {
     }
     /// Run the roster query; when Spiral bounded it, run the exact totals too.
     async fn judge(&self, curation: &CurationSpec, output: &str) -> Result<JudgedRun, String> {
-        let compiled = curation.compile()?;
+        let compiled = CurationSql::new(curation).compile()?;
         let started = Instant::now();
         let store = self.inner.storage.workflow_store();
         let mut connection = store.connect().await?;
         let progress = super::progress::ProgressOutput::for_spec(curation)?;
-        let camera_outputs = curation.derived_outputs(output)?;
+        let camera_outputs = CurationSql::new(curation).derived_outputs(output)?;
         let mut derived_relations = camera_outputs
             .iter()
             .map(|derived| derived.relation().to_owned())

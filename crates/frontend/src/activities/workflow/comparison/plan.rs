@@ -1,13 +1,13 @@
 //! Comparison-owned interpretation of two unmodified workflow queries.
-use crate::{
+use serde::{Deserialize, Serialize};
+use spiral_robotics_common::{
     datasets::DatasetSelection,
     sql::{ReadOnlyQuery, ReadOnlyQueryMode},
 };
-use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ComparisonPlan {
+pub(super) struct ComparisonPlan {
     title: String,
     summary: String,
     dataset: Option<DatasetSelection>,
@@ -19,12 +19,12 @@ pub struct ComparisonPlan {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ObservationUnit {
+pub(super) enum ObservationUnit {
     Episodes,
     Rows,
 }
 impl ObservationUnit {
-    pub fn label(self) -> &'static str {
+    pub(super) fn label(self) -> &'static str {
         match self {
             Self::Episodes => "episodes",
             Self::Rows => "rows",
@@ -39,7 +39,7 @@ struct ComparisonQueries {
 }
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct DashboardMetric {
+pub(super) struct DashboardMetric {
     column: String,
     label: String,
     unit: String,
@@ -50,29 +50,29 @@ pub struct DashboardMetric {
     source: String,
 }
 impl DashboardMetric {
-    pub fn description(&self) -> &str {
+    pub(super) fn description(&self) -> &str {
         &self.description
     }
-    pub fn source(&self) -> &str {
+    pub(super) fn source(&self) -> &str {
         &self.source
     }
-    pub fn column(&self) -> &str {
+    pub(super) fn column(&self) -> &str {
         &self.column
     }
-    pub fn label(&self) -> &str {
+    pub(super) fn label(&self) -> &str {
         &self.label
     }
-    pub fn unit(&self) -> &str {
+    pub(super) fn unit(&self) -> &str {
         &self.unit
     }
-    pub fn shown(&self) -> bool {
+    pub(super) fn shown(&self) -> bool {
         self.show
     }
 }
 impl ComparisonPlan {
     /// Enrich the already chosen populations with one measured value per episode.
     /// LEFT JOIN keeps episodes with missing measurements in the population.
-    pub fn with_measurement(&self, analysis: SignalAnalysis) -> Result<Self, String> {
+    pub(super) fn with_measurement(&self, analysis: SignalAnalysis) -> Result<Self, String> {
         if self.unit != ObservationUnit::Episodes || self.dataset.is_none() {
             return Err(
                 "Recorded-signal analysis requires episode populations and a dataset.".into(),
@@ -106,22 +106,16 @@ impl ComparisonPlan {
         plan.validate()?;
         Ok(plan)
     }
-    pub fn title(&self) -> &str {
-        &self.title
-    }
-    pub fn summary(&self) -> &str {
-        &self.summary
-    }
-    pub fn dataset(&self) -> Option<&DatasetSelection> {
+    pub(super) fn dataset(&self) -> Option<&DatasetSelection> {
         self.dataset.as_ref()
     }
-    pub fn unit(&self) -> ObservationUnit {
+    pub(super) fn unit(&self) -> ObservationUnit {
         self.unit
     }
-    pub fn metrics(&self) -> &[DashboardMetric] {
+    pub(super) fn metrics(&self) -> &[DashboardMetric] {
         &self.metrics
     }
-    pub fn validate(&self) -> Result<(), String> {
+    pub(super) fn validate(&self) -> Result<(), String> {
         if self.title.is_empty() || self.title.len() > 160 || self.summary.len() > 600 {
             return Err("Use a short dashboard title and summary.".into());
         }
@@ -160,7 +154,7 @@ impl ComparisonPlan {
     }
     /// One shared range per metric, computed over both full result populations.
     /// Source queries are embedded verbatim, never rewritten by the agent.
-    pub fn aggregate_sql(&self, sources: (&str, Option<&str>)) -> Result<String, String> {
+    pub(super) fn aggregate_sql(&self, sources: (&str, Option<&str>)) -> Result<String, String> {
         let prefix = self.query_prefix(sources)?;
         let normalized = self
             .metrics
@@ -252,7 +246,7 @@ FROM comparison_bins GROUP BY metric,bucket,low,high ORDER BY metric,bucket"#,
             self.queries.right.trim().trim_end_matches(';')
         ))
     }
-    pub fn evidence_sql(
+    pub(super) fn evidence_sql(
         &self,
         sources: (&str, Option<&str>),
         slice: &ComparisonSlice,
@@ -296,38 +290,38 @@ FROM comparison_bins GROUP BY metric,bucket,low,high ORDER BY metric,bucket"#,
 /// One discovered signal, aggregated by the agent to one value per episode.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SignalAnalysis {
+pub(super) struct SignalAnalysis {
     metric: DashboardMetric,
     sql: String,
 }
 impl SignalAnalysis {
-    pub fn new(metric: DashboardMetric, sql: String) -> Self {
+    pub(super) fn new(metric: DashboardMetric, sql: String) -> Self {
         Self { metric, sql }
     }
-    pub fn metric(&self) -> &DashboardMetric {
+    pub(super) fn metric(&self) -> &DashboardMetric {
         &self.metric
     }
 }
 
 #[derive(Clone, Debug)]
-pub struct ComparisonSlice {
+pub(super) struct ComparisonSlice {
     right: bool,
     offset: usize,
     bin: Option<(usize, f64, f64, bool)>,
 }
 impl ComparisonSlice {
-    pub fn new(right: bool) -> Self {
+    pub(super) fn new(right: bool) -> Self {
         Self {
             right,
             offset: 0,
             bin: None,
         }
     }
-    pub fn with_offset(mut self, offset: usize) -> Self {
+    pub(super) fn with_offset(mut self, offset: usize) -> Self {
         self.offset = offset;
         self
     }
-    pub fn with_bin(mut self, bin: Option<(usize, f64, f64, bool)>) -> Self {
+    pub(super) fn with_bin(mut self, bin: Option<(usize, f64, f64, bool)>) -> Self {
         self.bin = bin;
         self
     }
@@ -343,7 +337,7 @@ mod tests {
             "metrics":[{"column":"value","label":"Answer","unit":"","show":true}]
         })).unwrap()
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn sources_remain_verbatim_and_metrics_share_ranges() {
         let plan = plan();
         let sql = plan
@@ -359,7 +353,7 @@ mod tests {
         );
         assert!(plan.aggregate_sql(("SELECT 1", None)).is_err());
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn episode_counts_require_unique_identities_and_drilldown_uses_the_same_interpretation() {
         let mut plan = plan();
         plan.unit = ObservationUnit::Episodes;
@@ -391,7 +385,7 @@ mod tests {
             .is_err()
         );
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn signal_enrichment_preserves_population_rules_and_missing_measurements() {
         let mut original = plan();
         original.unit = ObservationUnit::Episodes;

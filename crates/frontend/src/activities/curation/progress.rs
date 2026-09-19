@@ -67,7 +67,8 @@ pub(super) fn ProgressEvidence(
     episode: crate::activities::data::OpenedEpisode,
     selection: ProgressSelection,
 ) -> Element {
-    use crate::activities::data::{EpisodeReview, EpisodeTransport};
+    use super::episode_review::EpisodeReview;
+    use crate::activities::data::EpisodeTransport;
     use crate::components::timeline::{
         NumericTrack, TimelineInterval, TimelineSample, TimelineTrack, TimelineTrackState,
     };

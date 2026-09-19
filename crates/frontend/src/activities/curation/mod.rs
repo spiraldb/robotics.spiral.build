@@ -9,6 +9,7 @@ pub(crate) use client::CurationClient;
 
 mod document_bar;
 mod episode;
+mod episode_review;
 mod pipeline;
 mod progress;
 mod recipe;

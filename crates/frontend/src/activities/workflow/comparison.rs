@@ -2,14 +2,17 @@
 mod agent;
 mod dashboard;
 mod discovery;
+mod episode_inspector;
 mod evidence;
 mod inputs;
+mod plan;
 mod progress;
 mod recorded_signal;
 mod report;
 mod selection;
 mod timing;
 
+use self::plan::{DashboardMetric, ObservationUnit};
 use super::state::WorkflowController;
 use crate::components::icons::{SpinnerIcon, WorkflowIcon};
 use crate::components::interaction::{Action, ActionPurpose, ActionVariant, BrowserFocus};
@@ -18,7 +21,6 @@ use dashboard::{ComparisonCard, ComparisonDashboard};
 use dioxus::prelude::*;
 use report::MetricNumber;
 use selection::{ComparisonEvidence, WorkflowSide};
-use spiral_robotics_common::workflow::comparison_plan::{DashboardMetric, ObservationUnit};
 
 #[derive(Clone, PartialEq)]
 struct EvidenceRequest {
@@ -142,7 +144,7 @@ pub(super) fn WorkflowComparison(
                 if let Some(row)=inspected() {
                     if let Some(dataset)=evidence_request().and_then(|request|request.result.plan().dataset().cloned()) {
                         div { class: "comparison-inspector",
-                            crate::activities::data::ComparisonEpisodeInspector { dataset, row, on_back: move |_|inspected.set(None) }
+                            episode_inspector::ComparisonEpisodeInspector { dataset, row, on_back: move |_|inspected.set(None) }
                         }
                     }
                 }

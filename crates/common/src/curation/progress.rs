@@ -1,5 +1,5 @@
 //! A replaceable native progress scorer and non-destructive training chunks.
-use super::facts::SqlLiteral;
+use crate::sql::SqlLiteral;
 use serde::{Deserialize, Serialize};
 
 /// The released, task-specific WARP checkpoint. Its velocity is progress per

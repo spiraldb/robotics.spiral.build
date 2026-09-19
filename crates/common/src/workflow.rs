@@ -1,7 +1,6 @@
 //! SQL workflow documents and independent query execution observations.
 pub mod camera;
 pub mod comparison_inputs;
-pub mod comparison_plan;
 pub mod conversation;
 pub mod document;
 pub mod plan;

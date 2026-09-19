@@ -7,3 +7,5 @@ pub(crate) mod manager;
 mod progress;
 
 mod episode_progress;
+
+mod sql;

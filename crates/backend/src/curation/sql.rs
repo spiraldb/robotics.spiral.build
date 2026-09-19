@@ -1,16 +1,35 @@
 //! One recipe becomes one read-only query: the episode population, each
 //! measured fact joined by episode, every rule and transform judged
 //! as a boolean column, and `kept` as the verdict.
-use super::CurationSpec;
-use super::facts::{BuiltinFact, SqlLiteral};
-use super::run::{CurationOutcome, CurationTotals, CurationVerdict, EpisodeFacts};
-use crate::relations::SpiralQuerySnapshot;
-use serde::{Deserialize, Serialize};
+use spiral_robotics_common::{
+    curation::{
+        CurationSpec, CurationStep,
+        facts::BuiltinFact,
+        rules::TransformOperation,
+        run::{
+            CurationOutcome, CurationStageImpact, CurationTotals, CurationVerdict, EpisodeFacts,
+        },
+    },
+    relations::SpiralQuerySnapshot,
+    sql::SqlLiteral,
+};
 use std::collections::BTreeMap;
 
+mod expressions;
+use expressions::{ConditionSql, FactSql};
+
+/// Backend-owned SQL generation for a shared, validated recipe.
+pub(super) struct CurationSql<'a> {
+    recipe: &'a CurationSpec,
+}
+impl<'a> CurationSql<'a> {
+    pub(super) fn new(recipe: &'a CurationSpec) -> Self {
+        Self { recipe }
+    }
+}
+
 /// The compiled statements and the identities behind their positional aliases.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct CompiledCuration {
+pub(super) struct CompiledCuration {
     roster_sql: String,
     totals_sql: String,
     facts: Vec<String>,
@@ -18,14 +37,18 @@ pub struct CompiledCuration {
     transforms: Vec<String>,
 }
 
-impl CurationSpec {
+impl CurationSql<'_> {
     /// Compile the recipe, or explain the first thing that stops it.
-    pub fn compile(&self) -> Result<CompiledCuration, String> {
-        let report = self.validate();
+    pub(super) fn compile(&self) -> Result<CompiledCuration, String> {
+        let report = self.recipe.validate();
         if let Some(error) = report.errors().first() {
             return Err(error.message().to_owned());
         }
-        let dataset = self.source().ok_or("No dataset is selected.")?.sql_name();
+        let dataset = self
+            .recipe
+            .source()
+            .ok_or("No dataset is selected.")?
+            .sql_name();
         let mut ctes = vec![format!(
             "episodes AS (SELECT id, source.uri AS source_uri, source.size AS source_bytes, \
              message_count, channel_count, message_start_time, duration_ns \
@@ -34,9 +57,9 @@ impl CurationSpec {
         )];
         let mut fact_columns = Vec::new();
         let mut joins = String::new();
-        for (index, fact) in self.facts().iter().enumerate() {
+        for (index, fact) in self.recipe.facts().iter().enumerate() {
             let prefix = format!("f{index}");
-            ctes.extend(fact.measure().sql_ctes(&prefix, &dataset));
+            ctes.extend(FactSql(fact.measure()).sql_ctes(&prefix, &dataset));
             fact_columns.push(format!("{prefix}.value AS fact_{index}"));
             joins.push_str(&format!(" LEFT JOIN {prefix} ON {prefix}.id = e.id"));
         }
@@ -49,23 +72,25 @@ impl CurationSpec {
             "facts AS (SELECT e.id, e.source_uri, e.source_bytes, e.message_count, e.channel_count, \
              e.message_start_time, e.duration_ns{fact_select} FROM episodes e{joins})"
         ));
-        let expressions = FactExpressions::for_spec(self);
+        let expressions = FactExpressions::for_spec(self.recipe);
         let mut judged_columns = Vec::new();
         let mut rule_ids = Vec::new();
-        for rule in self.rules().iter() {
+        for rule in self.recipe.rules().iter() {
             let index = rule_ids.len();
             judged_columns.push(format!(
                 "{} AS rule_{index}",
-                rule.condition()
+                ConditionSql(rule.condition())
                     .sql(&expressions.resolve(rule.condition().fact())?)?
             ));
             rule_ids.push(rule.id().to_owned());
         }
         let mut transform_ids = Vec::new();
-        for transform in self.transforms().iter() {
+        for transform in self.recipe.transforms().iter() {
             let index = transform_ids.len();
             let predicate = match transform.condition() {
-                Some(condition) => condition.sql(&expressions.resolve(condition.fact())?)?,
+                Some(condition) => {
+                    ConditionSql(condition).sql(&expressions.resolve(condition.fact())?)?
+                }
                 None => "true".to_owned(),
             };
             judged_columns.push(format!("{predicate} AS transform_{index}"));
@@ -113,6 +138,7 @@ impl CurationSpec {
             roster_sql,
             totals_sql,
             facts: self
+                .recipe
                 .facts()
                 .iter()
                 .map(|fact| fact.key().to_owned())
@@ -126,7 +152,11 @@ impl CurationSpec {
 impl CompiledCuration {
     /// Materialize the full judged population, including excluded rows and
     /// the exact submitted recipe. Preview limits never define training data.
-    pub fn materialize_sql(&self, relation: &str, recipe: &CurationSpec) -> Result<String, String> {
+    pub(super) fn materialize_sql(
+        &self,
+        relation: &str,
+        recipe: &CurationSpec,
+    ) -> Result<String, String> {
         let definition = serde_json::to_string(recipe).map_err(|error| error.to_string())?;
         Ok(format!(
             "CREATE TABLE \"{}\" AS SELECT judged.*, {} AS curation_recipe FROM ({}) judged",
@@ -135,13 +165,13 @@ impl CompiledCuration {
             self.roster_sql
         ))
     }
-    pub fn output_roster_sql(&self, relation: &str) -> String {
+    pub(super) fn output_roster_sql(&self, relation: &str) -> String {
         format!(
             "SELECT * FROM \"{}\" ORDER BY message_start_time, source_uri, id",
             relation.replace('"', "\"\"")
         )
     }
-    pub fn output_totals_sql(&self, relation: &str) -> String {
+    pub(super) fn output_totals_sql(&self, relation: &str) -> String {
         let select = self
             .totals_sql
             .rsplit_once("\nSELECT ")
@@ -155,21 +185,21 @@ impl CompiledCuration {
             )
         )
     }
-    pub fn stage_totals_sql(&self, relation: &str, recipe: &CurationSpec) -> String {
+    pub(super) fn stage_totals_sql(&self, relation: &str, recipe: &CurationSpec) -> String {
         let mut retained = "true".to_owned();
         let mut columns = Vec::new();
         for (index, step) in recipe.steps().iter().enumerate() {
             columns.push(format!(
                 "sum(CASE WHEN {retained} THEN 1 ELSE 0 END) AS stage_{index}_incoming"
             ));
-            if let super::CurationStep::Transform(transform) = step {
+            if let CurationStep::Transform(transform) = step {
                 if let Some(transform_index) =
                     self.transforms.iter().position(|id| id == transform.id())
                 {
                     columns.push(format!("sum(CASE WHEN {retained} AND COALESCE(transform_{transform_index},false) THEN 1 ELSE 0 END) AS stage_{index}_affected"));
                 }
             }
-            if let super::CurationStep::Filter(rule) = step {
+            if let CurationStep::Filter(rule) = step {
                 if let Some(rule_index) = self.rules.iter().position(|id| id == rule.id()) {
                     retained = format!("{retained} AND NOT COALESCE(rule_{rule_index},false)");
                 }
@@ -184,14 +214,14 @@ impl CompiledCuration {
         format!(
             "SELECT {} FROM {}",
             columns.join(", "),
-            CurationSpec::quoted_relation(relation)
+            CurationSql::quoted_relation(relation)
         )
     }
-    pub fn stage_impacts(
+    pub(super) fn stage_impacts(
         &self,
         recipe: &CurationSpec,
         totals: &SpiralQuerySnapshot,
-    ) -> Result<Vec<super::run::CurationStageImpact>, String> {
+    ) -> Result<Vec<CurationStageImpact>, String> {
         let row = totals
             .rows()
             .first()
@@ -206,12 +236,12 @@ impl CompiledCuration {
                         .and_then(serde_json::Value::as_u64)
                         .unwrap_or(0)
                 };
-                let mut impact = super::run::CurationStageImpact::new(
+                let mut impact = CurationStageImpact::new(
                     step.id().to_owned(),
                     count("incoming"),
                     count("retained"),
                 );
-                if matches!(step, super::CurationStep::Transform(_)) {
+                if matches!(step, CurationStep::Transform(_)) {
                     impact.set_affected_episodes(count("affected"));
                 }
                 impact
@@ -219,15 +249,18 @@ impl CompiledCuration {
             .collect())
     }
     /// One row per episode, bounded by the result preview limit.
-    pub fn roster_sql(&self) -> &str {
+    pub(super) fn roster_sql(&self) -> &str {
         &self.roster_sql
     }
     /// Exact population counts, for when the roster was truncated.
-    pub fn totals_sql(&self) -> &str {
+    pub(super) fn totals_sql(&self) -> &str {
         &self.totals_sql
     }
     /// Read every listed episode's verdict from the roster result.
-    pub fn verdicts(&self, roster: &SpiralQuerySnapshot) -> Result<Vec<CurationVerdict>, String> {
+    pub(super) fn verdicts(
+        &self,
+        roster: &SpiralQuerySnapshot,
+    ) -> Result<Vec<CurationVerdict>, String> {
         roster.rows().iter().map(|row| self.verdict(row)).collect()
     }
     fn verdict(
@@ -270,7 +303,7 @@ impl CompiledCuration {
     }
     /// Assemble the outcome. Totals come from the population query when the
     /// roster was bounded, otherwise from the verdicts themselves.
-    pub fn outcome(
+    pub(super) fn outcome(
         &self,
         roster: &SpiralQuerySnapshot,
         totals: Option<&SpiralQuerySnapshot>,
@@ -344,7 +377,14 @@ impl FactExpressions {
     }
     fn resolve(&self, key: &str) -> Result<String, String> {
         if let Some(builtin) = BuiltinFact::from_key(key) {
-            return Ok(builtin.sql_expression().to_owned());
+            return Ok(match builtin {
+                BuiltinFact::DurationSeconds => "duration_ns / 1000000000.0",
+                BuiltinFact::Messages => "message_count",
+                BuiltinFact::Channels => "channel_count",
+                BuiltinFact::SizeMegabytes => "source_bytes / 1048576.0",
+                BuiltinFact::SourcePath => "source_uri",
+            }
+            .to_owned());
         }
         self.declared
             .iter()
@@ -353,3 +393,163 @@ impl FactExpressions {
             .ok_or_else(|| format!("Rule names an unknown fact “{key}”."))
     }
 }
+
+pub(super) struct DerivedOutput {
+    relation: String,
+    statement: String,
+}
+impl DerivedOutput {
+    pub(super) fn relation(&self) -> &str {
+        &self.relation
+    }
+    pub(super) fn statement(&self) -> &str {
+        &self.statement
+    }
+}
+
+impl CurationSql<'_> {
+    pub(super) fn derived_outputs(&self, roster: &str) -> Result<Vec<DerivedOutput>, String> {
+        let dataset = self
+            .recipe
+            .source()
+            .ok_or("No dataset is selected.")?
+            .sql_name();
+        let mut cameras = BTreeMap::<String, Vec<(usize, &TransformOperation)>>::new();
+        for (index, transform) in self.recipe.transforms().iter().enumerate() {
+            if let Some(topic) = transform.operation().topic() {
+                cameras
+                    .entry(topic.topic().to_owned())
+                    .or_default()
+                    .push((index, transform.operation()));
+            }
+        }
+        let mut outputs = Vec::new();
+        let time_ns = "spql.dt.duration_total(f.time, 'ns')";
+        let time_predicate = self.time_predicate(time_ns, &format!("{time_ns} + 1"));
+        let progress_predicates = self.recipe.transforms().iter().enumerate().filter_map(|(index, transform)| matches!(transform.operation(), TransformOperation::SelectProgressChunks { .. }).then(|| format!("NOT EXISTS (SELECT 1 FROM {} c WHERE c.id = s.id AND NOT c.kept AND f.request_index >= c.start_frame AND f.request_index < c.end_frame)", Self::quoted_relation(&format!("{roster}_chunks_{index}"))))).collect::<Vec<_>>();
+        let selection = std::iter::once(time_predicate)
+            .chain(progress_predicates)
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        for (index, (topic, operations)) in cameras.into_iter().enumerate() {
+            let mut image = "spql.video.decode(f.frame)".to_owned();
+            for (transform, operation) in operations {
+                image = format!(
+                    "CASE WHEN COALESCE(v.transform_{transform}, false) THEN {} ELSE {image} END",
+                    operation.image_sql(&image)?
+                );
+            }
+            let relation = format!("{roster}_camera_{index}");
+            let statement = format!(
+                "CREATE VIEW {} AS WITH packets AS (SELECT r.id, r.value.data AS payload, spql.dt.from_epoch(CAST(r.log_time AS BIGINT), 'ns') - spql.dt.from_epoch(CAST(v.message_start_time AS BIGINT), 'ns') AS presentation_time, \
+                CAST(ROW_NUMBER() OVER (PARTITION BY r.id ORDER BY r.chunk_start_offset, r.sample_ordinal)-1 AS BIGINT) AS decode_index \
+                FROM spql.mcap.read_topic({}, {}) r JOIN {} v ON r.id = v.id WHERE v.kept), \
+                streams AS (SELECT id, spql.video.from_packets(spql.list.collect(STRUCT_PACK(payload := payload, decode_index := decode_index, presentation_time := presentation_time)), 'h264', 'annex_b') AS source FROM packets GROUP BY id) \
+                SELECT s.id, {} AS topic, f.request_index AS frame_index, f.time, f.duration, {image} AS image \
+                FROM streams s JOIN {} v ON s.id = v.id CROSS JOIN LATERAL spql.video.frames(s.source, spql.video.frame_slice()) f WHERE {selection}",
+                Self::quoted_relation(&relation),
+                SqlLiteral::text(&dataset),
+                SqlLiteral::text(&topic),
+                Self::quoted_relation(roster),
+                SqlLiteral::text(&topic),
+                Self::quoted_relation(roster)
+            );
+            outputs.push(DerivedOutput {
+                relation,
+                statement,
+            });
+        }
+        if self
+            .recipe
+            .transforms()
+            .iter()
+            .any(|transform| matches!(transform.operation(), TransformOperation::TrimTime { .. }))
+        {
+            let relation = format!("{roster}_time_windows");
+            let mut lower = "0".to_owned();
+            let mut upper = "v.duration_ns + 1".to_owned();
+            for (index, transform) in self.recipe.transforms().iter().enumerate() {
+                let TransformOperation::TrimTime {
+                    start_seconds,
+                    end_seconds,
+                } = transform.operation()
+                else {
+                    continue;
+                };
+                let start = format!("{:.0}", start_seconds * 1e9);
+                lower = format!(
+                    "CASE WHEN COALESCE(v.transform_{index}, false) AND {start} > ({lower}) THEN {start} ELSE ({lower}) END"
+                );
+                if let Some(end) = end_seconds {
+                    let end = format!("{:.0}", end * 1e9);
+                    upper = format!(
+                        "CASE WHEN COALESCE(v.transform_{index}, false) AND {end} < ({upper}) THEN {end} ELSE ({upper}) END"
+                    );
+                }
+            }
+            let statement = format!(
+                "CREATE VIEW {} AS SELECT id,start_ns,end_ns,episode_kept AND start_ns < end_ns AS kept FROM (SELECT v.id, {lower} AS start_ns, {upper} AS end_ns, v.kept AS episode_kept FROM {} v) windows",
+                Self::quoted_relation(&relation),
+                Self::quoted_relation(roster)
+            );
+            outputs.push(DerivedOutput {
+                relation,
+                statement,
+            });
+        }
+        Ok(outputs)
+    }
+    /// Intersect half-open time windows. The end expression is
+    /// exclusive, so image samples pass their timestamp plus one nanosecond.
+    pub(super) fn time_predicate(&self, start: &str, end: &str) -> String {
+        self.time_predicate_for((start, end), None)
+    }
+    pub(super) fn time_predicate_before(&self, step_id: &str, bounds: (&str, &str)) -> String {
+        self.time_predicate_for(bounds, Some(step_id))
+    }
+    fn time_predicate_for(&self, (start, end): (&str, &str), before: Option<&str>) -> String {
+        let eligible = self
+            .recipe
+            .steps()
+            .iter()
+            .take_while(|step| before != Some(step.id()))
+            .map(|step| step.id().to_owned())
+            .collect::<Vec<_>>();
+        let clauses = self
+            .recipe
+            .transforms()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, transform)| {
+                if !eligible.iter().any(|id| id == transform.id()) {
+                    return None;
+                }
+                let TransformOperation::TrimTime {
+                    start_seconds,
+                    end_seconds,
+                } = transform.operation()
+                else {
+                    return None;
+                };
+                let from = format!("{start} >= {:.0}", start_seconds * 1e9);
+                let bounds = end_seconds.map_or(from.clone(), |until| {
+                    format!("{from} AND {end} <= {:.0}", until * 1e9)
+                });
+                Some(format!(
+                    "(NOT COALESCE(v.transform_{index}, false) OR ({bounds}))"
+                ))
+            })
+            .collect::<Vec<_>>();
+        if clauses.is_empty() {
+            "true".into()
+        } else {
+            clauses.join(" AND ")
+        }
+    }
+    fn quoted_relation(relation: &str) -> String {
+        format!("\"{}\"", relation.replace('"', "\"\""))
+    }
+}
+
+#[cfg(test)]
+mod tests;

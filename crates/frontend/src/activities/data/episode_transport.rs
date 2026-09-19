@@ -13,7 +13,7 @@ use dioxus::prelude::*;
 use std::{collections::BTreeMap, rc::Rc};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub(super) struct EpisodeTimeRange {
+pub(crate) struct EpisodeTimeRange {
     start_ns: u64,
     end_ns: u64,
 }
@@ -161,7 +161,7 @@ impl EpisodeTransport {
         self.range.set(range);
         self.feeds.write().clear();
     }
-    pub(super) fn range(&self) -> EpisodeTimeRange {
+    pub(crate) fn range(&self) -> EpisodeTimeRange {
         *self.range.read()
     }
     pub(crate) fn seconds(&self) -> f64 {
@@ -205,12 +205,12 @@ impl EpisodeTransport {
             false
         }
     }
-    pub(super) fn timeline_state(&self) -> TimelineState {
+    pub(crate) fn timeline_state(&self) -> TimelineState {
         TimelineState::new(self.generation.read().to_string(), *self.clock.read())
             .with_window(self.view())
             .with_buffering(self.buffering())
     }
-    pub(super) fn interaction(&self) -> TimelineInteraction {
+    pub(crate) fn interaction(&self) -> TimelineInteraction {
         let mut transport = self.clone();
         TimelineInteraction::new(
             self.timeline_state(),

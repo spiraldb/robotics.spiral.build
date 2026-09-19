@@ -1,7 +1,7 @@
 //! Incremental dashboard state: completed cards survive later analysis failures.
 use super::agent::{ComparisonEvent, ComparisonResult};
+use super::plan::DashboardMetric;
 use super::progress::{ComparisonPhase, ComparisonProgress};
-use spiral_robotics_common::workflow::comparison_plan::DashboardMetric;
 
 #[derive(Clone, Default, PartialEq)]
 pub(super) struct ComparisonDashboard {

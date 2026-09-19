@@ -9,7 +9,6 @@ use crate::components::interaction::{
 };
 use dioxus::prelude::*;
 
-use crate::activities::data::workbench::EpisodeIdPresentation;
 use crate::activities::live::timeline_subject::{TimelineSubject, TimelineTarget};
 use crate::components::charts::CharmingChart;
 use crate::format::ClockPresentation;
@@ -566,5 +565,28 @@ mod tests {
             TimelinePlayback::RobotSyncPaused.transport_intent(true),
             TimelineTransportIntent::RobotSync(TimelineRobotSyncAction::Resume)
         );
+    }
+}
+
+trait EpisodeIdPresentation {
+    fn short_episode_id(&self) -> String;
+}
+
+impl EpisodeIdPresentation for str {
+    fn short_episode_id(&self) -> String {
+        self.strip_prefix("episode_")
+            .and_then(|number| number.parse::<u64>().ok())
+            .map(|number| format!("#{number}"))
+            .unwrap_or_else(|| self.to_owned())
+    }
+}
+
+#[cfg(test)]
+mod episode_id_tests {
+    use super::*;
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn generated_episode_ids_read_as_take_numbers() {
+        assert_eq!("episode_000024".short_episode_id(), "#24");
+        assert_eq!("imported-pass".short_episode_id(), "imported-pass");
     }
 }

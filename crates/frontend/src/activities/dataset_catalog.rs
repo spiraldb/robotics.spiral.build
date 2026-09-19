@@ -5,13 +5,13 @@ use spiral_robotics_common::datasets::DatasetSummary;
 
 use crate::client::CommandError;
 
-use super::DatasetClient;
+use super::data::DatasetClient;
 use crate::client::queries::{QueryDomain, QueryPolicy, QueryRefresh};
 use crate::components::interaction::{Action, ActionPurpose, ActionVariant};
 use crate::shell::project::ProjectSessionSignals;
 
 #[derive(Clone, Debug, Default)]
-pub(super) enum DatasetCatalogState {
+enum DatasetCatalogState {
     #[default]
     NotRequested,
     Loading(Option<LoadedDatasets>),
@@ -23,7 +23,7 @@ pub(super) enum DatasetCatalogState {
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct LoadedDatasets {
+struct LoadedDatasets {
     datasets: Vec<DatasetSummary>,
 }
 
@@ -36,28 +36,28 @@ impl DatasetCatalogState {
         }
     }
 
-    pub(super) fn datasets(&self) -> &[DatasetSummary] {
+    fn datasets(&self) -> &[DatasetSummary] {
         self.snapshot().map_or(&[], |snapshot| &snapshot.datasets)
     }
 
-    pub(super) fn loading(&self) -> bool {
+    fn loading(&self) -> bool {
         matches!(self, Self::Loading(_))
     }
 
-    pub(super) fn error(&self) -> Option<&CommandError> {
+    fn error(&self) -> Option<&CommandError> {
         match self {
             Self::Failed { error, .. } => Some(error),
             _ => None,
         }
     }
 
-    pub(super) fn pending(&mut self) {
+    fn pending(&mut self) {
         if !self.loading() {
             *self = Self::Loading(self.snapshot().cloned());
         }
     }
 
-    pub(super) fn accept(&mut self, result: Result<Vec<DatasetSummary>, CommandError>) {
+    fn accept(&mut self, result: Result<Vec<DatasetSummary>, CommandError>) {
         let previous = self.snapshot().cloned();
         *self = match result {
             Ok(datasets) => Self::Ready(LoadedDatasets { datasets }),

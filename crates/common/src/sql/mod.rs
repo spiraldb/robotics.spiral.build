@@ -7,3 +7,6 @@ pub use query::{
     InvalidSqlIdentifier, QueryPolicyError, ReadOnlyQuery, ReadOnlyQueryMode, UnquotedSqlIdentifier,
 };
 pub use workflow::{QualifiedRelation, WorkflowSyntaxError};
+
+mod literal;
+pub use literal::SqlLiteral;

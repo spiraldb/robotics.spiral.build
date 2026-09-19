@@ -350,7 +350,7 @@ impl DataLayout {
 }
 
 #[component]
-pub(super) fn DataPanels(#[props(default)] initial_episode: Option<OpenedEpisode>) -> Element {
+pub(crate) fn DataPanels(#[props(default)] initial_episode: Option<OpenedEpisode>) -> Element {
     let browsing = initial_episode.is_none();
     let studio = crate::shell::state::StudioProjectState::current();
     let sessions = crate::shell::project::ProjectSessionSignals::current();

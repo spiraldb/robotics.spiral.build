@@ -482,39 +482,4 @@ mod tests {
         assert!(error.contains("dataset_warp_sim_bottles_sample"));
         assert!(unsupported.transforms().is_empty());
     }
-    #[test]
-    fn message_count_proposal_uses_the_builtin_fact_key() {
-        let mut proposal = RuleProposal::default();
-        proposal.set_intent(RuleIntent::MessageCount);
-        proposal.set_comparison(Some(ConditionOp::Below));
-        proposal.set_value(Some(3000.0));
-        let mut spec = CurationSpec::new("test", "Test").with_source(
-            crate::datasets::DatasetSelection::new(vec!["dataset_test".into()]).unwrap(),
-        );
-        proposal.apply(&mut spec, "messages").unwrap();
-        assert!(
-            spec.compile()
-                .unwrap()
-                .roster_sql()
-                .contains("message_count < 3000")
-        );
-    }
-    #[test]
-    fn filters_from_either_authoring_path_compile_identically() {
-        let mut proposal = RuleProposal::default();
-        proposal.set_intent(RuleIntent::Duration);
-        proposal.set_comparison(Some(ConditionOp::Below));
-        proposal.set_value(Some(5.0));
-        proposal.set_unit(Some("seconds".into()));
-        let mut spec = CurationSpec::new("test", "Test").with_source(
-            crate::datasets::DatasetSelection::new(vec!["dataset_test".into()]).unwrap(),
-        );
-        proposal.apply(&mut spec, "short").unwrap();
-        assert!(
-            spec.compile()
-                .unwrap()
-                .roster_sql()
-                .contains("duration_ns / 1000000000.0 < 5")
-        );
-    }
 }

@@ -1,11 +1,9 @@
 //! Native array measurements grouped and joined by episode UUID.
+use super::plan::{DashboardMetric, SignalAnalysis};
 use crate::activities::data::DatasetClient;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use spiral_robotics_common::{
-    datasets::DatasetInspection,
-    workflow::comparison_plan::{DashboardMetric, SignalAnalysis},
-};
+use spiral_robotics_common::datasets::DatasetInspection;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -219,17 +219,6 @@ pub(crate) struct OpenedEpisode {
 }
 
 impl OpenedEpisode {
-    pub(super) fn from_comparison(
-        dataset: DatasetSelection,
-        mut row: serde_json::Map<String, serde_json::Value>,
-    ) -> Result<Self, String> {
-        let id = row
-            .remove("episode_id")
-            .ok_or("Comparison evidence has no episode identity.")?;
-        row.insert("id".into(), id);
-        Self::from_row(dataset, row)
-    }
-
     pub(crate) fn from_row(
         dataset: DatasetSelection,
         row: serde_json::Map<String, serde_json::Value>,
@@ -266,6 +255,9 @@ impl OpenedEpisode {
     }
     pub(super) fn label(&self) -> &SourceLabel {
         &self.label
+    }
+    pub(crate) fn title(&self) -> String {
+        self.listed.title()
     }
     pub(crate) fn selection(&self) -> EpisodeSelection {
         self.listed.record.selection(&self.dataset)
@@ -498,21 +490,5 @@ mod tests {
         let dataset = DatasetSelection::new(vec!["owner's recordings".into()]).unwrap();
         assert!(EpisodePage::sql(&dataset, 50).contains("'owner''s recordings'"));
         assert!(EpisodePage::sql(&dataset, 50).ends_with("LIMIT 51 OFFSET 50"));
-    }
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn comparison_evidence_preserves_episode_identity_and_timing() {
-        let dataset = DatasetSelection::new(vec!["recordings".into()]).unwrap();
-        let mut evidence = row("a", "spfsu://project/take-24.mcap", 1_000);
-        let id = evidence.remove("id").unwrap();
-        evidence.insert("episode_id".into(), id);
-        evidence.insert("id".into(), "comparison-row".into());
-        let episode = OpenedEpisode::from_comparison(dataset.clone(), evidence).unwrap();
-        assert_eq!(episode.selection().dataset(), &dataset);
-        assert_eq!(episode.selection().episode_id(), "a");
-        assert_eq!(episode.listed().title(), "a");
-        assert_eq!(episode.label().head(), "take-24.mcap");
-        assert_eq!(episode.record().time_range().unwrap().start_ns(), 1_000);
-        assert!(OpenedEpisode::from_comparison(dataset, Default::default()).is_err());
     }
 }
